@@ -5,7 +5,9 @@ import { getGitFileDiff } from "@/lib/git-changes";
 export async function GET(request: NextRequest) {
   try {
     const cwd = request.nextUrl.searchParams.get("cwd")?.trim() ?? "";
-    const filePath = request.nextUrl.searchParams.get("path")?.trim() ?? "";
+    // Not trimmed: a filename may end in whitespace, and trimming would show
+    // the diff of a different, real file (see /api/git/mutate).
+    const filePath = request.nextUrl.searchParams.get("path") ?? "";
     if (!cwd || (!cwd.startsWith("/") && !isWindowsAbsolutePath(cwd))) {
       return NextResponse.json({ error: "cwd must be an absolute path", code: "cwd_must_be_absolute" }, { status: 400 });
     }

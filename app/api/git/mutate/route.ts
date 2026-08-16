@@ -30,7 +30,10 @@ export async function POST(request: NextRequest) {
     if (typeof action !== "string" || !ACTIONS.has(action as GitMutationAction)) {
       return NextResponse.json({ error: "action must be stage, unstage, discard or commit", code: "invalid_action" }, { status: 400 });
     }
-    const filePath = typeof rawPath === "string" ? rawPath.trim() : undefined;
+    // NOT trimmed: a filename may legitimately end in whitespace, and
+    // trimming would silently retarget the operation at a different real file
+    // — catastrophic for discard, which deletes.
+    const filePath = typeof rawPath === "string" && rawPath !== "" ? rawPath : undefined;
     if (action !== "commit") {
       if (!filePath || (!filePath.startsWith("/") && !isWindowsAbsolutePath(filePath))) {
         return NextResponse.json({ error: "path must be an absolute path", code: "path_must_be_absolute" }, { status: 400 });

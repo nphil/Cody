@@ -220,6 +220,19 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** Every channel execFile attaches, for matching git's advice text. git prints
+ * the "please tell me who you are" identity hint across many lines, so the
+ * last-3-lines trimming in errorText() would miss it. */
+function fullErrorText(error: unknown): string {
+  if (!error || typeof error !== "object") return String(error);
+  const parts = [
+    String((error as { stdout?: unknown }).stdout ?? ""),
+    String((error as { stderr?: unknown }).stderr ?? ""),
+    String((error as { message?: unknown }).message ?? ""),
+  ];
+  return parts.join("\n");
+}
+
 /** Resolve + authorize a target path for mutation: inside the repo, and its
  * status entry (when required) so discard can distinguish untracked files. */
 async function repoRelative(repositoryRoot: string, filePath: string): Promise<string | null> {
@@ -244,15 +257,21 @@ export async function mutateGit(
       // --no-verify is NOT passed: the user's hooks are part of their repo
       // contract. Identity may be unset in fresh environments; fall back to a
       // local one-off identity rather than failing the commit.
+      // Scope the commit to the subtree the panel actually shows. Without a
+      // pathspec, committing from a subdirectory workspace would sweep in
+      // staged changes from elsewhere in the repository that the user never
+      // saw in the file list.
+      const scope = path.relative(repositoryRoot, path.resolve(cwd));
+      const pathspec = scope && !scope.startsWith("..") ? ["--", toGitPath(scope)] : [];
       try {
-        await git(repositoryRoot, ["commit", "-m", trimmed]);
+        await git(repositoryRoot, ["commit", "-m", trimmed, ...pathspec]);
       } catch (error) {
-        const text = errorText(error);
+        const text = fullErrorText(error);
         if (/user\.(name|email)|empty ident|tell me who you are/i.test(text)) {
           await git(repositoryRoot, [
             "-c", "user.name=Cody",
             "-c", "user.email=cody@localhost",
-            "commit", "-m", trimmed,
+            "commit", "-m", trimmed, ...pathspec,
           ]);
         } else {
           throw error;
@@ -266,19 +285,32 @@ export async function mutateGit(
     if (relative === null) return { ok: false, error: "Path is outside the repository" };
 
     if (action === "stage") {
-      // -A so a deleted file's removal can be staged the same way.
+      // -A so a deleted file's removal can be staged the same way. `--` keeps
+      // a path that begins with a dash from being read as an option.
       await git(repositoryRoot, ["add", "-A", "--", relative]);
       return { ok: true };
     }
 
+    // Everything below needs the file's actual status. Untracked DIRECTORIES
+    // are reported collapsed ("vendor/"), so a row for one only matches after
+    // normalizing the trailing slash.
+    const entries = await readStatusEntries(repositoryRoot);
+    const normalized = relative.replace(/\/+$/, "");
+    const entry = entries.find((candidate) => candidate.path.replace(/\/+$/, "") === normalized);
+    // A rename is one index entry spanning two paths; acting on only the new
+    // one leaves a half-staged rename (a staged deletion of the old path).
+    const targets = entry?.originalPath && entry.originalPath !== entry.path
+      ? [entry.originalPath, entry.path]
+      : [relative];
+
     if (action === "unstage") {
       try {
-        await git(repositoryRoot, ["restore", "--staged", "--", relative]);
+        await git(repositoryRoot, ["restore", "--staged", "--", ...targets]);
       } catch (error) {
         // A repo with no commits has no HEAD for restore to read; dropping the
-        // path from the index is the equivalent operation there.
-        if (/HEAD|unborn|unknown revision/i.test(errorText(error))) {
-          await git(repositoryRoot, ["rm", "--cached", "--force", "-r", "--", relative]);
+        // paths from the index is the equivalent operation there.
+        if (/HEAD|unborn|unknown revision/i.test(fullErrorText(error))) {
+          await git(repositoryRoot, ["rm", "--cached", "--force", "-r", "--", ...targets]);
         } else {
           throw error;
         }
@@ -286,17 +318,41 @@ export async function mutateGit(
       return { ok: true };
     }
 
-    // discard: untracked files are deleted outright; tracked files return to
-    // HEAD in both the index and the working tree. The UI confirms first.
-    const entries = await readStatusEntries(repositoryRoot);
-    const entry = entries.find((candidate) => candidate.path === relative);
+    // discard
     if (!entry) return { ok: false, error: "File has no pending changes" };
-    if (entry.indexStatus === "?" && entry.worktreeStatus === "?") {
-      const absolute = path.resolve(repositoryRoot, relative);
-      await fs.promises.rm(absolute, { force: true });
+    const untracked = entry.indexStatus === "?" && entry.worktreeStatus === "?";
+    if (untracked) {
+      // Never tracked, so there is no committed version to return to: the file
+      // (or collapsed directory) is removed outright. The UI confirms first.
+      const absolute = path.resolve(repositoryRoot, normalized);
+      if (!isWithinPath(repositoryRoot, absolute)) return { ok: false, error: "Path is outside the repository" };
+      await fs.promises.rm(absolute, { force: true, recursive: true });
       return { ok: true };
     }
-    await git(repositoryRoot, ["checkout", "HEAD", "--", relative]);
+
+    // `git checkout HEAD -- <path>` fails outright for a path that does not
+    // exist in HEAD — exactly the case for an index-added file ("A "/"AM") or
+    // the new side of a staged rename. Unstage first, then drop the worktree
+    // copy, which is what "discard" means for a file HEAD has never seen.
+    const inHead = await git(repositoryRoot, ["ls-tree", "--name-only", "HEAD", "--", ...targets])
+      .then((output) => output.trim().length > 0)
+      .catch(() => false);
+
+    if (!inHead) {
+      try {
+        await git(repositoryRoot, ["restore", "--staged", "--", ...targets]);
+      } catch {
+        await git(repositoryRoot, ["rm", "--cached", "--force", "-r", "--", ...targets]).catch(() => "");
+      }
+      const absolute = path.resolve(repositoryRoot, entry.path);
+      if (!isWithinPath(repositoryRoot, absolute)) return { ok: false, error: "Path is outside the repository" };
+      await fs.promises.rm(absolute, { force: true, recursive: true });
+      return { ok: true };
+    }
+
+    // Tracked in HEAD: return every path the entry spans to its committed
+    // state, in the index and the working tree alike.
+    await git(repositoryRoot, ["checkout", "HEAD", "--", ...targets]);
     return { ok: true };
   } catch (error) {
     return { ok: false, error: errorText(error) };
