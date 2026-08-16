@@ -32,7 +32,7 @@ function getContentDisposition(fileName: string, inline: boolean): string {
 async function exportSession(filePath: string, outputPath: string): Promise<void> {
   const bin = resolveOmpBin();
   if (!bin) {
-    throw new Error("omp binary not found. Install oh-my-pi or set OMP_WEB_OMP_BIN.");
+    throw new Error("omp binary not found. Install oh-my-pi or set CODY_OMP_BIN.");
   }
   await execFileAsync(bin, ["--export", filePath, outputPath], {
     cwd: tmpdir(),
@@ -54,7 +54,7 @@ export async function GET(
     if ("response" in resolved) return resolved.response;
     const filePath = resolved.filePath;
 
-    const tempDir = join(tmpdir(), "omp-web-export");
+    const tempDir = join(tmpdir(), "cody-export");
     mkdirSync(tempDir, { recursive: true });
 
     const sessionBase = basename(filePath, ".jsonl");

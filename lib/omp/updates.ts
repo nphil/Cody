@@ -10,7 +10,7 @@ export interface OmpUpdateStatus {
 
 function runOmpUpdate(args: string[]): Promise<string> {
   const bin = resolveOmpBin();
-  if (!bin) return Promise.reject(new Error("omp binary not found. Install oh-my-pi or set OMP_WEB_OMP_BIN."));
+  if (!bin) return Promise.reject(new Error("omp binary not found. Install oh-my-pi or set CODY_OMP_BIN."));
   const { promise, resolve, reject } = Promise.withResolvers<string>();
   execFile(bin, ["update", ...args], {
     timeout: 300_000,

@@ -836,11 +836,11 @@ export function ChatWindow({ session, newSessionCwd, advisorEnabled, toolCallsDe
             >
               <div style={{ display: "flex", alignItems: "baseline", gap: 10, minWidth: 0, flex: 1, lineHeight: 1.4, overflow: "hidden" }}>
                 <span style={{ fontSize: 18, fontWeight: 600, letterSpacing: "0.04em", color: "var(--accent)", flexShrink: 0, whiteSpace: "nowrap" }}>⌥</span>
-                <span style={{ fontSize: 18, color: "var(--text)", fontWeight: 600, letterSpacing: "0.02em", flexShrink: 0, whiteSpace: "nowrap" }}>omp web</span>
+                <span style={{ fontSize: 18, color: "var(--text)", fontWeight: 600, letterSpacing: "0.02em", flexShrink: 0, whiteSpace: "nowrap" }}>cody</span>
               </div>
               <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2, flexShrink: 0 }}>
                 <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                  web <span style={{ color: "var(--text)" }}>v{process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0"}</span>
+                  cody <span style={{ color: "var(--text)" }}>v{process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0"}</span>
                 </span>
                 <OmpRuntimeVersion />
               </div>

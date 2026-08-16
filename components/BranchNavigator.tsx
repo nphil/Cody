@@ -325,7 +325,7 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
   const hasContent = !noBranchReason && firstNode !== null && firstNode.children.length > 1;
 
   const branchIcon = (
-    <GitBranch size={16} strokeWidth={1.8} aria-hidden="true" style={{ color: hasContent ? "var(--accent)" : undefined, flexShrink: 0 }} />
+    <GitBranch size={14} strokeWidth={1.8} aria-hidden="true" style={{ color: hasContent ? "var(--accent)" : undefined, flexShrink: 0 }} />
   );
 
   const chevron = (
@@ -341,7 +341,7 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
         <button
           ref={btnRef}
           onClick={() => onToggle ? onToggle() : setOpenInternal((v) => !v)}
-          className="shell-toolbar-btn ui-focus-ring"
+          className="shell-toolbar-btn shell-captioned-btn ui-focus-ring"
           style={{
             background: open ? "var(--bg-selected)" : undefined,
             color: open ? "var(--text)" : undefined,
@@ -352,6 +352,7 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
           aria-expanded={open}
         >
           {branchIcon}
+          <span className="shell-btn-caption">{t("appShell.captionBranches")}</span>
         </button>
         {open && dropdownPos && (
           <div data-branch-panel className="dropdown-surface" style={{

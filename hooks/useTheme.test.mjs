@@ -27,7 +27,28 @@ test("pairs each theme with its same-family opposite mode", () => {
 });
 
 test("validates stored ids and falls back to Cody's default", () => {
-  assert.equal(isThemeId("sky-dark"), true);
+  assert.equal(isThemeId("solarized-dark"), true);
   assert.equal(isThemeId("system"), false);
   assert.equal(getTheme("missing-theme").id, DEFAULT_THEME_ID);
+});
+
+test("degrades pre-catalog ids to the default instead of throwing", () => {
+  // Ids stored by an earlier catalog ("canvas-light", "sky-dark", ...) are no
+  // longer served; both the hook and the layout bootstrap must fall through to
+  // DEFAULT_THEME_ID rather than leave the document unthemed.
+  for (const retired of ["canvas-light", "paper-dark", "copper-light"]) {
+    assert.equal(isThemeId(retired), false);
+    assert.equal(getTheme(retired).id, DEFAULT_THEME_ID);
+  }
+});
+
+test("every id carries a light/dark family pair the mode toggle can reach", () => {
+  const families = new Set(THEMES.map((theme) => theme.family));
+  assert.equal(families.size, 10);
+  for (const family of families) {
+    const pair = THEMES.filter((theme) => theme.family === family);
+    assert.equal(pair.length, 2);
+    // The picker labels a family once, so both modes must share the name.
+    assert.equal(pair[0].name, pair[1].name);
+  }
 });

@@ -16,7 +16,7 @@ const path = require("path");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const fs = require("fs");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const { parseLaunchOptions } = require("./omp-web-options");
+const { parseLaunchOptions, readEnv } = require("./cody-options");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { isPortAvailable } = require("./port-availability");
 
@@ -26,7 +26,7 @@ const serverBin = path.join(__dirname, "cody-server.js");
 
 const { port, hostname, openBrowser } = parseLaunchOptions();
 const loopbackHostnames = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
-const passwordEnabled = Boolean(process.env.OMP_WEB_PASSWORD);
+const passwordEnabled = Boolean(readEnv("PASSWORD"));
 
 if (!fs.existsSync(nextDir)) {
   console.error("Build artifacts not found. Please report this issue.");
@@ -35,10 +35,10 @@ if (!fs.existsSync(nextDir)) {
 
 if (!loopbackHostnames.has(hostname)) {
   if (!passwordEnabled) {
-    console.error(`Refusing to listen on ${hostname} without OMP_WEB_PASSWORD. Set a strong password or bind to 127.0.0.1.`);
+    console.error(`Refusing to listen on ${hostname} without CODY_PASSWORD. Set a strong password or bind to 127.0.0.1.`);
     process.exit(1);
   }
-  console.warn(`Warning: ompweb is listening on ${hostname} with Basic Auth over HTTP. Use HTTPS or a trusted VPN to protect the password in transit.`);
+  console.warn(`Warning: Cody is listening on ${hostname} with Basic Auth over HTTP. Use HTTPS or a trusted VPN to protect the password in transit.`);
 }
 
 const serverArgs = ["--experimental-strip-types", serverBin, "-p", port, "-H", hostname];
@@ -50,7 +50,7 @@ const url = `http://${hostname}:${port}`;
 async function main() {
   if (!await isPortAvailable(port, hostname)) {
     console.error(`Port ${port} on ${hostname} is already in use.`);
-    console.error(`If ompweb is already running, open ${url}. Otherwise, stop the process using it or run: ompweb --port ${Number(port) + 1}`);
+    console.error(`If Cody is already running, open ${url}. Otherwise, stop the process using it or run: cody --port ${Number(port) + 1}`);
     process.exitCode = 1;
     return;
   }
@@ -60,10 +60,10 @@ async function main() {
     stdio: ["inherit", "pipe", "inherit"],
     env: {
       ...process.env,
-      OMP_WEB_PACKAGE_DIR: pkgDir,
-      OMP_WEB_LAUNCHER_PID: String(process.pid),
-      OMP_WEB_PORT: port,
-      OMP_WEB_HOSTNAME: hostname,
+      CODY_PACKAGE_DIR: pkgDir,
+      CODY_LAUNCHER_PID: String(process.pid),
+      CODY_PORT: port,
+      CODY_HOSTNAME: hostname,
     },
   });
 

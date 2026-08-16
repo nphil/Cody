@@ -14,6 +14,7 @@ import { clearLastOpenSession, setLastOpenSession, workspaceKeyOf } from "@/lib/
 import { groupSessionsByProject, projectActivityCounts, sortManagedProjects } from "@/lib/project-ordering";
 import { comparableProjectPath } from "@/lib/comparable-path";
 import { Check, ChevronDown, ChevronRight, FileUp, Folder, GitBranch, MoreHorizontal, Plus, RefreshCw, Search, Settings2, SlidersHorizontal, Trash2, Upload } from "lucide-react";
+import { STORAGE_KEYS } from "@/lib/storage-keys";
 
 declare global {
   interface Window {
@@ -45,7 +46,7 @@ interface Props {
   onAtMentions?: (relativePaths: string[]) => void;
   /** Opens the app settings (pinned sidebar footer row). */
   onOpenSettings?: () => void;
-  /** True when an omp/ompweb update is available — shows a badge on the gear. */
+  /** True when an omp/Cody update is available — shows a badge on the gear. */
   updateAvailable?: boolean;
 }
 
@@ -87,7 +88,7 @@ function normalizeProjectKey(value: string): string {
 const INITIAL_RESTORE_RETRY_MS = 1000;
 const INITIAL_RESTORE_MAX_ATTEMPTS = 8;
 
-const UNREAD_SESSIONS_STORAGE_KEY = "omp-web:unread-session-ids";
+const UNREAD_SESSIONS_STORAGE_KEY = STORAGE_KEYS.unreadSessions;
 
 function loadUnreadSessionIds(): Set<string> {
   if (typeof window === "undefined") return new Set();
@@ -112,7 +113,7 @@ function saveUnreadSessionIds(ids: Set<string>): void {
   }
 }
 
-const EXPANDED_PROJECTS_STORAGE_KEY = "omp-web:expanded-projects";
+const EXPANDED_PROJECTS_STORAGE_KEY = STORAGE_KEYS.expandedProjects;
 
 /** Shared empty set for the no-stored-expansion default (never mutated). */
 const EMPTY_PROJECT_SET: ReadonlySet<string> = new Set();
@@ -470,14 +471,14 @@ function useScramble(target: string, running: boolean, reducedMotion: boolean): 
   return display;
 }
 
-function OmpWebTitle() {
+function CodyTitle() {
   const [showVersion, setShowVersion] = useState(false);
   const [scrambling, setScrambling] = useState(false);
   const revertTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scrambleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reducedMotion = usePrefersReducedMotion();
 
-  const target = showVersion ? `v${process.env.NEXT_PUBLIC_OMP_WEB_VERSION ?? "0.0.0"}` : "omp web";
+  const target = showVersion ? `v${process.env.NEXT_PUBLIC_CODY_VERSION ?? "0.0.0"}` : "cody";
   const display = useScramble(target, scrambling, reducedMotion);
 
   const triggerScramble = useCallback((toVersion: boolean) => {
@@ -514,12 +515,12 @@ function OmpWebTitle() {
         minWidth: "6ch",
         lineHeight: 1,
       }}
-      title={showVersion ? "Show ompweb name" : "Show ompweb version"}
+      title={showVersion ? "Show Cody name" : "Show Cody version"}
     >
       {!scrambling && !showVersion ? (
         <>
-          <span style={{ color: "var(--accent)" }}>omp</span>
-          <span style={{ color: "var(--text)" }}>web</span>
+          <span style={{ color: "var(--accent)" }}>co</span>
+          <span style={{ color: "var(--text)" }}>dy</span>
         </>
       ) : (
         <span style={{ color: showVersion ? "var(--accent)" : "var(--text)" }}>{display}</span>
@@ -1210,7 +1211,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
     ? worktreeStateByProject[normalizeProjectKey(selectedProject)]
     : undefined;
 
-  /** Inline branch label ("omp-web · main") from a project's OWN cached Git
+  /** Inline branch label ("cody · main") from a project's OWN cached Git
    *  state. Returns null when the project has no Git state or is not a git
    *  repo, so a non-Git / not-yet-loaded project never shows another repo's
    *  branch. */
@@ -1305,7 +1306,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
         }}
       >
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <OmpWebTitle />
+          <CodyTitle />
           <div style={{ display: "flex", gap: 2 }}>
             <Tooltip content={t("sessionSidebar.importTitle")} side="bottom">
               <SidebarIconButton

@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
+import { createCheckpoint } from "@/lib/checkpoints";
 import { readSessionHeader } from "@/lib/session-reader";
 import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
 import { startRpcSession, getRpcSession, resolveSpawnCwd, WebRpcError } from "@/lib/rpc-manager";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
 
-/** omp-web's own failures carry a stable code the client can localize; omp's
+/** Cody's own failures carry a stable code the client can localize; omp's
  * errors stay opaque English text. */
 function commandErrorResponse(error: unknown) {
   if (error instanceof SyntaxError) {
@@ -20,6 +21,15 @@ function commandErrorResponse(error: unknown) {
 }
 
 // POST /api/agent/[id] - Send a command to an existing session
+/** A workspace snapshot before every prompt: the agent is about to edit files,
+ * and this is what makes "restore to before that message" possible. Failure is
+ * deliberately silent — a missing checkpoint must never block a send. */
+async function checkpointBeforePrompt(cwd: string, body: { type?: unknown; message?: unknown }): Promise<void> {
+  if (body.type !== "prompt") return;
+  const message = typeof body.message === "string" ? body.message : "";
+  await createCheckpoint(cwd, message || "Prompt");
+}
+
 export async function POST(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -35,6 +45,7 @@ export async function POST(
     // Fast path: already-running session
     const existing = getRpcSession(id);
     if (existing?.isAlive()) {
+      await checkpointBeforePrompt(existing.cwd, body);
       const result = await existing.send(body);
       return NextResponse.json({ success: true, data: result });
     }
@@ -46,6 +57,7 @@ export async function POST(
     const cwd = resolveSpawnCwd(readSessionHeader(filePath)?.cwd);
 
     const { session } = await startRpcSession(id, filePath, cwd);
+    await checkpointBeforePrompt(cwd, body);
     const result = await session.send(body);
 
     return NextResponse.json({ success: true, data: result });

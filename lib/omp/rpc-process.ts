@@ -87,7 +87,7 @@ export class RpcProcess {
     this.spawnProcess = options.dependencies?.spawn ?? spawn;
     const bin = resolveBin();
     if (!bin) {
-      throw new Error("omp binary not found. Install oh-my-pi or set OMP_WEB_OMP_BIN.");
+      throw new Error("omp binary not found. Install oh-my-pi or set CODY_OMP_BIN.");
     }
     this.cwd = options.cwd;
     if (options.onFrame) this.frameListeners.add(options.onFrame);

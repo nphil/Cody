@@ -23,6 +23,7 @@ import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import { createActiveGoal, parseActiveGoal, type ActiveGoal, type ActivePlan } from "@/lib/web-mode-state";
 import type { HostToolDefinition, HostUriSchemeDefinition, RpcAvailableSlashCommand, SessionStatsInfo, TodoPhase } from "@/lib/pi-types";
 import { isRecord } from "@/lib/type-guards";
+import { SESSION_STORAGE_PREFIXES } from "@/lib/storage-keys";
 import {
   parseSubagentActivityEvent,
   parseSubagentLifecycle,
@@ -200,7 +201,7 @@ const EMPTY_QUEUE: QueuedMessages = { steering: [], followUp: [] };
 // omp reports only queuedMessageCount over RPC; the queued texts live in React
 // state and would vanish on reload. Mirror them into sessionStorage (per
 // session, best-effort, size-bounded) so a reload can restore the queue panel.
-const QUEUE_STORAGE_PREFIX = "omp-queue-";
+const QUEUE_STORAGE_PREFIX = SESSION_STORAGE_PREFIXES.queue;
 const QUEUE_STORAGE_MAX_CHARS = 50_000;
 
 function isEmptyQueue(queue: QueuedMessages): boolean {
@@ -748,7 +749,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setActiveGoal(null);
       return;
     }
-    setActiveGoal(parseActiveGoal(sessionStorage.getItem(`omp-web:goal:${sid}`)));
+    setActiveGoal(parseActiveGoal(sessionStorage.getItem(`${SESSION_STORAGE_PREFIXES.goal}${sid}`)));
   }, [session?.id]);
 
   // A plan request is in progress only for its current agent turn.
@@ -1212,7 +1213,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, []);
 
   // ---------------------------------------------------------------------
-  // Host-tool bridge: omp-web registers tools the AGENT can call. The server
+  // Host-tool bridge: Cody registers tools the AGENT can call. The server
   // emits host_tool_call frames; this UI executes them and answers with
   // host_tool_result (lib/rpc-manager routes registered tools to listeners).
   // The built-in `ask` tool already covers user questions via the extension
@@ -1350,7 +1351,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       default:
-        await respondHostTool(sid, id, `Host tool \"${toolName}\" is not available in omp-web`, true);
+        await respondHostTool(sid, id, `Host tool \"${toolName}\" is not available in Cody`, true);
     }
   }, [onOpenFile, respondHostTool]);
 
@@ -1378,7 +1379,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           await respondHostUri(sid, id, { content: text || "(clipboard is empty)", contentType: "text/plain" });
         } catch {
           // Permission denied / document not focused: surface a readable error.
-          await respondHostUri(sid, id, { isError: true, error: "Clipboard read was denied. Click into the omp-web window and try again." });
+          await respondHostUri(sid, id, { isError: true, error: "Clipboard read was denied. Click into the Cody window and try again." });
         }
         return;
       }
@@ -2679,7 +2680,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             const goal = createActiveGoal(args);
             setActiveGoal(goal);
             const activeSessionId = sessionIdRef.current;
-            if (activeSessionId) sessionStorage.setItem(`omp-web:goal:${activeSessionId}`, JSON.stringify(goal));
+            if (activeSessionId) sessionStorage.setItem(`${SESSION_STORAGE_PREFIXES.goal}${activeSessionId}`, JSON.stringify(goal));
           }
           return { handled: true };
         }

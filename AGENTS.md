@@ -1,4 +1,4 @@
-# omp-web - Development Notes
+# Cody - Development Notes
 
 ## Quick Start
 
@@ -10,14 +10,14 @@ Typecheck: `node_modules/.bin/tsc --noEmit`
 Lint: `npm run lint`  
 **Never run `next build` during dev** — pollutes `.next/` and breaks `npm run dev`.
 
-The dev server needs the `omp` binary installed (on `PATH`, or set `OMP_WEB_OMP_BIN`).
+The dev server needs the `omp` binary installed (on `PATH`, or set `CODY_OMP_BIN`).
 All live-agent features go through it; session browsing works without it.
 
 ---
 
 ## Architecture
 
-omp-web never imports `@oh-my-pi/*` or `@earendil-works/*` packages (they are
+Cody never imports `@oh-my-pi/*` or `@earendil-works/*` packages (they are
 Bun-only and cannot run inside Node/Next). See `DESIGN.md` for the full porting
 contract.
 
@@ -69,6 +69,11 @@ app/api/
   cwd/validate/route.ts           POST validate/select a cwd
   default-cwd/route.ts            POST create ~/omp-cwd-YYYYMMDD
   files/[...path]/route.ts        GET file contents for viewer
+  git/status/route.ts             GET repo status + branch/ahead-behind for a cwd
+  git/diff/route.ts               GET one file's HEAD->worktree patch
+  info/route.ts                   GET server facts for the Info panel
+  tasks/route.ts                  GET .cody/tasks.json (validated)
+  tasks/run/route.ts              POST run a task by id into a new terminal
   home/route.ts                   GET user home directory
   models/route.ts                 GET { models, modelList, defaultModel }
   models-config/route.ts          GET/PUT — read/write ~/.omp/agent/models.yml
@@ -86,7 +91,9 @@ lib/
   omp/                 shared omp foundations (paths, CLI probe, RpcProcess)
   agent-client.ts      typed fetch helper for /api/agent commands
   draft-store.ts       local draft persistence helpers
+  env.ts               readEnv(): CODY_* config with OMP_WEB_* fallback
   file-access.ts       allowed file roots for /api/files and worktrees
+  harness/             agent-harness adapter seam (types, omp adapter, getHarness)
   file-paths.ts        client/server path encoding helpers
   markdown.ts          shared markdown helpers
   npx.ts               npx runner used by skill install
@@ -96,6 +103,8 @@ lib/
   rpc-manager.ts       session registry + startRpcSession over RpcProcess
   session-reader.ts    session .jsonl parsing + path cache + buildSessionContext
   skills-service.ts    pure-Node skill discovery mirroring omp's providers
+  storage-keys.ts      the cody: browser-storage namespace + legacy migration
+  workspace-tasks.ts   .cody/tasks.json schema validation + grouping
   tool-presets.ts      PRESET_NONE/DEFAULT/FULL + getPresetFromTools()
   types.ts             shared TypeScript types
   normalize.ts         normalizeToolCalls() — field name mismatch between file format and our types
@@ -113,6 +122,11 @@ components/
   CommandPalette.tsx  ⌘K/Ctrl+K palette (cmdk): session switch, new session, theme
   ImageLightbox.tsx   click-to-preview lightbox for chat images (ClickableImage)
   BranchNavigator.tsx in-session branch switcher
+  DiffView.tsx        folding unified-diff renderer (FileViewer + GitPanel)
+  GitPanel.tsx        right-panel Git tool: changed files + diffs + branch info
+  TasksPanel.tsx      right-panel Tasks tool: .cody/tasks.json runner
+  UpdatesPanel.tsx    right-panel Updates tool: app/omp/skills update status
+  InfoPanel.tsx       right-panel Info tool: versions + workspace diagnostics
   ChatMinimap.tsx     scroll minimap alongside the message list
   MarkdownBody.tsx    markdown renderer
   ModelsConfig.tsx    modal for models/auth configuration
@@ -189,7 +203,7 @@ handled or safely ignored.
 - **On-disk history** (`lib/subagent-history.ts`, `/api/sessions/[id]/subagents*`):
   omp persists each subagent's transcript to the parent session's sibling
   artifacts dir (`<session-dir>/<subagent-id>.jsonl`) and the parent file's
-  task toolResults keep `progress[]`/`results[]` snapshots. omp-web recovers
+  task toolResults keep `progress[]`/`results[]` snapshots. Cody recovers
   the roster from disk (`extractSubagentHistory`, result fields win over the
   mid-run snapshot), so past/finished runs show in the composer panel after a
   reload. The transcript route pages the sibling file byte-wise (mirroring
@@ -236,7 +250,7 @@ handled or safely ignored.
   (`lib/project-ordering.ts`); the order deliberately does NOT depend on
   session activity, so project rows never jump around while sessions refresh.
   Expanded project paths live
-  in `localStorage` (`omp-web:expanded-projects`), defaulting to only the
+  in `localStorage` (`cody:expanded-projects`, see `lib/storage-keys.ts`), defaulting to only the
   active/restored project expanded, and stale keys are pruned against the
   current project list (only after the first project fetch — an empty
   still-loading list must never wipe storage).
@@ -294,13 +308,13 @@ handled or safely ignored.
 
 ### Update notifications (`/api/omp-update`, `/api/app-update`)
 - Automatic in-app self-updating has been removed in favor of explicit user notifications and manual terminal commands.
-- `GET /api/app-update` queries the npm registry for `@kahme247/ompweb` updates, detects the install manager (`bun` vs `npm` via `detectInstallMethod`), and returns `updateAvailable` plus the exact terminal command (e.g. `npm install -g @kahme247/ompweb` or `bun add -g @kahme247/ompweb`).
+- `GET /api/app-update` queries the npm registry for `@nphil/cody` updates, detects the install manager (`bun` vs `npm` via `detectInstallMethod`), and returns `updateAvailable` plus the exact terminal command (e.g. `npm install -g @nphil/cody` or `bun add -g @nphil/cody`).
 - `POST /api/omp-update` (`action: "check"`) runs `omp update --check` and returns `updateAvailable` plus `updateCommand: "omp update"`.
 - `POST /api/omp-update` (`action: "restart"`) restarts active OMP sessions after a manual CLI update.
 - Notifications in `AppShell` and settings cards in `SettingsConfig` present the update notification alongside copyable terminal update commands.
 
 ### Auth and model config
-- Auth flows go through RPC commands (`get_login_providers`, `login`) against the omp child process; credentials live in omp's `agent.db` (SQLite) which omp-web never touches directly.
+- Auth flows go through RPC commands (`get_login_providers`, `login`) against the omp child process; credentials live in omp's `agent.db` (SQLite) which Cody never touches directly.
 - The Models panel reads and writes `models.yml` in the omp agent directory (`~/.omp/agent/models.yml`, `.yaml` fallback).
 - API-key status endpoints must never return the raw key.
 

@@ -16,7 +16,7 @@ import type {
 export const dynamic = "force-dynamic";
 
 // Plugin management is delegated to the user's omp binary (`omp plugin ...`);
-// omp-web never embeds the Bun-only SDK. `--json` output shapes are mirrored
+// Cody never embeds the Bun-only SDK. `--json` output shapes are mirrored
 // from oh-my-pi coding-agent src/cli/plugin-cli.ts + extensibility/plugins.
 
 type PluginAction = "install" | "remove" | "update" | "disable" | "enable";
@@ -72,7 +72,7 @@ function runOmp(
 ): Promise<{ stdout: string; stderr: string }> {
   const bin = resolveOmpBin();
   if (!bin) {
-    return Promise.reject(new Error("omp binary not found. Install oh-my-pi or set OMP_WEB_OMP_BIN."));
+    return Promise.reject(new Error("omp binary not found. Install oh-my-pi or set CODY_OMP_BIN."));
   }
   return new Promise((resolve, reject) => {
     execFile(

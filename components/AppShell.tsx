@@ -10,9 +10,8 @@ import { toast } from "./ui/toast";
 import { ChatWindow } from "./ChatWindow";
 import { TabBar, type Tab } from "./TabBar";
 import { BranchNavigator } from "./BranchNavigator";
-import { LanguageSwitcher } from "./LanguageSwitcher";
 import { ThemePicker } from "./ThemePicker";
-import { Check, Files, History, Menu, PanelLeft, ScrollText, Terminal, Wand2 } from "lucide-react";
+import { AppWindow, Check, CircleArrowUp, Files, GitBranch, History, Info, ListTodo, Menu, PanelLeft, ScrollText, Terminal, Wand2 } from "lucide-react";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { translate, useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
@@ -23,10 +22,12 @@ import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText }
 import { getInitialNavigation } from "@/lib/initial-navigation";
 import { comparableProjectPath } from "@/lib/comparable-path";
 import { showCompletionNotification } from "@/lib/browser-notifications";
+import type { GitStatusResponse } from "@/lib/git-types";
 import type { SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { SettingsTab } from "./SettingsTabs";
+import { STORAGE_KEYS } from "@/lib/storage-keys";
 
 // Loaded on demand: the config modals open on click and the file viewer only
 // renders once a file tab exists, so none of them belong in the first-load chunk.
@@ -38,11 +39,40 @@ const TerminalPanel = dynamic(() => import("./TerminalPanel").then((module) => m
   ssr: false,
   loading: () => <PanelLoadingFallback />,
 });
+const GitPanel = dynamic(() => import("./GitPanel").then((module) => module.GitPanel), {
+  ssr: false,
+  loading: () => <PanelLoadingFallback />,
+});
+const TasksPanel = dynamic(() => import("./TasksPanel").then((module) => module.TasksPanel), {
+  ssr: false,
+  loading: () => <PanelLoadingFallback />,
+});
+const UpdatesPanel = dynamic(() => import("./UpdatesPanel").then((module) => module.UpdatesPanel), {
+  ssr: false,
+  loading: () => <PanelLoadingFallback />,
+});
+const InfoPanel = dynamic(() => import("./InfoPanel").then((module) => module.InfoPanel), {
+  ssr: false,
+  loading: () => <PanelLoadingFallback />,
+});
+const PreviewPanel = dynamic(() => import("./PreviewPanel").then((module) => module.PreviewPanel), {
+  ssr: false,
+  loading: () => <PanelLoadingFallback />,
+});
+
+/** The tools of the right workspace panel, in tab order (pi-web parity:
+ * Files | Git | Terminal | Tasks | Updates | Info). */
+type WorkspacePanelId = "file" | "git" | "terminal" | "preview" | "tasks" | "updates" | "info";
+const WORKSPACE_PANEL_IDS: readonly WorkspacePanelId[] = ["file", "git", "terminal", "preview", "tasks", "updates", "info"];
+
+function isWorkspacePanelId(value: string | null): value is WorkspacePanelId {
+  return (WORKSPACE_PANEL_IDS as readonly string[]).includes(value ?? "");
+}
 
 // Resizable desktop sidebar: the width is stored on the container as the
 // --sidebar-width CSS variable (globals.css) and persisted between sessions.
-const SIDEBAR_WIDTH_STORAGE_KEY = "omp-web:sidebar-width";
-const TOOL_CALLS_COLLAPSED_STORAGE_KEY = "omp-web:tool-calls-collapsed";
+const SIDEBAR_WIDTH_STORAGE_KEY = STORAGE_KEYS.sidebarWidth;
+const TOOL_CALLS_COLLAPSED_STORAGE_KEY = STORAGE_KEYS.toolCallsCollapsed;
 const SIDEBAR_MIN_WIDTH = 200;
 const SIDEBAR_MAX_WIDTH = 520;
 const SIDEBAR_DEFAULT_WIDTH = 260;
@@ -121,7 +151,7 @@ export function AppShell() {
   const [toolCallsDefaultCollapsed, setToolCallsDefaultCollapsed] = useState(true);
   const [sidebarResizing, setSidebarResizing] = useState(false);
   // Active drag handlers so an unmount mid-drag can detach them.
-  const sidebarResizeHandlersRef = useRef<{ onMove: (ev: MouseEvent) => void; onUp: () => void } | null>(null);
+  const sidebarResizeHandlersRef = useRef<{ onMove: (ev: PointerEvent) => void; onUp: () => void } | null>(null);
   // DOM element + live width during a drag (see handleSidebarResizeStart).
   const sidebarContainerRef = useRef<HTMLDivElement>(null);
   const pendingSidebarWidthRef = useRef<number>(SIDEBAR_DEFAULT_WIDTH);
@@ -168,11 +198,11 @@ export function AppShell() {
     setMobileSidebarReady(true);
   }, []);
   useEffect(() => {
-    setAdvisorEnabled(localStorage.getItem("omp-advisor-enabled") === "true");
+    setAdvisorEnabled(localStorage.getItem(STORAGE_KEYS.advisorEnabled) === "true");
   }, []);
   const handleAdvisorChange = useCallback((enabled: boolean) => {
     setAdvisorEnabled(enabled);
-    localStorage.setItem("omp-advisor-enabled", String(enabled));
+    localStorage.setItem(STORAGE_KEYS.advisorEnabled, String(enabled));
   }, []);
   useEffect(() => {
     const controller = new AbortController();
@@ -218,9 +248,9 @@ export function AppShell() {
       .then((data: { currentVersion?: string; availableVersion?: string | null; updateAvailable?: boolean; updateCommand?: string } | null) => {
         setAppUpdateAvailable(Boolean(data?.updateAvailable));
         if (!data?.updateAvailable || !data.availableVersion) return;
-        const cmd = data.updateCommand || "npm install -g @kahme247/ompweb";
+        const cmd = data.updateCommand || "npm install -g @nphil/cody";
         toast.info(
-          "ompweb update available",
+          "Cody update available",
           <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4 }}>
             <div>v{data.currentVersion ?? "?"} -&gt; v{data.availableVersion}</div>
             <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -341,22 +371,26 @@ export function AppShell() {
     }
   }, [changeSidebarWidth, resetSidebarWidth]);
 
-  const handleSidebarResizeStart = useCallback((e: React.MouseEvent) => {
+  const handleSidebarResizeStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     if (isMobile) return;
     e.preventDefault();
+    // Pointer events (with capture) cover mouse, pen and touch alike — a
+    // finger on a tablet drags the seam the same as a mouse does.
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* capture is best-effort */ }
     const startX = e.clientX;
     const startWidth = sidebarWidth;
     setSidebarResizing(true);
-    const onMove = (ev: MouseEvent) => {
+    const onMove = (ev: PointerEvent) => {
       const next = clampSidebarWidth(startWidth + (ev.clientX - startX));
       // Write the CSS variable straight to the DOM: the flex row follows the
-      // pointer without re-rendering the whole AppShell on every mousemove.
+      // pointer without re-rendering the whole AppShell on every move.
       sidebarContainerRef.current?.style.setProperty("--sidebar-width", `${next}px`);
       pendingSidebarWidthRef.current = next;
     };
     const onUp = () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
       sidebarResizeHandlersRef.current = null;
       setSidebarResizing(false);
       // Commit the final width so state and the persisted value agree with
@@ -369,8 +403,9 @@ export function AppShell() {
     document.body.style.userSelect = "none";
     pendingSidebarWidthRef.current = startWidth;
     sidebarResizeHandlersRef.current = { onMove, onUp };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
   }, [isMobile, sidebarWidth]);
 
   // If the app unmounts mid-drag, remove the window listeners and restore the
@@ -378,8 +413,9 @@ export function AppShell() {
   useEffect(() => () => {
     const handlers = sidebarResizeHandlersRef.current;
     if (!handlers) return;
-    window.removeEventListener("mousemove", handlers.onMove);
-    window.removeEventListener("mouseup", handlers.onUp);
+    window.removeEventListener("pointermove", handlers.onMove);
+    window.removeEventListener("pointerup", handlers.onUp);
+    window.removeEventListener("pointercancel", handlers.onUp);
     sidebarResizeHandlersRef.current = null;
     document.body.style.cursor = "";
     document.body.style.userSelect = "";
@@ -423,11 +459,140 @@ export function AppShell() {
     };
   }, [activeTopPanel]);
 
-  // Right panel — file and terminal workspaces remain mounted while hidden.
+  // Right panel — every workspace tool stays mounted once first shown, so
+  // switching tabs never loses terminal buffers, diff selections or scroll.
   const [fileTabs, setFileTabs] = useState<Tab[]>([]);
   const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
-  const [rightPanelMode, setRightPanelMode] = useState<"file" | "terminal">("file");
+  const [rightPanelMode, setRightPanelModeState] = useState<WorkspacePanelId>("file");
+  // file + terminal always mount (pre-existing behavior); the rest join on first activation.
+  const [mountedPanels, setMountedPanels] = useState<ReadonlySet<WorkspacePanelId>>(() => new Set(["file", "terminal"]));
+  const setRightPanelMode = useCallback((mode: WorkspacePanelId) => {
+    setRightPanelModeState(mode);
+    setMountedPanels((prev) => (prev.has(mode) ? prev : new Set([...prev, mode])));
+    try { localStorage.setItem(STORAGE_KEYS.workspacePanel, mode); } catch { /* storage may be unavailable */ }
+  }, []);
+  // Restore the last-used tool after mount (localStorage is unavailable during SSR).
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(STORAGE_KEYS.workspacePanel);
+      if (isWorkspacePanelId(stored) && stored !== "file") {
+        setRightPanelModeState(stored);
+        setMountedPanels((prev) => (prev.has(stored) ? prev : new Set([...prev, stored])));
+      }
+    } catch { /* storage may be unavailable */ }
+  }, []);
+
+  // Tab badges + workspace git identity (branch/repo root for the Info panel).
+  const [gitBadgeCount, setGitBadgeCount] = useState<number | null>(null);
+  const [gitMeta, setGitMeta] = useState<{ branch: string | null; repoRoot: string | null }>({ branch: null, repoRoot: null });
+  const [tasksConfigInvalid, setTasksConfigInvalid] = useState(false);
+  const [updatesBadgeCount, setUpdatesBadgeCount] = useState(0);
+  // One-shot: the token makes each dispatch distinct, so a stale request is
+  // never replayed by later cwd changes (TerminalPanel tracks consumed tokens).
+  const [focusTerminalRequest, setFocusTerminalRequest] = useState<{ id: string; token: number } | null>(null);
+  const focusTerminalTokenRef = useRef(0);
+
+  // Right panel width — user-adjustable via the seam handle; null keeps the
+  // CSS default (42%). Written straight to the container's CSS var during a
+  // drag so the flex row tracks the pointer without AppShell re-rendering.
+  const rightPanelRef = useRef<HTMLDivElement | null>(null);
+  const [workspaceWidth, setWorkspaceWidth] = useState<number | null>(null);
+  useEffect(() => {
+    try {
+      const stored = Number.parseInt(localStorage.getItem(STORAGE_KEYS.workspaceWidth) ?? "", 10);
+      if (Number.isFinite(stored) && stored > 0) setWorkspaceWidth(stored);
+    } catch { /* storage may be unavailable */ }
+  }, []);
+  // pi-web's constraint math: the panel may grow only until the OTHER panel
+  // plus a usable chat column still fit. Reserving the live sidebar width
+  // (not a constant) is what keeps the chat from being crushed when both
+  // side panels are wide.
+  const CHAT_MIN_WIDTH = 320;
+  const clampWorkspaceWidth = useCallback((value: number): number => {
+    const sidebarSpace = !isMobile && sidebarOpen ? sidebarWidth : 0;
+    const max = Math.max(300, window.innerWidth - sidebarSpace - CHAT_MIN_WIDTH);
+    return Math.round(Math.min(Math.max(value, 300), max));
+  }, [isMobile, sidebarOpen, sidebarWidth]);
+  // Re-clamp whenever the constraint inputs move: a sidebar drag or a window
+  // resize can invalidate a width that was legal when it was chosen. The
+  // stored preference is left untouched so a bigger window gets it back.
+  useEffect(() => {
+    if (isMobile) return;
+    const reclamp = () => {
+      setWorkspaceWidth((current) => {
+        if (current === null) return current;
+        const next = clampWorkspaceWidth(current);
+        return next === current ? current : next;
+      });
+    };
+    reclamp();
+    window.addEventListener("resize", reclamp);
+    return () => window.removeEventListener("resize", reclamp);
+  }, [clampWorkspaceWidth, isMobile]);
+  const commitWorkspaceWidth = useCallback((value: number | null) => {
+    setWorkspaceWidth(value);
+    try {
+      if (value === null) localStorage.removeItem(STORAGE_KEYS.workspaceWidth);
+      else localStorage.setItem(STORAGE_KEYS.workspaceWidth, String(value));
+    } catch { /* storage may be unavailable */ }
+  }, []);
+  const handleWorkspaceResizeStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (isMobile) return;
+    e.preventDefault();
+    const seam = e.currentTarget;
+    // Pointer capture covers mouse, pen and touch alike, so a finger on a
+    // tablet drags the seam the same as a mouse does.
+    try { seam.setPointerCapture(e.pointerId); } catch { /* capture is best-effort */ }
+    const startX = e.clientX;
+    const startWidth = rightPanelRef.current?.getBoundingClientRect().width ?? workspaceWidth ?? window.innerWidth * 0.42;
+    seam.classList.add("panel-resizing");
+    rightPanelRef.current?.classList.add("panel-resizing-target");
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    let pending = workspaceWidth;
+    const onMove = (ev: PointerEvent) => {
+      // The seam sits left of the panel: dragging left grows the panel.
+      const next = clampWorkspaceWidth(startWidth + (startX - ev.clientX));
+      rightPanelRef.current?.style.setProperty("--workspace-width", `${next}px`);
+      pending = next;
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      seam.classList.remove("panel-resizing");
+      rightPanelRef.current?.classList.remove("panel-resizing-target");
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      if (pending !== null) commitWorkspaceWidth(pending);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  }, [clampWorkspaceWidth, commitWorkspaceWidth, isMobile, workspaceWidth]);
+  const handleWorkspaceResizeKey = useCallback((e: React.KeyboardEvent) => {
+    const current = rightPanelRef.current?.getBoundingClientRect().width ?? workspaceWidth ?? window.innerWidth * 0.42;
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      commitWorkspaceWidth(clampWorkspaceWidth(current + 10));
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      commitWorkspaceWidth(clampWorkspaceWidth(current - 10));
+    } else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      commitWorkspaceWidth(null);
+    }
+  }, [clampWorkspaceWidth, commitWorkspaceWidth, workspaceWidth]);
+
+  const handleGitCountChange = useCallback((count: number | null) => setGitBadgeCount(count), []);
+  const handleGitMetaChange = useCallback((meta: { branch: string | null; repoRoot: string | null } | null) => {
+    setGitMeta(meta ?? { branch: null, repoRoot: null });
+  }, []);
+  const handleTasksConfigStateChange = useCallback((state: "missing" | "invalid" | "loaded" | null) => {
+    setTasksConfigInvalid(state === "invalid");
+  }, []);
+  const handleUpdatesAvailableCountChange = useCallback((count: number) => setUpdatesBadgeCount(count), []);
 
   // Same @mention format as the chat input's @ autocomplete, so the agent's
   // read tool resolves it the same way (it strips the @ prefix).
@@ -446,6 +611,30 @@ export function AppShell() {
 
   const initialSessionId = initialNavigation.sessionId;
   const [activeCwd, setActiveCwd] = useState<string | null>(null);
+
+  // Lightweight git summary for the Git tab badge and the Info panel —
+  // refreshed when the workspace changes and after every agent turn. Once the
+  // Git panel has mounted it owns this data (it fetches on the same triggers
+  // and reports back through onCountChange/onMetaChange), so skip the
+  // duplicate request.
+  useEffect(() => {
+    if (!activeCwd) {
+      setGitBadgeCount(null);
+      setGitMeta({ branch: null, repoRoot: null });
+      return;
+    }
+    if (mountedPanels.has("git")) return;
+    const controller = new AbortController();
+    void fetch(`/api/git/status?cwd=${encodeURIComponent(activeCwd)}`, { signal: controller.signal })
+      .then((response) => (response.ok ? (response.json() as Promise<GitStatusResponse>) : null))
+      .then((data) => {
+        if (!data || controller.signal.aborted) return;
+        setGitBadgeCount(data.isGitRepository ? data.files.length : null);
+        setGitMeta({ branch: data.branchInfo?.branch ?? null, repoRoot: data.repositoryRoot });
+      })
+      .catch(() => { /* aborted or offline — keep the last known badge */ });
+    return () => controller.abort();
+  }, [activeCwd, explorerRefreshKey, mountedPanels]);
   // True once the initial ?session= URL param has been resolved (or confirmed absent)
   const [initialSessionRestored, setInitialSessionRestored] = useState<boolean>(() => !initialSessionId);
   // Suppresses sessionKey bump in handleCwdChange during the initial URL restore
@@ -693,7 +882,7 @@ export function AppShell() {
     setRightPanelOpen(true);
     // On mobile the file panel is full-screen; close the drawer so it shows.
     if (isMobile) setSidebarOpen(false);
-  }, [isMobile]);
+  }, [isMobile, setRightPanelMode]);
 
   const handleOpenLinkedFile = useCallback((filePath: string) => {
     handleOpenFile(filePath, getFileName(filePath), selectedSession?.id ?? null);
@@ -729,7 +918,7 @@ export function AppShell() {
 
   const activeFileTab = fileTabs.find((t) => t.id === activeFileTabId) ?? null;
   const activeCwdName = activeCwd ? getFileName(activeCwd) || activeCwd : null;
-  const windowTitle = activeCwdName ? `${activeCwdName} - omp web` : "omp web";
+  const windowTitle = activeCwdName ? `${activeCwdName} - Cody` : "Cody";
 
   useEffect(() => {
     const syncWindowTitle = () => {
@@ -879,24 +1068,20 @@ export function AppShell() {
           aria-orientation="vertical"
           aria-label={t("appShell.resizeSidebar")}
           tabIndex={0}
-          onMouseDown={handleSidebarResizeStart}
+          onPointerDown={handleSidebarResizeStart}
           onDoubleClick={resetSidebarWidth}
           onKeyDown={handleSidebarResizeKey}
           title={t("appShell.resizeSidebarTitle")}
+          className={`panel-resize-seam seam-line-end ui-focus-ring${sidebarResizing ? " panel-resizing" : ""}`}
           style={{
-            width: 5,
+            width: 12,
             flexShrink: 0,
-            marginLeft: -5,
+            marginLeft: -12,
             cursor: "col-resize",
             background: "transparent",
             zIndex: 205,
             outline: "none",
-            transition: "background var(--dur-fast) var(--ease-out-warm)",
           }}
-          onMouseEnter={(e) => { e.currentTarget.style.background = "color-mix(in srgb, var(--accent) 35%, transparent)"; }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
-          onFocus={(e) => { e.currentTarget.style.background = "color-mix(in srgb, var(--accent) 35%, transparent)"; }}
-          onBlur={(e) => { e.currentTarget.style.background = "transparent"; }}
         />
       )}
 
@@ -915,7 +1100,6 @@ export function AppShell() {
             {sidebarOpen ? <PanelLeft size={16} strokeWidth={1.8} aria-hidden="true" /> : <Menu size={16} strokeWidth={1.8} aria-hidden="true" />}
           </button>
           <ThemePicker />
-          <LanguageSwitcher />
         </div>
         {showChat && (
           <>
@@ -927,9 +1111,10 @@ export function AppShell() {
                 disabled={!selectedSession}
                 title={selectedSession ? t("appShell.fullHistory") : t("appShell.fullHistoryUnavailable")}
                 aria-label={t("appShell.fullHistory")}
-                className="shell-toolbar-btn ui-focus-ring"
+                className="shell-toolbar-btn shell-captioned-btn ui-focus-ring"
               >
-                <History size={16} strokeWidth={1.8} aria-hidden="true" />
+                <History size={14} strokeWidth={1.8} aria-hidden="true" />
+                <span className="shell-btn-caption">{t("appShell.captionHistory")}</span>
               </button>
               {(() => {
                 const hasMessages = Boolean(
@@ -961,21 +1146,22 @@ export function AppShell() {
                     disabled={disabled}
                     title={title}
                     aria-label={label}
-                    className="shell-toolbar-btn ui-focus-ring"
+                    className="shell-toolbar-btn shell-captioned-btn ui-focus-ring"
                     style={{ opacity: autoNameStatus.kind === "naming" ? 1 : undefined }}
                   >
                     {autoNameStatus.kind === "naming" ? (
-                      <svg className="animate-spin" width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                      <svg className="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                         <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" opacity="0.25" />
                         <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
                       </svg>
                     ) : isSuccess ? (
-                      <Check size={16} strokeWidth={1.8} aria-hidden="true" style={{ color: "var(--accent)" }} />
+                      <Check size={14} strokeWidth={1.8} aria-hidden="true" style={{ color: "var(--accent)" }} />
                     ) : isError ? (
-                      <Wand2 size={16} strokeWidth={1.8} aria-hidden="true" style={{ color: "var(--status-error)" }} />
+                      <Wand2 size={14} strokeWidth={1.8} aria-hidden="true" style={{ color: "var(--status-error)" }} />
                     ) : (
-                      <Wand2 size={16} strokeWidth={1.8} aria-hidden="true" />
+                      <Wand2 size={14} strokeWidth={1.8} aria-hidden="true" />
                     )}
+                    <span className="shell-btn-caption">{t("appShell.captionTitle")}</span>
                   </button>
                 );
               })()}
@@ -995,9 +1181,10 @@ export function AppShell() {
                 title={t("appShell.system")}
                 aria-label={t("appShell.system")}
                 aria-pressed={activeTopPanel === "system"}
-                className="shell-toolbar-btn ui-focus-ring"
+                className="shell-toolbar-btn shell-captioned-btn ui-focus-ring"
               >
-                <ScrollText size={16} strokeWidth={1.8} aria-hidden="true" style={{ color: systemPrompt ? "var(--accent)" : undefined }} />
+                <ScrollText size={14} strokeWidth={1.8} aria-hidden="true" style={{ color: systemPrompt ? "var(--accent)" : undefined }} />
+                <span className="shell-btn-caption">{t("appShell.captionSystem")}</span>
               </button>
             </div>
           </>
@@ -1396,79 +1583,150 @@ export function AppShell() {
         </div>
       </main>
 
+      {/* Workspace panel resize seam — desktop only, hidden while closed. */}
+      {!isMobile && rightPanelOpen && (
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label={t("appShell.resizeWorkspacePanel")}
+          tabIndex={0}
+          className="panel-resize-seam seam-line-start ui-focus-ring"
+          onPointerDown={handleWorkspaceResizeStart}
+          onDoubleClick={() => commitWorkspaceWidth(null)}
+          onKeyDown={handleWorkspaceResizeKey}
+          title={t("appShell.resizeWorkspacePanelTitle")}
+          style={{
+            width: 12,
+            marginRight: -12,
+            flexShrink: 0,
+            cursor: "col-resize",
+            background: "transparent",
+            zIndex: 205,
+            outline: "none",
+          }}
+        />
+      )}
       {/* Right workspace panel — file viewer and terminal stay mounted between mode changes. */}
       <div
+        ref={rightPanelRef}
         className={`right-panel-container${rightPanelOpen ? " right-panel-open" : " right-panel-closed"}`}
         style={{
           display: "flex",
           flexDirection: "column",
           borderLeft: "1px solid var(--border)",
           background: "var(--bg)",
+          ...(!isMobile && workspaceWidth !== null ? { "--workspace-width": `${workspaceWidth}px` } : {}),
         }}
       >
         <div
           role="tablist"
           aria-label={t("workspace.tools")}
+          className="workspace-tab-strip"
           style={{
             display: "flex",
             alignItems: "center",
             gap: 4,
             flexShrink: 0,
             height: isMobile ? 44 : 36,
-            padding: isMobile ? "0 48px 0 4px" : "0 40px 0 4px",
+            padding: "0 4px",
             boxSizing: "border-box",
             borderBottom: "1px solid var(--border)",
             background: "var(--bg-panel)",
+            overflowX: "auto",
           }}
         >
-          <button
-            id="workspace-files-tab"
-            type="button"
-            role="tab"
-            aria-selected={rightPanelMode === "file"}
-            aria-controls="workspace-files-tool"
-            tabIndex={rightPanelMode === "file" ? 0 : -1}
-            className="shell-toolbar-btn ui-focus-ring"
-            onClick={() => { setRightPanelMode("file"); setRightPanelOpen(true); }}
-            onKeyDown={(event) => {
-              if (event.key !== "ArrowRight" && event.key !== "End") return;
-              event.preventDefault();
-              setRightPanelMode("terminal");
-              document.getElementById("workspace-terminal-tab")?.focus();
-            }}
-            title={t("workspace.files")}
-            aria-label={t("workspace.files")}
-            style={{ background: rightPanelMode === "file" ? "var(--bg-selected)" : undefined }}
-          >
-            <Files size={15} aria-hidden="true" />
-          </button>
-          <button
-            id="workspace-terminal-tab"
-            type="button"
-            role="tab"
-            aria-selected={rightPanelMode === "terminal"}
-            aria-controls="workspace-terminal-tool"
-            tabIndex={rightPanelMode === "terminal" ? 0 : -1}
-            className="shell-toolbar-btn ui-focus-ring"
-            onClick={() => { setRightPanelMode("terminal"); setRightPanelOpen(true); }}
-            onKeyDown={(event) => {
-              if (event.key !== "ArrowLeft" && event.key !== "Home") return;
-              event.preventDefault();
-              setRightPanelMode("file");
-              document.getElementById("workspace-files-tab")?.focus();
-            }}
-            title={t("terminal.open")}
-            aria-label={t("terminal.open")}
-            style={{ background: rightPanelMode === "terminal" ? "var(--bg-selected)" : undefined }}
-          >
-            <Terminal size={15} aria-hidden="true" />
-          </button>
+          {(() => {
+            const panels: Array<{ id: WorkspacePanelId; icon: React.ReactNode; label: string; badge?: string | null }> = [
+              { id: "file", icon: <Files size={15} aria-hidden="true" />, label: t("workspace.files") },
+              {
+                id: "git",
+                icon: <GitBranch size={15} aria-hidden="true" />,
+                label: t("workspace.git"),
+                badge: gitBadgeCount !== null && gitBadgeCount > 0 ? String(gitBadgeCount) : null,
+              },
+              { id: "terminal", icon: <Terminal size={15} aria-hidden="true" />, label: t("workspace.terminal") },
+              { id: "preview", icon: <AppWindow size={15} aria-hidden="true" />, label: t("workspace.preview") },
+              { id: "tasks", icon: <ListTodo size={15} aria-hidden="true" />, label: t("workspace.tasks"), badge: tasksConfigInvalid ? "!" : null },
+              {
+                id: "updates",
+                icon: <CircleArrowUp size={15} aria-hidden="true" />,
+                label: t("workspace.updates"),
+                badge: updatesBadgeCount > 0 ? String(updatesBadgeCount) : null,
+              },
+              { id: "info", icon: <Info size={15} aria-hidden="true" />, label: t("workspace.info") },
+            ];
+            const selectPanelAt = (index: number) => {
+              const panel = panels[(index + panels.length) % panels.length];
+              setRightPanelMode(panel.id);
+              document.getElementById(`workspace-${panel.id}-tab`)?.focus();
+            };
+            return panels.map((panel, index) => (
+              <button
+                key={panel.id}
+                id={`workspace-${panel.id}-tab`}
+                type="button"
+                role="tab"
+                aria-selected={rightPanelMode === panel.id}
+                aria-controls={`workspace-${panel.id}-tool`}
+                tabIndex={rightPanelMode === panel.id ? 0 : -1}
+                className="shell-toolbar-btn ui-focus-ring"
+                onClick={() => { setRightPanelMode(panel.id); setRightPanelOpen(true); }}
+                onKeyDown={(event) => {
+                  if (event.key === "ArrowRight") { event.preventDefault(); selectPanelAt(index + 1); }
+                  else if (event.key === "ArrowLeft") { event.preventDefault(); selectPanelAt(index - 1); }
+                  else if (event.key === "Home") { event.preventDefault(); selectPanelAt(0); }
+                  else if (event.key === "End") { event.preventDefault(); selectPanelAt(panels.length - 1); }
+                }}
+                title={panel.label}
+                aria-label={panel.badge ? `${panel.label} (${panel.badge})` : panel.label}
+                style={{
+                  background: rightPanelMode === panel.id ? "var(--bg-selected)" : undefined,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 5,
+                  flexShrink: 0,
+                  whiteSpace: "nowrap",
+                  // .shell-toolbar-btn is a fixed square for icon-only
+                  // buttons; these tabs carry a label and a badge. minWidth
+                  // keeps the mobile tap target at toolbar size (40px).
+                  width: "auto",
+                  minWidth: isMobile ? 40 : undefined,
+                  padding: "0 8px",
+                }}
+              >
+                {panel.icon}
+                {!isMobile && <span style={{ fontSize: 11.5 }}>{panel.label}</span>}
+                {panel.badge && (
+                  <span
+                    aria-hidden="true"
+                    style={{
+                      minWidth: 15,
+                      padding: "0 4px",
+                      borderRadius: 8,
+                      background: panel.badge === "!" ? "var(--status-error)" : "var(--accent)",
+                      color: "var(--bg)",
+                      fontSize: 10,
+                      fontWeight: 700,
+                      lineHeight: "15px",
+                      textAlign: "center",
+                      fontVariantNumeric: "tabular-nums",
+                    }}
+                  >
+                    {panel.badge}
+                  </span>
+                )}
+              </button>
+            ));
+          })()}
+          {/* Scrollable spacer: the panel toggle is position:fixed above the
+              strip, so the last tab needs in-flow room to scroll clear of it. */}
+          <div aria-hidden="true" style={{ flexShrink: 0, width: isMobile ? 44 : 36 }} />
         </div>
 
         <div
-          id="workspace-files-tool"
+          id="workspace-file-tool"
           role="tabpanel"
-          aria-labelledby="workspace-files-tab"
+          aria-labelledby="workspace-file-tab"
           style={{ flex: 1, minHeight: 0, overflow: "hidden", display: rightPanelMode === "file" ? "flex" : "none", flexDirection: "column" }}
         >
           {fileTabs.length > 0 && (
@@ -1497,12 +1755,94 @@ export function AppShell() {
           </div>
         </div>
         <div
+          id="workspace-git-tool"
+          role="tabpanel"
+          aria-labelledby="workspace-git-tab"
+          style={{ flex: 1, minHeight: 0, overflow: "hidden", display: rightPanelMode === "git" ? "flex" : "none", flexDirection: "column" }}
+        >
+          {mountedPanels.has("git") && (
+            <GitPanel
+              cwd={activeCwd}
+              active={rightPanelMode === "git" && rightPanelOpen}
+              refreshKey={explorerRefreshKey}
+              onOpenFile={(filePath) => {
+                handleOpenFile(filePath, getFileName(filePath), selectedSession?.id ?? null);
+              }}
+              onCountChange={handleGitCountChange}
+              onMetaChange={handleGitMetaChange}
+            />
+          )}
+        </div>
+        <div
           id="workspace-terminal-tool"
           role="tabpanel"
           aria-labelledby="workspace-terminal-tab"
           style={{ flex: 1, minHeight: 0, overflow: "hidden", display: rightPanelMode === "terminal" ? "flex" : "none" }}
         >
-          <TerminalPanel cwd={activeCwd} onOpen={() => { setRightPanelMode("terminal"); setRightPanelOpen(true); }} />
+          <TerminalPanel cwd={activeCwd} focusRequest={focusTerminalRequest} onOpen={() => { setRightPanelMode("terminal"); setRightPanelOpen(true); }} />
+        </div>
+        <div
+          id="workspace-preview-tool"
+          role="tabpanel"
+          aria-labelledby="workspace-preview-tab"
+          style={{ flex: 1, minHeight: 0, overflow: "hidden", display: rightPanelMode === "preview" ? "flex" : "none", flexDirection: "column" }}
+        >
+          {mountedPanels.has("preview") && (
+            <PreviewPanel
+              cwd={activeCwd}
+              active={rightPanelMode === "preview" && rightPanelOpen}
+              onOpenTasks={() => setRightPanelMode("tasks")}
+            />
+          )}
+        </div>
+        <div
+          id="workspace-tasks-tool"
+          role="tabpanel"
+          aria-labelledby="workspace-tasks-tab"
+          style={{ flex: 1, minHeight: 0, overflow: "hidden", display: rightPanelMode === "tasks" ? "flex" : "none", flexDirection: "column" }}
+        >
+          {mountedPanels.has("tasks") && (
+            <TasksPanel
+              cwd={activeCwd}
+              active={rightPanelMode === "tasks" && rightPanelOpen}
+              onOpenTerminal={(terminalId) => {
+                if (terminalId) setFocusTerminalRequest({ id: terminalId, token: ++focusTerminalTokenRef.current });
+                setRightPanelMode("terminal");
+                setRightPanelOpen(true);
+              }}
+              onConfigStateChange={handleTasksConfigStateChange}
+            />
+          )}
+        </div>
+        <div
+          id="workspace-updates-tool"
+          role="tabpanel"
+          aria-labelledby="workspace-updates-tab"
+          style={{ flex: 1, minHeight: 0, overflow: "hidden", display: rightPanelMode === "updates" ? "flex" : "none", flexDirection: "column" }}
+        >
+          {mountedPanels.has("updates") && (
+            <UpdatesPanel
+              cwd={activeCwd}
+              active={rightPanelMode === "updates" && rightPanelOpen}
+              onOpenSettings={(tab) => setSettingsTab(tab)}
+              onAvailableCountChange={handleUpdatesAvailableCountChange}
+            />
+          )}
+        </div>
+        <div
+          id="workspace-info-tool"
+          role="tabpanel"
+          aria-labelledby="workspace-info-tab"
+          style={{ flex: 1, minHeight: 0, overflow: "hidden", display: rightPanelMode === "info" ? "flex" : "none", flexDirection: "column" }}
+        >
+          {mountedPanels.has("info") && (
+            <InfoPanel
+              cwd={activeCwd}
+              active={rightPanelMode === "info" && rightPanelOpen}
+              gitBranch={gitMeta.branch}
+              gitRepoRoot={gitMeta.repoRoot}
+            />
+          )}
         </div>
 
     </div>

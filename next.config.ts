@@ -50,7 +50,11 @@ const nextConfig = (phase: string): NextConfig => {
         { key: "X-Frame-Options", value: "DENY" },
         { key: "Referrer-Policy", value: "no-referrer" },
         { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
-        { key: "Content-Security-Policy", value: "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; connect-src 'self' ws: wss:; font-src 'self' data:" },
+        // frame-src: the Preview panel embeds the user's own dev server, so
+        // loopback origins (any port) are allowed to frame INTO Cody. This is
+        // unrelated to frame-ancestors 'none', which still stops anything from
+        // framing Cody itself.
+        { key: "Content-Security-Policy", value: "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; frame-src 'self' http://localhost:* http://127.0.0.1:* https://localhost:* https://127.0.0.1:*; object-src 'none'; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; connect-src 'self' ws: wss: http://localhost:* http://127.0.0.1:*; font-src 'self' data:" },
       ];
       const headers = [
         {
@@ -83,7 +87,7 @@ const nextConfig = (phase: string): NextConfig => {
     },
     env: {
       NEXT_PUBLIC_APP_VERSION: version,
-      NEXT_PUBLIC_OMP_WEB_VERSION: version,
+      NEXT_PUBLIC_CODY_VERSION: version,
     },
   };
 };

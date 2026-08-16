@@ -1,11 +1,11 @@
-# Contributing to omp-web
+# Contributing to Cody
 
 Thanks for your interest in contributing!
 
 ## Setup
 
 - Node.js 22.19.0 or newer
-- The [omp](https://github.com/can1357/oh-my-pi) binary on your `PATH` (or set `OMP_WEB_OMP_BIN`)
+- The [omp](https://github.com/can1357/oh-my-pi) binary on your `PATH` (or set `CODY_OMP_BIN`)
 
 ```bash
 npm install
@@ -31,7 +31,7 @@ interferes with the dev server. Builds are for release work.
   icons come from `lucide-react`.
 - **i18n**: every user-facing string needs entries in all three dictionaries:
   `lib/i18n/locales/{en,zh-CN,ja}.json`.
-- **Architecture**: omp-web never imports `@oh-my-pi/*` or `@earendil-works/*`
+- **Architecture**: Cody never imports `@oh-my-pi/*` or `@earendil-works/*`
   packages (Bun-only). Live agent features go through the `omp` child process
   via RPC; see `DESIGN.md` and `AGENTS.md` for the full contract.
 

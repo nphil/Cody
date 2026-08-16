@@ -57,6 +57,7 @@ import NvidiaColorIcon from "@lobehub/icons/es/Nvidia/components/Color";
 import OpenCodeIcon from "@lobehub/icons/es/OpenCode/components/Mono";
 import XiaomiMiMoIcon from "@lobehub/icons/es/XiaomiMiMo/components/Mono";
 import ZAIIcon from "@lobehub/icons/es/ZAI/components/Mono";
+import { STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
 
 type IconComponent = React.ComponentType<{ size?: number | string; style?: React.CSSProperties }>;
 
@@ -402,7 +403,7 @@ function NativeRegistryDetail({ models, connectedProviders, onChanged }: { model
   </div>;
 }
 
-const COMPOSER_MODELS_STORAGE_KEY = "omp-composer-models";
+const COMPOSER_MODELS_STORAGE_KEY = STORAGE_KEYS.composerModels;
 const NATIVE_MODEL_ROLES = ["default", "smol", "slow", "vision", "plan", "designer", "commit", "tiny", "task", "advisor"];
 
 function ModelRolesDetail({ models }: { models: RuntimeModelEntry[] }) {
@@ -1564,7 +1565,7 @@ function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefre
 
 // ── API Key detail ────────────────────────────────────────────────────────────
 // omp keeps API keys in its own encrypted credential store (agent.db), which
-// omp-web never reads or writes — this panel is status-only.
+// Cody never reads or writes — this panel is status-only.
 
 function ApiKeyDetail({ provider }: { provider: ApiKeyProvider }) {
   const { t, tn } = useI18n();
@@ -1878,7 +1879,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
       const key = `${model.provider}:${model.id}`;
       if (visible) next.add(key); else next.delete(key);
       localStorage.setItem(COMPOSER_MODELS_STORAGE_KEY, JSON.stringify([...next]));
-      window.dispatchEvent(new Event("omp-composer-models-change"));
+      window.dispatchEvent(new Event(STORAGE_EVENTS.composerModelsChange));
       return next;
     });
   }, [runtimeModels]);
@@ -1892,7 +1893,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
         if (visible) next.add(key); else next.delete(key);
       }
       localStorage.setItem(COMPOSER_MODELS_STORAGE_KEY, JSON.stringify([...next]));
-      window.dispatchEvent(new Event("omp-composer-models-change"));
+      window.dispatchEvent(new Event(STORAGE_EVENTS.composerModelsChange));
       return next;
     });
   }, [runtimeModels]);
@@ -2061,7 +2062,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
           <div>
             <SectionTitle>Composer Model Picker</SectionTitle>
-            <p style={{ margin: "4px 0 0", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>Choose which native OMP models are available in the composer. This changes only omp-web&apos;s picker, not OMP&apos;s model registry.</p>
+            <p style={{ margin: "4px 0 0", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>Choose which native OMP models are available in the composer. This changes only Cody&apos;s picker, not OMP&apos;s model registry.</p>
           </div>
           <button type="button" onClick={() => void loadRuntimeModels()} disabled={runtimeModelsLoading} title="Refresh OMP runtime models" style={{ padding: 7, border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text-muted)", cursor: runtimeModelsLoading ? "wait" : "pointer" }}><RefreshCw size={14} aria-hidden="true" /></button>
         </div>

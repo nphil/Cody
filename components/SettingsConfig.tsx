@@ -7,6 +7,8 @@ import { Copy, ExternalLink, RefreshCw, RotateCcw, Sparkles, Search, AlertCircle
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/primitives";
 import { SettingsTabs, type SettingsTab, SETTINGS_CATEGORIES, getNormalizedActive } from "./SettingsTabs";
+import { STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
+import { LOCALES, useI18n, type Locale } from "@/lib/i18n";
 
 const SettingsTabLoading = () => <div role="status" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 12 }}>Loading settings…</div>;
 const ModelsConfig = dynamic(() => import("./ModelsConfig").then((module) => module.ModelsConfig), { loading: SettingsTabLoading });
@@ -281,10 +283,11 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
   const [searchQuery, setSearchQuery] = useState("");
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const [submitBehavior, setSubmitBehavior] = useState<SubmitDuringRunBehavior>(() => getSubmitDuringRunBehavior());
+  const { locale, setLocale } = useI18n();
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() => {
     if (typeof window === "undefined") return true;
     try {
-      const value = window.localStorage.getItem("omp-sound-enabled");
+      const value = window.localStorage.getItem(STORAGE_KEYS.soundEnabled);
       return value === null ? true : value === "true";
     } catch {
       return true;
@@ -523,12 +526,23 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                       checked={soundEnabled}
                       onChange={(next) => {
                         setSoundEnabled(next);
-                        try { localStorage.setItem("omp-sound-enabled", String(next)); } catch { /* storage fallback */ }
-                        window.dispatchEvent(new CustomEvent("omp-sound-pref-change", { detail: next }));
+                        try { localStorage.setItem(STORAGE_KEYS.soundEnabled, String(next)); } catch { /* storage fallback */ }
+                        window.dispatchEvent(new CustomEvent(STORAGE_EVENTS.soundPrefChange, { detail: next }));
                       }}
                     />
                   </NativeSetting>
                 </div>
+                <NativeSetting label="Language" description="Interface language. Auto-detected from the browser until chosen here." scope="UI">
+                  <select
+                    style={nativeSelectStyle}
+                    value={locale}
+                    onChange={(event) => setLocale(event.target.value as Locale)}
+                  >
+                    {LOCALES.map((item) => (
+                      <option key={item.value} value={item.value} style={nativeOptionStyle}>{item.label}</option>
+                    ))}
+                  </select>
+                </NativeSetting>
                 <NativeSetting label="Message during active run" description="What composer does on submit while agent runs. Steer interrupts; Queue follow-up delivers after finish." scope="UI">
                   <select
                     style={nativeSelectStyle}
@@ -881,28 +895,28 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                   <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)" }}>App version status, OMP runtime updates, and active session management.</p>
                 </div>
 
-                {/* ompweb app update card */}
+                {/* Cody app update card */}
                 <section style={{ padding: 14, border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", display: "flex", flexDirection: "column", gap: 10 }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
                     <div>
-                      <div style={{ fontSize: 13, fontWeight: 600 }}>ompweb application</div>
+                      <div style={{ fontSize: 13, fontWeight: 600 }}>Cody application</div>
                       <div style={{ marginTop: 4, color: appUpdate?.updateAvailable ? "var(--accent)" : "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 12 }}>
                         {checkingAppUpdate ? "Checking for updates..." : appUpdate?.updateAvailable ? `v${appUpdate.currentVersion ?? "?"} -> v${appUpdate.availableVersion}` : appUpdate?.currentVersion ? `v${appUpdate.currentVersion} is up to date` : "Version unavailable"}
                       </div>
                     </div>
-                    <button type="button" onClick={() => void checkForAppUpdate(true)} disabled={checkingAppUpdate} aria-label="Check ompweb updates" style={{ padding: "6px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text)", cursor: checkingAppUpdate ? "wait" : "pointer", fontSize: 12, display: "inline-flex", alignItems: "center", gap: 5 }}>
+                    <button type="button" onClick={() => void checkForAppUpdate(true)} disabled={checkingAppUpdate} aria-label="Check Cody updates" style={{ padding: "6px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text)", cursor: checkingAppUpdate ? "wait" : "pointer", fontSize: 12, display: "inline-flex", alignItems: "center", gap: 5 }}>
                       <RefreshCw size={13} aria-hidden="true" /> Refresh
                     </button>
                   </div>
                   {appUpdate?.updateAvailable && (
                     <div style={{ marginTop: 6, padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", display: "flex", flexDirection: "column", gap: 6 }}>
-                      <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Run this command in terminal to update ompweb:</div>
+                      <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Run this command in terminal to update Cody:</div>
                       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <code style={{ flex: 1, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--accent)", wordBreak: "break-all" }}>{appUpdate.updateCommand || "npm install -g @kahme247/ompweb"}</code>
+                        <code style={{ flex: 1, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--accent)", wordBreak: "break-all" }}>{appUpdate.updateCommand || "npm install -g @nphil/cody"}</code>
                         <button
                           type="button"
                           onClick={() => {
-                            void navigator.clipboard.writeText(appUpdate.updateCommand || "npm install -g @kahme247/ompweb");
+                            void navigator.clipboard.writeText(appUpdate.updateCommand || "npm install -g @nphil/cody");
                             setMessage("Copied update command to clipboard.");
                           }}
                           style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", color: "var(--text)", cursor: "pointer", fontSize: 11 }}
