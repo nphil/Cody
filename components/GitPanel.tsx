@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement, type ReactNode } from "react";
-import { Check, ChevronRight, FileText, GitBranch, List, ListTree, Minus, Plus, RotateCw, Undo2 } from "lucide-react";
+import { Camera, Check, ChevronRight, FileText, GitBranch, History, List, ListTree, Minus, Plus, RotateCw, Undo2 } from "lucide-react";
 import { DiffView } from "./DiffView";
 import { translate, useI18n } from "@/lib/i18n";
 import { getRelativeFilePath } from "@/lib/file-paths";
@@ -665,6 +665,62 @@ export function GitPanel({ cwd, active, refreshKey, onOpenFile, onCountChange, o
     });
   }, [commitMessage, mutate]);
 
+  // Workspace checkpoints: snapshots taken before each prompt (and on demand)
+  // that can restore every file to how it was — the panel's undo for agent
+  // work. The list opens as a card under the header.
+  const [checkpointsOpen, setCheckpointsOpen] = useState(false);
+  const [checkpoints, setCheckpoints] = useState<Array<{ hash: string; label: string; ts: number }> | null>(null);
+  const [checkpointBusy, setCheckpointBusy] = useState(false);
+  const [checkpointNote, setCheckpointNote] = useState<string | null>(null);
+  const loadCheckpoints = useCallback(async () => {
+    if (!cwd) return;
+    try {
+      const response = await fetch(`/api/checkpoints?cwd=${encodeURIComponent(cwd)}`);
+      const body = await response.json().catch(() => ({})) as { checkpoints?: Array<{ hash: string; label: string; ts: number }>; error?: string };
+      if (!mountedRef.current) return;
+      setCheckpoints(response.ok ? body.checkpoints ?? [] : []);
+    } catch {
+      if (mountedRef.current) setCheckpoints([]);
+    }
+  }, [cwd]);
+  const toggleCheckpoints = useCallback(() => {
+    setCheckpointsOpen((open) => {
+      if (!open) { setCheckpointNote(null); void loadCheckpoints(); }
+      return !open;
+    });
+  }, [loadCheckpoints]);
+  useEffect(() => { setCheckpointsOpen(false); setCheckpoints(null); setCheckpointNote(null); }, [cwd]);
+  const checkpointAction = useCallback(async (payload: { action: "create"; label: string } | { action: "restore"; hash: string }) => {
+    if (!cwd || checkpointBusy) return;
+    setCheckpointBusy(true);
+    setCheckpointNote(null);
+    try {
+      const response = await fetch("/api/checkpoints", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd, ...payload }),
+      });
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      if (!mountedRef.current) return;
+      if (!response.ok) {
+        setCheckpointNote(body.error ?? translate("gitPanel.checkpointFailed"));
+        return;
+      }
+      setCheckpointNote(payload.action === "restore" ? translate("gitPanel.restored") : translate("gitPanel.checkpointCreated"));
+      void loadCheckpoints();
+      void fetchStatus();
+      if (selectedPathRef.current !== null) void fetchDiff(selectedPathRef.current);
+    } catch (error) {
+      if (mountedRef.current) setCheckpointNote(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (mountedRef.current) setCheckpointBusy(false);
+    }
+  }, [checkpointBusy, cwd, fetchDiff, fetchStatus, loadCheckpoints]);
+  const restoreCheckpointClick = useCallback((hash: string, label: string) => {
+    if (!window.confirm(translate("gitPanel.restoreConfirm", { label }))) return;
+    void checkpointAction({ action: "restore", hash });
+  }, [checkpointAction]);
+
   /** The controls a row offers, derived from which sides of the status are
    * dirty. In the sectioned list the section narrows this further. */
   const rowActions = useCallback((entry: ChangedEntry, section: "staged" | "changes" | "all"): RowAction[] => {
@@ -910,6 +966,9 @@ export function GitPanel({ cwd, active, refreshKey, onOpenFile, onCountChange, o
           </span>
         )}
 
+        <HeaderButton label={t("gitPanel.checkpoints")} pressed={checkpointsOpen} disabled={!cwd} onClick={toggleCheckpoints}>
+          <History size={13} strokeWidth={2} aria-hidden="true" />
+        </HeaderButton>
         <HeaderButton label={t("gitPanel.refresh")} disabled={!cwd || loading} onClick={refresh}>
           <RotateCw
             size={13}
@@ -919,6 +978,50 @@ export function GitPanel({ cwd, active, refreshKey, onOpenFile, onCountChange, o
           />
         </HeaderButton>
       </div>
+
+      {checkpointsOpen && (
+        <div style={{ flexShrink: 0, maxHeight: "40%", overflowY: "auto", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)", padding: "6px 10px 8px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+            <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--text-muted)" }}>{t("gitPanel.checkpoints")}</span>
+            <span style={{ flex: 1 }} />
+            <button
+              type="button"
+              className="ui-focus-ring"
+              onClick={() => void checkpointAction({ action: "create", label: translate("gitPanel.manualCheckpointLabel") })}
+              disabled={checkpointBusy}
+              style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "3px 8px", fontSize: 11, border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text)", cursor: checkpointBusy ? "default" : "pointer", opacity: checkpointBusy ? 0.5 : 1 }}
+            >
+              <Camera size={12} aria-hidden="true" /> {t("gitPanel.checkpointNow")}
+            </button>
+          </div>
+          {checkpointNote && <div role="status" style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 6 }}>{checkpointNote}</div>}
+          {checkpoints === null ? (
+            <div style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("gitPanel.checkpointsLoading")}</div>
+          ) : checkpoints.length === 0 ? (
+            <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.5 }}>{t("gitPanel.checkpointsEmpty")}</div>
+          ) : (
+            checkpoints.map((checkpoint) => (
+              <div key={checkpoint.hash} style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0", fontSize: 12 }}>
+                <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)" }} title={checkpoint.label}>
+                  {checkpoint.label}
+                </span>
+                <span style={{ flexShrink: 0, color: "var(--text-dim)", fontSize: 11, fontVariantNumeric: "tabular-nums" }}>
+                  {new Date(checkpoint.ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                </span>
+                <button
+                  type="button"
+                  className="ui-focus-ring"
+                  onClick={() => restoreCheckpointClick(checkpoint.hash, checkpoint.label)}
+                  disabled={checkpointBusy}
+                  style={{ flexShrink: 0, padding: "2px 8px", fontSize: 11, border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--accent)", cursor: checkpointBusy ? "default" : "pointer", opacity: checkpointBusy ? 0.5 : 1 }}
+                >
+                  {t("gitPanel.restore")}
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+      )}
 
       {statusError && (
         <div

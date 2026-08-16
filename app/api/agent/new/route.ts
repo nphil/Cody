@@ -5,6 +5,7 @@ import { randomUUID } from "crypto";
 import { allowFileRoot } from "@/lib/file-access";
 import { invalidateSessionListCache } from "@/lib/session-reader";
 import { WebRpcError, startRpcSession } from "@/lib/rpc-manager";
+import { createCheckpoint } from "@/lib/checkpoints";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
 
 function newSessionErrorResponse(error: unknown) {
@@ -48,6 +49,11 @@ export async function POST(req: Request) {
     // that share a key onto one session. Date.now() (ms resolution) collides for
     // requests in the same millisecond, merging two new sessions into one.
     const tempKey = `__new__${randomUUID()}`;
+    // Snapshot before the very first prompt of a new session, same as the
+    // per-message hook: failures are silent and never block the send.
+    if (typeof command.message === "string" || command.type === "prompt") {
+      await createCheckpoint(cwd, typeof command.message === "string" && command.message ? command.message : "New session");
+    }
     const { session, realSessionId } = await startRpcSession(tempKey, "", cwd, toolNames, advisor === true);
 
     // Keep the files-route allowed-roots cache (see app/api/files/[...path]/route.ts)
