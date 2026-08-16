@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { invalidateModelsCache } from "@/lib/models-cache";
 import { disposeUtilityRpc } from "@/lib/omp/rpc-utility";
 import { readSchemaSettings, writeSchemaSettings } from "@/lib/omp/settings-values";
+import { getHarness } from "@/lib/harness";
 
 /**
  * OMP's own settings schema plus the values currently persisted for it. The
@@ -14,10 +15,14 @@ export const dynamic = "force-dynamic";
 export function GET() {
   try {
     const { path, schema, values } = readSchemaSettings();
+    // The active harness names the panel ("All OMP Settings"), so the label
+    // follows CODY_HARNESS instead of being baked into the UI.
+    const { id, shortName } = getHarness();
+    const harness = { id, shortName };
     if (!schema) {
-      return NextResponse.json({ path, schema: null, values: {}, reason: "OMP's settings schema could not be read from the installed package" });
+      return NextResponse.json({ path, harness, schema: null, values: {}, reason: `${shortName}'s settings schema could not be read from the installed package` });
     }
-    return NextResponse.json({ path, schema, values });
+    return NextResponse.json({ path, harness, schema, values });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 });
   }

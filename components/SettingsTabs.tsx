@@ -22,6 +22,22 @@ export interface TabItem {
   description: string;
   Icon: ComponentType<{ size?: number; className?: string; "aria-hidden"?: boolean | "true" | "false"; style?: CSSProperties }>;
   needsWorkspace?: boolean;
+  /** Sits apart at the foot of the sidebar. The full harness settings dump is
+   * a reference surface, not part of the curated walk through the tabs above. */
+  pinBottom?: boolean;
+}
+
+/** Fallback brand for the harness-settings tab. The real one comes from the
+ * active harness (CODY_HARNESS) and arrives with the schema fetch, so this is
+ * only what renders before that lands. */
+export const DEFAULT_HARNESS_LABEL = "OMP";
+
+export function getSettingsCategories(harnessLabel: string = DEFAULT_HARNESS_LABEL): TabItem[] {
+  return SETTINGS_CATEGORIES.map((tab) =>
+    tab.id === "omp"
+      ? { ...tab, label: `All ${harnessLabel} Settings`, description: `Every setting ${harnessLabel} declares, read from its own schema` }
+      : tab,
+  );
 }
 
 export const SETTINGS_CATEGORIES: TabItem[] = [
@@ -31,8 +47,8 @@ export const SETTINGS_CATEGORIES: TabItem[] = [
   { id: "providers", label: "API Keys & Providers", description: "Connected OAuth accounts, API keys, and model registry", Icon: KeyRound },
   { id: "intelligence", label: "Agent & Intelligence", description: "Advisor, memory, autolearn, compaction and retry", Icon: Sparkles },
   { id: "mcp", label: "Extensions & Tools", description: "MCP servers, managed skills, and OMP plugins", Icon: Cable },
-  { id: "omp", label: "All OMP Settings", description: "Every setting OMP declares, read from its own schema", Icon: SlidersHorizontal },
   { id: "system", label: "System & Updates", description: "App updates, runtime version, and active session restart", Icon: RefreshCw },
+  { id: "omp", label: `All ${DEFAULT_HARNESS_LABEL} Settings`, description: `Every setting ${DEFAULT_HARNESS_LABEL} declares, read from its own schema`, Icon: SlidersHorizontal, pinBottom: true },
 ];
 
 export const getNormalizedActive = (tab: SettingsTab): SettingsTab => {
@@ -45,16 +61,20 @@ export function SettingsTabs({
   onSelect,
   workspaceReady = true,
   layout = "vertical",
+  harnessLabel = DEFAULT_HARNESS_LABEL,
 }: {
   active: SettingsTab;
   onSelect: (tab: SettingsTab) => void;
   workspaceReady?: boolean;
   layout?: "horizontal" | "vertical";
+  /** Brand of the active harness, used for the "All <harness> Settings" tab. */
+  harnessLabel?: string;
 }) {
   const currentActive = getNormalizedActive(active);
+  const categories = getSettingsCategories(harnessLabel);
 
   const onKeyDown = (event: React.KeyboardEvent, index: number) => {
-    const enabled = SETTINGS_CATEGORIES.filter((tab) => !(tab.needsWorkspace && !workspaceReady));
+    const enabled = categories.filter((tab) => !(tab.needsWorkspace && !workspaceReady));
     let nextIndex: number | null = null;
     if (event.key === "ArrowRight" || event.key === "ArrowDown") nextIndex = index + 1;
     if (event.key === "ArrowLeft" || event.key === "ArrowUp") nextIndex = index - 1;
@@ -85,7 +105,7 @@ export function SettingsTabs({
           overflowY: "auto",
         }}
       >
-        {SETTINGS_CATEGORIES.map(({ id, label, description, Icon, needsWorkspace }, index) => {
+        {categories.map(({ id, label, description, Icon, needsWorkspace, pinBottom }, index) => {
           const selected = id === currentActive;
           const disabled = Boolean(needsWorkspace && !workspaceReady);
           return (
@@ -107,6 +127,8 @@ export function SettingsTabs({
                 padding: "9px 10px",
                 border: "none",
                 borderRadius: "var(--radius-control)",
+                // Pinned entries fall to the foot of the nav, set off by a rule.
+                ...(pinBottom ? { marginTop: "auto", borderTop: "1px solid var(--border)", paddingTop: 13, borderTopLeftRadius: 0, borderTopRightRadius: 0 } : {}),
                 background: selected ? "var(--bg-selected)" : "transparent",
                 color: selected ? "var(--text)" : disabled ? "var(--text-dim)" : "var(--text-muted)",
                 cursor: disabled ? "not-allowed" : "pointer",
@@ -134,7 +156,7 @@ export function SettingsTabs({
 
   return (
     <nav aria-label="Settings sections" role="tablist" style={{ display: "flex", gap: 3, padding: "7px 12px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)", flexShrink: 0, overflowX: "auto" }}>
-      {SETTINGS_CATEGORIES.map(({ id, label, Icon, needsWorkspace }, index) => {
+      {categories.map(({ id, label, Icon, needsWorkspace }, index) => {
         const selected = id === currentActive;
         const disabled = Boolean(needsWorkspace && !workspaceReady);
         return (

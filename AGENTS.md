@@ -174,12 +174,25 @@ appears without a Cody change.
   form OMP's own resolver reads. Unknown paths are rejected, not written.
 - `lib/omp/settings-conditions.ts` — restates OMP's value-derived `ui.condition`
   predicates so Cody hides the same rows OMP hides.
+- `lib/omp/settings-surface.ts` — **the one hand-maintained list in this
+  pipeline**: which settings only configure the harness's terminal UI and so do
+  nothing in a browser. The schema carries no metadata for it (the harness has
+  no notion of a second front end), so those rows get a "Terminal only" chip
+  rather than being hidden — the same file still drives the CLI.
+  `settings-surface.test.mjs` fails if a rule stops matching the installed
+  schema, so an upstream rename surfaces as a test failure, not a vanished chip.
 - `components/settings/OmpSchemaSettings.tsx` — the "All OMP Settings" tab.
 - `lib/omp/settings-config.ts` stays: it backs the curated tabs (model registry,
   approval matrix, retry fallback chains) that deserve bespoke controls. Both
   write the same file; the dialog re-reads after each save so they stay in step.
 - `jiti` must remain in `serverExternalPackages` — bundling it breaks its
   runtime file resolution.
+- The panel's tab is pinned to the foot of the settings sidebar and named from
+  the active harness (`HarnessAdapter.shortName`, served by the schema route),
+  so switching `CODY_HARNESS` renames it rather than requiring a UI edit.
+- There is no "Native OMP" chip: it labelled the majority of rows and named a
+  harness. Only the exceptions carry a chip — "Cody only" for browser-local
+  preferences, "Workspace", and "Terminal only" above.
 
 ## Key Design Decisions & Traps
 

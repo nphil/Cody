@@ -31,6 +31,9 @@ export interface HarnessAdapter {
   readonly id: string;
   /** Human name for the UI ("OMP runtime", "Pi"). */
   readonly displayName: string;
+  /** Short brand used inline in UI copy — "All {shortName} Settings". Kept
+   * separate from displayName, which reads badly mid-sentence. */
+  readonly shortName: string;
   /** Binary name for hints/messages ("omp", "pi"). */
   readonly binaryName: string;
   readonly capabilities: HarnessCapabilities;

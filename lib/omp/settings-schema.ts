@@ -3,6 +3,7 @@ import os from "os";
 import path from "path";
 import { createJiti } from "jiti";
 import { resolveOmpBin } from "./omp-cli";
+import { isTerminalOnlySetting } from "./settings-surface";
 
 /**
  * Cody renders OMP's settings from OMP's own schema rather than a hand-kept
@@ -53,6 +54,9 @@ export interface OmpSetting {
   ordered?: boolean;
   /** Name of the OMP predicate gating visibility; see SETTING_CONDITIONS. */
   condition?: string;
+  /** Configures the harness's terminal UI only, so changing it does nothing
+   * while working in Cody. See ./settings-surface.ts. */
+  terminalOnly?: boolean;
 }
 
 export interface OmpSettingsSchema {
@@ -198,6 +202,7 @@ function normalize(schemaModule: Record<string, unknown>, source: OmpSettingsSch
       ...(uiMeta.options === "runtime" ? { runtimeOptions: true } : {}),
       ...(uiMeta.ordered === true ? { ordered: true } : {}),
       ...(typeof uiMeta.condition === "string" ? { condition: uiMeta.condition } : {}),
+      ...(isTerminalOnlySetting(key) ? { terminalOnly: true } : {}),
     });
   }
   if (settings.length === 0) return null;

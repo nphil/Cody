@@ -98,10 +98,14 @@ export function ToggleSwitch({ checked, onChange, disabled }: { checked: boolean
   );
 }
 
-export function NativeSetting({ label, description, scope, searchId, control, children }: {
+export function NativeSetting({ label, description, scope, badge, searchId, control, children }: {
   label: string;
   description: string;
-  scope?: "UI" | "Native OMP" | "Workspace";
+  /** Where the value lives when it is not the harness's own config file. The
+   * common case carries no chip: badging the majority is noise. */
+  scope?: "Cody only" | "Workspace";
+  /** Free-form chip for a caveat about this specific setting. */
+  badge?: string;
   /** Overrides the label-derived search id, so two panels can carry the same
    * label without the search highlight landing on both. */
   searchId?: string;
@@ -141,6 +145,7 @@ export function NativeSetting({ label, description, scope, searchId, control, ch
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)" }}>{label}</span>
           {scope && <span style={chipStyle}>{scope}</span>}
+          {badge && <span style={chipStyle}>{badge}</span>}
         </div>
         {children !== undefined && <span style={{ flexShrink: 0 }}>{children}</span>}
       </div>

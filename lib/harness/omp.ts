@@ -8,6 +8,7 @@ import type { HarnessAdapter } from "./types";
 export const ompHarness: HarnessAdapter = {
   id: "omp",
   displayName: "OMP runtime",
+  shortName: "OMP",
   binaryName: "omp",
   capabilities: {
     liveSessions: true,

@@ -6,7 +6,7 @@ import dynamic from "next/dynamic";
 import { Copy, ExternalLink, RefreshCw, RotateCcw, Sparkles, Search, AlertCircle } from "lucide-react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/primitives";
-import { SettingsTabs, type SettingsTab, SETTINGS_CATEGORIES, getNormalizedActive } from "./SettingsTabs";
+import { SettingsTabs, type SettingsTab, DEFAULT_HARNESS_LABEL, getSettingsCategories, getNormalizedActive } from "./SettingsTabs";
 import { STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
 import { LOCALES, useI18n, type Locale } from "@/lib/i18n";
 import { NativeSetting, SettingsHighlightContext, ToggleSwitch, chipStyle, nativeOptionStyle, nativeSelectStyle, slugify } from "./settings/primitives";
@@ -56,7 +56,7 @@ type SettingIndexEntry = {
   section: string;
   label: string;
   description: string;
-  scope?: "UI" | "Native OMP" | "Workspace";
+  scope?: "Cody only" | "Workspace";
   /** Overrides the label-derived anchor; schema settings key theirs by path so
    * two panels sharing a label do not fight over the highlight. */
   searchId?: string;
@@ -67,43 +67,43 @@ type SettingIndexEntry = {
 // so keep labels/descriptions in sync when editing the settings UI.
 const SETTING_INDEX: SettingIndexEntry[] = [
   // Interface & Behavior
-  { tab: "general", section: "Interface & Behavior", label: "Keep tool calls collapsed", description: "Show only compact headers while tools execute.", scope: "UI" },
-  { tab: "general", section: "Interface & Behavior", label: "Completion sound", description: "Play a tone when the agent completes a run.", scope: "UI" },
-  { tab: "general", section: "Interface & Behavior", label: "Message during active run", description: "What composer does on submit while agent runs. Steer interrupts; Queue follow-up delivers after finish.", scope: "UI" },
+  { tab: "general", section: "Interface & Behavior", label: "Keep tool calls collapsed", description: "Show only compact headers while tools execute.", scope: "Cody only" },
+  { tab: "general", section: "Interface & Behavior", label: "Completion sound", description: "Play a tone when the agent completes a run.", scope: "Cody only" },
+  { tab: "general", section: "Interface & Behavior", label: "Message during active run", description: "What composer does on submit while agent runs. Steer interrupts; Queue follow-up delivers after finish.", scope: "Cody only" },
   // Tool Safety & Approvals
-  { tab: "safety", section: "Tool Safety & Approvals", label: "Approval Mode", description: "Choose when OMP asks before tool calls.", scope: "Native OMP" },
-  { tab: "safety", section: "Tool Safety & Approvals", label: "Bash Override", description: "Override default approval policy specifically for terminal commands.", scope: "Native OMP" },
-  { tab: "safety", section: "Tool Safety & Approvals", label: "Extension Tool Requests", description: "Automatically approve extension tool authorization requests.", scope: "Native OMP" },
+  { tab: "safety", section: "Tool Safety & Approvals", label: "Approval Mode", description: "Choose when OMP asks before tool calls." },
+  { tab: "safety", section: "Tool Safety & Approvals", label: "Bash Override", description: "Override default approval policy specifically for terminal commands." },
+  { tab: "safety", section: "Tool Safety & Approvals", label: "Extension Tool Requests", description: "Automatically approve extension tool authorization requests." },
   // AI Model Defaults
-  { tab: "models", section: "AI Model Defaults", label: "Reasoning", description: "Default effort level for thinking-capable models.", scope: "Native OMP" },
-  { tab: "models", section: "AI Model Defaults", label: "Verbosity", description: "Response detail level for supporting providers.", scope: "Native OMP" },
-  { tab: "models", section: "AI Model Defaults", label: "Personality", description: "Style included in OMP's system prompt.", scope: "Native OMP" },
-  { tab: "models", section: "AI Model Defaults", label: "Thinking Blocks", description: "Hide model reasoning from output view.", scope: "Native OMP" },
-  { tab: "models", section: "AI Model Defaults", label: "External Thinking", description: "Private scratchpad reasoning via think tool.", scope: "Native OMP" },
+  { tab: "models", section: "AI Model Defaults", label: "Reasoning", description: "Default effort level for thinking-capable models." },
+  { tab: "models", section: "AI Model Defaults", label: "Verbosity", description: "Response detail level for supporting providers." },
+  { tab: "models", section: "AI Model Defaults", label: "Personality", description: "Style included in OMP's system prompt." },
+  { tab: "models", section: "AI Model Defaults", label: "Thinking Blocks", description: "Hide model reasoning from output view." },
+  { tab: "models", section: "AI Model Defaults", label: "External Thinking", description: "Private scratchpad reasoning via think tool." },
   // Agent & Intelligence — Advisor Review
-  { tab: "intelligence", section: "Advisor Review", label: "Enable Advisor", description: "Enable Advisor for new sessions with the advisor role.", scope: "Native OMP" },
-  { tab: "intelligence", section: "Advisor Review", label: "Advisor Backlog", description: "Wait briefly when advisor falls behind.", scope: "Native OMP" },
-  { tab: "intelligence", section: "Advisor Review", label: "Review Subagents", description: "Apply Advisor passive review to subagent tasks.", scope: "Native OMP" },
+  { tab: "intelligence", section: "Advisor Review", label: "Enable Advisor", description: "Enable Advisor for new sessions with the advisor role." },
+  { tab: "intelligence", section: "Advisor Review", label: "Advisor Backlog", description: "Wait briefly when advisor falls behind." },
+  { tab: "intelligence", section: "Advisor Review", label: "Review Subagents", description: "Apply Advisor passive review to subagent tasks." },
   // Context Compaction
-  { tab: "intelligence", section: "Context Compaction", label: "Automatic Compaction", description: "Compact context before model context limit is hit.", scope: "Native OMP" },
-  { tab: "intelligence", section: "Context Compaction", label: "Continue After Compaction", description: "Resume task execution after compaction completes.", scope: "Native OMP" },
-  { tab: "intelligence", section: "Context Compaction", label: "Maintenance Strategy", description: "Select algorithm used to reduce context pressure.", scope: "Native OMP" },
-  { tab: "intelligence", section: "Context Compaction", label: "Compact Mid-Turn", description: "Check context limits between tool execution steps.", scope: "Native OMP" },
+  { tab: "intelligence", section: "Context Compaction", label: "Automatic Compaction", description: "Compact context before model context limit is hit." },
+  { tab: "intelligence", section: "Context Compaction", label: "Continue After Compaction", description: "Resume task execution after compaction completes." },
+  { tab: "intelligence", section: "Context Compaction", label: "Maintenance Strategy", description: "Select algorithm used to reduce context pressure." },
+  { tab: "intelligence", section: "Context Compaction", label: "Compact Mid-Turn", description: "Check context limits between tool execution steps." },
   // Memory & Auto-Learn
-  { tab: "intelligence", section: "Memory & Auto-Learn", label: "Memory Backend", description: "Where durable knowledge is stored across sessions.", scope: "Native OMP" },
-  { tab: "intelligence", section: "Memory & Auto-Learn", label: "Enable Auto-Learn", description: "Capture reusable lessons after completed runs.", scope: "Native OMP" },
-  { tab: "intelligence", section: "Memory & Auto-Learn", label: "Private Capture Turn", description: "Run private lesson-capture turn at completion.", scope: "Native OMP" },
-  { tab: "intelligence", section: "Memory & Auto-Learn", label: "Memory Scope", description: "Scoping for Mnemopi knowledge storage.", scope: "Native OMP" },
-  { tab: "intelligence", section: "Memory & Auto-Learn", label: "Recall on Session Start", description: "Load relevant memories into first turn.", scope: "Native OMP" },
-  { tab: "intelligence", section: "Memory & Auto-Learn", label: "Retain Completed Turns", description: "Store completed conversation turns in memory.", scope: "Native OMP" },
+  { tab: "intelligence", section: "Memory & Auto-Learn", label: "Memory Backend", description: "Where durable knowledge is stored across sessions." },
+  { tab: "intelligence", section: "Memory & Auto-Learn", label: "Enable Auto-Learn", description: "Capture reusable lessons after completed runs." },
+  { tab: "intelligence", section: "Memory & Auto-Learn", label: "Private Capture Turn", description: "Run private lesson-capture turn at completion." },
+  { tab: "intelligence", section: "Memory & Auto-Learn", label: "Memory Scope", description: "Scoping for Mnemopi knowledge storage." },
+  { tab: "intelligence", section: "Memory & Auto-Learn", label: "Recall on Session Start", description: "Load relevant memories into first turn." },
+  { tab: "intelligence", section: "Memory & Auto-Learn", label: "Retain Completed Turns", description: "Store completed conversation turns in memory." },
   // Automatic Retry
-  { tab: "intelligence", section: "Automatic Retry", label: "Automatic Retry", description: "Retry failed turns automatically.", scope: "Native OMP" },
-  { tab: "intelligence", section: "Automatic Retry", label: "Max Attempts", description: "Retry limit before giving up.", scope: "Native OMP" },
-  { tab: "intelligence", section: "Automatic Retry", label: "Model Fallback", description: "Fall back to alternative model when retries exhaust.", scope: "Native OMP" },
+  { tab: "intelligence", section: "Automatic Retry", label: "Automatic Retry", description: "Retry failed turns automatically." },
+  { tab: "intelligence", section: "Automatic Retry", label: "Max Attempts", description: "Retry limit before giving up." },
+  { tab: "intelligence", section: "Automatic Retry", label: "Model Fallback", description: "Fall back to alternative model when retries exhaust." },
   // Extensions & Tools
-  { tab: "mcp", section: "Extensions & Tools", label: "Load Project MCP Servers", description: "Allow project-root MCP configuration to be discovered.", scope: "Native OMP" },
-  { tab: "mcp", section: "Extensions & Tools", label: "Render MCP Markdown", description: "Render non-JSON MCP results as Markdown in transcript.", scope: "Native OMP" },
-  { tab: "mcp", section: "Extensions & Tools", label: "MCP Resource Updates", description: "Inject server resource updates into conversation.", scope: "Native OMP" },
+  { tab: "mcp", section: "Extensions & Tools", label: "Load Project MCP Servers", description: "Allow project-root MCP configuration to be discovered." },
+  { tab: "mcp", section: "Extensions & Tools", label: "Render MCP Markdown", description: "Render non-JSON MCP results as Markdown in transcript." },
+  { tab: "mcp", section: "Extensions & Tools", label: "MCP Resource Updates", description: "Inject server resource updates into conversation." },
 ];
 
 function SearchResultsList({ results, query, onSelect }: { results: SearchResult[]; query: string; onSelect: (result: SearchResult) => void }) {
@@ -191,6 +191,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
   const [nativeReloadToken, setNativeReloadToken] = useState(0);
   const [schemaReloadToken, setSchemaReloadToken] = useState(0);
   const [schemaSearchIndex, setSchemaSearchIndex] = useState<SettingIndexEntry[]>([]);
+  const [harnessLabel, setHarnessLabel] = useState(DEFAULT_HARNESS_LABEL);
   const [nativeSavesInFlight, setNativeSavesInFlight] = useState(0);
   const [visitedTabs, setVisitedTabs] = useState<Set<SettingsTab>>(() => new Set(["general", activeTab]));
 
@@ -211,14 +212,14 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
     const controller = new AbortController();
     fetch("/api/omp-settings/schema", { signal: controller.signal })
       .then((response) => (response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`))))
-      .then((data: { schema?: { tabs?: Array<{ id: string; label: string }>; settings?: Array<{ key: string; tab: string; group?: string; label: string; description?: string }> } | null }) => {
+      .then((data: { harness?: { shortName?: string }; schema?: { tabs?: Array<{ id: string; label: string }>; settings?: Array<{ key: string; tab: string; group?: string; label: string; description?: string }> } | null }) => {
+        if (data.harness?.shortName) setHarnessLabel(data.harness.shortName);
         const tabLabels = new Map((data.schema?.tabs ?? []).map((tab) => [tab.id, tab.label]));
         setSchemaSearchIndex((data.schema?.settings ?? []).map((setting) => ({
           tab: "omp" as SettingsTab,
           section: [tabLabels.get(setting.tab) ?? setting.tab, setting.group].filter(Boolean).join(" › "),
           label: setting.label,
           description: setting.description ?? setting.key,
-          scope: "Native OMP" as const,
           searchId: `omp-${setting.key}`,
         })));
       })
@@ -344,7 +345,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
   const searchResults = useMemo<SearchResult[]>(() => {
     if (!trimmedQuery) return [];
     const results: SearchResult[] = [];
-    for (const category of SETTINGS_CATEGORIES) {
+    for (const category of getSettingsCategories(harnessLabel)) {
       const haystack = `${category.label} ${category.description}`.toLowerCase();
       if (haystack.includes(trimmedQuery)) {
         results.push({ id: `tab-${category.id}`, kind: "category", tab: category.id, label: category.label, description: category.description });
@@ -357,7 +358,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
       }
     }
     return results;
-  }, [trimmedQuery, schemaSearchIndex]);
+  }, [trimmedQuery, schemaSearchIndex, harnessLabel]);
 
   const openSearchResult = useCallback((result: SearchResult) => {
     onSelectTab(result.tab);
@@ -410,9 +411,9 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
           ) : (
             <SettingsHighlightContext.Provider value={highlightId}>
               {isMobile ? (
-                <SettingsTabs active={currentTab} onSelect={onSelectTab} workspaceReady={workspaceReady} layout="horizontal" />
+                <SettingsTabs active={currentTab} onSelect={onSelectTab} workspaceReady={workspaceReady} layout="horizontal" harnessLabel={harnessLabel} />
               ) : (
-                <SettingsTabs active={currentTab} onSelect={onSelectTab} workspaceReady={workspaceReady} layout="vertical" />
+                <SettingsTabs active={currentTab} onSelect={onSelectTab} workspaceReady={workspaceReady} layout="vertical" harnessLabel={harnessLabel} />
               )}
 
               <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflowY: "auto", background: "var(--bg)" }}>
@@ -430,10 +431,10 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                   <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)" }}>Controls interface presentation, notification sounds, and execution submission mode.</p>
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(2, minmax(0, 1fr))", gap: 10 }}>
-                  <NativeSetting label="Keep tool calls collapsed" description="Show only compact headers while tools execute." scope="UI">
+                  <NativeSetting label="Keep tool calls collapsed" description="Show only compact headers while tools execute." scope="Cody only">
                     <ToggleSwitch checked={toolCallsDefaultCollapsed} onChange={onToolCallsDefaultCollapsedChange} />
                   </NativeSetting>
-                  <NativeSetting label="Completion sound" description="Play a tone when the agent completes a run." scope="UI">
+                  <NativeSetting label="Completion sound" description="Play a tone when the agent completes a run." scope="Cody only">
                     <ToggleSwitch
                       checked={soundEnabled}
                       onChange={(next) => {
@@ -444,7 +445,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                     />
                   </NativeSetting>
                 </div>
-                <NativeSetting label="Language" description="Interface language. Auto-detected from the browser until chosen here." scope="UI">
+                <NativeSetting label="Language" description="Interface language. Auto-detected from the browser until chosen here." scope="Cody only">
                   <select
                     style={nativeSelectStyle}
                     value={locale}
@@ -455,7 +456,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                     ))}
                   </select>
                 </NativeSetting>
-                <NativeSetting label="Message during active run" description="What composer does on submit while agent runs. Steer interrupts; Queue follow-up delivers after finish." scope="UI">
+                <NativeSetting label="Message during active run" description="What composer does on submit while agent runs. Steer interrupts; Queue follow-up delivers after finish." scope="Cody only">
                   <select
                     style={nativeSelectStyle}
                     value={submitBehavior}
@@ -480,7 +481,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                   <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)" }}>Tool execution safety rules and permission prompts. Persisted in <code>~/.omp/agent/config.yml</code>.</p>
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(2, minmax(0, 1fr))", gap: 10 }}>
-                  <NativeSetting label="Approval Mode" description="Choose when OMP asks before tool calls." scope="Native OMP">
+                  <NativeSetting label="Approval Mode" description="Choose when OMP asks before tool calls.">
                     <select
                       style={nativeSelectStyle}
                       value={nativeSettings?.tools?.approvalMode ?? "yolo"}
@@ -491,7 +492,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                       <option value="yolo" style={nativeOptionStyle}>Auto approve (YOLO)</option>
                     </select>
                   </NativeSetting>
-                  <NativeSetting label="Bash Override" description="Override default approval policy specifically for terminal commands." scope="Native OMP">
+                  <NativeSetting label="Bash Override" description="Override default approval policy specifically for terminal commands.">
                     <select
                       style={nativeSelectStyle}
                       value={nativeSettings?.tools?.approval?.bash ?? "prompt"}
@@ -502,7 +503,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                       <option value="deny" style={nativeOptionStyle}>Deny</option>
                     </select>
                   </NativeSetting>
-                  <NativeSetting label="Extension Tool Requests" description="Automatically approve extension tool authorization requests." scope="Native OMP">
+                  <NativeSetting label="Extension Tool Requests" description="Automatically approve extension tool authorization requests.">
                     <select
                       style={nativeSelectStyle}
                       value={nativeSettings?.tools?.approval?.extension ?? "prompt"}
@@ -524,7 +525,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                   <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)" }}>Configure default reasoning effort, response verbosity, personality tone, and thinking display.</p>
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(2, minmax(0, 1fr))", gap: 10 }}>
-                  <NativeSetting label="Reasoning" description="Default effort level for thinking-capable models." scope="Native OMP">
+                  <NativeSetting label="Reasoning" description="Default effort level for thinking-capable models.">
                     <select
                       style={nativeSelectStyle}
                       value={nativeSettings?.defaultThinkingLevel ?? "high"}
@@ -535,7 +536,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                       ))}
                     </select>
                   </NativeSetting>
-                  <NativeSetting label="Verbosity" description="Response detail level for supporting providers." scope="Native OMP">
+                  <NativeSetting label="Verbosity" description="Response detail level for supporting providers.">
                     <select
                       style={nativeSelectStyle}
                       value={nativeSettings?.textVerbosity ?? "medium"}
@@ -546,7 +547,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                       ))}
                     </select>
                   </NativeSetting>
-                  <NativeSetting label="Personality" description="Style included in OMP's system prompt." scope="Native OMP">
+                  <NativeSetting label="Personality" description="Style included in OMP's system prompt.">
                     <select
                       style={nativeSelectStyle}
                       value={nativeSettings?.personality ?? "default"}
@@ -557,13 +558,13 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                       ))}
                     </select>
                   </NativeSetting>
-                  <NativeSetting label="Thinking Blocks" description="Hide model reasoning from output view." scope="Native OMP">
+                  <NativeSetting label="Thinking Blocks" description="Hide model reasoning from output view.">
                     <ToggleSwitch
                       checked={nativeSettings?.hideThinkingBlock ?? false}
                       onChange={(checked) => patchSettings({ hideThinkingBlock: checked })}
                     />
                   </NativeSetting>
-                  <NativeSetting label="External Thinking" description="Private scratchpad reasoning via think tool." scope="Native OMP">
+                  <NativeSetting label="External Thinking" description="Private scratchpad reasoning via think tool.">
                     <ToggleSwitch
                       checked={nativeSettings?.externalThinking ?? false}
                       onChange={(checked) => patchSettings({ externalThinking: checked })}
@@ -590,7 +591,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                   </div>
                   <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12 }}>Configured advisor model role passively reviews turns and injects guidance notes.</p>
                   <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(2, minmax(0, 1fr))", gap: 10 }}>
-                    <NativeSetting label="Enable Advisor" description="Enable Advisor for new sessions with the advisor role." scope="Native OMP">
+                    <NativeSetting label="Enable Advisor" description="Enable Advisor for new sessions with the advisor role.">
                       <ToggleSwitch
                         checked={nativeSettings?.advisor?.enabled ?? advisorEnabled}
                         onChange={(enabled) => {
@@ -600,7 +601,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                       />
                     </NativeSetting>
                     {(nativeSettings?.advisor?.enabled ?? advisorEnabled) && (
-                      <NativeSetting label="Advisor Backlog" description="Wait briefly when advisor falls behind." scope="Native OMP">
+                      <NativeSetting label="Advisor Backlog" description="Wait briefly when advisor falls behind.">
                         <select
                           style={nativeSelectStyle}
                           value={nativeSettings?.advisor?.syncBacklog ?? "off"}
@@ -615,7 +616,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                     )}
                   </div>
                   {(nativeSettings?.advisor?.enabled ?? advisorEnabled) && (
-                    <NativeSetting label="Review Subagents" description="Apply Advisor passive review to subagent tasks." scope="Native OMP">
+                    <NativeSetting label="Review Subagents" description="Apply Advisor passive review to subagent tasks.">
                       <ToggleSwitch
                         checked={nativeSettings?.advisor?.subagents ?? false}
                         onChange={(checked) => patchSection("advisor", { subagents: checked })}
@@ -629,19 +630,19 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                   <div style={{ fontSize: 13, fontWeight: 600 }}>Context Compaction</div>
                   <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12 }}>OMP automatically compacts oversized context to prevent hitting context limits.</p>
                   <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(2, minmax(0, 1fr))", gap: 10 }}>
-                    <NativeSetting label="Automatic Compaction" description="Compact context before model context limit is hit." scope="Native OMP">
+                    <NativeSetting label="Automatic Compaction" description="Compact context before model context limit is hit.">
                       <ToggleSwitch
                         checked={nativeSettings?.compaction?.enabled ?? true}
                         onChange={(checked) => patchSection("compaction", { enabled: checked })}
                       />
                     </NativeSetting>
-                    <NativeSetting label="Continue After Compaction" description="Resume task execution after compaction completes." scope="Native OMP">
+                    <NativeSetting label="Continue After Compaction" description="Resume task execution after compaction completes.">
                       <ToggleSwitch
                         checked={nativeSettings?.compaction?.autoContinue ?? true}
                         onChange={(checked) => patchSection("compaction", { autoContinue: checked })}
                       />
                     </NativeSetting>
-                    <NativeSetting label="Maintenance Strategy" description="Select algorithm used to reduce context pressure." scope="Native OMP">
+                    <NativeSetting label="Maintenance Strategy" description="Select algorithm used to reduce context pressure.">
                       <select
                         style={nativeSelectStyle}
                         value={nativeSettings?.compaction?.strategy ?? "snapcompact"}
@@ -654,7 +655,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                         <option value="off" style={nativeOptionStyle}>Off</option>
                       </select>
                     </NativeSetting>
-                    <NativeSetting label="Compact Mid-Turn" description="Check context limits between tool execution steps." scope="Native OMP">
+                    <NativeSetting label="Compact Mid-Turn" description="Check context limits between tool execution steps.">
                       <ToggleSwitch
                         checked={nativeSettings?.compaction?.midTurnEnabled ?? true}
                         onChange={(checked) => patchSection("compaction", { midTurnEnabled: checked })}
@@ -668,7 +669,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                   <div style={{ fontSize: 13, fontWeight: 600 }}>Memory & Auto-Learn</div>
                   <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12 }}>Durable project memory storage and automatic lesson capture.</p>
                   <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(2, minmax(0, 1fr))", gap: 10 }}>
-                    <NativeSetting label="Memory Backend" description="Where durable knowledge is stored across sessions." scope="Native OMP">
+                    <NativeSetting label="Memory Backend" description="Where durable knowledge is stored across sessions.">
                       <select
                         style={nativeSelectStyle}
                         value={nativeSettings?.memory?.backend ?? "mnemopi"}
@@ -680,19 +681,19 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                         <option value="hindsight" style={nativeOptionStyle}>Hindsight</option>
                       </select>
                     </NativeSetting>
-                    <NativeSetting label="Enable Auto-Learn" description="Capture reusable lessons after completed runs." scope="Native OMP">
+                    <NativeSetting label="Enable Auto-Learn" description="Capture reusable lessons after completed runs.">
                       <ToggleSwitch
                         checked={nativeSettings?.autolearn?.enabled ?? true}
                         onChange={(checked) => patchSection("autolearn", { enabled: checked })}
                       />
                     </NativeSetting>
-                    <NativeSetting label="Private Capture Turn" description="Run private lesson-capture turn at completion." scope="Native OMP">
+                    <NativeSetting label="Private Capture Turn" description="Run private lesson-capture turn at completion.">
                       <ToggleSwitch
                         checked={nativeSettings?.autolearn?.autoContinue ?? true}
                         onChange={(checked) => patchSection("autolearn", { autoContinue: checked })}
                       />
                     </NativeSetting>
-                    <NativeSetting label="Memory Scope" description="Scoping for Mnemopi knowledge storage." scope="Native OMP">
+                    <NativeSetting label="Memory Scope" description="Scoping for Mnemopi knowledge storage.">
                       <select
                         style={nativeSelectStyle}
                         value={nativeSettings?.mnemopi?.scoping ?? "per-project"}
@@ -703,13 +704,13 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                         <option value="global" style={nativeOptionStyle}>Global</option>
                       </select>
                     </NativeSetting>
-                    <NativeSetting label="Recall on Session Start" description="Load relevant memories into first turn." scope="Native OMP">
+                    <NativeSetting label="Recall on Session Start" description="Load relevant memories into first turn.">
                       <ToggleSwitch
                         checked={nativeSettings?.mnemopi?.autoRecall ?? true}
                         onChange={(checked) => patchSection("mnemopi", { autoRecall: checked })}
                       />
                     </NativeSetting>
-                    <NativeSetting label="Retain Completed Turns" description="Store completed conversation turns in memory." scope="Native OMP">
+                    <NativeSetting label="Retain Completed Turns" description="Store completed conversation turns in memory.">
                       <ToggleSwitch
                         checked={nativeSettings?.mnemopi?.autoRetain ?? true}
                         onChange={(checked) => patchSection("mnemopi", { autoRetain: checked })}
@@ -723,13 +724,13 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                   <div style={{ fontSize: 13, fontWeight: 600 }}>Automatic Retry</div>
                   <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12 }}>Rules for automatically retrying failed turns.</p>
                   <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(2, minmax(0, 1fr))", gap: 10 }}>
-                    <NativeSetting label="Automatic Retry" description="Retry failed turns automatically." scope="Native OMP">
+                    <NativeSetting label="Automatic Retry" description="Retry failed turns automatically.">
                       <ToggleSwitch
                         checked={nativeSettings?.retry?.enabled ?? true}
                         onChange={(checked) => patchSection("retry", { enabled: checked })}
                       />
                     </NativeSetting>
-                    <NativeSetting label="Max Attempts" description="Retry limit before giving up." scope="Native OMP">
+                    <NativeSetting label="Max Attempts" description="Retry limit before giving up.">
                       <select
                         style={nativeSelectStyle}
                         value={String(nativeSettings?.retry?.maxRetries ?? 2)}
@@ -740,7 +741,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                         ))}
                       </select>
                     </NativeSetting>
-                    <NativeSetting label="Model Fallback" description="Fall back to alternative model when retries exhaust." scope="Native OMP">
+                    <NativeSetting label="Model Fallback" description="Fall back to alternative model when retries exhaust.">
                       <ToggleSwitch
                         checked={nativeSettings?.retry?.modelFallback ?? false}
                         onChange={(checked) => patchSection("retry", { modelFallback: checked })}
@@ -760,19 +761,19 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                 </div>
                 {cwd && (
                   <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(2, minmax(0, 1fr))", gap: 10 }}>
-                    <NativeSetting label="Load Project MCP Servers" description="Allow project-root MCP configuration to be discovered." scope="Native OMP">
+                    <NativeSetting label="Load Project MCP Servers" description="Allow project-root MCP configuration to be discovered.">
                       <ToggleSwitch
                         checked={nativeSettings?.mcp?.enableProjectConfig ?? true}
                         onChange={(checked) => patchSection("mcp", { enableProjectConfig: checked })}
                       />
                     </NativeSetting>
-                    <NativeSetting label="Render MCP Markdown" description="Render non-JSON MCP results as Markdown in transcript." scope="Native OMP">
+                    <NativeSetting label="Render MCP Markdown" description="Render non-JSON MCP results as Markdown in transcript.">
                       <ToggleSwitch
                         checked={nativeSettings?.mcp?.renderMarkdownResults ?? true}
                         onChange={(checked) => patchSection("mcp", { renderMarkdownResults: checked })}
                       />
                     </NativeSetting>
-                    <NativeSetting label="MCP Resource Updates" description="Inject server resource updates into conversation." scope="Native OMP">
+                    <NativeSetting label="MCP Resource Updates" description="Inject server resource updates into conversation.">
                       <ToggleSwitch
                         checked={nativeSettings?.mcp?.notifications ?? false}
                         onChange={(checked) => patchSection("mcp", { notifications: checked })}
@@ -803,6 +804,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
             {currentTab === "omp" && (
               <OmpSchemaSettings
                 isMobile={isMobile}
+                harnessLabel={harnessLabel}
                 reloadToken={schemaReloadToken}
                 onSaved={() => setNativeReloadToken((token) => token + 1)}
               />

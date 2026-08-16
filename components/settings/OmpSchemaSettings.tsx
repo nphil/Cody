@@ -3,7 +3,7 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, RefreshCw, RotateCcw } from "lucide-react";
 import { SETTING_CONDITIONS, isConditionSatisfied } from "@/lib/omp/settings-conditions";
-import type { OmpSetting, OmpSettingsSchema } from "@/lib/omp/settings-schema";
+import type { OmpSetting, OmpSettingOption, OmpSettingsSchema } from "@/lib/omp/settings-schema";
 import { NativeSetting, SettingsHighlightContext, ToggleSwitch, nativeInputStyle, nativeOptionStyle, nativeSelectStyle } from "./primitives";
 
 /**
@@ -21,6 +21,7 @@ export type OmpSettingValue = boolean | number | string | string[];
 
 interface SchemaResponse {
   path?: string;
+  harness?: { id?: string; shortName?: string };
   schema?: OmpSettingsSchema | null;
   values?: Record<string, OmpSettingValue>;
   reason?: string;
@@ -28,6 +29,26 @@ interface SchemaResponse {
 }
 
 const SAVE_DEBOUNCE_MS = 350;
+
+/** Marks settings that only configure the harness's terminal UI. Half of a
+ * coding agent's schema is TUI chrome, and toggling one of those here does
+ * nothing visible in the browser — the row still belongs in the panel, because
+ * the same file drives the CLI, but it must say so. */
+const TERMINAL_ONLY_BADGE = "Terminal only";
+
+/** Beyond this, an option label will not fit a select sitting beside the
+ * setting's name, so the control moves to its own full-width row. */
+const INLINE_OPTION_LABEL_LIMIT = 18;
+
+/** Toggles and short selects read best beside the label. Free text, list
+ * editors and long choice lists need the card's full width. */
+function isInlineControl(setting: OmpSetting): boolean {
+  if (setting.type === "boolean") return true;
+  if (setting.type === "string" || setting.type === "array") return false;
+  const labels = setting.options?.map((option) => option.label) ?? setting.values ?? [];
+  if (labels.length === 0) return true; // A bare number input is compact.
+  return labels.every((label) => label.length <= INLINE_OPTION_LABEL_LIMIT);
+}
 
 /** A condition Cody can evaluate is honoured by hiding the row, so saying so
  * again would be noise. One it cannot evaluate is worth naming, because the
@@ -48,8 +69,10 @@ function effectiveValue(setting: OmpSetting, values: Record<string, OmpSettingVa
   return undefined;
 }
 
-export function OmpSchemaSettings({ isMobile, onSaved, reloadToken }: {
+export function OmpSchemaSettings({ isMobile, harnessLabel = "OMP", onSaved, reloadToken }: {
   isMobile: boolean;
+  /** Brand of the active harness, used in this panel's own copy. */
+  harnessLabel?: string;
   /** Fires after a successful save so the curated panels can re-read the file. */
   onSaved?: () => void;
   /** Bumped by the dialog when another panel writes the settings file. */
@@ -188,14 +211,14 @@ export function OmpSchemaSettings({ isMobile, onSaved, reloadToken }: {
     return (
       <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 12 }}>
         <div>
-          <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>All OMP Settings</h3>
+          <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>All {harnessLabel} Settings</h3>
           <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)" }}>
-            This panel mirrors OMP&apos;s own settings schema, so it lists every setting the installed OMP declares.
+            This panel mirrors {harnessLabel}&apos;s own settings schema, so it lists every setting the installed {harnessLabel} declares.
           </p>
         </div>
         <div role="alert" style={{ padding: "10px 14px", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", border: "1px solid var(--border)", color: "var(--text-muted)", fontSize: 12, display: "flex", alignItems: "flex-start", gap: 8 }}>
           <AlertCircle size={14} aria-hidden="true" style={{ marginTop: 1, flexShrink: 0 }} />
-          <span>OMP&apos;s schema could not be read, so only Cody&apos;s curated settings are available. {reason}</span>
+          <span>{harnessLabel}&apos;s schema could not be read, so only Cody&apos;s curated settings are available. {reason}</span>
         </div>
       </div>
     );
@@ -205,9 +228,9 @@ export function OmpSchemaSettings({ isMobile, onSaved, reloadToken }: {
     <div role="tabpanel" id="settings-panel-omp" aria-labelledby="settings-tab-omp" style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16 }}>
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
         <div>
-          <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>All OMP Settings</h3>
+          <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>All {harnessLabel} Settings</h3>
           <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)" }}>
-            Read from OMP{schema?.source.version ? ` ${schema.source.version}` : ""}&apos;s own schema — every setting it declares, in its tabs and sections.
+            Read from {harnessLabel}{schema?.source.version ? ` ${schema.source.version}` : ""}&apos;s own schema — every setting it declares, in its tabs and sections.
           </p>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -218,7 +241,7 @@ export function OmpSchemaSettings({ isMobile, onSaved, reloadToken }: {
           )}
           <input
             type="text"
-            aria-label="Filter OMP settings"
+            aria-label={`Filter ${harnessLabel} settings`}
             placeholder="Filter…"
             value={filter}
             onChange={(event) => setFilter(event.target.value)}
@@ -295,16 +318,14 @@ function SchemaSettingRow({ setting, value, overridden, onChange }: {
   const description = [setting.description, setting.condition ? describeCondition(setting.condition) : null]
     .filter(Boolean)
     .join(" ");
-  // Toggles and selects sit beside the label; free-text and list editors need
-  // the full card width, so they drop below the description instead.
-  const inline = setting.type === "boolean" || setting.type === "enum" || setting.type === "number";
   const control = <SchemaControl setting={setting} value={value} onChange={onChange} />;
+  const inline = isInlineControl(setting);
 
   return (
     <NativeSetting
       label={setting.label}
       description={description || setting.key}
-      scope="Native OMP"
+      badge={setting.terminalOnly ? TERMINAL_ONLY_BADGE : undefined}
       searchId={`omp-${setting.key}`}
       control={
         <>
@@ -340,24 +361,35 @@ function SchemaControl({ setting, value, onChange }: {
   }
 
   if (setting.type === "enum" || (setting.type === "number" && setting.options)) {
-    const choices = setting.options ?? (setting.values ?? []).map((entry) => ({ value: entry, label: entry }));
+    const choices: OmpSettingOption[] = setting.options ?? (setting.values ?? []).map((entry) => ({ value: entry, label: entry }));
     const current = value === undefined ? "" : String(value);
     // A hand-edited file can hold a value OMP no longer offers; keep it listed
     // rather than silently showing a different setting than what is in effect.
     const options = choices.some((choice) => choice.value === current) || current === ""
       ? choices
       : [...choices, { value: current, label: `${current} (not in schema)` }];
+    const inline = isInlineControl(setting);
+    const selected = options.find((choice) => choice.value === current);
     return (
-      <select
-        aria-label={setting.label}
-        value={current}
-        onChange={(event) => onChange(setting.type === "number" ? Number(event.target.value) : event.target.value)}
-        style={{ ...nativeSelectStyle, maxWidth: 220 }}
-      >
-        {options.map((choice) => (
-          <option key={choice.value} value={choice.value} style={nativeOptionStyle}>{choice.label}</option>
-        ))}
-      </select>
+      <div style={{ display: "flex", flexDirection: "column", gap: 5, minWidth: 0, width: inline ? undefined : "100%" }}>
+        <select
+          aria-label={setting.label}
+          value={current}
+          onChange={(event) => onChange(setting.type === "number" ? Number(event.target.value) : event.target.value)}
+          // A select never grows past its card: long option labels ellipsize in
+          // the closed state instead of pushing the layout open.
+          style={{ ...nativeSelectStyle, width: inline ? undefined : "100%", maxWidth: "100%", minWidth: 0, textOverflow: "ellipsis" }}
+        >
+          {options.map((choice) => (
+            <option key={choice.value} value={choice.value} style={nativeOptionStyle}>{choice.label}</option>
+          ))}
+        </select>
+        {!inline && selected?.description && (
+          // The closed select can only show so much of a long label; the
+          // schema's own note for the chosen value says what it actually does.
+          <span style={{ fontSize: 10.5, color: "var(--text-dim)", lineHeight: 1.4 }}>{selected.description}</span>
+        )}
+      </div>
     );
   }
 
