@@ -12,7 +12,7 @@
   <Category>Tools: Productivity:</Category>
   <WebUI>http://[IP]:[PORT:30177]/</WebUI>
   <TemplateURL/>
-  <Icon>https://raw.githubusercontent.com/nphil/Cody/main/public/favicon.ico</Icon>
+  <Icon>https://raw.githubusercontent.com/nphil/Cody/main/app/favicon.ico</Icon>
   <ExtraParams/>
   <PostArgs/>
   <DonateText/>
