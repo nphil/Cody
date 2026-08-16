@@ -44,6 +44,8 @@
   "appShell.plugins": "插件",
   "appShell.resizeSidebar": "调整侧边栏大小",
   "appShell.resizeSidebarTitle": "拖动以调整侧边栏大小。双击或按回车键可重置为默认宽度。",
+  "appShell.resizeWorkspacePanel": "调整工作区面板大小",
+  "appShell.resizeWorkspacePanelTitle": "拖动以调整工作区面板大小。双击或按 Enter 恢复默认宽度。",
   "appShell.sectionMessages": "消息",
   "appShell.sectionSessionInfo": "会话信息",
   "appShell.sectionTokens": "Token",

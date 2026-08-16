@@ -488,6 +488,67 @@ export function AppShell() {
   const [focusTerminalRequest, setFocusTerminalRequest] = useState<{ id: string; token: number } | null>(null);
   const focusTerminalTokenRef = useRef(0);
 
+  // Right panel width — user-adjustable via the seam handle; null keeps the
+  // CSS default (42%). Written straight to the container's CSS var during a
+  // drag so the flex row tracks the pointer without AppShell re-rendering.
+  const rightPanelRef = useRef<HTMLDivElement | null>(null);
+  const [workspaceWidth, setWorkspaceWidth] = useState<number | null>(null);
+  useEffect(() => {
+    try {
+      const stored = Number.parseInt(localStorage.getItem(STORAGE_KEYS.workspaceWidth) ?? "", 10);
+      if (Number.isFinite(stored) && stored > 0) setWorkspaceWidth(stored);
+    } catch { /* storage may be unavailable */ }
+  }, []);
+  const clampWorkspaceWidth = useCallback((value: number): number => {
+    const max = Math.max(320, Math.min(window.innerWidth * 0.78, window.innerWidth - 420));
+    return Math.round(Math.min(Math.max(value, 300), max));
+  }, []);
+  const commitWorkspaceWidth = useCallback((value: number | null) => {
+    setWorkspaceWidth(value);
+    try {
+      if (value === null) localStorage.removeItem(STORAGE_KEYS.workspaceWidth);
+      else localStorage.setItem(STORAGE_KEYS.workspaceWidth, String(value));
+    } catch { /* storage may be unavailable */ }
+  }, []);
+  const handleWorkspaceResizeStart = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (isMobile) return;
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = rightPanelRef.current?.getBoundingClientRect().width ?? workspaceWidth ?? window.innerWidth * 0.42;
+    const seam = e.currentTarget;
+    seam.classList.add("panel-resizing");
+    rightPanelRef.current?.classList.add("panel-resizing-target");
+    let pending = workspaceWidth;
+    const onMove = (ev: MouseEvent) => {
+      // The seam sits left of the panel: dragging left grows the panel.
+      const next = clampWorkspaceWidth(startWidth + (startX - ev.clientX));
+      rightPanelRef.current?.style.setProperty("--workspace-width", `${next}px`);
+      pending = next;
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      seam.classList.remove("panel-resizing");
+      rightPanelRef.current?.classList.remove("panel-resizing-target");
+      if (pending !== null) commitWorkspaceWidth(pending);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [clampWorkspaceWidth, commitWorkspaceWidth, isMobile, workspaceWidth]);
+  const handleWorkspaceResizeKey = useCallback((e: React.KeyboardEvent) => {
+    const current = rightPanelRef.current?.getBoundingClientRect().width ?? workspaceWidth ?? window.innerWidth * 0.42;
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      commitWorkspaceWidth(clampWorkspaceWidth(current + 10));
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      commitWorkspaceWidth(clampWorkspaceWidth(current - 10));
+    } else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      commitWorkspaceWidth(null);
+    }
+  }, [clampWorkspaceWidth, commitWorkspaceWidth, workspaceWidth]);
+
   const handleGitCountChange = useCallback((count: number | null) => setGitBadgeCount(count), []);
   const handleGitMetaChange = useCallback((meta: { branch: string | null; repoRoot: string | null } | null) => {
     setGitMeta(meta ?? { branch: null, repoRoot: null });
@@ -975,20 +1036,16 @@ export function AppShell() {
           onDoubleClick={resetSidebarWidth}
           onKeyDown={handleSidebarResizeKey}
           title={t("appShell.resizeSidebarTitle")}
+          className={`panel-resize-seam ui-focus-ring${sidebarResizing ? " panel-resizing" : ""}`}
           style={{
-            width: 5,
+            width: 7,
             flexShrink: 0,
-            marginLeft: -5,
+            marginLeft: -7,
             cursor: "col-resize",
             background: "transparent",
             zIndex: 205,
             outline: "none",
-            transition: "background var(--dur-fast) var(--ease-out-warm)",
           }}
-          onMouseEnter={(e) => { e.currentTarget.style.background = "color-mix(in srgb, var(--accent) 35%, transparent)"; }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
-          onFocus={(e) => { e.currentTarget.style.background = "color-mix(in srgb, var(--accent) 35%, transparent)"; }}
-          onBlur={(e) => { e.currentTarget.style.background = "transparent"; }}
         />
       )}
 
@@ -1488,14 +1545,39 @@ export function AppShell() {
         </div>
       </main>
 
+      {/* Workspace panel resize seam — desktop only, hidden while closed. */}
+      {!isMobile && rightPanelOpen && (
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label={t("appShell.resizeWorkspacePanel")}
+          tabIndex={0}
+          className="panel-resize-seam ui-focus-ring"
+          onMouseDown={handleWorkspaceResizeStart}
+          onDoubleClick={() => commitWorkspaceWidth(null)}
+          onKeyDown={handleWorkspaceResizeKey}
+          title={t("appShell.resizeWorkspacePanelTitle")}
+          style={{
+            width: 7,
+            marginRight: -7,
+            flexShrink: 0,
+            cursor: "col-resize",
+            background: "transparent",
+            zIndex: 205,
+            outline: "none",
+          }}
+        />
+      )}
       {/* Right workspace panel — file viewer and terminal stay mounted between mode changes. */}
       <div
+        ref={rightPanelRef}
         className={`right-panel-container${rightPanelOpen ? " right-panel-open" : " right-panel-closed"}`}
         style={{
           display: "flex",
           flexDirection: "column",
           borderLeft: "1px solid var(--border)",
           background: "var(--bg)",
+          ...(!isMobile && workspaceWidth !== null ? { "--workspace-width": `${workspaceWidth}px` } : {}),
         }}
       >
         <div

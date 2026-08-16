@@ -1773,8 +1773,9 @@ html.dark .dropdown-surface :is(select, option) {
     flex-shrink: 0;
   }
   .right-panel-container.right-panel-open {
-    width: 42%;
+    width: var(--workspace-width, 42%);
     min-width: 300px;
+    max-width: 78vw;
   }
   .right-panel-container.right-panel-closed {
     width: 0;
@@ -1783,8 +1784,13 @@ html.dark .dropdown-surface :is(select, option) {
   }
   /* keep inner content at fixed width so it doesn't reflow during animation */
   .right-panel-container > * {
-    width: 42vw;
+    width: var(--workspace-width, 42vw);
     min-width: 300px;
+  }
+  /* A drag must track the pointer 1:1 — the open/close animation would lag it. */
+  .right-panel-container.panel-resizing-target,
+  .right-panel-container.panel-resizing-target > * {
+    transition: none;
   }
 }
 
@@ -1927,6 +1933,33 @@ html.dark .dropdown-surface :is(select, option) {
   background: color-mix(in srgb, var(--status-error) 8%, var(--bg-panel));
   font-size: 11px;
 }
+/* Grab pill on the resizable panel seams. The strip itself stays invisible —
+   only a small centered pill marks the handle, growing and taking the accent
+   while hovered, focused or mid-drag. */
+.panel-resize-seam {
+  position: relative;
+  touch-action: none;
+}
+.panel-resize-seam::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 3px;
+  height: 36px;
+  border-radius: 2px;
+  background: var(--border);
+  transition: background var(--dur-fast) var(--ease-out-warm), height var(--dur-fast) var(--ease-out-warm);
+  pointer-events: none;
+}
+.panel-resize-seam:hover::after,
+.panel-resize-seam:focus-visible::after,
+.panel-resize-seam.panel-resizing::after {
+  background: var(--accent);
+  height: 52px;
+}
+
 .workspace-tab-strip {
   scrollbar-width: none;
 }

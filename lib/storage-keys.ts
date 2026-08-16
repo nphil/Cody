@@ -34,6 +34,8 @@ export const STORAGE_KEYS = {
   workspacePanel: "cody:workspace-panel",
   /** Git panel changed-file presentation ("list" | "tree"). */
   gitFileView: "cody:git-file-view",
+  /** Right workspace panel width in pixels (unset = CSS default). */
+  workspaceWidth: "cody:workspace-width",
 } as const;
 
 /** localStorage prefixes completed with a workspace path. */

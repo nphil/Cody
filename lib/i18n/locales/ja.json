@@ -44,6 +44,8 @@
   "appShell.plugins": "プラグイン",
   "appShell.resizeSidebar": "サイドバーのサイズを変更",
   "appShell.resizeSidebarTitle": "ドラッグでサイドバーをリサイズ。ダブルクリックまたは Enter で既定の幅に戻します。",
+  "appShell.resizeWorkspacePanel": "ワークスペースパネルのサイズを変更",
+  "appShell.resizeWorkspacePanelTitle": "ドラッグでワークスペースパネルのサイズを変更します。ダブルクリックまたは Enter でデフォルト幅に戻します。",
   "appShell.sectionMessages": "メッセージ",
   "appShell.sectionSessionInfo": "セッション情報",
   "appShell.sectionTokens": "トークン",

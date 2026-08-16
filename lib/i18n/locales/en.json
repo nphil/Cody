@@ -44,6 +44,8 @@
   "appShell.plugins": "Plugins",
   "appShell.resizeSidebar": "Resize sidebar",
   "appShell.resizeSidebarTitle": "Drag to resize the sidebar. Double-click or press Enter to reset to the default width.",
+  "appShell.resizeWorkspacePanel": "Resize workspace panel",
+  "appShell.resizeWorkspacePanelTitle": "Drag to resize the workspace panel. Double-click or press Enter to reset to the default width.",
   "appShell.sectionMessages": "Messages",
   "appShell.sectionSessionInfo": "Session Info",
   "appShell.sectionTokens": "Tokens",
