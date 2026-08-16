@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { getRequestUser, isAuthRequired } from "@/lib/auth/guard";
 import { hasAnyUser, isSignupAllowed, toPublicUser } from "@/lib/auth/users";
-import { getHarness } from "@/lib/harness";
 
 /**
  * Everything the login screen (and the signed-in shell) needs to know about
@@ -22,7 +21,6 @@ export function GET(request: Request) {
       // its first account would be a brick.
       signupAllowed: firstRun || isSignupAllowed(),
       user: user ? toPublicUser(user) : null,
-      harness: { shortName: getHarness().shortName },
     },
     { headers: { "Cache-Control": "no-store" } },
   );

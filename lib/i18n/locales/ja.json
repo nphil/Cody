@@ -512,7 +512,6 @@
   "login.signinTitle": "おかえりなさい",
   "login.signupSubtitle": "このサーバーで使うユーザー名とパスワードを選んでください",
   "login.signupTitle": "アカウントを作成",
-  "login.tagline": "{harness} コーディングエージェントのワークスペース",
   "login.username": "ユーザー名",
   "mermaidBlock.close": "閉じる",
   "mermaidBlock.diagramTitle": "Mermaid 図",

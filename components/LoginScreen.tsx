@@ -17,7 +17,6 @@ interface AccountState {
   firstRun: boolean;
   signupAllowed: boolean;
   user: { id: string; username: string } | null;
-  harness?: { shortName?: string };
 }
 
 type Mode = "signin" | "signup" | "firstRun";
@@ -147,7 +146,6 @@ export function LoginScreen() {
   }, [busy, mode, username, fullName, password, confirm, next, t]);
 
   const creating = mode !== "signin";
-  const harnessName = state?.harness?.shortName ?? "OMP";
   const heading =
     mode === "firstRun" ? t("login.firstRunTitle")
     : mode === "signup" ? t("login.signupTitle")
@@ -166,7 +164,6 @@ export function LoginScreen() {
             <span style={{ color: "var(--text)" }}>dy</span>
             <span className="login-caret" aria-hidden />
           </div>
-          <div className="login-tagline">{t("login.tagline", { harness: harnessName })}</div>
         </div>
 
         <form className="login-card" onSubmit={submit} aria-busy={busy || state === null}>

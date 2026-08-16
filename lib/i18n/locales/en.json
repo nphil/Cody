@@ -512,7 +512,6 @@
   "login.signinTitle": "Welcome back",
   "login.signupSubtitle": "Choose a username and password for this server",
   "login.signupTitle": "Create your account",
-  "login.tagline": "Your workspace for the {harness} coding agent",
   "login.username": "Username",
   "mermaidBlock.close": "Close",
   "mermaidBlock.diagramTitle": "Mermaid diagram",
