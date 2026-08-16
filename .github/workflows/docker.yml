@@ -52,8 +52,10 @@ jobs:
       - name: Smoke test the image
         run: |
           set -euo pipefail
-          # The harness has to be runnable, not merely installed.
-          docker run --rm cody:smoke omp --version
+          # The harness has to be runnable, not merely installed. --entrypoint
+          # is required: the image's entrypoint ignores argv and demands a
+          # password, so a bare `docker run … omp --version` never reaches omp.
+          docker run --rm --entrypoint omp cody:smoke --version
           docker run -d --name cody-smoke -p 30177:30177 \
             -e CODY_PASSWORD=smoke-test-password cody:smoke
           for _ in $(seq 1 30); do
