@@ -12,7 +12,7 @@ import { TabBar, type Tab } from "./TabBar";
 import { BranchNavigator } from "./BranchNavigator";
 import { LanguageSwitcher } from "./LanguageSwitcher";
 import { ThemePicker } from "./ThemePicker";
-import { Check, Files, History, Menu, PanelLeft, ScrollText, Terminal, Wand2 } from "lucide-react";
+import { Check, CircleArrowUp, Files, GitBranch, History, Info, ListTodo, Menu, PanelLeft, ScrollText, Terminal, Wand2 } from "lucide-react";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { translate, useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
@@ -23,6 +23,7 @@ import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText }
 import { getInitialNavigation } from "@/lib/initial-navigation";
 import { comparableProjectPath } from "@/lib/comparable-path";
 import { showCompletionNotification } from "@/lib/browser-notifications";
+import type { GitStatusResponse } from "@/lib/git-types";
 import type { SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
@@ -39,6 +40,31 @@ const TerminalPanel = dynamic(() => import("./TerminalPanel").then((module) => m
   ssr: false,
   loading: () => <PanelLoadingFallback />,
 });
+const GitPanel = dynamic(() => import("./GitPanel").then((module) => module.GitPanel), {
+  ssr: false,
+  loading: () => <PanelLoadingFallback />,
+});
+const TasksPanel = dynamic(() => import("./TasksPanel").then((module) => module.TasksPanel), {
+  ssr: false,
+  loading: () => <PanelLoadingFallback />,
+});
+const UpdatesPanel = dynamic(() => import("./UpdatesPanel").then((module) => module.UpdatesPanel), {
+  ssr: false,
+  loading: () => <PanelLoadingFallback />,
+});
+const InfoPanel = dynamic(() => import("./InfoPanel").then((module) => module.InfoPanel), {
+  ssr: false,
+  loading: () => <PanelLoadingFallback />,
+});
+
+/** The tools of the right workspace panel, in tab order (pi-web parity:
+ * Files | Git | Terminal | Tasks | Updates | Info). */
+type WorkspacePanelId = "file" | "git" | "terminal" | "tasks" | "updates" | "info";
+const WORKSPACE_PANEL_IDS: readonly WorkspacePanelId[] = ["file", "git", "terminal", "tasks", "updates", "info"];
+
+function isWorkspacePanelId(value: string | null): value is WorkspacePanelId {
+  return (WORKSPACE_PANEL_IDS as readonly string[]).includes(value ?? "");
+}
 
 // Resizable desktop sidebar: the width is stored on the container as the
 // --sidebar-width CSS variable (globals.css) and persisted between sessions.
@@ -424,11 +450,42 @@ export function AppShell() {
     };
   }, [activeTopPanel]);
 
-  // Right panel — file and terminal workspaces remain mounted while hidden.
+  // Right panel — every workspace tool stays mounted once first shown, so
+  // switching tabs never loses terminal buffers, diff selections or scroll.
   const [fileTabs, setFileTabs] = useState<Tab[]>([]);
   const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
-  const [rightPanelMode, setRightPanelMode] = useState<"file" | "terminal">("file");
+  const [rightPanelMode, setRightPanelModeState] = useState<WorkspacePanelId>("file");
+  // file + terminal always mount (pre-existing behavior); the rest join on first activation.
+  const [mountedPanels, setMountedPanels] = useState<ReadonlySet<WorkspacePanelId>>(() => new Set(["file", "terminal"]));
+  const setRightPanelMode = useCallback((mode: WorkspacePanelId) => {
+    setRightPanelModeState(mode);
+    setMountedPanels((prev) => (prev.has(mode) ? prev : new Set([...prev, mode])));
+    try { localStorage.setItem(STORAGE_KEYS.workspacePanel, mode); } catch { /* storage may be unavailable */ }
+  }, []);
+  // Restore the last-used tool after mount (localStorage is unavailable during SSR).
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(STORAGE_KEYS.workspacePanel);
+      if (isWorkspacePanelId(stored) && stored !== "file") {
+        setRightPanelModeState(stored);
+        setMountedPanels((prev) => (prev.has(stored) ? prev : new Set([...prev, stored])));
+      }
+    } catch { /* storage may be unavailable */ }
+  }, []);
+
+  // Tab badges + workspace git identity (branch/repo root for the Info panel).
+  const [gitBadgeCount, setGitBadgeCount] = useState<number | null>(null);
+  const [gitMeta, setGitMeta] = useState<{ branch: string | null; repoRoot: string | null }>({ branch: null, repoRoot: null });
+  const [tasksConfigInvalid, setTasksConfigInvalid] = useState(false);
+  const [updatesBadgeCount, setUpdatesBadgeCount] = useState(0);
+  const [focusTerminalId, setFocusTerminalId] = useState<string | null>(null);
+
+  const handleGitCountChange = useCallback((count: number | null) => setGitBadgeCount(count), []);
+  const handleTasksConfigStateChange = useCallback((state: "missing" | "invalid" | "loaded" | null) => {
+    setTasksConfigInvalid(state === "invalid");
+  }, []);
+  const handleUpdatesAvailableCountChange = useCallback((count: number) => setUpdatesBadgeCount(count), []);
 
   // Same @mention format as the chat input's @ autocomplete, so the agent's
   // read tool resolves it the same way (it strips the @ prefix).
@@ -447,6 +504,26 @@ export function AppShell() {
 
   const initialSessionId = initialNavigation.sessionId;
   const [activeCwd, setActiveCwd] = useState<string | null>(null);
+
+  // Lightweight git summary for the Git tab badge and the Info panel —
+  // refreshed when the workspace changes and after every agent turn.
+  useEffect(() => {
+    if (!activeCwd) {
+      setGitBadgeCount(null);
+      setGitMeta({ branch: null, repoRoot: null });
+      return;
+    }
+    const controller = new AbortController();
+    void fetch(`/api/git/status?cwd=${encodeURIComponent(activeCwd)}`, { signal: controller.signal })
+      .then((response) => (response.ok ? (response.json() as Promise<GitStatusResponse>) : null))
+      .then((data) => {
+        if (!data || controller.signal.aborted) return;
+        setGitBadgeCount(data.isGitRepository ? data.files.length : null);
+        setGitMeta({ branch: data.branchInfo?.branch ?? null, repoRoot: data.repositoryRoot });
+      })
+      .catch(() => { /* aborted or offline — keep the last known badge */ });
+    return () => controller.abort();
+  }, [activeCwd, explorerRefreshKey]);
   // True once the initial ?session= URL param has been resolved (or confirmed absent)
   const [initialSessionRestored, setInitialSessionRestored] = useState<boolean>(() => !initialSessionId);
   // Suppresses sessionKey bump in handleCwdChange during the initial URL restore
@@ -1410,66 +1487,102 @@ export function AppShell() {
         <div
           role="tablist"
           aria-label={t("workspace.tools")}
+          className="workspace-tab-strip"
           style={{
             display: "flex",
             alignItems: "center",
-            gap: 4,
+            gap: 2,
             flexShrink: 0,
             height: isMobile ? 44 : 36,
             padding: isMobile ? "0 48px 0 4px" : "0 40px 0 4px",
             boxSizing: "border-box",
             borderBottom: "1px solid var(--border)",
             background: "var(--bg-panel)",
+            overflowX: "auto",
           }}
         >
-          <button
-            id="workspace-files-tab"
-            type="button"
-            role="tab"
-            aria-selected={rightPanelMode === "file"}
-            aria-controls="workspace-files-tool"
-            tabIndex={rightPanelMode === "file" ? 0 : -1}
-            className="shell-toolbar-btn ui-focus-ring"
-            onClick={() => { setRightPanelMode("file"); setRightPanelOpen(true); }}
-            onKeyDown={(event) => {
-              if (event.key !== "ArrowRight" && event.key !== "End") return;
-              event.preventDefault();
-              setRightPanelMode("terminal");
-              document.getElementById("workspace-terminal-tab")?.focus();
-            }}
-            title={t("workspace.files")}
-            aria-label={t("workspace.files")}
-            style={{ background: rightPanelMode === "file" ? "var(--bg-selected)" : undefined }}
-          >
-            <Files size={15} aria-hidden="true" />
-          </button>
-          <button
-            id="workspace-terminal-tab"
-            type="button"
-            role="tab"
-            aria-selected={rightPanelMode === "terminal"}
-            aria-controls="workspace-terminal-tool"
-            tabIndex={rightPanelMode === "terminal" ? 0 : -1}
-            className="shell-toolbar-btn ui-focus-ring"
-            onClick={() => { setRightPanelMode("terminal"); setRightPanelOpen(true); }}
-            onKeyDown={(event) => {
-              if (event.key !== "ArrowLeft" && event.key !== "Home") return;
-              event.preventDefault();
-              setRightPanelMode("file");
-              document.getElementById("workspace-files-tab")?.focus();
-            }}
-            title={t("terminal.open")}
-            aria-label={t("terminal.open")}
-            style={{ background: rightPanelMode === "terminal" ? "var(--bg-selected)" : undefined }}
-          >
-            <Terminal size={15} aria-hidden="true" />
-          </button>
+          {(() => {
+            const panels: Array<{ id: WorkspacePanelId; icon: React.ReactNode; label: string; badge?: string | null }> = [
+              { id: "file", icon: <Files size={15} aria-hidden="true" />, label: t("workspace.files") },
+              {
+                id: "git",
+                icon: <GitBranch size={15} aria-hidden="true" />,
+                label: t("workspace.git"),
+                badge: gitBadgeCount !== null && gitBadgeCount > 0 ? String(gitBadgeCount) : null,
+              },
+              { id: "terminal", icon: <Terminal size={15} aria-hidden="true" />, label: t("terminal.open") },
+              { id: "tasks", icon: <ListTodo size={15} aria-hidden="true" />, label: t("workspace.tasks"), badge: tasksConfigInvalid ? "!" : null },
+              {
+                id: "updates",
+                icon: <CircleArrowUp size={15} aria-hidden="true" />,
+                label: t("workspace.updates"),
+                badge: updatesBadgeCount > 0 ? String(updatesBadgeCount) : null,
+              },
+              { id: "info", icon: <Info size={15} aria-hidden="true" />, label: t("workspace.info") },
+            ];
+            const selectPanelAt = (index: number) => {
+              const panel = panels[(index + panels.length) % panels.length];
+              setRightPanelMode(panel.id);
+              document.getElementById(`workspace-${panel.id}-tab`)?.focus();
+            };
+            return panels.map((panel, index) => (
+              <button
+                key={panel.id}
+                id={`workspace-${panel.id}-tab`}
+                type="button"
+                role="tab"
+                aria-selected={rightPanelMode === panel.id}
+                aria-controls={`workspace-${panel.id}-tool`}
+                tabIndex={rightPanelMode === panel.id ? 0 : -1}
+                className="shell-toolbar-btn ui-focus-ring"
+                onClick={() => { setRightPanelMode(panel.id); setRightPanelOpen(true); }}
+                onKeyDown={(event) => {
+                  if (event.key === "ArrowRight") { event.preventDefault(); selectPanelAt(index + 1); }
+                  else if (event.key === "ArrowLeft") { event.preventDefault(); selectPanelAt(index - 1); }
+                  else if (event.key === "Home") { event.preventDefault(); selectPanelAt(0); }
+                  else if (event.key === "End") { event.preventDefault(); selectPanelAt(panels.length - 1); }
+                }}
+                title={panel.label}
+                aria-label={panel.badge ? `${panel.label} (${panel.badge})` : panel.label}
+                style={{
+                  background: rightPanelMode === panel.id ? "var(--bg-selected)" : undefined,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 5,
+                  flexShrink: 0,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {panel.icon}
+                {!isMobile && <span style={{ fontSize: 11.5 }}>{panel.label}</span>}
+                {panel.badge && (
+                  <span
+                    aria-hidden="true"
+                    style={{
+                      minWidth: 15,
+                      padding: "0 4px",
+                      borderRadius: 8,
+                      background: panel.badge === "!" ? "var(--status-error)" : "var(--accent)",
+                      color: "var(--bg)",
+                      fontSize: 10,
+                      fontWeight: 700,
+                      lineHeight: "15px",
+                      textAlign: "center",
+                      fontVariantNumeric: "tabular-nums",
+                    }}
+                  >
+                    {panel.badge}
+                  </span>
+                )}
+              </button>
+            ));
+          })()}
         </div>
 
         <div
-          id="workspace-files-tool"
+          id="workspace-file-tool"
           role="tabpanel"
-          aria-labelledby="workspace-files-tab"
+          aria-labelledby="workspace-file-tab"
           style={{ flex: 1, minHeight: 0, overflow: "hidden", display: rightPanelMode === "file" ? "flex" : "none", flexDirection: "column" }}
         >
           {fileTabs.length > 0 && (
@@ -1498,12 +1611,79 @@ export function AppShell() {
           </div>
         </div>
         <div
+          id="workspace-git-tool"
+          role="tabpanel"
+          aria-labelledby="workspace-git-tab"
+          style={{ flex: 1, minHeight: 0, overflow: "hidden", display: rightPanelMode === "git" ? "flex" : "none", flexDirection: "column" }}
+        >
+          {mountedPanels.has("git") && (
+            <GitPanel
+              cwd={activeCwd}
+              active={rightPanelMode === "git" && rightPanelOpen}
+              refreshKey={explorerRefreshKey}
+              onOpenFile={(filePath) => {
+                handleOpenFile(filePath, getFileName(filePath), selectedSession?.id ?? null);
+              }}
+              onCountChange={handleGitCountChange}
+            />
+          )}
+        </div>
+        <div
           id="workspace-terminal-tool"
           role="tabpanel"
           aria-labelledby="workspace-terminal-tab"
           style={{ flex: 1, minHeight: 0, overflow: "hidden", display: rightPanelMode === "terminal" ? "flex" : "none" }}
         >
-          <TerminalPanel cwd={activeCwd} onOpen={() => { setRightPanelMode("terminal"); setRightPanelOpen(true); }} />
+          <TerminalPanel cwd={activeCwd} focusTerminalId={focusTerminalId} onOpen={() => { setRightPanelMode("terminal"); setRightPanelOpen(true); }} />
+        </div>
+        <div
+          id="workspace-tasks-tool"
+          role="tabpanel"
+          aria-labelledby="workspace-tasks-tab"
+          style={{ flex: 1, minHeight: 0, overflow: "hidden", display: rightPanelMode === "tasks" ? "flex" : "none", flexDirection: "column" }}
+        >
+          {mountedPanels.has("tasks") && (
+            <TasksPanel
+              cwd={activeCwd}
+              active={rightPanelMode === "tasks" && rightPanelOpen}
+              onOpenTerminal={(terminalId) => {
+                if (terminalId) setFocusTerminalId(terminalId);
+                setRightPanelMode("terminal");
+                setRightPanelOpen(true);
+              }}
+              onConfigStateChange={handleTasksConfigStateChange}
+            />
+          )}
+        </div>
+        <div
+          id="workspace-updates-tool"
+          role="tabpanel"
+          aria-labelledby="workspace-updates-tab"
+          style={{ flex: 1, minHeight: 0, overflow: "hidden", display: rightPanelMode === "updates" ? "flex" : "none", flexDirection: "column" }}
+        >
+          {mountedPanels.has("updates") && (
+            <UpdatesPanel
+              cwd={activeCwd}
+              active={rightPanelMode === "updates" && rightPanelOpen}
+              onOpenSettings={(tab) => setSettingsTab(tab)}
+              onAvailableCountChange={handleUpdatesAvailableCountChange}
+            />
+          )}
+        </div>
+        <div
+          id="workspace-info-tool"
+          role="tabpanel"
+          aria-labelledby="workspace-info-tab"
+          style={{ flex: 1, minHeight: 0, overflow: "hidden", display: rightPanelMode === "info" ? "flex" : "none", flexDirection: "column" }}
+        >
+          {mountedPanels.has("info") && (
+            <InfoPanel
+              cwd={activeCwd}
+              active={rightPanelMode === "info" && rightPanelOpen}
+              gitBranch={gitMeta.branch}
+              gitRepoRoot={gitMeta.repoRoot}
+            />
+          )}
         </div>
 
     </div>

@@ -69,6 +69,11 @@ app/api/
   cwd/validate/route.ts           POST validate/select a cwd
   default-cwd/route.ts            POST create ~/omp-cwd-YYYYMMDD
   files/[...path]/route.ts        GET file contents for viewer
+  git/status/route.ts             GET repo status + branch/ahead-behind for a cwd
+  git/diff/route.ts               GET one file's HEAD->worktree patch
+  info/route.ts                   GET server facts for the Info panel
+  tasks/route.ts                  GET .cody/tasks.json (validated)
+  tasks/run/route.ts              POST run a task by id into a new terminal
   home/route.ts                   GET user home directory
   models/route.ts                 GET { models, modelList, defaultModel }
   models-config/route.ts          GET/PUT — read/write ~/.omp/agent/models.yml
@@ -98,6 +103,7 @@ lib/
   session-reader.ts    session .jsonl parsing + path cache + buildSessionContext
   skills-service.ts    pure-Node skill discovery mirroring omp's providers
   storage-keys.ts      the cody: browser-storage namespace + legacy migration
+  workspace-tasks.ts   .cody/tasks.json schema validation + grouping
   tool-presets.ts      PRESET_NONE/DEFAULT/FULL + getPresetFromTools()
   types.ts             shared TypeScript types
   normalize.ts         normalizeToolCalls() — field name mismatch between file format and our types
@@ -115,6 +121,11 @@ components/
   CommandPalette.tsx  ⌘K/Ctrl+K palette (cmdk): session switch, new session, theme
   ImageLightbox.tsx   click-to-preview lightbox for chat images (ClickableImage)
   BranchNavigator.tsx in-session branch switcher
+  DiffView.tsx        folding unified-diff renderer (FileViewer + GitPanel)
+  GitPanel.tsx        right-panel Git tool: changed files + diffs + branch info
+  TasksPanel.tsx      right-panel Tasks tool: .cody/tasks.json runner
+  UpdatesPanel.tsx    right-panel Updates tool: app/omp/skills update status
+  InfoPanel.tsx       right-panel Info tool: versions + workspace diagnostics
   ChatMinimap.tsx     scroll minimap alongside the message list
   MarkdownBody.tsx    markdown renderer
   ModelsConfig.tsx    modal for models/auth configuration

@@ -16,7 +16,13 @@ export type TerminalInfo = {
   exitCode?: number;
 };
 
-type Props = { cwd: string | null; onOpen?: () => void };
+type Props = {
+  cwd: string | null;
+  onOpen?: () => void;
+  /** When set (e.g. a task was dispatched into a fresh terminal), reload the
+   * list and focus that terminal. Same id twice is fine — it re-focuses. */
+  focusTerminalId?: string | null;
+};
 type ConnectionState = "disconnected" | "connecting" | "connected";
 
 function socketUrl(id: string, cols: number, rows: number): string {
@@ -30,6 +36,7 @@ async function responseError(response: Response, fallback: string): Promise<stri
 }
 
 function TerminalSoftKeys({ onSend, label }: { onSend: (data: string) => void; label: string }) {
+  // Keys that are awkward on mobile virtual keyboards (pi-web parity set).
   const keys = [
     ["Esc", "\x1b"],
     ["Tab", "\t"],
@@ -39,6 +46,16 @@ function TerminalSoftKeys({ onSend, label }: { onSend: (data: string) => void; l
     ["↑", "\x1b[A"],
     ["↓", "\x1b[B"],
     ["→", "\x1b[C"],
+    ["Ctrl Z", "\x1a"],
+    ["Ctrl L", "\x0c"],
+    ["Ctrl R", "\x12"],
+    ["Ctrl U", "\x15"],
+    ["Ctrl W", "\x17"],
+    ["Home", "\x1b[H"],
+    ["End", "\x1b[F"],
+    ["PgUp", "\x1b[5~"],
+    ["PgDn", "\x1b[6~"],
+    ["Del", "\x1b[3~"],
   ] as const;
   return (
     <div className="terminal-soft-keys" role="toolbar" aria-label={label}>
@@ -49,7 +66,7 @@ function TerminalSoftKeys({ onSend, label }: { onSend: (data: string) => void; l
   );
 }
 
-export function TerminalPanel({ cwd, onOpen }: Props) {
+export function TerminalPanel({ cwd, onOpen, focusTerminalId }: Props) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
   const [terminals, setTerminals] = useState<TerminalInfo[]>([]);
@@ -87,6 +104,27 @@ export function TerminalPanel({ cwd, onOpen }: Props) {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // An externally dispatched terminal (e.g. a workspace task) may not be in
+  // the current list yet: reload, then focus it once it appears.
+  useEffect(() => {
+    if (!focusTerminalId || !cwd) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await fetch(`/api/terminals?cwd=${encodeURIComponent(cwd)}`);
+        if (!response.ok || cancelled) return;
+        const data = await response.json() as { terminals?: TerminalInfo[] };
+        const loaded = data.terminals ?? [];
+        if (cancelled) return;
+        setTerminals(loaded);
+        if (loaded.some((item) => item.id === focusTerminalId)) setActiveId(focusTerminalId);
+      } catch {
+        // list refresh is best-effort; the regular loader will catch up
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [focusTerminalId, cwd]);
 
   const create = useCallback(async () => {
     if (!cwd || busy) return;

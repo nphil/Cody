@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "typecheck",
+      "title": "Typecheck",
+      "command": "npm run typecheck",
+      "description": "tsc --noEmit over the whole app",
+      "group": "Checks"
+    },
+    {
+      "id": "lint",
+      "title": "Lint",
+      "command": "npm run lint",
+      "description": "ESLint (zero warnings enforced)",
+      "group": "Checks"
+    },
+    {
+      "id": "test",
+      "title": "Test suite",
+      "command": "npm test",
+      "description": "node --test across lib, components, hooks and bin",
+      "group": "Checks"
+    },
+    {
+      "id": "dev",
+      "title": "Dev server",
+      "command": "npm run dev",
+      "description": "Start the development server on port 30178",
+      "group": "Run"
+    },
+    {
+      "id": "build",
+      "title": "Production build",
+      "command": "npm run build",
+      "description": "next build — avoid while the dev server is running",
+      "group": "Run",
+      "confirm": true
+    }
+  ]
+}
