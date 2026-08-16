@@ -807,7 +807,7 @@ export function AppShell() {
 
   const activeFileTab = fileTabs.find((t) => t.id === activeFileTabId) ?? null;
   const activeCwdName = activeCwd ? getFileName(activeCwd) || activeCwd : null;
-  const windowTitle = activeCwdName ? `${activeCwdName} - omp web` : "omp web";
+  const windowTitle = activeCwdName ? `${activeCwdName} - Cody` : "Cody";
 
   useEffect(() => {
     const syncWindowTitle = () => {
@@ -1510,7 +1510,7 @@ export function AppShell() {
                 label: t("workspace.git"),
                 badge: gitBadgeCount !== null && gitBadgeCount > 0 ? String(gitBadgeCount) : null,
               },
-              { id: "terminal", icon: <Terminal size={15} aria-hidden="true" />, label: t("terminal.open") },
+              { id: "terminal", icon: <Terminal size={15} aria-hidden="true" />, label: t("workspace.terminal") },
               { id: "tasks", icon: <ListTodo size={15} aria-hidden="true" />, label: t("workspace.tasks"), badge: tasksConfigInvalid ? "!" : null },
               {
                 id: "updates",
@@ -1551,6 +1551,10 @@ export function AppShell() {
                   gap: 5,
                   flexShrink: 0,
                   whiteSpace: "nowrap",
+                  // .shell-toolbar-btn is a fixed 28px square for icon-only
+                  // buttons; these tabs carry a label and a badge.
+                  width: "auto",
+                  padding: "0 8px",
                 }}
               >
                 {panel.icon}

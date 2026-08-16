@@ -917,6 +917,7 @@
   "workspace.git": "Git",
   "workspace.info": "情報",
   "workspace.tasks": "タスク",
+  "workspace.terminal": "ターミナル",
   "workspace.tools": "ワークスペースツール",
   "workspace.updates": "更新"
 }

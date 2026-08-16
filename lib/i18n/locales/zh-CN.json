@@ -917,6 +917,7 @@
   "workspace.git": "Git",
   "workspace.info": "信息",
   "workspace.tasks": "任务",
+  "workspace.terminal": "终端",
   "workspace.tools": "工作区工具",
   "workspace.updates": "更新"
 }
