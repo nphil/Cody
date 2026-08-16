@@ -36,6 +36,12 @@ export const STORAGE_KEYS = {
   gitFileView: "cody:git-file-view",
 } as const;
 
+/** localStorage prefixes completed with a workspace path. */
+export const STORAGE_PREFIXES = {
+  /** Last preview URL used in a workspace ("cody:preview-url:<cwd>"). */
+  previewUrl: "cody:preview-url:",
+} as const;
+
 /** sessionStorage prefixes — per-tab and rebuilt on demand, so they are not
  * migrated, only renamed. Both are completed with a session id. */
 export const SESSION_STORAGE_PREFIXES = {

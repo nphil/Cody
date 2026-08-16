@@ -12,7 +12,7 @@ import { TabBar, type Tab } from "./TabBar";
 import { BranchNavigator } from "./BranchNavigator";
 import { LanguageSwitcher } from "./LanguageSwitcher";
 import { ThemePicker } from "./ThemePicker";
-import { Check, CircleArrowUp, Files, GitBranch, History, Info, ListTodo, Menu, PanelLeft, ScrollText, Terminal, Wand2 } from "lucide-react";
+import { AppWindow, Check, CircleArrowUp, Files, GitBranch, History, Info, ListTodo, Menu, PanelLeft, ScrollText, Terminal, Wand2 } from "lucide-react";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { translate, useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
@@ -56,11 +56,15 @@ const InfoPanel = dynamic(() => import("./InfoPanel").then((module) => module.In
   ssr: false,
   loading: () => <PanelLoadingFallback />,
 });
+const PreviewPanel = dynamic(() => import("./PreviewPanel").then((module) => module.PreviewPanel), {
+  ssr: false,
+  loading: () => <PanelLoadingFallback />,
+});
 
 /** The tools of the right workspace panel, in tab order (pi-web parity:
  * Files | Git | Terminal | Tasks | Updates | Info). */
-type WorkspacePanelId = "file" | "git" | "terminal" | "tasks" | "updates" | "info";
-const WORKSPACE_PANEL_IDS: readonly WorkspacePanelId[] = ["file", "git", "terminal", "tasks", "updates", "info"];
+type WorkspacePanelId = "file" | "git" | "terminal" | "preview" | "tasks" | "updates" | "info";
+const WORKSPACE_PANEL_IDS: readonly WorkspacePanelId[] = ["file", "git", "terminal", "preview", "tasks", "updates", "info"];
 
 function isWorkspacePanelId(value: string | null): value is WorkspacePanelId {
   return (WORKSPACE_PANEL_IDS as readonly string[]).includes(value ?? "");
@@ -1521,6 +1525,7 @@ export function AppShell() {
                 badge: gitBadgeCount !== null && gitBadgeCount > 0 ? String(gitBadgeCount) : null,
               },
               { id: "terminal", icon: <Terminal size={15} aria-hidden="true" />, label: t("workspace.terminal") },
+              { id: "preview", icon: <AppWindow size={15} aria-hidden="true" />, label: t("workspace.preview") },
               { id: "tasks", icon: <ListTodo size={15} aria-hidden="true" />, label: t("workspace.tasks"), badge: tasksConfigInvalid ? "!" : null },
               {
                 id: "updates",
@@ -1655,6 +1660,20 @@ export function AppShell() {
           style={{ flex: 1, minHeight: 0, overflow: "hidden", display: rightPanelMode === "terminal" ? "flex" : "none" }}
         >
           <TerminalPanel cwd={activeCwd} focusRequest={focusTerminalRequest} onOpen={() => { setRightPanelMode("terminal"); setRightPanelOpen(true); }} />
+        </div>
+        <div
+          id="workspace-preview-tool"
+          role="tabpanel"
+          aria-labelledby="workspace-preview-tab"
+          style={{ flex: 1, minHeight: 0, overflow: "hidden", display: rightPanelMode === "preview" ? "flex" : "none", flexDirection: "column" }}
+        >
+          {mountedPanels.has("preview") && (
+            <PreviewPanel
+              cwd={activeCwd}
+              active={rightPanelMode === "preview" && rightPanelOpen}
+              onOpenTasks={() => setRightPanelMode("tasks")}
+            />
+          )}
         </div>
         <div
           id="workspace-tasks-tool"
