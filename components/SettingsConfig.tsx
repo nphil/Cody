@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getSubmitDuringRunBehavior, setSubmitDuringRunBehavior, type SubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import dynamic from "next/dynamic";
 import { Copy, ExternalLink, RefreshCw, RotateCcw, Sparkles, Search, AlertCircle } from "lucide-react";
@@ -9,12 +9,14 @@ import { Dialog, DialogContent, DialogTitle } from "@/components/ui/primitives";
 import { SettingsTabs, type SettingsTab, SETTINGS_CATEGORIES, getNormalizedActive } from "./SettingsTabs";
 import { STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
 import { LOCALES, useI18n, type Locale } from "@/lib/i18n";
+import { NativeSetting, SettingsHighlightContext, ToggleSwitch, chipStyle, nativeOptionStyle, nativeSelectStyle, slugify } from "./settings/primitives";
 
 const SettingsTabLoading = () => <div role="status" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 12 }}>Loading settings…</div>;
 const ModelsConfig = dynamic(() => import("./ModelsConfig").then((module) => module.ModelsConfig), { loading: SettingsTabLoading });
 const SkillsConfig = dynamic(() => import("./SkillsConfig").then((module) => module.SkillsConfig), { loading: SettingsTabLoading });
 const PluginsConfig = dynamic(() => import("./PluginsConfig").then((module) => module.PluginsConfig), { loading: SettingsTabLoading });
 const McpConfig = dynamic(() => import("./McpConfig").then((module) => module.McpConfig), { loading: SettingsTabLoading });
+const OmpSchemaSettings = dynamic(() => import("./settings/OmpSchemaSettings").then((module) => module.OmpSchemaSettings), { loading: SettingsTabLoading });
 
 type UpdateState = {
   currentVersion: string | null;
@@ -39,45 +41,6 @@ type NativeSettings = {
   retry?: { enabled?: boolean; maxRetries?: number; modelFallback?: boolean };
 };
 
-const nativeSelectStyle = {
-  minHeight: 32,
-  padding: "4px 28px 4px 10px",
-  border: "1px solid var(--border)",
-  borderRadius: "var(--radius-control)",
-  background: "var(--bg)",
-  color: "var(--text)",
-  fontSize: 12,
-  cursor: "pointer",
-  appearance: "none" as const,
-  WebkitAppearance: "none" as const,
-  MozAppearance: "none" as const,
-  backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888888' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E")`,
-  backgroundRepeat: "no-repeat" as const,
-  backgroundPosition: "right 8px center" as const,
-  outline: "none",
-  colorScheme: "dark light",
-} as const;
-
-const nativeOptionStyle = {
-  background: "var(--bg-panel)",
-  color: "var(--text)",
-} as const;
-
-const chipStyle = {
-  fontSize: 10,
-  padding: "1px 6px",
-  borderRadius: 4,
-  background: "var(--bg-subtle)",
-  color: "var(--text-muted)",
-  fontWeight: 500,
-} as const;
-
-function slugify(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-}
-
-const SettingsHighlightContext = createContext<string | null>(null);
-
 type SearchResult = {
   id: string;
   kind: "category" | "setting";
@@ -94,6 +57,9 @@ type SettingIndexEntry = {
   label: string;
   description: string;
   scope?: "UI" | "Native OMP" | "Workspace";
+  /** Overrides the label-derived anchor; schema settings key theirs by path so
+   * two panels sharing a label do not fight over the highlight. */
+  searchId?: string;
 };
 
 // NOTE: This index mirrors the <NativeSetting label=...> cards rendered in the
@@ -182,88 +148,6 @@ function SearchResultsList({ results, query, onSelect }: { results: SearchResult
   );
 }
 
-function ToggleSwitch({ checked, onChange, disabled }: { checked: boolean; onChange: (checked: boolean) => void; disabled?: boolean }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      disabled={disabled}
-      onClick={() => onChange(!checked)}
-      style={{
-        position: "relative",
-        display: "inline-flex",
-        alignItems: "center",
-        width: 36,
-        height: 20,
-        borderRadius: 10,
-        border: "none",
-        background: checked ? "var(--accent)" : "var(--border)",
-        cursor: disabled ? "not-allowed" : "pointer",
-        transition: "background var(--dur-fast)",
-        padding: 2,
-        flexShrink: 0,
-      }}
-    >
-      <span
-        style={{
-          width: 16,
-          height: 16,
-          borderRadius: 8,
-          background: "#fff",
-          transform: checked ? "translateX(16px)" : "translateX(0px)",
-          transition: "transform var(--dur-fast)",
-          boxShadow: "0 1px 3px rgba(0,0,0,0.2)",
-        }}
-      />
-    </button>
-  );
-}
-
-function NativeSetting({ label, description, scope, children }: { label: string; description: string; scope?: "UI" | "Native OMP" | "Workspace"; children: ReactNode }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const highlightId = useContext(SettingsHighlightContext);
-  const highlighted = highlightId !== null && highlightId === slugify(label);
-
-  useEffect(() => {
-    if (highlighted && ref.current) {
-      ref.current.scrollIntoView({ behavior: "smooth", block: "center" });
-    }
-  }, [highlighted]);
-
-  return (
-    <div
-      ref={ref}
-      data-search-id={slugify(label)}
-      style={{
-        minWidth: 0,
-        padding: "12px 14px",
-        border: "1px solid var(--border)",
-        borderRadius: "var(--radius-card)",
-        background: "var(--bg-panel)",
-        display: "flex",
-        flexDirection: "column",
-        gap: 8,
-        transition: "box-shadow var(--dur-fast), border-color var(--dur-fast)",
-        ...(highlighted ? { borderColor: "var(--accent)", boxShadow: "0 0 0 2px var(--accent)" } : {}),
-      }}
-    >
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)" }}>{label}</span>
-          {scope && (
-            <span style={chipStyle}>
-              {scope}
-            </span>
-          )}
-        </div>
-        <span style={{ flexShrink: 0 }}>{children}</span>
-      </div>
-      <span style={{ color: "var(--text-muted)", fontSize: 11, lineHeight: 1.45 }}>{description}</span>
-    </div>
-  );
-}
-
 export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, toolCallsDefaultCollapsed, onToolCallsDefaultCollapsedChange, cwd, sessionId, onModelsSaved, onPluginsReloaded, onOmpUpdateAvailabilityChange, onSelectTab, onClose }: {
   activeTab: SettingsTab;
   advisorEnabled: boolean;
@@ -301,6 +185,12 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
   const [message, setMessage] = useState<string | null>(null);
   const [nativeSettings, setNativeSettings] = useState<NativeSettings | null>(null);
   const [nativeSettingsError, setNativeSettingsError] = useState<string | null>(null);
+  // The curated panels and the schema-driven OMP panel write the same file.
+  // Each bumps the other’s token after a save so neither keeps showing a value
+  // the other has already changed.
+  const [nativeReloadToken, setNativeReloadToken] = useState(0);
+  const [schemaReloadToken, setSchemaReloadToken] = useState(0);
+  const [schemaSearchIndex, setSchemaSearchIndex] = useState<SettingIndexEntry[]>([]);
   const [nativeSavesInFlight, setNativeSavesInFlight] = useState(0);
   const [visitedTabs, setVisitedTabs] = useState<Set<SettingsTab>>(() => new Set(["general", activeTab]));
 
@@ -313,6 +203,27 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
       .then((response) => (response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`))))
       .then((data: { settings?: NativeSettings }) => setNativeSettings(data.settings ?? {}))
       .catch((error) => setNativeSettingsError(error instanceof Error ? error.message : String(error)));
+  }, [nativeReloadToken]);
+
+  // OMP's schema also backs the dialog-wide search, so a setting Cody never
+  // hand-listed is still findable by name from the search box.
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch("/api/omp-settings/schema", { signal: controller.signal })
+      .then((response) => (response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`))))
+      .then((data: { schema?: { tabs?: Array<{ id: string; label: string }>; settings?: Array<{ key: string; tab: string; group?: string; label: string; description?: string }> } | null }) => {
+        const tabLabels = new Map((data.schema?.tabs ?? []).map((tab) => [tab.id, tab.label]));
+        setSchemaSearchIndex((data.schema?.settings ?? []).map((setting) => ({
+          tab: "omp" as SettingsTab,
+          section: [tabLabels.get(setting.tab) ?? setting.tab, setting.group].filter(Boolean).join(" › "),
+          label: setting.label,
+          description: setting.description ?? setting.key,
+          scope: "Native OMP" as const,
+          searchId: `omp-${setting.key}`,
+        })));
+      })
+      .catch(() => setSchemaSearchIndex([]));
+    return () => controller.abort();
   }, []);
 
   const latestNativeSettingsRef = useRef<NativeSettings | null>(null);
@@ -344,6 +255,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
       } finally {
         nativeSaveDrainingRef.current = false;
         setNativeSavesInFlight((count) => Math.max(0, count - 1));
+        setSchemaReloadToken((token) => token + 1);
       }
     })();
   }, []);
@@ -438,14 +350,14 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
         results.push({ id: `tab-${category.id}`, kind: "category", tab: category.id, label: category.label, description: category.description });
       }
     }
-    for (const setting of SETTING_INDEX) {
+    for (const setting of [...SETTING_INDEX, ...schemaSearchIndex]) {
       const haystack = `${setting.label} ${setting.description} ${setting.section}`.toLowerCase();
       if (haystack.includes(trimmedQuery)) {
-        results.push({ id: slugify(setting.label), kind: "setting", tab: setting.tab, label: setting.label, description: setting.description, scope: setting.scope, section: setting.section });
+        results.push({ id: setting.searchId ?? slugify(setting.label), kind: "setting", tab: setting.tab, label: setting.label, description: setting.description, scope: setting.scope, section: setting.section });
       }
     }
     return results;
-  }, [trimmedQuery]);
+  }, [trimmedQuery, schemaSearchIndex]);
 
   const openSearchResult = useCallback((result: SearchResult) => {
     onSelectTab(result.tab);
@@ -885,6 +797,15 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
               <div role="tabpanel" id="settings-panel-plugins" aria-labelledby="settings-tab-plugins" style={{ display: activeTab === "plugins" ? "flex" : "none", height: "100%", minHeight: 0, flexDirection: "column" }}>
                 <PluginsConfig embedded cwd={cwd} sessionId={sessionId} onClose={onClose} onReloaded={onPluginsReloaded} />
               </div>
+            )}
+
+            {/* ALL OMP SETTINGS TAB — rendered from OMP's own schema */}
+            {currentTab === "omp" && (
+              <OmpSchemaSettings
+                isMobile={isMobile}
+                reloadToken={schemaReloadToken}
+                onSaved={() => setNativeReloadToken((token) => token + 1)}
+              />
             )}
 
             {/* SYSTEM & UPDATES TAB */}

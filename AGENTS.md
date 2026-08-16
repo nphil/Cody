@@ -1,5 +1,12 @@
 # Cody - Development Notes
 
+## Git Workflow (project rule)
+
+`main` is the only long-lived branch and is always the latest, up-to-date state.
+Commit and push directly to `main` — do not open feature branches, and delete any
+that appear once their work is merged. Keep the branch list clean: `main` locally,
+`origin/main` remotely, nothing else.
+
 ## Quick Start
 
 ```bash
@@ -79,6 +86,7 @@ app/api/
   models-config/route.ts          GET/PUT — read/write ~/.omp/agent/models.yml
   models-config/test/route.ts     POST test a configured model/provider
   omp-settings/route.ts           GET/PUT native config.yml settings (allow-listed)
+  omp-settings/schema/route.ts    GET omp's own settings schema + values; PUT a dotted-path patch
   mcp/route.ts                    GET/POST/PUT/DELETE project MCP servers
   plugins/route.ts                GET/POST plugin management (shells out to `omp plugin`)
   projects/route.ts               GET registered+discovered projects | POST add | DELETE hide
@@ -148,6 +156,30 @@ hooks/
 ```
 
 ---
+
+## Settings: schema-driven, not hand-listed
+
+Cody renders OMP's settings from OMP's own schema, so a setting added upstream
+appears without a Cody change.
+
+- `lib/omp/settings-schema.ts` — reads `<omp package>/src/config/settings-schema.ts`.
+  There is **no settings-schema RPC command**, so it goes through the installed
+  package's source. That file imports Bun-only siblings, so every import is
+  aliased to a permissive Proxy stub and jiti transpiles it. The stub must return
+  `undefined` for `then`, or the module becomes thenable and the load hangs
+  forever on an unsettled top-level await. Credentials, `ui.secret` settings, and
+  settings without `ui` metadata never reach the browser.
+- `lib/omp/settings-values.ts` — generic read/write for any schema-declared path.
+  Dotted paths persist nested (`prewalk.enabled` → `prewalk: { enabled }`), the
+  form OMP's own resolver reads. Unknown paths are rejected, not written.
+- `lib/omp/settings-conditions.ts` — restates OMP's value-derived `ui.condition`
+  predicates so Cody hides the same rows OMP hides.
+- `components/settings/OmpSchemaSettings.tsx` — the "All OMP Settings" tab.
+- `lib/omp/settings-config.ts` stays: it backs the curated tabs (model registry,
+  approval matrix, retry fallback chains) that deserve bespoke controls. Both
+  write the same file; the dialog re-reads after each save so they stay in step.
+- `jiti` must remain in `serverExternalPackages` — bundling it breaks its
+  runtime file resolution.
 
 ## Key Design Decisions & Traps
 

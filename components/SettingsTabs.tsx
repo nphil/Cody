@@ -1,6 +1,6 @@
 "use client";
 
-import { Cable, Cpu, KeyRound, RefreshCw, Settings2, ShieldCheck, Sparkles } from "lucide-react";
+import { Cable, Cpu, KeyRound, RefreshCw, Settings2, ShieldCheck, SlidersHorizontal, Sparkles } from "lucide-react";
 import type { ComponentType, CSSProperties } from "react";
 
 export type SettingsTab =
@@ -11,6 +11,7 @@ export type SettingsTab =
   | "intelligence"
   | "extensions"
   | "mcp"
+  | "omp"
   | "skills"
   | "plugins"
   | "system";
@@ -30,6 +31,7 @@ export const SETTINGS_CATEGORIES: TabItem[] = [
   { id: "providers", label: "API Keys & Providers", description: "Connected OAuth accounts, API keys, and model registry", Icon: KeyRound },
   { id: "intelligence", label: "Agent & Intelligence", description: "Advisor, memory, autolearn, compaction and retry", Icon: Sparkles },
   { id: "mcp", label: "Extensions & Tools", description: "MCP servers, managed skills, and OMP plugins", Icon: Cable },
+  { id: "omp", label: "All OMP Settings", description: "Every setting OMP declares, read from its own schema", Icon: SlidersHorizontal },
   { id: "system", label: "System & Updates", description: "App updates, runtime version, and active session restart", Icon: RefreshCw },
 ];
 
