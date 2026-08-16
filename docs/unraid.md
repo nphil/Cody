@@ -3,7 +3,27 @@
 The `docker/` directory packages Cody together with the omp harness in one
 container, built for exactly this deployment.
 
-## Build the image
+## Install the published image (recommended)
+
+CI publishes `ghcr.io/nphil/cody:latest` (and a version tag) on every push to
+`main`. Using the registry image — rather than a local build — is what makes
+Unraid's **check for updates** work at all: Unraid compares your running
+image's digest against the registry, and a locally-built image has no registry
+side to compare with. Make the GHCR package public once (GitHub → Packages →
+Cody → Package settings → Change visibility) or add registry credentials in
+Unraid, then the normal update-and-apply flow works.
+
+## Install the published image (recommended)
+
+CI publishes `ghcr.io/nphil/cody:latest` (and a version tag) on every push to
+`main`. Using the registry image — rather than a local build — is what makes
+Unraid's **check for updates** work at all: Unraid compares your running
+image's digest against the registry, and a locally-built image has no registry
+side to compare against. Make the GHCR package public once (GitHub → Packages
+→ Cody → Package settings → Change visibility) or add registry credentials in
+Unraid, then the normal update-and-apply flow works.
+
+## Build the image yourself (optional) yourself (optional)
 
 On any machine with Docker (or on the Unraid box itself):
 

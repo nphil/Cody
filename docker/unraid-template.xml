@@ -1,8 +1,8 @@
 <?xml version="1.0"?>
 <Container version="2">
   <Name>Cody</Name>
-  <Repository>cody:latest</Repository>
-  <Registry/>
+  <Repository>ghcr.io/nphil/cody:latest</Repository>
+  <Registry>https://ghcr.io/nphil/cody</Registry>
   <Network>bridge</Network>
   <Shell>bash</Shell>
   <Privileged>false</Privileged>
