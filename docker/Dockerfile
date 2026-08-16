@@ -25,10 +25,21 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends git curl ca-certificates procps openssh-client \
   && rm -rf /var/lib/apt/lists/*
 
+# omp is a Bun program: its entrypoint is `#!/usr/bin/env bun` and the package
+# declares `engines: { bun: ">=1.3.14" }`. npm installs it happily on a Node
+# image and then every invocation dies with "env: 'bun': No such file or
+# directory", so the runtime needs the Bun binary on PATH. Bun ships as a single
+# static executable, so copying it out of the official image is enough — no
+# second package manager, no install script.
+COPY --from=oven/bun:1 /usr/local/bin/bun /usr/local/bin/bun
+
 # The bundled harness. @oh-my-pi/pi-coding-agent ships the `omp` binary.
+# `omp --version` is the build's gate: it fails the image if the harness cannot
+# actually run here (a Bun that is too old for its engines range, for one).
 ARG HARNESS_INSTALL_SPEC=@oh-my-pi/pi-coding-agent@latest
 RUN npm install -g --no-audit --no-fund "${HARNESS_INSTALL_SPEC}" \
   && npm cache clean --force \
+  && bun --version \
   && omp --version
 
 ENV NODE_ENV=production \

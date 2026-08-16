@@ -37,6 +37,21 @@ side to compare with. Make the GHCR package public once (GitHub → Packages →
 Cody → Package settings → Change visibility) or add registry credentials in
 Unraid, then the normal update-and-apply flow works.
 
+### How an update reaches your server
+
+Push to `main` → CI builds the image, smoke-tests it (the harness must run and
+the server must answer) and republishes `:latest`, ~4–8 minutes → Unraid's
+Docker page shows "update ready" the next time it checks, which is once a day
+by default (Settings → Docker → *Check for updates*, or hit **Check for
+Updates** on the Docker tab to poll immediately) → **Apply Update** pulls and
+recreates the container, a few seconds of downtime.
+
+So: a few minutes to a registry, then however long you let Unraid wait. Nothing
+downstream needs a rebuild or a git pull; `/data` and `/workspace` are volumes,
+so state and repositories survive the recreate. For hands-off updating, point
+something like Watchtower at the container — but on a machine you rely on,
+manual **Apply Update** is the safer default.
+
 ## Build the image yourself (optional)
 
 On any machine with Docker (or on the Unraid box itself):
@@ -85,3 +100,7 @@ against the bundled omp.
   and recreating the container, the Unraid way.
 - `CODY_HARNESS` selects the agent adapter (`omp` today; see
   `docs/harnesses.md` for what adding Pi or another harness involves).
+- omp is a **Bun** program (`engines: bun >= 1.3.14`), so the image carries the
+  Bun binary alongside Node. Installing omp with npm onto a Node-only image
+  looks like it works and then fails at every invocation with
+  `env: 'bun': No such file or directory`.

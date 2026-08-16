@@ -34,6 +34,53 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Build once into the local daemon and prove the image actually runs
+      # before anything reaches the registry. A published :latest is pulled
+      # automatically by downstream hosts, so a broken one is a broken server,
+      # not a red check. The push step below re-uses this build from cache.
+      - name: Build for smoke test
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: cody:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test the image
+        run: |
+          set -euo pipefail
+          # The harness has to be runnable, not merely installed.
+          docker run --rm cody:smoke omp --version
+          docker run -d --name cody-smoke -p 30177:30177 \
+            -e CODY_PASSWORD=smoke-test-password cody:smoke
+          for _ in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:30177/ || echo 000)
+            # 401 is the healthy state: the server is up and demanding auth.
+            if [ "$code" = "401" ]; then
+              echo "server up (HTTP $code)"
+              # Informational: the settings panel degrades to Cody's own
+              # controls when OMP's schema cannot be read, so a miss here is
+              # worth seeing in the log but must not block a release.
+              if curl -sf -u "cody:smoke-test-password" \
+                   http://127.0.0.1:30177/api/omp-settings/schema \
+                   | grep -q '"settings"'; then
+                echo "omp settings schema served"
+              else
+                echo "::warning::omp settings schema did not load in the image"
+              fi
+              docker rm -f cody-smoke >/dev/null
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "server never became ready" >&2
+          docker logs cody-smoke >&2 || true
+          docker rm -f cody-smoke >/dev/null || true
+          exit 1
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
