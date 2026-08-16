@@ -33,7 +33,12 @@ function normalizePreviewUrl(raw: string): string | null {
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") return null;
   const host = url.hostname.toLowerCase();
-  if (host !== "localhost" && host !== "127.0.0.1" && host !== "[::1]" && host !== "::1") return null;
+  // [::1] is deliberately NOT accepted: CSP source lists cannot express a
+  // bracketed IPv6 host with a port wildcard (browsers reject
+  // "http://[::1]:*" outright), so such a preview would be accepted here and
+  // then silently refused by the browser. Use localhost, which resolves to
+  // ::1 anyway on dual-stack hosts.
+  if (host !== "localhost" && host !== "127.0.0.1") return null;
   return url.toString();
 }
 
