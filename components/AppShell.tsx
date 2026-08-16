@@ -499,10 +499,32 @@ export function AppShell() {
       if (Number.isFinite(stored) && stored > 0) setWorkspaceWidth(stored);
     } catch { /* storage may be unavailable */ }
   }, []);
+  // pi-web's constraint math: the panel may grow only until the OTHER panel
+  // plus a usable chat column still fit. Reserving the live sidebar width
+  // (not a constant) is what keeps the chat from being crushed when both
+  // side panels are wide.
+  const CHAT_MIN_WIDTH = 320;
   const clampWorkspaceWidth = useCallback((value: number): number => {
-    const max = Math.max(320, Math.min(window.innerWidth * 0.78, window.innerWidth - 420));
+    const sidebarSpace = !isMobile && sidebarOpen ? sidebarWidth : 0;
+    const max = Math.max(300, window.innerWidth - sidebarSpace - CHAT_MIN_WIDTH);
     return Math.round(Math.min(Math.max(value, 300), max));
-  }, []);
+  }, [isMobile, sidebarOpen, sidebarWidth]);
+  // Re-clamp whenever the constraint inputs move: a sidebar drag or a window
+  // resize can invalidate a width that was legal when it was chosen. The
+  // stored preference is left untouched so a bigger window gets it back.
+  useEffect(() => {
+    if (isMobile) return;
+    const reclamp = () => {
+      setWorkspaceWidth((current) => {
+        if (current === null) return current;
+        const next = clampWorkspaceWidth(current);
+        return next === current ? current : next;
+      });
+    };
+    reclamp();
+    window.addEventListener("resize", reclamp);
+    return () => window.removeEventListener("resize", reclamp);
+  }, [clampWorkspaceWidth, isMobile]);
   const commitWorkspaceWidth = useCallback((value: number | null) => {
     setWorkspaceWidth(value);
     try {
