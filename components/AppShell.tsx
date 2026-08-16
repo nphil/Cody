@@ -27,6 +27,7 @@ import type { SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { SettingsTab } from "./SettingsTabs";
+import { STORAGE_KEYS } from "@/lib/storage-keys";
 
 // Loaded on demand: the config modals open on click and the file viewer only
 // renders once a file tab exists, so none of them belong in the first-load chunk.
@@ -41,8 +42,8 @@ const TerminalPanel = dynamic(() => import("./TerminalPanel").then((module) => m
 
 // Resizable desktop sidebar: the width is stored on the container as the
 // --sidebar-width CSS variable (globals.css) and persisted between sessions.
-const SIDEBAR_WIDTH_STORAGE_KEY = "omp-web:sidebar-width";
-const TOOL_CALLS_COLLAPSED_STORAGE_KEY = "omp-web:tool-calls-collapsed";
+const SIDEBAR_WIDTH_STORAGE_KEY = STORAGE_KEYS.sidebarWidth;
+const TOOL_CALLS_COLLAPSED_STORAGE_KEY = STORAGE_KEYS.toolCallsCollapsed;
 const SIDEBAR_MIN_WIDTH = 200;
 const SIDEBAR_MAX_WIDTH = 520;
 const SIDEBAR_DEFAULT_WIDTH = 260;
@@ -168,11 +169,11 @@ export function AppShell() {
     setMobileSidebarReady(true);
   }, []);
   useEffect(() => {
-    setAdvisorEnabled(localStorage.getItem("omp-advisor-enabled") === "true");
+    setAdvisorEnabled(localStorage.getItem(STORAGE_KEYS.advisorEnabled) === "true");
   }, []);
   const handleAdvisorChange = useCallback((enabled: boolean) => {
     setAdvisorEnabled(enabled);
-    localStorage.setItem("omp-advisor-enabled", String(enabled));
+    localStorage.setItem(STORAGE_KEYS.advisorEnabled, String(enabled));
   }, []);
   useEffect(() => {
     const controller = new AbortController();
@@ -218,9 +219,9 @@ export function AppShell() {
       .then((data: { currentVersion?: string; availableVersion?: string | null; updateAvailable?: boolean; updateCommand?: string } | null) => {
         setAppUpdateAvailable(Boolean(data?.updateAvailable));
         if (!data?.updateAvailable || !data.availableVersion) return;
-        const cmd = data.updateCommand || "npm install -g @kahme247/ompweb";
+        const cmd = data.updateCommand || "npm install -g @nphil/cody";
         toast.info(
-          "ompweb update available",
+          "Cody update available",
           <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4 }}>
             <div>v{data.currentVersion ?? "?"} -&gt; v{data.availableVersion}</div>
             <div style={{ display: "flex", alignItems: "center", gap: 6 }}>

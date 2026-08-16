@@ -9,6 +9,13 @@ function isEnabled(value) {
   return typeof value === "string" && TRUE_VALUES.has(value.trim().toLowerCase());
 }
 
+/** CommonJS twin of lib/env.ts, for the launcher, which starts before jiti is
+ * available. Prefers the `CODY_` name and falls back to the `OMP_WEB_` one this
+ * project used before the fork was renamed. */
+function readEnv(name, env = process.env) {
+  return env[`CODY_${name}`] ?? env[`OMP_WEB_${name}`];
+}
+
 function parseLaunchOptions(args = process.argv.slice(2), env = process.env) {
   const { values: cliArgs } = parseArgs({
     args,
@@ -22,9 +29,9 @@ function parseLaunchOptions(args = process.argv.slice(2), env = process.env) {
 
   return {
     port: cliArgs.port ?? env.PORT ?? "30177",
-    hostname: cliArgs.hostname ?? env.OMP_WEB_HOSTNAME ?? "127.0.0.1",
-    openBrowser: !cliArgs["no-open"] && !isEnabled(env.OMP_WEB_NO_OPEN),
+    hostname: cliArgs.hostname ?? readEnv("HOSTNAME", env) ?? "127.0.0.1",
+    openBrowser: !cliArgs["no-open"] && !isEnabled(readEnv("NO_OPEN", env)),
   };
 }
 
-module.exports = { parseLaunchOptions };
+module.exports = { parseLaunchOptions, readEnv };

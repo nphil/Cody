@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useCallback, useEffect } from "react";
+import { STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
 
 function playTone(ctx: AudioContext) {
   const now = ctx.currentTime;
@@ -30,7 +31,7 @@ function playTone(ctx: AudioContext) {
 export function useAudio() {
   const [enabled, setEnabled] = useState<boolean>(() => {
     if (typeof window === "undefined") return true;
-    const stored = localStorage.getItem("omp-sound-enabled");
+    const stored = localStorage.getItem(STORAGE_KEYS.soundEnabled);
     return stored === null ? true : stored === "true";
   });
 
@@ -46,8 +47,8 @@ export function useAudio() {
       enabledRef.current = detail;
       setEnabled(detail);
     };
-    window.addEventListener("omp-sound-pref-change", onPrefChange);
-    return () => window.removeEventListener("omp-sound-pref-change", onPrefChange);
+    window.addEventListener(STORAGE_EVENTS.soundPrefChange, onPrefChange);
+    return () => window.removeEventListener(STORAGE_EVENTS.soundPrefChange, onPrefChange);
   }, []);
 
   // Reuse a single AudioContext so it can be resumed if the browser
@@ -75,7 +76,7 @@ export function useAudio() {
     const next = !enabledRef.current;
     if (next) unlockAudio(true);
     enabledRef.current = next;
-    localStorage.setItem("omp-sound-enabled", String(next));
+    localStorage.setItem(STORAGE_KEYS.soundEnabled, String(next));
     setEnabled(next);
   }, [unlockAudio]);
 

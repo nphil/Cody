@@ -4,6 +4,7 @@ import { useCallback, useSyncExternalStore } from "react";
 import en from "./locales/en.json";
 import ja from "./locales/ja.json";
 import zhCN from "./locales/zh-CN.json";
+import { STORAGE_KEYS } from "../storage-keys";
 
 export type Locale = "en" | "zh-CN" | "ja";
 
@@ -13,7 +14,7 @@ export const LOCALES: Array<{ value: Locale; label: string }> = [
   { value: "ja", label: "日本語" },
 ];
 
-const STORAGE_KEY = "omp-lang";
+const STORAGE_KEY = STORAGE_KEYS.lang;
 
 const dictionaries: Record<Locale, Record<string, string>> = {
   en: en as Record<string, string>,

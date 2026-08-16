@@ -1,11 +1,13 @@
 /**
  * Client-side composer preferences (localStorage). These live outside the
- * native OMP config because they are ompweb UI behaviors.
+ * native OMP config because they are Cody UI behaviors.
  */
+
+import { STORAGE_KEYS } from "./storage-keys";
 
 export type SubmitDuringRunBehavior = "steer" | "queue";
 
-const SUBMIT_DURING_RUN_KEY = "omp-web:submit-during-run";
+const SUBMIT_DURING_RUN_KEY = STORAGE_KEYS.submitDuringRun;
 
 /** Default behavior when a message is submitted while the agent is running. */
 export function getSubmitDuringRunBehavior(): SubmitDuringRunBehavior {

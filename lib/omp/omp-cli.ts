@@ -2,9 +2,10 @@ import { execFile } from "child_process";
 import { existsSync } from "fs";
 import { homedir } from "os";
 import { delimiter, join } from "path";
+import { readEnv } from "../env";
 
 /**
- * Locating and probing the user's installed `omp` CLI. omp-web never embeds
+ * Locating and probing the user's installed `omp` CLI. Cody never embeds
  * the (Bun-only) @oh-my-pi SDK — every live-agent capability goes through the
  * omp binary, so its absence is a first-class, user-visible state.
  */
@@ -29,7 +30,7 @@ export function invalidateOmpCliCache(): void {
 }
 
 function probeOmpBin(): string | null {
-  const override = process.env.OMP_WEB_OMP_BIN;
+  const override = readEnv("OMP_BIN");
   if (override) return existsSync(override) ? override : null;
   for (const dir of (process.env.PATH ?? "").split(delimiter)) {
     if (!dir) continue;
@@ -51,7 +52,7 @@ function probeOmpBin(): string | null {
   return null;
 }
 
-/** Resolve the omp binary: OMP_WEB_OMP_BIN override, then PATH lookup. Returns
+/** Resolve the omp binary: CODY_OMP_BIN override, then PATH lookup. Returns
  * null when omp is not installed. A hit is cached for the process lifetime; a
  * miss is re-probed after MISS_TTL_MS. */
 export function resolveOmpBin(): string | null {

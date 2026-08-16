@@ -1,4 +1,6 @@
-export const THEME_STORAGE_KEY = "cody-theme";
+import { STORAGE_KEYS } from "./storage-keys";
+
+export const THEME_STORAGE_KEY = STORAGE_KEYS.theme;
 
 export type ThemeMode = "light" | "dark";
 

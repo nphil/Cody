@@ -1,21 +1,21 @@
 {
-  "name": "@kahme247/ompweb",
+  "name": "@nphil/cody",
   "version": "0.3.1",
-  "description": "Web UI for the oh-my-pi (omp) coding agent",
-  "homepage": "https://github.com/kahme247/ompweb#readme",
+  "description": "Cody — a local web workspace for the oh-my-pi (omp) coding agent",
+  "homepage": "https://github.com/nphil/Cody#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kahme247/ompweb.git"
+    "url": "git+https://github.com/nphil/Cody.git"
   },
   "bugs": {
-    "url": "https://github.com/kahme247/ompweb/issues"
+    "url": "https://github.com/nphil/Cody/issues"
   },
   "license": "MIT",
   "engines": {
     "node": ">=22.19.0"
   },
   "bin": {
-    "ompweb": "bin/omp-web.js"
+    "cody": "bin/cody.js"
   },
   "files": [
     "bin",

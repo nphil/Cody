@@ -30,6 +30,7 @@ import { FolderIcon, getFileIcon } from "./FileIcons";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/lib/i18n";
 import { selectableThinkingLevels } from "@/lib/thinking-levels";
+import { STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
 
 export interface AttachedImage {
   data: string;   // base64, no prefix
@@ -105,7 +106,7 @@ export interface ChatInputHandle {
 const COMPOSITION_END_ENTER_GRACE_MS = 100;
 /** Circumference of the context ring (r = 9.5). */
 const RING_CIRCUMFERENCE = 2 * Math.PI * 9.5;
-const COMPOSER_MODELS_STORAGE_KEY = "omp-composer-models";
+const COMPOSER_MODELS_STORAGE_KEY = STORAGE_KEYS.composerModels;
 
 function readVisibleModelKeys(): Set<string> | null {
   try {
@@ -1301,8 +1302,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   useEffect(() => {
     const refresh = () => setVisibleModelKeys(readVisibleModelKeys());
     refresh();
-    window.addEventListener("omp-composer-models-change", refresh);
-    return () => window.removeEventListener("omp-composer-models-change", refresh);
+    window.addEventListener(STORAGE_EVENTS.composerModelsChange, refresh);
+    return () => window.removeEventListener(STORAGE_EVENTS.composerModelsChange, refresh);
   }, []);
 
   const modelOptions: ModelOption[] = React.useMemo(() => {

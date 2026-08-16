@@ -42,7 +42,7 @@ const BASH_EXCLUDE_MESSAGE =
   "omp cannot run a shell command with its output excluded from the model context (`!!`): the RPC bash command has no exclusion option, so the output would silently enter the context anyway. Run it with a single `!` to share the output with the model, or use a terminal outside omp web.";
 
 /**
- * Failure raised by omp-web itself (not by omp) carrying a stable snake_case
+ * Failure raised by Cody itself (not by omp) carrying a stable snake_case
  * code. API routes forward `{ error, code }` so the client dictionary can
  * localize it via `errors.<code>` while unknown codes fall back to the text.
  */
@@ -412,7 +412,7 @@ export class AgentSessionWrapper {
           type: "host_uri_result",
           id,
           isError: true,
-          error: `URI scheme \"${scheme}\" is not registered by omp-web`,
+          error: `URI scheme \"${scheme}\" is not registered by Cody`,
         });
         return;
       }
@@ -519,7 +519,7 @@ export class AgentSessionWrapper {
       result: {
         content: [{
           type: "text",
-          text: `Host tool \"${toolName}\" is not available in omp-web. Use OMP's built-in tools within the selected workspace.`,
+          text: `Host tool \"${toolName}\" is not available in Cody. Use OMP's built-in tools within the selected workspace.`,
         }],
       },
     });
@@ -753,7 +753,7 @@ export class AgentSessionWrapper {
   }
 
   /** Full restart of the child process against the same session file. This is
-   * omp-web's `reload`: extensions, skills, prompts, and tools are rediscovered
+   * Cody's `reload`: extensions, skills, prompts, and tools are rediscovered
    * on boot, matching a fresh CLI launch. */
   private async restart(): Promise<void> {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
