@@ -30,6 +30,10 @@ export const STORAGE_KEYS = {
   composerModels: "cody:composer-models",
   /** Whether the turn-completion sound plays. */
   soundEnabled: "cody:sound-enabled",
+  /** Selected right-panel tool (files / git / terminal / tasks / updates / info). */
+  workspacePanel: "cody:workspace-panel",
+  /** Git panel changed-file presentation ("list" | "tree"). */
+  gitFileView: "cody:git-file-view",
 } as const;
 
 /** sessionStorage prefixes — per-tab and rebuilt on demand, so they are not

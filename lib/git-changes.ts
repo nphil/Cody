@@ -1,9 +1,11 @@
 import { execFile } from "child_process";
+import { createHash } from "crypto";
 import fs from "fs";
 import path from "path";
 import { promisify } from "util";
 import { TEXT_PREVIEW_MAX_BYTES } from "./file-types";
 import type {
+  GitBranchInfo,
   GitFileDiffResponse,
   GitFileStatus,
   GitStatusResponse,
@@ -54,13 +56,52 @@ async function readStatusEntries(repositoryRoot: string): Promise<GitPorcelainEn
   return parseGitPorcelainV1(output);
 }
 
+/** Branch, upstream and ahead/behind counts for the checked-out HEAD. Every
+ * sub-probe degrades independently: a detached HEAD still reports its short
+ * hash, and a branch without an upstream reports zero ahead/behind. */
+async function getGitBranchInfo(repositoryRoot: string): Promise<GitBranchInfo> {
+  const info: GitBranchInfo = { branch: null, upstream: null, ahead: 0, behind: 0, detached: false };
+  try {
+    info.branch = (await git(repositoryRoot, ["symbolic-ref", "--short", "-q", "HEAD"])).trim() || null;
+  } catch {
+    info.detached = true;
+    try {
+      info.branch = (await git(repositoryRoot, ["rev-parse", "--short", "HEAD"])).trim() || null;
+    } catch {
+      // Unborn branch (fresh repo without commits): symbolic-ref -q exits 0
+      // with the name, so this path is a repo with no HEAD at all.
+    }
+  }
+  if (!info.detached && info.branch) {
+    try {
+      info.upstream = (await git(repositoryRoot, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])).trim() || null;
+    } catch {
+      return info;
+    }
+    try {
+      // left-right over upstream...HEAD: left = only-upstream (behind), right = only-HEAD (ahead)
+      const counts = (await git(repositoryRoot, ["rev-list", "--left-right", "--count", "@{upstream}...HEAD"])).trim();
+      const [behind, ahead] = counts.split(/\s+/).map((value) => Number.parseInt(value, 10));
+      if (Number.isFinite(behind)) info.behind = behind;
+      if (Number.isFinite(ahead)) info.ahead = ahead;
+    } catch {
+      // Upstream ref exists but is unreachable (e.g. pruned remote): keep 0/0.
+    }
+  }
+  return info;
+}
+
 export async function getGitStatus(cwd: string): Promise<GitStatusResponse> {
   const repositoryRoot = await findRepositoryRoot(cwd);
   if (!repositoryRoot) {
     return { isGitRepository: false, repositoryRoot: null, files: [] };
   }
 
-  const entries = await readStatusEntries(repositoryRoot);
+  const [statusOutput, branchInfo] = await Promise.all([
+    git(repositoryRoot, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
+    getGitBranchInfo(repositoryRoot),
+  ]);
+  const entries = parseGitPorcelainV1(statusOutput);
   const files = entries.flatMap((entry): GitFileStatus[] => {
     const filePath = path.resolve(repositoryRoot, entry.path);
     if (!isWithinPath(cwd, filePath)) return [];
@@ -73,7 +114,13 @@ export async function getGitStatus(cwd: string): Promise<GitStatusResponse> {
     }];
   });
 
-  return { isGitRepository: true, repositoryRoot, files };
+  return {
+    isGitRepository: true,
+    repositoryRoot,
+    files,
+    branchInfo,
+    statusHash: createHash("sha1").update(statusOutput).digest("hex"),
+  };
 }
 
 function hasNullByte(content: Buffer): boolean {
