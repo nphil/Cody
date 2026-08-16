@@ -51,7 +51,7 @@ CODY_PASSWORD='a-long-random-password' cody # require Basic Auth (username: cody
 CODY_NO_OPEN=1 cody           # useful when running as a background service
 ```
 
-Set `CODY_PASSWORD` to protect the interface and every API endpoint with HTTP Basic Auth. The username is always `cody`; leaving the variable unset disables authentication. Basic Auth does not encrypt traffic, so remote use still requires HTTPS through a trusted reverse proxy or VPN.
+Cody has a user account system: a themed login screen, self-service signup (first account created becomes the administrator), per-account profiles with pictures, and per-account chat sessions. Setting `CODY_PASSWORD` enables the built-in `cody` account — it signs in on the login screen and still works as HTTP Basic Auth for scripts and health probes. With neither a password nor any created account, authentication is off (the local-dev default); creating the first account turns it on. None of this encrypts traffic, so remote use still requires HTTPS through a trusted reverse proxy or VPN.
 
 ### Security and troubleshooting
 
@@ -85,7 +85,9 @@ Set `CODY_PASSWORD` to protect the interface and every API endpoint with HTTP Ba
 | --- | --- |
 | `PORT` | Server port (default `30177`; `-p/--port` wins) |
 | `CODY_HOSTNAME` | Bind hostname (default `127.0.0.1`; `-H/--hostname` wins) |
-| `CODY_PASSWORD` | Optional HTTP Basic Auth password (username: `cody`) |
+| `CODY_PASSWORD` | Password for the built-in `cody` account (login screen and HTTP Basic Auth) |
+| `CODY_ALLOW_SIGNUP` | Set `0` to hide "Create an account" on the login screen (admins can still add accounts) |
+| `CODY_ACCOUNTS_DIR` | Where user accounts are stored (default `<agent dir>/cody-accounts`) |
 | `CODY_NO_OPEN` | Set to `1`/`true` to skip auto-opening the browser |
 | `CODY_OMP_BIN` | Absolute path to the `omp` binary when it is not on `PATH` |
 | `PI_CODING_AGENT_DIR` | Point at another omp agent directory (default `~/.omp/agent`) |

@@ -1,5 +1,7 @@
 import { readSessionHeader, resolveSessionPath } from "@/lib/session-reader";
 import { getRpcSession, resolveSpawnCwd, startRpcSession } from "@/lib/rpc-manager";
+import { getRequestUser } from "@/lib/auth/guard";
+import { canAccessSession } from "@/lib/auth/session-owners";
 
 export const dynamic = "force-dynamic";
 
@@ -9,6 +11,13 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+
+  // Ownership gate: someone else's session answers the same 404 as a missing
+  // one. This route streams full session content, so it cannot rely on the
+  // resolveSessionPathOr404 helper the non-streaming routes share.
+  if (!canAccessSession(id, getRequestUser(req))) {
+    return new Response("Session not found", { status: 404 });
+  }
 
   // Fast path: already-running session. Otherwise only resolve the session file
   // here (cheap, and a miss must still answer 404); the omp spawn itself happens

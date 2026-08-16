@@ -7,6 +7,8 @@ import { invalidateSessionListCache } from "@/lib/session-reader";
 import { WebRpcError, startRpcSession } from "@/lib/rpc-manager";
 import { createCheckpoint } from "@/lib/checkpoints";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
+import { getRequestUser } from "@/lib/auth/guard";
+import { setSessionOwner } from "@/lib/auth/session-owners";
 
 function newSessionErrorResponse(error: unknown) {
   if (error instanceof SyntaxError) {
@@ -61,6 +63,11 @@ export async function POST(req: Request) {
     // a file request under a brand-new cwd would 403 for up to the cache TTL.
     allowFileRoot(cwd);
     invalidateSessionListCache();
+
+    // Stamp the creating account so the session lists (and opens) only for
+    // them. Sessions created with auth off stay unowned — visible to all.
+    const creator = getRequestUser(req);
+    if (creator) setSessionOwner(realSessionId, creator.id);
 
     // Apply pre-selected model before sending the prompt
     if (provider && modelId) {

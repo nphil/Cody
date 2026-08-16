@@ -12,12 +12,12 @@ export const dynamic = "force-dynamic";
  * toolResults (works without a live RPC process — survives page reloads).
  */
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
   try {
-    const resolved = await resolveSessionPathOr404(id);
+    const resolved = await resolveSessionPathOr404(id, req);
     if ("response" in resolved) {
       // A brand-new session's file can land just after the prompt
       // acknowledgement; while its RPC wrapper is alive that is "no on-disk

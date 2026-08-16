@@ -24,6 +24,7 @@ import {
 import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
 import { sessionPathKey } from "@/lib/session-path";
 import { getRpcSession } from "@/lib/rpc-manager";
+import { forgetSession } from "@/lib/auth/session-owners";
 
 // BranchNavigator still traverses recursively, so keep the response tree shallow.
 const MAX_PROJECTED_TREE_DEPTH = 200;
@@ -131,7 +132,7 @@ export async function GET(
 ) {
   const { id } = await params;
   try {
-    const resolved = await resolveSessionPathOr404(id);
+    const resolved = await resolveSessionPathOr404(id, req);
     if ("response" in resolved) return resolved.response;
     const filePath = resolved.filePath;
 
@@ -238,7 +239,7 @@ export async function PATCH(
       }
     }
     if (!renamed) {
-      const resolved = await resolveSessionPathOr404(id);
+      const resolved = await resolveSessionPathOr404(id, req);
       if ("response" in resolved) return resolved.response;
       const filePath = resolved.filePath;
       setSessionTitle(filePath, name.trim(), "user");
@@ -252,12 +253,12 @@ export async function PATCH(
 
 // DELETE /api/sessions/[id]
 export async function DELETE(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
   try {
-    const resolved = await resolveSessionPathOr404(id);
+    const resolved = await resolveSessionPathOr404(id, req);
     if ("response" in resolved) return resolved.response;
     const filePath = resolved.filePath;
 
@@ -376,6 +377,7 @@ export async function DELETE(
     deleteSessionFileWithArtifacts(filePath);
     invalidateSessionPathCache(id);
     invalidateSessionListCache();
+    forgetSession(deletedSessionId);
     return NextResponse.json({
       ok: true,
       ...(skippedChildren.length > 0 ? { skippedChildren } : {}),

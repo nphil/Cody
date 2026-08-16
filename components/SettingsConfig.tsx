@@ -17,6 +17,7 @@ const SkillsConfig = dynamic(() => import("./SkillsConfig").then((module) => mod
 const PluginsConfig = dynamic(() => import("./PluginsConfig").then((module) => module.PluginsConfig), { loading: SettingsTabLoading });
 const McpConfig = dynamic(() => import("./McpConfig").then((module) => module.McpConfig), { loading: SettingsTabLoading });
 const OmpSchemaSettings = dynamic(() => import("./settings/OmpSchemaSettings").then((module) => module.OmpSchemaSettings), { loading: SettingsTabLoading });
+const AccountSettings = dynamic(() => import("./settings/AccountSettings").then((module) => module.AccountSettings), { loading: SettingsTabLoading });
 
 type UpdateState = {
   currentVersion: string | null;
@@ -66,6 +67,10 @@ type SettingIndexEntry = {
 // panels below. Search matches against this index and jumps via slugify(label),
 // so keep labels/descriptions in sync when editing the settings UI.
 const SETTING_INDEX: SettingIndexEntry[] = [
+  // User Accounts
+  { tab: "accounts", section: "User Accounts", label: "Full name", description: "Shown on your profile and, for administrators, in the account roster.", scope: "Cody only" },
+  { tab: "accounts", section: "User Accounts", label: "Profile picture", description: "PNG, JPEG or WebP. Cropped square and downscaled in your browser before upload.", scope: "Cody only" },
+  { tab: "accounts", section: "User Accounts", label: "Change password", description: "Changing your password signs out your other devices." },
   // Interface & Behavior
   { tab: "general", section: "Interface & Behavior", label: "Keep tool calls collapsed", description: "Show only compact headers while tools execute.", scope: "Cody only" },
   { tab: "general", section: "Interface & Behavior", label: "Completion sound", description: "Play a tone when the agent completes a run.", scope: "Cody only" },
@@ -422,6 +427,9 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                 <AlertCircle size={14} aria-hidden="true" /> {nativeSettingsError}
               </div>
             )}
+
+            {/* USER ACCOUNTS TAB */}
+            {currentTab === "accounts" && <AccountSettings isMobile={isMobile} />}
 
             {/* GENERAL & UI TAB */}
             {currentTab === "general" && (

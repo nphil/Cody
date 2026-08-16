@@ -50,7 +50,7 @@ export async function POST(
       return NextResponse.json({ success: true, data: result });
     }
 
-    const resolved = await resolveSessionPathOr404(id);
+    const resolved = await resolveSessionPathOr404(id, req);
     if ("response" in resolved) return resolved.response;
     const filePath = resolved.filePath;
 

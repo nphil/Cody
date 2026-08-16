@@ -1,9 +1,10 @@
 "use client";
 
-import { Cable, Cpu, KeyRound, RefreshCw, Settings2, ShieldCheck, SlidersHorizontal, Sparkles } from "lucide-react";
+import { Cable, Cpu, KeyRound, RefreshCw, Settings2, ShieldCheck, SlidersHorizontal, Sparkles, UserRound } from "lucide-react";
 import type { ComponentType, CSSProperties } from "react";
 
 export type SettingsTab =
+  | "accounts"
   | "general"
   | "safety"
   | "models"
@@ -41,6 +42,7 @@ export function getSettingsCategories(harnessLabel: string = DEFAULT_HARNESS_LAB
 }
 
 export const SETTINGS_CATEGORIES: TabItem[] = [
+  { id: "accounts", label: "User Accounts", description: "Your profile, password, and who can sign in", Icon: UserRound },
   { id: "general", label: "Interface & Behavior", description: "UI preferences, completion sound, submission mode", Icon: Settings2 },
   { id: "safety", label: "Safety & Approvals", description: "Tool safety rules, YOLO mode, terminal permissions", Icon: ShieldCheck },
   { id: "models", label: "AI Model Defaults", description: "Reasoning budget, verbosity, personality, scratchpad", Icon: Cpu },

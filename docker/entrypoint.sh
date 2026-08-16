@@ -2,14 +2,20 @@
 set -eu
 
 # Cody in a container listens on 0.0.0.0 — that is only safe behind auth.
-# Require a password unless the operator explicitly opts out (e.g. the
-# container sits behind an authenticating reverse proxy).
+# Auth comes from either CODY_PASSWORD (the env-managed bootstrap account) or
+# user accounts already created in the persisted account store; require one of
+# the two unless the operator explicitly opts out (e.g. the container sits
+# behind an authenticating reverse proxy).
 # The app accepts the pre-fork OMP_WEB_PASSWORD too (lib/env.ts), so the gate
 # must recognize it or a documented-working config is refused at the door.
-if [ -z "${CODY_PASSWORD:-}" ] && [ -z "${OMP_WEB_PASSWORD:-}" ] && [ "${CODY_ALLOW_NO_AUTH:-}" != "1" ]; then
-  echo "No password is set (CODY_PASSWORD, or the legacy OMP_WEB_PASSWORD)." >&2
-  echo "Set it (Basic Auth username: cody), or set CODY_ALLOW_NO_AUTH=1 only if an" >&2
-  echo "authenticating reverse proxy fronts this container." >&2
+ACCOUNTS_FILE="${CODY_ACCOUNTS_DIR:-${PI_CODING_AGENT_DIR}/cody-accounts}/accounts.json"
+if [ -z "${CODY_PASSWORD:-}" ] && [ -z "${OMP_WEB_PASSWORD:-}" ] && [ "${CODY_ALLOW_NO_AUTH:-}" != "1" ] \
+  && ! { [ -f "${ACCOUNTS_FILE}" ] && grep -q '"username"' "${ACCOUNTS_FILE}"; }; then
+  echo "No password is set (CODY_PASSWORD, or the legacy OMP_WEB_PASSWORD) and no" >&2
+  echo "user accounts exist yet at ${ACCOUNTS_FILE}." >&2
+  echo "Set a password (Basic Auth / login username: cody), or set CODY_ALLOW_NO_AUTH=1" >&2
+  echo "only if an authenticating reverse proxy fronts this container. Once accounts" >&2
+  echo "exist, the password variable may be removed." >&2
   exit 1
 fi
 

@@ -9,7 +9,7 @@ const next = require("next");
 const { WebSocket, WebSocketServer } = require("ws");
 const { createJiti } = require("jiti");
 const jiti = createJiti(__filename);
-const { isValidBasicAuthorization, isWebPasswordEnabled } = jiti("../lib/web-auth.ts");
+const { getUserForCredentials, isAuthRequired } = jiti("../lib/auth/guard.ts");
 const { getTerminalManager } = jiti("../lib/terminal-manager.ts");
 
 function parseArgs(argv) {
@@ -59,8 +59,10 @@ async function main(argv = process.argv.slice(2)) {
       void upgrade(request, socket, head).catch(() => socket.destroy());
       return;
     }
-    if (isWebPasswordEnabled() && !isValidBasicAuthorization(request.headers.authorization || null)) {
-      reject(socket, 401, "Unauthorized", { "WWW-Authenticate": 'Basic realm="omp web", charset="UTF-8"' });
+    // Browsers attach the session cookie to same-origin upgrades automatically;
+    // Basic Auth stays accepted for pre-account clients.
+    if (isAuthRequired() && !getUserForCredentials(request.headers.cookie || null, request.headers.authorization || null)) {
+      reject(socket, 401, "Unauthorized");
       return;
     }
     if (!originAllowed(request)) { reject(socket, 403, "Forbidden"); return; }

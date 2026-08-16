@@ -14,7 +14,7 @@ import { resolveSessionPathOr404 } from "@/lib/api-utils";
  * derived from the first user message (persisted so the sidebar updates).
  */
 export async function POST(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
@@ -39,7 +39,7 @@ export async function POST(
       }
     }
 
-    const resolved = await resolveSessionPathOr404(id);
+    const resolved = await resolveSessionPathOr404(id, req);
     if ("response" in resolved) return resolved.response;
     const filePath = resolved.filePath;
 

@@ -82,17 +82,29 @@ The template asks for:
 | WebUI Port | Host port for the interface (default 30177) |
 | App Data (`/data`) | Agent state, checkpoints, terminal shell home — keep on appdata |
 | Projects (`/workspace`) | The share holding your repositories |
-| Password | Basic Auth password (username `cody`). The container refuses to start without one unless `CODY_ALLOW_NO_AUTH=1` is set — do that only behind an authenticating reverse proxy. |
+| Password | Password for the built-in `cody` account. Required on the first start; once you have created your own account in Cody (Settings → User Accounts, or the login screen) it may be removed. Without it and without accounts, the container refuses to start unless `CODY_ALLOW_NO_AUTH=1` — do that only behind an authenticating reverse proxy. |
+| Allow Account Signup | Leave empty to let the login screen offer "Create an account". Set `0` to restrict account creation to administrators. |
 | Anthropic API Key | Optional provider credential for the agent; add other provider env vars the same way |
 
 Then open the WebUI, add `/workspace/<your-project>` as a workspace, and
 everything — chat, Git panel, checkpoints, terminals, tasks, preview — runs
 against the bundled omp.
 
+### User accounts
+
+Opening the WebUI shows Cody's login screen. Sign in as `cody` with the
+Password variable, or create a personal account right from that screen
+(unless signup is disabled). Each account has its own profile — name,
+picture, password — under Settings → User Accounts, and sees only its own
+chat sessions; sessions from before accounts existed stay visible to
+everyone. Account data lives in `/data/agent/cody-accounts` (passwords are
+scrypt-hashed), so accounts survive image updates like the rest of appdata.
+
 ## Notes
 
-- Basic Auth is not encryption. Off your LAN, front it with a reverse proxy
-  doing HTTPS (SWAG/NPM/Traefik) or reach it over a VPN/Tailscale.
+- Neither the login cookie nor Basic Auth is encryption. Off your LAN, front
+  it with a reverse proxy doing HTTPS (SWAG/NPM/Traefik) or reach it over a
+  VPN/Tailscale.
 - Terminals run as the container's user with full access to `/data` and
   `/workspace` — scope those mounts to what the agent should touch.
 - The in-app "Updates" panel checks versions but self-update is disabled by

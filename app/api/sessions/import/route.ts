@@ -8,6 +8,8 @@ import { invalidateSessionListCache } from "@/lib/session-reader";
 import { invalidateSessionFileListCache } from "@/lib/omp/session-files";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
+import { getRequestUser } from "@/lib/auth/guard";
+import { setSessionOwner } from "@/lib/auth/session-owners";
 const MAX_IMPORT_BYTES = 10 * 1024 * 1024;
 
 // JSON escapes a session's newlines and quotes on the wire. Bound the request
@@ -95,6 +97,10 @@ export async function POST(req: Request) {
     // mtime-keyed walk cache (the AGENTS.md-documented Windows/NTFS trap).
     invalidateSessionListCache();
     invalidateSessionFileListCache();
+
+    // An import belongs to whoever imported it, like a freshly created session.
+    const importer = getRequestUser(req);
+    if (importer) setSessionOwner(freshId, importer.id);
 
     return NextResponse.json({ success: true, sessionFile });
   } catch (error) {

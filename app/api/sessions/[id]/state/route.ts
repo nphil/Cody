@@ -3,7 +3,7 @@ import { getRpcSession } from "@/lib/rpc-manager";
 import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
 
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params;
@@ -17,7 +17,7 @@ export async function GET(
       return NextResponse.json({ running: true, state });
     }
 
-    const resolved = await resolveSessionPathOr404(id);
+    const resolved = await resolveSessionPathOr404(id, req);
     if ("response" in resolved) return resolved.response;
     return NextResponse.json({ running: false });
   } catch (error) {

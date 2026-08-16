@@ -32,7 +32,7 @@ export async function GET(
     if (!SUBAGENT_ID_RE.test(subagentId) || subagentId.length > SUBAGENT_ID_MAX_LENGTH) {
       return NextResponse.json({ error: "Invalid subagent id", code: "invalid_subagent_id" }, { status: 400 });
     }
-    const sessionResolved = await resolveSessionPathOr404(id);
+    const sessionResolved = await resolveSessionPathOr404(id, req);
     if ("response" in sessionResolved) return sessionResolved.response;
     const filePath = sessionResolved.filePath;
     const searchParams = new URL(req.url).searchParams;

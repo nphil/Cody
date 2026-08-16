@@ -1,0 +1,514 @@
+"use client";
+
+import { AlertCircle, Check, Loader2, LogOut, ShieldCheck, Trash2, Upload, UserRoundPlus, X } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { chipStyle, nativeInputStyle, nativeOptionStyle, nativeSelectStyle, NativeSetting } from "./primitives";
+
+/**
+ * The User Accounts settings panel: the signed-in profile (name, picture,
+ * password, sign out) plus, for administrators, the server's account roster
+ * and self-service-signup status. Follows the settings-panel convention of
+ * NativeSetting cards so search highlighting and theming come for free.
+ */
+
+interface PublicUser {
+  id: string;
+  username: string;
+  fullName: string;
+  role: "admin" | "member";
+  envManaged: boolean;
+  hasAvatar: boolean;
+  avatarKey: string | null;
+  createdAt: string;
+}
+
+interface AccountStateInfo {
+  authRequired: boolean;
+  firstRun: boolean;
+  signupAllowed: boolean;
+  user: PublicUser | null;
+}
+
+const AVATAR_TARGET_PX = 256;
+
+function avatarUrl(user: PublicUser): string | null {
+  return user.hasAvatar ? `/api/accounts/avatar/${user.id}?v=${user.avatarKey ?? ""}` : null;
+}
+
+function initials(user: PublicUser): string {
+  const parts = user.fullName.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return user.username.slice(0, 2).toUpperCase();
+  return parts.slice(0, 2).map((part) => part[0]!.toUpperCase()).join("");
+}
+
+/** Center-crop to a square and downscale before upload, so the server stores
+ * small images without needing an image library. */
+async function downscaleImage(file: File): Promise<Blob> {
+  const bitmap = await createImageBitmap(file);
+  try {
+    const side = Math.min(bitmap.width, bitmap.height);
+    const target = Math.min(AVATAR_TARGET_PX, side);
+    const canvas = document.createElement("canvas");
+    canvas.width = target;
+    canvas.height = target;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Canvas unavailable");
+    context.imageSmoothingQuality = "high";
+    context.drawImage(bitmap, (bitmap.width - side) / 2, (bitmap.height - side) / 2, side, side, 0, 0, target, target);
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/webp", 0.9));
+    if (!blob) throw new Error("Could not encode image");
+    return blob;
+  } finally {
+    bitmap.close();
+  }
+}
+
+function Avatar({ user, size }: { user: PublicUser; size: number }) {
+  const url = avatarUrl(user);
+  const fontSize = Math.round(size * 0.36);
+  return url ? (
+    // eslint-disable-next-line @next/next/no-img-element -- same-origin API image; next/image adds nothing here
+    <img src={url} alt="" width={size} height={size} style={{ width: size, height: size, borderRadius: "50%", objectFit: "cover", border: "1px solid var(--border)", flexShrink: 0 }} />
+  ) : (
+    <span aria-hidden style={{ width: size, height: size, borderRadius: "50%", background: "color-mix(in srgb, var(--accent) 18%, var(--bg))", color: "var(--accent)", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize, fontWeight: 650, letterSpacing: "0.02em", flexShrink: 0, userSelect: "none" }}>
+      {initials(user)}
+    </span>
+  );
+}
+
+const smallButtonStyle = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  minHeight: 30,
+  padding: "4px 10px",
+  border: "1px solid var(--border)",
+  borderRadius: "var(--radius-control)",
+  background: "transparent",
+  color: "var(--text)",
+  fontSize: 12,
+  cursor: "pointer",
+} as const;
+
+const primaryButtonStyle = {
+  ...smallButtonStyle,
+  border: "none",
+  background: "var(--accent-strong)",
+  color: "var(--on-accent)",
+  fontWeight: 600,
+} as const;
+
+const dangerButtonStyle = {
+  ...smallButtonStyle,
+  color: "var(--status-error)",
+  borderColor: "color-mix(in srgb, var(--status-error) 45%, transparent)",
+} as const;
+
+function useAsyncAction(): [boolean, string | null, (run: () => Promise<void>) => void, (message: string | null) => void] {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const invoke = useCallback((run: () => Promise<void>) => {
+    setBusy(true);
+    setError(null);
+    void run()
+      .catch((failure: unknown) => setError(failure instanceof Error ? failure.message : String(failure)))
+      .finally(() => setBusy(false));
+  }, []);
+  return [busy, error, invoke, setError];
+}
+
+async function requestJson<T>(input: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(input, init);
+  const body = (await response.json().catch(() => null)) as (T & { error?: string }) | null;
+  if (!response.ok) throw new Error(body?.error || `HTTP ${response.status}`);
+  return body as T;
+}
+
+function ErrorNote({ message }: { message: string | null }) {
+  if (!message) return null;
+  return (
+    <div role="alert" style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--status-error)", fontSize: 12 }}>
+      <AlertCircle size={13} aria-hidden style={{ flexShrink: 0 }} /> {message}
+    </div>
+  );
+}
+
+export function AccountSettings({ isMobile }: { isMobile: boolean }) {
+  const [me, setMe] = useState<PublicUser | null>(null);
+  const [stateInfo, setStateInfo] = useState<AccountStateInfo | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  const [fullName, setFullName] = useState("");
+  const [nameSaved, setNameSaved] = useState(false);
+  const [nameBusy, nameError, runName] = useAsyncAction();
+
+  const [avatarBusy, avatarError, runAvatar] = useAsyncAction();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [passwordDone, setPasswordDone] = useState(false);
+  const [passwordBusy, passwordError, runPassword, setPasswordError] = useAsyncAction();
+
+  const [users, setUsers] = useState<PublicUser[] | null>(null);
+  const [rosterError, setRosterError] = useState<string | null>(null);
+  const [rosterBusy, setRosterBusy] = useState<string | null>(null);
+
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [addUsername, setAddUsername] = useState("");
+  const [addFullName, setAddFullName] = useState("");
+  const [addPassword, setAddPassword] = useState("");
+  const [addRole, setAddRole] = useState<"member" | "admin">("member");
+  const [addBusy, addError, runAdd, setAddError] = useAsyncAction();
+
+  const isAdmin = me?.role === "admin";
+
+  const reloadRoster = useCallback(() => {
+    requestJson<{ users: PublicUser[] }>("/api/accounts/users")
+      .then((data) => { setUsers(data.users); setRosterError(null); })
+      .catch((error: unknown) => setRosterError(error instanceof Error ? error.message : String(error)));
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    requestJson<AccountStateInfo>("/api/accounts/state")
+      .then((data) => {
+        if (cancelled) return;
+        setStateInfo(data);
+        setMe(data.user);
+        if (data.user) setFullName(data.user.fullName);
+      })
+      .catch((error: unknown) => { if (!cancelled) setLoadError(error instanceof Error ? error.message : String(error)); });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (isAdmin) reloadRoster();
+  }, [isAdmin, reloadRoster]);
+
+  const saveName = () => runName(async () => {
+    const data = await requestJson<{ user: PublicUser }>("/api/accounts/me", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fullName }),
+    });
+    setMe(data.user);
+    setFullName(data.user.fullName);
+    setNameSaved(true);
+    setTimeout(() => setNameSaved(false), 1800);
+  });
+
+  const uploadAvatar = (file: File) => runAvatar(async () => {
+    const blob = await downscaleImage(file);
+    const form = new FormData();
+    form.append("avatar", blob, "avatar.webp");
+    const data = await requestJson<{ user: PublicUser }>("/api/accounts/me/avatar", { method: "POST", body: form });
+    setMe(data.user);
+    if (isAdmin) reloadRoster();
+  });
+
+  const removeAvatar = () => runAvatar(async () => {
+    const data = await requestJson<{ user: PublicUser }>("/api/accounts/me/avatar", { method: "DELETE" });
+    setMe(data.user);
+    if (isAdmin) reloadRoster();
+  });
+
+  const changePassword = () => {
+    if (newPassword !== confirmPassword) {
+      setPasswordError("New passwords do not match");
+      return;
+    }
+    runPassword(async () => {
+      await requestJson<{ success: boolean }>("/api/accounts/me/password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ currentPassword, newPassword }),
+      });
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      setPasswordDone(true);
+      setTimeout(() => setPasswordDone(false), 2500);
+    });
+  };
+
+  const signOut = () => {
+    void fetch("/api/accounts/logout", { method: "POST" }).finally(() => window.location.replace("/login"));
+  };
+
+  const changeRole = (target: PublicUser, role: "admin" | "member") => {
+    setRosterBusy(target.id);
+    requestJson<{ user: PublicUser }>(`/api/accounts/users/${target.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ role }),
+    })
+      .then(() => { setRosterError(null); reloadRoster(); })
+      .catch((error: unknown) => setRosterError(error instanceof Error ? error.message : String(error)))
+      .finally(() => setRosterBusy(null));
+  };
+
+  const resetPassword = (target: PublicUser) => {
+    const next = window.prompt(`New password for @${target.username} (at least 8 characters):`);
+    if (next === null) return;
+    setRosterBusy(target.id);
+    requestJson<{ user: PublicUser }>(`/api/accounts/users/${target.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: next }),
+    })
+      .then(() => setRosterError(null))
+      .catch((error: unknown) => setRosterError(error instanceof Error ? error.message : String(error)))
+      .finally(() => setRosterBusy(null));
+  };
+
+  const removeUser = (target: PublicUser) => {
+    if (!window.confirm(`Delete the account @${target.username}? Their sessions remain on disk but lose their owner.`)) return;
+    setRosterBusy(target.id);
+    requestJson<{ success: boolean }>(`/api/accounts/users/${target.id}`, { method: "DELETE" })
+      .then(() => { setRosterError(null); reloadRoster(); })
+      .catch((error: unknown) => setRosterError(error instanceof Error ? error.message : String(error)))
+      .finally(() => setRosterBusy(null));
+  };
+
+  const addUser = () => runAdd(async () => {
+    await requestJson<{ user: PublicUser }>("/api/accounts/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: addUsername, fullName: addFullName, password: addPassword, role: addRole }),
+    });
+    setAddUsername("");
+    setAddFullName("");
+    setAddPassword("");
+    setAddRole("member");
+    setShowAddForm(false);
+    reloadRoster();
+  });
+
+  if (loadError) {
+    return (
+      <div role="tabpanel" id="settings-panel-accounts" aria-labelledby="settings-tab-accounts" style={{ padding: 20 }}>
+        <ErrorNote message={loadError} />
+      </div>
+    );
+  }
+
+  // An open instance (no accounts, no password): explain and point at the
+  // first-run flow instead of rendering an empty profile.
+  if (stateInfo && !me) {
+    return (
+      <div role="tabpanel" id="settings-panel-accounts" aria-labelledby="settings-tab-accounts" style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16 }}>
+        <div>
+          <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>User Accounts</h3>
+          <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)" }}>No accounts exist on this server yet, and it is running without authentication.</p>
+        </div>
+        <section style={{ padding: 16, border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", display: "flex", flexDirection: "column", gap: 10, alignItems: "flex-start" }}>
+          <span style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.5 }}>
+            Create the first account to turn sign-in on. The first account becomes the administrator, and every visitor after that will need to sign in.
+          </span>
+          <a href="/login" style={{ ...primaryButtonStyle, textDecoration: "none" }}>
+            <UserRoundPlus size={14} aria-hidden /> Create the first account
+          </a>
+        </section>
+      </div>
+    );
+  }
+
+  if (!me) {
+    return (
+      <div role="status" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 12, padding: 40 }}>
+        <Loader2 size={14} aria-hidden style={{ animation: "spin 0.9s linear infinite", marginRight: 8 }} /> Loading account…
+      </div>
+    );
+  }
+
+  return (
+    <div role="tabpanel" id="settings-panel-accounts" aria-labelledby="settings-tab-accounts" style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16 }}>
+      <div>
+        <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>User Accounts</h3>
+        <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)" }}>Your profile and sign-in security{isAdmin ? ", plus the accounts that can use this server" : ""}.</p>
+      </div>
+
+      {/* Identity header */}
+      <section style={{ padding: 16, border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+        <Avatar user={me} size={56} />
+        <div style={{ display: "flex", flexDirection: "column", gap: 3, minWidth: 0, flex: 1 }}>
+          <span style={{ fontSize: 14.5, fontWeight: 650, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{me.fullName}</span>
+          <span style={{ fontSize: 12, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>@{me.username}</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          {me.role === "admin" && <span style={{ ...chipStyle, display: "inline-flex", alignItems: "center", gap: 4 }}><ShieldCheck size={11} aria-hidden /> Admin</span>}
+          {me.envManaged && <span style={chipStyle}>Managed by Docker</span>}
+        </div>
+        <button type="button" onClick={signOut} style={smallButtonStyle}>
+          <LogOut size={13} aria-hidden /> Sign out
+        </button>
+      </section>
+
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(2, minmax(0, 1fr))", gap: 10 }}>
+        <NativeSetting
+          label="Full name"
+          description="Shown on your profile and, for administrators, in the account roster."
+          scope="Cody only"
+          control={
+            <div style={{ display: "flex", gap: 8 }}>
+              <input
+                value={fullName}
+                onChange={(event) => setFullName(event.target.value)}
+                maxLength={80}
+                style={{ ...nativeInputStyle, flex: 1, minWidth: 0 }}
+              />
+              <button type="button" onClick={saveName} disabled={nameBusy || fullName.trim() === "" || fullName === me.fullName} style={{ ...primaryButtonStyle, opacity: nameBusy || fullName.trim() === "" || fullName === me.fullName ? 0.6 : 1 }}>
+                {nameBusy ? <Loader2 size={13} aria-hidden style={{ animation: "spin 0.9s linear infinite" }} /> : nameSaved ? <Check size={13} aria-hidden /> : null}
+                Save
+              </button>
+            </div>
+          }
+        >
+          {nameError ? <ErrorNote message={nameError} /> : undefined}
+        </NativeSetting>
+
+        <NativeSetting
+          label="Profile picture"
+          description="PNG, JPEG or WebP. Cropped square and downscaled in your browser before upload."
+          scope="Cody only"
+          control={
+            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <Avatar user={me} size={40} />
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                style={{ display: "none" }}
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  event.target.value = "";
+                  if (file) uploadAvatar(file);
+                }}
+              />
+              <button type="button" onClick={() => fileInputRef.current?.click()} disabled={avatarBusy} style={smallButtonStyle}>
+                {avatarBusy ? <Loader2 size={13} aria-hidden style={{ animation: "spin 0.9s linear infinite" }} /> : <Upload size={13} aria-hidden />} Upload
+              </button>
+              {me.hasAvatar && (
+                <button type="button" onClick={removeAvatar} disabled={avatarBusy} style={smallButtonStyle}>
+                  <X size={13} aria-hidden /> Remove
+                </button>
+              )}
+              <ErrorNote message={avatarError} />
+            </div>
+          }
+        />
+      </div>
+
+      <NativeSetting
+        label="Change password"
+        description={me.envManaged
+          ? "This account signs in with the CODY_PASSWORD environment variable. Change it in your container settings — for example the Unraid template — and restart."
+          : "Changing your password signs out your other devices."}
+        control={me.envManaged ? undefined : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, maxWidth: 420 }}>
+            <input type="password" placeholder="Current password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} style={nativeInputStyle} />
+            <input type="password" placeholder="New password (at least 8 characters)" autoComplete="new-password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} style={nativeInputStyle} />
+            <input type="password" placeholder="Repeat new password" autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} style={nativeInputStyle} />
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <button
+                type="button"
+                onClick={changePassword}
+                disabled={passwordBusy || !currentPassword || !newPassword || !confirmPassword}
+                style={{ ...primaryButtonStyle, opacity: passwordBusy || !currentPassword || !newPassword || !confirmPassword ? 0.6 : 1 }}
+              >
+                {passwordBusy && <Loader2 size={13} aria-hidden style={{ animation: "spin 0.9s linear infinite" }} />}
+                Update password
+              </button>
+              {passwordDone && <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "var(--status-success)", fontSize: 12 }}><Check size={13} aria-hidden /> Password updated</span>}
+            </div>
+            <ErrorNote message={passwordError} />
+          </div>
+        )}
+      />
+
+      {isAdmin && (
+        <>
+          <div style={{ marginTop: 4 }}>
+            <h3 style={{ fontSize: 13, fontWeight: 600, margin: 0 }}>Accounts on this server</h3>
+            <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)" }}>
+              {stateInfo?.signupAllowed
+                ? "Anyone who can reach the login screen may create an account. Set CODY_ALLOW_SIGNUP=0 to restrict account creation to administrators."
+                : "Self-service signup is disabled (CODY_ALLOW_SIGNUP=0); only administrators can create accounts here."}
+            </p>
+          </div>
+
+          <section style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", overflow: "hidden" }}>
+            {(users ?? []).map((user, index) => (
+              <div key={user.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", borderTop: index === 0 ? "none" : "1px solid var(--border)", flexWrap: "wrap" }}>
+                <Avatar user={user} size={32} />
+                <div style={{ display: "flex", flexDirection: "column", minWidth: 0, flex: 1 }}>
+                  <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {user.fullName}
+                    {user.id === me.id && <span style={{ color: "var(--text-dim)", fontWeight: 400 }}> (you)</span>}
+                  </span>
+                  <span style={{ fontSize: 11, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>@{user.username}</span>
+                </div>
+                {user.envManaged && <span style={chipStyle}>Managed by Docker</span>}
+                {rosterBusy === user.id && <Loader2 size={13} aria-hidden style={{ animation: "spin 0.9s linear infinite", color: "var(--text-dim)" }} />}
+                <select
+                  value={user.role}
+                  onChange={(event) => changeRole(user, event.target.value as "admin" | "member")}
+                  disabled={user.envManaged || rosterBusy === user.id}
+                  aria-label={`Role for ${user.username}`}
+                  style={{ ...nativeSelectStyle, minHeight: 28, fontSize: 11.5, opacity: user.envManaged ? 0.6 : 1 }}
+                >
+                  <option value="admin" style={nativeOptionStyle}>Admin</option>
+                  <option value="member" style={nativeOptionStyle}>Member</option>
+                </select>
+                {!user.envManaged && (
+                  <button type="button" onClick={() => resetPassword(user)} disabled={rosterBusy === user.id} style={{ ...smallButtonStyle, minHeight: 28, fontSize: 11.5 }}>
+                    Reset password
+                  </button>
+                )}
+                {user.id !== me.id && (
+                  <button type="button" onClick={() => removeUser(user)} disabled={rosterBusy === user.id || user.envManaged} aria-label={`Delete ${user.username}`} style={{ ...dangerButtonStyle, minHeight: 28, fontSize: 11.5, opacity: user.envManaged ? 0.5 : 1 }}>
+                    <Trash2 size={12} aria-hidden />
+                  </button>
+                )}
+              </div>
+            ))}
+            {users === null && !rosterError && (
+              <div style={{ padding: "14px", color: "var(--text-muted)", fontSize: 12 }}>Loading accounts…</div>
+            )}
+            {rosterError && <div style={{ padding: "10px 14px" }}><ErrorNote message={rosterError} /></div>}
+
+            <div style={{ borderTop: users && users.length > 0 ? "1px solid var(--border)" : "none", padding: "10px 14px", display: "flex", flexDirection: "column", gap: 10 }}>
+              {!showAddForm ? (
+                <button type="button" onClick={() => setShowAddForm(true)} style={{ ...smallButtonStyle, alignSelf: "flex-start" }}>
+                  <UserRoundPlus size={13} aria-hidden /> Add account
+                </button>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(2, minmax(0, 1fr))", gap: 8 }}>
+                    <input placeholder="Username" autoCapitalize="none" spellCheck={false} value={addUsername} onChange={(event) => setAddUsername(event.target.value)} style={nativeInputStyle} />
+                    <input placeholder="Full name" value={addFullName} onChange={(event) => setAddFullName(event.target.value)} style={nativeInputStyle} />
+                    <input type="password" placeholder="Password (at least 8 characters)" autoComplete="new-password" value={addPassword} onChange={(event) => setAddPassword(event.target.value)} style={nativeInputStyle} />
+                    <select value={addRole} onChange={(event) => setAddRole(event.target.value as "member" | "admin")} aria-label="Role for the new account" style={nativeSelectStyle}>
+                      <option value="member" style={nativeOptionStyle}>Member</option>
+                      <option value="admin" style={nativeOptionStyle}>Admin</option>
+                    </select>
+                  </div>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <button type="button" onClick={addUser} disabled={addBusy || !addUsername || !addPassword} style={{ ...primaryButtonStyle, opacity: addBusy || !addUsername || !addPassword ? 0.6 : 1 }}>
+                      {addBusy && <Loader2 size={13} aria-hidden style={{ animation: "spin 0.9s linear infinite" }} />}
+                      Create account
+                    </button>
+                    <button type="button" onClick={() => { setShowAddForm(false); setAddError(null); }} style={smallButtonStyle}>Cancel</button>
+                  </div>
+                  <ErrorNote message={addError} />
+                </div>
+              )}
+            </div>
+          </section>
+        </>
+      )}
+    </div>
+  );
+}

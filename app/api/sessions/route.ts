@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { createHash } from "crypto";
 import { listAllSessions } from "@/lib/session-reader";
 import { getRunningRpcSessionIds } from "@/lib/rpc-manager";
+import { getRequestUser } from "@/lib/auth/guard";
+import { filterSessionsForUser } from "@/lib/auth/session-owners";
 
 // The session list mixes on-disk sessions with the live runningSessionIds set,
 // which changes on every agent turn, so it must never be cached by proxies or
@@ -15,8 +17,11 @@ const SESSION_LIST_HEADERS = {
 
 export async function GET(req: Request) {
   try {
-    const sessions = await listAllSessions();
-    const runningSessionIds = getRunningRpcSessionIds();
+    // Ownership filter: each account sees its own sessions plus unowned ones
+    // (pre-account history and terminal-created sessions stay visible to all).
+    const sessions = filterSessionsForUser(await listAllSessions(), getRequestUser(req));
+    const visible = new Set(sessions.map((session) => session.id));
+    const runningSessionIds = getRunningRpcSessionIds().filter((id) => visible.has(id));
     const body = { sessions, runningSessionIds };
 
     const etag = `"${createHash("sha1").update(JSON.stringify(body)).digest("hex").slice(0, 16)}"`;
