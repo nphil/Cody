@@ -1,11 +1,10 @@
 "use client";
 
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
-import { Check, ChevronDown, Palette } from "lucide-react";
+import { Check, Palette } from "lucide-react";
 import { useTheme } from "@/hooks/useTheme";
 import { THEMES, type ThemeDefinition, type ThemeId } from "@/lib/theme-catalog";
 import { useI18n } from "@/lib/i18n";
-import { useIsMobile } from "@/hooks/useIsMobile";
 
 const lightThemes = THEMES.filter((item) => item.mode === "light");
 const darkThemes = THEMES.filter((item) => item.mode === "dark");
@@ -23,7 +22,6 @@ function ThemePreview({ theme }: { theme: ThemeDefinition }) {
 export function ThemePicker() {
   const { theme, themeId, setTheme } = useTheme();
   const { t } = useI18n();
-  const isMobile = useIsMobile();
   const [open, setOpen] = useState(false);
   const [selectedMode, setSelectedMode] = useState<ThemeDefinition["mode"]>(theme.mode);
   const [activeIndex, setActiveIndex] = useState(0);
@@ -141,11 +139,9 @@ export function ThemePicker() {
         aria-expanded={open}
         aria-controls={open ? pickerId : undefined}
         className="shell-toolbar-btn ui-focus-ring"
-        style={{ width: "auto", minWidth: isMobile ? 44 : 36, padding: isMobile ? "0 8px" : "0 7px", gap: 5, background: open ? "var(--bg-selected)" : undefined, color: open ? "var(--text)" : undefined }}
+        style={{ background: open ? "var(--bg-selected)" : undefined, color: open ? "var(--text)" : undefined }}
       >
         <Palette size={16} strokeWidth={1.8} aria-hidden="true" />
-        {!isMobile && <ThemePreview theme={theme} />}
-        <ChevronDown size={11} strokeWidth={2} aria-hidden="true" style={{ transform: open ? "rotate(180deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }} />
       </button>
 
       {open && (
