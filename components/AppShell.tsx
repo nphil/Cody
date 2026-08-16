@@ -152,7 +152,7 @@ export function AppShell() {
   const [toolCallsDefaultCollapsed, setToolCallsDefaultCollapsed] = useState(true);
   const [sidebarResizing, setSidebarResizing] = useState(false);
   // Active drag handlers so an unmount mid-drag can detach them.
-  const sidebarResizeHandlersRef = useRef<{ onMove: (ev: MouseEvent) => void; onUp: () => void } | null>(null);
+  const sidebarResizeHandlersRef = useRef<{ onMove: (ev: PointerEvent) => void; onUp: () => void } | null>(null);
   // DOM element + live width during a drag (see handleSidebarResizeStart).
   const sidebarContainerRef = useRef<HTMLDivElement>(null);
   const pendingSidebarWidthRef = useRef<number>(SIDEBAR_DEFAULT_WIDTH);
@@ -372,22 +372,26 @@ export function AppShell() {
     }
   }, [changeSidebarWidth, resetSidebarWidth]);
 
-  const handleSidebarResizeStart = useCallback((e: React.MouseEvent) => {
+  const handleSidebarResizeStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     if (isMobile) return;
     e.preventDefault();
+    // Pointer events (with capture) cover mouse, pen and touch alike — a
+    // finger on a tablet drags the seam the same as a mouse does.
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* capture is best-effort */ }
     const startX = e.clientX;
     const startWidth = sidebarWidth;
     setSidebarResizing(true);
-    const onMove = (ev: MouseEvent) => {
+    const onMove = (ev: PointerEvent) => {
       const next = clampSidebarWidth(startWidth + (ev.clientX - startX));
       // Write the CSS variable straight to the DOM: the flex row follows the
-      // pointer without re-rendering the whole AppShell on every mousemove.
+      // pointer without re-rendering the whole AppShell on every move.
       sidebarContainerRef.current?.style.setProperty("--sidebar-width", `${next}px`);
       pendingSidebarWidthRef.current = next;
     };
     const onUp = () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
       sidebarResizeHandlersRef.current = null;
       setSidebarResizing(false);
       // Commit the final width so state and the persisted value agree with
@@ -400,8 +404,9 @@ export function AppShell() {
     document.body.style.userSelect = "none";
     pendingSidebarWidthRef.current = startWidth;
     sidebarResizeHandlersRef.current = { onMove, onUp };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
   }, [isMobile, sidebarWidth]);
 
   // If the app unmounts mid-drag, remove the window listeners and restore the
@@ -409,8 +414,9 @@ export function AppShell() {
   useEffect(() => () => {
     const handlers = sidebarResizeHandlersRef.current;
     if (!handlers) return;
-    window.removeEventListener("mousemove", handlers.onMove);
-    window.removeEventListener("mouseup", handlers.onUp);
+    window.removeEventListener("pointermove", handlers.onMove);
+    window.removeEventListener("pointerup", handlers.onUp);
+    window.removeEventListener("pointercancel", handlers.onUp);
     sidebarResizeHandlersRef.current = null;
     document.body.style.cursor = "";
     document.body.style.userSelect = "";
@@ -532,30 +538,39 @@ export function AppShell() {
       else localStorage.setItem(STORAGE_KEYS.workspaceWidth, String(value));
     } catch { /* storage may be unavailable */ }
   }, []);
-  const handleWorkspaceResizeStart = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+  const handleWorkspaceResizeStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     if (isMobile) return;
     e.preventDefault();
+    const seam = e.currentTarget;
+    // Pointer capture covers mouse, pen and touch alike, so a finger on a
+    // tablet drags the seam the same as a mouse does.
+    try { seam.setPointerCapture(e.pointerId); } catch { /* capture is best-effort */ }
     const startX = e.clientX;
     const startWidth = rightPanelRef.current?.getBoundingClientRect().width ?? workspaceWidth ?? window.innerWidth * 0.42;
-    const seam = e.currentTarget;
     seam.classList.add("panel-resizing");
     rightPanelRef.current?.classList.add("panel-resizing-target");
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
     let pending = workspaceWidth;
-    const onMove = (ev: MouseEvent) => {
+    const onMove = (ev: PointerEvent) => {
       // The seam sits left of the panel: dragging left grows the panel.
       const next = clampWorkspaceWidth(startWidth + (startX - ev.clientX));
       rightPanelRef.current?.style.setProperty("--workspace-width", `${next}px`);
       pending = next;
     };
     const onUp = () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
       seam.classList.remove("panel-resizing");
       rightPanelRef.current?.classList.remove("panel-resizing-target");
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
       if (pending !== null) commitWorkspaceWidth(pending);
     };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
   }, [clampWorkspaceWidth, commitWorkspaceWidth, isMobile, workspaceWidth]);
   const handleWorkspaceResizeKey = useCallback((e: React.KeyboardEvent) => {
     const current = rightPanelRef.current?.getBoundingClientRect().width ?? workspaceWidth ?? window.innerWidth * 0.42;
@@ -1054,15 +1069,15 @@ export function AppShell() {
           aria-orientation="vertical"
           aria-label={t("appShell.resizeSidebar")}
           tabIndex={0}
-          onMouseDown={handleSidebarResizeStart}
+          onPointerDown={handleSidebarResizeStart}
           onDoubleClick={resetSidebarWidth}
           onKeyDown={handleSidebarResizeKey}
           title={t("appShell.resizeSidebarTitle")}
-          className={`panel-resize-seam ui-focus-ring${sidebarResizing ? " panel-resizing" : ""}`}
+          className={`panel-resize-seam seam-line-end ui-focus-ring${sidebarResizing ? " panel-resizing" : ""}`}
           style={{
-            width: 7,
+            width: 12,
             flexShrink: 0,
-            marginLeft: -7,
+            marginLeft: -12,
             cursor: "col-resize",
             background: "transparent",
             zIndex: 205,
@@ -1574,14 +1589,14 @@ export function AppShell() {
           aria-orientation="vertical"
           aria-label={t("appShell.resizeWorkspacePanel")}
           tabIndex={0}
-          className="panel-resize-seam ui-focus-ring"
-          onMouseDown={handleWorkspaceResizeStart}
+          className="panel-resize-seam seam-line-start ui-focus-ring"
+          onPointerDown={handleWorkspaceResizeStart}
           onDoubleClick={() => commitWorkspaceWidth(null)}
           onKeyDown={handleWorkspaceResizeKey}
           title={t("appShell.resizeWorkspacePanelTitle")}
           style={{
-            width: 7,
-            marginRight: -7,
+            width: 12,
+            marginRight: -12,
             flexShrink: 0,
             cursor: "col-resize",
             background: "transparent",

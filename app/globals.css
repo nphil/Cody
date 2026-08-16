@@ -1934,8 +1934,11 @@ html.dark .dropdown-surface :is(select, option) {
   font-size: 11px;
 }
 /* Grab pill on the resizable panel seams. The strip itself stays invisible —
-   only a small centered pill marks the handle, growing and taking the accent
-   while hovered, focused or mid-drag. */
+   only a small pill centered ON the seam line marks the handle. The strip
+   overlaps one side of the 1px border, so each side anchors its pill to the
+   edge where the line actually is (seam-line-start: left edge, seam-line-end:
+   right edge). Hover/focus tint it; press (mouse or touch) enlarges it and
+   adds a soft accent glow so grabbing is unmistakable. */
 .panel-resize-seam {
   position: relative;
   touch-action: none;
@@ -1943,21 +1946,37 @@ html.dark .dropdown-surface :is(select, option) {
 .panel-resize-seam::after {
   content: "";
   position: absolute;
-  left: 50%;
   top: 50%;
-  transform: translate(-50%, -50%);
   width: 3px;
   height: 36px;
-  border-radius: 2px;
+  border-radius: 3px;
   background: var(--border);
-  transition: background var(--dur-fast) var(--ease-out-warm), height var(--dur-fast) var(--ease-out-warm);
+  transition:
+    background var(--dur-fast) var(--ease-out-warm),
+    height var(--dur-fast) var(--ease-out-warm),
+    width var(--dur-fast) var(--ease-out-warm),
+    box-shadow var(--dur-fast) var(--ease-out-warm);
   pointer-events: none;
 }
+.panel-resize-seam.seam-line-start::after {
+  left: 0;
+  transform: translate(-50%, -50%);
+}
+.panel-resize-seam.seam-line-end::after {
+  right: 0;
+  transform: translate(50%, -50%);
+}
 .panel-resize-seam:hover::after,
-.panel-resize-seam:focus-visible::after,
-.panel-resize-seam.panel-resizing::after {
+.panel-resize-seam:focus-visible::after {
   background: var(--accent);
   height: 52px;
+}
+.panel-resize-seam:active::after,
+.panel-resize-seam.panel-resizing::after {
+  background: var(--accent);
+  width: 5px;
+  height: 64px;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
 .workspace-tab-strip {
