@@ -11,8 +11,8 @@ import { ChatWindow } from "./ChatWindow";
 import { TabBar, type Tab } from "./TabBar";
 import { BranchNavigator } from "./BranchNavigator";
 import { LanguageSwitcher } from "./LanguageSwitcher";
-import { Check, History, Menu, Moon, PanelLeft, Sun, Terminal, Wand2 } from "lucide-react";
-import { useTheme } from "@/hooks/useTheme";
+import { ThemePicker } from "./ThemePicker";
+import { Check, Files, History, Menu, PanelLeft, ScrollText, Terminal, Wand2 } from "lucide-react";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { translate, useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
@@ -31,6 +31,10 @@ import type { SettingsTab } from "./SettingsTabs";
 // Loaded on demand: the config modals open on click and the file viewer only
 // renders once a file tab exists, so none of them belong in the first-load chunk.
 const FileViewer = dynamic(() => import("./FileViewer").then((m) => m.FileViewer), {
+  ssr: false,
+  loading: () => <PanelLoadingFallback />,
+});
+const TerminalPanel = dynamic(() => import("./TerminalPanel").then((module) => module.TerminalPanel), {
   ssr: false,
   loading: () => <PanelLoadingFallback />,
 });
@@ -95,7 +99,6 @@ export function AppShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [initialNavigation] = useState(() => getInitialNavigation(searchParams));
-  const { isDark, preference, toggleTheme } = useTheme();
   const { t, locale } = useI18n();
   const isMobile = useIsMobile();
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
@@ -420,10 +423,11 @@ export function AppShell() {
     };
   }, [activeTopPanel]);
 
-  // Right panel — file tabs only
+  // Right panel — file and terminal workspaces remain mounted while hidden.
   const [fileTabs, setFileTabs] = useState<Tab[]>([]);
   const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
+  const [rightPanelMode, setRightPanelMode] = useState<"file" | "terminal">("file");
 
   // Same @mention format as the chat input's @ autocomplete, so the agent's
   // read tool resolves it the same way (it strips the @ prefix).
@@ -685,6 +689,7 @@ export function AppShell() {
       return prev.map((t) => t.id === tabId ? { ...t, sourceSessionId } : t);
     });
     setActiveFileTabId(tabId);
+    setRightPanelMode("file");
     setRightPanelOpen(true);
     // On mobile the file panel is full-screen; close the drawer so it shows.
     if (isMobile) setSidebarOpen(false);
@@ -701,7 +706,6 @@ export function AppShell() {
     // would still have read the pre-close list from the closure).
     const next = fileTabs.filter((t) => t.id !== tabId);
     setFileTabs(next);
-    if (next.length === 0) setRightPanelOpen(false);
     setActiveFileTabId((cur) => {
       if (cur !== tabId) return cur;
       return next.length > 0 ? next[next.length - 1].id : null;
@@ -910,18 +914,7 @@ export function AppShell() {
           >
             {sidebarOpen ? <PanelLeft size={16} strokeWidth={1.8} aria-hidden="true" /> : <Menu size={16} strokeWidth={1.8} aria-hidden="true" />}
           </button>
-          <button
-            onClick={(e) => {
-              const rect = e.currentTarget.getBoundingClientRect();
-              toggleTheme({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
-            }}
-            title={preference === "system" ? t("appShell.systemTheme") : (isDark ? t("appShell.switchToSystemTheme") : t("appShell.switchToDarkMode"))}
-            aria-label={preference === "system" ? t("appShell.systemTheme") : (isDark ? t("appShell.switchToSystemTheme") : t("appShell.switchToDarkMode"))}
-            aria-pressed={isDark}
-            className="shell-toolbar-btn ui-focus-ring"
-          >
-            {isDark ? <Sun size={16} strokeWidth={1.8} aria-hidden="true" /> : <Moon size={16} strokeWidth={1.8} aria-hidden="true" />}
-          </button>
+          <ThemePicker />
           <LanguageSwitcher />
         </div>
         {showChat && (
@@ -1004,7 +997,7 @@ export function AppShell() {
                 aria-pressed={activeTopPanel === "system"}
                 className="shell-toolbar-btn ui-focus-ring"
               >
-                <Terminal size={16} strokeWidth={1.8} aria-hidden="true" style={{ color: systemPrompt ? "var(--accent)" : undefined }} />
+                <ScrollText size={16} strokeWidth={1.8} aria-hidden="true" style={{ color: systemPrompt ? "var(--accent)" : undefined }} />
               </button>
             </div>
           </>
@@ -1403,7 +1396,7 @@ export function AppShell() {
         </div>
       </main>
 
-      {/* Right panel: file viewer — always mounted, width animated via CSS */}
+      {/* Right workspace panel — file viewer and terminal stay mounted between mode changes. */}
       <div
         className={`right-panel-container${rightPanelOpen ? " right-panel-open" : " right-panel-closed"}`}
         style={{
@@ -1413,47 +1406,112 @@ export function AppShell() {
           background: "var(--bg)",
         }}
       >
-        {/* Right panel tab bar */}
-        <div style={{ display: "flex", alignItems: "center", flexShrink: 0, background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", height: 36 }}>
-          <div style={{ flex: 1, overflow: "hidden" }}>
+        <div
+          role="tablist"
+          aria-label={t("workspace.tools")}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 4,
+            flexShrink: 0,
+            height: isMobile ? 44 : 36,
+            padding: isMobile ? "0 48px 0 4px" : "0 40px 0 4px",
+            boxSizing: "border-box",
+            borderBottom: "1px solid var(--border)",
+            background: "var(--bg-panel)",
+          }}
+        >
+          <button
+            id="workspace-files-tab"
+            type="button"
+            role="tab"
+            aria-selected={rightPanelMode === "file"}
+            aria-controls="workspace-files-tool"
+            tabIndex={rightPanelMode === "file" ? 0 : -1}
+            className="shell-toolbar-btn ui-focus-ring"
+            onClick={() => { setRightPanelMode("file"); setRightPanelOpen(true); }}
+            onKeyDown={(event) => {
+              if (event.key !== "ArrowRight" && event.key !== "End") return;
+              event.preventDefault();
+              setRightPanelMode("terminal");
+              document.getElementById("workspace-terminal-tab")?.focus();
+            }}
+            title={t("workspace.files")}
+            aria-label={t("workspace.files")}
+            style={{ background: rightPanelMode === "file" ? "var(--bg-selected)" : undefined }}
+          >
+            <Files size={15} aria-hidden="true" />
+          </button>
+          <button
+            id="workspace-terminal-tab"
+            type="button"
+            role="tab"
+            aria-selected={rightPanelMode === "terminal"}
+            aria-controls="workspace-terminal-tool"
+            tabIndex={rightPanelMode === "terminal" ? 0 : -1}
+            className="shell-toolbar-btn ui-focus-ring"
+            onClick={() => { setRightPanelMode("terminal"); setRightPanelOpen(true); }}
+            onKeyDown={(event) => {
+              if (event.key !== "ArrowLeft" && event.key !== "Home") return;
+              event.preventDefault();
+              setRightPanelMode("file");
+              document.getElementById("workspace-files-tab")?.focus();
+            }}
+            title={t("terminal.open")}
+            aria-label={t("terminal.open")}
+            style={{ background: rightPanelMode === "terminal" ? "var(--bg-selected)" : undefined }}
+          >
+            <Terminal size={15} aria-hidden="true" />
+          </button>
+        </div>
+
+        <div
+          id="workspace-files-tool"
+          role="tabpanel"
+          aria-labelledby="workspace-files-tab"
+          style={{ flex: 1, minHeight: 0, overflow: "hidden", display: rightPanelMode === "file" ? "flex" : "none", flexDirection: "column" }}
+        >
+          {fileTabs.length > 0 && (
             <TabBar
               tabs={fileTabs}
               activeTabId={activeFileTabId ?? ""}
               onSelectTab={setActiveFileTabId}
               onCloseTab={handleCloseFileTab}
             />
-          </div>
-
-        </div>
-
-        {/* File content */}
-        <div style={{ flex: 1, overflow: "hidden" }}>
-          {activeFileTab?.filePath ? (
-            <FileViewer
-              filePath={activeFileTab.filePath}
-              cwd={activeCwd ?? undefined}
-              sourceSessionId={activeFileTab.sourceSessionId}
-              gitRefreshKey={explorerRefreshKey}
-              onMentionLines={rightPanelOpen ? handleFileLineMention : undefined}
-              onOpenFile={(filePath) => handleOpenFile(
-                filePath,
-                getFileName(filePath),
-                activeFileTab.sourceSessionId,
-              )}
-            />
-          ) : (
-            <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12 }}>
-              {t("appShell.noFileOpen")}
-            </div>
           )}
+          <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
+            {activeFileTab?.filePath ? (
+              <FileViewer
+                filePath={activeFileTab.filePath}
+                cwd={activeCwd ?? undefined}
+                sourceSessionId={activeFileTab.sourceSessionId}
+                gitRefreshKey={explorerRefreshKey}
+                onMentionLines={rightPanelOpen ? handleFileLineMention : undefined}
+                onOpenFile={(filePath) => handleOpenFile(filePath, getFileName(filePath), activeFileTab.sourceSessionId)}
+              />
+            ) : (
+              <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12 }}>
+                {t("appShell.noFileOpen")}
+              </div>
+            )}
+          </div>
         </div>
-      </div>
+        <div
+          id="workspace-terminal-tool"
+          role="tabpanel"
+          aria-labelledby="workspace-terminal-tab"
+          style={{ flex: 1, minHeight: 0, overflow: "hidden", display: rightPanelMode === "terminal" ? "flex" : "none" }}
+        >
+          <TerminalPanel cwd={activeCwd} onOpen={() => { setRightPanelMode("terminal"); setRightPanelOpen(true); }} />
+        </div>
+
     </div>
-    {/* File panel toggle — always visible at top-right */}
+    </div>
+    {/* Workspace panel toggle — always visible at top-right */}
     <button
       onClick={() => setRightPanelOpen((v) => !v)}
-      title={rightPanelOpen ? t("appShell.hideFilePanel") : t("appShell.showFilePanel")}
-      aria-label={rightPanelOpen ? t("appShell.hideFilePanel") : t("appShell.showFilePanel")}
+      title={rightPanelOpen ? t("appShell.hideWorkspacePanel") : t("appShell.showWorkspacePanel")}
+      aria-label={rightPanelOpen ? t("appShell.hideWorkspacePanel") : t("appShell.showWorkspacePanel")}
       style={{
         position: "fixed", top: 0, right: 0, zIndex: 300,
         display: "flex", alignItems: "center", justifyContent: "center",

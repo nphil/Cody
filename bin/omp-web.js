@@ -22,21 +22,7 @@ const { isPortAvailable } = require("./port-availability");
 
 const pkgDir = path.join(__dirname, "..");
 const nextDir = path.join(pkgDir, ".next");
-
-// Resolve next's CLI entry directly to avoid relying on .bin symlinks (which
-// may not exist when installed via npx).
-let nextBin;
-try {
-  nextBin = require.resolve("next/dist/bin/next", { paths: [pkgDir] });
-} catch {
-  // Fallback: locate next package root and derive the bin path manually.
-  try {
-    const nextPkg = require.resolve("next/package.json", { paths: [pkgDir] });
-    nextBin = path.join(path.dirname(nextPkg), "dist", "bin", "next");
-  } catch {
-    nextBin = path.join(pkgDir, "node_modules", "next", "dist", "bin", "next");
-  }
-}
+const serverBin = path.join(__dirname, "cody-server.js");
 
 const { port, hostname, openBrowser } = parseLaunchOptions();
 const loopbackHostnames = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
@@ -55,11 +41,10 @@ if (!loopbackHostnames.has(hostname)) {
   console.warn(`Warning: ompweb is listening on ${hostname} with Basic Auth over HTTP. Use HTTPS or a trusted VPN to protect the password in transit.`);
 }
 
-const nextArgs = ["start", "-p", port];
-nextArgs.push("-H", hostname);
+const serverArgs = ["--experimental-strip-types", serverBin, "-p", port, "-H", hostname];
 
-// Always run next's JS entry with node directly — avoids .bin symlink issues
-// and path-with-spaces problems on Windows when shell: true is used.
+// Run Cody's custom Next server so terminal WebSocket upgrades share the same
+// authenticated origin as the rest of the application.
 const url = `http://${hostname}:${port}`;
 
 async function main() {
@@ -70,7 +55,7 @@ async function main() {
     return;
   }
 
-  const child = spawn(process.execPath, [nextBin, ...nextArgs], {
+  const child = spawn(process.execPath, serverArgs, {
     cwd: pkgDir,
     stdio: ["inherit", "pipe", "inherit"],
     env: {

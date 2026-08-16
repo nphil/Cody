@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Noto_Sans_Mono, Noto_Serif_SC, Source_Serif_4 } from "next/font/google";
+import { DEFAULT_THEME_ID, THEMES } from "@/lib/theme-catalog";
 import "./globals.css";
 
 const notoSansMono = Noto_Sans_Mono({
@@ -25,6 +26,7 @@ const notoSerifSC = Noto_Serif_SC({
   variable: "--font-noto-serif",
   display: "swap",
 });
+const themeBootstrap = JSON.stringify(Object.fromEntries(THEMES.map(({ id, mode, preview }) => [id, { mode, background: preview.background }])));
 
 export const metadata: Metadata = {
   title: "omp web",
@@ -47,10 +49,7 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
-  themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#FAF9F6" },
-    { media: "(prefers-color-scheme: dark)", color: "#1B1916" },
-  ],
+  themeColor: "#FAF9F6",
 };
 
 export default function RootLayout({
@@ -62,11 +61,11 @@ export default function RootLayout({
     <html lang="en" translate="no" className={`${notoSansMono.variable} ${sourceSerif.variable} ${notoSerifSC.variable} notranslate`} suppressHydrationWarning>
       <head>
         <meta name="google" content="notranslate" />
-        {/* Pre-hydration: apply stored theme before first paint to avoid a flash
-            of the wrong theme. Matches html.dark selector in globals.css. */}
+        {/* Apply the stored theme before first paint so both the UI and browser
+            chrome match the user's previous choice without a light-mode flash. */}
         <script
           dangerouslySetInnerHTML={{
-            __html: `(function(){try{var t=localStorage.getItem("omp-theme"),d=matchMedia("(prefers-color-scheme: dark)").matches;if(t==="dark"||(t!=="light"&&t!=="dark"&&d))document.documentElement.classList.add("dark")}catch(e){}})();`,
+            __html: `(function(){try{var d=document,m=${themeBootstrap},t=localStorage.getItem("cody-theme");if(!m[t])t="${DEFAULT_THEME_ID}";d.documentElement.dataset.theme=t;d.documentElement.classList.toggle("dark",m[t].mode==="dark");d.querySelectorAll('meta[name="theme-color"]').forEach(function(e){e.setAttribute("content",m[t].background)})}catch(e){}})();`,
           }}
         />
         <script

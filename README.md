@@ -57,6 +57,7 @@ Set `OMP_WEB_PASSWORD` to protect the interface and every API endpoint with HTTP
 
 - The server binds to `127.0.0.1` by default. A non-loopback hostname is an explicit opt-in and should only be used behind a trusted network boundary; ompweb is not safe to expose publicly.
 - File APIs are allow-listed to the selected workspace, its valid Git worktrees, session-referenced directories, and explicitly selected roots. Paths are canonicalized to reject traversal and symlink escapes.
+- Browser terminals can execute anything the Cody server account can execute. They are restricted to allow-listed workspace roots, require the same authentication as the rest of the app, and reject cross-origin WebSocket upgrades.
 - `omp` is resolved from `OMP_WEB_OMP_BIN` first, then `PATH`. If live chat cannot start, run `omp --version` in the same terminal or set `OMP_WEB_OMP_BIN` to the executable's absolute path.
 - Session history remains native OMP JSONL. OMP owns live-session writes; ompweb reads the files directly and only performs explicit title, archive, and delete maintenance when it is not racing a live OMP write.
 - Session archive uses OMP's native `archive/sessions/<cwd>/<file>.jsonl.gz` layout and moves sibling artifacts with the transcript; the original JSONL bytes are preserved inside the gzip.
@@ -68,6 +69,7 @@ Set `OMP_WEB_PASSWORD` to protect the interface and every API endpoint with HTTP
 - **Keep the sidebar tidy**: archive an inactive session without deleting its native transcript, or delete it explicitly when it is no longer needed.
 - **Work across branches**: switch Git worktrees from the sidebar so new sessions and the Explorer follow the checkout you choose.
 - **Chat beside the project**: browse files on the left and preview source, docs, images, audio, and PDFs on the right while the agent works.
+- **Use a real terminal in the workspace**: open multiple persistent xterm sessions in the right panel for shells and TUIs such as `vim`, `lazygit`, `htop`, and `omp`, with reconnect, resize, clipboard, and mobile soft-key support.
 - **See session state clearly**: context usage, cost, compaction state, and system prompt details are visible from the top bar.
 - **Configure less from the terminal**: manage models, login/API keys, model tests, native OMP controls (advisor, approval, Bash policy, thinking, compaction, memory, auto-learn, retry/fallback), skills, plugins, and project MCP servers from the web UI.
 - **MCP management in Settings**: a dedicated MCP tab lists installed project servers with status (enabled / disabled / invalid), supports add/edit/rename/validate/remove, and surfaces configuration failures as corner toasts.
@@ -99,6 +101,7 @@ ompweb is a Node-hosted Next.js app that drives your installed `omp` binary — 
 - **Skills and plugins**: scans omp's skill directories (`~/.omp/agent/skills`, project `.omp/skills`, and compat dirs) and shells out to `omp plugin` for plugin management.
 - **MCP servers**: project servers are managed through OMP's native locations (`.omp/mcp.json`, then compatibility files) at the git top level, validated against the stdio/http/sse schema and written atomically.
 - **File access**: file browsing and preview are scoped to the selected project directory and working directories that appear in sessions.
+- **Terminal sessions**: the custom Node launcher serves Next.js and same-origin terminal WebSockets on one port. Each tab owns a server-side `node-pty` shell in an authorized workspace; shells survive browser disconnects until explicitly closed or the Cody server shuts down.
 - **Forks vs in-session branches**: Fork creates a new `.jsonl` file. "Edit from here" creates another branch inside the same session file.
 
 ## Development

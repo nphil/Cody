@@ -1,11 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import { useCallback, useSyncExternalStore } from "react";
+import {
+  DEFAULT_THEME_ID,
+  getAlternateTheme,
+  getTheme,
+  isThemeId,
+  THEME_STORAGE_KEY,
+  type ThemeId,
+} from "@/lib/theme-catalog";
 
-export type ThemePreference = "light" | "dark" | "system";
-type Theme = "light" | "dark";
-
-const STORAGE_KEY = "omp-theme";
 const listeners = new Set<() => void>();
 
 function subscribe(cb: () => void): () => void {
@@ -13,40 +17,38 @@ function subscribe(cb: () => void): () => void {
   return () => listeners.delete(cb);
 }
 
-function storedPreference(): ThemePreference {
-  if (typeof window === "undefined") return "system";
+function storedThemeId(): ThemeId {
+  if (typeof window === "undefined") return DEFAULT_THEME_ID;
   try {
-    const value = localStorage.getItem(STORAGE_KEY);
-    return value === "light" || value === "dark" || value === "system" ? value : "system";
+    const value = localStorage.getItem(THEME_STORAGE_KEY);
+    return isThemeId(value) ? value : DEFAULT_THEME_ID;
   } catch {
-    return "system";
+    return DEFAULT_THEME_ID;
   }
 }
 
-export function resolveTheme(preference: ThemePreference, prefersDark = false): Theme {
-  return preference === "system" ? (prefersDark ? "dark" : "light") : preference;
-}
-
-export function nextThemePreference(preference: ThemePreference): ThemePreference {
-  return preference === "light" ? "dark" : preference === "dark" ? "system" : "light";
-}
-
-function applyTheme(preference: ThemePreference): void {
-  const dark = resolveTheme(preference, window.matchMedia?.("(prefers-color-scheme: dark)").matches);
-  document.documentElement.classList.toggle("dark", dark === "dark");
+function applyTheme(themeId: ThemeId): void {
+  const theme = getTheme(themeId);
+  const root = document.documentElement;
+  root.dataset.theme = theme.id;
+  root.classList.toggle("dark", theme.mode === "dark");
+  document.querySelectorAll('meta[name="theme-color"]').forEach((element) => {
+    element.setAttribute("content", theme.preview.background);
+  });
   try {
-    localStorage.setItem(STORAGE_KEY, preference);
+    localStorage.setItem(THEME_STORAGE_KEY, theme.id);
   } catch {
     // Theme selection remains usable when storage is unavailable.
   }
   listeners.forEach((cb) => cb());
 }
 
-function getServerSnapshot(): ThemePreference {
-  return "system";
+function getServerSnapshot(): ThemeId {
+  return DEFAULT_THEME_ID;
 }
 
 type ToggleOrigin = { x: number; y: number };
+
 function motionDurationMs(variable: string, fallback: number): number {
   const raw = getComputedStyle(document.documentElement).getPropertyValue(variable).trim();
   if (raw.endsWith("ms")) {
@@ -60,28 +62,11 @@ function motionDurationMs(variable: string, fallback: number): number {
   return fallback;
 }
 
-
 export function useTheme() {
-  const preference = useSyncExternalStore(subscribe, storedPreference, getServerSnapshot);
-  // The OS preference is browser-only. Deferring it until after hydration keeps
-  // the initial client tree identical to the server's system/light snapshot.
-  const [hydrated, setHydrated] = useState(false);
-  useEffect(() => { setHydrated(true); }, []);
-  const prefersDark = hydrated && window.matchMedia("(prefers-color-scheme: dark)").matches;
-  const theme = resolveTheme(preference, prefersDark);
+  const themeId = useSyncExternalStore(subscribe, storedThemeId, getServerSnapshot);
+  const theme = getTheme(themeId);
 
-  useEffect(() => {
-    if (preference !== "system" || typeof window === "undefined") return;
-    const media = window.matchMedia("(prefers-color-scheme: dark)");
-    const onChange = () => {
-      document.documentElement.classList.toggle("dark", media.matches);
-      listeners.forEach((cb) => cb());
-    };
-    media.addEventListener("change", onChange);
-    return () => media.removeEventListener("change", onChange);
-  }, [preference]);
-
-  const setTheme = useCallback((next: ThemePreference, origin?: ToggleOrigin) => {
+  const setTheme = useCallback((next: ThemeId, origin?: ToggleOrigin) => {
     const apply = () => applyTheme(next);
     const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
     const supportsVT = typeof document.startViewTransition === "function";
@@ -105,7 +90,10 @@ export function useTheme() {
     transition.finished?.catch(() => {});
   }, []);
 
-  const toggleTheme = useCallback((origin?: ToggleOrigin) => setTheme(nextThemePreference(preference), origin), [preference, setTheme]);
+  const toggleTheme = useCallback(
+    (origin?: ToggleOrigin) => setTheme(getAlternateTheme(themeId).id, origin),
+    [themeId, setTheme],
+  );
 
-  return { theme, preference, isDark: theme === "dark", setTheme, toggleTheme };
+  return { theme, themeId, isDark: theme.mode === "dark", setTheme, toggleTheme };
 }
