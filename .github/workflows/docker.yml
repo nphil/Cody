@@ -58,30 +58,53 @@ jobs:
           docker run --rm --entrypoint omp cody:smoke --version
           docker run -d --name cody-smoke -p 30177:30177 \
             -e CODY_PASSWORD=smoke-test-password cody:smoke
+
+          fail() {
+            echo "::error::$1" >&2
+            docker logs cody-smoke >&2 || true
+            docker rm -f cody-smoke >/dev/null || true
+            exit 1
+          }
+
+          # Readiness is the login screen rendering: it is the first thing a
+          # signed-out visitor sees, and it needs no credentials.
+          last=000
+          ready=false
           for _ in $(seq 1 30); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:30177/ || echo 000)
-            # 401 is the healthy state: the server is up and demanding auth.
-            if [ "$code" = "401" ]; then
-              echo "server up (HTTP $code)"
-              # Informational: the settings panel degrades to Cody's own
-              # controls when OMP's schema cannot be read, so a miss here is
-              # worth seeing in the log but must not block a release.
-              if curl -sf -u "cody:smoke-test-password" \
-                   http://127.0.0.1:30177/api/omp-settings/schema \
-                   | grep -q '"settings"'; then
-                echo "omp settings schema served"
-              else
-                echo "::warning::omp settings schema did not load in the image"
-              fi
-              docker rm -f cody-smoke >/dev/null
-              exit 0
-            fi
+            last=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:30177/login || echo 000)
+            if [ "$last" = "200" ]; then ready=true; break; fi
             sleep 2
           done
-          echo "server never became ready" >&2
-          docker logs cody-smoke >&2 || true
-          docker rm -f cody-smoke >/dev/null || true
-          exit 1
+          [ "$ready" = true ] || fail "server never became ready (last GET /login -> $last)"
+
+          # The auth perimeter, end to end. A signed-out page request lands on
+          # the login screen; a signed-out API request is refused outright; and
+          # HTTP Basic with CODY_PASSWORD still works, which scripts, bookmarks
+          # and the container healthcheck all depend on.
+          root=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:30177/ || echo 000)
+          [ "$root" = "307" ] || fail "GET / expected a 307 redirect to the login screen, got $root"
+          location=$(curl -s -o /dev/null -w '%{redirect_url}' http://127.0.0.1:30177/ || echo '')
+          case "$location" in
+            */login) ;;
+            *) fail "GET / redirected to '$location', expected /login" ;;
+          esac
+          anon=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:30177/api/sessions || echo 000)
+          [ "$anon" = "401" ] || fail "unauthenticated GET /api/sessions expected 401, got $anon"
+          basic=$(curl -s -o /dev/null -w '%{http_code}' -u cody:smoke-test-password http://127.0.0.1:30177/api/sessions || echo 000)
+          [ "$basic" = "200" ] || fail "GET /api/sessions with Basic Auth expected 200, got $basic"
+          echo "auth perimeter verified (/login 200, / 307 -> /login, api 401 anonymous / 200 with Basic)"
+
+          # Informational: the settings panel degrades to Cody's own controls
+          # when OMP's schema cannot be read, so a miss here is worth seeing in
+          # the log but must not block a release.
+          if curl -sf -u "cody:smoke-test-password" \
+               http://127.0.0.1:30177/api/omp-settings/schema \
+               | grep -q '"settings"'; then
+            echo "omp settings schema served"
+          else
+            echo "::warning::omp settings schema did not load in the image"
+          fi
+          docker rm -f cody-smoke >/dev/null
 
       - name: Build and push
         uses: docker/build-push-action@v6
