@@ -1,29 +1,30 @@
-# ompweb — Product & Architecture Contract
+# Cody — Product & Architecture Contract
 
 ## Purpose
 
-ompweb is a local, browser-based workspace for the
+Cody is a local, browser-based workspace for the
 [oh-my-pi](https://github.com/can1357/oh-my-pi) (`omp`) coding agent. It lets a
 user browse the same local sessions they use in the terminal, continue live
 work, configure supported OMP settings, and inspect project files without
 creating a second agent runtime or a second source of truth.
 
-The project originated from [agegr/pi-web](https://github.com/agegr/pi-web)
-(MIT), but it is maintained as an OMP-focused downstream. We preserve the
-license and attribution, and selectively learn from upstream improvements; we
-do not assume that Pi-specific implementation changes can be merged unchanged.
+Cody is a downstream of [kahme247/ompweb](https://github.com/kahme247/ompweb)
+(MIT), which itself originated from [agegr/pi-web](https://github.com/agegr/pi-web)
+(MIT). We preserve the license and attribution at both levels, and selectively
+learn from upstream improvements; we do not assume that ompweb- or Pi-specific
+implementation changes can be merged unchanged.
 
 ## Product principles
 
 1. **OMP remains authoritative.** Sessions, credentials, providers, and agent
-   behavior belong to the installed `omp` CLI. ompweb must not invent a
+   behavior belong to the installed `omp` CLI. Cody must not invent a
    parallel data format or credential store.
 2. **Local-first by default.** The server binds to `127.0.0.1`; remote access
    is an explicit user choice and must be protected by a trusted network
    boundary and HTTPS.
 3. **Node-first installation.** A normal user installs Node.js 22.19+ and OMP,
-   then runs `npx ompweb@latest` or installs `ompweb` globally. ompweb does not
-   require users to install Bun for its own runtime.
+   then runs `npx @nphil/cody@latest` or installs `@nphil/cody` globally. Cody
+   does not require users to install Bun for its own runtime.
 4. **Native compatibility over imitation.** Prefer OMP's CLI and documented
    on-disk formats to copied SDK internals. If a capability cannot be done
    safely through those boundaries, leave it out rather than emulating it
@@ -34,11 +35,15 @@ do not assume that Pi-specific implementation changes can be merged unchanged.
 
 ## Distribution and identity
 
-- npm package and CLI command: `ompweb`.
+- npm package `@nphil/cody`; CLI command `cody`.
 - Default server address: `http://127.0.0.1:30177`.
-- Existing `OMP_WEB_*` environment variables remain the configuration prefix
-  for compatibility: `OMP_WEB_HOSTNAME`, `OMP_WEB_NO_OPEN`,
-  `OMP_WEB_PASSWORD`, and `OMP_WEB_OMP_BIN`.
+- `CODY_*` is the configuration prefix: `CODY_HOSTNAME`, `CODY_NO_OPEN`,
+  `CODY_PASSWORD`, and `CODY_OMP_BIN`. Every one of them falls back to its
+  pre-fork `OMP_WEB_*` spelling so an existing ompweb environment keeps
+  working; the `CODY_*` name wins when both are set. New configuration is
+  added under `CODY_*` only.
+- Browser storage lives under a single `cody:` namespace (lib/storage-keys.ts).
+  Pre-fork keys are migrated once, before first paint, and then removed.
 - `PI_CODING_AGENT_DIR`, profiles, and OMP's own directory conventions are
   respected because they identify the user’s existing OMP state.
 - The web UI displays its own package version separately from the detected
@@ -50,7 +55,7 @@ do not assume that Pi-specific implementation changes can be merged unchanged.
 Browser
   │ HTTP / Server-Sent Events
   ▼
-ompweb (Next.js on Node)
+Cody (Next.js on Node)
   ├─ reads native OMP session files and selected configuration
   ├─ serves allow-listed project files
   └─ starts one `omp --mode rpc-ui` child per active session
@@ -78,9 +83,9 @@ v1-capable installations.
 
 - `~/.omp/agent` (or OMP's configured/profiled equivalent) is the source of
   truth for sessions, configuration, models, skills, plugins, and blobs.
-- `agent.db` contains authentication data. ompweb never reads or writes it;
+- `agent.db` contains authentication data. Cody never reads or writes it;
   authentication actions go through the OMP RPC process.
-- A live OMP process owns writes to its session file. ompweb routes supported
+- A live OMP process owns writes to its session file. Cody routes supported
   live actions through RPC and never races a live file rewrite.
 
 ### Direct file access
@@ -93,7 +98,7 @@ tree.
 Direct session mutation is deliberately narrow and explicit: rename/title,
 archive, deletion, and required branch-parent maintenance. These writes are
 atomic where possible; archive or deletion stops the associated live process
-first. ompweb does not provide a general editor for session JSONL or opaque OMP
+first. Cody does not provide a general editor for session JSONL or opaque OMP
 state.
 
 Models and allow-listed OMP settings use surgical YAML updates that preserve
@@ -103,8 +108,8 @@ configuration is project-local, validated before writing, and saved atomically.
 ## Security contract
 
 - Bind loopback-only by default. A non-loopback hostname is an explicit opt-in.
-- `OMP_WEB_PASSWORD` protects every route with HTTP Basic Auth using the fixed
-  username `omp`. Basic Auth is not encryption; exposed deployments require
+- `CODY_PASSWORD` protects every route with HTTP Basic Auth using the fixed
+  username `cody`. Basic Auth is not encryption; exposed deployments require
   HTTPS through a trusted reverse proxy or VPN.
 - API requests are origin-checked. Do not add browser-to-host execution paths
   that bypass this boundary.
@@ -141,8 +146,8 @@ Releases are independent:
 
 1. Run typecheck, lint, relevant tests, and a production build.
 2. Confirm `npm pack --dry-run` contains the built `.next` output and exposes
-   the `ompweb` binary.
-3. Publish `ompweb@<version>` only from an npm account authorized for that
+   the `cody` binary.
+3. Publish `@nphil/cody@<version>` only from an npm account authorized for that
    package.
 4. Tag and release the repository that owns this downstream project.
 

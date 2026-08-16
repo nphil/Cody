@@ -1,23 +1,23 @@
-# ompweb
+# Cody
 
 [English](./README.md) | [简体中文](./README.zh-CN.md) | [日本語](./README.ja.md)
 
-Community: [Join the OMPWEB Discord](https://discord.gg/evqgGzRfM5)
+Cody is a local web workspace for the [oh-my-pi (omp) coding agent](https://github.com/can1357/oh-my-pi). It reads your local omp session files and gives you a browser workspace for session browsing, real-time chat, model configuration, skill management, project file preview, and persistent terminals.
 
-Local web UI for the [oh-my-pi (omp) coding agent](https://github.com/can1357/oh-my-pi). ompweb reads your local omp session files and gives you a browser workspace for session browsing, real-time chat, model configuration, skill management, and project file preview.
+Cody is a fork of [kahme247/ompweb](https://github.com/kahme247/ompweb) — see [Credits](#credits).
 
-![ompweb — light theme](docs/screenshot-light.png)
+![Cody — light theme](docs/screenshot-light.png)
 
 <details>
 <summary>Dark theme</summary>
 
-![ompweb — dark theme](docs/screenshot-dark.png)
+![Cody — dark theme](docs/screenshot-dark.png)
 
 </details>
 
 ## Requirements
 
-- [omp](https://github.com/can1357/oh-my-pi) installed and on your `PATH` (or point `OMP_WEB_OMP_BIN` at the binary)
+- [omp](https://github.com/can1357/oh-my-pi) installed and on your `PATH` (or point `CODY_OMP_BIN` at the binary)
 - Node.js 22.19.0 or newer (`node --version`)
 
 ## Quick Start
@@ -25,41 +25,41 @@ Local web UI for the [oh-my-pi (omp) coding agent](https://github.com/can1357/oh
 **Run without installing:**
 
 ```bash
-npx @kahme247/ompweb@latest
+npx @nphil/cody@latest
 ```
 
 **Or install globally:**
 
 ```bash
-npm install -g @kahme247/ompweb
-ompweb
+npm install -g @nphil/cody
+cody
 ```
 
-Then open [http://127.0.0.1:30177](http://127.0.0.1:30177). The CLI will try to open the browser automatically after the server is ready. ompweb listens on `127.0.0.1` by default.
+Then open [http://127.0.0.1:30177](http://127.0.0.1:30177). The CLI will try to open the browser automatically after the server is ready. Cody listens on `127.0.0.1` by default.
 
 **Options:**
 
 ```bash
-ompweb --port 8080              # custom port
-ompweb --hostname 0.0.0.0       # expose on a trusted network
-ompweb -p 8080 -H 0.0.0.0       # combine options
-ompweb --no-open                # do not open the browser automatically
+cody --port 8080              # custom port
+cody --hostname 0.0.0.0       # expose on a trusted network
+cody -p 8080 -H 0.0.0.0       # combine options
+cody --no-open                # do not open the browser automatically
 
-PORT=8080 ompweb                # environment variable is also supported
-OMP_WEB_HOSTNAME=0.0.0.0 ompweb # explicit network exposure
-OMP_WEB_PASSWORD='a-long-random-password' ompweb # require Basic Auth (username: omp)
-OMP_WEB_NO_OPEN=1 ompweb        # useful when running as a background service
+PORT=8080 cody                # environment variable is also supported
+CODY_HOSTNAME=0.0.0.0 cody    # explicit network exposure
+CODY_PASSWORD='a-long-random-password' cody # require Basic Auth (username: cody)
+CODY_NO_OPEN=1 cody           # useful when running as a background service
 ```
 
-Set `OMP_WEB_PASSWORD` to protect the interface and every API endpoint with HTTP Basic Auth. The username is always `omp`; leaving the variable unset disables authentication. Basic Auth does not encrypt traffic, so remote use still requires HTTPS through a trusted reverse proxy or VPN.
+Set `CODY_PASSWORD` to protect the interface and every API endpoint with HTTP Basic Auth. The username is always `cody`; leaving the variable unset disables authentication. Basic Auth does not encrypt traffic, so remote use still requires HTTPS through a trusted reverse proxy or VPN.
 
 ### Security and troubleshooting
 
-- The server binds to `127.0.0.1` by default. A non-loopback hostname is an explicit opt-in and should only be used behind a trusted network boundary; ompweb is not safe to expose publicly.
+- The server binds to `127.0.0.1` by default. A non-loopback hostname is an explicit opt-in and should only be used behind a trusted network boundary; Cody is not safe to expose publicly.
 - File APIs are allow-listed to the selected workspace, its valid Git worktrees, session-referenced directories, and explicitly selected roots. Paths are canonicalized to reject traversal and symlink escapes.
 - Browser terminals can execute anything the Cody server account can execute. They are restricted to allow-listed workspace roots, require the same authentication as the rest of the app, and reject cross-origin WebSocket upgrades.
-- `omp` is resolved from `OMP_WEB_OMP_BIN` first, then `PATH`. If live chat cannot start, run `omp --version` in the same terminal or set `OMP_WEB_OMP_BIN` to the executable's absolute path.
-- Session history remains native OMP JSONL. OMP owns live-session writes; ompweb reads the files directly and only performs explicit title, archive, and delete maintenance when it is not racing a live OMP write.
+- `omp` is resolved from `CODY_OMP_BIN` first, then `PATH`. If live chat cannot start, run `omp --version` in the same terminal or set `CODY_OMP_BIN` to the executable's absolute path.
+- Session history remains native OMP JSONL. OMP owns live-session writes; Cody reads the files directly and only performs explicit title, archive, and delete maintenance when it is not racing a live OMP write.
 - Session archive uses OMP's native `archive/sessions/<cwd>/<file>.jsonl.gz` layout and moves sibling artifacts with the transcript; the original JSONL bytes are preserved inside the gzip.
 
 ## Features
@@ -76,23 +76,25 @@ Set `OMP_WEB_PASSWORD` to protect the interface and every API endpoint with HTTP
 - **Keep OMP current**: check the installed runtime version, update it, and restart active sessions from Settings when needed.
 - **Stay informed**: opt into browser notifications when an agent finishes, and check installed skills for updates.
 - **Jump anywhere with ⌘K**: a command palette (⌘K / Ctrl+K) for switching sessions, starting new ones, and toggling the theme.
-- **Warm, paper-like design**: light and dark themes with serif display type and WCAG AA-verified contrast, built on a token-driven UI kit (Base UI primitives, cmdk, lucide icons).
+- **Pick a look that suits you**: ten theme families, each with a paired light and dark variant, built on a token-driven UI kit (Base UI primitives, cmdk, lucide icons) with WCAG AA-verified contrast.
 
 ## Configuration
 
 | Variable | Meaning |
 | --- | --- |
 | `PORT` | Server port (default `30177`; `-p/--port` wins) |
-| `OMP_WEB_HOSTNAME` | Bind hostname (default `127.0.0.1`; `-H/--hostname` wins) |
-| `OMP_WEB_PASSWORD` | Optional HTTP Basic Auth password (username: `omp`) |
-| `OMP_WEB_NO_OPEN` | Set to `1`/`true` to skip auto-opening the browser |
-| `OMP_WEB_OMP_BIN` | Absolute path to the `omp` binary when it is not on `PATH` |
+| `CODY_HOSTNAME` | Bind hostname (default `127.0.0.1`; `-H/--hostname` wins) |
+| `CODY_PASSWORD` | Optional HTTP Basic Auth password (username: `cody`) |
+| `CODY_NO_OPEN` | Set to `1`/`true` to skip auto-opening the browser |
+| `CODY_OMP_BIN` | Absolute path to the `omp` binary when it is not on `PATH` |
 | `PI_CODING_AGENT_DIR` | Point at another omp agent directory (default `~/.omp/agent`) |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | Standard proxy variables for server-side requests |
 
+Every `CODY_` variable above also accepts its pre-fork `OMP_WEB_` spelling (`OMP_WEB_PASSWORD`, `OMP_WEB_OMP_BIN`, …), so an existing ompweb setup keeps working after upgrading. When both are set, the `CODY_` name wins. Browser-side preferences are likewise migrated from ompweb's storage keys the first time Cody loads, so theme, language, sidebar width and the rest carry over.
+
 ## Architecture
 
-ompweb is a Node-hosted Next.js app that drives your installed `omp` binary — it does not embed the agent:
+Cody is a Node-hosted Next.js app that drives your installed `omp` binary — it does not embed the agent:
 
 - **Live sessions**: spawns `omp --mode rpc-ui` (NDJSON over stdio), one child process per active session, so the agent version is always exactly what you have installed. It negotiates RPC v2 when the installed OMP advertises it, uses bounded chunk reassembly for large frames, and falls back to v1 for older versions.
 - **Session browsing**: reads omp's session files (`~/.omp/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`) directly; title, archive, and delete are narrow native-file maintenance operations guarded against live OMP writes.
@@ -126,7 +128,7 @@ Avoid running `next build` / `npm run build` during local development. It writes
 
 ## Internationalization
 
-ompweb supports English, Simplified Chinese (简体中文), and Japanese (日本語) with translated UI strings across all three languages. The language is auto-detected from `navigator.language` and can be switched at runtime via the language menu in the top bar. The choice persists across sessions.
+Cody supports English, Simplified Chinese (简体中文), and Japanese (日本語) with translated UI strings across all three languages. The language is auto-detected from `navigator.language` and can be switched at runtime via the language menu in the top bar. The choice persists across sessions.
 
 - Dictionaries: `lib/i18n/locales/{en,zh-CN,ja}.json`
 - Framework: `lib/i18n/index.tsx` — a lightweight store built on `useSyncExternalStore` with `{var}` interpolation and plural support (`.one`/`.other`)
@@ -141,7 +143,9 @@ ompweb supports English, Simplified Chinese (简体中文), and Japanese (日本
 
 ## Credits
 
-ompweb is a fork of [agegr/pi-web](https://github.com/agegr/pi-web) (MIT), the web UI for the [earendil/pi-mono](https://github.com/earendil-works/pi) pi coding agent, adapted for [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi).
+Cody is a fork of [kahme247/ompweb](https://github.com/kahme247/ompweb) (MIT) — join the [OMPWEB Discord](https://discord.gg/evqgGzRfM5) for the upstream project.
+
+ompweb is itself a fork of [agegr/pi-web](https://github.com/agegr/pi-web) (MIT), the web UI for the [earendil/pi-mono](https://github.com/earendil-works/pi) pi coding agent, adapted for [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi).
 
 ## License
 

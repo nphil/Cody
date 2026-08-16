@@ -1,25 +1,25 @@
-# ompweb
+# Cody
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
-コミュニティ：[OMPWEB Discord に参加](https://discord.gg/evqgGzRfM5)
+[oh-my-pi (omp) コーディングエージェント](https://github.com/can1357/oh-my-pi)のローカル Web UI です。Cody はローカルの omp セッションファイルを読み込み、セッションの閲覧、リアルタイムチャット、モデル設定、スキル管理、プロジェクトファイルのプレビューを行えるブラウザワークスペースを提供します。
 
-[oh-my-pi (omp) コーディングエージェント](https://github.com/can1357/oh-my-pi)のローカル Web UI です。ompweb はローカルの omp セッションファイルを読み込み、セッションの閲覧、リアルタイムチャット、モデル設定、スキル管理、プロジェクトファイルのプレビューを行えるブラウザワークスペースを提供します。
+Cody は [kahme247/ompweb](https://github.com/kahme247/ompweb) のフォークです — [クレジット](#クレジット)を参照してください。
 
-![ompweb — ライトテーマ](docs/screenshot-light.png)
+![Cody — ライトテーマ](docs/screenshot-light.png)
 
 <details>
 <summary>ダークテーマとコマンドパレット</summary>
 
-![ompweb — ダークテーマ](docs/screenshot-dark.png)
+![Cody — ダークテーマ](docs/screenshot-dark.png)
 
-![ompweb — コマンドパレット](docs/screenshot-palette.png)
+![Cody — コマンドパレット](docs/screenshot-palette.png)
 
 </details>
 
 ## 必要条件
 
-- [omp](https://github.com/can1357/oh-my-pi) がインストールされ、`PATH` に含まれていること（または `OMP_WEB_OMP_BIN` でバイナリの場所を指定）
+- [omp](https://github.com/can1357/oh-my-pi) がインストールされ、`PATH` に含まれていること（または `CODY_OMP_BIN` でバイナリの場所を指定）
 - Node.js 22.19.0 以降（`node --version`）
 
 ## クイックスタート
@@ -27,33 +27,33 @@
 **インストールせずに実行:**
 
 ```bash
-npx @kahme247/ompweb@latest
+npx @nphil/cody@latest
 ```
 
 **またはグローバルにインストール:**
 
 ```bash
-npm install -g @kahme247/ompweb
-ompweb
+npm install -g @nphil/cody
+cody
 ```
 
-続いて [http://127.0.0.1:30177](http://127.0.0.1:30177) を開きます。サーバーの準備が整うと、CLI はブラウザを自動的に開こうとします。ompweb はデフォルトで `127.0.0.1` で待ち受けます。
+続いて [http://127.0.0.1:30177](http://127.0.0.1:30177) を開きます。サーバーの準備が整うと、CLI はブラウザを自動的に開こうとします。Cody はデフォルトで `127.0.0.1` で待ち受けます。
 
 **オプション:**
 
 ```bash
-ompweb --port 8080              # カスタムポート
-ompweb --hostname 0.0.0.0       # 信頼できるネットワークに公開
-ompweb -p 8080 -H 0.0.0.0       # オプションを組み合わせる
-ompweb --no-open                # ブラウザを自動的に開かない
+cody --port 8080              # カスタムポート
+cody --hostname 0.0.0.0       # 信頼できるネットワークに公開
+cody -p 8080 -H 0.0.0.0       # オプションを組み合わせる
+cody --no-open                # ブラウザを自動的に開かない
 
-PORT=8080 ompweb                # 環境変数にも対応
-OMP_WEB_HOSTNAME=0.0.0.0 ompweb # ネットワーク公開を明示的に有効化
-OMP_WEB_PASSWORD='a-long-random-password' ompweb # Basic Auth を有効化（ユーザー名: omp）
-OMP_WEB_NO_OPEN=1 ompweb        # バックグラウンドサービスとして実行する場合に便利
+PORT=8080 cody                # 環境変数にも対応
+CODY_HOSTNAME=0.0.0.0 cody # ネットワーク公開を明示的に有効化
+CODY_PASSWORD='a-long-random-password' cody # Basic Auth を有効化（ユーザー名: cody）
+CODY_NO_OPEN=1 cody        # バックグラウンドサービスとして実行する場合に便利
 ```
 
-`OMP_WEB_PASSWORD` を設定すると、HTTP Basic 認証で UI とすべての API エンドポイントを保護できます。ユーザー名は常に `omp` です。未設定なら認証は無効です。Basic 認証は通信を暗号化しないため、リモート利用では信頼できるリバースプロキシまたは VPN 経由の HTTPS が必要です。ompweb をインターネットへ直接公開しないでください。
+`CODY_PASSWORD` を設定すると、HTTP Basic 認証で UI とすべての API エンドポイントを保護できます。ユーザー名は常に `cody` です。未設定なら認証は無効です。Basic 認証は通信を暗号化しないため、リモート利用では信頼できるリバースプロキシまたは VPN 経由の HTTPS が必要です。Cody をインターネットへ直接公開しないでください。
 
 ## 機能
 
@@ -75,16 +75,18 @@ OMP_WEB_NO_OPEN=1 ompweb        # バックグラウンドサービスとして�
 | 変数 | 意味 |
 | --- | --- |
 | `PORT` | サーバーポート（デフォルト `30177`。`-p/--port` が優先） |
-| `OMP_WEB_HOSTNAME` | バインドするホスト名（デフォルト `127.0.0.1`。`-H/--hostname` が優先） |
-| `OMP_WEB_PASSWORD` | 任意の HTTP Basic 認証パスワード（ユーザー名: `omp`） |
-| `OMP_WEB_NO_OPEN` | `1`/`true` を設定するとブラウザの自動起動をスキップ |
-| `OMP_WEB_OMP_BIN` | `omp` バイナリが `PATH` にない場合の絶対パス |
+| `CODY_HOSTNAME` | バインドするホスト名（デフォルト `127.0.0.1`。`-H/--hostname` が優先） |
+| `CODY_PASSWORD` | 任意の HTTP Basic 認証パスワード（ユーザー名: `cody`） |
+| `CODY_NO_OPEN` | `1`/`true` を設定するとブラウザの自動起動をスキップ |
+| `CODY_OMP_BIN` | `omp` バイナリが `PATH` にない場合の絶対パス |
 | `PI_CODING_AGENT_DIR` | 別の omp エージェントディレクトリを指定（デフォルト `~/.omp/agent`） |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | サーバーサイドリクエスト用の標準プロキシ変数 |
 
+上記の各 `CODY_` 変数は、フォーク前の `OMP_WEB_` 表記（`OMP_WEB_PASSWORD`、`OMP_WEB_OMP_BIN` など）でも指定できます。そのため既存の ompweb の設定はそのまま動作します。両方が設定されている場合は `CODY_` が優先されます。ブラウザ側の設定も初回起動時に ompweb のストレージキーから移行されるため、テーマ・言語・サイドバー幅などは引き継がれます。
+
 ## アーキテクチャ
 
-ompweb は Node 上でホストされる Next.js アプリで、インストール済みの `omp` バイナリを操作します。エージェント自体は同梱していません:
+Cody は Node 上でホストされる Next.js アプリで、インストール済みの `omp` バイナリを操作します。エージェント自体は同梱していません:
 
 - **ライブセッション**: `omp --mode rpc-ui`（stdio 上の NDJSON）を、アクティブなセッションごとに 1 つの子プロセスとして起動します。そのため、エージェントのバージョンは常にインストールされているものと完全に一致します。
 - **セッション閲覧**: omp のセッションファイル（`~/.omp/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`）を直接読み込みます。タイトル変更、アーカイブ、削除は、OMP のライブ書き込みと競合しないよう保護されたネイティブファイルのメンテナンス操作です。
@@ -114,7 +116,7 @@ node --test lib/*.test.mjs components/*.test.mjs   # テスト実行
 
 ## 国際化
 
-ompweb は英語、簡体字中国語（简体中文）、日本語をサポートし、3 言語で UI 全体の翻訳文字列を提供しています。言語は `navigator.language` から自動検出され、トップバーの言語メニューから実行時に切り替えできます。選択はセッション間で永続化されます。
+Cody は英語、簡体字中国語（简体中文）、日本語をサポートし、3 言語で UI 全体の翻訳文字列を提供しています。言語は `navigator.language` から自動検出され、トップバーの言語メニューから実行時に切り替えできます。選択はセッション間で永続化されます。
 
 - 辞書ファイル: `lib/i18n/locales/{en,zh-CN,ja}.json`
 - フレームワーク: `lib/i18n/index.tsx` — `useSyncExternalStore` ベースの軽量ストア、`{var}` 補間と複数形サポート（`.one`/`.other`）
@@ -129,7 +131,9 @@ ompweb は英語、簡体字中国語（简体中文）、日本語をサポー�
 
 ## クレジット
 
-ompweb は [agegr/pi-web](https://github.com/agegr/pi-web)（MIT）のフォークです。pi-web は [badlogic/pi-mono](https://github.com/badlogic/pi-mono) の pi コーディングエージェント向け Web UI で、これを [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi) 向けに適合させたものです。
+Cody は [kahme247/ompweb](https://github.com/kahme247/ompweb)（MIT）のフォークです。上流プロジェクトについては [OMPWEB Discord](https://discord.gg/evqgGzRfM5) を参照してください。
+
+ompweb 自体は [agegr/pi-web](https://github.com/agegr/pi-web)（MIT）のフォークです。pi-web は [earendil/pi-mono](https://github.com/earendil-works/pi) の pi コーディングエージェント向け Web UI で、これを [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi) 向けに適合させたものです。
 
 ## ライセンス
 

@@ -1,25 +1,25 @@
-# ompweb
+# Cody
 
 [English](./README.md) | [日本語](./README.ja.md)
 
-社区：[加入 OMPWEB Discord](https://discord.gg/evqgGzRfM5)
+[oh-my-pi (omp) 编程智能体](https://github.com/can1357/oh-my-pi)的本地 Web UI。Cody 读取本机的 omp 会话文件，在浏览器中提供一个工作区，支持会话浏览、实时对话、模型配置、技能管理和项目文件预览。
 
-[oh-my-pi (omp) 编程智能体](https://github.com/can1357/oh-my-pi)的本地 Web UI。ompweb 读取本机的 omp 会话文件，在浏览器中提供一个工作区，支持会话浏览、实时对话、模型配置、技能管理和项目文件预览。
+Cody 分叉自 [kahme247/ompweb](https://github.com/kahme247/ompweb) —— 参见[致谢](#致谢)。
 
-![ompweb — 浅色主题](docs/screenshot-light.png)
+![Cody — 浅色主题](docs/screenshot-light.png)
 
 <details>
 <summary>深色主题与命令面板</summary>
 
-![ompweb — 深色主题](docs/screenshot-dark.png)
+![Cody — 深色主题](docs/screenshot-dark.png)
 
-![ompweb — 命令面板](docs/screenshot-palette.png)
+![Cody — 命令面板](docs/screenshot-palette.png)
 
 </details>
 
 ## 环境要求
 
-- 已安装 [omp](https://github.com/can1357/oh-my-pi) 且在 `PATH` 中（或通过 `OMP_WEB_OMP_BIN` 指向其二进制文件）
+- 已安装 [omp](https://github.com/can1357/oh-my-pi) 且在 `PATH` 中（或通过 `CODY_OMP_BIN` 指向其二进制文件）
 - Node.js 22.19.0 或更高版本（`node --version`）
 
 ## 快速开始
@@ -27,33 +27,33 @@
 **免安装直接运行：**
 
 ```bash
-npx @kahme247/ompweb@latest
+npx @nphil/cody@latest
 ```
 
 **或全局安装：**
 
 ```bash
-npm install -g @kahme247/ompweb
-ompweb
+npm install -g @nphil/cody
+cody
 ```
 
-然后打开 [http://127.0.0.1:30177](http://127.0.0.1:30177)。服务器就绪后，CLI 会尝试自动打开浏览器。ompweb 默认监听 `127.0.0.1`。
+然后打开 [http://127.0.0.1:30177](http://127.0.0.1:30177)。服务器就绪后，CLI 会尝试自动打开浏览器。Cody 默认监听 `127.0.0.1`。
 
 **选项：**
 
 ```bash
-ompweb --port 8080              # 自定义端口
-ompweb --hostname 0.0.0.0       # 在可信网络中暴露服务
-ompweb -p 8080 -H 0.0.0.0       # 组合使用
-ompweb --no-open                # 不自动打开浏览器
+cody --port 8080              # 自定义端口
+cody --hostname 0.0.0.0       # 在可信网络中暴露服务
+cody -p 8080 -H 0.0.0.0       # 组合使用
+cody --no-open                # 不自动打开浏览器
 
-PORT=8080 ompweb                # 也支持环境变量
-OMP_WEB_HOSTNAME=0.0.0.0 ompweb # 显式暴露到网络
-OMP_WEB_PASSWORD='a-long-random-password' ompweb # 启用 Basic Auth（用户名：omp）
-OMP_WEB_NO_OPEN=1 ompweb        # 作为后台服务运行时很有用
+PORT=8080 cody                # 也支持环境变量
+CODY_HOSTNAME=0.0.0.0 cody # 显式暴露到网络
+CODY_PASSWORD='a-long-random-password' cody # 启用 Basic Auth（用户名：cody）
+CODY_NO_OPEN=1 cody        # 作为后台服务运行时很有用
 ```
 
-设置 `OMP_WEB_PASSWORD` 可使用 HTTP Basic Auth 保护界面和所有 API 端点。用户名固定为 `omp`；留空则关闭认证。Basic Auth 不加密流量，远程访问仍需通过受信任反向代理或 VPN 提供 HTTPS。默认仅监听 `127.0.0.1`；不要将 ompweb 直接暴露到互联网。
+设置 `CODY_PASSWORD` 可使用 HTTP Basic Auth 保护界面和所有 API 端点。用户名固定为 `cody`；留空则关闭认证。Basic Auth 不加密流量，远程访问仍需通过受信任反向代理或 VPN 提供 HTTPS。默认仅监听 `127.0.0.1`；不要将 Cody 直接暴露到互联网。
 
 ## 功能特性
 
@@ -75,16 +75,18 @@ OMP_WEB_NO_OPEN=1 ompweb        # 作为后台服务运行时很有用
 | 变量 | 含义 |
 | --- | --- |
 | `PORT` | 服务器端口（默认 `30177`；`-p/--port` 优先） |
-| `OMP_WEB_HOSTNAME` | 绑定主机名（默认 `127.0.0.1`；`-H/--hostname` 优先） |
-| `OMP_WEB_PASSWORD` | 可选的 HTTP Basic Auth 密码（用户名：`omp`） |
-| `OMP_WEB_NO_OPEN` | 设为 `1`/`true` 可跳过自动打开浏览器 |
-| `OMP_WEB_OMP_BIN` | `omp` 不在 `PATH` 中时，指向其二进制文件的绝对路径 |
+| `CODY_HOSTNAME` | 绑定主机名（默认 `127.0.0.1`；`-H/--hostname` 优先） |
+| `CODY_PASSWORD` | 可选的 HTTP Basic Auth 密码（用户名：`cody`） |
+| `CODY_NO_OPEN` | 设为 `1`/`true` 可跳过自动打开浏览器 |
+| `CODY_OMP_BIN` | `omp` 不在 `PATH` 中时，指向其二进制文件的绝对路径 |
 | `PI_CODING_AGENT_DIR` | 指向其他 omp agent 目录（默认 `~/.omp/agent`） |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | 服务器端请求使用的标准代理变量 |
 
+上表中的每个 `CODY_` 变量同样接受分叉前的 `OMP_WEB_` 写法（`OMP_WEB_PASSWORD`、`OMP_WEB_OMP_BIN` 等），因此已有的 ompweb 配置升级后可继续使用。两者同时设置时以 `CODY_` 为准。浏览器端的偏好设置也会在 Cody 首次加载时从 ompweb 的存储键迁移过来，主题、语言、侧栏宽度等都会保留。
+
 ## 架构
 
-ompweb 是一个由 Node 托管的 Next.js 应用，驱动你已安装的 `omp` 二进制文件——它并不内嵌智能体：
+Cody 是一个由 Node 托管的 Next.js 应用，驱动你已安装的 `omp` 二进制文件——它并不内嵌智能体：
 
 - **实时会话**：启动 `omp --mode rpc-ui`（基于 stdio 的 NDJSON），每个活动会话对应一个子进程，因此智能体版本始终与你安装的完全一致。
 - **会话浏览**：直接读取 omp 的会话文件（`~/.omp/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`）；标题、归档和删除是受保护的原生文件维护操作，不会与 OMP 的实时写入竞争。
@@ -114,7 +116,7 @@ node --test lib/*.test.mjs components/*.test.mjs   # 运行测试
 
 ## 多语言支持
 
-ompweb 支持英语、简体中文和日本語，三种语言均覆盖整个界面的翻译字符串。语言从 `navigator.language` 自动检测，可通过顶栏的语言菜单在运行时切换。选择会跨会话持久化。
+Cody 支持英语、简体中文和日本語，三种语言均覆盖整个界面的翻译字符串。语言从 `navigator.language` 自动检测，可通过顶栏的语言菜单在运行时切换。选择会跨会话持久化。
 
 - 字典文件：`lib/i18n/locales/{en,zh-CN,ja}.json`
 - 框架：`lib/i18n/index.tsx` — 基于 `useSyncExternalStore` 的轻量 store，支持 `{var}` 插值和复数形式（`.one`/`.other`）
@@ -129,7 +131,9 @@ ompweb 支持英语、简体中文和日本語，三种语言均覆盖整个界�
 
 ## 致谢
 
-ompweb 分叉自 [agegr/pi-web](https://github.com/agegr/pi-web)（MIT）——[badlogic/pi-mono](https://github.com/badlogic/pi-mono) pi 编程智能体的 Web UI，并针对 [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi) 进行了适配。
+Cody 分叉自 [kahme247/ompweb](https://github.com/kahme247/ompweb)（MIT）——上游项目请见 [OMPWEB Discord](https://discord.gg/evqgGzRfM5)。
+
+ompweb 本身分叉自 [agegr/pi-web](https://github.com/agegr/pi-web)（MIT）——[earendil/pi-mono](https://github.com/earendil-works/pi) pi 编程智能体的 Web UI，并针对 [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi) 进行了适配。
 
 ## 许可证
 
