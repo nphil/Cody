@@ -50,7 +50,10 @@ RUN chmod 0755 /usr/local/bin/cody-entrypoint
 
 EXPOSE 30177
 VOLUME ["/data", "/workspace"]
+# 401 means the server is up and correctly demanding auth — the normal state,
+# since the entrypoint requires a password. Only a connection failure or a 5xx
+# is unhealthy, so match on the status line rather than curl's --fail.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s \
-  CMD curl -sf -o /dev/null "http://127.0.0.1:${PORT}/" || exit 1
+  CMD sh -c 'code=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${PORT}/") && [ -n "$code" ] && [ "$code" -lt 500 ]' || exit 1
 
 ENTRYPOINT ["cody-entrypoint"]

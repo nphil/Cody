@@ -42,9 +42,13 @@ jobs:
           # Unraid is x86; a second arch would double build time for no gain.
           platforms: linux/amd64
           push: true
+          # :latest tracks main only — tagging an older commit must never move
+          # it backwards. The version tag is immutable-by-convention: it is
+          # published from tag builds, where the version is pinned to the ref.
           tags: |
-            ghcr.io/${{ github.repository_owner }}/cody:latest
+            ${{ github.ref == 'refs/heads/main' && format('ghcr.io/{0}/cody:latest', github.repository_owner) || '' }}
             ghcr.io/${{ github.repository_owner }}/cody:${{ steps.meta.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/cody:sha-${{ github.sha }}
           # Update-tracking tools (and Unraid itself) read the version label.
           labels: |
             org.opencontainers.image.title=Cody

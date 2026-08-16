@@ -115,7 +115,10 @@ export function ThemePicker() {
         close(true);
         break;
       case "Tab":
-        close(false);
+        // Do NOT swallow Tab: the Light/Dark mode buttons live before the list
+        // and are the only way to reach the other mode's themes by keyboard.
+        // Closing here made them unreachable, so let focus move naturally and
+        // close only when it actually leaves the picker (onBlur handles that).
         break;
     }
   };

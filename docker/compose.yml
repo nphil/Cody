@@ -5,9 +5,13 @@ services:
       dockerfile: docker/Dockerfile
     image: cody:latest
     ports:
-      - "30177:30177"
+      # Loopback-only by default: terminals in this container run real shells,
+      # so do not publish on every interface until auth is deliberately set.
+      - "127.0.0.1:30177:30177"
     environment:
-      CODY_PASSWORD: change-me
+      # Required — the container refuses to start without it. Generate one:
+      #   openssl rand -base64 24
+      CODY_PASSWORD: ${CODY_PASSWORD:?set CODY_PASSWORD before starting}
       # TZ: America/New_York
     volumes:
       - ./appdata:/data          # agent state, checkpoints, shell home

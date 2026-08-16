@@ -53,6 +53,8 @@ export function PreviewPanel({ cwd, active, onOpenTasks }: PreviewPanelProps): R
   // Bumping remounts the iframe — the only reliable cross-origin reload.
   const [frameKey, setFrameKey] = useState(0);
   const probeSeqRef = useRef(0);
+  /** Reset per workspace so each one auto-loads once on its first activation. */
+  const autoLoadedRef = useRef(false);
   const mountedRef = useRef(true);
   useEffect(() => () => { mountedRef.current = false; }, []);
 
@@ -63,6 +65,7 @@ export function PreviewPanel({ cwd, active, onOpenTasks }: PreviewPanelProps): R
     setTarget(null);
     setReachability("unknown");
     setInputError(false);
+    autoLoadedRef.current = false;
     if (!cwd) return;
     try {
       const stored = localStorage.getItem(storageKeyFor(cwd));
@@ -105,16 +108,20 @@ export function PreviewPanel({ cwd, active, onOpenTasks }: PreviewPanelProps): R
   }, [cwd, input, probe]);
 
   // First activation with a stored URL: try it automatically so the panel is
-  // useful without a click when the dev server is already running.
-  const autoLoadedRef = useRef(false);
+  // useful without a click when the dev server is already running. Read the
+  // stored value rather than `input`, which may still hold the previous
+  // workspace's URL in the render pass where cwd just changed.
   useEffect(() => {
-    if (!active || autoLoadedRef.current || target !== null) return;
-    const normalized = normalizePreviewUrl(input);
+    if (!active || !cwd || autoLoadedRef.current || target !== null) return;
+    let stored: string | null = null;
+    try { stored = localStorage.getItem(storageKeyFor(cwd)); } catch { /* unavailable */ }
+    const normalized = normalizePreviewUrl(stored ?? DEFAULT_URL);
     if (!normalized) return;
     autoLoadedRef.current = true;
+    setInput(normalized);
     setTarget(normalized);
     void probe(normalized);
-  }, [active, input, probe, target]);
+  }, [active, cwd, probe, target]);
 
   const detach = useCallback(() => {
     const normalized = normalizePreviewUrl(input) ?? target;
@@ -184,7 +191,11 @@ export function PreviewPanel({ cwd, active, onOpenTasks }: PreviewPanelProps): R
       )}
 
       <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
-        {target !== null && reachability !== "down" ? (
+        {/* The probe is advisory only: an app that is slow, redirects, or
+            answers 404 at "/" is still worth framing. The iframe stays mounted
+            once a target exists, and the probe result only drives the hint
+            below it. */}
+        {target !== null ? (
           <iframe
             key={frameKey}
             src={target}
@@ -194,7 +205,7 @@ export function PreviewPanel({ cwd, active, onOpenTasks }: PreviewPanelProps): R
           />
         ) : (
           <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, padding: 20, textAlign: "center", color: "var(--text-dim)", fontSize: 12 }}>
-            {reachability === "down" ? (
+            {reachability === "down" && target === null ? (
               <>
                 <span>{t("preview.notReachable", { url: target ?? input })}</span>
                 <span style={{ color: "var(--text-muted)" }}>{t("preview.startHint")}</span>

@@ -511,8 +511,12 @@ export function AppShell() {
   const CHAT_MIN_WIDTH = 320;
   const clampWorkspaceWidth = useCallback((value: number): number => {
     const sidebarSpace = !isMobile && sidebarOpen ? sidebarWidth : 0;
-    const max = Math.max(300, window.innerWidth - sidebarSpace - CHAT_MIN_WIDTH);
-    return Math.round(Math.min(Math.max(value, 300), max));
+    // Never exceed the container's own CSS ceiling (max-width: 78vw), or the
+    // element would stop at that width while its children — sized from the
+    // same custom property — kept growing and overflowed.
+    const cssCap = window.innerWidth * 0.78;
+    const max = Math.min(cssCap, Math.max(300, window.innerWidth - sidebarSpace - CHAT_MIN_WIDTH));
+    return Math.round(Math.min(Math.max(value, 300), Math.max(300, max)));
   }, [isMobile, sidebarOpen, sidebarWidth]);
   // Re-clamp whenever the constraint inputs move: a sidebar drag or a window
   // resize can invalidate a width that was legal when it was chosen. The
@@ -521,8 +525,12 @@ export function AppShell() {
     if (isMobile) return;
     const reclamp = () => {
       setWorkspaceWidth((current) => {
-        if (current === null) return current;
-        const next = clampWorkspaceWidth(current);
+        // A null width means the CSS default (42%), which has no JS clamp
+        // protecting the chat column. Materialize it before clamping so the
+        // CHAT_MIN_WIDTH guarantee holds in the default configuration too.
+        const effective = current ?? Math.round(window.innerWidth * 0.42);
+        const next = clampWorkspaceWidth(effective);
+        if (current === null && next >= effective) return current;
         return next === current ? current : next;
       });
     };

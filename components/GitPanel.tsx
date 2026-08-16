@@ -521,6 +521,8 @@ export function GitPanel({ cwd, active, refreshKey, onOpenFile, onCountChange, o
   // pre-edit patch beside a fresh file list. While the panel is hidden the
   // refetch is deferred (no git shell-outs for an invisible diff) and runs on
   // the next activation instead.
+  const cwdRef = useRef<string | null>(cwd);
+  cwdRef.current = cwd;
   const selectedPathRef = useRef<string | null>(null);
   selectedPathRef.current = selectedPath;
   const diffRefreshedForRef = useRef(refreshKey);
@@ -639,10 +641,16 @@ export function GitPanel({ cwd, active, refreshKey, onOpenFile, onCountChange, o
       if (mountedRef.current) setStatusError(error instanceof Error ? error.message : String(error));
       return false;
     } finally {
-      if (mountedRef.current) {
+      // Re-read through refs: the user may have switched workspace while the
+      // mutation was in flight, and the captured fetchers still point at the
+      // old cwd — refreshing with those would repopulate the panel, the tab
+      // badge and the Info panel with another workspace's state.
+      if (mountedRef.current && cwdRef.current === cwd) {
         setMutating(false);
         void fetchStatus();
         if (selectedPathRef.current !== null) void fetchDiff(selectedPathRef.current);
+      } else if (mountedRef.current) {
+        setMutating(false);
       }
     }
   }, [cwd, fetchDiff, fetchStatus, mutating]);
@@ -674,13 +682,16 @@ export function GitPanel({ cwd, active, refreshKey, onOpenFile, onCountChange, o
   const [checkpointNote, setCheckpointNote] = useState<string | null>(null);
   const loadCheckpoints = useCallback(async () => {
     if (!cwd) return;
+    const requested = cwd;
     try {
       const response = await fetch(`/api/checkpoints?cwd=${encodeURIComponent(cwd)}`);
       const body = await response.json().catch(() => ({})) as { checkpoints?: Array<{ hash: string; label: string; ts: number }>; error?: string };
-      if (!mountedRef.current) return;
+      // An out-of-order response must not render one workspace's history
+      // under another.
+      if (!mountedRef.current || cwdRef.current !== requested) return;
       setCheckpoints(response.ok ? body.checkpoints ?? [] : []);
     } catch {
-      if (mountedRef.current) setCheckpoints([]);
+      if (mountedRef.current && cwdRef.current === requested) setCheckpoints([]);
     }
   }, [cwd]);
   const toggleCheckpoints = useCallback(() => {
