@@ -3,6 +3,30 @@
 The `docker/` directory packages Cody together with the omp harness in one
 container, built for exactly this deployment.
 
+## Already running an omp-web container?
+
+If you already have a container repository that bundles omp with omp-web,
+there are two ways forward. Pick one deliberately — running both would give
+you two images racing for the same appdata.
+
+**A. Adapt your existing container repo** (least disruption). Keep its
+Dockerfile, image name, Unraid template and update workflow; change only what
+it installs for the UI: drop `@kahme247/ompweb` and install Cody instead
+(from git — `npm ci && npm run build` — since Cody is not on npm yet), and
+change the launch command from `ompweb` to `cody`. Your existing CA entry and
+auto-update flow keep working untouched. Cody's own `docker/` and
+`.github/workflows/docker.yml` then become redundant — ignore or delete them.
+
+**B. Adopt Cody's packaging** (one repo owns the app and its image). Use the
+image and template below and retire the old container. Cleaner long-term,
+because packaging lives beside the code it ships, but you re-create the
+container entry and its update wiring once.
+
+Either way the container must bundle **both** Cody and the harness: Cody
+spawns `omp --mode rpc-ui` as a child process over stdio and shares its
+filesystem (agent dir + workspace), so they cannot live in separate
+containers.
+
 ## Install the published image (recommended)
 
 CI publishes `ghcr.io/nphil/cody:latest` (and a version tag) on every push to
