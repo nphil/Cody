@@ -2,7 +2,13 @@ import { realpathSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import pty, { type IPty } from "node-pty";
+// Namespace import, not default: node-pty is CJS with `__esModule: true` and
+// no default export, so webpack's production interop resolves a default
+// import to `undefined` (Turbopack dev interops differently, which hides the
+// bug until `next build --webpack`). `pty.spawn` then throws
+// "Cannot read properties of undefined (reading 'spawn')" on every terminal.
+import * as pty from "node-pty";
+import type { IPty } from "node-pty";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "./file-access";
 
 export type TerminalInfo = {
