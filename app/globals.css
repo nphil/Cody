@@ -1939,6 +1939,37 @@ html.dark .dropdown-surface :is(select, option) {
    edge where the line actually is (seam-line-start: left edge, seam-line-end:
    right edge). Hover/focus tint it; press (mouse or touch) enlarges it and
    adds a soft accent glow so grabbing is unmistakable. */
+/* Icon buttons that carry a tiny caption below the glyph — touch devices get
+   no hover tooltips, so the label rides along without full-size buttons. */
+.shell-captioned-btn {
+  flex-direction: column;
+  gap: 1px;
+  width: auto;
+  min-width: 34px;
+  padding: 2px 6px 1px;
+  height: 32px;
+}
+.shell-btn-caption {
+  font-size: 8.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  line-height: 1;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.shell-captioned-btn:disabled .shell-btn-caption {
+  color: var(--text-dim);
+}
+@media (max-width: 640px) {
+  .shell-captioned-btn {
+    height: 40px;
+    min-width: 42px;
+  }
+  .shell-btn-caption {
+    font-size: 9px;
+  }
+}
+
 .panel-resize-seam {
   position: relative;
   touch-action: none;

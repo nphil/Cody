@@ -8,6 +8,7 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/primitives";
 import { SettingsTabs, type SettingsTab, SETTINGS_CATEGORIES, getNormalizedActive } from "./SettingsTabs";
 import { STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
+import { LOCALES, useI18n, type Locale } from "@/lib/i18n";
 
 const SettingsTabLoading = () => <div role="status" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 12 }}>Loading settings…</div>;
 const ModelsConfig = dynamic(() => import("./ModelsConfig").then((module) => module.ModelsConfig), { loading: SettingsTabLoading });
@@ -282,6 +283,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
   const [searchQuery, setSearchQuery] = useState("");
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const [submitBehavior, setSubmitBehavior] = useState<SubmitDuringRunBehavior>(() => getSubmitDuringRunBehavior());
+  const { locale, setLocale } = useI18n();
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() => {
     if (typeof window === "undefined") return true;
     try {
@@ -530,6 +532,17 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                     />
                   </NativeSetting>
                 </div>
+                <NativeSetting label="Language" description="Interface language. Auto-detected from the browser until chosen here." scope="UI">
+                  <select
+                    style={nativeSelectStyle}
+                    value={locale}
+                    onChange={(event) => setLocale(event.target.value as Locale)}
+                  >
+                    {LOCALES.map((item) => (
+                      <option key={item.value} value={item.value} style={nativeOptionStyle}>{item.label}</option>
+                    ))}
+                  </select>
+                </NativeSetting>
                 <NativeSetting label="Message during active run" description="What composer does on submit while agent runs. Steer interrupts; Queue follow-up delivers after finish." scope="UI">
                   <select
                     style={nativeSelectStyle}

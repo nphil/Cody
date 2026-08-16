@@ -10,7 +10,6 @@ import { toast } from "./ui/toast";
 import { ChatWindow } from "./ChatWindow";
 import { TabBar, type Tab } from "./TabBar";
 import { BranchNavigator } from "./BranchNavigator";
-import { LanguageSwitcher } from "./LanguageSwitcher";
 import { ThemePicker } from "./ThemePicker";
 import { AppWindow, Check, CircleArrowUp, Files, GitBranch, History, Info, ListTodo, Menu, PanelLeft, ScrollText, Terminal, Wand2 } from "lucide-react";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
@@ -1101,7 +1100,6 @@ export function AppShell() {
             {sidebarOpen ? <PanelLeft size={16} strokeWidth={1.8} aria-hidden="true" /> : <Menu size={16} strokeWidth={1.8} aria-hidden="true" />}
           </button>
           <ThemePicker />
-          <LanguageSwitcher />
         </div>
         {showChat && (
           <>
@@ -1113,9 +1111,10 @@ export function AppShell() {
                 disabled={!selectedSession}
                 title={selectedSession ? t("appShell.fullHistory") : t("appShell.fullHistoryUnavailable")}
                 aria-label={t("appShell.fullHistory")}
-                className="shell-toolbar-btn ui-focus-ring"
+                className="shell-toolbar-btn shell-captioned-btn ui-focus-ring"
               >
-                <History size={16} strokeWidth={1.8} aria-hidden="true" />
+                <History size={14} strokeWidth={1.8} aria-hidden="true" />
+                <span className="shell-btn-caption">{t("appShell.captionHistory")}</span>
               </button>
               {(() => {
                 const hasMessages = Boolean(
@@ -1147,21 +1146,22 @@ export function AppShell() {
                     disabled={disabled}
                     title={title}
                     aria-label={label}
-                    className="shell-toolbar-btn ui-focus-ring"
+                    className="shell-toolbar-btn shell-captioned-btn ui-focus-ring"
                     style={{ opacity: autoNameStatus.kind === "naming" ? 1 : undefined }}
                   >
                     {autoNameStatus.kind === "naming" ? (
-                      <svg className="animate-spin" width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                      <svg className="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                         <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" opacity="0.25" />
                         <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
                       </svg>
                     ) : isSuccess ? (
-                      <Check size={16} strokeWidth={1.8} aria-hidden="true" style={{ color: "var(--accent)" }} />
+                      <Check size={14} strokeWidth={1.8} aria-hidden="true" style={{ color: "var(--accent)" }} />
                     ) : isError ? (
-                      <Wand2 size={16} strokeWidth={1.8} aria-hidden="true" style={{ color: "var(--status-error)" }} />
+                      <Wand2 size={14} strokeWidth={1.8} aria-hidden="true" style={{ color: "var(--status-error)" }} />
                     ) : (
-                      <Wand2 size={16} strokeWidth={1.8} aria-hidden="true" />
+                      <Wand2 size={14} strokeWidth={1.8} aria-hidden="true" />
                     )}
+                    <span className="shell-btn-caption">{t("appShell.captionTitle")}</span>
                   </button>
                 );
               })()}
@@ -1181,9 +1181,10 @@ export function AppShell() {
                 title={t("appShell.system")}
                 aria-label={t("appShell.system")}
                 aria-pressed={activeTopPanel === "system"}
-                className="shell-toolbar-btn ui-focus-ring"
+                className="shell-toolbar-btn shell-captioned-btn ui-focus-ring"
               >
-                <ScrollText size={16} strokeWidth={1.8} aria-hidden="true" style={{ color: systemPrompt ? "var(--accent)" : undefined }} />
+                <ScrollText size={14} strokeWidth={1.8} aria-hidden="true" style={{ color: systemPrompt ? "var(--accent)" : undefined }} />
+                <span className="shell-btn-caption">{t("appShell.captionSystem")}</span>
               </button>
             </div>
           </>
