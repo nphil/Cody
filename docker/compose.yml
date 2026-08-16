@@ -1,0 +1,15 @@
+services:
+  cody:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: cody:latest
+    ports:
+      - "30177:30177"
+    environment:
+      CODY_PASSWORD: change-me
+      # TZ: America/New_York
+    volumes:
+      - ./appdata:/data          # agent state, checkpoints, shell home
+      - ~/projects:/workspace    # your repositories
+    restart: unless-stopped

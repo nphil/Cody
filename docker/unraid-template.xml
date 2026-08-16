@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>Cody</Name>
+  <Repository>cody:latest</Repository>
+  <Registry/>
+  <Network>bridge</Network>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/nphil/Cody/issues</Support>
+  <Project>https://github.com/nphil/Cody</Project>
+  <Overview>Cody — a web workspace for the omp (oh-my-pi) coding agent. Session browsing, live chat, Git panel with staging and checkpoints, persistent terminals, workspace tasks, and an embedded app preview. This container bundles the omp harness; point /workspace at your projects share and open the WebUI.</Overview>
+  <Category>Tools: Productivity:</Category>
+  <WebUI>http://[IP]:[PORT:30177]/</WebUI>
+  <TemplateURL/>
+  <Icon>https://raw.githubusercontent.com/nphil/Cody/main/public/favicon.ico</Icon>
+  <ExtraParams/>
+  <PostArgs/>
+  <DonateText/>
+  <DonateLink/>
+  <Config Name="WebUI Port" Target="30177" Default="30177" Mode="tcp" Description="Cody web interface" Type="Port" Display="always" Required="true" Mask="false">30177</Config>
+  <Config Name="App Data" Target="/data" Default="/mnt/user/appdata/cody" Mode="rw" Description="Agent state, checkpoints and shell home. Keep on appdata." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/cody</Config>
+  <Config Name="Projects" Target="/workspace" Default="/mnt/user/projects" Mode="rw" Description="Your repositories — the workspaces Cody and the agent operate on." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/projects</Config>
+  <Config Name="Password" Target="CODY_PASSWORD" Default="" Mode="" Description="HTTP Basic Auth password (username: cody). Required — the container refuses to start without it unless CODY_ALLOW_NO_AUTH=1." Type="Variable" Display="always" Required="true" Mask="true"></Config>
+  <Config Name="Anthropic API Key" Target="ANTHROPIC_API_KEY" Default="" Mode="" Description="Optional: API key for the agent's model provider. Any provider env var omp understands can be added the same way." Type="Variable" Display="advanced" Required="false" Mask="true"></Config>
+</Container>

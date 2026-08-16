@@ -93,6 +93,7 @@ lib/
   draft-store.ts       local draft persistence helpers
   env.ts               readEnv(): CODY_* config with OMP_WEB_* fallback
   file-access.ts       allowed file roots for /api/files and worktrees
+  harness/             agent-harness adapter seam (types, omp adapter, getHarness)
   file-paths.ts        client/server path encoding helpers
   markdown.ts          shared markdown helpers
   npx.ts               npx runner used by skill install
