@@ -24,6 +24,8 @@ export interface GitPanelProps {
   onOpenFile?: (absolutePath: string) => void;
   /** Changed-file count for the tab badge; null when this is not a repository. */
   onCountChange?: (count: number | null) => void;
+  /** Branch + repo root for the shell (Info panel); null when not a repository. */
+  onMetaChange?: (meta: { branch: string | null; repoRoot: string | null } | null) => void;
 }
 
 type GitFileView = "list" | "tree";
@@ -312,7 +314,7 @@ function DirectoryRow({
   );
 }
 
-export function GitPanel({ cwd, active, refreshKey, onOpenFile, onCountChange }: GitPanelProps): ReactElement | null {
+export function GitPanel({ cwd, active, refreshKey, onOpenFile, onCountChange, onMetaChange }: GitPanelProps): ReactElement | null {
   const { t, tn } = useI18n();
   const [status, setStatus] = useState<GitStatusResponse | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
@@ -338,6 +340,8 @@ export function GitPanel({ cwd, active, refreshKey, onOpenFile, onCountChange }:
   // re-trigger the fetch effects below.
   const onCountChangeRef = useRef(onCountChange);
   onCountChangeRef.current = onCountChange;
+  const onMetaChangeRef = useRef(onMetaChange);
+  onMetaChangeRef.current = onMetaChange;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -389,6 +393,9 @@ export function GitPanel({ cwd, active, refreshKey, onOpenFile, onCountChange }:
       setStatusError(null);
       setStatus(body);
       onCountChangeRef.current?.(body.isGitRepository ? body.files.length : null);
+      onMetaChangeRef.current?.(body.isGitRepository
+        ? { branch: body.branchInfo?.branch ?? null, repoRoot: body.repositoryRoot }
+        : null);
     } catch (error) {
       if (controller.signal.aborted || seq !== statusSeqRef.current || !mountedRef.current) return;
       setStatusError(error instanceof Error ? error.message : String(error));
@@ -451,6 +458,7 @@ export function GitPanel({ cwd, active, refreshKey, onOpenFile, onCountChange }:
     if (!cwd) {
       setLoading(false);
       onCountChangeRef.current?.(null);
+      onMetaChangeRef.current?.(null);
     }
   }, [cwd]);
 
@@ -460,6 +468,25 @@ export function GitPanel({ cwd, active, refreshKey, onOpenFile, onCountChange }:
     if (!cwd) return;
     void fetchStatus();
   }, [cwd, fetchStatus, refreshKey]);
+
+  // The selected file's diff must follow agent turns too, or the pane shows a
+  // pre-edit patch beside a fresh file list. While the panel is hidden the
+  // refetch is deferred (no git shell-outs for an invisible diff) and runs on
+  // the next activation instead.
+  const selectedPathRef = useRef<string | null>(null);
+  selectedPathRef.current = selectedPath;
+  const diffRefreshedForRef = useRef(refreshKey);
+  useEffect(() => {
+    if (!cwd || selectedPathRef.current === null) {
+      // Nothing selected: a later selection fetches fresh anyway.
+      diffRefreshedForRef.current = refreshKey;
+      return;
+    }
+    if (!active) return;
+    if (diffRefreshedForRef.current === refreshKey) return;
+    diffRefreshedForRef.current = refreshKey;
+    void fetchDiff(selectedPathRef.current);
+  }, [active, cwd, fetchDiff, refreshKey]);
 
   // Focus refetch only while visible — a background panel does not need to
   // re-shell out to git every time the window is tabbed back to.

@@ -15,14 +15,16 @@ const TERMINAL_NAME_MAX = 80;
  * Illegal characters become spaces, runs of whitespace collapse, and a title
  * that survives as nothing (e.g. fully non-ASCII) falls back to "Task".
  */
-function terminalNameForTask(title: string): string {
+function terminalNameForTask(title: string, taskId: string): string {
   const cleaned = title
     .replace(TERMINAL_NAME_CHARSET, " ")
     .replace(/\s+/gu, " ")
     .trim()
     .slice(0, TERMINAL_NAME_MAX)
     .trim();
-  return cleaned || "Task";
+  // A fully non-ASCII title (CJK, Cyrillic, …) cleans to nothing; the id is
+  // already restricted to a legal terminal-name charset and stays distinctive.
+  return cleaned || taskId.slice(0, TERMINAL_NAME_MAX) || "Task";
 }
 
 export async function POST(request: NextRequest) {
@@ -75,7 +77,7 @@ export async function POST(request: NextRequest) {
     // The command is never taken from the request: the config is re-read here
     // and the task is looked up by id, so the browser can only name a task the
     // workspace already declares.
-    const config = await readTasksConfig(authorizedCwd);
+    const config = await readTasksConfig(authorizedCwd, allowedRoots);
     if (config.state !== "loaded") {
       const error = config.state === "missing"
         ? "No workspace tasks are configured"
@@ -89,7 +91,7 @@ export async function POST(request: NextRequest) {
     }
 
     const manager = getTerminalManager();
-    const info = manager.create(authorizedCwd, terminalNameForTask(task.title));
+    const info = manager.create(authorizedCwd, terminalNameForTask(task.title, task.id));
     try {
       manager.write(info.id, `${task.command}\n`);
     } catch (error) {

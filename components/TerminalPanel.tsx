@@ -19,9 +19,11 @@ export type TerminalInfo = {
 type Props = {
   cwd: string | null;
   onOpen?: () => void;
-  /** When set (e.g. a task was dispatched into a fresh terminal), reload the
-   * list and focus that terminal. Same id twice is fine — it re-focuses. */
-  focusTerminalId?: string | null;
+  /** One-shot focus request (e.g. a task was dispatched into a fresh
+   * terminal): reload the list and focus that terminal. Each request carries a
+   * fresh token; a token is consumed exactly once, so neither workspace
+   * switches nor re-renders replay an old request. */
+  focusRequest?: { id: string; token: number } | null;
 };
 type ConnectionState = "disconnected" | "connecting" | "connected";
 
@@ -66,7 +68,7 @@ function TerminalSoftKeys({ onSend, label }: { onSend: (data: string) => void; l
   );
 }
 
-export function TerminalPanel({ cwd, onOpen, focusTerminalId }: Props) {
+export function TerminalPanel({ cwd, onOpen, focusRequest }: Props) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
   const [terminals, setTerminals] = useState<TerminalInfo[]>([]);
@@ -106,9 +108,14 @@ export function TerminalPanel({ cwd, onOpen, focusTerminalId }: Props) {
   }, [load]);
 
   // An externally dispatched terminal (e.g. a workspace task) may not be in
-  // the current list yet: reload, then focus it once it appears.
+  // the current list yet: reload, then focus it once it appears. Consuming the
+  // token makes the request one-shot — a later cwd change must not replay it.
+  const consumedFocusTokenRef = useRef(0);
   useEffect(() => {
-    if (!focusTerminalId || !cwd) return;
+    if (!focusRequest || !cwd) return;
+    if (focusRequest.token === consumedFocusTokenRef.current) return;
+    consumedFocusTokenRef.current = focusRequest.token;
+    const { id } = focusRequest;
     let cancelled = false;
     void (async () => {
       try {
@@ -118,13 +125,13 @@ export function TerminalPanel({ cwd, onOpen, focusTerminalId }: Props) {
         const loaded = data.terminals ?? [];
         if (cancelled) return;
         setTerminals(loaded);
-        if (loaded.some((item) => item.id === focusTerminalId)) setActiveId(focusTerminalId);
+        if (loaded.some((item) => item.id === id)) setActiveId(id);
       } catch {
         // list refresh is best-effort; the regular loader will catch up
       }
     })();
     return () => { cancelled = true; };
-  }, [focusTerminalId, cwd]);
+  }, [focusRequest, cwd]);
 
   const create = useCallback(async () => {
     if (!cwd || busy) return;

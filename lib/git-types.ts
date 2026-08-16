@@ -32,8 +32,6 @@ export interface GitStatusResponse {
   files: GitFileStatus[];
   /** Populated for git repositories; absent in older cached responses. */
   branchInfo?: GitBranchInfo;
-  /** sha1 of the raw porcelain output — cheap change detection for pollers. */
-  statusHash?: string;
 }
 
 export interface GitFileDiffResponse {

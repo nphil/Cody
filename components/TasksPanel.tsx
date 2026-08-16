@@ -163,7 +163,7 @@ export function TasksPanel({ cwd, active, onOpenTerminal, onConfigStateChange }:
 
   const runTask = useCallback(async (task: WorkspaceTask) => {
     if (!cwd || dispatchingId !== null) return;
-    if (task.confirm && !window.confirm(`${task.title}\n${task.command}`)) {
+    if (task.confirm && !window.confirm(translate("tasks.runConfirm", { title: task.title, command: task.command }))) {
       setNote({ kind: "info", text: translate("tasks.cancelled", { title: task.title }) });
       return;
     }
@@ -355,7 +355,7 @@ export function TasksPanel({ cwd, active, onOpenTerminal, onConfigStateChange }:
           <>
             <div style={{ marginBottom: 10, fontSize: 11, lineHeight: 1.45, color: "var(--text-dim)" }}>{t("tasks.hint")}</div>
             {groups.map((group, index) => (
-              <div key={group.group ?? " ungrouped"} style={{ marginTop: index === 0 ? 0 : 12 }}>
+              <div key={group.group ?? "\u0000ungrouped"} style={{ marginTop: index === 0 ? 0 : 12 }}>
                 {group.group !== undefined && (
                   <div
                     style={{

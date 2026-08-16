@@ -32,7 +32,7 @@ export async function GET(request: NextRequest) {
 
     // A malformed config is reported as data (200 + state: "invalid") so the
     // panel can surface the validation message instead of a request failure.
-    return NextResponse.json(await readTasksConfig(cwd), { headers: { "Cache-Control": "no-store" } });
+    return NextResponse.json(await readTasksConfig(cwd, allowedRoots), { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }

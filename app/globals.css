@@ -1927,6 +1927,13 @@ html.dark .dropdown-surface :is(select, option) {
   background: color-mix(in srgb, var(--status-error) 8%, var(--bg-panel));
   font-size: 11px;
 }
+.workspace-tab-strip {
+  scrollbar-width: none;
+}
+.workspace-tab-strip::-webkit-scrollbar {
+  display: none;
+}
+
 .terminal-soft-keys {
   display: flex;
   flex-shrink: 0;
@@ -1940,6 +1947,10 @@ html.dark .dropdown-surface :is(select, option) {
   min-width: 42px;
   min-height: 36px;
   padding: 0 8px;
+  /* 18 keys always overflow a phone viewport: keep natural widths and let the
+     row's overflow-x do the scrolling instead of squashing labels. */
+  flex-shrink: 0;
+  white-space: nowrap;
   border: 1px solid var(--border);
   border-radius: var(--radius-control);
   color: var(--text);

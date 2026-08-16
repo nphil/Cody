@@ -1,5 +1,4 @@
 import { execFile } from "child_process";
-import { createHash } from "crypto";
 import fs from "fs";
 import path from "path";
 import { promisify } from "util";
@@ -114,13 +113,7 @@ export async function getGitStatus(cwd: string): Promise<GitStatusResponse> {
     }];
   });
 
-  return {
-    isGitRepository: true,
-    repositoryRoot,
-    files,
-    branchInfo,
-    statusHash: createHash("sha1").update(statusOutput).digest("hex"),
-  };
+  return { isGitRepository: true, repositoryRoot, files, branchInfo };
 }
 
 function hasNullByte(content: Buffer): boolean {

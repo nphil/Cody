@@ -479,9 +479,15 @@ export function AppShell() {
   const [gitMeta, setGitMeta] = useState<{ branch: string | null; repoRoot: string | null }>({ branch: null, repoRoot: null });
   const [tasksConfigInvalid, setTasksConfigInvalid] = useState(false);
   const [updatesBadgeCount, setUpdatesBadgeCount] = useState(0);
-  const [focusTerminalId, setFocusTerminalId] = useState<string | null>(null);
+  // One-shot: the token makes each dispatch distinct, so a stale request is
+  // never replayed by later cwd changes (TerminalPanel tracks consumed tokens).
+  const [focusTerminalRequest, setFocusTerminalRequest] = useState<{ id: string; token: number } | null>(null);
+  const focusTerminalTokenRef = useRef(0);
 
   const handleGitCountChange = useCallback((count: number | null) => setGitBadgeCount(count), []);
+  const handleGitMetaChange = useCallback((meta: { branch: string | null; repoRoot: string | null } | null) => {
+    setGitMeta(meta ?? { branch: null, repoRoot: null });
+  }, []);
   const handleTasksConfigStateChange = useCallback((state: "missing" | "invalid" | "loaded" | null) => {
     setTasksConfigInvalid(state === "invalid");
   }, []);
@@ -506,13 +512,17 @@ export function AppShell() {
   const [activeCwd, setActiveCwd] = useState<string | null>(null);
 
   // Lightweight git summary for the Git tab badge and the Info panel —
-  // refreshed when the workspace changes and after every agent turn.
+  // refreshed when the workspace changes and after every agent turn. Once the
+  // Git panel has mounted it owns this data (it fetches on the same triggers
+  // and reports back through onCountChange/onMetaChange), so skip the
+  // duplicate request.
   useEffect(() => {
     if (!activeCwd) {
       setGitBadgeCount(null);
       setGitMeta({ branch: null, repoRoot: null });
       return;
     }
+    if (mountedPanels.has("git")) return;
     const controller = new AbortController();
     void fetch(`/api/git/status?cwd=${encodeURIComponent(activeCwd)}`, { signal: controller.signal })
       .then((response) => (response.ok ? (response.json() as Promise<GitStatusResponse>) : null))
@@ -523,7 +533,7 @@ export function AppShell() {
       })
       .catch(() => { /* aborted or offline — keep the last known badge */ });
     return () => controller.abort();
-  }, [activeCwd, explorerRefreshKey]);
+  }, [activeCwd, explorerRefreshKey, mountedPanels]);
   // True once the initial ?session= URL param has been resolved (or confirmed absent)
   const [initialSessionRestored, setInitialSessionRestored] = useState<boolean>(() => !initialSessionId);
   // Suppresses sessionKey bump in handleCwdChange during the initial URL restore
@@ -1491,10 +1501,10 @@ export function AppShell() {
           style={{
             display: "flex",
             alignItems: "center",
-            gap: 2,
+            gap: 4,
             flexShrink: 0,
             height: isMobile ? 44 : 36,
-            padding: isMobile ? "0 48px 0 4px" : "0 40px 0 4px",
+            padding: "0 4px",
             boxSizing: "border-box",
             borderBottom: "1px solid var(--border)",
             background: "var(--bg-panel)",
@@ -1551,9 +1561,11 @@ export function AppShell() {
                   gap: 5,
                   flexShrink: 0,
                   whiteSpace: "nowrap",
-                  // .shell-toolbar-btn is a fixed 28px square for icon-only
-                  // buttons; these tabs carry a label and a badge.
+                  // .shell-toolbar-btn is a fixed square for icon-only
+                  // buttons; these tabs carry a label and a badge. minWidth
+                  // keeps the mobile tap target at toolbar size (40px).
                   width: "auto",
+                  minWidth: isMobile ? 40 : undefined,
                   padding: "0 8px",
                 }}
               >
@@ -1581,6 +1593,9 @@ export function AppShell() {
               </button>
             ));
           })()}
+          {/* Scrollable spacer: the panel toggle is position:fixed above the
+              strip, so the last tab needs in-flow room to scroll clear of it. */}
+          <div aria-hidden="true" style={{ flexShrink: 0, width: isMobile ? 44 : 36 }} />
         </div>
 
         <div
@@ -1629,6 +1644,7 @@ export function AppShell() {
                 handleOpenFile(filePath, getFileName(filePath), selectedSession?.id ?? null);
               }}
               onCountChange={handleGitCountChange}
+              onMetaChange={handleGitMetaChange}
             />
           )}
         </div>
@@ -1638,7 +1654,7 @@ export function AppShell() {
           aria-labelledby="workspace-terminal-tab"
           style={{ flex: 1, minHeight: 0, overflow: "hidden", display: rightPanelMode === "terminal" ? "flex" : "none" }}
         >
-          <TerminalPanel cwd={activeCwd} focusTerminalId={focusTerminalId} onOpen={() => { setRightPanelMode("terminal"); setRightPanelOpen(true); }} />
+          <TerminalPanel cwd={activeCwd} focusRequest={focusTerminalRequest} onOpen={() => { setRightPanelMode("terminal"); setRightPanelOpen(true); }} />
         </div>
         <div
           id="workspace-tasks-tool"
@@ -1651,7 +1667,7 @@ export function AppShell() {
               cwd={activeCwd}
               active={rightPanelMode === "tasks" && rightPanelOpen}
               onOpenTerminal={(terminalId) => {
-                if (terminalId) setFocusTerminalId(terminalId);
+                if (terminalId) setFocusTerminalRequest({ id: terminalId, token: ++focusTerminalTokenRef.current });
                 setRightPanelMode("terminal");
                 setRightPanelOpen(true);
               }}
