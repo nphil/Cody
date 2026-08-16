@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactElement, type ReactNode } from "react";
-import { Check, ChevronRight, FileText, GitBranch, List, ListTree, RotateCw } from "lucide-react";
+import { Check, ChevronRight, FileText, GitBranch, List, ListTree, Minus, Plus, RotateCw, Undo2 } from "lucide-react";
 import { DiffView } from "./DiffView";
 import { translate, useI18n } from "@/lib/i18n";
 import { getRelativeFilePath } from "@/lib/file-paths";
@@ -181,6 +181,13 @@ function StatusCode({ file, label }: { file: GitFileStatus; label: string }) {
   );
 }
 
+interface RowAction {
+  key: string;
+  label: string;
+  icon: ReactNode;
+  onClick: () => void;
+}
+
 function FileRow({
   entry,
   depth,
@@ -191,6 +198,8 @@ function FileRow({
   onOpen,
   openLabel,
   statusLabel,
+  actions,
+  actionsDisabled,
 }: {
   entry: ChangedEntry;
   depth: number;
@@ -202,9 +211,14 @@ function FileRow({
   onOpen?: () => void;
   openLabel: string;
   statusLabel: string;
+  /** Stage/unstage/discard controls, shown on the selected row like Open. */
+  actions?: RowAction[];
+  actionsDisabled?: boolean;
 }) {
   const background = selected ? "var(--bg-selected)" : "transparent";
+  const showActions = selected && (actions?.length ?? 0) > 0;
   const showOpen = selected && onOpen !== undefined;
+  const reservedRight = 10 + (showOpen ? 22 : 0) + (showActions ? (actions?.length ?? 0) * 22 : 0);
   return (
     <div style={{ position: "relative" }}>
       <button
@@ -216,7 +230,7 @@ function FileRow({
         style={{
           ...ROW_BASE_STYLE,
           paddingLeft: 10 + depth * 14,
-          paddingRight: showOpen ? 30 : 10,
+          paddingRight: reservedRight,
           background,
         }}
         onMouseEnter={(event) => {
@@ -232,6 +246,40 @@ function FileRow({
           <span style={{ color: "var(--text)" }}>{name}</span>
         </span>
       </button>
+      {showActions && actions?.map((action, index) => (
+        <button
+          key={action.key}
+          type="button"
+          className="ui-focus-ring"
+          onClick={action.onClick}
+          disabled={actionsDisabled}
+          title={action.label}
+          aria-label={action.label}
+          style={{
+            position: "absolute",
+            right: 5 + (showOpen ? 22 : 0) + index * 22,
+            top: "50%",
+            transform: "translateY(-50%)",
+            width: 20,
+            height: 20,
+            padding: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            border: "none",
+            borderRadius: "var(--radius-control)",
+            background: "transparent",
+            color: "var(--text-muted)",
+            cursor: actionsDisabled ? "default" : "pointer",
+            opacity: actionsDisabled ? 0.5 : 1,
+            transition: "color var(--dur-fast) var(--ease-out-warm)",
+          }}
+          onMouseEnter={(event) => { event.currentTarget.style.color = "var(--text)"; }}
+          onMouseLeave={(event) => { event.currentTarget.style.color = "var(--text-muted)"; }}
+        >
+          {action.icon}
+        </button>
+      ))}
       {showOpen && (
         <button
           type="button"
@@ -565,11 +613,79 @@ export function GitPanel({ cwd, active, refreshKey, onOpenFile, onCountChange, o
     if (selectedPath !== null) void fetchDiff(selectedPath);
   }, [fetchDiff, fetchStatus, selectedPath]);
 
+  // Write side: stage/unstage/discard/commit. One mutation at a time; every
+  // outcome (success or failure) ends in a status refresh so the list always
+  // shows what git now thinks.
+  const [mutating, setMutating] = useState(false);
+  const [commitMessage, setCommitMessage] = useState("");
+  const mutate = useCallback(async (action: "stage" | "unstage" | "discard" | "commit", filePath?: string, message?: string): Promise<boolean> => {
+    if (!cwd || mutating) return false;
+    setMutating(true);
+    try {
+      const response = await fetch("/api/git/mutate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd, action, path: filePath, message }),
+      });
+      const body = await response.json().catch(() => ({})) as { error?: string };
+      if (!mountedRef.current) return false;
+      if (!response.ok) {
+        setStatusError(body.error ?? translate("gitPanel.mutationFailed"));
+        return false;
+      }
+      setStatusError(null);
+      return true;
+    } catch (error) {
+      if (mountedRef.current) setStatusError(error instanceof Error ? error.message : String(error));
+      return false;
+    } finally {
+      if (mountedRef.current) {
+        setMutating(false);
+        void fetchStatus();
+        if (selectedPathRef.current !== null) void fetchDiff(selectedPathRef.current);
+      }
+    }
+  }, [cwd, fetchDiff, fetchStatus, mutating]);
+
+  const stageFile = useCallback((entry: ChangedEntry) => { void mutate("stage", entry.file.filePath); }, [mutate]);
+  const unstageFile = useCallback((entry: ChangedEntry) => { void mutate("unstage", entry.file.filePath); }, [mutate]);
+  const discardFile = useCallback((entry: ChangedEntry) => {
+    const untracked = entry.file.status === "untracked";
+    const prompt = untracked
+      ? translate("gitPanel.discardConfirmUntracked", { path: entry.relativePath })
+      : translate("gitPanel.discardConfirm", { path: entry.relativePath });
+    if (!window.confirm(prompt)) return;
+    void mutate("discard", entry.file.filePath);
+  }, [mutate]);
+  const commit = useCallback(() => {
+    const message = commitMessage.trim();
+    if (!message) return;
+    void mutate("commit", undefined, message).then((ok) => {
+      if (ok && mountedRef.current) setCommitMessage("");
+    });
+  }, [commitMessage, mutate]);
+
+  /** The controls a row offers, derived from which sides of the status are
+   * dirty. In the sectioned list the section narrows this further. */
+  const rowActions = useCallback((entry: ChangedEntry, section: "staged" | "changes" | "all"): RowAction[] => {
+    const staged = entry.file.indexStatus !== " " && entry.file.indexStatus !== "?";
+    const unstaged = entry.file.worktreeStatus !== " " || entry.file.status === "untracked";
+    const actions: RowAction[] = [];
+    if (section !== "staged" && unstaged) {
+      actions.push({ key: "discard", label: translate("gitPanel.discard"), icon: <Undo2 size={12} strokeWidth={2.2} aria-hidden="true" />, onClick: () => discardFile(entry) });
+      actions.push({ key: "stage", label: translate("gitPanel.stage"), icon: <Plus size={13} strokeWidth={2.2} aria-hidden="true" />, onClick: () => stageFile(entry) });
+    }
+    if (section !== "changes" && staged) {
+      actions.push({ key: "unstage", label: translate("gitPanel.unstage"), icon: <Minus size={13} strokeWidth={2.2} aria-hidden="true" />, onClick: () => unstageFile(entry) });
+    }
+    return actions;
+  }, [discardFile, stageFile, unstageFile]);
+
   const openLabel = t("gitPanel.openInFiles");
 
-  const renderFileRow = useCallback((entry: ChangedEntry, depth: number, directoryPrefix: string, name: string) => (
+  const renderFileRow = useCallback((entry: ChangedEntry, depth: number, directoryPrefix: string, name: string, section: "staged" | "changes" | "all" = "all") => (
     <FileRow
-      key={entry.file.filePath}
+      key={`${section}:${entry.file.filePath}`}
       entry={entry}
       depth={depth}
       directoryPrefix={directoryPrefix}
@@ -579,8 +695,10 @@ export function GitPanel({ cwd, active, refreshKey, onOpenFile, onCountChange, o
       onOpen={onOpenFile ? () => onOpenFile(entry.file.filePath) : undefined}
       openLabel={openLabel}
       statusLabel={t(STATUS_LABEL_KEYS[entry.file.status])}
+      actions={rowActions(entry, section)}
+      actionsDisabled={mutating}
     />
-  ), [onOpenFile, openLabel, selectFile, selectedPath, t]);
+  ), [mutating, onOpenFile, openLabel, rowActions, selectFile, selectedPath, t]);
 
   const renderTreeNodes = useCallback((nodes: readonly GitFileTreeNode[], depth: number): ReactNode[] => (
     nodes.flatMap((node) => {
@@ -640,8 +758,50 @@ export function GitPanel({ cwd, active, refreshKey, onOpenFile, onCountChange, o
       );
     }
 
+    const listRow = (entry: ChangedEntry, section: "staged" | "changes" | "all") => {
+      const separator = entry.relativePath.lastIndexOf("/");
+      return renderFileRow(
+        entry,
+        0,
+        separator >= 0 ? entry.relativePath.slice(0, separator + 1) : "",
+        separator >= 0 ? entry.relativePath.slice(separator + 1) : entry.relativePath,
+        section,
+      );
+    };
+    const stagedEntries = entries.filter((entry) => entry.file.indexStatus !== " " && entry.file.indexStatus !== "?");
+    const changedEntries = entries.filter((entry) => entry.file.worktreeStatus !== " " || entry.file.status === "untracked");
+    const sectioned = view === "list" && stagedEntries.length > 0;
+    const sectionHeading = (label: string, count: number) => (
+      <div style={{ padding: "5px 10px 2px", fontSize: 10, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--text-muted)" }}>
+        {label} · {count}
+      </div>
+    );
+
     return (
       <>
+        {stagedEntries.length > 0 && (
+          <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0, padding: "6px 10px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)" }}>
+            <input
+              type="text"
+              value={commitMessage}
+              onChange={(event) => setCommitMessage(event.target.value)}
+              onKeyDown={(event) => { if (event.key === "Enter") commit(); }}
+              placeholder={t("gitPanel.commitPlaceholder")}
+              aria-label={t("gitPanel.commitPlaceholder")}
+              disabled={mutating}
+              style={{ flex: 1, minWidth: 0, padding: "4px 8px", fontSize: 12, border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}
+            />
+            <button
+              type="button"
+              className="ui-focus-ring"
+              onClick={commit}
+              disabled={mutating || commitMessage.trim() === ""}
+              style={{ flexShrink: 0, padding: "4px 10px", fontSize: 12, fontWeight: 600, border: "1px solid var(--accent)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--accent)", cursor: mutating || commitMessage.trim() === "" ? "default" : "pointer", opacity: mutating || commitMessage.trim() === "" ? 0.5 : 1 }}
+            >
+              {tn("gitPanel.commitStaged", stagedEntries.length)}
+            </button>
+          </div>
+        )}
         <div
           role="group"
           aria-label={t("gitPanel.changedFilesLabel")}
@@ -655,15 +815,16 @@ export function GitPanel({ cwd, active, refreshKey, onOpenFile, onCountChange, o
         >
           {view === "tree"
             ? renderTreeNodes(treeNodes, 0)
-            : entries.map((entry) => {
-              const separator = entry.relativePath.lastIndexOf("/");
-              return renderFileRow(
-                entry,
-                0,
-                separator >= 0 ? entry.relativePath.slice(0, separator + 1) : "",
-                separator >= 0 ? entry.relativePath.slice(separator + 1) : entry.relativePath,
-              );
-            })}
+            : sectioned
+              ? (
+                <>
+                  {sectionHeading(t("gitPanel.stagedSection"), stagedEntries.length)}
+                  {stagedEntries.map((entry) => listRow(entry, "staged"))}
+                  {changedEntries.length > 0 && sectionHeading(t("gitPanel.changesSection"), changedEntries.length)}
+                  {changedEntries.map((entry) => listRow(entry, "changes"))}
+                </>
+              )
+              : entries.map((entry) => listRow(entry, "all"))}
         </div>
         <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, overflow: "auto" }}>
           {renderDiff()}

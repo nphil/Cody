@@ -202,3 +202,103 @@ export async function getGitFileDiff(cwd: string, filePath: string): Promise<Git
   if (!patch.includes("\n@@ ")) return { supported: false };
   return { supported: true, status, patch };
 }
+
+/** Actions the UI may request against the working tree / index. All of them
+ * operate on one path except commit, which commits whatever is staged. */
+export type GitMutationAction = "stage" | "unstage" | "discard" | "commit";
+
+export interface GitMutationResult {
+  ok: boolean;
+  error?: string;
+}
+
+function errorText(error: unknown): string {
+  if (error && typeof error === "object" && "stderr" in error) {
+    const stderr = String((error as { stderr: unknown }).stderr).trim();
+    if (stderr) return stderr.split("\n").slice(-3).join("\n");
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Resolve + authorize a target path for mutation: inside the repo, and its
+ * status entry (when required) so discard can distinguish untracked files. */
+async function repoRelative(repositoryRoot: string, filePath: string): Promise<string | null> {
+  const resolved = path.resolve(filePath);
+  if (!isWithinPath(repositoryRoot, resolved)) return null;
+  return toGitPath(path.relative(repositoryRoot, resolved));
+}
+
+export async function mutateGit(
+  cwd: string,
+  action: GitMutationAction,
+  filePath?: string,
+  message?: string,
+): Promise<GitMutationResult> {
+  const repositoryRoot = await findRepositoryRoot(cwd);
+  if (!repositoryRoot) return { ok: false, error: "Not a git repository" };
+
+  try {
+    if (action === "commit") {
+      const trimmed = message?.trim();
+      if (!trimmed) return { ok: false, error: "Commit message is required" };
+      // --no-verify is NOT passed: the user's hooks are part of their repo
+      // contract. Identity may be unset in fresh environments; fall back to a
+      // local one-off identity rather than failing the commit.
+      try {
+        await git(repositoryRoot, ["commit", "-m", trimmed]);
+      } catch (error) {
+        const text = errorText(error);
+        if (/user\.(name|email)|empty ident|tell me who you are/i.test(text)) {
+          await git(repositoryRoot, [
+            "-c", "user.name=Cody",
+            "-c", "user.email=cody@localhost",
+            "commit", "-m", trimmed,
+          ]);
+        } else {
+          throw error;
+        }
+      }
+      return { ok: true };
+    }
+
+    if (!filePath) return { ok: false, error: "path is required" };
+    const relative = await repoRelative(repositoryRoot, filePath);
+    if (relative === null) return { ok: false, error: "Path is outside the repository" };
+
+    if (action === "stage") {
+      // -A so a deleted file's removal can be staged the same way.
+      await git(repositoryRoot, ["add", "-A", "--", relative]);
+      return { ok: true };
+    }
+
+    if (action === "unstage") {
+      try {
+        await git(repositoryRoot, ["restore", "--staged", "--", relative]);
+      } catch (error) {
+        // A repo with no commits has no HEAD for restore to read; dropping the
+        // path from the index is the equivalent operation there.
+        if (/HEAD|unborn|unknown revision/i.test(errorText(error))) {
+          await git(repositoryRoot, ["rm", "--cached", "--force", "-r", "--", relative]);
+        } else {
+          throw error;
+        }
+      }
+      return { ok: true };
+    }
+
+    // discard: untracked files are deleted outright; tracked files return to
+    // HEAD in both the index and the working tree. The UI confirms first.
+    const entries = await readStatusEntries(repositoryRoot);
+    const entry = entries.find((candidate) => candidate.path === relative);
+    if (!entry) return { ok: false, error: "File has no pending changes" };
+    if (entry.indexStatus === "?" && entry.worktreeStatus === "?") {
+      const absolute = path.resolve(repositoryRoot, relative);
+      await fs.promises.rm(absolute, { force: true });
+      return { ok: true };
+    }
+    await git(repositoryRoot, ["checkout", "HEAD", "--", relative]);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: errorText(error) };
+  }
+}
