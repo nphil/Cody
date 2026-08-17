@@ -95,6 +95,14 @@ export class TerminalManager {
     return record;
   }
 
+  rename(id: string, name: string): TerminalInfo {
+    const record = this.get(id);
+    const requestedName = name.trim();
+    if (!/^[\w .:+-]{1,80}$/.test(requestedName)) throw new Error("Invalid terminal name");
+    record.name = requestedName;
+    return publicInfo(record);
+  }
+
   subscribe(id: string, listener: (event: TerminalEvent) => void): () => void {
     const record = this.get(id);
     record.listeners.add(listener);

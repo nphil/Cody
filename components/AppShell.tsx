@@ -1206,15 +1206,18 @@ export function AppShell() {
         <div ref={topBarRef} className="shell-topbar" style={{ display: "flex", alignItems: "center", flexShrink: 0, borderBottom: "1px solid var(--border)", height: isMobile ? 44 : 36, background: "var(--bg-panel)" }}>
         {/* Utility group: sidebar, theme, language */}
         <div style={{ display: "flex", alignItems: "center", gap: 4, height: "100%", paddingLeft: isMobile ? 4 : 8 }}>
+          {/* Same captioned treatment as the session controls so the whole
+              topbar reads as one system: 14px icon + tiny caption, one box. */}
           <button
             onClick={handleSidebarToggle}
             title={sidebarOpen ? t("appShell.hideSidebar") : t("appShell.showSidebar")}
             aria-label={sidebarOpen ? t("appShell.hideSidebar") : t("appShell.showSidebar")}
-            className="shell-toolbar-btn ui-focus-ring"
+            className="shell-toolbar-btn shell-captioned-btn ui-focus-ring"
           >
-            {sidebarOpen ? <PanelLeft size={16} strokeWidth={1.8} aria-hidden="true" /> : <Menu size={16} strokeWidth={1.8} aria-hidden="true" />}
+            {sidebarOpen ? <PanelLeft size={14} strokeWidth={1.8} aria-hidden="true" /> : <Menu size={14} strokeWidth={1.8} aria-hidden="true" />}
+            <span className="shell-btn-caption">{t("appShell.captionSidebar")}</span>
           </button>
-          <ThemePicker />
+          <ThemePicker captioned />
         </div>
         {showChat && (
           <>

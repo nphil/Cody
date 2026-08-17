@@ -10,3 +10,14 @@ export async function DELETE(_request: NextRequest, { params }: { params: Promis
   try { getTerminalManager().close((await params).id); return NextResponse.json({ closed: true }); }
   catch (error) { return errorResponse(error); }
 }
+
+// PATCH { name } — rename a terminal (the tab title is click-to-edit).
+export async function PATCH(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  try {
+    const body = await request.json().catch(() => ({})) as { name?: unknown };
+    if (typeof body.name !== "string") throw new Error("Invalid terminal name");
+    return NextResponse.json(getTerminalManager().rename((await params).id, body.name));
+  } catch (error) {
+    return errorResponse(error);
+  }
+}

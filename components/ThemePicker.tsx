@@ -19,7 +19,7 @@ function ThemePreview({ theme }: { theme: ThemeDefinition }) {
 }
 
 /** A direct, keyboard-operable choice of Cody's paired light and dark themes. */
-export function ThemePicker() {
+export function ThemePicker({ captioned = false }: { captioned?: boolean } = {}) {
   const { theme, themeId, setTheme } = useTheme();
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
@@ -141,10 +141,11 @@ export function ThemePicker() {
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-controls={open ? pickerId : undefined}
-        className="shell-toolbar-btn ui-focus-ring"
+        className={`shell-toolbar-btn${captioned ? " shell-captioned-btn" : ""} ui-focus-ring`}
         style={{ background: open ? "var(--bg-selected)" : undefined, color: open ? "var(--text)" : undefined }}
       >
-        <Palette size={16} strokeWidth={1.8} aria-hidden="true" />
+        <Palette size={captioned ? 14 : 16} strokeWidth={1.8} aria-hidden="true" />
+        {captioned && <span className="shell-btn-caption">{t("appShell.captionTheme")}</span>}
       </button>
 
       {open && (

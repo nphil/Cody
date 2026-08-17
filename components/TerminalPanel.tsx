@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Play, Plus, RotateCw, X } from "lucide-react";
+import { Keyboard, Play, Plus, RotateCw, X } from "lucide-react";
 import { Terminal, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { useI18n } from "@/lib/i18n";
@@ -28,6 +28,19 @@ type Props = {
 };
 type ConnectionState = "disconnected" | "connecting" | "connected";
 
+/** Soft-key bar preference: "on"/"off" override, absent = automatic (shown
+ * on touch devices, hidden on fine pointers). */
+const SOFT_KEYS_PREF = "cody:terminal-soft-keys";
+
+function readSoftKeysPref(): "on" | "off" | null {
+  try {
+    const value = localStorage.getItem(SOFT_KEYS_PREF);
+    return value === "on" || value === "off" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 function socketUrl(id: string, cols: number, rows: number): string {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   return `${protocol}//${window.location.host}/api/terminals/${encodeURIComponent(id)}/socket?cols=${cols}&rows=${rows}`;
@@ -39,16 +52,22 @@ async function responseError(response: Response, fallback: string): Promise<stri
 }
 
 function TerminalSoftKeys({ onSend, label }: { onSend: (data: string) => void; label: string }) {
-  // Keys that are awkward on mobile virtual keyboards (pi-web parity set).
+  // Keys that are awkward on touch keyboards, ordered for driving an agent
+  // TUI (omp: Esc interrupts, Shift+Tab cycles modes, "/" opens commands,
+  // "@" mentions files), then the pi-web parity set of shell chords.
   const keys = [
     ["Esc", "\x1b"],
     ["Tab", "\t"],
-    ["Ctrl C", "\x03"],
-    ["Ctrl D", "\x04"],
-    ["←", "\x1b[D"],
+    ["⇧Tab", "\x1b[Z"],
+    ["/", "/"],
+    ["@", "@"],
     ["↑", "\x1b[A"],
     ["↓", "\x1b[B"],
+    ["←", "\x1b[D"],
     ["→", "\x1b[C"],
+    ["Enter", "\r"],
+    ["Ctrl C", "\x03"],
+    ["Ctrl D", "\x04"],
     ["Ctrl Z", "\x1a"],
     ["Ctrl L", "\x0c"],
     ["Ctrl R", "\x12"],
@@ -79,6 +98,13 @@ export function TerminalPanel({ cwd, onOpen, focusRequest }: Props) {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [softKeysPref, setSoftKeysPref] = useState<"on" | "off" | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  // Read after hydration so server and first client render agree.
+  useEffect(() => {
+    setSoftKeysPref(readSoftKeysPref());
+  }, []);
   const [connection, setConnection] = useState<ConnectionState>("disconnected");
   const [connectionGeneration, setConnectionGeneration] = useState(0);
   const hostRef = useRef<HTMLDivElement>(null);
@@ -191,6 +217,33 @@ export function TerminalPanel({ cwd, onOpen, focusRequest }: Props) {
     const socket = socketRef.current;
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "input", data }));
     terminalRef.current?.focus();
+  }, []);
+
+  const commitRename = useCallback(async (id: string, name: string) => {
+    setRenamingId(null);
+    const current = terminals.find((item) => item.id === id);
+    const trimmed = name.trim();
+    if (!current || !trimmed || trimmed === current.name) return;
+    const response = await fetch(`/api/terminals/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: trimmed }),
+    }).catch(() => null);
+    if (!response || !response.ok) {
+      setError(response ? await responseError(response, t("terminal.renameError")) : t("terminal.renameError"));
+      return;
+    }
+    const renamed = await response.json() as TerminalInfo;
+    setTerminals((items) => items.map((item) => (item.id === id ? renamed : item)));
+    setError(null);
+  }, [t, terminals]);
+
+  const toggleSoftKeys = useCallback((currentlyVisible: boolean) => {
+    const next = currentlyVisible ? "off" : "on";
+    setSoftKeysPref(next);
+    try {
+      localStorage.setItem(SOFT_KEYS_PREF, next);
+    } catch { /* preference simply will not persist */ }
   }, []);
 
   useEffect(() => {
@@ -321,6 +374,10 @@ export function TerminalPanel({ cwd, onOpen, focusRequest }: Props) {
     };
   }, [activeId, connectionGeneration, send, t]);
 
+  // Auto on touch (phones and tablets), off on fine pointers; the keyboard
+  // toggle in the toolbar overrides either way and sticks in localStorage.
+  const softKeysVisible = softKeysPref === "on" || (softKeysPref === null && (isMobile || isCoarsePointer));
+
   return (
     <section className="terminal-panel" aria-label={t("terminal.title")}>
       <div className="terminal-toolbar">
@@ -334,7 +391,17 @@ export function TerminalPanel({ cwd, onOpen, focusRequest }: Props) {
                 aria-selected={item.id === activeId}
                 tabIndex={item.id === activeId ? 0 : -1}
                 className="terminal-tab-select ui-focus-ring"
-                onClick={() => setActiveId(item.id)}
+                title={item.id === activeId ? t("terminal.renameHint") : undefined}
+                onClick={() => {
+                  // First click selects; a click on the already-active tab
+                  // starts an inline rename.
+                  if (item.id === activeId) {
+                    setRenameDraft(item.name);
+                    setRenamingId(item.id);
+                    return;
+                  }
+                  setActiveId(item.id);
+                }}
                 onKeyDown={(event) => {
                   let nextIndex: number | undefined;
                   if (event.key === "ArrowRight") nextIndex = (index + 1) % terminals.length;
@@ -350,6 +417,22 @@ export function TerminalPanel({ cwd, onOpen, focusRequest }: Props) {
               >
                 <span>{item.name}</span>
               </button>
+              {renamingId === item.id && (
+                <input
+                  className="terminal-tab-rename"
+                  aria-label={t("terminal.renameHint")}
+                  value={renameDraft}
+                  autoFocus
+                  onFocus={(event) => event.currentTarget.select()}
+                  onChange={(event) => setRenameDraft(event.target.value)}
+                  onBlur={() => void commitRename(item.id, renameDraft)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") event.currentTarget.blur();
+                    if (event.key === "Escape") setRenamingId(null);
+                  }}
+                  style={{ position: "absolute", inset: 0, zIndex: 1, background: "var(--bg-selected)" }}
+                />
+              )}
               <button type="button" className="terminal-tab-close ui-focus-ring" aria-label={t("terminal.close", { label: item.name })} title={t("terminal.close", { label: item.name })} onClick={() => void close(item.id)}><X size={12} /></button>
             </div>
           ))}
@@ -361,12 +444,24 @@ export function TerminalPanel({ cwd, onOpen, focusRequest }: Props) {
         ) : activeId ? (
           <button type="button" className="terminal-action ui-focus-ring" onClick={() => setConnectionGeneration((value) => value + 1)} title={t("terminal.reconnect")} aria-label={t("terminal.reconnect")}><RotateCw size={13} /></button>
         ) : null}
+        {activeId && (
+          <button
+            type="button"
+            className="terminal-action ui-focus-ring"
+            onClick={() => toggleSoftKeys(softKeysVisible)}
+            aria-pressed={softKeysVisible}
+            title={softKeysVisible ? t("terminal.keysHide") : t("terminal.keysShow")}
+            aria-label={softKeysVisible ? t("terminal.keysHide") : t("terminal.keysShow")}
+          >
+            <Keyboard size={13} />
+          </button>
+        )}
       </div>
       {error && <div className="terminal-error" role="alert">{error}</div>}
       {activeId ? (
         <>
           <div ref={hostRef} className="terminal-host" role="tabpanel" aria-labelledby={`terminal-tab-${activeId}`} onClick={() => terminalRef.current?.focus()} />
-          {(isMobile || isCoarsePointer) && <TerminalSoftKeys onSend={send} label={t("terminal.keys")} />}
+          {softKeysVisible && <TerminalSoftKeys onSend={send} label={t("terminal.keys")} />}
         </>
       ) : (
         <div className="terminal-empty">

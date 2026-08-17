@@ -1865,7 +1865,7 @@ html.dark .dropdown-surface :is(select, option) {
 .terminal-toolbar {
   display: flex;
   align-items: center;
-  min-height: 36px;
+  min-height: 25px;
   border-bottom: 1px solid var(--border);
   background: var(--bg-panel);
 }
@@ -1874,17 +1874,30 @@ html.dark .dropdown-surface :is(select, option) {
   flex: 1;
   min-width: 0;
   overflow-x: auto;
-  height: 36px;
+  height: 25px;
 }
 .terminal-tab {
+  position: relative; /* anchors the inline rename editor */
   display: flex;
   align-items: center;
   max-width: 180px;
   min-width: 88px;
   border-right: 1px solid var(--border);
   color: var(--text-muted);
-  font: 12px var(--font-mono);
+  font: 11px var(--font-mono);
   white-space: nowrap;
+}
+/* Inline rename editor: swaps in for the tab label on active-tab click. */
+.terminal-tab-rename {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0 5px 0 10px;
+  border: 0;
+  outline: none;
+  color: var(--text);
+  background: transparent;
+  font: inherit;
 }
 .terminal-tab-active {
   color: var(--text);
@@ -1910,8 +1923,8 @@ html.dark .dropdown-surface :is(select, option) {
   flex-shrink: 0;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
+  width: 22px;
+  height: 22px;
   padding: 0;
   border: 0;
   border-radius: var(--radius-control);
@@ -1932,7 +1945,10 @@ html.dark .dropdown-surface :is(select, option) {
 }
 .terminal-connection-connected { background: var(--status-success); }
 .terminal-connection-connecting { background: var(--status-warning); }
-.terminal-host { flex: 1; min-height: 0; padding: 8px; overflow: hidden; }
+/* Extra bottom padding + safe-area so the TUI's last row is never clipped by
+   tablet browser chrome or rounded corners (xterm fits to whole rows; a
+   too-tight box eats the status line). */
+.terminal-host { flex: 1; min-height: 0; padding: 8px 8px max(10px, env(safe-area-inset-bottom)); overflow: hidden; }
 .terminal-host .xterm { height: 100%; }
 .terminal-error {
   padding: 7px 10px;
@@ -2086,7 +2102,8 @@ html.dark .dropdown-surface :is(select, option) {
   background: var(--accent);
   vertical-align: baseline;
   transform: translateY(0.08em);
-  animation: login-caret-blink 1.2s steps(1) infinite;
+  /* Deliberately static: the caret is the brand mark (see docker/icon.svg),
+     not a live cursor — blinking next to the wordmark reads as noise. */
 }
 .login-card {
   width: min(400px, 100%);
@@ -2191,10 +2208,9 @@ html.dark .dropdown-surface :is(select, option) {
 }
 .login-reveal:hover { color: var(--text); background: var(--bg-hover); }
 
-@keyframes login-caret-blink { 0%, 55% { opacity: 1; } 56%, 100% { opacity: 0; } }
 @keyframes login-card-in { from { opacity: 0; transform: translateY(10px) scale(0.985); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: reduce) {
-  .login-caret, .login-card { animation: none; }
+  .login-card { animation: none; }
 }
 
 /* ============================ Engine picker ============================== */
@@ -2424,9 +2440,15 @@ html.dark .dropdown-surface :is(select, option) {
     height: 40px;
     min-width: 42px;
   }
+  /* The terminal strip stays deliberately compact even on touch (it is a
+     tab bar, not a toolbar); 28px keeps it tappable without the bulk. */
+  .terminal-toolbar, .terminal-tabs {
+    min-height: 28px;
+    height: 28px;
+  }
   .terminal-tab-close, .terminal-action {
-    width: 34px;
-    height: 34px;
+    width: 26px;
+    height: 26px;
   }
   .directory-picker-back,
   .directory-picker-entry,

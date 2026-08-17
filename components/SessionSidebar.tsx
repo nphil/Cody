@@ -228,7 +228,7 @@ function SidebarIconButton({
       aria-pressed={active}
       style={{
         display: "flex", alignItems: "center", justifyContent: "center",
-        width: 26, height: 26, padding: 0, flexShrink: 0, lineHeight: 0,
+        width: 28, height: 28, padding: 0, flexShrink: 0, lineHeight: 0,
         background: active || hovered ? "var(--bg-hover)" : "none",
         border: "none",
         borderRadius: "var(--radius-control)",
