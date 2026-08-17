@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Cody app icon: the login-wordmark identity (lowercase "c" + terminal
+       caret) in the dark-theme palette, dressed for a launcher tile —
+       gradient ground, soft caret glow, hairline top highlight. Rendered to
+       icon.png (512px) for the Unraid template; regenerate the PNG whenever
+       this file changes. -->
+  <defs>
+    <linearGradient id="ground" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2A2A40"/>
+      <stop offset="0.55" stop-color="#1E1E2E"/>
+      <stop offset="1" stop-color="#181825"/>
+    </linearGradient>
+    <linearGradient id="caret" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#DDC2FF"/>
+      <stop offset="1" stop-color="#B583F0"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.72" cy="0.5" r="0.55">
+      <stop offset="0" stop-color="#CBA6F7" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#CBA6F7" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="tile"><rect width="512" height="512" rx="116"/></clipPath>
+  </defs>
+  <g clip-path="url(#tile)">
+    <rect width="512" height="512" fill="url(#ground)"/>
+    <rect width="512" height="512" fill="url(#glow)"/>
+    <!-- hairline highlight along the top edge -->
+    <rect x="8" y="8" width="496" height="496" rx="108" fill="none"
+          stroke="#CDD6F4" stroke-opacity="0.10" stroke-width="2"/>
+    <!-- the "c" -->
+    <path d="M 266.5 184 A 88 88 0 1 0 266.5 328" fill="none"
+          stroke="#CDD6F4" stroke-width="52" stroke-linecap="round"/>
+    <!-- the caret -->
+    <rect x="336" y="150" width="66" height="212" rx="18" fill="url(#caret)"/>
+  </g>
+</svg>
