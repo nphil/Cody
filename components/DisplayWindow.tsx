@@ -38,6 +38,21 @@ export function DisplayWindow({ sessionId }: { sessionId: string }): ReactElemen
     return () => { cancelled = true; };
   }, [sessionId]);
 
+  // globals.css reserves a permanent scrollbar gutter on <html> so the app's
+  // layout never shifts. Here that gutter is a fidelity bug, not a cosmetic
+  // one: this window's whole job is to report its real size, and the reserved
+  // strip both shows a scrollbar the surface can never use and shrinks the
+  // viewport the remote surface renders at. Scoped to this route, restored on
+  // unmount, so the app-wide behaviour is untouched.
+  useEffect(() => {
+    const root = document.documentElement;
+    const gutter = root.style.scrollbarGutter;
+    const overflow = root.style.overflow;
+    root.style.scrollbarGutter = "auto";
+    root.style.overflow = "hidden";
+    return () => { root.style.scrollbarGutter = gutter; root.style.overflow = overflow; };
+  }, []);
+
   const request = live ?? initial ?? null;
 
   return (

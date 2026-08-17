@@ -36,9 +36,9 @@ preview:
 
 | Surface | Device px | Mpx | Repaint median |
 | --- | --- | --- | --- |
-| **Docked Preview panel** | 1076×1518 | 1.63 | **≈30 ms** — comfortably immediate |
-| **Popped out / maximised** | 2880×1800 | 5.18 | **≈64 ms** — noticeable |
-| **4K-class surface** | 3840×2400 | 9.22 | **≈100 ms** (154 ms p95) — not native |
+| **Docked Preview panel** (a range — depends on the panel split) | 640×1518 – 2150×1518 | 0.97 – 3.3 | **≈23–45 ms** — immediate |
+| **Popped out / maximised** | 2880×1800 – 3180×2000 | 5.2 – 6.4 | **≈64–76 ms** — noticeable |
+| **Architectural maximum** (the clamps' ceiling) | 4096×2560 | 10.5 | **115 ms**, 154 ms p95 — not native |
 
 So today's path is *fine where it is normally used* and degrades exactly where the
 user is looking hardest: **the penalty becomes visible when they pop the preview out
@@ -339,26 +339,48 @@ back; n = 8–18 per row.
    25 → 55 → 97 → 115 ms. A linear fit gives roughly **13–16 ms fixed plus
    ~9–10 ms per megapixel** (`GpuPassthrough` reports ~13 + 9.9; my own
    least-squares on the four points gives 16.1 + 9.17 — the same answer within the
-   noise of four samples). **Interpolate to the surfaces that actually exist, and
-   the answer is a ladder rather than one number** — both figures below sit
-   *between* measured rows, so neither extrapolates:
+   noise of four samples). **Interpolated onto the surfaces that actually exist it
+   becomes a ladder.** The "surface" column says where the *geometry* comes from; the
+   only row whose *latency* was directly measured is the last one, and every other
+   median is interpolated from the fit — all of them inside the measured 1.02–10.49
+   Mpx span except the floor row, which is below it and so marked:
 
-   | Surface | CSS viewport | Device px | Mpx | Median |
-   | --- | --- | --- | --- | --- |
-   | Docked Preview panel | 538×759 @dpr2 | 1076×1518 | 1.63 | **≈30 ms** |
-   | Popped out / maximised | 1440×900 @dpr2 | 2880×1800 | 5.18 | **≈64 ms** |
-   | 4K-class | 1920×1200 @dpr2 | 3840×2400 | 9.22 | **≈100 ms**, 154 ms p95 |
+   | Surface | CSS viewport | Device px | Mpx | Median | Geometry from |
+   | --- | --- | --- | --- | --- | --- |
+   | Docked, client floor | 320×240 @dpr2 | 640×480 | 0.31 | ≈16 ms *(extrapolated)* | clamp |
+   | Docked, narrow panel | 320×759 @dpr2 | 640×1518 | 0.97 | ≈23 ms | measured |
+   | Docked, ~42 % of a 1280 window | 538×759 @dpr2 | 1076×1518 | 1.63 | **≈30 ms** | measured |
+   | Docked, ~42 % of a 2560 window | 1075×759 @dpr2 | 2150×1518 | 3.26 | ≈45 ms | arithmetic |
+   | Pop-out, 1440 logical | 1440×900 @dpr2 | 2880×1800 | 5.18 | **≈64 ms** | arithmetic |
+   | Pop-out, 1600×1000 logical | 1590×1000 @dpr2 | 3180×2000 | 6.36 | ≈76 ms | measured |
+   | **Architectural maximum** | 2560×1600 @dpr3 | 4096×2560 | 10.49 | **115 ms** (154 p95) | **latency measured** |
 
-   The docked panel is small because it shares the window with chat, the file tree
-   and the rest of the UI (docked figure measured by `StreamClient`, who owns that
-   component). **So ~30 ms is the everyday cost and it is comfortably inside the
-   immediate-feel budget** — I earlier attached the 64 ms figure to everyday use and
-   that was wrong by about 2×. The 64 ms is the price of **popping out or
-   maximising**, and ~100–154 ms is what a 4K-class surface costs. The
-   uncomfortable part is the shape: the penalty grows exactly in proportion to how
-   much screen the user gives the preview, so it becomes visible precisely when they
-   have popped it out to look closely. Any cap the pop-out places on surface size is
-   therefore a latency control, and should be understood as one.
+   **The docked panel is a range, not a number** — it is whatever CSS width
+   `AppShell`'s panel split hands the canvas, since the panel shares the window with
+   chat and the file tree. `StreamClient` measured the 320- and 538-wide cases and
+   confirmed the pop-out sends the **full window** viewport. So **≈30 ms is a fair
+   everyday figure and it is comfortably inside the immediate-feel budget.** I
+   earlier attached the 64 ms number to everyday use, which was wrong by about 2×:
+   64–76 ms is the price of **popping out or maximising**.
+
+   **The last row is the satisfying part: the worst case measured is the worst case
+   that can exist.** Working the clamps in `provider.ts` through — CSS clamped to
+   320–2560 × 240–1600, `deviceScaleFactor` to 1–3, and `captureScale` additionally
+   reduced by `fit = min(4096/w, 4096/h)` so the surface stays inside
+   `MAX_FRAME_EDGE` — a 2560×1600 CSS viewport at dpr 3 yields `captureScale` 1.6 and
+   a frame of exactly **4096×2560 = 10.49 Mpx**, which is precisely
+   `GpuPassthrough`'s row 4. So ~115 ms median / 154 ms p95 is not a test artefact,
+   it is the architectural ceiling, and the `fit` clamp is what prevents the
+   5120×3200 (16.4 Mpx) frame the raw CSS limits would otherwise permit.
+
+   **Correcting myself on where the latency control lives.** I wrote earlier that a
+   pop-out surface cap acts as a latency control. There is **no client-side area
+   cap**: the client sends its measured CSS size with only a 320×240 floor, and caps
+   **density** at `min(3, max(1, devicePixelRatio))`. The area backstop is entirely
+   server-side, in `control()`'s clamps and `MAX_FRAME_EDGE`. So the knobs that
+   actually bound latency are the server's CSS clamp, the dsf ceiling of 3, and
+   `MAX_FRAME_EDGE` — and since device pixels go as `css × min(dsf, fit)`, both a
+   high-DPI client and a large panel push toward the same ceiling.
 3. **Idle bandwidth is modest**: 1.22–6.26 Mbit/s, against 30.5–58.6 Mbit/s
    saturated. So bandwidth is genuinely the *weaker* half of the case against the
    current path, and latency is the strong half. The 19–27× bandwidth gap in §2.2 is

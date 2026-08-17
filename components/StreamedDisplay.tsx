@@ -266,11 +266,32 @@ export const StreamedDisplay = forwardRef<StreamedDisplayHandle, StreamedDisplay
     // Fires once on observe, which is what establishes the initial viewport.
     const observer = new ResizeObserver(() => applyViewport());
     observer.observe(canvas);
-    // Moving the window to a display with a different pixel ratio, or zooming,
-    // changes the device grid without changing the CSS box.
+    // Zooming fires resize, so the CSS box and the device grid both stay
+    // honest through it.
     const onWindowResize = () => applyViewport();
     window.addEventListener("resize", onWindowResize);
-    return () => { observer.disconnect(); window.removeEventListener("resize", onWindowResize); };
+    // Dragging the window to a display with a different density, however,
+    // changes devicePixelRatio with NO resize and NO CSS box change, and the
+    // density is exactly what the provider renders at — leaving it stale is how
+    // a whole session ends up soft. A resolution query is the only thing that
+    // reports it: it matches while the ratio holds and fires once when it
+    // stops, so each change re-arms the next watch.
+    let density: MediaQueryList | null = null;
+    function onDensityChange(): void {
+      applyViewport();
+      watchDensity();
+    }
+    function watchDensity(): void {
+      density?.removeEventListener("change", onDensityChange);
+      density = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+      density.addEventListener("change", onDensityChange);
+    }
+    watchDensity();
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", onWindowResize);
+      density?.removeEventListener("change", onDensityChange);
+    };
   }, [active, applyViewport]);
 
   /** Remote input space is the viewport we asked for, in its CSS pixels — NOT

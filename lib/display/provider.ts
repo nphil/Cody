@@ -222,7 +222,22 @@ class RasterWebProvider implements DisplayProvider {
   private disposed = false;
   private sessionId: string;
   private viewport: Viewport = { width: 1280, height: 800, deviceScaleFactor: 1 };
-  /** Density Chromium was launched at; fixed for the browser's lifetime. */
+  /**
+   * Density Chromium was launched at; fixed for the browser's lifetime because
+   * it is a process flag, not a page property. A client reporting a HIGHER
+   * deviceScaleFactor later — a monitor drag, or zooming past the launch
+   * density — is deliberately NOT honoured: the only way to act on it is
+   * relaunching, which re-navigates and destroys the page's scroll position,
+   * form input and JS state. A soft frame costs the user one reopen (the idle
+   * dispose then hands them a fresh provider at the current density); lost form
+   * state costs them their work. This follows from the launch flag itself, not
+   * from how the client noticed the change — removing any client-side density
+   * watcher will not make it go away. DECREASES need no relaunch at all,
+   * fractional ones included (150% zoom reports 1.5): they re-clamp against
+   * this surface in `startScreencast`. A provider whose surface owns its own
+   * density (X11/Wayland, Android) should honour both directions; the wire
+   * already carries what it needs.
+   */
   private captureScale = 1;
   private startTimer: NodeJS.Timeout | null = null;
   /** Screencast frame awaiting an ack that backpressure is holding back. */
