@@ -2,10 +2,11 @@
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ChevronDown } from "lucide-react";
-import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
+import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, ImageContent, SessionInfo, SessionTreeNode, ToolCallContent, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
 import { countToolCallBlocks, getDisplayableAssistantBlocks, splitFinalAssistantBlocks } from "@/lib/message-display";
-import { MessageView } from "./MessageView";
+import { imageSource, MessageView } from "./MessageView";
+import { ClickableImage } from "./ImageLightbox";
 import { ChatInput, type ChatInputHandle, type ContextModelUsage } from "./ChatInput";
 import { ExtensionDialog } from "./ExtensionDialog";
 import { SubagentTranscriptDialog } from "./SubagentTranscriptDialog";
@@ -166,7 +167,37 @@ function OmpRuntimeVersion() {
   );
 }
 
-function ProcessDetailsGroup({ messageCount, toolCallCount, children }: { messageCount: number; toolCallCount: number; children: ReactNode }) {
+/** Tool-result images produced inside a collapsed process group. A screenshot
+ * the agent took of its work (preview_screenshot) is the point of the turn,
+ * so it must not disappear with the collapse. */
+function collectGroupResultImages(
+  messages: AgentMessage[],
+  indices: number[],
+  toolResultsMap: Map<string, ToolResultMessage>,
+  extraBlocks: AssistantContentBlock[],
+): ImageContent[] {
+  const images: ImageContent[] = [];
+  const fromResult = (toolCallId: string) => {
+    const result = toolResultsMap.get(toolCallId);
+    if (!result || !Array.isArray(result.content)) return;
+    for (const block of result.content) {
+      if (block.type === "image") images.push(block);
+    }
+  };
+  const fromMessageBlocks = (content: AssistantContentBlock[]) => {
+    for (const block of content) {
+      if (block.type === "toolCall") fromResult((block as ToolCallContent).toolCallId);
+    }
+  };
+  for (const idx of indices) {
+    const message = messages[idx];
+    if (message.role === "assistant" && Array.isArray(message.content)) fromMessageBlocks(message.content);
+  }
+  fromMessageBlocks(extraBlocks);
+  return images.slice(0, 6);
+}
+
+function ProcessDetailsGroup({ messageCount, toolCallCount, resultImages, children }: { messageCount: number; toolCallCount: number; resultImages?: ImageContent[]; children: ReactNode }) {
   const { t, tn } = useI18n();
   const [expanded, setExpanded] = useState(false);
   const parts = [t("chatWindow.processDetails"), tn("chatWindow.messageCount", messageCount)];
@@ -195,6 +226,23 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, children }: { messag
           {parts.join(" · ")}
         </span>
       </button>
+      {/* Collapsed only: expanding shows the same images inside their tool
+          blocks, so the strip would duplicate them. */}
+      {!expanded && resultImages && resultImages.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
+          {resultImages.map((img, i) => {
+            const src = imageSource(img);
+            return src ? (
+              <ClickableImage
+                key={i}
+                src={src}
+                alt=""
+                style={{ maxWidth: "min(440px, 100%)", maxHeight: 260, borderRadius: 6, objectFit: "contain", display: "block", border: "1px solid var(--border)", background: "#fff" }}
+              />
+            ) : null;
+          })}
+        </div>
+      )}
       {expanded && (
         <div style={{ marginTop: 8 }}>
           {children}
@@ -360,6 +408,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
         <ProcessDetailsGroup
           messageCount={processCount}
           toolCallCount={countToolCalls(messages, visibleProcessIndices) + countToolCallBlocks(finalSplit.processBlocks)}
+          resultImages={collectGroupResultImages(messages, visibleProcessIndices, toolResultsMap, finalSplit.processBlocks)}
         >
           {visibleProcessIndices.map((processIdx) => renderMessage(processIdx, { attachRef: false, keyPrefix: "process" }))}
           {finalProcessMessage && renderMessage(finalAssistantIdx, { attachRef: false, keyPrefix: "process-final", messageOverride: finalProcessMessage, showTimestamp: false })}

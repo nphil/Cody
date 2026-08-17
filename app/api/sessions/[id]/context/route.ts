@@ -34,6 +34,8 @@ export async function GET(
     const context = buildSessionContext(entries, leafId, {
       deferThinking,
       deferToolResultImages,
+      toolResultImageUrl: (entryId, index) =>
+        `/api/sessions/${encodeURIComponent(id)}/media?entryId=${encodeURIComponent(entryId)}&index=${index}`,
     });
 
     return NextResponse.json({ context });

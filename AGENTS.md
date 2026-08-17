@@ -71,6 +71,8 @@ app/api/
   sessions/[id]/route.ts          GET/PATCH/DELETE session
   sessions/[id]/context/route.ts  GET ?leafId= — context for a specific leaf
   sessions/[id]/export/route.ts   GET exported HTML for a session
+  sessions/[id]/media/route.ts    GET one deferred tool-result image's bytes
+  preview/screenshot/route.ts     POST server-side screenshot of a loopback URL
   agent/new/route.ts              POST { cwd, message, toolNames?, provider?, modelId? }
   agent/[id]/route.ts             GET state | POST any RPC command
   agent/[id]/events/route.ts      GET SSE stream
@@ -114,6 +116,7 @@ lib/
   pi-types.ts          local structural types for agent/RPC objects
   preview-url.ts       loopback preview URL rules: normalize/extract/probe
   preview-autoopen.ts  when an assistant-mentioned URL auto-opens the Preview panel
+  preview-screenshot.ts server-side headless-Chromium capture of loopback apps
   project-ordering.ts  pure project sort/group/activity helpers (client + tests)
   project-registry.ts  on-disk managed-project registry (~/.omp/agent/projects.json)
   rpc-manager.ts       session registry + startRpcSession over RpcProcess
@@ -323,6 +326,33 @@ appears without a Cody change.
   so the stored URL cannot race the requested one on first mount.
 - Host tools exist only on omp's rpc-ui protocol; turn engines (Claude Code /
   Codex) get the assistant-text detection path only.
+
+### Preview screenshots (`lib/preview-screenshot.ts`)
+- `preview_screenshot` is a SERVER-implemented host tool (rpc-manager
+  `SERVER_HOST_TOOLS`): registered at wrapper initialize, merged into every UI
+  `set_host_tools` (omp replaces the roster per call, so a reconnect
+  re-register must never drop it), and settled in `handleFrame` with
+  `sendFrame` — no attached browser required. The result carries the PNG as an
+  image content block plus a text line, so vision models see their own work.
+- Rendering shells out to a headless Chromium in one-shot `--screenshot` mode
+  (no CDP, no new dependency). Binary resolution: `CODY_CHROMIUM_BIN` →
+  Playwright caches → PATH → common install paths; the Docker image bundles
+  Debian chromium and pins `CODY_CHROMIUM_BIN=/usr/bin/chromium` (smoke test
+  asserts it). Loopback-only via `normalizePreviewUrl` — that rule is the SSRF
+  guard, do not widen it casually. `--no-sandbox` only when running as root.
+- Chat display: `ToolCallBlock` renders tool-result image blocks as
+  always-visible thumbnails (not behind the collapse). History loads defer
+  those images (`deferMedia`) — the reader replaces each with a url-source
+  block minted by `toolResultImageUrl` pointing at
+  `/api/sessions/[id]/media?entryId=&index=`, which streams the bytes with
+  blob resolution on. The media route MUST enumerate images with the same
+  predicate the deferral used (`isDeferrableToolResultImage`) or indexes
+  drift.
+- The Preview panel's camera button posts `/api/preview/screenshot` and
+  attaches the PNG to the composer via `ChatInputHandle.addFiles` — the
+  screenshot rides the existing image-attach path into whichever engine is
+  active (turn engines currently reject image prompts with
+  `images_unsupported`, same as a manual attach).
 
 ### Two kinds of branching — don't confuse them
 - **Fork** (Fork button on user message): creates a new independent `.jsonl` file. Shown as a child in the sidebar tree via `parentSession` header field.

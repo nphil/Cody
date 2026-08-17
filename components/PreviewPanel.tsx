@@ -1,8 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type ReactElement } from "react";
-import { ExternalLink, Globe, ListTodo, RotateCw } from "lucide-react";
+import { Camera, ExternalLink, Globe, ListTodo, RotateCw } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
+import { toast } from "./ui/toast";
 import { STORAGE_PREFIXES } from "@/lib/storage-keys";
 // Loopback-only rules + rationale live in lib/preview-url, shared with the
 // agent-facing open_preview host tool and the assistant-URL auto-open path.
@@ -22,6 +23,9 @@ export interface PreviewPanelProps {
   request?: PreviewOpenRequest | null;
   /** Jump to the Tasks tab (the usual way to start a dev server). */
   onOpenTasks?: () => void;
+  /** Receive a server-side screenshot of the previewed app (attached to the
+   * composer by the shell). */
+  onCaptureToChat?: (image: { data: string; mimeType: string }) => void;
 }
 
 const DEFAULT_URL = "http://localhost:3000";
@@ -32,7 +36,7 @@ function storageKeyFor(cwd: string): string {
 
 type Reachability = "unknown" | "checking" | "up" | "down";
 
-export function PreviewPanel({ cwd, active, request, onOpenTasks }: PreviewPanelProps): ReactElement | null {
+export function PreviewPanel({ cwd, active, request, onOpenTasks, onCaptureToChat }: PreviewPanelProps): ReactElement | null {
   const { t } = useI18n();
   const [input, setInput] = useState(DEFAULT_URL);
   /** The validated URL the iframe is (or will be) pointed at. */
@@ -139,6 +143,36 @@ export function PreviewPanel({ cwd, active, request, onOpenTasks }: PreviewPanel
     if (normalized) window.open(normalized, "_blank", "noopener");
   }, [input, target]);
 
+  // Server-side capture: the screenshot renders where the dev server runs,
+  // so it works even when this browser cannot reach the app as localhost.
+  const [capturing, setCapturing] = useState(false);
+  const captureToChat = useCallback(async () => {
+    const normalized = normalizePreviewUrl(input) ?? target;
+    if (!normalized || capturing) {
+      if (!normalized) setInputError(true);
+      return;
+    }
+    setCapturing(true);
+    try {
+      const res = await fetch("/api/preview/screenshot", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url: normalized }),
+      });
+      const payload = await res.json().catch(() => null) as { data?: string; mimeType?: string; error?: string; hint?: string } | null;
+      if (!res.ok || !payload?.data || !payload.mimeType) {
+        toast.error(t("preview.captureFailed"), [payload?.error, payload?.hint].filter(Boolean).join(" "), { clamp: true });
+        return;
+      }
+      onCaptureToChat?.({ data: payload.data, mimeType: payload.mimeType });
+      toast.success(t("preview.captureAttached"));
+    } catch {
+      toast.error(t("preview.captureFailed"));
+    } finally {
+      if (mountedRef.current) setCapturing(false);
+    }
+  }, [capturing, input, onCaptureToChat, t, target]);
+
   const reload = useCallback(() => {
     if (target === null) { load(); return; }
     setFrameKey((k) => k + 1);
@@ -189,6 +223,14 @@ export function PreviewPanel({ cwd, active, request, onOpenTasks }: PreviewPanel
           onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }} onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}>
           <RotateCw size={13} strokeWidth={2} aria-hidden="true" style={reachability === "checking" ? { animation: "spin 0.8s linear infinite" } : undefined} />
         </button>
+        {onCaptureToChat && (
+          <button type="button" className="ui-focus-ring" onClick={() => { void captureToChat(); }} disabled={capturing}
+            title={t("preview.capture")} aria-label={t("preview.capture")}
+            style={{ ...controlStyle, cursor: capturing ? "progress" : "pointer", opacity: capturing ? 0.6 : 1 }}
+            onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }} onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}>
+            <Camera size={13} strokeWidth={2} aria-hidden="true" style={capturing ? { animation: "pulse 1s ease-in-out infinite" } : undefined} />
+          </button>
+        )}
         <button type="button" className="ui-focus-ring" onClick={detach} title={t("preview.detach")} aria-label={t("preview.detach")} style={controlStyle}
           onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }} onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}>
           <ExternalLink size={13} strokeWidth={2} aria-hidden="true" />

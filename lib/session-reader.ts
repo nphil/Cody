@@ -360,7 +360,14 @@ const SUPERSEDED_COMPACTION_SUMMARY = "[Superseded compaction summary elided aft
 export function buildSessionContext(
   entries: SessionEntry[],
   leafId?: string | null,
-  options: { deferThinking?: boolean; deferToolResultImages?: boolean } = {},
+  options: {
+    deferThinking?: boolean;
+    deferToolResultImages?: boolean;
+    /** With deferToolResultImages: replace each deferred image with a
+     *  url-source block minted by this factory (entry id + image index)
+     *  instead of a text placeholder. */
+    toolResultImageUrl?: (entryId: string, index: number) => string;
+  } = {},
 ): SessionContext {
   const emptyContext: SessionContext = { messages: [], entryIds: [], thinkingLevel: "off", model: null, todoPhases: [] };
   const byId = new Map<string, SessionEntry>();
@@ -599,7 +606,18 @@ function stripToolResultDetails(message: AgentMessage): AgentMessage {
   return rest;
 }
 
-function omitToolResultBase64Images(message: AgentMessage): AgentMessage {
+/** The blocks the deferral machinery counts as tool-result images: image
+ * blocks carrying data (inline base64, or a blob ref when resolution was
+ * skipped). The media route MUST enumerate with the same predicate so its
+ * `index` addresses the same block the deferred URL was minted for. */
+export function isDeferrableToolResultImage(block: unknown): boolean {
+  return base64ImageInfo(block) !== null;
+}
+
+function omitToolResultBase64Images(
+  message: AgentMessage,
+  imageUrl?: (index: number) => string,
+): AgentMessage {
   if (message.role !== "toolResult") return message;
   // Shape-malformed-but-JSON-valid files can carry a string content here
   // (import accepts arbitrary content); the loader tolerates such lines, so
@@ -609,21 +627,36 @@ function omitToolResultBase64Images(message: AgentMessage): AgentMessage {
   let omitted = 0;
   let bytes = 0;
   const mimes = new Set<string>();
-  const content = message.content.filter((block) => {
+  let imageIndex = -1;
+  const content: typeof message.content = [];
+  for (const block of message.content) {
     const image = base64ImageInfo(block);
-    if (!image) return true;
+    if (!image) {
+      content.push(block);
+      continue;
+    }
+    imageIndex += 1;
+    if (imageUrl) {
+      // Deferred images stay addressable: a url-source block pointing at the
+      // per-entry media route, so the transcript shows the real image (the
+      // browser fetches and caches it lazily) without the initial context
+      // payload carrying megabytes of base64.
+      content.push({ type: "image", source: { type: "url", url: imageUrl(imageIndex) } });
+      continue;
+    }
     omitted += 1;
     bytes += image.bytes;
     if (image.mime) mimes.add(image.mime);
-    return false;
-  });
-  if (omitted === 0) return message;
+  }
+  if (imageIndex === -1) return message;
 
-  const mimeText = mimes.size > 0 ? `: ${[...mimes].join(", ")}` : "";
-  content.push({
-    type: "text",
-    text: `[${omitted} tool result image${omitted === 1 ? "" : "s"} omitted from initial history payload${mimeText}, ~${bytes} bytes]`,
-  });
+  if (omitted > 0) {
+    const mimeText = mimes.size > 0 ? `: ${[...mimes].join(", ")}` : "";
+    content.push({
+      type: "text",
+      text: `[${omitted} tool result image${omitted === 1 ? "" : "s"} omitted from initial history payload${mimeText}, ~${bytes} bytes]`,
+    });
+  }
   return { ...message, content };
 }
 
@@ -645,7 +678,11 @@ function compactionUiMessage(entry: CompactionEntry, active: boolean): CustomMes
 // Returns null for entries that do not map to chat history (metadata, non-message types).
 export function entryToUiMessage(
   entry: SessionEntry,
-  options: { deferThinking?: boolean; deferToolResultImages?: boolean },
+  options: {
+    deferThinking?: boolean;
+    deferToolResultImages?: boolean;
+    toolResultImageUrl?: (entryId: string, index: number) => string;
+  },
 ): AgentMessage | null {
   switch (entry.type) {
     case "message": {
@@ -691,7 +728,10 @@ export function entryToUiMessage(
         };
       }
       const normalized = options.deferToolResultImages
-        ? omitToolResultBase64Images(normalizeToolCalls(raw))
+        ? omitToolResultBase64Images(
+            normalizeToolCalls(raw),
+            options.toolResultImageUrl ? (index) => options.toolResultImageUrl!(entry.id, index) : undefined,
+          )
         : normalizeToolCalls(raw);
       const message = stripToolResultDetails(normalized);
       if (!options.deferThinking || message.role !== "assistant") return message;

@@ -769,6 +769,12 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
     : null;
   const resultIsEmpty = resultText === null ? false : (resultText.trim() === "(no output)" || resultText.trim() === "");
   const isError = result?.isError ?? false;
+  // Tool-result images (preview_screenshot and friends) render as
+  // always-visible thumbnails, not behind the collapse — a screenshot the
+  // agent took of its work is the point of the tool call.
+  const resultImages = result && Array.isArray(result.content)
+    ? result.content.filter((b): b is ImageContent => b.type === "image")
+    : [];
 
   return (
     <div
@@ -860,6 +866,21 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
           )
         )}
       </Collapsible>
+      {resultImages.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, padding: "8px 10px", borderTop: "1px solid color-mix(in srgb, var(--status-success) 20%, transparent)" }}>
+          {resultImages.map((img, i) => {
+            const src = imageSource(img);
+            return src ? (
+              <ClickableImage
+                key={i}
+                src={src}
+                alt=""
+                style={{ maxWidth: "min(440px, 100%)", maxHeight: 260, borderRadius: 6, objectFit: "contain", display: "block", border: "1px solid var(--border)", background: "#fff" }}
+              />
+            ) : null;
+          })}
+        </div>
+      )}
     </div>
   );
 }, (prev, next) => (
@@ -1520,7 +1541,9 @@ function getMessageImages(content: CustomMessage["content"] | UserMessage["conte
   return content.filter((b): b is ImageContent => b.type === "image");
 }
 
-function imageSource(img: ImageContent): string {
+/** data:/url src for an image block (nested source or pi-ai flat data shape).
+ * Shared with ChatWindow's process-group thumbnail strip. */
+export function imageSource(img: ImageContent): string {
   const flat = img as unknown as { data?: string; mimeType?: string };
   if (img.source) {
     return img.source.type === "base64"

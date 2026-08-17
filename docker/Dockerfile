@@ -21,8 +21,8 @@ RUN npm run build && npm prune --omit=dev
 FROM node:22-bookworm-slim AS runtime
 
 # The container doubles as the dev box the agent works in, so it carries a
-# curated set of everyday tools on top of the slim Debian base — enough to
-# develop with, small enough to stay lightweight (~120MB over the base):
+# curated set of everyday tools on top of the slim Debian base (~120MB, plus
+# Chromium's ~430MB — the one deliberately heavy passenger):
 #   git/gh:            version control + GitHub CLI
 #   python3(+pip/venv): scripts, tooling, agent-written code
 #   ripgrep/jq:        search and JSON plumbing agents and humans both use
@@ -30,11 +30,16 @@ FROM node:22-bookworm-slim AS runtime
 #   openssh-server:    direct SSH into the workspace (entrypoint-managed,
 #                      only enabled when credentials are configured)
 #   procps/curl:       healthcheck + debug
+#   chromium/fonts:    headless renderer behind the preview_screenshot host
+#                      tool and the Preview panel's capture button — the
+#                      agent seeing its own work is core product, and a
+#                      post-hoc apt install would not survive image updates
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     git gh curl wget ca-certificates procps openssh-client openssh-server \
     python3 python3-pip python3-venv \
     ripgrep jq nano less unzip zip \
+    chromium fonts-liberation \
   && rm -rf /var/lib/apt/lists/* \
   && mkdir -p /run/sshd
 
@@ -51,6 +56,7 @@ ENV NODE_ENV=production \
   HOME=/data/home \
   PI_CODING_AGENT_DIR=/data/agent \
   CODY_HARNESS=omp \
+  CODY_CHROMIUM_BIN=/usr/bin/chromium \
   PORT=30177 \
   TERM=xterm-256color
 

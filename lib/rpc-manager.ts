@@ -7,10 +7,12 @@ import { validateAgentImages } from "./image-attachments";
 import { invalidateModelsCache } from "./models-cache";
 import { RpcCommandError, RpcProcess, type RpcFrame } from "./omp/rpc-process";
 import { readNativeSettings } from "./omp/settings-config";
+import { captureLoopbackScreenshot, ScreenshotError } from "./preview-screenshot";
 import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
 import { PRESET_FULL } from "./tool-presets";
 import type {
   BashResultInfo,
+  HostToolDefinition,
   OmpModel,
   RpcAvailableSlashCommand,
   RpcSessionState,
@@ -38,6 +40,28 @@ interface CompactionResultLike {
 
 const IDLE_DESTROY_MS = 10 * 60 * 1000;
 const READY_TIMEOUT_MS = 120_000;
+
+/**
+ * Host tools implemented by the Cody SERVER rather than the browser: they
+ * ride along every set_host_tools registration and settle in handleFrame with
+ * no attached UI required. preview_screenshot renders a loopback URL in a
+ * headless Chromium where the dev server actually runs, so the model can SEE
+ * its work — including with every browser tab closed.
+ */
+const SERVER_HOST_TOOLS: HostToolDefinition[] = [{
+  name: "preview_screenshot",
+  description: "Capture a screenshot of a web page served by a local dev server and see the rendered result. Use it after making UI changes to visually verify your work. Only loopback URLs (http://localhost:PORT or http://127.0.0.1:PORT) can be captured.",
+  parameters: {
+    type: "object",
+    properties: {
+      url: { type: "string", description: "Loopback URL to capture, e.g. http://localhost:3000" },
+      width: { type: "number", description: "Viewport width in px (default 1280)" },
+      height: { type: "number", description: "Viewport height in px (default 800)" },
+    },
+    required: ["url"],
+  },
+}];
+const SERVER_HOST_TOOL_NAMES = new Set(SERVER_HOST_TOOLS.map((tool) => tool.name));
 const MCP_LIST_TIMEOUT_MS = 15_000;
 
 const RESTARTING_MESSAGE = "This session is restarting — retry in a moment.";
@@ -260,6 +284,10 @@ export class AgentSessionWrapper {
     // a live subagent roster. Older omp builds may not know the command —
     // degrade silently (the UI falls back to no subagent info).
     await this.proc.sendCommand({ type: "set_subagent_subscription", level: "events" }).catch(() => {});
+    // Server-implemented host tools are available from the first turn, no
+    // browser needed; a later UI set_host_tools re-sends them merged. Older
+    // omp builds without host tools degrade silently.
+    await this.proc.sendCommand({ type: "set_host_tools", tools: [...SERVER_HOST_TOOLS] }).catch(() => {});
     const state = await this.proc.sendCommand<RpcSessionState>({ type: "get_state" });
     this.applyIdentity(state);
   }
@@ -372,6 +400,11 @@ export class AgentSessionWrapper {
       case "host_tool_call": {
         const id = typeof event.id === "string" ? event.id : "";
         const toolName = typeof event.toolName === "string" ? event.toolName : "";
+        // Server-implemented tools settle right here, browser or no browser.
+        if (id && SERVER_HOST_TOOL_NAMES.has(toolName)) {
+          void this.handleServerHostTool(id, toolName, event);
+          return;
+        }
         // Route REGISTERED host tools to an attached UI (the browser answers
         // via host_tool_result); unregistered tools or no attached listener
         // are rejected immediately so the agent never hangs on a tool nobody
@@ -503,6 +536,46 @@ export class AgentSessionWrapper {
       }
     }
     return false;
+  }
+
+  /**
+   * Settle a SERVER-implemented host tool call (see SERVER_HOST_TOOLS) —
+   * executed here in the Node process, answered with sendFrame like the
+   * reject paths, never routed to a browser.
+   */
+  private async handleServerHostTool(id: string, toolName: string, event: AgentEvent): Promise<void> {
+    if (toolName !== "preview_screenshot") {
+      this.rejectUnexpectedHostTool(event);
+      return;
+    }
+    const args = (typeof event.arguments === "object" && event.arguments !== null ? event.arguments : {}) as { url?: unknown; width?: unknown; height?: unknown };
+    const url = typeof args.url === "string" ? args.url : "";
+    try {
+      const shot = await captureLoopbackScreenshot(url, {
+        width: typeof args.width === "number" ? args.width : undefined,
+        height: typeof args.height === "number" ? args.height : undefined,
+      });
+      this.proc.sendFrame({
+        type: "host_tool_result",
+        id,
+        result: {
+          content: [
+            { type: "image", data: shot.data, mimeType: shot.mimeType },
+            { type: "text", text: `Screenshot of ${shot.url} at ${shot.width}x${shot.height}.` },
+          ],
+        },
+      });
+    } catch (error) {
+      const message = error instanceof ScreenshotError
+        ? `${error.message}${error.hint ? ` ${error.hint}` : ""}`
+        : `Screenshot failed: ${error instanceof Error ? error.message : String(error)}`;
+      this.proc.sendFrame({
+        type: "host_tool_result",
+        id,
+        isError: true,
+        result: { content: [{ type: "text", text: message }] },
+      });
+    }
   }
 
   /**
@@ -1015,9 +1088,14 @@ export class AgentSessionWrapper {
 
       case "set_host_tools": {
         const tools = Array.isArray(command.tools) ? command.tools as Array<{ name?: unknown; [key: string]: unknown }> : [];
-        const valid = tools.filter((t) => typeof t.name === "string" && t.name);
+        // A server tool name in the UI's list would shadow the server
+        // implementation — the server one wins.
+        const valid = tools.filter((t) => typeof t.name === "string" && t.name && !SERVER_HOST_TOOL_NAMES.has(t.name as string));
         this.hostToolNames = new Set(valid.map((t) => t.name as string));
-        await this.proc.sendCommand({ type: "set_host_tools", tools: valid });
+        // Server-implemented tools ride every registration: omp replaces the
+        // whole roster per set_host_tools, so a UI re-register (SSE
+        // reconnect) must never drop them.
+        await this.proc.sendCommand({ type: "set_host_tools", tools: [...valid, ...SERVER_HOST_TOOLS] });
         return null;
       }
 

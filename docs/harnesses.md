@@ -35,9 +35,10 @@ prompt, streamed reply, tool activity, abort. What it does not buy (yet):
 forking, compaction, thinking levels, model switching from the composer,
 skills/plugins/MCP management, transcript replay across server restarts, or
 the agent-callable host tools (`open_file` / `open_url` / `open_preview` /
-`notify` — omp's rpc-ui bridge; loopback URLs in assistant replies still
-auto-open the Preview panel on every engine) — those surfaces hide
-automatically via capability flags. Both engines run
+`notify` / `preview_screenshot` — omp's rpc-ui bridge; loopback URLs in
+assistant replies still auto-open the Preview panel on every engine, and the
+Preview panel's capture button screenshots the app server-side regardless of
+engine) — those surfaces hide automatically via capability flags. Both engines run
 non-interactively with edits auto-accepted inside the workspace (there is no
 approval channel in their non-interactive modes) — treat the workspace as
 theirs while a turn runs.

@@ -1002,6 +1002,19 @@ export function AppShell() {
     previewAutoOpenerRef.current?.offer(urls, sessionId ?? null);
   }, []);
 
+  /** Preview panel capture button → composer attachment, so the screenshot
+   * rides the existing image-attach path into whichever engine is active. */
+  const handleCaptureToChat = useCallback((image: { data: string; mimeType: string }) => {
+    try {
+      const bytes = Uint8Array.from(atob(image.data), (c) => c.charCodeAt(0));
+      const ext = image.mimeType === "image/png" ? "png" : (image.mimeType.split("/")[1] ?? "png");
+      const file = new File([bytes], `preview-screenshot-${Date.now()}.${ext}`, { type: image.mimeType });
+      chatInputRef.current?.addFiles([file]);
+    } catch {
+      // A malformed payload only costs the attachment, never the panel.
+    }
+  }, []);
+
   const handleCloseFileTab = useCallback((tabId: string) => {
     // Compute everything from the current list outside the updaters: no side
     // effect inside a state updater, and no stale-closure read (the callback
@@ -1867,6 +1880,7 @@ export function AppShell() {
               active={rightPanelMode === "preview" && rightPanelOpen}
               request={previewRequest}
               onOpenTasks={() => setRightPanelMode("tasks")}
+              onCaptureToChat={handleCaptureToChat}
             />
           )}
         </div>

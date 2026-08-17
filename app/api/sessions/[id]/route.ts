@@ -235,7 +235,12 @@ export async function GET(
     }
     const leafId = getLeafEntryId(entries);
     const tree = projectTreeForResponse(buildSessionTree(entries));
-    const context = buildSessionContext(entries, leafId, { deferThinking, deferToolResultImages });
+    const context = buildSessionContext(entries, leafId, {
+      deferThinking,
+      deferToolResultImages,
+      toolResultImageUrl: (entryId, index) =>
+        `/api/sessions/${encodeURIComponent(id)}/media?entryId=${encodeURIComponent(entryId)}&index=${index}`,
+    });
 
     let modified = header.timestamp ?? new Date().toISOString();
     try { modified = statSync(filePath).mtime.toISOString(); } catch { /* use header timestamp */ }
