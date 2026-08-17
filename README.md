@@ -112,16 +112,15 @@ Cody is a Node-hosted Next.js app that drives your installed `omp` binary — it
 
 ## Self-hosting and engines
 
-`docker/` packages Cody together with the omp engine in one container —
-built for home servers; `docs/unraid.md` walks through the Unraid deployment
-(template included). The engine is chosen at onboarding (or later in
-Settings → User Accounts → Agent engine): omp ships in the image, while
-Claude Code and Codex install on demand into a persistent prefix that
-survives image updates. Engine credentials are the engine's own — run
-`claude` or `codex login` once in a Cody terminal, or set
-`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` on the container. The adapter
-contract and the checklist for adding more engines (Pi, Cline, …) live in
-`docs/harnesses.md`.
+`docker/` packages Cody engine-free for home servers; `docs/unraid.md`
+walks through the Unraid deployment (template included). The engine is
+chosen at onboarding (or later in Settings → User Accounts → Agent engine):
+omp, Claude Code and Codex all install on demand into a persistent prefix
+that survives image updates, and each updates independently from the same
+card. Engine credentials are the engine's own — run `claude` or
+`codex login` once in a Cody terminal, or set `ANTHROPIC_API_KEY` /
+`OPENAI_API_KEY` on the container. The adapter contract and the checklist
+for adding more engines (Pi, Cline, …) live in `docs/harnesses.md`.
 
 ## Development
 

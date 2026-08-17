@@ -52,11 +52,6 @@ jobs:
       - name: Smoke test the image
         run: |
           set -euo pipefail
-          # The harness has to be runnable, not merely installed. --entrypoint
-          # is required: the image's entrypoint ignores argv, so a bare
-          # `docker run … omp --version` never reaches omp.
-          docker run --rm --entrypoint omp cody:smoke --version
-
           fail() {
             echo "::error::$1" >&2
             docker logs cody-smoke >&2 || true
@@ -101,6 +96,21 @@ jobs:
           authed=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/smoke-cookies http://127.0.0.1:30177/api/sessions || echo 000)
           [ "$authed" = "200" ] || fail "fresh install: signed-in GET /api/sessions expected 200, got $authed"
 
+          # The image ships no engine: onboarding installs it. This is the
+          # critical path of a fresh install, so exercise it for real — the
+          # picker's install route must fetch omp into the persistent tools
+          # prefix and the binary must actually run there (Bun present, etc.).
+          engines=$(curl -s -b /tmp/smoke-cookies http://127.0.0.1:30177/api/engines || echo '')
+          echo "$engines" | grep -q '"id":"omp"' || fail "fresh install: /api/engines did not list omp (got: $engines)"
+          install=$(curl -s -o /tmp/install-body -w '%{http_code}' -b /tmp/smoke-cookies \
+            -H 'Content-Type: application/json' -d '{"id":"omp"}' \
+            --max-time 320 \
+            http://127.0.0.1:30177/api/engines/install || echo 000)
+          [ "$install" = "200" ] || fail "fresh install: omp install expected 200, got $install ($(cat /tmp/install-body))"
+          grep -q '"installed":true' /tmp/install-body || fail "fresh install: omp install did not report installed ($(cat /tmp/install-body))"
+          docker exec cody-smoke /data/agent/tools/bin/omp --version \
+            || fail "fresh install: installed omp does not run from the tools prefix"
+
           # Informational: the settings panel degrades to Cody's own controls
           # when OMP's schema cannot be read, so a miss here is worth seeing in
           # the log but must not block a release.
@@ -112,7 +122,7 @@ jobs:
             echo "::warning::omp settings schema did not load in the image"
           fi
           docker rm -f cody-smoke >/dev/null
-          echo "fresh-install perimeter verified (locked, first-run setup mints an admin, cookie works)"
+          echo "fresh-install verified (locked, setup mints an admin, omp installs from the picker and runs)"
 
           # ------------------------------------------------------------------
           # Password mode: CODY_PASSWORD still enables the env-managed account

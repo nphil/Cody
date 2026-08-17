@@ -269,6 +269,23 @@ function AgentEngineSection({ isMobile }: { isMobile: boolean }) {
                     {installing === engine.id ? "Installing…" : "Install"}
                   </button>
                 )}
+                {engine.installed && engine.installable && (
+                  // Same npm run as an install — the spec pins @latest, so a
+                  // re-install IS the update. Updating the active engine
+                  // restarts its live sessions server-side.
+                  <button
+                    type="button"
+                    onClick={() => install(engine)}
+                    disabled={busy}
+                    title={isActive ? "Update (restarts live agent sessions)" : "Update to the latest release"}
+                    style={{ ...smallButtonStyle, opacity: busy ? 0.6 : 1 }}
+                  >
+                    {installing === engine.id
+                      ? <Loader2 size={13} aria-hidden style={{ animation: "spin 0.9s linear infinite" }} />
+                      : <Download size={13} aria-hidden />}
+                    {installing === engine.id ? "Updating…" : "Update"}
+                  </button>
+                )}
                 {engine.installed && !isActive && (
                   <button type="button" onClick={() => select(engine)} disabled={busy} style={{ ...primaryButtonStyle, opacity: busy ? 0.6 : 1 }}>
                     {selecting === engine.id && <Loader2 size={13} aria-hidden style={{ animation: "spin 0.9s linear infinite" }} />}

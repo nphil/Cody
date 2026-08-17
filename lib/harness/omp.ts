@@ -11,6 +11,7 @@ export const ompHarness: HarnessAdapter = {
   shortName: "OMP",
   binaryName: "omp",
   tagline: "The oh-my-pi coding agent — Cody's founding engine, every surface enabled.",
+  installSpec: "@oh-my-pi/pi-coding-agent@latest",
   capabilities: {
     liveSessions: true,
     models: true,

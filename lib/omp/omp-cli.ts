@@ -3,6 +3,7 @@ import { existsSync } from "fs";
 import { homedir } from "os";
 import { delimiter, join } from "path";
 import { readEnv } from "../env";
+import { getAgentDir } from "./paths";
 
 /**
  * Locating and probing the user's installed `omp` CLI. Cody never embeds
@@ -32,6 +33,12 @@ export function invalidateOmpCliCache(): void {
 function probeOmpBin(): string | null {
   const override = readEnv("OMP_BIN");
   if (override) return existsSync(override) ? override : null;
+  // Cody's persistent tools prefix first: an omp installed from the engine
+  // picker must win over any stale copy elsewhere on PATH. Computed inline
+  // (mirrors lib/harness/engine-bin getToolsDir) to keep lib/omp free of a
+  // lib/harness import cycle.
+  const toolsCandidate = join(readEnv("TOOLS_DIR") ?? join(getAgentDir(), "tools"), "bin", BIN_NAME);
+  if (existsSync(toolsCandidate)) return toolsCandidate;
   for (const dir of (process.env.PATH ?? "").split(delimiter)) {
     if (!dir) continue;
     const candidate = join(dir, BIN_NAME);

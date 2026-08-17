@@ -1,6 +1,6 @@
 import { jsonError, requireAdmin } from "@/lib/auth/http";
 import { parseJsonWithinLimit } from "@/lib/bounded-form-data";
-import { getHarnessById, selectHarness } from "@/lib/harness";
+import { getHarness, getHarnessById, selectHarness } from "@/lib/harness";
 import { restartAllRpcSessions } from "@/lib/rpc-manager";
 import { GET as getEngines } from "../route";
 
@@ -32,7 +32,14 @@ export async function POST(request: Request) {
   const adapter = id ? getHarnessById(id) : undefined;
   if (!adapter) return jsonError(`Unknown engine "${id}"`, 400, "unknown_engine");
 
-  if (adapter.resolveBinary() === null) {
+  // Re-selecting the engine that is already active is the onboarding
+  // "decide later" path: nothing changes, the choice is just persisted. It
+  // must work even before the engine is installed — the image ships no
+  // engine, so on a fresh instance NOTHING is installed yet — and it must
+  // not restart anything.
+  const reaffirming = getHarness().id === adapter.id;
+
+  if (!reaffirming && adapter.resolveBinary() === null) {
     return jsonError(
       `${adapter.displayName} is not installed. Install it before making it the active engine.`,
       409,
@@ -41,12 +48,15 @@ export async function POST(request: Request) {
   }
 
   selectHarness(adapter.id);
-  try {
-    await restartAllRpcSessions();
-  } catch {
-    // The selection is what had to stick. A child that refused to die cleanly
-    // is already orphaned from the new engine and times out on its own; failing
-    // the request here would report a switch that actually happened as an error.
+  if (!reaffirming) {
+    try {
+      await restartAllRpcSessions();
+    } catch {
+      // The selection is what had to stick. A child that refused to die
+      // cleanly is already orphaned from the new engine and times out on its
+      // own; failing the request here would report a switch that actually
+      // happened as an error.
+    }
   }
 
   return getEngines(request);

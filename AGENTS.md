@@ -228,10 +228,15 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   surfaces: a `false` **hides** the settings tab / panel card / composer
   control, it never renders a broken one. `/api/info` serves the active
   engine's capabilities to the client.
-- Engines installed from the picker land in the persistent tools prefix
-  (`CODY_TOOLS_DIR`, default `<data dir>/tools`; entrypoint puts its `bin`
-  first on PATH). Binary resolution per engine: `CODY_<NAME>_BIN` override →
-  tools prefix → PATH (`lib/harness/engine-bin.ts`).
+- The Docker image ships NO engine — omp included. Every engine installs
+  from the picker into the persistent tools prefix (`CODY_TOOLS_DIR`,
+  default `<data dir>/tools`; entrypoint puts its `bin` first on PATH), and
+  the install route doubles as UPDATE (specs pin `@latest`; updating the
+  active engine restarts live sessions). Binary resolution per engine:
+  `CODY_<NAME>_BIN` override → tools prefix → PATH
+  (`lib/harness/engine-bin.ts`; omp's probe in `lib/omp/omp-cli.ts` checks
+  the tools prefix too). Selecting the already-active engine is the
+  "decide later" no-op and must never require the binary.
 - The onboarding picker (`components/EnginePicker.tsx`) mounts post-auth for
   admins while `cody-engine.json` is absent/un-onboarded; `/api/engines` is
   deliberately unreachable before the first account exists.

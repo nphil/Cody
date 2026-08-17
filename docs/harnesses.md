@@ -94,7 +94,9 @@ a headless mode and a session-resume story fits the same mold.
 
 ## Packaging with an engine
 
-The Docker image under `docker/` bundles omp as the default engine
-(`HARNESS_INSTALL_SPEC` build arg). Other engines install at runtime from
-the picker into the persistent tools prefix — the image does not need to
-ship them.
+The Docker image under `docker/` ships **no engine at all** — bring your
+own. Every engine, omp included, installs at runtime from the onboarding
+picker (or Settings → User Accounts → Agent engine) into the persistent
+tools prefix, and updates independently of the Cody image via the same
+card's Update action. The image only carries the runtimes engines need
+(Node, and Bun for omp).

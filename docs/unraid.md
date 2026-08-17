@@ -22,10 +22,11 @@ image and template below and retire the old container. Cleaner long-term,
 because packaging lives beside the code it ships, but you re-create the
 container entry and its update wiring once.
 
-Either way the container must bundle **both** Cody and the harness: Cody
-spawns `omp --mode rpc-ui` as a child process over stdio and shares its
-filesystem (agent dir + workspace), so they cannot live in separate
-containers.
+Either way the engine must run **inside** Cody's container: Cody spawns it
+as a child process over stdio and shares its filesystem (agent dir +
+workspace), so they cannot live in separate containers. The engine itself
+is not baked into the image — it installs from the onboarding picker into
+`/data/agent/tools`, which persists across image updates.
 
 ## Install the published image (recommended)
 
@@ -61,13 +62,9 @@ git clone https://github.com/nphil/Cody && cd Cody
 docker build -f docker/Dockerfile -t cody:latest .
 ```
 
-Pin the bundled harness if you want reproducible images:
-
-```bash
-docker build -f docker/Dockerfile \
-  --build-arg HARNESS_INSTALL_SPEC=@oh-my-pi/pi-coding-agent@17.3.5 \
-  -t cody:latest .
-```
+The image ships no engine, so there is nothing engine-related to pin at
+build time — engine versions are managed at runtime from Settings → User
+Accounts → Agent engine (Install/Update per engine).
 
 ## Install on Unraid
 
@@ -118,12 +115,13 @@ behind an authenticating reverse proxy.
   and recreating the container, the Unraid way.
 - The agent **engine** is chosen in the UI: a one-time picker after the
   first admin signs in, and later under Settings → User Accounts → Agent
-  engine. omp ships in the image; Claude Code and Codex install on demand
-  into `/data/agent/tools`, which survives image updates. Their sign-in
-  state lives under `/data/home` — run `claude` or `codex login` once in a
-  Cody terminal, or pass `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` as extra
-  container variables. `CODY_HARNESS` remains the pre-selection default
-  (`omp`); see `docs/harnesses.md`.
+  engine. No engine ships in the image — omp, Claude Code and Codex all
+  install on demand into `/data/agent/tools`, which survives image updates,
+  and each has an Update action in the same card (updating the active
+  engine restarts its live sessions). Claude/Codex sign-in state lives
+  under `/data/home` — run `claude` or `codex login` once in a Cody
+  terminal, or pass `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` as extra
+  container variables. See `docs/harnesses.md`.
 - omp is a **Bun** program (`engines: bun >= 1.3.14`), so the image carries the
   Bun binary alongside Node. Installing omp with npm onto a Node-only image
   looks like it works and then fails at every invocation with

@@ -1,17 +1,22 @@
 import { NextResponse } from "next/server";
 import { jsonError, requireAdmin } from "@/lib/auth/http";
 import { parseJsonWithinLimit } from "@/lib/bounded-form-data";
-import { getHarnessById } from "@/lib/harness";
+import { getHarness, getHarnessById } from "@/lib/harness";
 import { EngineInstallError, installEngine } from "@/lib/harness/install";
+import { invalidateOmpCliCache } from "@/lib/omp/omp-cli";
+import { restartAllRpcSessions } from "@/lib/rpc-manager";
 
 /**
- * Install an engine on demand (admin only). npm runs against Cody's own
- * persistent prefix, so the engine survives container image updates; the call
- * is a single await (up to five minutes) rather than a stream — the UI shows a
- * spinner and gets either the installed version or an npm error to display.
+ * Install OR update an engine on demand (admin only) — the two are the same
+ * npm run against Cody's persistent prefix (the specs pin @latest), so the
+ * engine survives container image updates and "Update" in the engine card is
+ * simply a re-install. The call is a single await (up to five minutes) rather
+ * than a stream — the UI shows a spinner and gets either the installed
+ * version or an npm error to display.
  *
  * Installing does not switch engines: POST /api/engines/select does that, and
- * the picker calls it after a successful install.
+ * the picker calls it after a successful install. Updating the ACTIVE engine
+ * restarts its live sessions so nothing keeps running on the old binary.
  */
 
 export const dynamic = "force-dynamic";
@@ -48,6 +53,14 @@ export async function POST(request: Request) {
       },
       { status: 500, headers: { "Cache-Control": "no-store" } },
     );
+  }
+
+  // omp's own CLI probe caches independently of engine-bin's.
+  if (adapter.id === "omp") invalidateOmpCliCache();
+  // An update of the running engine must not leave live children on the old
+  // binary; the browser reconnects sessions on demand with the fresh install.
+  if (getHarness().id === adapter.id) {
+    await restartAllRpcSessions().catch(() => {});
   }
 
   // installEngine dropped the binary caches, so this probe sees the new install.
