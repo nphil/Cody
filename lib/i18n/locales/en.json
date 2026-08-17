@@ -1034,6 +1034,8 @@
   "terminal.new": "New terminal",
   "terminal.noWorkspace": "Select a workspace to use the terminal",
   "terminal.open": "Open terminal",
+  "terminal.paste": "Paste",
+  "terminal.pasteFailed": "Could not read the clipboard. Use your keyboard or browser paste instead.",
   "terminal.reconnect": "Reconnect terminal",
   "terminal.renameError": "Failed to rename terminal",
   "terminal.renameHint": "Click to rename this terminal",

@@ -124,6 +124,9 @@ export function TerminalPanel({ cwd, onOpen, focusRequest }: Props) {
   const reconnectRef = useRef<number | null>(null);
   const activeIdRef = useRef<string | null>(null);
   activeIdRef.current = activeId;
+  // The terminal effect captures its handlers once per session; route paste
+  // through a ref so it always reaches the current implementation.
+  const pasteFromClipboardRef = useRef<() => void>(() => {});
 
   const load = useCallback(async () => {
     if (!cwd) {
@@ -230,6 +233,32 @@ export function TerminalPanel({ cwd, onOpen, focusRequest }: Props) {
     terminalRef.current?.focus();
   }, []);
 
+  /**
+   * Paste that never leaks bracketed-paste markers. xterm's own paste() wraps
+   * the text in ESC[200~ / ESC[201~ whenever its tracked DECSET 2004 state is
+   * on — but that state survives our reconnect replay while the live program's
+   * does not, so the markers regularly reached a program that never consumed
+   * them and landed as literal "200~" around pasted text (API tokens included).
+   * Bracket only when the terminal currently reports the mode; otherwise write
+   * the text straight through. Any markers already sitting in the clipboard are
+   * stripped either way.
+   */
+  const pasteText = useCallback((text: string) => {
+    const term = terminalRef.current;
+    if (!term || !text) return;
+    const clean = text.replace(/\u001b\[20[01]~/g, "");
+    const bracketed = (term.modes as { bracketedPasteMode?: boolean } | undefined)?.bracketedPasteMode === true;
+    if (bracketed) term.paste(clean);
+    else send(clean);
+  }, [send]);
+
+  const pasteFromClipboard = useCallback(() => {
+    void navigator.clipboard?.readText()
+      .then((text) => pasteText(text))
+      .catch(() => setError(t("terminal.pasteFailed")));
+  }, [pasteText, t]);
+  pasteFromClipboardRef.current = pasteFromClipboard;
+
   const commitRename = useCallback(async (id: string, name: string) => {
     setRenamingId(null);
     const current = terminals.find((item) => item.id === id);
@@ -304,6 +333,11 @@ export function TerminalPanel({ cwd, onOpen, focusRequest }: Props) {
       const copy = key === "c" && ((event.ctrlKey && event.shiftKey) || event.metaKey);
       if (copy && term.hasSelection()) {
         copyTerminalText(term.getSelection());
+        return false;
+      }
+      const paste = key === "v" && ((event.ctrlKey && event.shiftKey) || event.metaKey);
+      if (paste) {
+        pasteFromClipboardRef.current();
         return false;
       }
       // Let the browser raise a ClipboardEvent for paste. The capture handler

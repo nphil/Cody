@@ -1034,6 +1034,8 @@
   "terminal.new": "新建终端",
   "terminal.noWorkspace": "选择工作区后才能使用终端",
   "terminal.open": "打开终端",
+  "terminal.paste": "粘贴",
+  "terminal.pasteFailed": "无法读取剪贴板。请改用键盘或浏览器的粘贴功能。",
   "terminal.reconnect": "重新连接终端",
   "terminal.renameError": "重命名终端失败",
   "terminal.renameHint": "点击重命名此终端",

@@ -1034,6 +1034,8 @@
   "terminal.new": "新しいターミナル",
   "terminal.noWorkspace": "ターミナルを使うにはワークスペースを選択してください",
   "terminal.open": "ターミナルを開く",
+  "terminal.paste": "貼り付け",
+  "terminal.pasteFailed": "クリップボードを読み取れませんでした。キーボードまたはブラウザの貼り付けをご利用ください。",
   "terminal.reconnect": "ターミナルに再接続",
   "terminal.renameError": "ターミナル名の変更に失敗しました",
   "terminal.renameHint": "クリックしてターミナル名を変更",
