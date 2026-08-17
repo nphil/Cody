@@ -3009,6 +3009,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
   }, [markUserScrollIntent]);
 
+  // Re-runs only when the scroll container can appear or disappear (the empty
+  // new-session view and the loading state both render without one), not on
+  // every appended message: tearing down and re-adding three listeners per
+  // message happens at the busiest moment and throws away the browser's
+  // event-handler fast paths. The handlers themselves read through refs.
+  const hasMessages = messages.length > 0;
   useEffect(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
@@ -3020,7 +3026,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       container.removeEventListener("touchstart", markUserScrollIntent);
       container.removeEventListener("scroll", handleScrollPositionChange);
     };
-  }, [messages.length, loading, handleScrollPositionChange, markUserScrollIntent]);
+  }, [hasMessages, loading, handleScrollPositionChange, markUserScrollIntent]);
 
   // Follow the conversation: scroll to the user's latest message when they
   // send one, then keep the newest content in view while the agent streams.

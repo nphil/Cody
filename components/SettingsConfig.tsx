@@ -19,6 +19,7 @@ const PluginsConfig = dynamic(() => import("./PluginsConfig").then((module) => m
 const McpConfig = dynamic(() => import("./McpConfig").then((module) => module.McpConfig), { loading: SettingsTabLoading });
 const OmpSchemaSettings = dynamic(() => import("./settings/OmpSchemaSettings").then((module) => module.OmpSchemaSettings), { loading: SettingsTabLoading });
 const AccountSettings = dynamic(() => import("./settings/AccountSettings").then((module) => module.AccountSettings), { loading: SettingsTabLoading });
+const LocalAiConfig = dynamic(() => import("./settings/LocalAiConfig").then((module) => module.LocalAiConfig), { loading: SettingsTabLoading });
 
 type UpdateState = {
   currentVersion: string | null;
@@ -697,6 +698,13 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
             {(visitedTabs.has("providers") || visitedTabs.has("models")) && (
               <div role="tabpanel" id="settings-panel-providers" aria-labelledby="settings-tab-providers" style={{ display: (currentTab === "providers" || activeTab === "providers") ? "flex" : "none", height: "100%", minHeight: 0, flexDirection: "column" }}>
                 <ModelsConfig embedded onClose={onClose} onSaved={onModelsSaved} />
+              </div>
+            )}
+
+            {/* LOCAL AI TAB */}
+            {visitedTabs.has("localai") && (
+              <div role="tabpanel" id="settings-panel-localai" aria-labelledby="settings-tab-localai" style={{ display: currentTab === "localai" ? "flex" : "none", flexDirection: "column" }}>
+                <LocalAiConfig />
               </div>
             )}
 

@@ -68,6 +68,22 @@ npm run build          # production build…
 npm start              # …served on 127.0.0.1:30177 (start:lan for 0.0.0.0)
 ```
 
+## Cody Desktop (Windows)
+
+A native Windows app: a small Tauri shell (no bundled Chromium or Node in
+the shell process) hosting the exact same UI, with the Cody server and
+engines running inside a dedicated WSL2 distro built from the same image as
+the Docker deployment.
+
+Download the installer from the
+[`desktop-latest` release](https://github.com/nphil/Cody/releases/tag/desktop-latest)
+(`cody-desktop-*-x64-setup.exe`). Requires Windows 10 (2004+) or 11, x64,
+and WSL2 — the installer guides you through enabling it if it's missing. An
+NVIDIA GPU is optional, for local models running inside the distro.
+
+**Status: experimental.** Full architecture in
+[docs/windows.md](docs/windows.md).
+
 ## Engines
 
 | Engine | Status | What you get |

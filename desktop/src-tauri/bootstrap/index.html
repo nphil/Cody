@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cody</title>
+    <style>
+      /* Cody's dark palette. The setup page never sees the app's theme
+         preference — it runs before the server exists — so it commits to
+         the dark ground the login screen uses. */
+      :root {
+        --bg: #1e1e2e;
+        --bg-raised: #262637;
+        --line: #313244;
+        --text: #cdd6f4;
+        --muted: #9399b2;
+        --accent: #cba6f7;
+        --accent-dim: #b583f0;
+        --danger: #f38ba8;
+        --radius: 10px;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+
+      body {
+        display: flex;
+        flex-direction: column;
+        background: var(--bg);
+        color: var(--text);
+        font: 14px/1.55 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+        overflow: hidden;
+        user-select: none;
+      }
+
+      /* Frameless from the first frame: the window has no OS chrome, so the
+         setup page supplies its own drag region and controls. */
+      .titlebar {
+        display: flex;
+        align-items: center;
+        flex-shrink: 0;
+        height: 32px;
+        padding-left: 12px;
+        border-bottom: 1px solid transparent;
+      }
+
+      .titlebar .name {
+        font-size: 12px;
+        letter-spacing: 0.04em;
+        color: var(--muted);
+      }
+
+      .controls {
+        display: flex;
+        margin-left: auto;
+        height: 100%;
+      }
+
+      .controls button {
+        width: 46px;
+        height: 100%;
+        border: 0;
+        background: transparent;
+        color: var(--muted);
+        font-family: "Segoe MDL2 Assets", "Segoe Fluent Icons", sans-serif;
+        font-size: 10px;
+        cursor: default;
+      }
+
+      .controls button:hover {
+        background: #ffffff14;
+        color: var(--text);
+      }
+
+      .controls button.close:hover {
+        background: #e81123;
+        color: #fff;
+      }
+
+      main {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        padding: 0 40px 48px;
+        text-align: center;
+      }
+
+      .mark {
+        width: 56px;
+        height: 56px;
+        margin-bottom: 22px;
+        border-radius: 16px;
+        background: linear-gradient(180deg, #2a2a40, #181825);
+        border: 1px solid var(--line);
+        display: grid;
+        place-items: center;
+        color: var(--accent);
+        font-size: 24px;
+        font-weight: 600;
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: 18px;
+        font-weight: 600;
+      }
+
+      p.detail {
+        margin: 0;
+        max-width: 44ch;
+        color: var(--muted);
+        white-space: pre-wrap;
+      }
+
+      .track {
+        width: min(360px, 100%);
+        height: 4px;
+        margin-top: 26px;
+        border-radius: 999px;
+        background: var(--line);
+        overflow: hidden;
+      }
+
+      .track .fill {
+        height: 100%;
+        width: 30%;
+        border-radius: 999px;
+        background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+        transition: width 0.25s ease;
+      }
+
+      /* No fake percentage: when the total is unknown the bar sweeps. */
+      .track.indeterminate .fill {
+        width: 30%;
+        animation: sweep 1.4s ease-in-out infinite;
+      }
+
+      @keyframes sweep {
+        0% {
+          transform: translateX(-110%);
+        }
+        100% {
+          transform: translateX(370%);
+        }
+      }
+
+      .steps {
+        display: flex;
+        gap: 18px;
+        margin-top: 22px;
+        font-size: 12px;
+        color: #6c7086;
+      }
+
+      .steps span.done {
+        color: var(--muted);
+      }
+
+      .steps span.active {
+        color: var(--accent);
+      }
+
+      .command {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-top: 22px;
+        padding: 10px 12px;
+        max-width: 100%;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--bg-raised);
+        font-family: "Cascadia Mono", "Consolas", ui-monospace, monospace;
+        font-size: 12.5px;
+        user-select: text;
+      }
+
+      .command .badge {
+        flex-shrink: 0;
+        padding: 2px 6px;
+        border-radius: 5px;
+        background: #45475a;
+        color: var(--text);
+        font-family: inherit;
+        font-size: 10px;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+      }
+
+      .command code {
+        overflow-x: auto;
+        white-space: nowrap;
+      }
+
+      .row {
+        display: flex;
+        gap: 10px;
+        margin-top: 22px;
+      }
+
+      button.action {
+        padding: 8px 18px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--bg-raised);
+        color: var(--text);
+        font: inherit;
+        cursor: default;
+      }
+
+      button.action:hover {
+        border-color: #585b70;
+        background: #2f2f44;
+      }
+
+      button.action.primary {
+        border-color: transparent;
+        background: var(--accent);
+        color: #1e1e2e;
+        font-weight: 600;
+      }
+
+      button.action.primary:hover {
+        background: var(--accent-dim);
+      }
+
+      .hidden {
+        display: none !important;
+      }
+
+      .failed h1 {
+        color: var(--danger);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="titlebar" data-tauri-drag-region="deep">
+      <span class="name">Cody</span>
+      <div class="controls">
+        <button id="win-min" title="Minimize" aria-label="Minimize">&#xE921;</button>
+        <button id="win-max" title="Maximize" aria-label="Maximize">&#xE922;</button>
+        <button id="win-close" class="close" title="Close" aria-label="Close">&#xE8BB;</button>
+      </div>
+    </div>
+
+    <main id="stage">
+      <div class="mark">c</div>
+      <h1 id="title">Starting Cody…</h1>
+      <p class="detail" id="detail"></p>
+
+      <div class="track indeterminate" id="track"><div class="fill" id="fill"></div></div>
+
+      <div class="steps" id="steps">
+        <span data-step="checking-wsl">WSL</span>
+        <span data-step="downloading">Download</span>
+        <span data-step="importing">Install</span>
+        <span data-step="starting-server">Start</span>
+      </div>
+
+      <div class="command hidden" id="command">
+        <span class="badge" id="command-badge">Admin</span>
+        <code id="command-text"></code>
+        <button class="action" id="command-copy" style="margin-left:auto;padding:4px 10px">Copy</button>
+      </div>
+
+      <div class="row hidden" id="actions">
+        <button class="action primary" id="retry">Try again</button>
+        <button class="action hidden" id="docs">Open guide</button>
+      </div>
+    </main>
+
+    <script>
+      // Status arrives two ways on purpose: one snapshot over `invoke` so a
+      // change that lands before this listener attaches is never missed, then
+      // the event stream for everything after.
+      const tauri = window.__TAURI__;
+      const invoke = tauri.core.invoke;
+      const win = tauri.window.getCurrentWindow();
+
+      const el = (id) => document.getElementById(id);
+      const stage = el("stage");
+      const title = el("title");
+      const detail = el("detail");
+      const track = el("track");
+      const fill = el("fill");
+      const steps = el("steps");
+      const commandBox = el("command");
+      const commandText = el("command-text");
+      const commandBadge = el("command-badge");
+      const actions = el("actions");
+      const retry = el("retry");
+      const docs = el("docs");
+
+      const ORDER = ["checking-wsl", "downloading", "importing", "starting-server"];
+
+      el("win-min").addEventListener("click", () => win.minimize());
+      el("win-max").addEventListener("click", () => win.toggleMaximize());
+      el("win-close").addEventListener("click", () => win.close());
+
+      el("command-copy").addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(commandText.textContent);
+          el("command-copy").textContent = "Copied";
+          setTimeout(() => (el("command-copy").textContent = "Copy"), 1600);
+        } catch {
+          const range = document.createRange();
+          range.selectNodeContents(commandText);
+          const selection = window.getSelection();
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
+      });
+
+      retry.addEventListener("click", () => {
+        actions.classList.add("hidden");
+        commandBox.classList.add("hidden");
+        invoke("bootstrap_retry");
+      });
+
+      let docsUrl = null;
+      docs.addEventListener("click", () => {
+        if (docsUrl) invoke("open_external", { url: docsUrl });
+      });
+
+      function bytes(n) {
+        if (n < 1024) return `${n} B`;
+        const units = ["KB", "MB", "GB"];
+        let value = n / 1024;
+        let unit = 0;
+        while (value >= 1024 && unit < units.length - 1) {
+          value /= 1024;
+          unit += 1;
+        }
+        return `${value.toFixed(value < 10 ? 1 : 0)} ${units[unit]}`;
+      }
+
+      function render(status) {
+        const failed = status.phase === "failed";
+        stage.classList.toggle("failed", failed);
+        title.textContent = failed ? status.failure.title : status.message;
+        detail.textContent = failed ? status.failure.detail : "";
+
+        const active = ORDER.indexOf(status.phase);
+        for (const node of steps.querySelectorAll("span")) {
+          const index = ORDER.indexOf(node.dataset.step);
+          node.className = "";
+          if (status.phase === "ready") node.classList.add("done");
+          else if (index === active) node.classList.add("active");
+          else if (active > -1 && index < active) node.classList.add("done");
+        }
+        steps.classList.toggle("hidden", failed);
+
+        if (failed || status.phase === "ready") {
+          track.classList.add("hidden");
+        } else {
+          track.classList.remove("hidden");
+          const progress = status.progress;
+          if (progress && progress.total) {
+            const pct = Math.max(1, Math.min(100, (progress.received / progress.total) * 100));
+            track.classList.remove("indeterminate");
+            fill.style.width = `${pct}%`;
+            detail.textContent = `${bytes(progress.received)} of ${bytes(progress.total)}`;
+          } else if (progress) {
+            track.classList.add("indeterminate");
+            detail.textContent = bytes(progress.received);
+          } else {
+            track.classList.add("indeterminate");
+          }
+        }
+
+        if (failed && status.failure.command) {
+          commandBox.classList.remove("hidden");
+          commandText.textContent = status.failure.command;
+          commandBadge.classList.toggle("hidden", !status.failure.elevated);
+        } else {
+          commandBox.classList.add("hidden");
+        }
+
+        docsUrl = failed ? status.failure.docs : null;
+        docs.classList.toggle("hidden", !docsUrl);
+        actions.classList.toggle("hidden", !failed);
+        retry.classList.toggle("hidden", failed && !status.failure.retryable);
+      }
+
+      tauri.event.listen("cody://setup-status", (event) => render(event.payload));
+      invoke("bootstrap_status").then(render);
+    </script>
+  </body>
+</html>

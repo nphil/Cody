@@ -98,4 +98,8 @@ else
   echo "[Cody] SSH disabled — set CODY_SSH_PASSWORD or add keys to /data/home/.ssh/authorized_keys"
 fi
 
-exec node --experimental-strip-types /app/bin/cody-server.js -H 0.0.0.0 -p "${PORT:-30177}"
+# Containers keep the wide bind (Docker port mapping needs it, and auth is
+# always on). The Windows desktop shell overrides with 127.0.0.1: inside WSL2
+# loopback is still forwarded to the host, and a wider bind would become
+# LAN-reachable under user-enabled mirrored networking.
+exec node --experimental-strip-types /app/bin/cody-server.js -H "${CODY_BIND_HOST:-0.0.0.0}" -p "${PORT:-30177}"

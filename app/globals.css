@@ -1458,7 +1458,12 @@ html.dark .dropdown-surface :is(select, option) {
   to   { opacity: 1; transform: translateY(0) scale(1); }
 }
 .chat-message-card {
-  animation: chat-message-in var(--dur-med) var(--ease-out-warm) both;
+  /* `backwards`, not `both`: a finished `both` fill leaves a permanent
+     translate/scale on every message in the transcript, which makes each one a
+     containing block and keeps a completed animation alive in the style
+     engine. The keyframes end on the element's natural state, so dropping the
+     forwards fill is visually identical. */
+  animation: chat-message-in var(--dur-med) var(--ease-out-warm) backwards;
   transition: border-color var(--dur-fast) var(--ease-out-warm),
               box-shadow var(--dur-fast) var(--ease-out-warm),
               transform var(--dur-fast) var(--ease-out-warm);
@@ -1480,11 +1485,11 @@ html.dark .dropdown-surface :is(select, option) {
    cannot be composited, so a continuous ring/bar pulse would repaint
    the layer on every animation frame for the whole run. */
 .chat-message {
-  animation: chat-message-in var(--dur-med) var(--ease-out-warm) both;
+  animation: chat-message-in var(--dur-med) var(--ease-out-warm) backwards;
 }
 .chat-message--live {
   position: relative;
-  animation: chat-message-in var(--dur-med) var(--ease-out-warm) both;
+  animation: chat-message-in var(--dur-med) var(--ease-out-warm) backwards;
 }
 .chat-message--live::before {
   content: "";
@@ -1502,6 +1507,48 @@ html.dark .dropdown-surface :is(select, option) {
 @keyframes live-text-pulse {
   0%, 100% { opacity: 0; }
   50% { opacity: 0.3; }
+}
+
+/* ── Transcript scrolling ──────────────────────────────────────────────────
+   `scroll-behavior` is inherited, so the chat scroller picks up
+   `html { scroll-behavior: smooth }` and turns every imperative `scrollTop`
+   write (lazy-load restore, minimap thumb drag, live follow) into a UA-driven
+   eased animation that lags the pointer and fights the user's own wheel.
+   Deliberate smooth scrolls pass `behavior: "smooth"` explicitly instead. */
+.chat-scroll-region {
+  scroll-behavior: auto;
+}
+
+/* Per-turn containment. The transcript stays fully in the DOM — find-in-page,
+   select-across-turns, native scroll anchoring and the minimap's per-message
+   getBoundingClientRect() all depend on that, which is why this is used
+   instead of virtualization — but off-screen turns cost no style, layout or
+   paint. The `auto` keyword in contain-intrinsic-size makes the browser
+   remember each turn's last rendered height, so scrolling back into a turn
+   does not resize the scroller. Degrades to a no-op where unsupported. */
+.chat-turn {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 320px;
+}
+/* Short turns (user bubbles, collapsed process groups) start from a smaller
+   placeholder so an unvisited transcript's scroll height is closer to real. */
+.chat-turn--compact {
+  contain-intrinsic-size: auto 96px;
+}
+/* The live tail must lay out for real: the follow-scroll measures the end
+   sentinel's geometry, and a skipped ancestor would feed it a placeholder
+   height. A turn whose message rendered nothing must not claim one either. */
+.chat-turn--live,
+.chat-turn:empty {
+  content-visibility: visible;
+}
+
+/* Entrance animation only on the live tail: revealing a lazy-loaded page
+   otherwise starts ~50 simultaneous transform/opacity animations in the
+   middle of an upward scroll. */
+.chat-turn:not(.chat-turn--live) .chat-message,
+.chat-turn:not(.chat-turn--live) .chat-message-card {
+  animation: none;
 }
 
 @keyframes toast-in {

@@ -158,35 +158,66 @@ existing local-endpoint engine configuration. GPU presence from
 
 ## Updates
 
-Two independently-versioned artifacts, one Release:
+Two independently-versioned artifacts, one CI run, two Releases:
 
 - **Shell** (`desktop-vX.Y.Z`): NSIS installer. Self-update: at launch (and
-  on demand) the shell fetches the update manifest from GitHub Releases,
-  compares versions, downloads the new installer, verifies sha256, spawns it
-  detached with `/S`, exits. No signing-key infrastructure in v1; transport
-  trust is TLS to github.com, integrity via manifest sha256.
-- **Runtime** (rootfs, versioned by the Cody version it was flattened from):
-  manifest lists the current rootfs; on mismatch the shell offers "update
-  runtime": export `/data` to a tar on the Windows side → `--unregister` →
-  import new rootfs → restore `/data` → restart server. `/data` is the only
-  stateful path (same contract as the container). Export→reimport is also
-  the disk-reclaim story: sparse VHDs are disabled by WSL as
-  corruption-prone (`--allow-unsafe`-gated) and shrinking is admin-only, so
-  Cody never enables sparse mode.
+  on demand) the shell fetches the update manifest from its fixed,
+  permanently-stable URL — `.../releases/download/desktop-latest/
+  desktop-manifest.json` — compares versions, downloads the new installer,
+  verifies sha256, spawns it detached with `/S`, exits. No signing-key
+  infrastructure in v1; transport trust is TLS to github.com, integrity via
+  manifest sha256.
+- **Runtime** (rootfs, gzip-compressed and named `rootfs-cody-<cody
+  version>.tar.gz` after the Cody version it was flattened from): the
+  manifest's `runtime` object carries both the container's version label and
+  the source image's digest (`runtime.imageDigest`), and the import writes
+  each into the distro — `/etc/cody-runtime-version` and
+  `/etc/cody-runtime-digest`. An update is offered when the manifest's
+  version is **newer** than the installed marker, **or** when both digests
+  are known and they **differ**. The digest is the signal that carries the
+  weight: `ghcr.io/nphil/cody:latest` is republished far more often than its
+  version label moves, so version-compare alone would sit on a stale runtime
+  indefinitely. Neither marker present (a distro predating them) counts as
+  outdated. Applying it: export `/data` to a tar on the Windows side →
+  `--unregister` → import new rootfs → restore `/data` → restart server.
+  `/data` is the only stateful path (same contract as the container). Past
+  the `--unregister` there is no distro to fall back to, so a failed import
+  retries, then reimports the previously cached rootfs, and the `/data`
+  backup goes back into whichever one comes up; if none does, the error
+  names the backup's path and the next successful install restores it
+  automatically. The two newest backups are kept, older ones pruned.
+  Export→reimport is also the disk-reclaim story: sparse VHDs are disabled
+  by WSL as corruption-prone (`--allow-unsafe`-gated) and shrinking is
+  admin-only, so Cody never enables sparse mode.
 
-Release/tag scheme, manifest name, and the `releases/latest` collision with
-container `vX.Y.Z` releases: per CI research report. [VERIFY]
+Release/tag scheme: every dispatch publishes **two** releases, both marked
+`prerelease: true` — a namespace-isolation device, not a quality signal, so
+neither can ever win the container's `/releases/latest` (that endpoint
+resolves to the newest non-prerelease release repo-wide by creation date,
+with no notion of tag prefixes — a plain, non-prerelease desktop release
+would risk shadowing, or being shadowed by, a container `vX.Y.Z` release).
+`desktop-latest` is force-recreated every run — the fixed URL above, and the
+only thing the shell's updater ever polls. `desktop-vX.Y.Z` is immutable,
+one per version, kept forever as desktop's own changelog alongside the
+installer, rootfs, and `desktop-manifest.json`.
 
 ## CI
 
 - `.github/workflows/desktop.yml` — push to `main` filtered to `desktop/**`
-  + manual dispatch with `version`/`notes`. Jobs: shell build
-  (windows-latest, NSIS), rootfs build (ubuntu, flatten + zstd the published
-  container image), release publish (installer + rootfs + manifest).
+  builds and validates only: shell build (windows-latest, NSIS installer)
+  uploaded as a CI artifact, no release. Manual dispatch (required
+  `version` + `notes`) additionally runs rootfs build (ubuntu, flatten +
+  **gzip** the published container image — gzip, not zstd, is WSL's own
+  recommended `wsl --import` compression; other formats risk import
+  incompatibility on older WSL versions) and release publish (installer +
+  rootfs + manifest, to both the immutable `desktop-vX.Y.Z` and the rolling
+  `desktop-latest`).
 - `.github/workflows/docker.yml` gains a paths guard so `desktop/**`-only
   pushes stop cutting container releases (and vice versa: web/docker pushes
   never build the desktop app — the runtime picks up web changes through
-  rootfs updates, the shell doesn't need rebuilding).
+  rootfs updates, the shell doesn't need rebuilding). Path filters are never
+  evaluated for tag pushes or `workflow_dispatch`, so container releases are
+  unaffected either way.
 - The container smoke-gate contract is untouched.
 
 ## Non-goals for v1

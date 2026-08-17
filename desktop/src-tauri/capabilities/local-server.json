@@ -1,0 +1,24 @@
+{
+  "$schema": "../gen/schemas/windows-schema.json",
+  "identifier": "cody-local-server",
+  "description": "IPC granted to the Cody web UI served by the shell-managed loopback server. Window chrome plus the desktop-only surface documented in docs/windows.md — nothing else.",
+  "windows": ["main"],
+  "local": false,
+  "remote": {
+    "urls": ["http://localhost:*", "http://127.0.0.1:*"]
+  },
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-internal-toggle-maximize",
+    "core:window:allow-is-maximized",
+    "core:window:allow-close",
+    "allow-desktop-info",
+    "allow-open-external",
+    "allow-runtime-update-check",
+    "allow-runtime-update-apply"
+  ]
+}

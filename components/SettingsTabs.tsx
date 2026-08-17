@@ -1,6 +1,6 @@
 "use client";
 
-import { Cable, Cpu, KeyRound, RefreshCw, Settings2, ShieldCheck, SlidersHorizontal, Sparkles, UserRound } from "lucide-react";
+import { Cable, Cpu, KeyRound, RefreshCw, Server, Settings2, ShieldCheck, SlidersHorizontal, Sparkles, UserRound } from "lucide-react";
 import type { ComponentType, CSSProperties } from "react";
 
 export type SettingsTab =
@@ -15,6 +15,7 @@ export type SettingsTab =
   | "omp"
   | "skills"
   | "plugins"
+  | "localai"
   | "system";
 
 /**
@@ -67,6 +68,26 @@ export function normalizeCapabilities(value: unknown): EngineCapabilities {
   return result;
 }
 
+/**
+ * What shell/deployment is hosting Cody, mirroring `InfoResponse["platformInfo"]`
+ * in app/api/info/route.ts. Orthogonal to EngineCapabilities above: that's
+ * what the active *engine* can serve, this is what the *shell* is — a plain
+ * web/Docker deployment never sets CODY_DESKTOP, so `desktop` stays false.
+ */
+export interface PlatformInfo {
+  desktop: boolean;
+}
+
+/** Unlike ALL_CAPABILITIES, the safe default here is "no" — an older server
+ * with no `platformInfo` field is never the desktop shell. */
+export const DEFAULT_PLATFORM: PlatformInfo = { desktop: false };
+
+export function normalizePlatform(value: unknown): PlatformInfo {
+  if (!value || typeof value !== "object") return DEFAULT_PLATFORM;
+  const source = value as Record<string, unknown>;
+  return { desktop: source.desktop === true };
+}
+
 export interface TabItem {
   id: SettingsTab;
   label: string;
@@ -105,6 +126,10 @@ export const SETTINGS_CATEGORIES: TabItem[] = [
   { id: "safety", label: "Safety & Approvals", description: "Tool safety rules, YOLO mode, terminal permissions", Icon: ShieldCheck, needsCapability: "nativeSettings" },
   { id: "models", label: "AI Model Defaults", description: "Reasoning budget, verbosity, personality, scratchpad", Icon: Cpu, needsCapability: "nativeSettings" },
   { id: "providers", label: "API Keys & Providers", description: "Connected OAuth accounts, API keys, and model registry", Icon: KeyRound, needsCapability: "models" },
+  // No needsCapability: this scans the network Cody itself runs on, not
+  // anything the active engine serves, so it stays visible on every engine —
+  // and is just as useful on a headless Docker install as on desktop.
+  { id: "localai", label: "Local AI", description: "Detect Ollama, LM Studio, and llama.cpp running near this instance", Icon: Server },
   { id: "intelligence", label: "Agent & Intelligence", description: "Advisor, memory, autolearn, compaction and retry", Icon: Sparkles, needsCapability: "nativeSettings" },
   { id: "mcp", label: "Extensions & Tools", description: "MCP servers, managed skills, and OMP plugins", Icon: Cable, needsCapability: "mcp" },
   { id: "system", label: "System & Updates", description: "App updates, runtime version, and active session restart", Icon: RefreshCw },

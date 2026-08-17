@@ -1,0 +1,51 @@
+[package]
+name = "cody-desktop"
+version = "0.1.0"
+description = "Cody desktop shell for Windows"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+publish = false
+
+[lints.rust]
+unsafe_code = "warn"
+
+# The shell only ever runs on Windows. Everything Tauri- or Win32-shaped is
+# target-gated so `cargo test --target x86_64-unknown-linux-gnu` can exercise
+# the pure-logic modules on a Linux CI host, where webkit2gtk is absent.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+
+[target.'cfg(windows)'.dependencies]
+tauri = "2.11"
+tauri-plugin-opener = "2.5"
+tauri-plugin-single-instance = "2.4"
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+getrandom = "0.3"
+# native-tls resolves to schannel on windows-msvc: the OS trust store, no
+# bundled roots, and no C toolchain needed to cross-check from Linux.
+reqwest = { version = "0.13", default-features = false, features = [
+  "blocking",
+  "json",
+  "native-tls",
+] }
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security_Cryptography",
+  "Win32_System_Memory",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+serde_json = "1"
+tauri-build = "2.6"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import packageJson from "../../../package.json";
 import { getHarness } from "@/lib/harness";
 import type { HarnessCapabilities } from "@/lib/harness/types";
+import { readEnv } from "@/lib/env";
 
 
 export const dynamic = "force-dynamic";
@@ -12,7 +13,9 @@ export interface InfoResponse {
   /** Runtime probe of the harness binary ("17.1.3"), null when absent. */
   ompVersion: string | null;
   nodeVersion: string;
-  /** "<platform> <arch>", e.g. "darwin arm64". */
+  /** "<os> <arch>", e.g. "darwin arm64" (process.platform/process.arch). Not
+   * to be confused with `platformInfo` below, which is about the hosting
+   * shell rather than the OS. */
   platform: string;
   agentDir: string;
   /** Which agent harness this deployment runs on (see lib/harness). */
@@ -22,6 +25,15 @@ export interface InfoResponse {
   capabilities: HarnessCapabilities;
   /** Identity of the active engine, for labels and the experimental chip. */
   engine: { id: string; displayName: string; shortName: string; experimental: boolean };
+  /**
+   * What shell/deployment is hosting Cody — orthogonal to `capabilities`
+   * (that's what the active *engine* can serve; this describes the *shell*
+   * instead). `desktop` is true only when the Windows desktop shell set
+   * CODY_DESKTOP=1 in the env block it owns (docs/windows.md Process
+   * Model); false for web and Docker deployments, which never set it —
+   * byte-identical to today.
+   */
+  platformInfo: { desktop: boolean };
 }
 
 /** Read-only runtime facts for the Info panel. Deliberately minimal: no env
@@ -44,6 +56,7 @@ export async function GET() {
         shortName: harness.shortName,
         experimental: harness.experimental === true,
       },
+      platformInfo: { desktop: readEnv("DESKTOP") === "1" },
     };
     return NextResponse.json(body, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {

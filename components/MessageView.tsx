@@ -29,6 +29,8 @@ import type {
 const MAX_THINKING_CACHE_ENTRIES = 100;
 const thinkingContentCache = new Map<string, Promise<string>>();
 const MAX_MARKDOWN_CHARS = 100_000;
+/** Tool output rendered inline before the "view full output" reveal. */
+const MAX_INLINE_RESULT_CHARS = 200_000;
 
 function formatMessageSize(chars: number): string {
   return chars >= 1_000_000 ? `${(chars / 1_000_000).toFixed(1)} MB` : `${Math.round(chars / 1_000)} KB`;
@@ -55,7 +57,7 @@ export function SafeMarkdownBody({ children, className, ...props }: ComponentPro
   }
 
   return (
-    <div className={className} style={{ maxHeight: 420, overflow: "auto", fontSize: 12, lineHeight: 1.5 }}>
+    <div className={className} style={{ maxHeight: 420, overflow: "auto", overscrollBehavior: "contain", fontSize: 12, lineHeight: 1.5 }}>
       <pre style={{ margin: 0, padding: "8px 10px", whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>
         {children}
       </pre>
@@ -500,7 +502,13 @@ function AssistantMessageView({
       if (chars === 0) return;
       if (streamStartRef.current === null) streamStartRef.current = now;
       const elapsed = (now - streamStartRef.current) / 1000;
-      if (elapsed > 0.5) setTps(chars / 4 / elapsed);
+      // Rounded to the displayed precision before it hits state: the raw float
+      // changes on essentially every tick, forcing a re-render of the live
+      // message (and its markdown block) 3.3×/s independently of token arrival.
+      if (elapsed > 0.5) {
+        const next = Math.round((chars / 4 / elapsed) * 10) / 10;
+        setTps((prev) => (prev === next ? prev : next));
+      }
     };
     const id = setInterval(tick, 300);
     return () => clearInterval(id);
@@ -838,6 +846,7 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
               fontSize: 12,
               lineHeight: 1.5,
               overflow: "auto",
+              overscrollBehavior: "contain",
               backgroundColor: "var(--bg-subtle)",
               borderTop: isError ? "1px solid color-mix(in srgb, var(--status-error) 25%, transparent)" : "1px solid color-mix(in srgb, var(--status-success) 20%, transparent)",
               whiteSpace: "pre-wrap",
@@ -1027,7 +1036,7 @@ function SplitPatchView({ text }: { text: string }) {
   const showFileHeaders = files.length > 1;
 
   return (
-    <div style={{ maxHeight: 560, overflowY: "auto", overflowX: "hidden", background: "var(--bg)" }}>
+    <div style={{ maxHeight: 560, overflowY: "auto", overflowX: "hidden", overscrollBehavior: "contain", background: "var(--bg)" }}>
       {files.map((file, fileIndex) => (
         <div
           key={fileIndex}
@@ -1163,7 +1172,7 @@ function PatchTextView({ text }: { text: string }) {
   const lines = text.split(/\r?\n/);
 
   return (
-    <div style={{ maxHeight: 520, overflowY: "auto", overflowX: "hidden", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.55, minWidth: 0 }}>
+    <div style={{ maxHeight: 520, overflowY: "auto", overflowX: "hidden", overscrollBehavior: "contain", fontFamily: "var(--font-mono)", fontSize: 12, lineHeight: 1.55, minWidth: 0 }}>
       {lines.map((line, i) => {
         const kind =
           line.startsWith("@@") ? "hunk" :
@@ -1253,6 +1262,12 @@ function PairedResult({ text, isEmpty, isError }: {
   isError: boolean;
 }) {
   const { t } = useI18n();
+  const [showFull, setShowFull] = useState(false);
+  // A tool result can hold megabytes in a single text node, and `pre-wrap` +
+  // `break-all` makes the engine line-break the whole blob even though only
+  // 400px of it is visible — then redo it on every width change (sidebar
+  // drag). Show the head until the rest is asked for.
+  const truncated = !isEmpty && !showFull && text.length > MAX_INLINE_RESULT_CHARS;
   return (
     <div
       style={{
@@ -1268,6 +1283,9 @@ function PairedResult({ text, isEmpty, isError }: {
           fontSize: 12,
           lineHeight: 1.5,
           overflow: "auto",
+          // Without this the wheel latches to this box and then chains out to
+          // the transcript with a visible stall.
+          overscrollBehavior: "contain",
           maxHeight: 400,
           backgroundColor: "var(--bg)",
           whiteSpace: "pre-wrap",
@@ -1276,8 +1294,28 @@ function PairedResult({ text, isEmpty, isError }: {
           opacity: isEmpty ? 0.6 : 1,
         }}
       >
-        {isEmpty ? t("messageView.noOutput") : text}
+        {isEmpty ? t("messageView.noOutput") : (truncated ? text.slice(0, MAX_INLINE_RESULT_CHARS) : text)}
       </pre>
+      {truncated && (
+        <button
+          type="button"
+          onClick={() => setShowFull(true)}
+          style={{
+            display: "block", width: "100%",
+            padding: "6px 10px",
+            border: "none",
+            borderTop: "1px solid var(--border)",
+            background: "var(--bg-panel)",
+            color: "var(--accent)",
+            cursor: "pointer",
+            fontSize: 12,
+            textAlign: "left",
+            fontFamily: "inherit",
+          }}
+        >
+          {t("messageView.viewFullOutput")}
+        </button>
+      )}
     </div>
   );
 }
@@ -1517,6 +1555,7 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
               wordBreak: "break-word",
               maxHeight: 360,
               overflow: "auto",
+              overscrollBehavior: "contain",
               fontFamily: "var(--font-mono)",
             }}
           >
@@ -1710,7 +1749,7 @@ function BashExecutionView({ message, sessionId }: { message: BashExecutionMessa
         </div>
       )}
       {fullOutput?.phase === "ready" && (
-        <div style={{ maxHeight: 420, overflow: "auto", marginTop: 6, border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)" }}>
+        <div style={{ maxHeight: 420, overflow: "auto", overscrollBehavior: "contain", marginTop: 6, border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)" }}>
           <pre style={{ margin: 0, padding: "8px 10px", whiteSpace: "pre-wrap", wordBreak: "break-word", fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-muted)" }}>
             {fullOutput.output}
           </pre>

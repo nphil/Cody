@@ -459,6 +459,25 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const valueRef = useRef(value);
   const attachedImagesRef = useRef(attachedImages);
   const attachedTextFilesRef = useRef(attachedTextFiles);
+  // Textarea autosize is a write→read→write on `height`, which forces a
+  // synchronous layout of the whole document — and the document includes the
+  // entire mounted transcript, so typing stutters in a long session. The input
+  // handler and the value effect both fire per keystroke; coalesce them into
+  // one rAF so the measure happens once, in the frame's own layout phase.
+  const autosizeFrameRef = useRef<number | null>(null);
+  const scheduleAutosize = useCallback(() => {
+    if (autosizeFrameRef.current !== null) return;
+    autosizeFrameRef.current = requestAnimationFrame(() => {
+      autosizeFrameRef.current = null;
+      const ta = textareaRef.current;
+      if (!ta) return;
+      ta.style.height = "auto";
+      if (ta.value) ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+    });
+  }, []);
+  useEffect(() => () => {
+    if (autosizeFrameRef.current !== null) cancelAnimationFrame(autosizeFrameRef.current);
+  }, []);
   // Bumped whenever the user clears/sends the composer: in-flight FileReader
   // and file.text() reads must not re-append their results afterwards.
   const attachmentRevisionRef = useRef(0);
@@ -729,11 +748,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   }, [draftKey]);
 
   useEffect(() => {
-    const ta = textareaRef.current;
-    if (!ta) return;
-    ta.style.height = "auto";
-    if (value) ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
-  }, [value]);
+    scheduleAutosize();
+  }, [value, scheduleAutosize]);
 
   useEffect(() => {
     return () => {
@@ -1267,11 +1283,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   );
 
   const handleInput = useCallback(() => {
-    const ta = textareaRef.current;
-    if (!ta) return;
-    ta.style.height = "auto";
-    ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
-  }, []);
+    scheduleAutosize();
+  }, [scheduleAutosize]);
 
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
     const items = Array.from(e.clipboardData?.items ?? []);

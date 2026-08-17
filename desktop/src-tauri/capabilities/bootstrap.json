@@ -1,0 +1,20 @@
+{
+  "$schema": "../gen/schemas/windows-schema.json",
+  "identifier": "cody-bootstrap",
+  "description": "IPC for the bundled setup page. The window is frameless from the first frame, so the bootstrap page needs the same chrome grants the web UI gets.",
+  "windows": ["main"],
+  "local": true,
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-internal-toggle-maximize",
+    "core:window:allow-is-maximized",
+    "core:window:allow-close",
+    "allow-bootstrap-status",
+    "allow-bootstrap-retry",
+    "allow-open-external"
+  ]
+}

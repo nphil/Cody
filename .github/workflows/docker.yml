@@ -7,6 +7,11 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+    # Desktop-only pushes skip this; tag pushes and workflow_dispatch never evaluate path filters at all (see docs/windows.md).
+    paths-ignore:
+      - "desktop/**"
+      - "docs/windows.md"
+      - ".github/workflows/desktop.yml"
   # Dispatching with a version cuts a RELEASE: image tagged X.Y.Z + latest,
   # a v-tag created on the dispatched ref, and a GitHub Release whose body is
   # `notes` — the changelog the ShipLog plugin shows in Unraid's Docker tab.

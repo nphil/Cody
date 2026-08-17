@@ -11,6 +11,8 @@ import { ChatWindow } from "./ChatWindow";
 import { TabBar, type Tab } from "./TabBar";
 import { BranchNavigator } from "./BranchNavigator";
 import { ThemePicker } from "./ThemePicker";
+import { TitleBar } from "./TitleBar";
+import { useDesktopShell } from "@/hooks/useDesktopShell";
 import { AppWindow, CircleArrowUp, Files, GitBranch, History, Info, ListTodo, Menu, PanelLeft, ScrollText, Terminal } from "lucide-react";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { translate, useI18n } from "@/lib/i18n";
@@ -139,6 +141,7 @@ export function AppShell() {
   const [initialNavigation] = useState(() => getInitialNavigation(searchParams));
   const { t, locale } = useI18n();
   const isMobile = useIsMobile();
+  const { isDesktop } = useDesktopShell();
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
   // When user clicks +, we only store the cwd — no fake session id
   const [newSessionCwd, setNewSessionCwd] = useState<string | null>(null);
@@ -1168,7 +1171,9 @@ export function AppShell() {
         }
       }
     `}</style>
-    <div style={{ display: "flex", height: "100dvh", overflow: "hidden", background: "var(--bg)" }}>
+    <div style={{ display: "flex", flexDirection: "column", height: "100dvh" }}>
+    <TitleBar workspaceName={activeCwdName} />
+    <div style={{ display: "flex", flex: 1, minHeight: 0, overflow: "hidden", background: "var(--bg)" }}>
       {/* Mobile overlay backdrop */}
       <div
         className={`sidebar-overlay-backdrop${mobileSidebarReady ? "" : " sidebar-mobile-pending"}`}
@@ -1957,6 +1962,7 @@ export function AppShell() {
 
     </div>
     </div>
+    </div>
     {/* Workspace panel toggle — always visible at top-right */}
     <button
       onClick={() => setRightPanelOpen((v) => !v)}
@@ -1965,7 +1971,8 @@ export function AppShell() {
       style={{
         // Safe-area insets keep the toggle tappable on notched/rounded
         // tablets in landscape (viewportFit: cover exposes those corners).
-        position: "fixed", top: "env(safe-area-inset-top, 0px)", right: "env(safe-area-inset-right, 0px)", zIndex: 300,
+        // In the desktop shell the viewport starts under the 36px titlebar.
+        position: "fixed", top: isDesktop ? "calc(env(safe-area-inset-top, 0px) + 36px)" : "env(safe-area-inset-top, 0px)", right: "env(safe-area-inset-right, 0px)", zIndex: 300,
         display: "flex", alignItems: "center", justifyContent: "center",
         width: isMobile ? 44 : 36, height: isMobile ? 44 : 36, padding: 0,
         background: "var(--bg-panel)", border: "none", borderLeft: "1px solid var(--border)", borderBottom: "1px solid var(--border)",

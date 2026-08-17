@@ -63,16 +63,36 @@ interface NodeInfo {
   index: number;
 }
 
+/** Sub-pixel-equal node geometry over the same messages — a re-measure that
+ *  produces this is not worth a re-render. */
+function sameNodeGeometry(prev: NodeInfo[], next: NodeInfo[]): boolean {
+  if (prev.length !== next.length) return false;
+  for (let i = 0; i < prev.length; i++) {
+    if (prev[i].msg !== next[i].msg) return false;
+    if (Math.abs(prev[i].topRatio - next[i].topRatio) > 0.0005) return false;
+    if (Math.abs(prev[i].heightRatio - next[i].heightRatio) > 0.0005) return false;
+  }
+  return true;
+}
+
 export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer, messageRefs }: Props) {
-  const [scrollRatio, setScrollRatio] = useState(0);
-  const [viewportRatio, setViewportRatio] = useState(1);
   const [visible, setVisible] = useState(false);
   const [nodes, setNodes] = useState<NodeInfo[]>([]);
   const [minimapHovered, setMinimapHovered] = useState(false);
   const [mouseYRatio, setMouseYRatio] = useState<number | null>(null);
+  const [minimapHeightPx, setMinimapHeightPx] = useState(600);
   const draggingRef = useRef(false);
   const dragListenersRef = useRef<{ onMove: (ev: MouseEvent) => void; onUp: () => void } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  // Scroll geometry is deliberately NOT React state: it changes on every scroll
+  // frame, and re-rendering the minimap would reconcile one absolutely
+  // positioned node per message (plus a fresh style object each) 60+ times a
+  // second. The rAF writes the viewport box's own style through this ref
+  // instead, so a plain scroll costs no reconciliation at all.
+  const viewportBoxRef = useRef<HTMLDivElement>(null);
+  const scrollRatioRef = useRef(0);
+  const viewportRatioRef = useRef(1);
+  const visibleRef = useRef(false);
   // RAF gate for mousemove so a pixel-level pointer event doesn't re-render
   // the whole minimap (every node + tooltip) on every frame.
   const mouseMoveRafRef = useRef<number | null>(null);
@@ -85,22 +105,35 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
   const allMessagesRef = useRef(allMessages);
   allMessagesRef.current = allMessages;
 
-  // --- 仅更新视口比例，不读取 DOM ---
+  const applyViewportBox = useCallback(() => {
+    const box = viewportBoxRef.current;
+    if (!box) return;
+    const viewportRatio = viewportRatioRef.current;
+    box.style.top = `${scrollRatioRef.current * (1 - viewportRatio) * 100}%`;
+    box.style.height = `${viewportRatio * 100}%`;
+  }, []);
+
+  // --- 仅更新视口比例，不读取消息 DOM ---
   const updateScroll = useCallback(() => {
     const scrollEl = scrollContainer.current;
     if (!scrollEl) return;
     const totalH = scrollEl.scrollHeight;
     const clientH = scrollEl.clientHeight;
     const scrollable = totalH - clientH;
-    setVisible(scrollable > 20);
-    if (scrollable <= 0) {
-      setScrollRatio(0);
-      setViewportRatio(1);
-    } else {
-      setScrollRatio(scrollEl.scrollTop / scrollable);
-      setViewportRatio(clientH / totalH);
+    const nextVisible = scrollable > 20;
+    if (visibleRef.current !== nextVisible) {
+      visibleRef.current = nextVisible;
+      setVisible(nextVisible);
     }
-  }, [scrollContainer]);
+    if (scrollable <= 0) {
+      scrollRatioRef.current = 0;
+      viewportRatioRef.current = 1;
+    } else {
+      scrollRatioRef.current = scrollEl.scrollTop / scrollable;
+      viewportRatioRef.current = clientH / totalH;
+    }
+    applyViewportBox();
+  }, [scrollContainer, applyViewportBox]);
 
   // --- 节流 DOM 测量（仅消息变化/尺寸变化时触发，最多 150ms 一次）---
   const measureThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -140,7 +173,9 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
           });
         }
       }
-      setNodes(newNodes);
+      // Re-rendering N absolutely positioned nodes is only worth it when the
+      // geometry actually moved; a width-only resize leaves every ratio equal.
+      setNodes((prev) => (sameNodeGeometry(prev, newNodes) ? prev : newNodes));
     }, 150);
   }, [scrollContainer, messageRefs]);
 
@@ -216,9 +251,10 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
     if (!el) return;
     const scrollable = el.scrollHeight - el.clientHeight;
     if (scrollable <= 0) return;
+    const viewportRatio = viewportRatioRef.current;
     const clamped = Math.max(0, Math.min(1 - viewportRatio, viewportTopRatio));
     el.scrollTop = (clamped / (1 - viewportRatio)) * scrollable;
-  }, [scrollContainer, viewportRatio]);
+  }, [scrollContainer]);
 
   // Coalesce mousemove updates to one per animation frame: writing state on
   // every pointermove event re-renders all nodes + tooltips dozens of times
@@ -242,9 +278,10 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
     if (!visible) return;
 
     draggingRef.current = true;
+    const viewportRatio = viewportRatioRef.current;
     const rect = e.currentTarget.getBoundingClientRect();
     const clickRatio = (e.clientY - rect.top) / rect.height;
-    const grabOffset = clickRatio - scrollRatio * (1 - viewportRatio);
+    const grabOffset = clickRatio - scrollRatioRef.current * (1 - viewportRatio);
     const insideBox = grabOffset >= 0 && grabOffset <= viewportRatio;
     const offset = insideBox ? grabOffset : viewportRatio / 2;
 
@@ -264,7 +301,7 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
     dragListenersRef.current = { onMove, onUp };
-  }, [visible, viewportRatio, scrollRatio, scrollToMinimapRatio]);
+  }, [visible, scrollToMinimapRatio]);
 
   // An interrupted drag (unmount before mouseup) must not leak the window
   // listeners.
@@ -280,10 +317,26 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
 
 
 
+  // The minimap's own height feeds the tooltip layout. It used to be read off
+  // the DOM during render, which forces a synchronous layout inside the render
+  // phase; a ResizeObserver keeps it in state instead.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const applyHeight = (height: number) => {
+      setMinimapHeightPx((prev) => (Math.abs(prev - height) < 0.5 ? prev : height));
+    };
+    const ro = new ResizeObserver((entries) => {
+      applyHeight(entries[0]?.contentRect.height ?? el.clientHeight);
+    });
+    ro.observe(el);
+    applyHeight(el.clientHeight);
+    return () => ro.disconnect();
+  }, [visible]);
+
   // Compute collision-free tooltip positions for all nodes
   const TOOLTIP_HEIGHT = 22;
   const TOOLTIP_GAP = 2;
-  const minimapHeightPx = containerRef.current?.clientHeight ?? 600;
 
   // Per-node colors and previews are pure functions of each node's message;
   // memoize so they aren't recomputed on every scroll/mousemove re-render.
@@ -314,17 +367,22 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
     return positions;
   }, [minimapHovered, nodes, minimapHeightPx]);
 
+  // Find the node closest to the current mouse position. Only the pointer
+  // moves this, so it must not be recomputed on every re-render.
+  const nearestIndex = useMemo(() => {
+    if (mouseYRatio === null || nodes.length === 0) return null;
+    let best = 0;
+    for (let i = 1; i < nodes.length; i++) {
+      if (Math.abs(nodes[i].topRatio - mouseYRatio) < Math.abs(nodes[best].topRatio - mouseYRatio)) best = i;
+    }
+    return nodes[best].index;
+  }, [mouseYRatio, nodes]);
+
   if (!visible) return null;
 
-  const viewportBoxTop = scrollRatio * (1 - viewportRatio) * 100;
-  const viewportBoxHeight = viewportRatio * 100;
-
-  // Find the node closest to the current mouse position
-  const nearestIndex = mouseYRatio !== null && nodes.length > 0
-    ? nodes.reduce((best, node) => {
-        return Math.abs(node.topRatio - mouseYRatio) < Math.abs(nodes[best].topRatio - mouseYRatio) ? node.index : best;
-      }, 0)
-    : null;
+  // Initial paint only — the rAF owns these afterwards (see applyViewportBox).
+  const viewportBoxTop = scrollRatioRef.current * (1 - viewportRatioRef.current) * 100;
+  const viewportBoxHeight = viewportRatioRef.current * 100;
 
   return (
     <div
@@ -344,8 +402,9 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
         overflow: "visible",
       }}
     >
-      {/* Viewport indicator */}
+      {/* Viewport indicator — geometry written directly by the scroll rAF */}
       <div
+        ref={viewportBoxRef}
         style={{
           position: "absolute",
           left: 0,
@@ -429,7 +488,10 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
             key={node.index}
             style={{
               position: "absolute",
-              top: tooltipPositions[i],
+              // Positioned by transform, not `top`: animating `top` lays out
+              // and repaints every tooltip per frame, a transform composites.
+              top: 0,
+              transform: `translateY(${tooltipPositions[i]}px)`,
               right: "100%",
               marginRight: 6,
               background: "var(--bg)",
@@ -443,7 +505,7 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
               zIndex: 100,
               pointerEvents: "none",
               opacity: isNearest ? 1 : 0.45,
-              transition: "top var(--dur-fast) var(--ease-out-warm), opacity var(--dur-fast) var(--ease-out-warm)",
+              transition: "transform var(--dur-fast) var(--ease-out-warm), opacity var(--dur-fast) var(--ease-out-warm)",
             }}
           >
             <div

@@ -2,9 +2,10 @@
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ChevronDown } from "lucide-react";
-import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, ImageContent, SessionInfo, SessionTreeNode, ToolCallContent, ToolResultMessage } from "@/lib/types";
+import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, ImageContent, SessionInfo, SessionTreeNode, TextContent, ToolCallContent, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
 import { countToolCallBlocks, getDisplayableAssistantBlocks, splitFinalAssistantBlocks } from "@/lib/message-display";
+import { estimateTurnHeight, type TurnContentSignal } from "@/lib/turn-height-estimate";
 import { imageSource, MessageView } from "./MessageView";
 import { ClickableImage } from "./ImageLightbox";
 import { ChatInput, type ChatInputHandle, type ContextModelUsage } from "./ChatInput";
@@ -119,6 +120,51 @@ function hasDisplayableProcessMessage(message: AgentMessage): boolean {
     return getDisplayableAssistantBlocks(message as AssistantMessage).length > 0;
   }
   return message.role === "custom";
+}
+
+/** Concatenates a user/developer/custom/toolResult message's text blocks
+ *  (its content shape: a plain string or a TextContent/ImageContent array)
+ *  into one string, alongside its image count — the raw ingredients
+ *  `estimateTurnHeight` turns into a placeholder height. */
+function collectMessageText(content: string | (TextContent | ImageContent)[]): { text: string; imageCount: number } {
+  if (typeof content === "string") return { text: content, imageCount: 0 };
+  let text = "";
+  let imageCount = 0;
+  for (const block of content) {
+    if (block.type === "text") text += `${block.text}\n`;
+    else if (block.type === "image") imageCount += 1;
+  }
+  return { text, imageCount };
+}
+
+/** Cheap per-message content signal for `estimateTurnHeight` — see that
+ *  module for why this only has to be roughly right, not exact. */
+function turnContentSignal(message: AgentMessage): TurnContentSignal {
+  switch (message.role) {
+    case "user":
+    case "developer":
+    case "custom":
+    case "toolResult":
+      return collectMessageText(message.content);
+    case "assistant": {
+      const blocks = getDisplayableAssistantBlocks(message);
+      let text = "";
+      let imageCount = 0;
+      for (const block of blocks) {
+        if (block.type === "text") text += `${block.text}\n`;
+        else if (block.type === "image") imageCount += 1;
+      }
+      return { text, imageCount, toolCallCount: countToolCallBlocks(blocks) };
+    }
+    case "bashExecution":
+      return { text: `${message.command}\n${message.output}` };
+    case "pythonExecution":
+      return { text: `${message.code}\n${message.output}` };
+    case "fileMention":
+      return { text: message.files.map((file) => file.content ?? "").join("\n") };
+    default:
+      return {};
+  }
 }
 
 // A user message normally anchors a turn (user prompt → process → final
@@ -281,6 +327,108 @@ interface CommittedTranscriptProps {
   handleLoadMoreClick: () => void;
 }
 
+/** One slot in the transcript's render window: either a single message, the
+ *  final answer split off its assistant message, or the collapsed process
+ *  group folded out of a turn. Planning the slots is cheap; building their
+ *  React elements is not, so only the windowed slots get built.
+ *
+ *  `estimatedHeight` (lib/turn-height-estimate.ts) becomes the turn wrapper's
+ *  inline `contain-intrinsic-size`, computed here alongside everything else
+ *  this function already has in hand so it rides the same memoization
+ *  (`buildTranscriptUnits` is only re-run when `messages` actually changes)
+ *  instead of recomputing per render during streaming. */
+type TranscriptUnit =
+  | { kind: "message"; idx: number; estimatedHeight: number }
+  | { kind: "answer"; idx: number; message: AssistantMessage; estimatedHeight: number }
+  | {
+      kind: "process";
+      userIdx: number;
+      finalAssistantIdx: number;
+      processIndices: number[];
+      finalProcessMessage: AssistantMessage | null;
+      hasAnswer: boolean;
+      estimatedHeight: number;
+    };
+
+/** Turns at the end of the transcript that opt out of CSS containment: the
+ *  follow-scroll measures the end sentinel, and a skipped subtree would report
+ *  its `contain-intrinsic-size` placeholder instead of its real height. */
+const LIVE_TAIL_UNITS = 6;
+
+/**
+ * Group the transcript into render units without building any elements. Same
+ * grouping the renderer used to do inline, but separated so the window can be
+ * computed first: the elements before `startIndex` were previously built and
+ * then thrown away by `slice`, which cost O(total history) on every committed
+ * message change.
+ */
+function buildTranscriptUnits(messages: AgentMessage[], lastAnchorIdx: number, tailIsLive: boolean): TranscriptUnit[] {
+  const units: TranscriptUnit[] = [];
+  const heightForMessage = (idx: number) => estimateTurnHeight(turnContentSignal(messages[idx]));
+  // Process groups render collapsed by default (ProcessDetailsGroup) — the
+  // toggle button is the only thing that actually paints until expanded, so
+  // its placeholder stays near the floor regardless of how much (or little)
+  // text/tool-calls are folded underneath. Scaling it with the hidden
+  // content would recreate the same placeholder-vs-real mismatch this
+  // estimate exists to fix, just in the opposite (over-reserving) direction.
+  const collapsedProcessHeight = estimateTurnHeight({});
+
+  for (let idx = 0; idx < messages.length;) {
+    const msg = messages[idx];
+    if (!isGroupAnchor(msg)) {
+      units.push({ kind: "message", idx, estimatedHeight: heightForMessage(idx) });
+      idx += 1;
+      continue;
+    }
+
+    const userIdx = idx;
+    let endIdx = userIdx + 1;
+    while (endIdx < messages.length && !isGroupAnchor(messages[endIdx])) endIdx += 1;
+
+    const finalAssistantIdx = findFinalAssistantIndex(messages, userIdx, endIdx);
+    const isLiveTail = tailIsLive && endIdx === messages.length && userIdx === lastAnchorIdx;
+
+    if (finalAssistantIdx === -1 || isLiveTail) {
+      for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
+        units.push({ kind: "message", idx: renderIdx, estimatedHeight: heightForMessage(renderIdx) });
+      }
+      idx = endIdx;
+      continue;
+    }
+
+    units.push({ kind: "message", idx: userIdx, estimatedHeight: heightForMessage(userIdx) });
+
+    const processIndices: number[] = [];
+    for (let processIdx = userIdx + 1; processIdx < finalAssistantIdx; processIdx++) {
+      if (hasDisplayableProcessMessage(messages[processIdx])) processIndices.push(processIdx);
+    }
+    const finalAssistant = messages[finalAssistantIdx] as AssistantMessage;
+    const finalSplit = splitFinalAssistantBlocks(finalAssistant);
+    const finalProcessMessage = finalSplit.processBlocks.length > 0
+      ? withAssistantBlocks(finalAssistant, finalSplit.processBlocks, { omitUsage: true })
+      : null;
+    const hasAnswer = finalSplit.answerBlocks.length > 0;
+
+    if (processIndices.length + (finalProcessMessage ? 1 : 0) > 0) {
+      units.push({ kind: "process", userIdx, finalAssistantIdx, processIndices, finalProcessMessage, hasAnswer, estimatedHeight: collapsedProcessHeight });
+    }
+    if (hasAnswer) {
+      const answerMessage = withAssistantBlocks(finalAssistant, finalSplit.answerBlocks);
+      units.push({ kind: "answer", idx: finalAssistantIdx, message: answerMessage, estimatedHeight: estimateTurnHeight(turnContentSignal(answerMessage)) });
+    }
+    for (let renderIdx = finalAssistantIdx + 1; renderIdx < endIdx; renderIdx++) {
+      units.push({ kind: "message", idx: renderIdx, estimatedHeight: heightForMessage(renderIdx) });
+    }
+    idx = endIdx;
+  }
+  return units;
+}
+
+function turnClassName(live: boolean, compact: boolean): string {
+  if (live) return "chat-turn chat-turn--live";
+  return compact ? "chat-turn chat-turn--compact" : "chat-turn";
+}
+
 /**
  * The committed (non-streaming) transcript. Extracted from ChatWindow and
  * memoized over the committed messages so token-streaming updates (which only
@@ -295,18 +443,26 @@ const CommittedTranscript = memo(function CommittedTranscript({
   const { t } = useI18n();
   const { toolResultsMap, lastAnchorIdx, visibleRefIndexByMessage } = conversationMeta;
 
-  const attachVisibleRef = (idx: number, refIndex: number) => (el: HTMLDivElement | null) => {
-    messageRefs.current[refIndex] = el;
+  // One stable callback per ref slot: a fresh closure per render makes React
+  // detach and re-attach every message ref on every render, which churns the
+  // array the minimap measures.
+  const refCallbacksRef = useRef<Array<((el: HTMLDivElement | null) => void) | undefined>>([]);
+  const messageRefCallback = (refIndex: number) => {
+    const callbacks = refCallbacksRef.current;
+    let callback = callbacks[refIndex];
+    if (!callback) {
+      callback = (el: HTMLDivElement | null) => { messageRefs.current[refIndex] = el; };
+      callbacks[refIndex] = callback;
+    }
+    return callback;
   };
 
-  const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean } = {}): ReactNode => {
+  const renderMessage = (idx: number, options: { keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean } = {}): ReactNode => {
     const msg = options.messageOverride ?? messages[idx];
     const prevAssistantEntryId =
       msg.role === "user" && idx > 0 && messages[idx - 1].role === "assistant"
         ? entryIds[idx - 1]
         : undefined;
-    const isVisible = msg.role === "user" || msg.role === "assistant";
-    const currentRefIdx = visibleRefIndexByMessage.get(idx);
     const keyPrefix = options.keyPrefix ?? "message";
     let showTimestamp = false;
     if (msg.role === "assistant") {
@@ -322,7 +478,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
       }
     }
     if (options.showTimestamp !== undefined) showTimestamp = options.showTimestamp;
-    const view = (
+    return (
       <MessageView
         key={`${keyPrefix}-view-${idx}`}
         message={msg}
@@ -342,114 +498,82 @@ const CommittedTranscript = memo(function CommittedTranscript({
         toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
       />
     );
-    if (!isVisible || options.attachRef === false || currentRefIdx === undefined) return view;
+  };
+
+  const renderUnit = (unit: TranscriptUnit, live: boolean): ReactNode => {
+    // Per-turn estimate (lib/turn-height-estimate.ts), computed once in
+    // buildTranscriptUnits and carried on the unit — overrides the
+    // stylesheet's flat contain-intrinsic-size (app/globals.css `.chat-turn`)
+    // so an unpainted turn's placeholder is close to its real height. The
+    // CSS rule stays in place as the fallback for the instant before this
+    // inline style attaches.
+    const turnStyle: React.CSSProperties = { containIntrinsicSize: `auto ${unit.estimatedHeight}px` };
+    if (unit.kind === "process") {
+      const processBlocks = unit.finalProcessMessage?.content ?? [];
+      const processRefIdx = unit.processIndices
+        .map((processIdx) => visibleRefIndexByMessage.get(processIdx))
+        .find((value): value is number => typeof value === "number")
+        ?? (unit.hasAnswer ? undefined : visibleRefIndexByMessage.get(unit.finalAssistantIdx));
+      return (
+        <div
+          key={`process-group-${unit.userIdx}-${unit.finalAssistantIdx}`}
+          className={turnClassName(live, true)}
+          style={turnStyle}
+          ref={processRefIdx === undefined ? undefined : messageRefCallback(processRefIdx)}
+        >
+          <ProcessDetailsGroup
+            messageCount={unit.processIndices.length + (unit.finalProcessMessage ? 1 : 0)}
+            toolCallCount={countToolCalls(messages, unit.processIndices) + countToolCallBlocks(processBlocks)}
+            resultImages={collectGroupResultImages(messages, unit.processIndices, toolResultsMap, processBlocks)}
+          >
+            {unit.processIndices.map((processIdx) => renderMessage(processIdx, { keyPrefix: "process" }))}
+            {unit.finalProcessMessage && renderMessage(unit.finalAssistantIdx, { keyPrefix: "process-final", messageOverride: unit.finalProcessMessage, showTimestamp: false })}
+          </ProcessDetailsGroup>
+        </div>
+      );
+    }
+    const refIdx = visibleRefIndexByMessage.get(unit.idx);
+    const isUserTurn = unit.kind === "message" && messages[unit.idx].role === "user";
     return (
-      <div key={`${keyPrefix}-${idx}`} ref={attachVisibleRef(idx, currentRefIdx)}>
-        {view}
+      <div
+        key={`turn-${unit.idx}`}
+        className={turnClassName(live, isUserTurn)}
+        style={turnStyle}
+        ref={refIdx === undefined ? undefined : messageRefCallback(refIdx)}
+      >
+        {renderMessage(unit.idx, unit.kind === "answer" ? { messageOverride: unit.message } : undefined)}
       </div>
     );
   };
 
-  const rendered: ReactNode[] = [];
-  for (let idx = 0; idx < messages.length;) {
-    const msg = messages[idx];
-    if (!isGroupAnchor(msg)) {
-      rendered.push(renderMessage(idx));
-      idx += 1;
-      continue;
-    }
+  const units = useMemo(
+    () => buildTranscriptUnits(messages, lastAnchorIdx, sessionBusy || isStreaming),
+    [messages, lastAnchorIdx, sessionBusy, isStreaming],
+  );
 
-    const userIdx = idx;
-    let endIdx = userIdx + 1;
-    while (endIdx < messages.length && !isGroupAnchor(messages[endIdx])) endIdx += 1;
-
-    const finalAssistantIdx = findFinalAssistantIndex(messages, userIdx, endIdx);
-
-    if (finalAssistantIdx === -1) {
-      for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
-        rendered.push(renderMessage(renderIdx));
-      }
-      idx = endIdx;
-      continue;
-    }
-
-    const isLiveTail = (sessionBusy || isStreaming) && endIdx === messages.length && userIdx === lastAnchorIdx;
-    if (isLiveTail) {
-      for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
-        rendered.push(renderMessage(renderIdx));
-      }
-      idx = endIdx;
-      continue;
-    }
-
-    rendered.push(renderMessage(userIdx));
-
-    const processIndices: number[] = [];
-    for (let processIdx = userIdx + 1; processIdx < finalAssistantIdx; processIdx++) {
-      processIndices.push(processIdx);
-    }
-    const visibleProcessIndices = processIndices.filter((processIdx) => hasDisplayableProcessMessage(messages[processIdx]));
-    const finalAssistant = messages[finalAssistantIdx] as AssistantMessage;
-    const finalSplit = splitFinalAssistantBlocks(finalAssistant);
-    const finalProcessMessage = finalSplit.processBlocks.length > 0
-      ? withAssistantBlocks(finalAssistant, finalSplit.processBlocks, { omitUsage: true })
-      : null;
-    const finalAnswerMessage = finalSplit.answerBlocks.length > 0
-      ? withAssistantBlocks(finalAssistant, finalSplit.answerBlocks)
-      : null;
-
-    const processCount = visibleProcessIndices.length + (finalProcessMessage ? 1 : 0);
-    if (processCount > 0) {
-      const processRefIdx = visibleProcessIndices
-        .map((processIdx) => visibleRefIndexByMessage.get(processIdx))
-        .find((value): value is number => typeof value === "number")
-        ?? (finalAnswerMessage ? undefined : visibleRefIndexByMessage.get(finalAssistantIdx));
-      const processGroup = (
-        <ProcessDetailsGroup
-          messageCount={processCount}
-          toolCallCount={countToolCalls(messages, visibleProcessIndices) + countToolCallBlocks(finalSplit.processBlocks)}
-          resultImages={collectGroupResultImages(messages, visibleProcessIndices, toolResultsMap, finalSplit.processBlocks)}
-        >
-          {visibleProcessIndices.map((processIdx) => renderMessage(processIdx, { attachRef: false, keyPrefix: "process" }))}
-          {finalProcessMessage && renderMessage(finalAssistantIdx, { attachRef: false, keyPrefix: "process-final", messageOverride: finalProcessMessage, showTimestamp: false })}
-        </ProcessDetailsGroup>
-      );
-      rendered.push(
-        <div
-          key={`process-group-${userIdx}-${finalAssistantIdx}`}
-          ref={processRefIdx === undefined ? undefined : (el) => { messageRefs.current[processRefIdx] = el; }}
-        >
-          {processGroup}
-        </div>,
-      );
-    }
-
-    if (finalAnswerMessage) {
-      rendered.push(renderMessage(finalAssistantIdx, { messageOverride: finalAnswerMessage }));
-    }
-    for (let renderIdx = finalAssistantIdx + 1; renderIdx < endIdx; renderIdx++) {
-      rendered.push(renderMessage(renderIdx));
-    }
-    idx = endIdx;
-  }
   // Anchor the render window while the user is reading history: the plain
   // end-anchored window (total - visibleCount) slides forward as a running
   // agent appends messages, silently pushing the viewed messages out of the
   // window with no scroll correction. While not near the bottom, keep the
   // window's top at the last end-anchored position and let the appended tail
   // grow into the window; returning to the bottom re-engages the end anchor.
-  const anchorStartIndexRef = useRef<number | null>(null);
-  const { startIndex, hasMore } = useMemo(() => {
-    const total = rendered.length;
-    const endAnchored = Math.max(0, total - visibleCount);
-    if (nearBottom || anchorStartIndexRef.current === null) {
-      anchorStartIndexRef.current = endAnchored;
-      return { startIndex: endAnchored, hasMore: endAnchored > 0 };
-    }
-    const anchored = Math.min(anchorStartIndexRef.current, endAnchored);
-    anchorStartIndexRef.current = anchored;
-    return { startIndex: anchored, hasMore: anchored > 0 };
-  }, [rendered.length, visibleCount, nearBottom]);
+  // The anchor lives in state and is written from an effect: advancing a ref
+  // during render is impure, and a render React later discards would leave the
+  // anchor pointing at a window that was never shown.
+  const [anchorStartIndex, setAnchorStartIndex] = useState<number | null>(null);
+  const endAnchoredStart = Math.max(0, units.length - visibleCount);
+  const startIndex = nearBottom || anchorStartIndex === null
+    ? endAnchoredStart
+    : Math.min(anchorStartIndex, endAnchoredStart);
+  const hasMore = startIndex > 0;
+  useEffect(() => {
+    setAnchorStartIndex((prev) => {
+      if (nearBottom) return null;
+      return prev === null ? endAnchoredStart : Math.min(prev, endAnchoredStart);
+    });
+  }, [nearBottom, endAnchoredStart]);
+
+  const liveTailStart = units.length - LIVE_TAIL_UNITS;
   return (
     <>
       {hasMore && (
@@ -462,12 +586,15 @@ const CommittedTranscript = memo(function CommittedTranscript({
           {t("chatWindow.scrollUpToLoad", { count: startIndex })}
         </button>
       )}
-      {rendered.slice(startIndex)}
+      {units.slice(startIndex).map((unit, offset) => renderUnit(unit, startIndex + offset >= liveTailStart))}
     </>
   );
 });
 
-export function ChatWindow({ session, newSessionCwd, advisorEnabled, chatExtras = true, toolCallsDefaultCollapsed = true, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onOpenPreview, onPreviewUrlsSeen }: Props) {
+/** Memoized: AppShell holds ~60 state values (git badge polls, update checks,
+ *  the context-usage tick ChatWindow itself pushes up), and each of those
+ *  re-renders would otherwise rebuild this whole tree. */
+export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, advisorEnabled, chatExtras = true, toolCallsDefaultCollapsed = true, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onOpenPreview, onPreviewUrlsSeen }: Props) {
   const { t, tn } = useI18n();
   const { playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -553,13 +680,24 @@ export function ChatWindow({ session, newSessionCwd, advisorEnabled, chatExtras 
   useEffect(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
+    // Scroll events fire well above 60 Hz on precision trackpads; coalesce the
+    // three layout reads into one per frame so they land in the rAF phase
+    // instead of interleaving with the frame's style writes.
+    let frame: number | null = null;
     const update = () => {
+      frame = null;
       const next = el.scrollTop + el.clientHeight >= el.scrollHeight - 96;
       setNearBottom((prev) => (prev === next ? prev : next));
     };
+    const onScroll = () => {
+      if (frame === null) frame = requestAnimationFrame(update);
+    };
     update();
-    el.addEventListener("scroll", update, { passive: true });
-    return () => el.removeEventListener("scroll", update);
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      if (frame !== null) cancelAnimationFrame(frame);
+    };
   }, [scrollContainerRef]);
   const sentinelRef = useRef<HTMLButtonElement>(null);
   const prevScrollDistanceRef = useRef<number | null>(null);
@@ -680,7 +818,6 @@ export function ChatWindow({ session, newSessionCwd, advisorEnabled, chatExtras 
 
   const { isDragOver, handleDragEnter, handleDragOver, handleDragLeave, handleDrop } = useDragDrop(onDrop);
 
-  const visibleMessages = messages.filter((m) => m.role === "user" || m.role === "assistant");
   const inputHistory = useMemo(() => {
     const seen = new Set<string>();
     const history: string[] = [];
@@ -693,7 +830,6 @@ export function ChatWindow({ session, newSessionCwd, advisorEnabled, chatExtras 
     }
     return history.reverse();
   }, [messages]);
-  const messageRefs = useMessageRefs(visibleMessages.length);
   const conversationMeta = useMemo(() => {
     const toolResultsMap = new Map<string, ToolResultMessage>();
     let lastAnchorIdx = -1;
@@ -708,6 +844,10 @@ export function ChatWindow({ session, newSessionCwd, advisorEnabled, chatExtras 
 
     return { toolResultsMap, lastAnchorIdx, visibleRefIndexByMessage };
   }, [messages]);
+  // The minimap needs one ref slot per user/assistant message — the same set
+  // conversationMeta already indexed, so re-filtering `messages` per render
+  // (an O(N) pass plus an array allocation on every streaming frame) is waste.
+  const messageRefs = useMessageRefs(conversationMeta.visibleRefIndexByMessage.size);
   // Tool-call ids already rendered by COMMITTED messages — memoized away from
   // the streaming path so a per-token update only re-scans the live bubble.
   const committedToolCallIds = useMemo(() => {
@@ -735,13 +875,18 @@ export function ChatWindow({ session, newSessionCwd, advisorEnabled, chatExtras 
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
   const messageCwd = session?.cwd ?? newSessionCwd ?? undefined;
 
-  const availableThinkingLevels = displayModelValue
-    ? resolveAvailableThinkingLevels(
-        modelThinkingLevels[`${displayModelValue.provider}:${displayModelValue.modelId}`],
-        displayModelValue,
-        liveModelMeta,
-      )
-    : null;
+  // Memoized because the live-metadata fallback allocates a fresh array: a new
+  // identity here defeats ChatInput's memo, re-rendering the whole composer on
+  // every streaming frame.
+  const availableThinkingLevels = useMemo(() => (
+    displayModelValue
+      ? resolveAvailableThinkingLevels(
+          modelThinkingLevels[`${displayModelValue.provider}:${displayModelValue.modelId}`],
+          displayModelValue,
+          liveModelMeta,
+        )
+      : null
+  ), [displayModelValue, modelThinkingLevels, liveModelMeta]);
 
   const currentThinkingLevelMap = displayModelValue
     ? (modelThinkingLevelMaps[`${displayModelValue.provider}:${displayModelValue.modelId}`] ?? null)
@@ -958,7 +1103,7 @@ export function ChatWindow({ session, newSessionCwd, advisorEnabled, chatExtras 
         {/* Hide the Firefox scrollbar on desktop only: ChatMinimap provides the
             position indicator there, but on mobile there is no minimap and
             users need the scrollbar (Chrome's overlay scrollbar still shows). */}
-        <div ref={scrollContainerRef} className={`flex-1 overflow-y-auto pt-6` + (isMobile ? "" : " [scrollbar-width:none]")}>
+        <div ref={scrollContainerRef} className={`chat-scroll-region flex-1 overflow-y-auto pt-6` + (isMobile ? "" : " [scrollbar-width:none]")}>
           <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
             <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
               <ExtensionStatusBar statuses={extensionStatuses} />
@@ -1089,7 +1234,7 @@ export function ChatWindow({ session, newSessionCwd, advisorEnabled, chatExtras 
       )}
     </div>
   );
-}
+});
 
 function ExtensionStatusBar({ statuses }: { statuses: Array<{ key: string; text: string }> }) {
   if (statuses.length === 0) return null;

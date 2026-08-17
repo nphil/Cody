@@ -1,6 +1,6 @@
 "use client";
 
-import { Children, cloneElement, isValidElement, useMemo, type ComponentProps, type MouseEvent, type ReactElement, type ReactNode } from "react";
+import { Children, cloneElement, isValidElement, useEffect, useMemo, useRef, useState, type ComponentProps, type MouseEvent, type ReactElement, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import { resolveLocalFileHref } from "@/lib/file-links";
 import { encodeFilePathForApi } from "@/lib/file-paths";
@@ -16,8 +16,56 @@ interface MarkdownBodyProps {
   onOpenFile?: (filePath: string) => void;
 }
 
+/** Slowest cadence at which a growing block re-parses while it streams. The
+ *  SSE coalescer delivers updates at display rate, and normalizeDisplayMath +
+ *  the whole remark→rehype→react-markdown pass over the accumulated answer is
+ *  a 10–40ms task on a long one — the frame budget is gone before layout. */
+const STREAMING_PARSE_INTERVAL_MS = 100;
+
+/**
+ * The text this block should parse right now: the live text while settled, or
+ * a ≤10 Hz sample of it while streaming. Never withholds the final text —
+ * `isStreaming` is false the moment the message settles, so the last update
+ * always renders in full.
+ */
+function useParseSource(text: string, isStreaming: boolean | undefined): string {
+  const [sampled, setSampled] = useState(text);
+  const latestRef = useRef(text);
+  const lastFlushRef = useRef(0);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    // Written after commit, never during render, so a trailing flush can only
+    // ever publish text that was actually committed.
+    latestRef.current = text;
+    if (!isStreaming) return;
+    const flush = () => {
+      lastFlushRef.current = Date.now();
+      setSampled((prev) => (prev === latestRef.current ? prev : latestRef.current));
+    };
+    const elapsed = Date.now() - lastFlushRef.current;
+    if (elapsed >= STREAMING_PARSE_INTERVAL_MS) {
+      flush();
+      return;
+    }
+    // A trailing flush is already pending; it will pick up this text too.
+    if (timerRef.current !== null) return;
+    timerRef.current = setTimeout(() => {
+      timerRef.current = null;
+      flush();
+    }, STREAMING_PARSE_INTERVAL_MS - elapsed);
+  }, [text, isStreaming]);
+
+  useEffect(() => () => {
+    if (timerRef.current !== null) clearTimeout(timerRef.current);
+  }, []);
+
+  return isStreaming ? sampled : text;
+}
+
 export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile }: MarkdownBodyProps) {
-  const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
+  const parseSource = useParseSource(children, isStreaming);
+  const normalizedMarkdown = useMemo(() => normalizeDisplayMath(parseSource), [parseSource]);
   const { remarkPlugins, rehypePlugins } = useMarkdownPlugins(normalizedMarkdown);
 
   // Rebuilt only when its captured props change, not on every render.
@@ -124,15 +172,22 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
     };
   }, [isStreaming, cwd, onOpenFile]);
 
+  // Held by identity so a re-render that changed nothing the parse depends on
+  // (a re-render between two streaming samples, a parent state change) skips
+  // the whole markdown subtree instead of re-parsing and re-reconciling it.
+  const parsed = useMemo(() => (
+    <ReactMarkdown
+      remarkPlugins={remarkPlugins}
+      rehypePlugins={rehypePlugins}
+      components={components}
+    >
+      {normalizedMarkdown}
+    </ReactMarkdown>
+  ), [remarkPlugins, rehypePlugins, components, normalizedMarkdown]);
+
   return (
     <div className={["markdown-body", className].filter(Boolean).join(" ")}>
-      <ReactMarkdown
-        remarkPlugins={remarkPlugins}
-        rehypePlugins={rehypePlugins}
-        components={components}
-      >
-        {normalizedMarkdown}
-      </ReactMarkdown>
+      {parsed}
     </div>
   );
 }

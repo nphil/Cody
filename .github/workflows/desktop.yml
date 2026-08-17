@@ -1,0 +1,484 @@
+name: Cody Desktop
+
+# Two trigger shapes, two very different jobs run:
+#
+#   - Plain push to main touching desktop/** -> shell-build ONLY. This is
+#     build-and-validate: prove desktop/ still compiles and bundles into an
+#     NSIS installer, upload it as a CI artifact for a human to grab. No
+#     rootfs snapshot, no GitHub Release. (docker.yml's paths-ignore is the
+#     other half of this split: it stops desktop-only pushes from cutting a
+#     container release, see docs/windows.md's CI section.)
+#   - workflow_dispatch (version + notes both required) -> shell-build AND
+#     rootfs-build run, then release publishes. Every dispatch builds AND
+#     publishes; there is no separate "rebuild only" dispatch mode here
+#     (unlike docker.yml) because the push trigger already covers that case.
+#
+# Release namespace: container releases live at tags vX.Y.Z (docker.yml).
+# Desktop publishes to a separate, clearly-prefixed namespace so the two
+# never collide in the repo's Releases list or in GitHub's single
+# /releases/latest slot (that endpoint picks the newest non-draft,
+# non-prerelease release across the WHOLE repo by created_at, with no
+# awareness of tag prefixes). Every release run moves:
+#   - `desktop-latest` (rolling release, force-moved tag): the
+#     machine-facing update-check target. The Rust shell polls this by
+#     fixed tag/asset name via a direct asset-download URL, never GitHub's
+#     own "latest" concept -- immune to whatever the container namespace is
+#     doing, and vice versa. Managed with the `gh` CLI (preinstalled on the
+#     runner) rather than an upsert-style action, because the tag must move
+#     to a new commit on every run. The release is updated in place, never
+#     deleted: it is a live download channel, and deleting it would take
+#     every asset offline for the minutes the multi-gigabyte re-upload
+#     takes. See the step for the ordering that keeps it coherent.
+#   - `desktop-vX.Y.Z` (immutable, one per version): human-facing history,
+#     so desktop keeps a real changelog the way the container does.
+# Both are marked prerelease:true -- not a quality signal (these are
+# ordinary, stable releases) but purely so neither can ever win the
+# container's /releases/latest slot. Direct-tag and direct-asset-download
+# lookups (what this pipeline and the desktop app both use) ignore that
+# flag entirely, so nothing about *fetching* them changes.
+#
+# Rootfs compression is gzip, NOT zstd/xz: WSL's own docs call gzip the
+# *recommended* format for `wsl --import` tarballs and warn that other
+# compression formats risk breaking import compatibility with older WSL
+# versions (verified in the desktop networking/import research -- this is
+# the one place this file deliberately differs from the original CI design
+# draft, which used zstd).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "desktop/**"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (X.Y.Z, no leading v). Every dispatch builds AND publishes, so this is required."
+        required: true
+        type: string
+      notes:
+        description: "Release notes / changelog (markdown) for the versioned desktop-vX.Y.Z release"
+        required: false
+        type: string
+
+# desktop-latest is a single shared mutation target for every release run,
+# so this serializes across the whole workflow rather than per-ref the way
+# docker.yml does.
+concurrency:
+  group: desktop-release
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Windows installer. windows-latest is Windows Server 2025 + VS2026 as of
+  # the June 2026 image migration. Verified against the live runner-images
+  # manifest:
+  #   - NSIS is NOT preinstalled (it was on the older windows-2022 image;
+  #     dropped from windows-2025). No separate install step needed anyway:
+  #     Tauri's bundler downloads and hash-verifies its own NSIS toolchain
+  #     into a cache dir the first time it finds NSIS missing -- a one-time
+  #     tax on a cold cache, free once rust-cache hits.
+  #   - jq ships preinstalled on this image (verified: "jq 1.8.1" in the
+  #     current Windows2025-VS2026 manifest) -- no install step needed for
+  #     the version-patch step below.
+  #   - WebView2 isn't itemized by name, but Windows Server 2025 ships
+  #     current Edge and the OS-level WebView2 runtime Tauri needs the same
+  #     way Tauri's docs describe for Windows 10 (April 2018+)/11 -- nothing
+  #     extra to install for the default "downloaded bootstrapper" mode.
+  #   - Rust/Cargo/Rustup are already on the image, but we still pin via
+  #     dtolnay/rust-toolchain for a reproducible, explicit version instead
+  #     of depending on whatever the image happens to preinstall.
+  shell-build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: meta
+        shell: bash
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
+        run: |
+          v="${DISPATCH_VERSION:-}"
+          [ -n "$v" ] || v=$(node -p "require('./desktop/src-tauri/tauri.conf.json').version")
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      # Only a workflow_dispatch cuts a specific version; a plain push just
+      # validates that desktop/ still builds, using whatever version is
+      # already committed in tauri.conf.json.
+      #
+      # All three files move together. tauri.conf.json alone names the bundle,
+      # but the binary reports CARGO_PKG_VERSION, and that is what the updater
+      # compares the manifest against: patch only the config and every
+      # installer ever shipped calls itself 0.1.0, so every update check finds
+      # the manifest "newer" and reinstalls, forever. desktop/src-tauri/
+      # build.rs asserts the two agree, so a miss here fails the build below
+      # rather than shipping.
+      - name: Set app version (dispatch only)
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          tmp=$(mktemp)
+          jq --arg v "$VERSION" '.version = $v' desktop/src-tauri/tauri.conf.json > "$tmp"
+          mv "$tmp" desktop/src-tauri/tauri.conf.json
+
+          # The first `^version = ` line is [package]'s: it is the first
+          # section, and every dependency version sits inside an inline table.
+          sed -i "0,/^version = /{s/^version = .*/version = \"${VERSION}\"/}" desktop/src-tauri/Cargo.toml
+          # The lock records the crate's own version too; leaving it stale
+          # makes the build stop to rewrite the lockfile.
+          sed -i "/^name = \"cody-desktop\"\$/{n;s/^version = .*/version = \"${VERSION}\"/}" desktop/src-tauri/Cargo.lock
+
+          # Checked, not assumed: a sed that silently matched nothing would
+          # otherwise ship the old version.
+          check() {
+            [ "$2" = "$3" ] || { echo "::error::$1 was not set to ${VERSION} (found: $2)"; exit 1; }
+          }
+          check tauri.conf.json \
+            "$(jq -r .version desktop/src-tauri/tauri.conf.json)" "$VERSION"
+          check Cargo.toml \
+            "$(grep -m1 '^version = ' desktop/src-tauri/Cargo.toml)" "version = \"${VERSION}\""
+          check Cargo.lock \
+            "$(grep -A1 '^name = "cody-desktop"$' desktop/src-tauri/Cargo.lock | tail -n1)" "version = \"${VERSION}\""
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "desktop/src-tauri -> target"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      # Verified current (2026) recommendation: the npm-distributed CLI is
+      # a prebuilt native addon (installs in seconds) vs. `cargo install
+      # tauri-cli` / cargo-binstall, which still resolve/link a Rust
+      # binary. Pinning it as a desktop/package.json devDependency also
+      # means this version travels with the repo instead of drifting to
+      # whatever "latest" resolves to on build day.
+      - name: Install frontend deps + Tauri CLI (npm)
+        working-directory: desktop
+        run: npm ci
+
+      - name: tauri build
+        working-directory: desktop
+        shell: bash
+        env:
+          # Fixed regardless of which version is being built (it's the
+          # rolling channel, not a per-version URL), so it is set on every
+          # build, push or dispatch. The Rust shell reads it via
+          # option_env! at compile time; exact consumption is reconciled at
+          # integration.
+          CODY_DESKTOP_MANIFEST_URL: https://github.com/nphil/Cody/releases/download/desktop-latest/desktop-manifest.json
+        run: npx tauri build
+
+      # NOTE -- not wired in yet: once desktop/ ships a `--self-test` flag
+      # (parse argv before tauri::Builder::default().run(), exit 0 before
+      # any window is created), a smoke step belongs right here:
+      #   - name: Self-test the built exe
+      #     shell: bash
+      #     timeout-minutes: 2
+      #     run: |
+      #       exe=$(ls src-tauri/target/release/bundle/nsis/*.exe | head -n1)
+      #       "$exe" --self-test
+      # windows-latest can run it today with no extra setup -- unlike Linux
+      # runners, GH's Windows (and macOS) runners execute jobs in a real
+      # interactive desktop session, so a GUI process can create a window
+      # here without Xvfb or similar. That's exactly why the flag needs to
+      # exit *before* window creation: the runner won't fail for lack of a
+      # display, it'll just hang forever waiting on a window nothing will
+      # ever close.
+      - name: Stage installer artifact
+        shell: bash
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          src=$(ls desktop/src-tauri/target/release/bundle/nsis/*.exe | head -n1)
+          cp "$src" "dist/cody-desktop-${VERSION}-x64-setup.exe"
+          sha256sum "dist/cody-desktop-${VERSION}-x64-setup.exe" > "dist/cody-desktop-${VERSION}-x64-setup.exe.sha256"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: desktop-installer
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------------
+  # Rootfs snapshot of the ALREADY-published container image, so the
+  # desktop app can offer "install the Cody server locally" without the
+  # user needing Docker/GHCR access themselves. Image is public
+  # (docs/unraid.md), so no registry login needed to pull it. Dispatch-only:
+  # a plain validate-only push has no release to attach this to.
+  rootfs-build:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      cody_version: ${{ steps.snapshot.outputs.cody_version }}
+      image_digest: ${{ steps.snapshot.outputs.image_digest }}
+    steps:
+      # No checkout needed: this job only reads the already-published
+      # container image, never repo files -- the rootfs artifact name is
+      # keyed by the CONTAINER's own version label (cody_version below),
+      # not the desktop app's version.
+      - name: Snapshot ghcr.io/nphil/cody:latest
+        id: snapshot
+        run: |
+          set -euo pipefail
+          docker pull ghcr.io/nphil/cody:latest
+
+          cody_version=$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' ghcr.io/nphil/cody:latest)
+          image_digest=$(docker inspect --format '{{ index .RepoDigests 0 }}' ghcr.io/nphil/cody:latest)
+          echo "cody_version=$cody_version" >> "$GITHUB_OUTPUT"
+          echo "image_digest=$image_digest" >> "$GITHUB_OUTPUT"
+          echo "source image: $image_digest (cody $cody_version)"
+
+          cid=$(docker create ghcr.io/nphil/cody:latest)
+          mkdir -p rootfs dist
+
+          # docker create (not run) so the snapshot is exactly the image's
+          # baked-in layers -- nothing runtime-generated (SSH host keys,
+          # account state, logs) ever gets a chance to exist, since no
+          # process is started. Excludes below are packaging fat only:
+          #   - /var/lib/apt/lists is already emptied at image-build time
+          #     (docker/Dockerfile: `rm -rf /var/lib/apt/lists/*`), so it is
+          #     NOT listed here -- there is nothing left there to strip.
+          #   - doc/man/locale: Cody ships its own i18n (lib/i18n:
+          #     en/ja/zh-CN); OS-level message catalogs for the bundled CLI
+          #     tools are an unused soft dependency (missing = English
+          #     fallback, not a crash).
+          #
+          # Excluding at extract time (not `tar --delete` on the exported
+          # archive) is the robust route: `docker export` streams straight
+          # into the pipe below, and GNU tar's --delete needs random access
+          # to the archive -- it cannot operate on a pipe/stdin at all.
+          # Excluding here means the stripped paths never touch disk.
+          docker export "$cid" | tar -x -C rootfs \
+            --exclude='usr/share/doc/*' \
+            --exclude='usr/share/man/*' \
+            --exclude='usr/share/locale/*'
+          docker rm "$cid" >/dev/null
+
+          echo "extracted size: $(du -sh rootfs | cut -f1)"
+
+          # gzip, NOT zstd/xz -- see the top-of-file note. pigz parallelizes
+          # the gzip -9 pass across cores; it ships preinstalled on this
+          # image (verified: "pigz | 2.8-1" in the current Ubuntu 24.04
+          # runner-images apt package list), so no install step is needed.
+          out="dist/rootfs-cody-${cody_version}.tar.gz"
+          tar -cf - -C rootfs . | pigz -9 > "$out"
+          sha256sum "$out" > "$out.sha256"
+
+          # Hard size assertion: fail loudly, with the exact byte count,
+          # before ever attempting to attach the asset to a release --
+          # rather than a cryptic upload failure downstream.
+          # 1990 MiB = 2,086,666,240 bytes: headroom under GitHub's 2 GiB
+          # (2,147,483,648 byte) hard per-asset limit.
+          limit=2086666240
+          size=$(stat -c%s "$out")
+          echo "compressed rootfs size: $size bytes (limit: $limit bytes / 1990 MiB)"
+          if [ "$size" -gt "$limit" ]; then
+            echo "::error::rootfs asset is ${size} bytes, over the ${limit}-byte (1990 MiB) safety threshold. Tighten the excludes above or split the asset."
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: desktop-rootfs
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------------
+  release:
+    # success() is spelled out even though it's GitHub's implicit default
+    # for an `if:` with no status-check function -- explicit here so a
+    # failed shell-build/rootfs-build visibly skips this job instead of
+    # relying on a reader already knowing that default.
+    if: success() && github.event_name == 'workflow_dispatch'
+    needs: [shell-build, rootfs-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-tags: true
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: desktop-installer
+          path: dist
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: desktop-rootfs
+          path: dist
+
+      - name: Build desktop-manifest.json + release body
+        id: meta
+        env:
+          VERSION: ${{ inputs.version }}
+          NOTES_INPUT: ${{ inputs.notes }}
+          CODY_VERSION: ${{ needs.rootfs-build.outputs.cody_version }}
+          IMAGE_DIGEST: ${{ needs.rootfs-build.outputs.image_digest }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          installer="cody-desktop-${VERSION}-x64-setup.exe"
+          rootfs="rootfs-cody-${CODY_VERSION}.tar.gz"
+          installer_sha=$(cut -d' ' -f1 "dist/${installer}.sha256")
+          rootfs_sha=$(cut -d' ' -f1 "dist/${rootfs}.sha256")
+          base="https://github.com/${REPO}/releases/download/desktop-latest"
+          published_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          # Shape is the Rust updater's Manifest struct (desktop/src-tauri/
+          # src/update.rs): {shell, runtime} of {version, url, sha256, size},
+          # plus runtime.imageDigest. That digest is inside the runtime object
+          # because the updater reads it there and compares it with the digest
+          # marker in the installed distro -- it is the only signal that
+          # catches a :latest republish, which usually carries the same
+          # version label. The top-level copy is for humans; serde ignores it.
+          installer_size=$(stat -c%s "dist/${installer}")
+          rootfs_size=$(stat -c%s "dist/${rootfs}")
+          jq -n \
+            --arg shellVersion "$VERSION" \
+            --arg shellUrl "${base}/${installer}" \
+            --arg shellSha "$installer_sha" \
+            --argjson shellSize "$installer_size" \
+            --arg runtimeVersion "$CODY_VERSION" \
+            --arg runtimeUrl "${base}/${rootfs}" \
+            --arg runtimeSha "$rootfs_sha" \
+            --argjson runtimeSize "$rootfs_size" \
+            --arg publishedAt "$published_at" \
+            --arg imageDigest "$IMAGE_DIGEST" \
+            --arg notes "$NOTES_INPUT" \
+            '{shell: {version:$shellVersion, url:$shellUrl, sha256:$shellSha, size:$shellSize},
+              runtime: {version:$runtimeVersion, url:$runtimeUrl, sha256:$runtimeSha, size:$runtimeSize,
+                        imageDigest:$imageDigest},
+              publishedAt:$publishedAt, imageDigest:$imageDigest, notes:$notes}' \
+            > dist/desktop-manifest.json
+          cat dist/desktop-manifest.json
+
+          # Randomized delimiter: the notes are arbitrary operator input, and
+          # a line reading exactly `DESKTOP_EOF` would otherwise end the
+          # heredoc early and corrupt every later write to $GITHUB_OUTPUT.
+          delim="DESKTOP_EOF_$(openssl rand -hex 8)"
+          {
+            echo "body<<${delim}"
+            printf '%s\n\n' "$NOTES_INPUT"
+            echo '## Artifacts'
+            echo
+            echo '| Asset | SHA-256 |'
+            echo '| --- | --- |'
+            echo "| \`${installer}\` | \`${installer_sha}\` |"
+            echo "| \`${rootfs}\` | \`${rootfs_sha}\` |"
+            echo '| `desktop-manifest.json` | see file |'
+            echo
+            echo "Rootfs flattened from \`ghcr.io/nphil/cody:latest\` at \`${IMAGE_DIGEST}\` (Cody ${CODY_VERSION})."
+            echo "${delim}"
+          } >> "$GITHUB_OUTPUT"
+
+      # Immutable per-version release: desktop's own history/changelog.
+      # prerelease:true is a namespace-isolation device here, not a quality
+      # signal -- see the top-of-file comment. Plain create (not upsert):
+      # desktop-vX.Y.Z never gets republished under the same tag.
+      - name: Publish desktop-vX.Y.Z (history)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: desktop-v${{ inputs.version }}
+          name: Cody Desktop ${{ inputs.version }}
+          prerelease: true
+          body: ${{ steps.meta.outputs.body }}
+          files: |
+            dist/cody-desktop-*-x64-setup.exe
+            dist/cody-desktop-*-x64-setup.exe.sha256
+            dist/rootfs-cody-*.tar.gz
+            dist/rootfs-cody-*.tar.gz.sha256
+            dist/desktop-manifest.json
+
+      # Rolling pointer: this is the ONLY thing the desktop app's Rust
+      # updater ever polls -- by fixed tag + fixed asset name, never
+      # GitHub's /releases/latest (that endpoint belongs to the container
+      # namespace, see the top-of-file comment). Managed directly with the
+      # `gh` CLI rather than an upsert-style action, because the tag has to
+      # move to a new commit on every run.
+      #
+      # The release itself is NEVER deleted and re-created. Deleting it takes
+      # every asset offline for the several minutes the ~2 GB rootfs upload
+      # runs, so every client polling in that window 404s and every first run
+      # started in it fails outright. Updating in place means the worst a
+      # client sees is the *previous*, entirely coherent set: the old manifest
+      # still names the old assets, and those stay in place until the new
+      # manifest replaces them (the rootfs and installer names carry their
+      # version, so the new uploads never clobber the old ones).
+      - name: Move desktop-latest (rolling update channel)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if ! gh release view desktop-latest > /dev/null 2>&1; then
+            gh release create desktop-latest \
+              --title "Cody Desktop (latest: ${VERSION})" \
+              --notes "Rolling update channel polled by the desktop app's built-in updater." \
+              --prerelease \
+              --target "${GITHUB_SHA}"
+          fi
+
+          # Retarget the rolling tag at this commit; the release keeps its
+          # identity, and its assets, while the tag moves under it.
+          # actions/checkout leaves its credentials in place, so this pushes
+          # with the same GITHUB_TOKEN (the job holds contents: write).
+          git tag -f desktop-latest "${GITHUB_SHA}"
+          git push -f origin refs/tags/desktop-latest
+
+          gh release edit desktop-latest \
+            --title "Cody Desktop (latest: ${VERSION})" \
+            --notes "Rolling update channel polled by the desktop app's built-in updater. See desktop-v${VERSION} for the full changelog."
+
+          # ORDER MATTERS, and this is the whole point of the step: every
+          # asset goes up before the manifest that names it. Clients read
+          # desktop-manifest.json and then follow its URLs, so the manifest
+          # must never be the first thing to land.
+          for asset in \
+            dist/cody-desktop-*-x64-setup.exe \
+            dist/cody-desktop-*-x64-setup.exe.sha256 \
+            dist/rootfs-cody-*.tar.gz \
+            dist/rootfs-cody-*.tar.gz.sha256
+          do
+            gh release upload desktop-latest "$asset" --clobber
+          done
+          gh release upload desktop-latest dist/desktop-manifest.json --clobber
+
+          # ...and only NOW drop what the new manifest does not reference.
+          # Until the line above, the old manifest was the live one and these
+          # were the assets it pointed at; deleting them any earlier is the
+          # same outage as deleting the release. Without this pass the
+          # release grows by a full rootfs every version.
+          # Assigned, not inlined into the loop: a jq that failed inside a
+          # `for` list would silently leave the keep-set empty, and this loop
+          # would then delete the assets that were just uploaded.
+          referenced=$(jq -r '.shell.url, .runtime.url' dist/desktop-manifest.json | sed 's#.*/##')
+          keep="desktop-manifest.json"
+          for name in $referenced; do
+            keep="${keep} ${name} ${name}.sha256"
+          done
+          for asset in $(gh release view desktop-latest --json assets --jq '.assets[].name'); do
+            case " ${keep} " in
+              *" ${asset} "*) ;;
+              *) gh release delete-asset desktop-latest "$asset" --yes ;;
+            esac
+          done

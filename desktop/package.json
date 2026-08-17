@@ -1,0 +1,14 @@
+{
+  "name": "cody-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Build tooling for the Cody Windows desktop shell. The shell itself is the Rust crate in src-tauri/; nothing here is published or consumed by the web app.",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4"
+  }
+}

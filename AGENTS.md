@@ -192,6 +192,11 @@ bin/
                            Claude/Codex engines (posts to /api/internal/display)
 ```
 
+`desktop/` is a separate top-level tree, not part of the Next.js app above:
+a Tauri 2 Rust shell over WebView2, running the server inside a dedicated
+WSL2 distro flattened from this image. Own CI
+(`.github/workflows/desktop.yml`); full architecture in `docs/windows.md`.
+
 ---
 
 ## User accounts & auth (`lib/auth/`)

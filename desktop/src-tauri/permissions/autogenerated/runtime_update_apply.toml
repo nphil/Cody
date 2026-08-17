@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-runtime-update-apply"
+description = "Enables the runtime_update_apply command without any pre-configured scope."
+commands.allow = ["runtime_update_apply"]
+
+[[permission]]
+identifier = "deny-runtime-update-apply"
+description = "Denies the runtime_update_apply command without any pre-configured scope."
+commands.deny = ["runtime_update_apply"]
