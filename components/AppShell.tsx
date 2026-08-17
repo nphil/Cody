@@ -29,6 +29,9 @@ import type { SessionStatsInfo } from "@/lib/pi-types";
 import { ALL_CAPABILITIES, normalizeCapabilities, type ActiveEngineInfo, type EngineCapabilities, type SettingsTab } from "./SettingsTabs";
 import type { EnginesPayload } from "./EnginePicker";
 import { STORAGE_KEYS } from "@/lib/storage-keys";
+import { createPreviewAutoOpener, type PreviewAutoOpener } from "@/lib/preview-autoopen";
+import { normalizePreviewUrl, probeLoopbackUrl } from "@/lib/preview-url";
+import type { PreviewOpenRequest } from "./PreviewPanel";
 
 // Loaded on demand: the config modals open on click and the file viewer only
 // renders once a file tab exists, so none of them belong in the first-load chunk.
@@ -951,6 +954,54 @@ export function AppShell() {
     handleOpenFile(filePath, getFileName(filePath), selectedSession?.id ?? null);
   }, [handleOpenFile, selectedSession?.id]);
 
+  // --- Preview auto-open --------------------------------------------------
+  // Two ways the agent reaches the Preview panel: the open_preview host tool
+  // (deliberate, opens immediately) and loopback URLs mentioned in live
+  // assistant replies (auto-open once the URL actually answers — policy in
+  // lib/preview-autoopen).
+  const previewRequestTokenRef = useRef(0);
+  const [previewRequest, setPreviewRequest] = useState<PreviewOpenRequest | null>(null);
+  const openPreviewPanel = useCallback((url: string) => {
+    setPreviewRequest({ url, token: ++previewRequestTokenRef.current });
+    setRightPanelMode("preview");
+    setRightPanelOpen(true);
+    // On mobile the workspace panel is full-screen; close the drawer so it shows.
+    if (isMobile) setSidebarOpen(false);
+  }, [isMobile, setRightPanelMode]);
+
+  // Latest-value refs: the auto-opener lives for the whole app and settles
+  // probes asynchronously, so it must never close over a stale render.
+  const openPreviewPanelRef = useRef(openPreviewPanel);
+  openPreviewPanelRef.current = openPreviewPanel;
+  const previewSessionIdRef = useRef<string | null>(null);
+  previewSessionIdRef.current = selectedSession?.id ?? null;
+
+  const previewAutoOpenerRef = useRef<PreviewAutoOpener | null>(null);
+  if (previewAutoOpenerRef.current === null) {
+    previewAutoOpenerRef.current = createPreviewAutoOpener({
+      probe: (url) => probeLoopbackUrl(url),
+      open: (url) => openPreviewPanelRef.current(url),
+      // Only a definite mismatch blocks an open: while a first prompt is
+      // creating its session, the shell's selected id briefly lags the id
+      // the chat hook already reports.
+      isSessionActive: (sessionId) =>
+        sessionId === null || previewSessionIdRef.current === null || previewSessionIdRef.current === sessionId,
+    });
+  }
+
+  /** open_preview (and loopback open_url) host tools: open now, and remember
+   * the pair so follow-up prose mentions do not re-open a closed panel. */
+  const handleAgentOpenPreview = useCallback((url: string, sessionId?: string) => {
+    const normalized = normalizePreviewUrl(url);
+    if (!normalized) return;
+    previewAutoOpenerRef.current?.markHandled(normalized, sessionId ?? null);
+    openPreviewPanel(normalized);
+  }, [openPreviewPanel]);
+
+  const handlePreviewUrlsSeen = useCallback((urls: string[], sessionId?: string) => {
+    previewAutoOpenerRef.current?.offer(urls, sessionId ?? null);
+  }, []);
+
   const handleCloseFileTab = useCallback((tabId: string) => {
     // Compute everything from the current list outside the updaters: no side
     // effect inside a state updater, and no stale-closure read (the callback
@@ -1542,6 +1593,8 @@ export function AppShell() {
               onSessionStatsPanelOpen={openSessionStatsPanel}
               onContextUsageChange={handleContextUsageChange}
               onOpenFile={handleOpenLinkedFile}
+              onOpenPreview={handleAgentOpenPreview}
+              onPreviewUrlsSeen={handlePreviewUrlsSeen}
               advisorEnabled={advisorEnabled}
               chatExtras={capabilities.chatExtras}
               toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
@@ -1812,6 +1865,7 @@ export function AppShell() {
             <PreviewPanel
               cwd={activeCwd}
               active={rightPanelMode === "preview" && rightPanelOpen}
+              request={previewRequest}
               onOpenTasks={() => setRightPanelMode("tasks")}
             />
           )}

@@ -4,43 +4,27 @@ import { useCallback, useEffect, useRef, useState, type ReactElement } from "rea
 import { ExternalLink, Globe, ListTodo, RotateCw } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
 import { STORAGE_PREFIXES } from "@/lib/storage-keys";
+// Loopback-only rules + rationale live in lib/preview-url, shared with the
+// agent-facing open_preview host tool and the assistant-URL auto-open path.
+import { normalizePreviewUrl } from "@/lib/preview-url";
+
+/** One-shot "show this URL" request (agent host tool / auto-open). The token
+ * makes each dispatch distinct so a re-render never replays a consumed one. */
+export interface PreviewOpenRequest {
+  url: string;
+  token: number;
+}
 
 export interface PreviewPanelProps {
   cwd: string | null;
   /** This panel is the visible tab. */
   active: boolean;
+  request?: PreviewOpenRequest | null;
   /** Jump to the Tasks tab (the usual way to start a dev server). */
   onOpenTasks?: () => void;
 }
 
 const DEFAULT_URL = "http://localhost:3000";
-
-/**
- * Only loopback origins are previewable: Cody's CSP frame-src is restricted to
- * localhost/127.0.0.1 (any port), and embedding arbitrary origins in an
- * authenticated tool would be a phishing surface. Everything else gets the
- * "open in its own window" affordance instead.
- */
-function normalizePreviewUrl(raw: string): string | null {
-  const trimmed = raw.trim();
-  if (!trimmed) return null;
-  const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
-  let url: URL;
-  try {
-    url = new URL(withScheme);
-  } catch {
-    return null;
-  }
-  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-  const host = url.hostname.toLowerCase();
-  // [::1] is deliberately NOT accepted: CSP source lists cannot express a
-  // bracketed IPv6 host with a port wildcard (browsers reject
-  // "http://[::1]:*" outright), so such a preview would be accepted here and
-  // then silently refused by the browser. Use localhost, which resolves to
-  // ::1 anyway on dual-stack hosts.
-  if (host !== "localhost" && host !== "127.0.0.1") return null;
-  return url.toString();
-}
 
 function storageKeyFor(cwd: string): string {
   return `${STORAGE_PREFIXES.previewUrl}${cwd}`;
@@ -48,7 +32,7 @@ function storageKeyFor(cwd: string): string {
 
 type Reachability = "unknown" | "checking" | "up" | "down";
 
-export function PreviewPanel({ cwd, active, onOpenTasks }: PreviewPanelProps): ReactElement | null {
+export function PreviewPanel({ cwd, active, request, onOpenTasks }: PreviewPanelProps): ReactElement | null {
   const { t } = useI18n();
   const [input, setInput] = useState(DEFAULT_URL);
   /** The validated URL the iframe is (or will be) pointed at. */
@@ -111,6 +95,28 @@ export function PreviewPanel({ cwd, active, onOpenTasks }: PreviewPanelProps): R
     setFrameKey((k) => k + 1);
     void probe(normalized);
   }, [cwd, input, probe]);
+
+  // Agent-driven requests (open_preview host tool / assistant-URL auto-open).
+  // Declared BEFORE the stored-URL auto-load effect: on a mount caused by a
+  // request, this one runs first and its autoLoadedRef write (refs are
+  // synchronous across same-commit effects, unlike state) stops auto-load
+  // from loading the stored URL underneath the requested one.
+  const consumedRequestTokenRef = useRef(0);
+  useEffect(() => {
+    if (!request || request.token === consumedRequestTokenRef.current) return;
+    consumedRequestTokenRef.current = request.token;
+    const normalized = normalizePreviewUrl(request.url);
+    if (!normalized) return;
+    autoLoadedRef.current = true;
+    setInput(normalized);
+    setInputError(false);
+    if (cwd) {
+      try { localStorage.setItem(storageKeyFor(cwd), normalized); } catch { /* best-effort */ }
+    }
+    setTarget(normalized);
+    setFrameKey((k) => k + 1);
+    void probe(normalized);
+  }, [request, cwd, probe]);
 
   // First activation with a stored URL: try it automatically so the panel is
   // useful without a click when the dev server is already running. Read the

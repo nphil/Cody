@@ -112,6 +112,8 @@ lib/
   markdown.ts          shared markdown helpers
   npx.ts               npx runner used by skill install
   pi-types.ts          local structural types for agent/RPC objects
+  preview-url.ts       loopback preview URL rules: normalize/extract/probe
+  preview-autoopen.ts  when an assistant-mentioned URL auto-opens the Preview panel
   project-ordering.ts  pure project sort/group/activity helpers (client + tests)
   project-registry.ts  on-disk managed-project registry (~/.omp/agent/projects.json)
   rpc-manager.ts       session registry + startRpcSession over RpcProcess
@@ -299,6 +301,28 @@ appears without a Cody change.
 - `globalThis` survives Next.js hot-reload; plain module-level Map does not.
 - Idle sessions are disposed after a timeout; concurrent `startRpcSession()`
   calls must share a single start promise.
+
+### Agent-driven Preview panel (`lib/preview-url.ts`, `lib/preview-autoopen.ts`)
+- The agent reaches the Preview tab two ways. Deliberately: the `open_preview`
+  host tool (and `open_url` host-tool calls carrying a loopback URL — a
+  host_tool_call arrives outside any user gesture, so `window.open` would be
+  popup-blocked) opens the panel immediately and reports probe-checked
+  reachability back to the model. Implicitly: loopback URLs in **live**
+  assistant replies (`message_end` frames only — history loads and reconnect
+  hydration never trigger) are offered to `createPreviewAutoOpener`, which
+  opens the panel only once a no-cors probe confirms something answers,
+  retrying briefly so a still-booting dev server is not missed.
+- Auto-open policy: once per (session, url) pair; explicit host-tool opens
+  mark the pair handled so follow-up prose cannot re-open a panel the user
+  closed; a session switch abandons pending probes. URL rules are shared in
+  `normalizePreviewUrl` — loopback only (CSP frame-src), with 0.0.0.0 / [::] /
+  [::1] canonicalized to localhost.
+- `PreviewPanel` consumes one-shot `PreviewOpenRequest { url, token }` props
+  (consumed-token guard, like the terminal focus request); its request effect
+  is declared before the stored-URL auto-load effect and sets `autoLoadedRef`
+  so the stored URL cannot race the requested one on first mount.
+- Host tools exist only on omp's rpc-ui protocol; turn engines (Claude Code /
+  Codex) get the assistant-text detection path only.
 
 ### Two kinds of branching — don't confuse them
 - **Fork** (Fork button on user message): creates a new independent `.jsonl` file. Shown as a child in the sidebar tree via `parentSession` header field.

@@ -11,6 +11,7 @@ import type {
   SessionTreeNode,
 } from "@/lib/types";
 import { normalizeToolCalls } from "@/lib/normalize";
+import { extractLoopbackUrls, normalizePreviewUrl, probeLoopbackUrl } from "@/lib/preview-url";
 import { derivePersistedContextUsage, type ContextUsageValue } from "@/lib/context-usage";
 import type { ThinkingModelMeta } from "@/lib/thinking-levels";
 import { sendAgentCommand } from "@/lib/agent-client";
@@ -360,6 +361,12 @@ export interface UseAgentSessionOptions {
   setToolPreset?: (preset: "none" | "default" | "full") => void;
   /** Opens a file in the web UI's file viewer (used by the open_file host tool). */
   onOpenFile?: (filePath: string, name: string, sessionId?: string) => void;
+  /** Shows a loopback URL in the workspace Preview panel (open_preview host
+   *  tool, and open_url calls that target localhost). */
+  onOpenPreview?: (url: string, sessionId?: string) => void;
+  /** Loopback URLs the assistant mentioned in a live reply — candidates for
+   *  auto-opening the Preview panel once something answers there. */
+  onPreviewUrlsSeen?: (urls: string[], sessionId?: string) => void;
 }
 
 export type ThinkingLevelOption = string;
@@ -582,7 +589,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
     session, newSessionCwd, advisorEnabled, onAgentEnd, onSessionCreated, onSessionForked,
     modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
-    onOpenFile,
+    onOpenFile, onOpenPreview, onPreviewUrlsSeen,
   } = opts;
 
   const reducedMotion = usePrefersReducedMotion();
@@ -1265,10 +1272,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const HOST_TOOL_DEFINITIONS = useMemo<HostToolDefinition[]>(() => [
     {
       name: "open_url",
-      description: "Open a URL in the user's browser.",
+      description: "Open a URL in a new browser tab. Loopback URLs (localhost / 127.0.0.1) open in Cody's embedded Preview panel instead.",
       parameters: {
         type: "object",
         properties: { url: { type: "string" } },
+        required: ["url"],
+      },
+    },
+    {
+      name: "open_preview",
+      description: "Show a locally served web app in Cody's Preview panel, embedded in the workspace beside the chat. Call this with the full URL (e.g. http://localhost:3000) after starting or restarting a local dev server, or whenever the user should see a local web page. Only loopback URLs (localhost / 127.0.0.1) can be embedded; use open_url for anything else.",
+      parameters: {
+        type: "object",
+        properties: { url: { type: "string", description: "Loopback URL to show, e.g. http://localhost:3000" } },
         required: ["url"],
       },
     },
@@ -1352,6 +1368,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     switch (toolName) {
       case "open_url": {
         const raw = typeof args.url === "string" ? args.url : "";
+        // Loopback URLs render in the workspace Preview panel instead of a
+        // new tab: a host_tool_call arrives outside any user gesture, so
+        // window.open is at the popup blocker's mercy — and the embedded
+        // panel is the surface built for local dev servers anyway.
+        const loopback = normalizePreviewUrl(raw);
+        if (loopback && onOpenPreview) {
+          onOpenPreview(loopback, sid);
+          await respondHostTool(sid, id, `Opened ${loopback} in the workspace Preview panel`);
+          break;
+        }
         const safe = isSafeOpenUrl(raw);
         const url = safe ? raw : "";
         if (url && typeof window !== "undefined") {
@@ -1393,10 +1419,30 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         await respondHostTool(sid, id, path ? `Opened ${path}` : "No path provided", !path);
         break;
       }
+      case "open_preview": {
+        const raw = str(args.url) ?? "";
+        const url = normalizePreviewUrl(raw);
+        if (!url) {
+          await respondHostTool(sid, id, "Only loopback URLs (http://localhost:PORT or http://127.0.0.1:PORT) can be shown in the Preview panel. Use open_url for other pages.", true);
+          break;
+        }
+        if (!onOpenPreview) {
+          await respondHostTool(sid, id, "The Preview panel is not available in this view", true);
+          break;
+        }
+        onOpenPreview(url, sid);
+        // Tell the model whether anything is actually listening — it may
+        // have called before its dev server finished booting.
+        const reachable = await probeLoopbackUrl(url, 3_000);
+        await respondHostTool(sid, id, reachable
+          ? `Preview panel is now showing ${url}`
+          : `Preview panel opened for ${url}, but nothing answered there yet — verify the server is running and listening on that port.`);
+        break;
+      }
       default:
         await respondHostTool(sid, id, `Host tool \"${toolName}\" is not available in Cody`, true);
     }
-  }, [onOpenFile, respondHostTool]);
+  }, [onOpenFile, onOpenPreview, respondHostTool]);
 
   /** Answer a host_uri_request (agent read/write of a registered scheme). */
   const respondHostUri = useCallback(async (sid: string, id: string, frame: { content?: string; contentType?: "text/markdown" | "application/json" | "text/plain"; isError?: boolean; error?: string }) => {
@@ -1962,6 +2008,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           toast.info("MCP tools updated", describeMcpMountNotice(completed as CustomMessage), { clamp: true });
         } else if (completed) {
           setMessages((prev) => [...prev, normalizeToolCalls(completed)]);
+          if (completed.role === "assistant" && onPreviewUrlsSeen) {
+            // Loopback URLs in a live assistant reply are candidates for
+            // auto-opening the Preview panel; the shell probes reachability
+            // before acting, so mere mentions of a dead port stay quiet.
+            const urls = extractLoopbackUrls(extractMessageText(completed));
+            if (urls.length > 0) onPreviewUrlsSeen(urls, sessionIdRef.current ?? undefined);
+          }
         }
         dispatch({ type: "reset" });
         setAgentPhase({ kind: "waiting_model" });
@@ -2147,7 +2200,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as unknown as IncomingExtensionUiRequest);
         break;
     }
-  }, [addNotice, consumeQueuedMessage, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, mergeSubagents, onAgentEnd, reconcileAgentState, resetSubagentActivityState, applyAuthoritativeModel, beginAuthoritativeModelSync]);
+  }, [addNotice, consumeQueuedMessage, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, mergeSubagents, onAgentEnd, onPreviewUrlsSeen, reconcileAgentState, resetSubagentActivityState, applyAuthoritativeModel, beginAuthoritativeModelSync]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]): Promise<boolean> => {
