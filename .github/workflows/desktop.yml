@@ -9,7 +9,8 @@ name: Cody Desktop
 # and injected into the build; it is not stored in the repo. workflow_dispatch
 # runs the identical pipeline with manual overrides: `version` pins an exact
 # number, `bump` picks patch/minor/major, `notes` is prepended to the
-# generated changelog.
+# generated changelog, and `force_rootfs` re-snapshots the runtime even when
+# the reuse check below says it is unchanged.
 #
 # (docker.yml's paths-ignore is the other half of this split: it lists
 # `desktop/**`, `docs/windows.md` and this file, so a desktop-only push never
@@ -64,6 +65,30 @@ name: Cody Desktop
 # versions (verified in the desktop networking/import research -- this is
 # the one place this file deliberately differs from the original CI design
 # draft, which used zstd).
+#
+# RUNTIME REUSE -- why a desktop-only release is ~1.6 MB, not ~740 MB
+#
+# The rootfs is a snapshot of a container image this workflow does not build.
+# A desktop-only change (a Rust fix, a CI tweak) leaves that image untouched,
+# so rebuilding the snapshot would spend ~10 minutes pulling 3.35 GB, ~740 MB
+# of upload, and a full re-download for every installed client -- to produce a
+# byte-identical runtime. So the `version` job resolves, cheaply, whether the
+# image actually moved, and `rootfs-build` is skipped when it did not:
+#   - current digest of ghcr.io/nphil/cody:latest, from the registry v2 API
+#     with an anonymous pull token (the package is public). Two seconds and
+#     zero bytes of image data -- see the step for why this beats the docker
+#     CLI here.
+#   - the digest the LIVE manifest records (desktop-latest's
+#     desktop-manifest.json), plus a liveness probe of the rootfs URL it
+#     names, so a pruned asset or a deleted release forces a rebuild rather
+#     than publishing a manifest that points at nothing.
+# Equal digests + a reachable asset => `reuse_rootfs`, and the release
+# republishes the PREVIOUS runtime block verbatim: same URL, same sha256,
+# same size, same imageDigest. Installed clients therefore see an unchanged
+# runtime and download only the new shell. Dispatch with `force_rootfs` to
+# rebuild the snapshot anyway. Every failure mode of the check -- unparseable
+# manifest, empty digest, unreachable asset, network trouble -- falls to
+# REBUILD, which is never wrong, only slower.
 on:
   push:
     branches: [main]
@@ -86,6 +111,11 @@ on:
         description: "Extra release notes (markdown), prepended to the auto-generated changelog"
         required: false
         type: string
+      force_rootfs:
+        description: "Rebuild + re-upload the WSL rootfs even if the container image has not changed."
+        required: false
+        default: false
+        type: boolean
 
 # desktop-latest is a single shared mutation target for every release run,
 # and so is the tag namespace the version number is derived from: this
@@ -110,6 +140,15 @@ jobs:
       version: ${{ steps.compute.outputs.version }}
       prev_tag: ${{ steps.compute.outputs.prev_tag }}
       changelog: ${{ steps.changelog.outputs.changelog }}
+      # The runtime-reuse decision and, when it is `true`, the previous
+      # manifest's entire runtime block -- republished verbatim so the
+      # reused runtime keeps byte-identical metadata.
+      reuse_rootfs: ${{ steps.runtime.outputs.reuse_rootfs }}
+      runtime_version: ${{ steps.runtime.outputs.runtime_version }}
+      runtime_url: ${{ steps.runtime.outputs.runtime_url }}
+      runtime_sha256: ${{ steps.runtime.outputs.runtime_sha256 }}
+      runtime_size: ${{ steps.runtime.outputs.runtime_size }}
+      runtime_image_digest: ${{ steps.runtime.outputs.runtime_image_digest }}
     steps:
       # Full history, because the changelog walks commits back to the
       # previous desktop tag; the default depth-1 checkout has nothing to
@@ -229,6 +268,154 @@ jobs:
             fi
             echo "${delim}"
           } >> "$GITHUB_OUTPUT"
+
+      # Decides whether `rootfs-build` runs at all -- see the RUNTIME REUSE
+      # note at the top of the file. Reads only metadata: an image manifest
+      # (a few hundred bytes), a JSON manifest, and one byte of the rootfs.
+      #
+      # EVERY branch that is not a proven match sets reuse=false. A wrong
+      # `false` costs ten minutes; a wrong `true` publishes a manifest whose
+      # runtime URL is dead or whose digest lies about what is inside the
+      # tarball. The asymmetry is the whole design of this step.
+      - name: Decide whether the runtime needs rebuilding
+        id: runtime
+        env:
+          # Must name the SAME image rootfs-build snapshots; they are written
+          # separately because this step talks to the registry API (which
+          # wants repo and tag apart) and that one talks to the docker CLI.
+          IMAGE_REPO: nphil/cody
+          IMAGE_TAG: latest
+          FORCE_ROOTFS: ${{ inputs.force_rootfs }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # Answers "why did/didn't it rebuild?" in one grep-able line, always
+          # written, whichever way the decision goes.
+          decide() {
+            echo "reuse_rootfs=$1" >> "$GITHUB_OUTPUT"
+            echo "::notice::runtime: $2"
+            echo "runtime decision: reuse_rootfs=$1 -- $2"
+          }
+
+          if [ "${FORCE_ROOTFS:-false}" = "true" ]; then
+            decide false "force_rootfs was requested; rebuilding the snapshot unconditionally"
+            exit 0
+          fi
+
+          # -- (a) what the registry serves for :latest right now ----------
+          #
+          # The registry v2 API, NOT the docker CLI, and deliberately:
+          # `docker buildx imagetools inspect --format '{{.Manifest.Digest}}'`
+          # was tested against this exact image and SILENTLY IGNORES the
+          # template, printing the whole human-readable listing instead (the
+          # Manifest field carries its own formatter, so the sub-field lookup
+          # falls through). A workflow parsing that gets a decision made on
+          # garbage. `docker manifest inspect` reports the per-PLATFORM
+          # manifest digest, which is a different sha256 from the one below
+          # and would never match. curl+jq also keeps this job docker-free.
+          #
+          # The digest resolved here is the OCI *index* digest -- verified to
+          # be exactly what `docker inspect .RepoDigests` (rootfs-build's
+          # source for imageDigest) records after pulling the tag, which is
+          # what makes the comparison below meaningful at all.
+          token=$(curl -fsS --retry 3 --retry-delay 2 -m 30 \
+            "https://ghcr.io/token?scope=repository:${IMAGE_REPO}:pull&service=ghcr.io" \
+            | jq -r '.token // empty') || token=""
+          if [ -z "$token" ]; then
+            decide false "could not get an anonymous pull token for ${IMAGE_REPO}; rebuilding"
+            exit 0
+          fi
+
+          # Accept both OCI and Docker media types, index and single-manifest:
+          # ask for the wrong one and the registry answers with a converted
+          # manifest under a DIFFERENT digest.
+          current_digest=$(curl -fsS --retry 3 --retry-delay 2 -m 30 -I -L \
+            -H "Authorization: Bearer ${token}" \
+            -H 'Accept: application/vnd.oci.image.index.v1+json' \
+            -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
+            -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \
+            -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
+            "https://ghcr.io/v2/${IMAGE_REPO}/manifests/${IMAGE_TAG}" \
+            | tr -d '\r' \
+            | awk 'tolower($1) == "docker-content-digest:" { print $2 }' \
+            | tail -n1) || current_digest=""
+          if [ -z "$current_digest" ]; then
+            decide false "registry did not report a digest for ${IMAGE_REPO}:${IMAGE_TAG}; rebuilding"
+            exit 0
+          fi
+          echo "registry ${IMAGE_REPO}:${IMAGE_TAG} -> ${current_digest}"
+
+          # -- (b) what the LIVE manifest claims ---------------------------
+          #
+          # desktop-latest's manifest, not the repo, is the source of truth:
+          # it is what installed clients actually read, so reusing means
+          # "republish what they already have". A 404 is ordinary (first
+          # release ever, or the channel was reset), not an error.
+          manifest_url="https://github.com/${REPO}/releases/download/desktop-latest/desktop-manifest.json"
+          code=$(curl -sSL -m 60 -o "${RUNNER_TEMP}/prev-manifest.json" -w '%{http_code}' "$manifest_url" || echo 000)
+          if [ "$code" != "200" ]; then
+            decide false "no published desktop-manifest.json (HTTP ${code}); rebuilding"
+            exit 0
+          fi
+          if ! jq -e . "${RUNNER_TEMP}/prev-manifest.json" > /dev/null 2>&1; then
+            decide false "published desktop-manifest.json is not valid JSON; rebuilding"
+            exit 0
+          fi
+
+          prev_digest=$(jq -r '.runtime.imageDigest // ""' "${RUNNER_TEMP}/prev-manifest.json")
+          prev_version=$(jq -r '.runtime.version // ""' "${RUNNER_TEMP}/prev-manifest.json")
+          prev_url=$(jq -r '.runtime.url // ""' "${RUNNER_TEMP}/prev-manifest.json")
+          prev_sha=$(jq -r '.runtime.sha256 // ""' "${RUNNER_TEMP}/prev-manifest.json")
+          prev_size=$(jq -r '.runtime.size // ""' "${RUNNER_TEMP}/prev-manifest.json")
+          echo "published manifest runtime: ${prev_version:-<none>} ${prev_digest:-<none>}"
+
+          # Every field is republished as-is, so every field has to be there.
+          # size is checked for shape too: it goes back out through jq
+          # --argjson, where a non-number would abort the release job.
+          if [ -z "$prev_digest" ] || [ -z "$prev_version" ] || [ -z "$prev_url" ] || [ -z "$prev_sha" ]; then
+            decide false "published manifest has an incomplete runtime block; rebuilding"
+            exit 0
+          fi
+          if ! printf '%s' "$prev_size" | grep -Eq '^[0-9]+$'; then
+            decide false "published manifest runtime.size ('${prev_size}') is not a number; rebuilding"
+            exit 0
+          fi
+
+          # rootfs-build records the digest as `repo@sha256:...`; the registry
+          # reports the bare `sha256:...`. Compare the part that identifies
+          # the bytes. (`${x##*@}` is a no-op when there is no `@`.)
+          if [ "${prev_digest##*@}" != "${current_digest##*@}" ]; then
+            decide false "container image moved (published ${prev_digest##*@} -> registry ${current_digest##*@}); rebuilding"
+            exit 0
+          fi
+
+          # -- (c) is the asset the manifest names still THERE? ------------
+          #
+          # Catches a rootfs pruned by an earlier run, or a deleted release.
+          # A ranged GET, not HEAD, and this is not a style choice: the
+          # github.com download URL 302s to a presigned objects.github-
+          # usercontent.com URL whose signature covers the METHOD, so a HEAD
+          # of a perfectly healthy asset comes back 401 (verified against the
+          # live release). Reuse would then never fire. `-r 0-0` transfers
+          # one byte and answers 206; a missing asset or release answers 404.
+          asset_code=$(curl -sSL -m 90 -r 0-0 -o /dev/null -w '%{http_code}' "$prev_url" || echo 000)
+          case "$asset_code" in
+            200|206) ;;
+            *)
+              decide false "published rootfs ${prev_url} is not reachable (HTTP ${asset_code}); rebuilding"
+              exit 0
+              ;;
+          esac
+
+          {
+            echo "runtime_version=$prev_version"
+            echo "runtime_url=$prev_url"
+            echo "runtime_sha256=$prev_sha"
+            echo "runtime_size=$prev_size"
+            echo "runtime_image_digest=$prev_digest"
+          } >> "$GITHUB_OUTPUT"
+          decide true "ghcr.io/${IMAGE_REPO}:${IMAGE_TAG} is unchanged at ${current_digest##*@} and the published rootfs is live; reusing Cody ${prev_version} and skipping the snapshot"
 
   # ---------------------------------------------------------------------
   # Windows installer. windows-latest is Windows Server 2025 + VS2026 as of
@@ -368,11 +555,22 @@ jobs:
   # Rootfs snapshot of the ALREADY-published container image, so the
   # desktop app can offer "install the Cody server locally" without the
   # user needing Docker/GHCR access themselves. Image is public
-  # (docs/unraid.md), so no registry login needed to pull it. Runs on every
-  # trigger now that every trigger publishes -- and it deliberately does not
-  # depend on the `version` job: the artifact is keyed by the CONTAINER's
-  # version, so it can build in parallel with the shell.
+  # (docs/unraid.md), so no registry login needed to pull it.
+  #
+  # SKIPPED when the image has not moved since the published manifest was
+  # written -- the RUNTIME REUSE note at the top of the file explains the
+  # rule and the `version` job's `runtime` step makes the call. That is the
+  # only reason this job `needs: version`; nothing here reads the desktop
+  # version (the artifact is keyed by the CONTAINER's version label), so the
+  # dependency costs only the ~20s the version job takes, and the snapshot
+  # still runs in parallel with the shell build.
+  #
+  # Everything below is unconditional once the job does run: the excludes,
+  # the gzip choice, and the size assertion are the snapshot's contract, and
+  # a reused runtime is one that already passed them.
   rootfs-build:
+    needs: version
+    if: needs.version.outputs.reuse_rootfs != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -455,16 +653,31 @@ jobs:
 
   # ---------------------------------------------------------------------
   release:
-    # success() is spelled out even though it's GitHub's implicit default
-    # for an `if:` with no status-check function -- explicit here so a
-    # failed shell-build/rootfs-build visibly skips this job instead of
-    # relying on a reader already knowing that default.
-    if: success()
+    # NOT success(), and not by accident: `rootfs-build` is skipped whenever
+    # the runtime is reused, and GitHub's default `success()` treats a
+    # SKIPPED dependency as "did not succeed" -- so the plain default would
+    # silently cancel every reuse release, which is most of them.
+    #
+    # `always()` re-enables the job, and the explicit result checks put back
+    # exactly the gate success() was providing: shell-build must have
+    # SUCCEEDED (not skipped, not failed, not cancelled -- there is no
+    # release without an installer), and rootfs-build must have either
+    # succeeded or been deliberately skipped. Anything else -- failure,
+    # cancellation, a skip that came from a failed `version` job cascading
+    # down -- leaves at least one of these unequal and the release does not
+    # run. `version` is checked too: its outputs feed the manifest, and it
+    # failing would otherwise reach here as two skipped builds.
+    if: >-
+      always()
+      && needs.version.result == 'success'
+      && needs.shell-build.result == 'success'
+      && (needs.rootfs-build.result == 'success' || needs.rootfs-build.result == 'skipped')
     needs: [version, shell-build, rootfs-build]
     runs-on: ubuntu-latest
-    # Generous: the rootfs is uploaded twice (once per release) at several
-    # hundred megabytes a time, and a timeout here means a build that already
-    # passed never ships.
+    # Generous: on a rebuild the rootfs is uploaded twice (once per release)
+    # at several hundred megabytes a time, and a timeout here means a build
+    # that already passed never ships. A reuse run finishes in a fraction of
+    # this -- it uploads ~1.6 MB.
     timeout-minutes: 25
     permissions:
       contents: write
@@ -478,7 +691,11 @@ jobs:
           name: desktop-installer
           path: dist
 
+      # Only exists when the snapshot actually ran. On a reuse run the
+      # runtime's metadata comes from the published manifest instead, and no
+      # rootfs file is present in dist/ at all -- which is the point.
       - uses: actions/download-artifact@v8
+        if: needs.version.outputs.reuse_rootfs != 'true'
         with:
           name: desktop-rootfs
           path: dist
@@ -488,17 +705,46 @@ jobs:
           VERSION: ${{ needs.version.outputs.version }}
           CHANGELOG: ${{ needs.version.outputs.changelog }}
           NOTES_INPUT: ${{ inputs.notes }}
+          REUSE_ROOTFS: ${{ needs.version.outputs.reuse_rootfs }}
           CODY_VERSION: ${{ needs.rootfs-build.outputs.cody_version }}
           IMAGE_DIGEST: ${{ needs.rootfs-build.outputs.image_digest }}
+          PREV_RUNTIME_VERSION: ${{ needs.version.outputs.runtime_version }}
+          PREV_RUNTIME_URL: ${{ needs.version.outputs.runtime_url }}
+          PREV_RUNTIME_SHA: ${{ needs.version.outputs.runtime_sha256 }}
+          PREV_RUNTIME_SIZE: ${{ needs.version.outputs.runtime_size }}
+          PREV_RUNTIME_DIGEST: ${{ needs.version.outputs.runtime_image_digest }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           installer="cody-desktop-${VERSION}-x64-setup.exe"
-          rootfs="rootfs-cody-${CODY_VERSION}.tar.gz"
           installer_sha=$(cut -d' ' -f1 "dist/${installer}.sha256")
-          rootfs_sha=$(cut -d' ' -f1 "dist/${rootfs}.sha256")
           base="https://github.com/${REPO}/releases/download/desktop-latest"
           published_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          # The runtime half comes from one of two places. Reusing means
+          # republishing the previous block VERBATIM -- same URL, same
+          # sha256, same size, same digest -- so an installed client
+          # comparing the manifest against its distro sees no change and
+          # downloads nothing. Deriving the filename from the previous URL
+          # (rather than rebuilding it from the version) keeps the manifest
+          # and the asset that must survive the prune provably in step.
+          if [ "$REUSE_ROOTFS" = "true" ]; then
+            cody_version="$PREV_RUNTIME_VERSION"
+            rootfs="${PREV_RUNTIME_URL##*/}"
+            rootfs_url="$PREV_RUNTIME_URL"
+            rootfs_sha="$PREV_RUNTIME_SHA"
+            rootfs_size="$PREV_RUNTIME_SIZE"
+            image_digest="$PREV_RUNTIME_DIGEST"
+            echo "runtime: REUSED -- Cody ${cody_version} at ${image_digest} (${rootfs})"
+          else
+            cody_version="$CODY_VERSION"
+            rootfs="rootfs-cody-${cody_version}.tar.gz"
+            rootfs_url="${base}/${rootfs}"
+            rootfs_sha=$(cut -d' ' -f1 "dist/${rootfs}.sha256")
+            rootfs_size=$(stat -c%s "dist/${rootfs}")
+            image_digest="$IMAGE_DIGEST"
+            echo "runtime: REBUILT -- Cody ${cody_version} at ${image_digest} (${rootfs})"
+          fi
 
           # Operator notes (dispatch only) come first, then the generated
           # changelog -- one text used for both the manifest and the release
@@ -516,18 +762,17 @@ jobs:
           # catches a :latest republish, which usually carries the same
           # version label. The top-level copy is for humans; serde ignores it.
           installer_size=$(stat -c%s "dist/${installer}")
-          rootfs_size=$(stat -c%s "dist/${rootfs}")
           jq -n \
             --arg shellVersion "$VERSION" \
             --arg shellUrl "${base}/${installer}" \
             --arg shellSha "$installer_sha" \
             --argjson shellSize "$installer_size" \
-            --arg runtimeVersion "$CODY_VERSION" \
-            --arg runtimeUrl "${base}/${rootfs}" \
+            --arg runtimeVersion "$cody_version" \
+            --arg runtimeUrl "$rootfs_url" \
             --arg runtimeSha "$rootfs_sha" \
             --argjson runtimeSize "$rootfs_size" \
             --arg publishedAt "$published_at" \
-            --arg imageDigest "$IMAGE_DIGEST" \
+            --arg imageDigest "$image_digest" \
             --arg notes "$notes_text" \
             '{shell: {version:$shellVersion, url:$shellUrl, sha256:$shellSha, size:$shellSize},
               runtime: {version:$runtimeVersion, url:$runtimeUrl, sha256:$runtimeSha, size:$runtimeSize,
@@ -552,10 +797,27 @@ jobs:
             echo '| Asset | SHA-256 |'
             echo '| --- | --- |'
             echo "| \`${installer}\` | \`${installer_sha}\` |"
-            echo "| \`${rootfs}\` | \`${rootfs_sha}\` |"
+            if [ "$REUSE_ROOTFS" = "true" ]; then
+              # Named, not attached: this release carries no rootfs, and a
+              # table row implying otherwise would send readers hunting for
+              # an asset that is not here. The row still gives the sha256, so
+              # a manual install can be verified against the file it does
+              # point at.
+              echo "| \`${rootfs}\` | \`${rootfs_sha}\` (hosted on \`desktop-latest\`, not attached here) |"
+            else
+              echo "| \`${rootfs}\` | \`${rootfs_sha}\` |"
+            fi
             echo '| `desktop-manifest.json` | see file |'
             echo
-            echo "Rootfs flattened from \`ghcr.io/nphil/cody:latest\` at \`${IMAGE_DIGEST}\` (Cody ${CODY_VERSION})."
+            # The provenance line, and the one thing a reader most wants from
+            # it: did the runtime move? Reuse says so plainly and names the
+            # release that actually hosts the tarball, so this release's
+            # shorter asset list is never mistaken for a broken build.
+            if [ "$REUSE_ROOTFS" = "true" ]; then
+              echo "Runtime: **unchanged** (Cody ${cody_version}, \`${image_digest}\`) — reused from the [\`desktop-latest\`](https://github.com/${REPO}/releases/tag/desktop-latest) release, which hosts \`${rootfs}\`. \`ghcr.io/nphil/cody:latest\` has not moved since that snapshot, so this release ships the shell only and installed runtimes need no update."
+            else
+              echo "Runtime: **rebuilt**. Rootfs flattened from \`ghcr.io/nphil/cody:latest\` at \`${image_digest}\` (Cody ${cody_version})."
+            fi
           } > "${RUNNER_TEMP}/release-notes.md"
           cat "${RUNNER_TEMP}/release-notes.md"
 
@@ -570,17 +832,31 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.version.outputs.version }}
+          REUSE_ROOTFS: ${{ needs.version.outputs.reuse_rootfs }}
         run: |
           set -euo pipefail
+
+          # Built as an array rather than inlined: on a reuse run there is no
+          # rootfs in dist/, and an unmatched glob would reach `gh` as the
+          # literal pattern and fail the upload. The release body names the
+          # release that does host the tarball (see the notes step).
+          assets=(
+            dist/cody-desktop-*-x64-setup.exe
+            dist/cody-desktop-*-x64-setup.exe.sha256
+          )
+          if [ "$REUSE_ROOTFS" != "true" ]; then
+            assets+=(
+              dist/rootfs-cody-*.tar.gz
+              dist/rootfs-cody-*.tar.gz.sha256
+            )
+          fi
+
           gh release create "desktop-v${VERSION}" \
             --title "Cody Desktop ${VERSION}" \
             --notes-file "${RUNNER_TEMP}/release-notes.md" \
             --target "${GITHUB_SHA}" \
             --latest=false \
-            dist/cody-desktop-*-x64-setup.exe \
-            dist/cody-desktop-*-x64-setup.exe.sha256 \
-            dist/rootfs-cody-*.tar.gz \
-            dist/rootfs-cody-*.tar.gz.sha256 \
+            "${assets[@]}" \
             dist/desktop-manifest.json
 
       # Backfill, kept because it is idempotent and costs one API call once it
@@ -656,6 +932,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.version.outputs.version }}
+          REUSE_ROOTFS: ${{ needs.version.outputs.reuse_rootfs }}
         run: |
           set -euo pipefail
           if ! gh release view desktop-latest > /dev/null 2>&1; then
@@ -683,12 +960,22 @@ jobs:
           # asset goes up before the manifest that names it. Clients read
           # desktop-manifest.json and then follow its URLs, so the manifest
           # must never be the first thing to land.
-          for asset in \
-            dist/cody-desktop-*-x64-setup.exe \
-            dist/cody-desktop-*-x64-setup.exe.sha256 \
-            dist/rootfs-cody-*.tar.gz \
-            dist/rootfs-cody-*.tar.gz.sha256
-          do
+          #
+          # On a reuse run the rootfs and its sidecar are skipped here
+          # because they are ALREADY on this release, unchanged, and are
+          # exactly what the new manifest keeps pointing at. Nothing about
+          # the runtime moves; the ~740 MB round trip is the saving.
+          uploads=(
+            dist/cody-desktop-*-x64-setup.exe
+            dist/cody-desktop-*-x64-setup.exe.sha256
+          )
+          if [ "$REUSE_ROOTFS" != "true" ]; then
+            uploads+=(
+              dist/rootfs-cody-*.tar.gz
+              dist/rootfs-cody-*.tar.gz.sha256
+            )
+          fi
+          for asset in "${uploads[@]}"; do
             gh release upload desktop-latest "$asset" --clobber
           done
           gh release upload desktop-latest dist/desktop-manifest.json --clobber
@@ -701,11 +988,19 @@ jobs:
           # Assigned, not inlined into the loop: a jq that failed inside a
           # `for` list would silently leave the keep-set empty, and this loop
           # would then delete the assets that were just uploaded.
+          #
+          # The keep-set is derived from the MANIFEST, never from what this
+          # run uploaded, and on a reuse run that distinction is what saves
+          # the release: the rootfs was not uploaded, but the manifest still
+          # names it, so it stays. Deriving the keep-set from the uploaded
+          # files would delete the runtime every existing install depends on
+          # -- and the manifest would keep pointing at it.
           referenced=$(jq -r '.shell.url, .runtime.url' dist/desktop-manifest.json | sed 's#.*/##')
           keep="desktop-manifest.json"
           for name in $referenced; do
             keep="${keep} ${name} ${name}.sha256"
           done
+          echo "keeping: ${keep}"
           for asset in $(gh release view desktop-latest --json assets --jq '.assets[].name'); do
             case " ${keep} " in
               *" ${asset} "*) ;;

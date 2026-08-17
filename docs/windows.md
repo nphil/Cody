@@ -178,7 +178,10 @@ Two independently-versioned artifacts, one CI run, two Releases:
   weight: `ghcr.io/nphil/cody:latest` is republished far more often than its
   version label moves, so version-compare alone would sit on a stale runtime
   indefinitely. Neither marker present (a distro predating them) counts as
-  outdated. Applying it: export `/data` to a tar on the Windows side →
+  outdated. The reverse case is the common one and costs nothing: a release
+  that only changed the shell republishes the previous `runtime` block
+  unchanged (see CI, below), so the digests match and no runtime update is
+  offered at all. Applying it: export `/data` to a tar on the Windows side →
   `--unregister` → import new rootfs → restore `/data` → restart server.
   `/data` is the only stateful path (same contract as the container). Past
   the `--unregister` there is no distro to fall back to, so a failed import
@@ -212,9 +215,9 @@ release list is deliberate.
   build-only mode: shell build (windows-latest, NSIS installer), rootfs build
   (ubuntu, flatten + **gzip** the published container image — gzip, not zstd,
   is WSL's own recommended `wsl --import` compression; other formats risk
-  import incompatibility on older WSL versions), then publish installer +
-  rootfs + manifest to both the immutable `desktop-vX.Y.Z` and the rolling
-  `desktop-latest`.
+  import incompatibility on older WSL versions) **when the runtime actually
+  changed**, then publish installer + rootfs + manifest to both the immutable
+  `desktop-vX.Y.Z` and the rolling `desktop-latest`.
   - **Version** — computed from the tags, never committed anywhere: the
     highest existing `desktop-v*` tag compared *numerically* (0.1.10 > 0.1.9)
     plus one patch, or 0.1.0 if no desktop tag exists yet. It is patched into
@@ -227,9 +230,28 @@ release list is deliberate.
     with no such commits (a CI-only change, say) says so in the body instead of
     shipping an empty section. The artifact/SHA-256 table and the rootfs
     provenance line follow it.
+  - **Runtime reuse** — the rootfs is a snapshot of a container image this
+    workflow does not build, so a desktop-only change would otherwise spend
+    ten minutes and ~740 MB reproducing a byte-identical runtime. Before
+    anything builds, the workflow reads the current digest of
+    `ghcr.io/nphil/cody:latest` straight from the registry API (an anonymous
+    pull token; no image data transferred) and compares it with the digest
+    recorded in the **live** `desktop-manifest.json`. Equal digests, plus a
+    liveness probe confirming the rootfs that manifest names is still
+    downloadable, skip the rootfs job entirely: the release republishes the
+    previous `runtime` block verbatim — same URL, same sha256, same size, same
+    `imageDigest` — so a typical desktop-only release is just the ~1.6 MB
+    installer and a new manifest, and installed clients see no runtime change.
+    Anything unproven falls back to rebuilding: no published manifest, an
+    unparseable one, a digest that moved, an asset that 404s, or a registry
+    that will not answer. The release body says which happened, and when the
+    runtime is reused it names the release that hosts the tarball (the
+    per-version release carries installer + manifest only).
   - **Dispatch overrides**, all optional: `version` (exact X.Y.Z, wins over
     everything), `bump` (patch/minor/major, default patch), `notes` (prepended
-    to the generated changelog).
+    to the generated changelog), `force_rootfs` (rebuild and re-upload the
+    rootfs even when the image has not moved — the escape hatch for a bad
+    snapshot or a changed exclude list).
   - The release job pushes **tags only** and never commits back to `main`, and
     the push trigger is branch-filtered — which a tag push does not match — so
     a release cannot re-trigger the workflow.
