@@ -12,7 +12,7 @@ const { WebSocket, WebSocketServer } = require("ws");
 const { createJiti } = require("jiti");
 const jiti = createJiti(__filename);
 const { getUserForCredentials, isAuthRequired } = jiti("../lib/auth/guard.ts");
-const { canAccessSession } = jiti("../lib/auth/session-owners.ts");
+const { canAccessDisplaySession } = jiti("../lib/display/access.ts");
 const { attachDisplaySocket, disposeDisplayProviders } = jiti("../lib/display/provider.ts");
 const { closeNativeGateway, proxyNativeHttp, proxyNativeUpgrade } = jiti("../lib/display/native-gateway.ts");
 const { getTerminalManager } = jiti("../lib/terminal-manager.ts");
@@ -74,8 +74,15 @@ async function main(argv = process.argv.slice(2)) {
       if (!originAllowed(request)) { reject(socket, 403, "Forbidden"); return; }
       const parsed = new URL(request.url, "http://localhost");
       const sessionId = parsed.searchParams.get("sessionId") || "";
-      if (!sessionId || !canAccessSession(sessionId, user)) { reject(socket, 404, "Not Found"); return; }
-      displayWs.handleUpgrade(request, socket, head, (ws) => attachDisplaySocket(sessionId, ws));
+      // Ownership alone would admit any id: an UNKNOWN session is indistinguishable
+      // from an unowned one, so the shared gate proves the session exists too.
+      // ws documents async authentication before handleUpgrade; `head` is retained.
+      void canAccessDisplaySession(sessionId, user)
+        .then((allowed) => {
+          if (!allowed) { reject(socket, 404, "Not Found"); return; }
+          displayWs.handleUpgrade(request, socket, head, (ws) => attachDisplaySocket(sessionId, ws));
+        })
+        .catch(() => reject(socket, 404, "Not Found"));
       return;
     }
     if (!terminalPath(request.url || "")) {
