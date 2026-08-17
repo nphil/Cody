@@ -47,6 +47,13 @@ by default (Settings → Docker → *Check for updates*, or hit **Check for
 Updates** on the Docker tab to poll immediately) → **Apply Update** pulls and
 recreates the container, a few seconds of downtime.
 
+Running the ShipLog plugin? It resolves this image to the Cody repo and shows
+the repo's GitHub Releases as the changelog in the Docker tab. Cutting one is
+a manual, deliberate act: dispatch `.github/workflows/docker.yml` with
+`version: X.Y.Z` (no leading v) and `notes:` a human-readable changelog — CI
+publishes the version-tagged image, creates the `vX.Y.Z` tag and the Release.
+Plain pushes to main still republish `:latest` without a release entry.
+
 So: a few minutes to a registry, then however long you let Unraid wait. Nothing
 downstream needs a rebuild or a git pull; `/data` and `/workspace` are volumes,
 so state and repositories survive the recreate. For hands-off updating, point

@@ -7,7 +7,23 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  # Dispatching with a version cuts a RELEASE: image tagged X.Y.Z + latest,
+  # a v-tag created on the dispatched ref, and a GitHub Release whose body is
+  # `notes` — the changelog the ShipLog plugin shows in Unraid's Docker tab.
+  # Dispatch without a version = plain rebuild, no release. (The dispatch
+  # path is primary because Claude sessions cannot push tags through the git
+  # proxy; a human pushing an annotated v-tag works identically, with the tag
+  # message as the notes.)
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (X.Y.Z, no leading v). Empty = rebuild only."
+        required: false
+        type: string
+      notes:
+        description: "Release notes / changelog (markdown), shown by ShipLog"
+        required: false
+        type: string
 
 concurrency:
   group: docker-${{ github.ref }}
@@ -22,9 +38,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # A dispatched release version wins over package.json so the image
+      # label, the GHCR tag and the GitHub Release always agree on one number.
       - name: Read version
         id: meta
-        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
+        run: |
+          v="${DISPATCH_VERSION:-}"
+          [ -n "$v" ] || v=$(node -p "require('./package.json').version")
+          echo "version=$v" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -171,3 +194,48 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # Publishes the GitHub Release that is the image's changelog: the ShipLog
+  # plugin on Unraid resolves ghcr.io/nphil/cody to this repo via the
+  # org.opencontainers.image.source label and shows the repo's Releases in
+  # the Docker tab. Only runs for real releases (v-tag or versioned
+  # dispatch); plain pushes to main keep republishing :latest without one.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.version != '')
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-tags: true
+
+      - name: Resolve tag + notes
+        id: rel
+        env:
+          NOTES_INPUT: ${{ inputs.notes }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "tag=v${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+            {
+              echo 'body<<SHIPLOG_EOF'
+              printf '%s\n' "$NOTES_INPUT"
+              echo SHIPLOG_EOF
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            {
+              echo 'body<<SHIPLOG_EOF'
+              git tag -l --format='%(contents)' "$GITHUB_REF_NAME"
+              echo SHIPLOG_EOF
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.rel.outputs.tag }}
+          name: Cody ${{ steps.rel.outputs.tag }}
+          body: ${{ steps.rel.outputs.body }}
+          generate_release_notes: true
