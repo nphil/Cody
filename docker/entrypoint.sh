@@ -2,21 +2,15 @@
 set -eu
 
 # Cody in a container listens on 0.0.0.0 — that is only safe behind auth.
-# Auth comes from either CODY_PASSWORD (the env-managed bootstrap account) or
-# user accounts already created in the persisted account store; require one of
-# the two unless the operator explicitly opts out (e.g. the container sits
-# behind an authenticating reverse proxy).
-# The app accepts the pre-fork OMP_WEB_PASSWORD too (lib/env.ts), so the gate
-# must recognize it or a documented-working config is refused at the door.
-ACCOUNTS_FILE="${CODY_ACCOUNTS_DIR:-${PI_CODING_AGENT_DIR}/cody-accounts}/accounts.json"
-if [ -z "${CODY_PASSWORD:-}" ] && [ -z "${OMP_WEB_PASSWORD:-}" ] && [ "${CODY_ALLOW_NO_AUTH:-}" != "1" ] \
-  && ! { [ -f "${ACCOUNTS_FILE}" ] && grep -q '"username"' "${ACCOUNTS_FILE}"; }; then
-  echo "No password is set (CODY_PASSWORD, or the legacy OMP_WEB_PASSWORD) and no" >&2
-  echo "user accounts exist yet at ${ACCOUNTS_FILE}." >&2
-  echo "Set a password (Basic Auth / login username: cody), or set CODY_ALLOW_NO_AUTH=1" >&2
-  echo "only if an authenticating reverse proxy fronts this container. Once accounts" >&2
-  echo "exist, the password variable may be removed." >&2
-  exit 1
+# No password is needed up front: with CODY_REQUIRE_ACCOUNTS=1 the app locks
+# every surface behind /login from the very first request, and a fresh
+# instance shows only the first-run setup screen where the opener creates the
+# admin account. CODY_PASSWORD stays optional (it adds the env-managed `cody`
+# Basic Auth account for scripts). CODY_ALLOW_NO_AUTH=1 keeps the fully-open
+# mode for containers behind an authenticating reverse proxy.
+if [ "${CODY_ALLOW_NO_AUTH:-}" != "1" ]; then
+  CODY_REQUIRE_ACCOUNTS=1
+  export CODY_REQUIRE_ACCOUNTS
 fi
 
 mkdir -p "${HOME}" "${PI_CODING_AGENT_DIR}" /workspace

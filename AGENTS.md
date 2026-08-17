@@ -193,9 +193,13 @@ is a reserved seam if per-uid isolation is ever wanted.
   visible to all. Enforced in `resolveSessionPathOr404` (which now REQUIRES the
   request — every per-session route passes it), the SSE events route, and the
   session list. Blocked = the same 404 as missing.
-- Signup policy: `CODY_ALLOW_SIGNUP=0` hides self-service signup (first-run
-  setup is always allowed). Container refuses to start with no password AND no
-  accounts unless `CODY_ALLOW_NO_AUTH=1` (docker/entrypoint.sh).
+- Signup policy: `CODY_ALLOW_SIGNUP=0` hides self-service signup, but the
+  first HUMAN signup is always allowed and becomes the admin — the
+  env-managed bootstrap account never uses up that slot. The container needs
+  no password: docker/entrypoint.sh sets `CODY_REQUIRE_ACCOUNTS=1` (unless
+  `CODY_ALLOW_NO_AUTH=1`), which makes `isAuthRequired()` true even with zero
+  accounts, so a fresh instance shows only the first-run setup screen until
+  the opener creates the admin account.
 
 ---
 

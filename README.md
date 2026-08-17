@@ -51,7 +51,7 @@ CODY_PASSWORD='a-long-random-password' cody # require Basic Auth (username: cody
 CODY_NO_OPEN=1 cody           # useful when running as a background service
 ```
 
-Cody has a user account system: a themed login screen, self-service signup (first account created becomes the administrator), per-account profiles with pictures, and per-account chat sessions. Setting `CODY_PASSWORD` enables the built-in `cody` account — it signs in on the login screen and still works as HTTP Basic Auth for scripts and health probes. With neither a password nor any created account, authentication is off (the local-dev default); creating the first account turns it on. None of this encrypts traffic, so remote use still requires HTTPS through a trusted reverse proxy or VPN.
+Cody has a user account system: a themed login screen, self-service signup (the first human account becomes the administrator), per-account profiles with pictures, and per-account chat sessions. Setting `CODY_PASSWORD` enables the built-in `cody` account — it signs in on the login screen and still works as HTTP Basic Auth for scripts and health probes. With neither a password nor any created account, authentication is off (the local-dev default); creating the first account turns it on, and `CODY_REQUIRE_ACCOUNTS=1` (which the Docker entrypoint sets) closes even that zero-account window so a fresh container only offers the first-run setup screen. None of this encrypts traffic, so remote use still requires HTTPS through a trusted reverse proxy or VPN.
 
 ### Security and troubleshooting
 
@@ -85,7 +85,8 @@ Cody has a user account system: a themed login screen, self-service signup (firs
 | --- | --- |
 | `PORT` | Server port (default `30177`; `-p/--port` wins) |
 | `CODY_HOSTNAME` | Bind hostname (default `127.0.0.1`; `-H/--hostname` wins) |
-| `CODY_PASSWORD` | Password for the built-in `cody` account (login screen and HTTP Basic Auth) |
+| `CODY_PASSWORD` | Optional password for the built-in `cody` account (login screen and HTTP Basic Auth) |
+| `CODY_REQUIRE_ACCOUNTS` | `1` forces auth on even with zero accounts (fresh instance shows only first-run setup; the Docker entrypoint sets this) |
 | `CODY_ALLOW_SIGNUP` | Set `0` to hide "Create an account" on the login screen (admins can still add accounts) |
 | `CODY_ACCOUNTS_DIR` | Where user accounts are stored (default `<agent dir>/cody-accounts`) |
 | `CODY_NO_OPEN` | Set to `1`/`true` to skip auto-opening the browser |

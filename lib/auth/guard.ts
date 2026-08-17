@@ -1,3 +1,4 @@
+import { readEnv } from "../env";
 import { isValidBasicAuthorization, isWebPasswordEnabled } from "../web-auth";
 import { sessionTokenFromCookieHeader, verifySessionToken } from "./session";
 import { ENV_MANAGED_USERNAME, findUserByUsername, hasAnyUser, type UserRecord } from "./users";
@@ -15,10 +16,15 @@ import { ENV_MANAGED_USERNAME, findUserByUsername, hasAnyUser, type UserRecord }
  * Auth is required once any account exists or CODY_PASSWORD is set. A bare
  * `npm run dev` on loopback with neither stays open, exactly as before the
  * account system existed; creating the first account is what locks the door.
+ *
+ * CODY_REQUIRE_ACCOUNTS=1 (set by the container entrypoint, which binds
+ * 0.0.0.0) closes the zero-account window: auth is required from the first
+ * request, so a fresh install shows only the first-run setup screen — where
+ * the person opening it creates the admin account — instead of an open app.
  */
 
 export function isAuthRequired(): boolean {
-  return isWebPasswordEnabled() || hasAnyUser();
+  return isWebPasswordEnabled() || hasAnyUser() || readEnv("REQUIRE_ACCOUNTS") === "1";
 }
 
 export function getUserForCredentials(
