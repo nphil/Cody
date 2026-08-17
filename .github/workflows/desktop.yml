@@ -262,9 +262,12 @@ jobs:
             else
               # Say so out loud rather than publish an empty section: a
               # release with no app commits is a real thing here (a CI change
-              # triggers one), and it still ships a freshly snapshotted
-              # runtime.
-              echo "_No \`desktop/\` changes ${since}. This release rebuilds the shell and re-snapshots the runtime from the current container image._"
+              # triggers one), and it still ships a freshly built shell.
+              # It deliberately does NOT claim anything about the runtime:
+              # this text is generated before the reuse decision is known, and
+              # the runtime line at the bottom of the body -- which does know
+              # -- would contradict it on the (common) reuse run.
+              echo "_No \`desktop/\` changes ${since}. This release rebuilds the shell; see the runtime line below for whether the runtime moved with it._"
             fi
             echo "${delim}"
           } >> "$GITHUB_OUTPUT"
