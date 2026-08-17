@@ -2,7 +2,7 @@
 
 [English](./README.md) | [简体中文](./README.zh-CN.md) | [日本語](./README.ja.md)
 
-Cody is a self-hosted web workspace for coding agents. The interface — session browsing, real-time chat, files, git, persistent terminals, settings — stays constant while the **engine** underneath is swappable: [oh-my-pi (omp)](https://github.com/can1357/oh-my-pi) is the founding, fully-featured engine, with Claude Code and Codex available as experimental engines you can install and switch to from the UI (see [docs/harnesses.md](docs/harnesses.md)). The container ships with everyday dev tools (git, `gh`, python3, ripgrep, jq) and optional SSH access that lands directly in the active engine's CLI.
+Cody is a self-hosted web workspace for coding agents — an IDE you keep, with an **engine you can swap**. The interface stays constant (session browsing, real-time chat, files, git, persistent terminals, tasks, settings) while the coding agent underneath is chosen at onboarding and can be replaced any time: [oh-my-pi (omp)](https://github.com/can1357/oh-my-pi) is the founding, fully-featured engine; **Claude Code** and **Codex** are available as experimental engines. Agents evolve fast — Cody lets you switch the internals without giving up your workspace.
 
 Cody is a fork of [kahme247/ompweb](https://github.com/kahme247/ompweb) — see [Credits](#credits).
 
@@ -15,112 +15,172 @@ Cody is a fork of [kahme247/ompweb](https://github.com/kahme247/ompweb) — see 
 
 </details>
 
-## Requirements
+<details>
+<summary>Engine onboarding</summary>
 
-- [omp](https://github.com/can1357/oh-my-pi) installed and on your `PATH` (or point `CODY_OMP_BIN` at the binary)
-- Node.js 22.19.0 or newer (`node --version`)
+![Choose your coding engine](docs/screenshot-engines.png)
 
-## Quick Start
+</details>
 
-**Run without installing:**
+## Getting started (Docker, recommended)
 
-```bash
-npx @nphil/cody@latest
-```
-
-**Or install globally:**
+The container is the primary way to run Cody. It ships **engine-free** and
+needs no configuration beyond two mounts and a port:
 
 ```bash
-npm install -g @nphil/cody
-cody
+docker run -d -p 30177:30177 \
+  -v /path/to/appdata:/data -v /path/to/projects:/workspace \
+  ghcr.io/nphil/cody:latest
 ```
 
-Then open [http://127.0.0.1:30177](http://127.0.0.1:30177). The CLI will try to open the browser automatically after the server is ready. Cody listens on `127.0.0.1` by default.
+Then open the WebUI:
 
-**Options:**
+1. **First-run setup** — the instance is locked from its very first request;
+   the only reachable page walks you through creating your account, which
+   becomes the administrator. No password variables needed.
+2. **Choose your coding engine** — pick omp (recommended), Claude Code, or
+   Codex. Cody installs it into the persistent `/data` tools prefix, where it
+   survives image updates and updates independently.
+3. Add `/workspace/<your-project>` as a workspace and start working.
+
+For Unraid there is a ready-made template and a full walkthrough in
+[docs/unraid.md](docs/unraid.md). The image also carries everyday dev tools
+(git, `gh`, python3 with pip/venv, ripgrep, jq) and optional **SSH access**
+that lands directly in the active engine's CLI — exit the engine and you are
+in a plain shell (see [SSH](#ssh-into-the-container)).
+
+### Running from npm (bare metal / development)
+
+```bash
+npx @nphil/cody@latest        # or: npm install -g @nphil/cody && cody
+```
+
+Requires Node.js 22.19+ and an engine on `PATH` (omp for the full
+experience). Cody listens on `127.0.0.1:30177` by default and opens your
+browser when ready.
 
 ```bash
 cody --port 8080              # custom port
 cody --hostname 0.0.0.0       # expose on a trusted network
-cody -p 8080 -H 0.0.0.0       # combine options
 cody --no-open                # do not open the browser automatically
-
-PORT=8080 cody                # environment variable is also supported
-CODY_HOSTNAME=0.0.0.0 cody    # explicit network exposure
-CODY_PASSWORD='a-long-random-password' cody # require Basic Auth (username: cody)
-CODY_NO_OPEN=1 cody           # useful when running as a background service
 ```
 
-Cody has a user account system: a themed login screen, self-service signup (the first human account becomes the administrator), per-account profiles with pictures, and per-account chat sessions. Setting `CODY_PASSWORD` enables the built-in `cody` account — it signs in on the login screen and still works as HTTP Basic Auth for scripts and health probes. With neither a password nor any created account, authentication is off (the local-dev default); creating the first account turns it on, and `CODY_REQUIRE_ACCOUNTS=1` (which the Docker entrypoint sets) closes even that zero-account window so a fresh container only offers the first-run setup screen. None of this encrypts traffic, so remote use still requires HTTPS through a trusted reverse proxy or VPN.
+## Engines
 
-### Security and troubleshooting
+| Engine | Status | What you get |
+| --- | --- | --- |
+| **omp** (oh-my-pi) | Founding engine — every surface enabled | Full chat (thinking levels, forking, compaction, steering, subagents), models & providers, skills, plugins, MCP, native settings, updates |
+| **Claude Code** | Experimental | Plain chat: prompt, streamed reply, tool activity, abort. Non-relevant settings hide automatically |
+| **Codex** | Experimental | Same plain-chat surface as Claude Code |
 
-- The server binds to `127.0.0.1` by default. A non-loopback hostname is an explicit opt-in and should only be used behind a trusted network boundary; Cody is not safe to expose publicly.
-- File APIs are allow-listed to the selected workspace, its valid Git worktrees, session-referenced directories, and explicitly selected roots. Paths are canonicalized to reject traversal and symlink escapes.
-- Browser terminals can execute anything the Cody server account can execute. They are restricted to allow-listed workspace roots, require the same authentication as the rest of the app, and reject cross-origin WebSocket upgrades.
-- `omp` is resolved from `CODY_OMP_BIN` first, then `PATH`. If live chat cannot start, run `omp --version` in the same terminal or set `CODY_OMP_BIN` to the executable's absolute path.
-- Session history remains native OMP JSONL. OMP owns live-session writes; Cody reads the files directly and only performs explicit title, archive, and delete maintenance when it is not racing a live OMP write.
-- Session archive uses OMP's native `archive/sessions/<cwd>/<file>.jsonl.gz` layout and moves sibling artifacts with the transcript; the original JSONL bytes are preserved inside the gzip.
+- **Install & update from the UI**: the onboarding picker and
+  Settings → User Accounts → Agent engine install engines on demand and give
+  each an **Update** button (omp also gets one-click "Update now" in the
+  Updates panel and System tab, next to its version check). Updating the
+  active engine restarts live sessions so nothing runs a stale binary.
+- **Credentials are the engine's own**: run `claude` or `codex login` once in
+  a Cody terminal (state persists in `/data/home`), or set
+  `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` on the container. omp's providers
+  are managed in Settings.
+- **Local models stay reachable**: omp's model registry takes custom
+  providers; Codex supports `--oss`/custom `model_provider` endpoints; the
+  Claude engine honors `ANTHROPIC_BASE_URL`. Any OpenAI/Anthropic-compatible
+  gateway (vLLM, Ollama, a routing proxy like NVIDIA Switchyard) plugs in
+  underneath whichever engine you run.
+- **Capability-gated UI**: surfaces an engine cannot serve are hidden, not
+  broken — with Claude/Codex active, settings collapse to Cody's own tabs
+  and omp-only composer controls disappear.
+- **Adding engines**: one adapter per engine. The contract and checklist
+  (Pi, Cline, Cursor, …) live in [docs/harnesses.md](docs/harnesses.md).
+- Experimental engines run non-interactively with file edits auto-accepted
+  inside the workspace, and their transcript history is session-local (no
+  replay across server restarts yet).
+
+## User accounts
+
+A themed login screen, self-service signup, per-account profiles with
+pictures, and per-account chat sessions. The first human account becomes the
+administrator; admins manage the roster, roles, signup policy
+(`CODY_ALLOW_SIGNUP=0` restricts creation to admins) and the engine.
+Passwords are scrypt-hashed on disk; browser sessions are signed cookies.
+Setting `CODY_PASSWORD` additionally enables the built-in `cody` account,
+which also answers HTTP Basic Auth for scripts and health probes.
+
+Outside the container, auth is off until the first account exists (the
+local-dev default); in the container, `CODY_REQUIRE_ACCOUNTS=1` (set by the
+entrypoint) locks a fresh instance down to first-run setup from the very
+first request. None of this encrypts traffic — remote use needs HTTPS via a
+reverse proxy or a VPN.
+
+## SSH into the container
+
+Set `CODY_SSH_PASSWORD` (or put public keys in
+`/data/home/.ssh/authorized_keys`) and map port `2222` — without credentials
+the daemon never starts. Interactive logins land **directly in the active
+engine's CLI**; exiting the engine drops to a normal shell instead of
+closing the connection (`CODY_NO_AUTO_ENGINE=1` skips straight to a shell).
+SSH shares the persistent `/data/home` with the web terminals — same engine
+sign-in state, history, and dotfiles — and host keys persist across image
+updates.
 
 ## Features
 
-- **Pick work back up**: browse previous omp conversations by project without digging through terminal history or session paths.
+- **Pick work back up**: browse previous conversations by project without digging through terminal history or session paths.
 - **Try different directions safely**: continue from an earlier message or fork a session into a separate route.
 - **Keep the sidebar tidy**: archive an inactive session without deleting its native transcript, or delete it explicitly when it is no longer needed.
 - **Work across branches**: switch Git worktrees from the sidebar so new sessions and the Explorer follow the checkout you choose.
 - **Chat beside the project**: browse files on the left and preview source, docs, images, audio, and PDFs on the right while the agent works.
-- **Use a real terminal in the workspace**: open multiple persistent xterm sessions in the right panel for shells and TUIs such as `vim`, `lazygit`, `htop`, and `omp`, with reconnect, resize, clipboard, and mobile soft-key support.
-- **A full workspace panel, pi-web style**: the right panel is a tabbed toolset — Files, Git, Terminal, Tasks, Updates, Info. The Git tab shows branch, ahead/behind, the changed-file list and per-file diffs (read-only); Tasks runs commands from `.cody/tasks.json` into persistent terminals; Updates consolidates Cody/OMP/skills update checks; Info shows versions and workspace diagnostics with one-click copy.
-- **See session state clearly**: context usage, cost, compaction state, and system prompt details are visible from the top bar.
-- **Configure less from the terminal**: manage models, login/API keys, model tests, native OMP controls (advisor, approval, Bash policy, thinking, compaction, memory, auto-learn, retry/fallback), skills, plugins, and project MCP servers from the web UI.
-- **MCP management in Settings**: a dedicated MCP tab lists installed project servers with status (enabled / disabled / invalid), supports add/edit/rename/validate/remove, and surfaces configuration failures as corner toasts.
-- **Keep OMP current**: check the installed runtime version, update it, and restart active sessions from Settings when needed.
-- **Stay informed**: opt into browser notifications when an agent finishes, and check installed skills for updates.
-- **Jump anywhere with ⌘K**: a command palette (⌘K / Ctrl+K) for switching sessions, starting new ones, and toggling the theme.
-- **Pick a look that suits you**: ten theme families, each with a paired light and dark variant, built on a token-driven UI kit (Base UI primitives, cmdk, lucide icons) with WCAG AA-verified contrast.
+- **Use a real terminal in the workspace**: multiple persistent xterm sessions for shells and TUIs such as `vim`, `lazygit`, `htop`, and the engine CLIs, with reconnect, resize, clipboard, and mobile soft-key support.
+- **A full workspace panel**: Files, Git (status, diffs, staging, commits), Terminal, Tasks (`.cody/tasks.json`), Updates, Info — plus workspace checkpoints and an embedded app preview with detach.
+- **See session state clearly**: context usage, cost, compaction state, and system prompt details in the top bar (engine-dependent).
+- **Configure less from the terminal**: models, provider auth, native omp controls (advisor, approvals, thinking, compaction, memory, retry/fallback), skills, plugins, and project MCP servers — all from Settings when the engine supports them.
+- **Stay current in-app**: version checks and one-click updates for the engine; Cody itself updates with the container image.
+- **Stay informed**: browser notifications when an agent finishes; skill update checks.
+- **Jump anywhere with ⌘K**: a command palette for switching sessions, starting new ones, and toggling the theme.
+- **Pick a look that suits you**: ten theme families, each with paired light/dark variants, on a token-driven UI kit with WCAG AA-verified contrast; English, 简体中文 and 日本語 UI.
 
 ## Configuration
 
 | Variable | Meaning |
 | --- | --- |
 | `PORT` | Server port (default `30177`; `-p/--port` wins) |
-| `CODY_HOSTNAME` | Bind hostname (default `127.0.0.1`; `-H/--hostname` wins) |
+| `CODY_HOSTNAME` | Bind hostname (default `127.0.0.1`; `-H/--hostname` wins; the container binds `0.0.0.0`) |
 | `CODY_PASSWORD` | Optional password for the built-in `cody` account (login screen and HTTP Basic Auth) |
 | `CODY_REQUIRE_ACCOUNTS` | `1` forces auth on even with zero accounts (fresh instance shows only first-run setup; the Docker entrypoint sets this) |
 | `CODY_ALLOW_SIGNUP` | Set `0` to hide "Create an account" on the login screen (admins can still add accounts) |
+| `CODY_ALLOW_NO_AUTH` | `1` disables the container's account lock — only behind an authenticating reverse proxy |
+| `CODY_SSH_PASSWORD` / `CODY_SSH_PORT` | Enable SSH into the container / change its port (default `2222`) |
+| `CODY_HARNESS` | Deployment-default engine before anyone picks in the UI (default `omp`; the persisted UI choice wins) |
+| `CODY_TOOLS_DIR` | Persistent prefix for UI-installed engines (default `<agent dir>/tools`) |
+| `CODY_OMP_BIN` / `CODY_CLAUDE_BIN` / `CODY_CODEX_BIN` | Absolute path overrides for engine binaries |
 | `CODY_ACCOUNTS_DIR` | Where user accounts are stored (default `<agent dir>/cody-accounts`) |
+| `PI_CODING_AGENT_DIR` | The instance data dir (default `~/.omp/agent`; `/data/agent` in the container) |
 | `CODY_NO_OPEN` | Set to `1`/`true` to skip auto-opening the browser |
-| `CODY_OMP_BIN` | Absolute path to the `omp` binary when it is not on `PATH` |
-| `PI_CODING_AGENT_DIR` | Point at another omp agent directory (default `~/.omp/agent`) |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | Standard proxy variables for server-side requests |
 
-Every `CODY_` variable above also accepts its pre-fork `OMP_WEB_` spelling (`OMP_WEB_PASSWORD`, `OMP_WEB_OMP_BIN`, …), so an existing ompweb setup keeps working after upgrading. When both are set, the `CODY_` name wins. Browser-side preferences are likewise migrated from ompweb's storage keys the first time Cody loads, so theme, language, sidebar width and the rest carry over.
+Every `CODY_` variable also accepts its pre-fork `OMP_WEB_` spelling, so an
+existing ompweb setup keeps working after upgrading; browser preferences are
+migrated from ompweb's storage keys on first load.
+
+## Security notes
+
+- Bare-metal Cody binds `127.0.0.1` by default; non-loopback exposure is an explicit opt-in for trusted networks only. Cody is not safe to expose publicly without HTTPS in front.
+- The web perimeter: unauthenticated pages redirect to `/login`, APIs answer 401, and the terminal WebSocket enforces the same credentials plus same-origin upgrades.
+- File APIs are allow-listed to the selected workspace, its valid Git worktrees, session-referenced directories, and explicitly selected roots; paths are canonicalized against traversal and symlink escapes.
+- Browser terminals (and SSH, if enabled) execute as the container's user with full access to `/data` and `/workspace` — scope those mounts deliberately.
+- Experimental engines auto-accept file edits inside the workspace while a turn runs.
 
 ## Architecture
 
-Cody is a Node-hosted Next.js app that drives your installed `omp` binary — it does not embed the agent:
+Cody is a Node-hosted Next.js app that drives an installed engine binary — it embeds no agent:
 
-- **Live sessions**: spawns `omp --mode rpc-ui` (NDJSON over stdio), one child process per active session, so the agent version is always exactly what you have installed. It negotiates RPC v2 when the installed OMP advertises it, uses bounded chunk reassembly for large frames, and falls back to v1 for older versions.
-- **Session browsing**: reads omp's session files (`~/.omp/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`) directly; title, archive, and delete are narrow native-file maintenance operations guarded against live OMP writes.
-- **Models and auth**: RPC commands against the omp child process; the Models panel edits `models.yml` in the omp agent directory.
-- **Native settings**: the General/MCP settings panels read and write the allow-listed subset of `~/.omp/agent/config.yml` (or `config.yaml` fallback), preserving unrelated keys and comments. Changes apply to new and restarted sessions.
-- **Skills and plugins**: scans omp's skill directories (`~/.omp/agent/skills`, project `.omp/skills`, and compat dirs) and shells out to `omp plugin` for plugin management.
-- **MCP servers**: project servers are managed through OMP's native locations (`.omp/mcp.json`, then compatibility files) at the git top level, validated against the stdio/http/sse schema and written atomically.
-- **File access**: file browsing and preview are scoped to the selected project directory and working directories that appear in sessions.
-- **Terminal sessions**: the custom Node launcher serves Next.js and same-origin terminal WebSockets on one port. Each tab owns a server-side `node-pty` shell in an authorized workspace; shells survive browser disconnects until explicitly closed or the Cody server shuts down.
-- **Forks vs in-session branches**: Fork creates a new `.jsonl` file. "Edit from here" creates another branch inside the same session file.
-
-## Self-hosting and engines
-
-`docker/` packages Cody engine-free for home servers; `docs/unraid.md`
-walks through the Unraid deployment (template included). The engine is
-chosen at onboarding (or later in Settings → User Accounts → Agent engine):
-omp, Claude Code and Codex all install on demand into a persistent prefix
-that survives image updates, and each updates independently from the same
-card. Engine credentials are the engine's own — run `claude` or
-`codex login` once in a Cody terminal, or set `ANTHROPIC_API_KEY` /
-`OPENAI_API_KEY` on the container. The adapter contract and the checklist
-for adding more engines (Pi, Cline, …) live in `docs/harnesses.md`.
+- **The engine seam** (`lib/harness/`): an adapter per engine — identity, capability flags, binary probing, install spec, and a live-session factory. Runtime selection is persisted in the instance data dir; capability flags gate every engine-specific surface.
+- **omp sessions**: spawns `omp --mode rpc-ui` (NDJSON over stdio), one child per active session, negotiating RPC v2 with bounded chunk reassembly when available. Session history is omp's native JSONL, read directly and maintained (title/archive/delete) without racing live writes.
+- **Claude Code / Codex sessions**: one CLI process per turn (`claude -p --output-format stream-json` / `codex exec --json`), translated server-side into the same event stream the UI renders; abort kills the turn, resume uses the engine's native session id.
+- **Engine install/update**: npm against a persistent prefix the runtime resolves first — install and update are the same operation, and updating the active engine restarts its live sessions.
+- **omp configuration surfaces**: models/`models.yml`, allow-listed `config.yml` settings, skills discovery, `omp plugin`, and project MCP servers (`.omp/mcp.json`) — all through the binary or its native files, all capability-gated.
+- **Terminals**: a custom Node launcher serves Next.js and same-origin terminal WebSockets on one port; each tab owns a server-side `node-pty` shell that survives browser disconnects.
+- **Accounts**: JSON store + scrypt hashes beside the rest of the instance state; session privacy via an ownership sidecar keyed by session id, engine-agnostic.
 
 ## Development
 
@@ -144,7 +204,7 @@ Avoid running `next build` / `npm run build` during local development. It writes
 
 ## Internationalization
 
-Cody supports English, Simplified Chinese (简体中文), and Japanese (日本語) with translated UI strings across all three languages. The language is auto-detected from `navigator.language` and can be switched at runtime via the language menu in the top bar. The choice persists across sessions.
+Cody supports English, Simplified Chinese (简体中文), and Japanese (日本語) with translated UI strings across all three languages. The language is auto-detected from `navigator.language` and can be switched at runtime from Settings. The choice persists across sessions.
 
 - Dictionaries: `lib/i18n/locales/{en,zh-CN,ja}.json`
 - Framework: `lib/i18n/index.tsx` — a lightweight store built on `useSyncExternalStore` with `{var}` interpolation and plural support (`.one`/`.other`)
@@ -154,8 +214,8 @@ Cody supports English, Simplified Chinese (简体中文), and Japanese (日本�
 
 - **Accessibility**: WCAG AA compliant — Lighthouse a11y score 100/100, keyboard navigation throughout, focus-visible rings, ARIA roles
 - **Performance**: memoized list components, RAF-gated scroll/mouse handlers, debounced search, streaming JSONL reader, ETag-cached session listing
-- **Resilience**: graceful shutdown of spawned omp processes (process-group kill), error boundaries, atomic session file rewrites
-- **Tests**: a focused test suite covering session parsing, terminal input, markdown rendering, message display, native settings, and MCP configuration
+- **Resilience**: graceful shutdown of spawned engine processes (process-group kill), error boundaries, atomic state-file rewrites
+- **Tests**: 450+ tests covering session parsing, the auth system, the engine seam and stream translators, terminal input, markdown rendering, native settings, and MCP configuration; CI smoke-tests the container's full first-run flow (locked boot → admin signup → in-app engine install) before any image is published
 
 ## Credits
 
