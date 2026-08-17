@@ -2408,3 +2408,58 @@ html.dark .dropdown-surface :is(select, option) {
 @media (prefers-reduced-motion: reduce) {
   .engine-card { animation: none; }
 }
+
+/* ---------------------------------------------------------------------------
+   Touch devices, tablets included. Width-based media queries classify a
+   1024px iPad as a desktop, so touch ergonomics key off pointer capability
+   instead: comfortable hit targets, hover-gated affordances always visible,
+   no double-tap-zoom delay, no iOS focus-zoom. Mirrored by
+   hooks/useIsCoarsePointer.ts. */
+@media (hover: none), (pointer: coarse) {
+  .shell-toolbar-btn {
+    width: 40px;
+    height: 40px;
+  }
+  .shell-captioned-btn {
+    height: 40px;
+    min-width: 42px;
+  }
+  .terminal-tab-close, .terminal-action {
+    width: 34px;
+    height: 34px;
+  }
+  .directory-picker-back,
+  .directory-picker-entry,
+  .directory-picker-action {
+    min-height: 44px;
+  }
+  .directory-picker-back {
+    min-width: 44px;
+  }
+  /* The desktop (min-width: 641px) block shrinks composer controls to 28px
+     for pointer precision; touch keeps them at thumb size. */
+  .composer-control-shelf > button {
+    height: 38px !important;
+    padding-inline: 10px !important;
+    font-size: 12px !important;
+  }
+  /* Below 16px iOS Safari zooms the page on focus and never zooms back. */
+  .composer-textarea {
+    font-size: 16px !important;
+  }
+  /* Kill the 300ms double-tap-to-zoom delay on every interactive control. */
+  .shell-toolbar-btn, .shell-captioned-btn, .ui-control, .ui-icon-button,
+  .terminal-tab-close, .terminal-action, .terminal-soft-keys button,
+  .composer-control-shelf > button, .login-primary, .login-ghost,
+  .engine-button, .engine-link {
+    touch-action: manipulation;
+  }
+  /* Hover-revealed actions (message copy/fork, session row menus) must be
+     visible where hover does not exist; !important outranks the inline
+     hover styles these elements carry. */
+  .touch-reveal {
+    opacity: 1 !important;
+    pointer-events: auto !important;
+    visibility: visible !important;
+  }
+}

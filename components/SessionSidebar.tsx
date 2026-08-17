@@ -2635,6 +2635,7 @@ const SessionItem = memo(function SessionItem({
           {/* Reserved overflow-menu slot: invisible (but space-preserving) until
               hover/focus, so rows never reflow and titles never shift. */}
           <div
+            className="touch-reveal"
             style={{
               position: "relative",
               flexShrink: 0,

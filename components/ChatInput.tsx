@@ -1984,6 +1984,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           >
           <textarea
             ref={textareaRef}
+            className="composer-textarea"
             value={value}
             onChange={(e) => {
               setValue(e.target.value);

@@ -271,6 +271,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
             gap: 6, marginTop: 3, width: "100%",
           }}>
           <div
+            className="touch-reveal"
             style={{
               display: "flex", gap: 3,
               opacity: hovered || actionsActive ? 1 : 0,
@@ -587,6 +588,7 @@ function AssistantMessageView({
         {textContent && !isStreaming && (
           <Tooltip content={t("messageView.copyMessage")}>
             <button
+              className="touch-reveal"
               onClick={() => copyContent(textContent)}
               aria-label={t("messageView.copyMessage")}
               style={{

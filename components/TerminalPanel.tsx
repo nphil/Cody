@@ -5,6 +5,7 @@ import { Play, Plus, RotateCw, X } from "lucide-react";
 import { Terminal, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { useI18n } from "@/lib/i18n";
+import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
 import { useIsMobile } from "@/hooks/useIsMobile";
 
 export type TerminalInfo = {
@@ -71,6 +72,9 @@ function TerminalSoftKeys({ onSend, label }: { onSend: (data: string) => void; l
 export function TerminalPanel({ cwd, onOpen, focusRequest }: Props) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
+  // Soft keys (Esc/Tab/Ctrl/arrows) matter on ANY touch keyboard, not just
+  // phones — a tablet terminal without Esc or Ctrl is near unusable.
+  const isCoarsePointer = useIsCoarsePointer();
   const [terminals, setTerminals] = useState<TerminalInfo[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -362,7 +366,7 @@ export function TerminalPanel({ cwd, onOpen, focusRequest }: Props) {
       {activeId ? (
         <>
           <div ref={hostRef} className="terminal-host" role="tabpanel" aria-labelledby={`terminal-tab-${activeId}`} onClick={() => terminalRef.current?.focus()} />
-          {isMobile && <TerminalSoftKeys onSend={send} label={t("terminal.keys")} />}
+          {(isMobile || isCoarsePointer) && <TerminalSoftKeys onSend={send} label={t("terminal.keys")} />}
         </>
       ) : (
         <div className="terminal-empty">

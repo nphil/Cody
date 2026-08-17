@@ -131,6 +131,10 @@ type AutoNameStatus =
   | { kind: "success" }
   | { kind: "error"; message: string };
 
+// First-launch handoff flag: set when the engine picker triggers a reload so
+// the fresh page still opens Settings → API Keys & Providers once.
+const OPEN_PROVIDERS_AFTER_ONBOARDING = "cody:open-providers-after-onboarding";
+
 export function AppShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -252,8 +256,28 @@ export function AppShell() {
     setEnginePickerOpen(false);
     // A different engine invalidates everything the shell loaded from the old
     // one (models, capabilities, live sessions), so start from a clean page.
-    if (engineChanged) window.location.reload();
-  }, []);
+    // Either way, the natural next step after picking an engine is connecting
+    // a provider — open Settings → API Keys & Providers (capability-gated:
+    // claude/codex have no providers UI; they sign in from their own CLIs).
+    // Across the reload the intent survives in sessionStorage.
+    if (engineChanged) {
+      try {
+        sessionStorage.setItem(OPEN_PROVIDERS_AFTER_ONBOARDING, "1");
+      } catch { /* storage unavailable: the user finds Settings themselves */ }
+      window.location.reload();
+      return;
+    }
+    if (capabilities.models) setSettingsTab("providers");
+  }, [capabilities.models]);
+  useEffect(() => {
+    if (!capabilitiesLoaded) return;
+    let flagged = false;
+    try {
+      flagged = sessionStorage.getItem(OPEN_PROVIDERS_AFTER_ONBOARDING) === "1";
+      if (flagged) sessionStorage.removeItem(OPEN_PROVIDERS_AFTER_ONBOARDING);
+    } catch { /* storage unavailable */ }
+    if (flagged && capabilities.models) setSettingsTab("providers");
+  }, [capabilitiesLoaded, capabilities.models]);
   // On mobile the sidebar is an overlay drawer; hide it by default so the chat
   // is visible on load. Runs once the breakpoint resolves after hydration.
   useEffect(() => {
@@ -606,6 +630,21 @@ export function AppShell() {
     window.addEventListener("resize", reclamp);
     return () => window.removeEventListener("resize", reclamp);
   }, [clampWorkspaceWidth, isMobile]);
+  // Portrait-tablet relief: the workspace panel's CSS floor is 300px, and the
+  // clamp above lets that floor win over CHAT_MIN_WIDTH — at ~768px with the
+  // sidebar open the chat column ends up under 200px. When opening the panel
+  // cannot leave the chat its minimum, collapse the sidebar instead of
+  // crushing the chat. Fires on the opening transition only; reopening the
+  // sidebar afterwards is the user's call and sticks.
+  const prevRightPanelOpenForRelief = useRef(false);
+  useEffect(() => {
+    const justOpened = rightPanelOpen && !prevRightPanelOpenForRelief.current;
+    prevRightPanelOpenForRelief.current = rightPanelOpen;
+    if (!justOpened || isMobile) return;
+    if (sidebarOpen && window.innerWidth - sidebarWidth - 300 < CHAT_MIN_WIDTH) {
+      setSidebarOpen(false);
+    }
+  }, [rightPanelOpen, isMobile, sidebarOpen, sidebarWidth]);
   const commitWorkspaceWidth = useCallback((value: number | null) => {
     setWorkspaceWidth(value);
     try {
@@ -1648,13 +1687,13 @@ export function AppShell() {
                     <span style={{ color: "var(--text-dim)", marginRight: 6 }}>1.</span>{t("appShell.getStartedStep1")}<br />
                     <span style={{ color: "var(--text-dim)", marginRight: 6 }}>2.</span>
                     {(() => {
-                      // One translatable sentence; the {models} slot is rendered
+                      // One translatable sentence; the {settings} slot is rendered
                       // as the emphasized button name so word order stays free.
-                      const [before, after] = t("appShell.getStartedStep2").split("{models}");
+                      const [before, after] = t("appShell.getStartedStep2").split("{settings}");
                       return (
                         <>
                           {before}
-                          <strong style={{ color: "var(--text)" }}>{t("appShell.models")}</strong>
+                          <strong style={{ color: "var(--text)" }}>{t("appShell.settingsButton")}</strong>
                           {after}
                         </>
                       );
@@ -1938,7 +1977,9 @@ export function AppShell() {
       title={rightPanelOpen ? t("appShell.hideWorkspacePanel") : t("appShell.showWorkspacePanel")}
       aria-label={rightPanelOpen ? t("appShell.hideWorkspacePanel") : t("appShell.showWorkspacePanel")}
       style={{
-        position: "fixed", top: 0, right: 0, zIndex: 300,
+        // Safe-area insets keep the toggle tappable on notched/rounded
+        // tablets in landscape (viewportFit: cover exposes those corners).
+        position: "fixed", top: "env(safe-area-inset-top, 0px)", right: "env(safe-area-inset-right, 0px)", zIndex: 300,
         display: "flex", alignItems: "center", justifyContent: "center",
         width: isMobile ? 44 : 36, height: isMobile ? 44 : 36, padding: 0,
         background: "var(--bg-panel)", border: "none", borderLeft: "1px solid var(--border)", borderBottom: "1px solid var(--border)",
