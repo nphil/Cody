@@ -8,7 +8,7 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/nphil/Cody/issues</Support>
   <Project>https://github.com/nphil/Cody</Project>
-  <Overview>Cody — a web workspace for the omp (oh-my-pi) coding agent. Session browsing, live chat, Git panel with staging and checkpoints, persistent terminals, workspace tasks, and an embedded app preview. This container bundles the omp harness; point /workspace at your projects share and open the WebUI.</Overview>
+  <Overview>Cody — a self-hosted web workspace for coding agents. Session browsing, live chat, Git panel with staging and checkpoints, persistent terminals, workspace tasks, and an embedded app preview. The agent engine is swappable from the UI: omp (oh-my-pi) ships in the container, and Claude Code or Codex can be installed and selected as experimental engines. Point /workspace at your projects share and open the WebUI.</Overview>
   <Category>Tools: Productivity:</Category>
   <WebUI>http://[IP]:[PORT:30177]/</WebUI>
   <TemplateURL/>

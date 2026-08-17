@@ -26,7 +26,8 @@ import type { GitStatusResponse } from "@/lib/git-types";
 import type { SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
-import type { SettingsTab } from "./SettingsTabs";
+import { ALL_CAPABILITIES, normalizeCapabilities, type ActiveEngineInfo, type EngineCapabilities, type SettingsTab } from "./SettingsTabs";
+import type { EnginesPayload } from "./EnginePicker";
 import { STORAGE_KEYS } from "@/lib/storage-keys";
 
 // Loaded on demand: the config modals open on click and the file viewer only
@@ -96,6 +97,11 @@ const SettingsConfig = dynamic(() => import("./SettingsConfig").then((m) => m.Se
   loading: () => <ModalLoadingFallback />,
 });
 const CommandPalette = dynamic(() => import("./CommandPalette").then((m) => m.CommandPalette), {
+  ssr: false,
+});
+// Onboarding-only: the picker ships in its own chunk so the shell never pays
+// for a screen that renders once per instance.
+const EnginePicker = dynamic(() => import("./EnginePicker").then((m) => m.EnginePicker), {
   ssr: false,
 });
 
@@ -189,6 +195,65 @@ export function AppShell() {
   }, [sidebarWidth, sidebarResizing]);
   const [appUpdateAvailable, setAppUpdateAvailable] = useState(false);
   const [ompUpdateAvailable, setOmpUpdateAvailable] = useState(false);
+  // What the active engine can serve, and who it is. Everything defaults to
+  // enabled: a server that does not report capabilities (or reports a partial
+  // set) keeps the full omp-era UI, and gating only bites on an explicit false.
+  const [capabilities, setCapabilities] = useState<EngineCapabilities>(ALL_CAPABILITIES);
+  const [activeEngine, setActiveEngine] = useState<ActiveEngineInfo | null>(null);
+  const [capabilitiesLoaded, setCapabilitiesLoaded] = useState(false);
+  // The onboarding engine step: mounted only when the roster says this account
+  // may choose (admin) and nobody has chosen yet.
+  const [engineRoster, setEngineRoster] = useState<EnginesPayload | null>(null);
+  const [enginePickerOpen, setEnginePickerOpen] = useState(false);
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetch("/api/info", { cache: "no-store", signal: controller.signal })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data: { capabilities?: unknown; engine?: Partial<ActiveEngineInfo> } | null) => {
+        if (controller.signal.aborted) return;
+        if (!data) {
+          setCapabilitiesLoaded(true);
+          return;
+        }
+        setCapabilities(normalizeCapabilities(data.capabilities));
+        const engine = data.engine;
+        if (engine && typeof engine.id === "string") {
+          setActiveEngine({
+            id: engine.id,
+            displayName: engine.displayName ?? engine.id,
+            shortName: engine.shortName ?? engine.id,
+            experimental: engine.experimental === true,
+          });
+        }
+        setCapabilitiesLoaded(true);
+      })
+      .catch(() => {
+        // Keep the permissive defaults; an unreachable /api/info must not
+        // strip the UI down to the smallest engine's surface.
+        if (!controller.signal.aborted) setCapabilitiesLoaded(true);
+      });
+    return () => controller.abort();
+  }, []);
+  useEffect(() => {
+    const controller = new AbortController();
+    // 401 here just means an open instance or a signed-out tab; either way
+    // there is no onboarding step to run.
+    void fetch("/api/engines", { cache: "no-store", signal: controller.signal })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data: EnginesPayload | null) => {
+        if (!data || controller.signal.aborted) return;
+        setEngineRoster(data);
+        if (data.canManage && !data.onboarded) setEnginePickerOpen(true);
+      })
+      .catch(() => { /* the picker simply does not run */ });
+    return () => controller.abort();
+  }, []);
+  const handleEnginePickerDone = useCallback((engineChanged: boolean) => {
+    setEnginePickerOpen(false);
+    // A different engine invalidates everything the shell loaded from the old
+    // one (models, capabilities, live sessions), so start from a clean page.
+    if (engineChanged) window.location.reload();
+  }, []);
   // On mobile the sidebar is an overlay drawer; hide it by default so the chat
   // is visible on load. Runs once the breakpoint resolves after hydration.
   useEffect(() => {
@@ -205,6 +270,9 @@ export function AppShell() {
     localStorage.setItem(STORAGE_KEYS.advisorEnabled, String(enabled));
   }, []);
   useEffect(() => {
+    // The runtime-update probe is omp's; wait until the engine is known so a
+    // Claude/Codex instance never opens with an "OMP update available" toast.
+    if (!capabilitiesLoaded || !capabilities.updates) return;
     const controller = new AbortController();
     void fetch("/api/omp-update", {
       method: "POST",
@@ -240,7 +308,7 @@ export function AppShell() {
       })
       .catch(() => {});
     return () => controller.abort();
-  }, []);
+  }, [capabilitiesLoaded, capabilities.updates]);
   useEffect(() => {
     const controller = new AbortController();
     void fetch("/api/app-update", { signal: controller.signal })
@@ -1114,17 +1182,21 @@ export function AppShell() {
             <div className="shell-toolbar-divider" aria-hidden="true" />
             {/* Session controls: history, generate title, branches, system */}
             <div style={{ display: "flex", alignItems: "center", gap: 4, height: "100%" }}>
-              <button
-                onClick={handleViewFullHistory}
-                disabled={!selectedSession}
-                title={selectedSession ? t("appShell.fullHistory") : t("appShell.fullHistoryUnavailable")}
-                aria-label={t("appShell.fullHistory")}
-                className="shell-toolbar-btn shell-captioned-btn ui-focus-ring"
-              >
-                <History size={14} strokeWidth={1.8} aria-hidden="true" />
-                <span className="shell-btn-caption">{t("appShell.captionHistory")}</span>
-              </button>
-              {(() => {
+              {/* The HTML export reads an omp transcript over the omp protocol. */}
+              {capabilities.chatExtras && (
+                <button
+                  onClick={handleViewFullHistory}
+                  disabled={!selectedSession}
+                  title={selectedSession ? t("appShell.fullHistory") : t("appShell.fullHistoryUnavailable")}
+                  aria-label={t("appShell.fullHistory")}
+                  className="shell-toolbar-btn shell-captioned-btn ui-focus-ring"
+                >
+                  <History size={14} strokeWidth={1.8} aria-hidden="true" />
+                  <span className="shell-btn-caption">{t("appShell.captionHistory")}</span>
+                </button>
+              )}
+              {/* Title generation runs against the omp transcript too. */}
+              {capabilities.chatExtras && (() => {
                 const hasMessages = Boolean(
                   selectedSession
                   && (sessionStats?.userMessages ?? selectedSession.messageCount) > 0,
@@ -1173,16 +1245,19 @@ export function AppShell() {
                   </button>
                 );
               })()}
-              <BranchNavigator
-                tree={branchTree}
-                activeLeafId={branchActiveLeafId}
-                onLeafChange={handleBranchLeafChange}
-                inline
-                containerRef={topBarRef}
-                open={activeTopPanel === "branches"}
-                onToggle={() => toggleTopPanel("branches")}
-                hasSession
-              />
+              {/* Branch/fork navigation is an omp-protocol affordance. */}
+              {capabilities.chatExtras && (
+                <BranchNavigator
+                  tree={branchTree}
+                  activeLeafId={branchActiveLeafId}
+                  onLeafChange={handleBranchLeafChange}
+                  inline
+                  containerRef={topBarRef}
+                  open={activeTopPanel === "branches"}
+                  onToggle={() => toggleTopPanel("branches")}
+                  hasSession
+                />
+              )}
               <button
                 ref={systemBtnRef}
                 onClick={() => toggleTopPanel("system")}
@@ -1531,6 +1606,7 @@ export function AppShell() {
               onContextUsageChange={handleContextUsageChange}
               onOpenFile={handleOpenLinkedFile}
               advisorEnabled={advisorEnabled}
+              chatExtras={capabilities.chatExtras}
               toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
             />
           ) : initialCwdStatus === "validating" ? (
@@ -1832,6 +1908,7 @@ export function AppShell() {
             <UpdatesPanel
               cwd={activeCwd}
               active={rightPanelMode === "updates" && rightPanelOpen}
+              engineUpdates={capabilities.updates}
               onOpenSettings={(tab) => setSettingsTab(tab)}
               onAvailableCountChange={handleUpdatesAvailableCountChange}
             />
@@ -1875,7 +1952,8 @@ export function AppShell() {
         <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />
       </svg>
     </button>
-    {settingsTab && <SettingsConfig activeTab={settingsTab} advisorEnabled={advisorEnabled} onAdvisorChange={handleAdvisorChange} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} onToolCallsDefaultCollapsedChange={handleToolCallsDefaultCollapsedChange} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd} sessionId={selectedSession?.id ?? null} onModelsSaved={() => setModelsRefreshKey((k) => k + 1)} onPluginsReloaded={() => setSessionKey((k) => k + 1)} onOmpUpdateAvailabilityChange={setOmpUpdateAvailable} onSelectTab={setSettingsTab} onClose={() => setSettingsTab(null)} />}
+    {settingsTab && <SettingsConfig activeTab={settingsTab} advisorEnabled={advisorEnabled} onAdvisorChange={handleAdvisorChange} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} onToolCallsDefaultCollapsedChange={handleToolCallsDefaultCollapsedChange} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd} sessionId={selectedSession?.id ?? null} capabilities={capabilities} engine={activeEngine} onModelsSaved={() => setModelsRefreshKey((k) => k + 1)} onPluginsReloaded={() => setSessionKey((k) => k + 1)} onOmpUpdateAvailabilityChange={setOmpUpdateAvailable} onSelectTab={setSettingsTab} onClose={() => setSettingsTab(null)} />}
+    {enginePickerOpen && <EnginePicker initial={engineRoster} onDone={handleEnginePickerDone} />}
     </ToastProvider>
     </>
   );

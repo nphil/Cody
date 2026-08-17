@@ -1,5 +1,8 @@
 import { existsSync } from "fs";
 import { homedir } from "os";
+import { renameSessionOwner } from "./auth/session-owners";
+import { getHarness } from "./harness";
+import type { EngineSession, EngineSessionOptions } from "./harness/types";
 import { validateAgentImages } from "./image-attachments";
 import { invalidateModelsCache } from "./models-cache";
 import { RpcCommandError, RpcProcess, type RpcFrame } from "./omp/rpc-process";
@@ -1098,13 +1101,20 @@ export interface RunningSessionUpdate {
   refreshSessionList: boolean;
 }
 
+/**
+ * The registry holds EngineSession, not AgentSessionWrapper: omp's wrapper is
+ * one implementation of that interface (structurally — it is never declared
+ * `implements`), and a non-omp engine's TurnEngineSession is another. Routes
+ * that need omp-only surface (getMcpList) narrow with `instanceof
+ * AgentSessionWrapper` or gate on the active engine's capabilities.
+ */
 declare global {
-  var __ompSessions: Map<string, AgentSessionWrapper> | undefined;
-  var __ompStartLocks: Map<string, Promise<{ session: AgentSessionWrapper; realSessionId: string }>> | undefined;
+  var __ompSessions: Map<string, EngineSession> | undefined;
+  var __ompStartLocks: Map<string, Promise<{ session: EngineSession; realSessionId: string }>> | undefined;
   var __ompRunningListeners: Set<(update: RunningSessionUpdate) => void> | undefined;
 }
 
-function getRegistry(): Map<string, AgentSessionWrapper> {
+function getRegistry(): Map<string, EngineSession> {
   if (!globalThis.__ompSessions) {
     globalThis.__ompSessions = new Map();
     const cleanup = () => globalThis.__ompSessions?.forEach((s) => s.destroy());
@@ -1115,12 +1125,12 @@ function getRegistry(): Map<string, AgentSessionWrapper> {
   return globalThis.__ompSessions;
 }
 
-function getLocks(): Map<string, Promise<{ session: AgentSessionWrapper; realSessionId: string }>> {
+function getLocks(): Map<string, Promise<{ session: EngineSession; realSessionId: string }>> {
   if (!globalThis.__ompStartLocks) globalThis.__ompStartLocks = new Map();
   return globalThis.__ompStartLocks;
 }
 
-export function getRpcSession(sessionId: string): AgentSessionWrapper | undefined {
+export function getRpcSession(sessionId: string): EngineSession | undefined {
   return getRegistry().get(sessionId);
 }
 
@@ -1180,10 +1190,60 @@ export function notifyRunningChange({ refreshSessionList = false }: { refreshSes
 }
 
 /**
+ * Start a live session for a non-omp engine (the adapter supplies the factory).
+ * Registration mirrors the omp path exactly — same registry keys, same
+ * onDestroy/onIdentityChange bookkeeping — so every consumer of getRpcSession
+ * behaves the same whichever engine is active.
+ */
+async function startEngineSession(
+  create: (options: EngineSessionOptions) => EngineSession,
+  sessionId: string,
+  cwd: string,
+): Promise<{ session: EngineSession; realSessionId: string }> {
+  const registry = getRegistry();
+  const created = create({ sessionId, cwd });
+  created.start();
+  await created.waitUntilReady();
+
+  const realSessionId = created.sessionId;
+  created.onDestroy(() => {
+    if (registry.get(created.sessionId) === created) registry.delete(created.sessionId);
+    if (registry.get(realSessionId) === created) registry.delete(realSessionId);
+    notifyRunningChange();
+  });
+  created.onIdentityChange((oldId, newId) => {
+    if (registry.get(oldId) === created) registry.delete(oldId);
+    registry.set(newId, created);
+    // The ownership row was stamped under the creation-time id; move it or
+    // the session becomes "unowned" — visible to every account — as soon as
+    // the engine announces its real id (Codex thread ids arrive mid-turn).
+    renameSessionOwner(oldId, newId);
+  });
+  // A turn-based engine has no frame pipeline calling notifyRunningChange the
+  // way handleFrame does for omp, so drive the sidebar's running indicator (and
+  // its session-list refresh) off the engine's own turn boundaries.
+  created.onEvent((event) => {
+    if (event.type === "agent_start" || event.type === "agent_end") {
+      notifyRunningChange({ refreshSessionList: true });
+    }
+  });
+  registry.set(realSessionId, created);
+  notifyRunningChange();
+  return { session: created, realSessionId };
+}
+
+/**
  * Get or create the omp RPC process for the given session.
  * For new sessions (sessionFile === ""), omp generates its own id.
  * Pass toolNames to pre-configure the builtin toolset of a NEW session
  * (empty array = all tools disabled); ignored when resuming.
+ *
+ * When the active engine is not omp (it supplies `createSession`), the spawn
+ * branches to that engine's own session implementation: `sessionFile`,
+ * `toolNames` and `advisor` are omp-only and ignored, and `engineSessionId`
+ * carries the Cody session id to resume ("" mints a brand-new one, the way
+ * `sessionFile: ""` does for omp). It defaults to `sessionId`, which is right
+ * for every caller that resumes an existing session by id.
  */
 export async function startRpcSession(
   sessionId: string,
@@ -1191,7 +1251,8 @@ export async function startRpcSession(
   cwd: string,
   toolNames?: string[],
   advisor = false,
-): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
+  engineSessionId?: string,
+): Promise<{ session: EngineSession; realSessionId: string }> {
   const registry = getRegistry();
   const locks = getLocks();
 
@@ -1205,7 +1266,13 @@ export async function startRpcSession(
   const inflight = locks.get(sessionId);
   if (inflight) return inflight;
 
+  const harness = getHarness();
+  const createEngineSession = harness.createSession?.bind(harness);
+
   const starting = (async () => {
+    if (createEngineSession) {
+      return startEngineSession(createEngineSession, engineSessionId ?? sessionId, cwd);
+    }
     // The wrapper needs the process and the process's onExit needs the wrapper;
     // the holder breaks that cycle (onExit only fires once the child dies).
     const holder: { wrapper?: AgentSessionWrapper } = {};

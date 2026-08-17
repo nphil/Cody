@@ -76,6 +76,20 @@ export function filterSessionsForUser<T extends { id: string }>(sessions: T[], u
   });
 }
 
+/** Move an ownership record when a session is re-keyed mid-flight. Codex
+ * reveals its real thread id only once the first turn starts, so the row
+ * stamped at creation must follow the rename — otherwise the session turns
+ * "unowned" under its new id and becomes visible to every account. */
+export function renameSessionOwner(oldId: string, newId: string): void {
+  if (!oldId || !newId || oldId === newId) return;
+  const file = readOwners();
+  const owner = file.owners[oldId];
+  if (owner === undefined) return;
+  delete file.owners[oldId];
+  file.owners[newId] = owner;
+  writeOwners(file);
+}
+
 /** Called when a session is deleted so the sidecar does not grow forever. */
 export function forgetSession(sessionId: string): void {
   const file = readOwners();

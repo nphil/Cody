@@ -21,10 +21,13 @@ import {
   buildSessionContext,
   readSessionHeader,
 } from "@/lib/session-reader";
-import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
+import { apiErrorResponse, resolveEngineSessionOr404, resolveSessionPathOr404 } from "@/lib/api-utils";
 import { sessionPathKey } from "@/lib/session-path";
 import { getRpcSession } from "@/lib/rpc-manager";
 import { forgetSession } from "@/lib/auth/session-owners";
+import { getHarness } from "@/lib/harness";
+import { removeEngineSession, upsertEngineSession, type EngineSessionRow } from "@/lib/harness/engine-sessions";
+import type { AgentMessage } from "@/lib/types";
 
 // BranchNavigator still traverses recursively, so keep the response tree shallow.
 const MAX_PROJECTED_TREE_DEPTH = 200;
@@ -126,12 +129,88 @@ function projectTreeForResponse<T extends { entry: { id: string }; children: T[]
   return projectedRoots;
 }
 
+/**
+ * The transcript payload for a session owned by a non-omp engine.
+ *
+ * Shape-identical to the omp response below — the client reads `info`,
+ * `leafId`, `tree` and `context` unconditionally — but sourced from what a
+ * turn-based engine can actually offer: the live session's in-memory turn log
+ * while it is running, and nothing once it has been disposed (reading a claude
+ * or codex native transcript off disk is explicitly out of scope for v1).
+ */
+async function engineSessionResponse(
+  id: string,
+  row: EngineSessionRow,
+  includeState: boolean,
+): Promise<NextResponse> {
+  const rpc = getRpcSession(id);
+  const alive = rpc?.isAlive() ? rpc : null;
+
+  let messages: AgentMessage[] = [];
+  if (alive) {
+    try {
+      const result = await alive.send({ type: "get_messages" }) as { messages?: AgentMessage[] } | null;
+      messages = result?.messages ?? [];
+    } catch {
+      // Leave the transcript empty; the live event stream still drives the UI.
+    }
+  }
+
+  let agent: { running: boolean; state?: unknown } | undefined;
+  if (includeState) {
+    if (alive) {
+      try {
+        agent = { running: true, state: await alive.send({ type: "get_state" }) };
+      } catch {
+        // Same contract as the omp path: a missing `agent` means "ask again".
+      }
+    } else {
+      agent = { running: false };
+    }
+  }
+
+  return NextResponse.json({
+    sessionId: id,
+    filePath: "",
+    info: {
+      path: "",
+      id,
+      cwd: row.cwd,
+      name: row.title || undefined,
+      created: row.createdAt,
+      modified: row.updatedAt || row.createdAt,
+      messageCount: messages.length,
+      firstMessage: row.title || "(no messages)",
+      parentSessionId: undefined,
+    },
+    leafId: null,
+    tree: [],
+    context: {
+      messages,
+      // Entry ids are omp session-file entry ids; a turn-based engine has none,
+      // and the client already tolerates a short/empty array (it only feeds
+      // omp-only affordances like forking and deferred thinking).
+      entryIds: [],
+      thinkingLevel: "off",
+      model: null,
+      todoPhases: [],
+    },
+    ...(agent ? { agent } : {}),
+  });
+}
+
 export async function GET(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
   try {
+    if (getHarness().createSession) {
+      const engine = resolveEngineSessionOr404(id, req);
+      if ("response" in engine) return engine.response;
+      return await engineSessionResponse(id, engine.row, new URL(req.url).searchParams.has("includeState"));
+    }
+
     const resolved = await resolveSessionPathOr404(id, req);
     if ("response" in resolved) return resolved.response;
     const filePath = resolved.filePath;
@@ -224,6 +303,15 @@ export async function PATCH(
     if (typeof name !== "string" || !name.trim()) {
       return NextResponse.json({ error: "name is required", code: "session_name_required" }, { status: 400 });
     }
+    // Non-omp engines own their transcript but not their label: the title lives
+    // in Cody's index, so a rename is a sidecar write (set_session_name is an
+    // omp-protocol command those engines answer "unsupported").
+    if (getHarness().createSession) {
+      const engine = resolveEngineSessionOr404(id, req);
+      if ("response" in engine) return engine.response;
+      upsertEngineSession(id, { engine: engine.row.engine, title: name.trim() });
+      return NextResponse.json({ ok: true });
+    }
     // A running omp process owns its session file; route the rename through it
     // so the in-memory title cannot clobber ours on the next flush. This runs
     // before the path check because omp does not create the session file until
@@ -258,6 +346,18 @@ export async function DELETE(
 ) {
   const { id } = await params;
   try {
+    // Non-omp engine: Cody deletes its own bookkeeping (index row, ownership)
+    // and stops the live session. The engine's native transcript is its own
+    // format and is deliberately left untouched.
+    if (getHarness().createSession) {
+      const engine = resolveEngineSessionOr404(id, req);
+      if ("response" in engine) return engine.response;
+      await getRpcSession(id)?.destroyAndWait?.();
+      removeEngineSession(id);
+      forgetSession(id);
+      return NextResponse.json({ ok: true });
+    }
+
     const resolved = await resolveSessionPathOr404(id, req);
     if ("response" in resolved) return resolved.response;
     const filePath = resolved.filePath;

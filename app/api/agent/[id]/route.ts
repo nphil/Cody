@@ -1,15 +1,22 @@
 import { NextResponse } from "next/server";
 import { createCheckpoint } from "@/lib/checkpoints";
 import { readSessionHeader } from "@/lib/session-reader";
-import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
+import { apiErrorResponse, resolveEngineSessionOr404, resolveSessionPathOr404 } from "@/lib/api-utils";
 import { startRpcSession, getRpcSession, resolveSpawnCwd, WebRpcError } from "@/lib/rpc-manager";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
+import { getHarness } from "@/lib/harness";
+import { EngineCommandError } from "@/lib/harness/turn-session";
 
 /** Cody's own failures carry a stable code the client can localize; omp's
  * errors stay opaque English text. */
 function commandErrorResponse(error: unknown) {
   if (error instanceof SyntaxError) {
     return NextResponse.json({ error: "Invalid JSON request body", code: "invalid_json" }, { status: 400 });
+  }
+  // Turn-based engines raise this for "unsupported", "session_busy" and
+  // friends — same {error, code} contract as omp's failures.
+  if (error instanceof EngineCommandError) {
+    return NextResponse.json({ error: error.message, code: error.code }, { status: 400 });
   }
   if (error instanceof WebRpcError) {
     return NextResponse.json({ error: error.message, code: error.code }, { status: 400 });
@@ -47,6 +54,18 @@ export async function POST(
     if (existing?.isAlive()) {
       await checkpointBeforePrompt(existing.cwd, body);
       const result = await existing.send(body);
+      return NextResponse.json({ success: true, data: result });
+    }
+
+    // Non-omp engines own their transcripts; the session is known by its index
+    // row (cwd included), never by a file Cody can resolve.
+    if (getHarness().createSession) {
+      const engine = resolveEngineSessionOr404(id, req);
+      if ("response" in engine) return engine.response;
+      const engineCwd = resolveSpawnCwd(engine.row.cwd);
+      const { session } = await startRpcSession(id, "", engineCwd, undefined, false, id);
+      await checkpointBeforePrompt(engineCwd, body);
+      const result = await session.send(body);
       return NextResponse.json({ success: true, data: result });
     }
 

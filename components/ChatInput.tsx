@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
-import { ChevronDown, ListChecks, Sparkles, Target } from "lucide-react";
+import { ChevronDown, ListChecks, Loader2, Sparkles, Target } from "lucide-react";
 import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
@@ -53,6 +53,9 @@ interface Props {
   onFollowUp?: (message: string, images?: AttachedImage[]) => void;
   onPromptWithStreamingBehavior?: (message: string, behavior: "steer" | "followUp", images?: AttachedImage[]) => void;
   isStreaming: boolean;
+  /** Active engine serves omp's advanced chat affordances. False means no
+   * steering and no follow-up queue: nothing can be submitted mid-turn. */
+  chatExtras?: boolean;
   model?: { provider: string; modelId: string } | null;
   isAutoModelSelection?: boolean;
   modelNames?: Record<string, string>;
@@ -376,7 +379,7 @@ function ComposerModeStatus({ goal, plan }: { goal?: ActiveGoal | null; plan?: A
 }
 
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, onModelChange, fastModeEnabled, fastModeActive, fastModeSupported, onFastModeChange,
+  onSend, onAbort, onSteer, onFollowUp, isStreaming, chatExtras = true, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, onModelChange, fastModeEnabled, fastModeActive, fastModeSupported, onFastModeChange,
   onAbortCompaction, isCompacting, compactResult,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap, modelNameOverride,
   retryInfo, queuedMessages, inputHistory = [], onAbortRetry,
@@ -1341,6 +1344,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   // loading chip, so "no models" can only appear after the fetch settled.
   const showModelsLoading = Boolean(modelsLoading) && !modelError;
   const modelSelectorDisabled = isStreaming || (showModelsLoading && modelOptions.length === 0);
+  // Turn-based engines take one prompt at a time: no steering, no follow-up
+  // queue. Rather than leave Enter silently inert, the composer says it is
+  // waiting. Typing stays allowed so the next message can be drafted.
+  const turnWaiting = !chatExtras && isStreaming;
 
   const compactSavedTokens = compactResult
     ? Math.max(0, compactResult.tokensBefore - compactResult.estimatedTokensAfter)
@@ -1422,7 +1429,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }}
       />
       <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
-        <ModelErrorBanner error={modelError} />
+        {/* The model registry is omp's; on an engine without chatExtras the
+            selector is hidden, so its load errors must not surface either. */}
+        <ModelErrorBanner error={chatExtras ? modelError : null} />
         <ComposerModeStatus goal={activeGoal} plan={activePlan} />
         {/* Retry banner */}
         {retryInfo && (
@@ -1884,6 +1893,32 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               </div>
             );
           })()}
+        {/* Waiting strip — same slot as the queued bar, shown when the engine
+            cannot take anything until the current turn ends. Visible even once
+            the user has typed, which the placeholder alone would not be. */}
+        {turnWaiting && !firstQueued && (
+          <div
+            role="status"
+            style={{
+              border: "1px solid var(--border)",
+              borderBottom: "none",
+              borderRadius: "var(--radius-card) var(--radius-card) 0 0",
+              background: "var(--bg-panel)",
+              padding: "5px 12px",
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              minWidth: 0,
+              fontSize: 11,
+              color: "var(--text-muted)",
+            }}
+          >
+            <Loader2 size={11} strokeWidth={2.2} style={{ flexShrink: 0, animation: "spin 0.8s linear infinite" }} aria-hidden="true" />
+            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {t("chatInput.waitingForTurn")}
+            </span>
+          </div>
+        )}
         {/* Queued follow-up bar — thin strip attached to the composer's top
             edge. Hidden entirely when nothing is queued. */}
         {firstQueued && (
@@ -1971,7 +2006,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             }}
             onInput={handleInput}
             onPaste={handlePaste}
-            placeholder={t("chatInput.placeholder")}
+            placeholder={turnWaiting ? t("chatInput.waitingForTurn") : t("chatInput.placeholder")}
             rows={1}
             style={{
               width: "100%",

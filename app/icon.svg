@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Cody mark: a lowercase "c" beside a terminal caret — the same identity
+       as the login wordmark ("co" accent / "dy" text + blinking caret). -->
+  <rect width="512" height="512" rx="116" fill="#1e1e2e"/>
+  <path d="M 266.5 184 A 88 88 0 1 0 266.5 328" fill="none" stroke="#cdd6f4" stroke-width="52" stroke-linecap="round"/>
+  <rect x="336" y="150" width="66" height="212" rx="16" fill="#cba6f7"/>
+</svg>

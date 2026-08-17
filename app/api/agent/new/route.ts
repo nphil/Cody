@@ -9,10 +9,16 @@ import { createCheckpoint } from "@/lib/checkpoints";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { getRequestUser } from "@/lib/auth/guard";
 import { setSessionOwner } from "@/lib/auth/session-owners";
+import { getHarness } from "@/lib/harness";
+import { engineSessionTitle, getEngineSession, upsertEngineSession } from "@/lib/harness/engine-sessions";
+import { EngineCommandError } from "@/lib/harness/turn-session";
 
 function newSessionErrorResponse(error: unknown) {
   if (error instanceof SyntaxError) {
     return NextResponse.json({ error: "Invalid JSON request body", code: "invalid_json" }, { status: 400 });
+  }
+  if (error instanceof EngineCommandError) {
+    return NextResponse.json({ error: error.message, code: error.code }, { status: 400 });
   }
   if (error instanceof WebRpcError || error instanceof RpcCommandError) {
     return NextResponse.json(
@@ -56,7 +62,18 @@ export async function POST(req: Request) {
     if (typeof command.message === "string" || command.type === "prompt") {
       await createCheckpoint(cwd, typeof command.message === "string" && command.message ? command.message : "New session");
     }
-    const { session, realSessionId } = await startRpcSession(tempKey, "", cwd, toolNames, advisor === true);
+    // A non-omp engine has no session file: pass an empty engine session id so
+    // the engine mints one, exactly as `sessionFile: ""` means "new" for omp.
+    const harness = getHarness();
+    const engineMode = typeof harness.createSession === "function";
+    const { session, realSessionId } = await startRpcSession(
+      tempKey,
+      "",
+      cwd,
+      toolNames,
+      advisor === true,
+      engineMode ? "" : undefined,
+    );
 
     // Keep the files-route allowed-roots cache (see app/api/files/[...path]/route.ts)
     // in sync so the new cwd is immediately readable via /api/files. Without this,
@@ -69,14 +86,34 @@ export async function POST(req: Request) {
     const creator = getRequestUser(req);
     if (creator) setSessionOwner(realSessionId, creator.id);
 
-    // Apply pre-selected model before sending the prompt
-    if (provider && modelId) {
-      await session.send({ type: "set_model", provider, modelId });
-    }
+    if (engineMode) {
+      // The sidebar lists engine sessions from the index, and the session
+      // itself only writes a row once a prompt reaches it. Seed the row now so
+      // a brand-new session (including `ensure_session`, which never prompts)
+      // appears immediately instead of after the first turn.
+      if (!getEngineSession(realSessionId)) {
+        try {
+          upsertEngineSession(realSessionId, {
+            engine: harness.id,
+            cwd,
+            title: engineSessionTitle(typeof command.message === "string" ? command.message : ""),
+          });
+        } catch {
+          // A sidecar write failure costs a sidebar row, never the session.
+        }
+      }
+    } else {
+      // Apply pre-selected model before sending the prompt. Both commands are
+      // omp-only (chatExtras); a turn-based engine answers them "unsupported",
+      // so never send them there.
+      if (provider && modelId) {
+        await session.send({ type: "set_model", provider, modelId });
+      }
 
-    // Apply pre-selected thinking level before sending the prompt
-    if (thinkingLevel) {
-      await session.send({ type: "set_thinking_level", level: thinkingLevel });
+      // Apply pre-selected thinking level before sending the prompt
+      if (thinkingLevel) {
+        await session.send({ type: "set_thinking_level", level: thinkingLevel });
+      }
     }
 
     if (promptCommand.type === "ensure_session") {

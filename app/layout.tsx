@@ -32,7 +32,7 @@ const legacyStorageKeys = JSON.stringify(LEGACY_STORAGE_KEYS);
 
 export const metadata: Metadata = {
   title: "Cody",
-  description: "A local web workspace for the oh-my-pi (omp) coding agent",
+  description: "A self-hosted web workspace for coding agents.",
   // PWA-like behavior on iOS: standalone chrome, no telephone autodetect.
   appleWebApp: {
     capable: true,

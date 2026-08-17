@@ -3,14 +3,16 @@ import { parseJsonWithinLimit } from "@/lib/bounded-form-data";
 import { jsonError } from "@/lib/auth/http";
 import { hashPassword, validatePasswordStrength } from "@/lib/auth/password";
 import { issueSessionToken, sessionCookie } from "@/lib/auth/session";
-import { createUser, hasAnyUser, isSignupAllowed, toPublicUser } from "@/lib/auth/users";
+import { createUser, hasAnyHumanUser, isSignupAllowed, toPublicUser } from "@/lib/auth/users";
 
 export const dynamic = "force-dynamic";
 
 /**
- * Self-service account creation from the login screen. The first account ever
- * created becomes the administrator (the fresh-install flow); afterwards the
- * route obeys CODY_ALLOW_SIGNUP and new accounts join as members.
+ * Self-service account creation from the login screen. The first HUMAN
+ * account becomes the administrator — the env-managed bootstrap account does
+ * not use up that slot, or a standard Docker install (CODY_PASSWORD always
+ * set) could never mint an admin from the login screen. Afterwards the route
+ * obeys CODY_ALLOW_SIGNUP and new accounts join as members.
  */
 export async function POST(request: Request) {
   let body: { username?: unknown; fullName?: unknown; password?: unknown };
@@ -24,8 +26,8 @@ export async function POST(request: Request) {
     return jsonError("Username and password are required", 400);
   }
 
-  const firstRun = !hasAnyUser();
-  if (!firstRun && !isSignupAllowed()) {
+  const firstHuman = !hasAnyHumanUser();
+  if (!firstHuman && !isSignupAllowed()) {
     return jsonError("Account creation is disabled on this server", 403, "signup_disabled");
   }
   const passwordError = validatePasswordStrength(password);
@@ -37,7 +39,7 @@ export async function POST(request: Request) {
       username,
       fullName: typeof fullName === "string" ? fullName : username,
       passwordHash: await hashPassword(password),
-      role: firstRun ? "admin" : "member",
+      role: firstHuman ? "admin" : "member",
     });
   } catch (error) {
     return jsonError(error instanceof Error ? error.message : String(error), 400);

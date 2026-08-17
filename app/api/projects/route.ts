@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { apiErrorResponse } from "@/lib/api-utils";
 import { comparableProjectPath } from "@/lib/comparable-path";
 import { allowFileRoot } from "@/lib/file-access";
+import { getHarness } from "@/lib/harness";
+import { listEngineSessions } from "@/lib/harness/engine-sessions";
 import {
   hideProject,
   loadProjectRegistry,
@@ -27,6 +29,16 @@ export async function GET() {
     const discovered = sessions
       .map((s) => s.projectRoot ?? s.cwd)
       .filter((path): path is string => Boolean(path));
+    // A non-omp engine keeps its transcripts in its own private store, so its
+    // sessions never appear in listAllSessions(). Their cwds come from Cody's
+    // sidecar index instead — without this the sidebar loses every project
+    // group that only has engine sessions.
+    const harness = getHarness();
+    if (harness.createSession) {
+      for (const entry of listEngineSessions(harness.id)) {
+        if (entry.cwd) discovered.push(entry.cwd);
+      }
+    }
     const projects = mergeProjects(registry, discovered);
     // Keep the in-memory browse allowlist warm for registered projects that
     // have no sessions (the in-memory list does not survive restarts, and an

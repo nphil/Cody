@@ -10,6 +10,7 @@ export const ompHarness: HarnessAdapter = {
   displayName: "OMP runtime",
   shortName: "OMP",
   binaryName: "omp",
+  tagline: "The oh-my-pi coding agent — Cody's founding engine, every surface enabled.",
   capabilities: {
     liveSessions: true,
     models: true,
@@ -18,6 +19,7 @@ export const ompHarness: HarnessAdapter = {
     mcp: true,
     nativeSettings: true,
     updates: true,
+    chatExtras: true,
   },
   resolveBinary: () => resolveOmpBin(),
   getVersion: () => getOmpVersion(),

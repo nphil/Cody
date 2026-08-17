@@ -2193,3 +2193,171 @@ html.dark .dropdown-surface :is(select, option) {
 @media (prefers-reduced-motion: reduce) {
   .login-caret, .login-card { animation: none; }
 }
+
+/* ============================ Engine picker ============================== */
+/* The onboarding engine step is the login screen's sibling: same ground, same
+   wordmark, same card material — a row of engine cards instead of a form. It
+   reuses .login-wordmark/.login-caret/.login-error/.login-primary/.login-ghost
+   and adds only what a card grid needs. Token-driven throughout, so all ten
+   theme families and both modes style it without a single literal color. */
+
+.engine-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  overflow-y: auto;
+  display: grid;
+  place-items: center;
+  padding: 32px 16px;
+  background:
+    radial-gradient(1100px 520px at 50% -12%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 70%),
+    var(--bg);
+}
+.engine-column {
+  width: min(1000px, 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 22px;
+}
+.engine-brand { display: flex; flex-direction: column; align-items: center; }
+.engine-intro { display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center; }
+.engine-title {
+  margin: 0;
+  font-family: var(--font-serif);
+  font-size: 21px;
+  font-weight: 650;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+.engine-subtitle {
+  margin: 0;
+  max-width: 56ch;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+.engine-alert { width: min(560px, 100%); }
+.engine-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  padding: 40px 0;
+}
+.engine-grid {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+  gap: 14px;
+  align-items: stretch;
+}
+.engine-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px 18px 16px;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius-card) + 2px);
+  background: var(--bg-panel);
+  box-shadow: 0 24px 60px -34px color-mix(in srgb, var(--text) 45%, transparent);
+  animation: login-card-in var(--dur-slow) var(--ease-out-warm) both;
+}
+.engine-card[data-active="true"] {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 26%, transparent),
+    0 24px 60px -34px color-mix(in srgb, var(--text) 45%, transparent);
+}
+.engine-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.engine-name {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--text);
+  font-family: var(--font-serif);
+}
+.engine-chips { display: inline-flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.engine-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-subtle);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.engine-chip[data-tone="recommended"] {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.engine-chip[data-tone="experimental"] {
+  color: var(--status-warning);
+  border-color: color-mix(in srgb, var(--status-warning) 40%, transparent);
+  background: color-mix(in srgb, var(--status-warning) 10%, transparent);
+}
+.engine-tagline { margin: 0; font-size: 12.5px; line-height: 1.55; color: var(--text-muted); }
+.engine-facts { margin: 2px 0 0; display: flex; flex-direction: column; gap: 7px; }
+.engine-fact { display: flex; flex-direction: column; gap: 2px; }
+.engine-fact dt {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.engine-fact dd { margin: 0; font-size: 11.5px; line-height: 1.5; color: var(--text-muted); }
+.engine-fact dd[data-state="installed"] { color: var(--text); font-family: var(--font-mono); }
+.engine-fact dd[data-state="missing"] { color: var(--text-dim); font-family: var(--font-mono); }
+.engine-actions {
+  margin-top: auto;
+  padding-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: stretch;
+}
+.engine-button { width: 100%; }
+.engine-active-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--accent);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.engine-blocked { font-size: 11.5px; line-height: 1.5; color: var(--text-dim); }
+.engine-footer {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+.engine-link {
+  border: none;
+  background: none;
+  padding: 2px 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.engine-link:hover:not(:disabled) { color: var(--text); }
+.engine-link:disabled { opacity: 0.6; cursor: default; }
+
+@media (prefers-reduced-motion: reduce) {
+  .engine-card { animation: none; }
+}

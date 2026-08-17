@@ -6,7 +6,7 @@ import dynamic from "next/dynamic";
 import { Copy, ExternalLink, RefreshCw, RotateCcw, Sparkles, Search, AlertCircle } from "lucide-react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/primitives";
-import { SettingsTabs, type SettingsTab, DEFAULT_HARNESS_LABEL, getSettingsCategories, getNormalizedActive } from "./SettingsTabs";
+import { SettingsTabs, type SettingsTab, type ActiveEngineInfo, type EngineCapabilities, ALL_CAPABILITIES, DEFAULT_HARNESS_LABEL, getSettingsCategories, getNormalizedActive } from "./SettingsTabs";
 import { STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
 import { LOCALES, useI18n, type Locale } from "@/lib/i18n";
 import { NativeSetting, SettingsHighlightContext, ToggleSwitch, chipStyle, nativeOptionStyle, nativeSelectStyle, slugify } from "./settings/primitives";
@@ -153,7 +153,7 @@ function SearchResultsList({ results, query, onSelect }: { results: SearchResult
   );
 }
 
-export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, toolCallsDefaultCollapsed, onToolCallsDefaultCollapsedChange, cwd, sessionId, onModelsSaved, onPluginsReloaded, onOmpUpdateAvailabilityChange, onSelectTab, onClose }: {
+export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, toolCallsDefaultCollapsed, onToolCallsDefaultCollapsedChange, cwd, sessionId, capabilities = ALL_CAPABILITIES, engine = null, onModelsSaved, onPluginsReloaded, onOmpUpdateAvailabilityChange, onSelectTab, onClose }: {
   activeTab: SettingsTab;
   advisorEnabled: boolean;
   onAdvisorChange: (enabled: boolean) => void;
@@ -161,6 +161,10 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
   onToolCallsDefaultCollapsedChange: (collapsed: boolean) => void;
   cwd: string | null;
   sessionId: string | null;
+  /** Active engine capabilities: surfaces the engine cannot serve are hidden. */
+  capabilities?: EngineCapabilities;
+  /** Active engine identity, used for the harness-branded labels. */
+  engine?: ActiveEngineInfo | null;
   onModelsSaved: () => void;
   onPluginsReloaded: () => void;
   onOmpUpdateAvailabilityChange: (available: boolean) => void;
@@ -196,7 +200,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
   const [nativeReloadToken, setNativeReloadToken] = useState(0);
   const [schemaReloadToken, setSchemaReloadToken] = useState(0);
   const [schemaSearchIndex, setSchemaSearchIndex] = useState<SettingIndexEntry[]>([]);
-  const [harnessLabel, setHarnessLabel] = useState(DEFAULT_HARNESS_LABEL);
+  const [harnessLabel, setHarnessLabel] = useState(engine?.shortName ?? DEFAULT_HARNESS_LABEL);
   const [nativeSavesInFlight, setNativeSavesInFlight] = useState(0);
   const [visitedTabs, setVisitedTabs] = useState<Set<SettingsTab>>(() => new Set(["general", activeTab]));
 
@@ -204,16 +208,24 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
     setVisitedTabs((tabs) => (tabs.has(activeTab) ? tabs : new Set([...tabs, activeTab])));
   }, [activeTab]);
 
+  // The engine's own settings file. Engines without native settings have no
+  // such file (and no route that can read one), so skip the request entirely
+  // rather than paint an error banner over panels that are already hidden.
   useEffect(() => {
+    if (!capabilities.nativeSettings) return;
     fetch("/api/omp-settings")
       .then((response) => (response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`))))
       .then((data: { settings?: NativeSettings }) => setNativeSettings(data.settings ?? {}))
       .catch((error) => setNativeSettingsError(error instanceof Error ? error.message : String(error)));
-  }, [nativeReloadToken]);
+  }, [nativeReloadToken, capabilities.nativeSettings]);
 
   // OMP's schema also backs the dialog-wide search, so a setting Cody never
   // hand-listed is still findable by name from the search box.
   useEffect(() => {
+    if (!capabilities.nativeSettings) {
+      setSchemaSearchIndex([]);
+      return;
+    }
     const controller = new AbortController();
     fetch("/api/omp-settings/schema", { signal: controller.signal })
       .then((response) => (response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`))))
@@ -230,7 +242,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
       })
       .catch(() => setSchemaSearchIndex([]));
     return () => controller.abort();
-  }, []);
+  }, [capabilities.nativeSettings]);
 
   const latestNativeSettingsRef = useRef<NativeSettings | null>(null);
   const nativeSaveDrainingRef = useRef(false);
@@ -307,8 +319,11 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
   }, [onOmpUpdateAvailabilityChange]);
 
   useEffect(() => {
+    // Only the omp runtime knows how to check itself for updates; engines
+    // without the capability have no card to fill and no route to ask.
+    if (!capabilities.updates) return;
     void checkForUpdate();
-  }, [checkForUpdate]);
+  }, [checkForUpdate, capabilities.updates]);
 
   const checkForAppUpdate = useCallback(async (force = false) => {
     setCheckingAppUpdate(true);
@@ -334,7 +349,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
       const response = await fetch("/api/omp-update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "restart" }) });
       const data = (await response.json()) as { error?: string; sessionsRestarted?: number };
       if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
-      setMessage(`Restarted ${data.sessionsRestarted ?? 0} active OMP session(s).`);
+      setMessage(`Restarted ${data.sessionsRestarted ?? 0} active agent session(s).`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -344,26 +359,47 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
 
   const currentTab = getNormalizedActive(activeTab);
 
+  // Tabs the active engine can serve. Sub-tabs (skills/plugins/extensions)
+  // live under "mcp", so they ride on that entry's visibility.
+  const visibleTabs = useMemo(() => {
+    const ids = new Set<SettingsTab>(getSettingsCategories(harnessLabel, capabilities).map((tab) => tab.id));
+    if (ids.has("mcp")) {
+      if (capabilities.skills) ids.add("skills");
+      if (capabilities.plugins) ids.add("plugins");
+      ids.add("extensions");
+    }
+    return ids;
+  }, [harnessLabel, capabilities]);
+
+  // A tab can go out of reach while it is open — the engine switched, or the
+  // capability payload landed after the dialog did. Fall back to a tab that is
+  // always available instead of rendering an empty panel.
+  useEffect(() => {
+    if (!visibleTabs.has(currentTab)) onSelectTab("general");
+  }, [visibleTabs, currentTab, onSelectTab]);
+
   const trimmedQuery = searchQuery.trim().toLowerCase();
   const searchActive = trimmedQuery.length > 0;
 
   const searchResults = useMemo<SearchResult[]>(() => {
     if (!trimmedQuery) return [];
     const results: SearchResult[] = [];
-    for (const category of getSettingsCategories(harnessLabel)) {
+    for (const category of getSettingsCategories(harnessLabel, capabilities)) {
       const haystack = `${category.label} ${category.description}`.toLowerCase();
       if (haystack.includes(trimmedQuery)) {
         results.push({ id: `tab-${category.id}`, kind: "category", tab: category.id, label: category.label, description: category.description });
       }
     }
     for (const setting of [...SETTING_INDEX, ...schemaSearchIndex]) {
+      // Never hand out a jump to a panel this engine does not render.
+      if (!visibleTabs.has(setting.tab)) continue;
       const haystack = `${setting.label} ${setting.description} ${setting.section}`.toLowerCase();
       if (haystack.includes(trimmedQuery)) {
         results.push({ id: setting.searchId ?? slugify(setting.label), kind: "setting", tab: setting.tab, label: setting.label, description: setting.description, scope: setting.scope, section: setting.section });
       }
     }
     return results;
-  }, [trimmedQuery, schemaSearchIndex, harnessLabel]);
+  }, [trimmedQuery, schemaSearchIndex, harnessLabel, capabilities, visibleTabs]);
 
   const openSearchResult = useCallback((result: SearchResult) => {
     onSelectTab(result.tab);
@@ -416,9 +452,9 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
           ) : (
             <SettingsHighlightContext.Provider value={highlightId}>
               {isMobile ? (
-                <SettingsTabs active={currentTab} onSelect={onSelectTab} workspaceReady={workspaceReady} layout="horizontal" harnessLabel={harnessLabel} />
+                <SettingsTabs active={currentTab} onSelect={onSelectTab} workspaceReady={workspaceReady} layout="horizontal" harnessLabel={harnessLabel} capabilities={capabilities} />
               ) : (
-                <SettingsTabs active={currentTab} onSelect={onSelectTab} workspaceReady={workspaceReady} layout="vertical" harnessLabel={harnessLabel} />
+                <SettingsTabs active={currentTab} onSelect={onSelectTab} workspaceReady={workspaceReady} layout="vertical" harnessLabel={harnessLabel} capabilities={capabilities} />
               )}
 
               <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflowY: "auto", background: "var(--bg)" }}>
@@ -795,14 +831,14 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
             )}
 
             {/* SKILLS SUB-PANEL CONTRACT MATCH */}
-            {cwd && visitedTabs.has("skills") && (
+            {cwd && capabilities.skills && visitedTabs.has("skills") && (
               <div role="tabpanel" id="settings-panel-skills" aria-labelledby="settings-tab-skills" style={{ display: activeTab === "skills" ? "flex" : "none", height: "100%", minHeight: 0, flexDirection: "column" }}>
                 <SkillsConfig embedded cwd={cwd} onClose={onClose} />
               </div>
             )}
 
             {/* PLUGINS SUB-PANEL CONTRACT MATCH */}
-            {cwd && visitedTabs.has("plugins") && (
+            {cwd && capabilities.plugins && visitedTabs.has("plugins") && (
               <div role="tabpanel" id="settings-panel-plugins" aria-labelledby="settings-tab-plugins" style={{ display: activeTab === "plugins" ? "flex" : "none", height: "100%", minHeight: 0, flexDirection: "column" }}>
                 <PluginsConfig embedded cwd={cwd} sessionId={sessionId} onClose={onClose} onReloaded={onPluginsReloaded} />
               </div>
@@ -823,7 +859,11 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
               <div role="tabpanel" id="settings-panel-system" aria-labelledby="settings-tab-system" style={{ padding: 20, display: "flex", flexDirection: "column", gap: 18 }}>
                 <div>
                   <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>System & Updates</h3>
-                  <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)" }}>App version status, OMP runtime updates, and active session management.</p>
+                  <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)" }}>
+                    {capabilities.updates
+                      ? `App version status, ${harnessLabel} runtime updates, and active session management.`
+                      : "App version status. The active engine manages its own runtime and updates."}
+                  </p>
                 </div>
 
                 {/* Cody app update card */}
@@ -859,22 +899,24 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                   )}
                 </section>
 
-                {/* OMP runtime update card */}
+                {/* Engine runtime update card — only engines that can check and
+                    restart themselves (omp) have anything to show here. */}
+                {capabilities.updates && (
                 <section style={{ padding: 14, border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", display: "flex", flexDirection: "column", gap: 10 }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
                     <div>
-                      <div style={{ fontSize: 13, fontWeight: 600 }}>OMP runtime</div>
+                      <div style={{ fontSize: 13, fontWeight: 600 }}>{harnessLabel} runtime</div>
                       <div style={{ marginTop: 4, color: update?.updateAvailable ? "var(--accent)" : "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 12 }}>
                         {checking ? "Checking for updates..." : update?.updateAvailable ? `v${update.currentVersion ?? "?"} -> v${update.availableVersion}` : update?.currentVersion ? `v${update.currentVersion} is up to date` : "Version unavailable"}
                       </div>
                     </div>
-                    <button type="button" onClick={() => void checkForUpdate()} disabled={checking} aria-label="Check OMP updates" style={{ padding: "6px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text)", cursor: checking ? "wait" : "pointer", fontSize: 12, display: "inline-flex", alignItems: "center", gap: 5 }}>
+                    <button type="button" onClick={() => void checkForUpdate()} disabled={checking} aria-label={`Check ${harnessLabel} updates`} style={{ padding: "6px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text)", cursor: checking ? "wait" : "pointer", fontSize: 12, display: "inline-flex", alignItems: "center", gap: 5 }}>
                       <RefreshCw size={13} aria-hidden="true" /> Refresh
                     </button>
                   </div>
                   {update?.updateAvailable && (
                     <div style={{ marginTop: 6, padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", display: "flex", flexDirection: "column", gap: 6 }}>
-                      <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Run this command in terminal to update OMP runtime:</div>
+                      <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Run this command in terminal to update the {harnessLabel} runtime:</div>
                       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                         <code style={{ flex: 1, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--accent)", wordBreak: "break-all" }}>{update.updateCommand || "omp update"}</code>
                         <button
@@ -908,8 +950,10 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                       <ExternalLink size={13} aria-hidden="true" /> Changelog
                     </a>
                   </div>
-                  {message && <p role="status" style={{ margin: "4px 0 0", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>{message}</p>}
                 </section>
+                )}
+
+                {message && <p role="status" style={{ margin: 0, color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>{message}</p>}
               </div>
             )}
               </div>

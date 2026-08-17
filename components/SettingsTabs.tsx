@@ -17,12 +17,65 @@ export type SettingsTab =
   | "plugins"
   | "system";
 
+/**
+ * The active engine's capability flags, mirroring HarnessCapabilities in
+ * lib/harness/types.ts. GET /api/info reports them for the engine currently
+ * driving the instance; the client keeps its own structural copy so no client
+ * component has to import server code.
+ */
+export interface EngineCapabilities {
+  liveSessions: boolean;
+  models: boolean;
+  skills: boolean;
+  plugins: boolean;
+  mcp: boolean;
+  nativeSettings: boolean;
+  updates: boolean;
+  chatExtras: boolean;
+}
+
+/** The active engine's identity, also from GET /api/info. */
+export interface ActiveEngineInfo {
+  id: string;
+  displayName: string;
+  shortName: string;
+  experimental: boolean;
+}
+
+/** Everything on: what an older server (no `capabilities` in /api/info) and
+ * omp both mean. Gating only ever bites on an explicit `false`. */
+export const ALL_CAPABILITIES: EngineCapabilities = {
+  liveSessions: true,
+  models: true,
+  skills: true,
+  plugins: true,
+  mcp: true,
+  nativeSettings: true,
+  updates: true,
+  chatExtras: true,
+};
+
+/** Coerce whatever /api/info returned into a full flag set, defaulting every
+ * missing or non-boolean flag to true so today's omp behavior is unchanged. */
+export function normalizeCapabilities(value: unknown): EngineCapabilities {
+  if (!value || typeof value !== "object") return ALL_CAPABILITIES;
+  const source = value as Record<string, unknown>;
+  const result = { ...ALL_CAPABILITIES };
+  for (const key of Object.keys(ALL_CAPABILITIES) as Array<keyof EngineCapabilities>) {
+    if (typeof source[key] === "boolean") result[key] = source[key] as boolean;
+  }
+  return result;
+}
+
 export interface TabItem {
   id: SettingsTab;
   label: string;
   description: string;
   Icon: ComponentType<{ size?: number; className?: string; "aria-hidden"?: boolean | "true" | "false"; style?: CSSProperties }>;
   needsWorkspace?: boolean;
+  /** Hidden entirely when the active engine lacks this capability — an engine
+   * that cannot serve the surface should not advertise it as disabled. */
+  needsCapability?: keyof EngineCapabilities;
   /** Sits apart at the foot of the sidebar. The full harness settings dump is
    * a reference surface, not part of the curated walk through the tabs above. */
   pinBottom?: boolean;
@@ -33,24 +86,29 @@ export interface TabItem {
  * only what renders before that lands. */
 export const DEFAULT_HARNESS_LABEL = "OMP";
 
-export function getSettingsCategories(harnessLabel: string = DEFAULT_HARNESS_LABEL): TabItem[] {
-  return SETTINGS_CATEGORIES.map((tab) =>
-    tab.id === "omp"
-      ? { ...tab, label: `All ${harnessLabel} Settings`, description: `Every setting ${harnessLabel} declares, read from its own schema` }
-      : tab,
-  );
+export function getSettingsCategories(
+  harnessLabel: string = DEFAULT_HARNESS_LABEL,
+  capabilities: EngineCapabilities = ALL_CAPABILITIES,
+): TabItem[] {
+  return SETTINGS_CATEGORIES
+    .filter((tab) => !tab.needsCapability || capabilities[tab.needsCapability])
+    .map((tab) =>
+      tab.id === "omp"
+        ? { ...tab, label: `All ${harnessLabel} Settings`, description: `Every setting ${harnessLabel} declares, read from its own schema` }
+        : tab,
+    );
 }
 
 export const SETTINGS_CATEGORIES: TabItem[] = [
   { id: "accounts", label: "User Accounts", description: "Your profile, password, and who can sign in", Icon: UserRound },
   { id: "general", label: "Interface & Behavior", description: "UI preferences, completion sound, submission mode", Icon: Settings2 },
-  { id: "safety", label: "Safety & Approvals", description: "Tool safety rules, YOLO mode, terminal permissions", Icon: ShieldCheck },
-  { id: "models", label: "AI Model Defaults", description: "Reasoning budget, verbosity, personality, scratchpad", Icon: Cpu },
-  { id: "providers", label: "API Keys & Providers", description: "Connected OAuth accounts, API keys, and model registry", Icon: KeyRound },
-  { id: "intelligence", label: "Agent & Intelligence", description: "Advisor, memory, autolearn, compaction and retry", Icon: Sparkles },
-  { id: "mcp", label: "Extensions & Tools", description: "MCP servers, managed skills, and OMP plugins", Icon: Cable },
+  { id: "safety", label: "Safety & Approvals", description: "Tool safety rules, YOLO mode, terminal permissions", Icon: ShieldCheck, needsCapability: "nativeSettings" },
+  { id: "models", label: "AI Model Defaults", description: "Reasoning budget, verbosity, personality, scratchpad", Icon: Cpu, needsCapability: "nativeSettings" },
+  { id: "providers", label: "API Keys & Providers", description: "Connected OAuth accounts, API keys, and model registry", Icon: KeyRound, needsCapability: "models" },
+  { id: "intelligence", label: "Agent & Intelligence", description: "Advisor, memory, autolearn, compaction and retry", Icon: Sparkles, needsCapability: "nativeSettings" },
+  { id: "mcp", label: "Extensions & Tools", description: "MCP servers, managed skills, and OMP plugins", Icon: Cable, needsCapability: "mcp" },
   { id: "system", label: "System & Updates", description: "App updates, runtime version, and active session restart", Icon: RefreshCw },
-  { id: "omp", label: `All ${DEFAULT_HARNESS_LABEL} Settings`, description: `Every setting ${DEFAULT_HARNESS_LABEL} declares, read from its own schema`, Icon: SlidersHorizontal, pinBottom: true },
+  { id: "omp", label: `All ${DEFAULT_HARNESS_LABEL} Settings`, description: `Every setting ${DEFAULT_HARNESS_LABEL} declares, read from its own schema`, Icon: SlidersHorizontal, pinBottom: true, needsCapability: "nativeSettings" },
 ];
 
 export const getNormalizedActive = (tab: SettingsTab): SettingsTab => {
@@ -64,6 +122,7 @@ export function SettingsTabs({
   workspaceReady = true,
   layout = "vertical",
   harnessLabel = DEFAULT_HARNESS_LABEL,
+  capabilities = ALL_CAPABILITIES,
 }: {
   active: SettingsTab;
   onSelect: (tab: SettingsTab) => void;
@@ -71,9 +130,11 @@ export function SettingsTabs({
   layout?: "horizontal" | "vertical";
   /** Brand of the active harness, used for the "All <harness> Settings" tab. */
   harnessLabel?: string;
+  /** Active engine capabilities; tabs the engine cannot serve are hidden. */
+  capabilities?: EngineCapabilities;
 }) {
   const currentActive = getNormalizedActive(active);
-  const categories = getSettingsCategories(harnessLabel);
+  const categories = getSettingsCategories(harnessLabel, capabilities);
 
   const onKeyDown = (event: React.KeyboardEvent, index: number) => {
     const enabled = categories.filter((tab) => !(tab.needsWorkspace && !workspaceReady));

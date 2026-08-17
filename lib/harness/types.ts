@@ -1,16 +1,17 @@
 /**
- * The seam between Cody's web UI and the coding-agent harness underneath it.
+ * The seam between Cody's web UI and the coding-agent engine underneath it.
  *
  * Cody was extracted from a UI hard-wired to omp (oh-my-pi, itself a Pi fork).
- * This contract names everything the UI needs from a harness so that omp is an
- * implementation, not an assumption. A new harness (Pi, or any agent with a
- * comparable session model) is added by implementing HarnessAdapter and
- * registering it in lib/harness/index.ts — and by porting the routes that the
- * coupling map in docs/harnesses.md still lists as omp-specific.
+ * This contract names everything the UI needs from an engine so that omp is an
+ * implementation, not an assumption. A new engine (Claude Code, Codex, Pi, …)
+ * is added by implementing HarnessAdapter and registering it in
+ * lib/harness/index.ts — capability flags gate the UI surfaces the engine
+ * cannot serve, and `createSession` supplies live chat for engines that speak
+ * something other than omp's rpc-ui protocol.
  */
 
 export interface HarnessCapabilities {
-  /** Live chat via an RPC child process (send prompts, stream events). */
+  /** Live chat via a child process (send prompts, stream events). */
   liveSessions: boolean;
   /** Model/provider management UI (models.yml-style configuration). */
   models: boolean;
@@ -24,26 +25,90 @@ export interface HarnessCapabilities {
   nativeSettings: boolean;
   /** Harness self-update checks and restarts. */
   updates: boolean;
+  /**
+   * The advanced chat affordances built against omp's protocol: thinking
+   * levels, in-session model switching, forking, compaction, steering modes,
+   * advisor sessions, tool presets, subagent rosters. Engines without this
+   * get a plain prompt/stream/abort chat surface.
+   */
+  chatExtras: boolean;
+}
+
+/** An event frame streamed to the browser (omp rpc-ui event vocabulary). */
+export interface EngineEvent {
+  type: string;
+  [key: string]: unknown;
+}
+
+export interface EngineSessionOptions {
+  /** Cody session id — "" lets the engine mint one for a brand-new session. */
+  sessionId: string;
+  /** Working directory the agent operates in. */
+  cwd: string;
+}
+
+/**
+ * One live chat session, whatever engine drives it. This is exactly the
+ * surface `AgentSessionWrapper` (lib/rpc-manager.ts) already exposes and the
+ * agent API routes consume, so the omp wrapper satisfies it structurally.
+ * Engines with a smaller command vocabulary throw RpcCommandError with code
+ * "unsupported" from send() — the UI is built to tolerate that.
+ */
+export interface EngineSession {
+  readonly sessionId: string;
+  /** Transcript path on disk; "" when the engine owns its own storage. */
+  readonly sessionFile: string;
+  readonly cwd: string;
+  isAlive(): boolean;
+  isRunning(): boolean;
+  start(): void;
+  /** Resolves once identity is known and the session accepts commands. */
+  waitUntilReady(): Promise<void>;
+  onEvent(listener: (event: EngineEvent) => void): () => void;
+  onDestroy(cb: () => void): void;
+  onIdentityChange(cb: (oldId: string, newId: string) => void): void;
+  send(command: Record<string, unknown>): Promise<unknown>;
+  destroy(): void;
+  destroyAndWait(): Promise<void>;
+  /** Resolves once an in-flight destroy finishes; null when idle. */
+  destroyPromise: Promise<void> | null;
 }
 
 export interface HarnessAdapter {
   /** Stable id, also the CODY_HARNESS value that selects this adapter. */
   readonly id: string;
-  /** Human name for the UI ("OMP runtime", "Pi"). */
+  /** Human name for the UI ("OMP runtime", "Claude Code"). */
   readonly displayName: string;
   /** Short brand used inline in UI copy — "All {shortName} Settings". Kept
    * separate from displayName, which reads badly mid-sentence. */
   readonly shortName: string;
-  /** Binary name for hints/messages ("omp", "pi"). */
+  /** Binary name for hints/messages ("omp", "claude"). */
   readonly binaryName: string;
+  /** One-line description for the engine picker card. */
+  readonly tagline: string;
+  /** Experimental engines carry a visible chip and reduced expectations. */
+  readonly experimental?: boolean;
+  /** npm spec for on-demand install ("@openai/codex@latest"); absent when
+   * Cody cannot install this engine itself. */
+  readonly installSpec?: string;
+  /** How to authenticate this engine, shown in the picker and engine card
+   * (e.g. "Run `claude` in a Cody terminal to sign in, or set
+   * ANTHROPIC_API_KEY on the container"). */
+  readonly authHint?: string;
   readonly capabilities: HarnessCapabilities;
 
   /** Absolute path of the installed binary, or null when not installed. */
   resolveBinary(): string | null;
   /** Version string of the installed binary ("17.3.5"), null when unknown. */
   getVersion(): Promise<string | null>;
-  /** The harness's agent state directory (sessions, config, skills). */
+  /** The engine's own state directory (its sessions, config, credentials). */
   getAgentDir(): string;
   /** Root directory that holds per-project session transcripts. */
   getSessionsDir(): string;
+  /**
+   * Live-chat factory for engines that do not speak omp's rpc-ui protocol.
+   * omp itself has no createSession — rpc-manager owns its bespoke path and
+   * treats the absence of this field as "use the omp pipeline".
+   */
+  createSession?(options: EngineSessionOptions): EngineSession;
 }

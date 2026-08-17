@@ -1,8 +1,9 @@
 "use client";
 
-import { AlertCircle, Check, Loader2, LogOut, ShieldCheck, Trash2, Upload, UserRoundPlus, X } from "lucide-react";
+import { AlertCircle, Check, Cpu, Download, Loader2, LogOut, ShieldCheck, Trash2, Upload, UserRoundPlus, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { chipStyle, nativeInputStyle, nativeOptionStyle, nativeSelectStyle, NativeSetting } from "./primitives";
+import type { EngineSummary, EnginesPayload } from "../EnginePicker";
 
 /**
  * The User Accounts settings panel: the signed-in profile (name, picture,
@@ -130,6 +131,161 @@ function ErrorNote({ message }: { message: string | null }) {
     <div role="alert" style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--status-error)", fontSize: 12 }}>
       <AlertCircle size={13} aria-hidden style={{ flexShrink: 0 }} /> {message}
     </div>
+  );
+}
+
+/**
+ * Agent engine card: the same choice the onboarding picker offers, kept
+ * reachable for the administrator afterwards. Admin-only (the roster route it
+ * mirrors is), English-only like the rest of the settings dialog.
+ */
+function AgentEngineSection({ isMobile }: { isMobile: boolean }) {
+  const [data, setData] = useState<EnginesPayload | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [installing, setInstalling] = useState<string | null>(null);
+  const [selecting, setSelecting] = useState<string | null>(null);
+
+  const load = useCallback(async (signal?: AbortSignal) => {
+    const response = await fetch("/api/engines", { cache: "no-store", signal });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    setData((await response.json()) as EnginesPayload);
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    load(controller.signal).catch((failure: unknown) => {
+      if (controller.signal.aborted) return;
+      setError(failure instanceof Error ? failure.message : String(failure));
+    });
+    return () => controller.abort();
+  }, [load]);
+
+  const post = useCallback(async (path: string, id: string) => {
+    const response = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    });
+    const body = (await response.json().catch(() => null)) as { error?: string; detail?: string } | null;
+    if (!response.ok) {
+      throw new Error([body?.error, body?.detail].filter(Boolean).join(" — ") || `HTTP ${response.status}`);
+    }
+  }, []);
+
+  const install = (engine: EngineSummary) => {
+    setError(null);
+    setInstalling(engine.id);
+    void post("/api/engines/install", engine.id)
+      .then(() => load())
+      .catch((failure: unknown) => setError(failure instanceof Error ? failure.message : String(failure)))
+      .finally(() => setInstalling(null));
+  };
+
+  const select = (engine: EngineSummary) => {
+    setError(null);
+    setSelecting(engine.id);
+    void post("/api/engines/select", engine.id)
+      // Everything the page loaded came from the old engine — capabilities,
+      // model lists, live sessions. Reload rather than reconcile.
+      .then(() => window.location.reload())
+      .catch((failure: unknown) => {
+        setError(failure instanceof Error ? failure.message : String(failure));
+        setSelecting(null);
+      });
+  };
+
+  if (!data && !error) {
+    return (
+      <section style={{ padding: 14, border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", color: "var(--text-muted)", fontSize: 12 }}>
+        <Loader2 size={13} aria-hidden style={{ animation: "spin 0.9s linear infinite", marginRight: 8, verticalAlign: "-2px" }} />
+        Loading engines…
+      </section>
+    );
+  }
+
+  const engines = data?.engines ?? [];
+  const active = engines.find((engine) => engine.id === data?.active) ?? null;
+  const busy = installing !== null || selecting !== null;
+
+  return (
+    <>
+      <div style={{ marginTop: 4 }}>
+        <h3 style={{ fontSize: 13, fontWeight: 600, margin: 0, display: "flex", alignItems: "center", gap: 6 }}>
+          <Cpu size={14} aria-hidden style={{ color: "var(--accent)" }} /> Agent engine
+        </h3>
+        <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)", lineHeight: 1.55 }}>
+          The coding agent behind every session on this server.
+          {active ? ` Currently ${active.name}${active.version ? ` (v${active.version})` : ""}.` : ""}
+          {" "}Switching restarts running agent sessions and reloads this page. Experimental engines run with file
+          edits auto-accepted inside your workspace.
+        </p>
+      </div>
+
+      <ErrorNote message={error} />
+
+      <section style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", overflow: "hidden" }}>
+        {engines.map((engine, index) => {
+          const isActive = engine.id === data?.active;
+          return (
+            <div
+              key={engine.id}
+              style={{
+                display: "flex",
+                alignItems: isMobile ? "stretch" : "flex-start",
+                flexDirection: isMobile ? "column" : "row",
+                gap: 10,
+                padding: "12px 14px",
+                borderTop: index === 0 ? "none" : "1px solid var(--border)",
+                background: isActive ? "color-mix(in srgb, var(--accent) 6%, transparent)" : "transparent",
+              }}
+            >
+              <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0, flex: 1 }}>
+                <span style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)" }}>{engine.name}</span>
+                  {isActive && <span style={{ ...chipStyle, color: "var(--accent)" }}>Active</span>}
+                  {engine.experimental
+                    ? <span style={{ ...chipStyle, color: "var(--status-warning)" }}>Experimental</span>
+                    : <span style={chipStyle}>Recommended</span>}
+                  <span style={{ ...chipStyle, fontFamily: "var(--font-mono)" }}>
+                    {engine.installed ? (engine.version ? `v${engine.version}` : "Installed") : "Not installed"}
+                  </span>
+                </span>
+                <span style={{ fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.5 }}>{engine.tagline}</span>
+                {engine.authHint && (
+                  <span style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.5 }}>{engine.authHint}</span>
+                )}
+                {!engine.installed && !engine.installable && (
+                  <span style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.5 }}>
+                    Install the {engine.binaryName} CLI on the host to use this engine.
+                  </span>
+                )}
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                {!engine.installed && engine.installable && (
+                  <button type="button" onClick={() => install(engine)} disabled={busy} style={{ ...smallButtonStyle, opacity: busy ? 0.6 : 1 }}>
+                    {installing === engine.id
+                      ? <Loader2 size={13} aria-hidden style={{ animation: "spin 0.9s linear infinite" }} />
+                      : <Download size={13} aria-hidden />}
+                    {installing === engine.id ? "Installing…" : "Install"}
+                  </button>
+                )}
+                {engine.installed && !isActive && (
+                  <button type="button" onClick={() => select(engine)} disabled={busy} style={{ ...primaryButtonStyle, opacity: busy ? 0.6 : 1 }}>
+                    {selecting === engine.id && <Loader2 size={13} aria-hidden style={{ animation: "spin 0.9s linear infinite" }} />}
+                    {selecting === engine.id ? "Switching…" : `Use ${engine.shortName}`}
+                  </button>
+                )}
+                {isActive && (
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "var(--accent)", fontSize: 11.5, fontWeight: 600 }}>
+                    <Check size={13} aria-hidden /> In use
+                  </span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </section>
+    </>
   );
 }
 
@@ -507,6 +663,8 @@ export function AccountSettings({ isMobile }: { isMobile: boolean }) {
               )}
             </div>
           </section>
+
+          <AgentEngineSection isMobile={isMobile} />
         </>
       )}
     </div>

@@ -101,7 +101,9 @@ lib/
   draft-store.ts       local draft persistence helpers
   env.ts               readEnv(): CODY_* config with OMP_WEB_* fallback
   file-access.ts       allowed file roots for /api/files and worktrees
-  harness/             agent-harness adapter seam (types, omp adapter, getHarness)
+  harness/             pluggable engine seam: adapters (omp/claude/codex), runtime
+                       selection state, turn-based sessions + stream translators,
+                       session index, binary probe + on-demand install (docs/harnesses.md)
   file-paths.ts        client/server path encoding helpers
   markdown.ts          shared markdown helpers
   npx.ts               npx runner used by skill install
@@ -194,6 +196,41 @@ is a reserved seam if per-uid isolation is ever wanted.
 - Signup policy: `CODY_ALLOW_SIGNUP=0` hides self-service signup (first-run
   setup is always allowed). Container refuses to start with no password AND no
   accounts unless `CODY_ALLOW_NO_AUTH=1` (docker/entrypoint.sh).
+
+---
+
+## Pluggable engines (`lib/harness/`)
+
+The coding agent under the UI is a swappable **engine**: omp (founding,
+full-featured), Claude Code and Codex (experimental, turn-based). Full
+architecture: `docs/harnesses.md`. The load-bearing rules:
+
+- `getHarness()` resolves persisted selection (`cody-engine.json`) →
+  `CODY_HARNESS` env → omp. `selectHarness(id)` persists a switch; the
+  select route then calls `restartAllRpcSessions()`.
+- **Cody-level state always lives in the instance data dir** (`lib/omp/paths`
+  `getAgentDir()`): accounts, checkpoints, engine selection, session owners,
+  the engine session index, the tools prefix. Never route these through the
+  active adapter's `getAgentDir()` — they must survive engine switches.
+- Non-omp live chat: `TurnEngineSession` spawns one CLI process per turn
+  (`claude -p --output-format stream-json` / `codex exec --json`), and
+  `claude-stream.ts`/`codex-stream.ts` translate NDJSON into the pi event
+  vocabulary. Commands beyond prompt/abort/get_state/get_messages throw code
+  `"unsupported"` — the UI tolerates that by design. Session metadata for
+  these engines lives in `cody-engine-sessions.json`
+  (`lib/harness/engine-sessions.ts`), keyed by Cody session id; ownership
+  uses the same session-owners sidecar as omp.
+- Capability flags (`HarnessCapabilities`, including `chatExtras`) gate UI
+  surfaces: a `false` **hides** the settings tab / panel card / composer
+  control, it never renders a broken one. `/api/info` serves the active
+  engine's capabilities to the client.
+- Engines installed from the picker land in the persistent tools prefix
+  (`CODY_TOOLS_DIR`, default `<data dir>/tools`; entrypoint puts its `bin`
+  first on PATH). Binary resolution per engine: `CODY_<NAME>_BIN` override →
+  tools prefix → PATH (`lib/harness/engine-bin.ts`).
+- The onboarding picker (`components/EnginePicker.tsx`) mounts post-auth for
+  admins while `cody-engine.json` is absent/un-onboarded; `/api/engines` is
+  deliberately unreachable before the first account exists.
 
 ## Settings: schema-driven, not hand-listed
 

@@ -9,6 +9,9 @@ import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 export interface UpdatesPanelProps {
   cwd: string | null;
   active: boolean;
+  /** Active engine exposes self-update checks (omp). False hides the runtime
+   * card entirely — the Cody app card is engine-independent and always shows. */
+  engineUpdates?: boolean;
   onOpenSettings: (tab: "system" | "skills") => void;
   /** Number of sources reporting an update (0-3), for the tab badge. */
   onAvailableCountChange?: (n: number) => void;
@@ -195,7 +198,7 @@ function LoadingLine({ label }: { label: string }): React.ReactElement {
 /** Read-only dashboard over the app / omp / skills update checks. Deep
  * management (installing, per-skill updates) stays in the Settings dialog —
  * every card links there instead of duplicating it. */
-export function UpdatesPanel({ cwd, active, onOpenSettings, onAvailableCountChange }: UpdatesPanelProps): React.ReactElement | null {
+export function UpdatesPanel({ cwd, active, engineUpdates = true, onOpenSettings, onAvailableCountChange }: UpdatesPanelProps): React.ReactElement | null {
   const { t, tn } = useI18n();
   const [app, setApp] = useState<AppCard>(IDLE_APP);
   const [omp, setOmp] = useState<OmpCard>(IDLE_OMP);
@@ -242,7 +245,7 @@ export function UpdatesPanel({ cwd, active, onOpenSettings, onAvailableCountChan
     const stale = () => requestId !== requestRef.current || !mountedRef.current;
 
     setApp({ status: "loading", data: null, error: null });
-    setOmp({ status: "loading", installed: null, data: null, error: null });
+    setOmp(engineUpdates ? { status: "loading", installed: null, data: null, error: null } : IDLE_OMP);
     setRestartNote(null);
     if (!cwd) setSkills({ status: "no-workspace", updates: [], error: null });
     else setSkills({ status: "loading", updates: [], error: null });
@@ -272,6 +275,9 @@ export function UpdatesPanel({ cwd, active, onOpenSettings, onAvailableCountChan
     };
 
     const loadOmp = async (): Promise<boolean> => {
+      // The runtime card is hidden on engines without self-update support, so
+      // its probes are skipped rather than fired and discarded.
+      if (!engineUpdates) return false;
       let installed: string | null = null;
       try {
         const response = await fetch("/api/omp-version", { signal });
@@ -339,7 +345,7 @@ export function UpdatesPanel({ cwd, active, onOpenSettings, onAvailableCountChan
     const results = await Promise.all([loadApp(), loadOmp(), loadSkills()]);
     if (stale()) return;
     reportRef.current?.(results.filter(Boolean).length);
-  }, [cwd]);
+  }, [cwd, engineUpdates]);
 
   // First activation, and any later workspace switch (the skills check is
   // workspace-scoped, so a new cwd invalidates the whole pass).
@@ -464,81 +470,83 @@ export function UpdatesPanel({ cwd, active, onOpenSettings, onAvailableCountChan
         </div>
 
         {/* ── OMP runtime ──────────────────────────────────────────────── */}
-        <div style={cardStyle}>
-          <div style={cardTitleStyle}>
-            <RotateCw size={13} strokeWidth={2.2} aria-hidden="true" />
-            {t("updates.omp.title")}
-          </div>
-          <div style={mutedLineStyle}>
-            {ompInstalledLabel
-              ? <>{`${t("updates.omp.installed")} `}<span style={{ fontFamily: "var(--font-mono)" }}>{ompInstalledLabel}</span></>
-              : omp.status === "loading" || omp.status === "idle" ? t("updates.omp.installedUnknown") : t("updates.omp.notInstalled")}
-          </div>
-          {(omp.status === "loading" || omp.status === "idle") && <LoadingLine label={t("updates.checking")} />}
-          {omp.status === "error" && <CardError message={omp.error ?? t("updates.checkFailed")} />}
-          {omp.status === "ready" && omp.data && (
-            <>
-              {omp.data.updateAvailable ? (
-                <div style={{ fontSize: 12, fontWeight: 600, color: "var(--accent)", overflowWrap: "anywhere" }}>
-                  {t("updates.omp.updateAvailable", { version: omp.data.availableVersion ?? t("updates.unknown") })}
-                </div>
-              ) : (
-                <div style={mutedLineStyle}>{t("updates.upToDate")}</div>
-              )}
-              {omp.data.updateAvailable && (
-                <>
-                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                    <code style={codeChipStyle}>{omp.data.updateCommand}</code>
-                    <button
-                      type="button"
-                      className="ui-focus-ring"
-                      onClick={() => ompCopy.copy(omp.data?.updateCommand ?? "omp update")}
-                      title={t("updates.copyCommand")}
-                      aria-label={t("updates.copyCommand")}
-                      style={cardButtonStyle(false)}
-                      onMouseEnter={hoverIn}
-                      onMouseLeave={hoverOut}
-                    >
-                      {ompCopy.copied
-                        ? <Check size={11} strokeWidth={2.4} aria-hidden="true" />
-                        : <Copy size={11} strokeWidth={2.2} aria-hidden="true" />}
-                      {ompCopy.copied ? t("updates.copied") : t("updates.copy")}
-                    </button>
+        {engineUpdates && (
+          <div style={cardStyle}>
+            <div style={cardTitleStyle}>
+              <RotateCw size={13} strokeWidth={2.2} aria-hidden="true" />
+              {t("updates.omp.title")}
+            </div>
+            <div style={mutedLineStyle}>
+              {ompInstalledLabel
+                ? <>{`${t("updates.omp.installed")} `}<span style={{ fontFamily: "var(--font-mono)" }}>{ompInstalledLabel}</span></>
+                : omp.status === "loading" || omp.status === "idle" ? t("updates.omp.installedUnknown") : t("updates.omp.notInstalled")}
+            </div>
+            {(omp.status === "loading" || omp.status === "idle") && <LoadingLine label={t("updates.checking")} />}
+            {omp.status === "error" && <CardError message={omp.error ?? t("updates.checkFailed")} />}
+            {omp.status === "ready" && omp.data && (
+              <>
+                {omp.data.updateAvailable ? (
+                  <div style={{ fontSize: 12, fontWeight: 600, color: "var(--accent)", overflowWrap: "anywhere" }}>
+                    {t("updates.omp.updateAvailable", { version: omp.data.availableVersion ?? t("updates.unknown") })}
                   </div>
-                  <div style={dimLineStyle}>{t("updates.omp.restartHint")}</div>
-                  <div>
-                    <button
-                      type="button"
-                      className="ui-focus-ring"
-                      onClick={() => void restartSessions()}
-                      disabled={restarting}
-                      title={t("updates.omp.restart")}
-                      aria-label={t("updates.omp.restart")}
-                      style={cardButtonStyle(restarting, true)}
-                      onMouseEnter={accentHoverIn}
-                      onMouseLeave={accentHoverOut}
-                    >
-                      {restarting
-                        ? <Loader2 size={11} strokeWidth={2.2} style={{ animation: "spin 0.8s linear infinite" }} aria-hidden="true" />
-                        : <RotateCw size={11} strokeWidth={2.2} aria-hidden="true" />}
-                      {restarting ? t("updates.omp.restarting") : t("updates.omp.restart")}
-                    </button>
+                ) : (
+                  <div style={mutedLineStyle}>{t("updates.upToDate")}</div>
+                )}
+                {omp.data.updateAvailable && (
+                  <>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <code style={codeChipStyle}>{omp.data.updateCommand}</code>
+                      <button
+                        type="button"
+                        className="ui-focus-ring"
+                        onClick={() => ompCopy.copy(omp.data?.updateCommand ?? "omp update")}
+                        title={t("updates.copyCommand")}
+                        aria-label={t("updates.copyCommand")}
+                        style={cardButtonStyle(false)}
+                        onMouseEnter={hoverIn}
+                        onMouseLeave={hoverOut}
+                      >
+                        {ompCopy.copied
+                          ? <Check size={11} strokeWidth={2.4} aria-hidden="true" />
+                          : <Copy size={11} strokeWidth={2.2} aria-hidden="true" />}
+                        {ompCopy.copied ? t("updates.copied") : t("updates.copy")}
+                      </button>
+                    </div>
+                    <div style={dimLineStyle}>{t("updates.omp.restartHint")}</div>
+                    <div>
+                      <button
+                        type="button"
+                        className="ui-focus-ring"
+                        onClick={() => void restartSessions()}
+                        disabled={restarting}
+                        title={t("updates.omp.restart")}
+                        aria-label={t("updates.omp.restart")}
+                        style={cardButtonStyle(restarting, true)}
+                        onMouseEnter={accentHoverIn}
+                        onMouseLeave={accentHoverOut}
+                      >
+                        {restarting
+                          ? <Loader2 size={11} strokeWidth={2.2} style={{ animation: "spin 0.8s linear infinite" }} aria-hidden="true" />
+                          : <RotateCw size={11} strokeWidth={2.2} aria-hidden="true" />}
+                        {restarting ? t("updates.omp.restarting") : t("updates.omp.restart")}
+                      </button>
+                    </div>
+                  </>
+                )}
+              </>
+            )}
+            {restartNote && (
+              restartNote.kind === "error"
+                ? <CardError message={restartNote.text} />
+                : (
+                  <div role="status" style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: "var(--status-success)", overflowWrap: "anywhere" }}>
+                    <Check size={12} strokeWidth={2.4} style={{ flexShrink: 0 }} aria-hidden="true" />
+                    {restartNote.text}
                   </div>
-                </>
-              )}
-            </>
-          )}
-          {restartNote && (
-            restartNote.kind === "error"
-              ? <CardError message={restartNote.text} />
-              : (
-                <div role="status" style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: "var(--status-success)", overflowWrap: "anywhere" }}>
-                  <Check size={12} strokeWidth={2.4} style={{ flexShrink: 0 }} aria-hidden="true" />
-                  {restartNote.text}
-                </div>
-              )
-          )}
-        </div>
+                )
+            )}
+          </div>
+        )}
 
         {/* ── Skills ───────────────────────────────────────────────────── */}
         <div style={cardStyle}>

@@ -2,7 +2,7 @@
 
 [English](./README.md) | [简体中文](./README.zh-CN.md) | [日本語](./README.ja.md)
 
-Cody is a local web workspace for the [oh-my-pi (omp) coding agent](https://github.com/can1357/oh-my-pi). It reads your local omp session files and gives you a browser workspace for session browsing, real-time chat, model configuration, skill management, project file preview, and persistent terminals.
+Cody is a self-hosted web workspace for coding agents. The interface — session browsing, real-time chat, files, git, persistent terminals, settings — stays constant while the **engine** underneath is swappable: [oh-my-pi (omp)](https://github.com/can1357/oh-my-pi) is the founding, fully-featured engine, with Claude Code and Codex available as experimental engines you can install and switch to from the UI (see [docs/harnesses.md](docs/harnesses.md)).
 
 Cody is a fork of [kahme247/ompweb](https://github.com/kahme247/ompweb) — see [Credits](#credits).
 
@@ -109,13 +109,17 @@ Cody is a Node-hosted Next.js app that drives your installed `omp` binary — it
 - **Terminal sessions**: the custom Node launcher serves Next.js and same-origin terminal WebSockets on one port. Each tab owns a server-side `node-pty` shell in an authorized workspace; shells survive browser disconnects until explicitly closed or the Cody server shuts down.
 - **Forks vs in-session branches**: Fork creates a new `.jsonl` file. "Edit from here" creates another branch inside the same session file.
 
-## Self-hosting and other harnesses
+## Self-hosting and engines
 
-`docker/` packages Cody together with the omp harness in one container —
+`docker/` packages Cody together with the omp engine in one container —
 built for home servers; `docs/unraid.md` walks through the Unraid deployment
-(template included). The UI is being split from the harness behind the
-adapter seam in `lib/harness/` (`CODY_HARNESS` selects the adapter); the
-contract and the porting checklist for hosting Pi or another agent live in
+(template included). The engine is chosen at onboarding (or later in
+Settings → User Accounts → Agent engine): omp ships in the image, while
+Claude Code and Codex install on demand into a persistent prefix that
+survives image updates. Engine credentials are the engine's own — run
+`claude` or `codex login` once in a Cody terminal, or set
+`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` on the container. The adapter
+contract and the checklist for adding more engines (Pi, Cline, …) live in
 `docs/harnesses.md`.
 
 ## Development

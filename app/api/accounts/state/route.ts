@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getRequestUser, isAuthRequired } from "@/lib/auth/guard";
-import { hasAnyUser, isSignupAllowed, toPublicUser } from "@/lib/auth/users";
+import { hasAnyHumanUser, hasAnyUser, isSignupAllowed, toPublicUser } from "@/lib/auth/users";
 
 /**
  * Everything the login screen (and the signed-in shell) needs to know about
@@ -18,8 +18,10 @@ export function GET(request: Request) {
       authRequired: isAuthRequired(),
       firstRun,
       // First-run setup is always allowed; a fresh install that cannot create
-      // its first account would be a brick.
-      signupAllowed: firstRun || isSignupAllowed(),
+      // its first account would be a brick. The same applies while only the
+      // env-managed bootstrap account exists: the first human signup (which
+      // becomes the admin) must stay reachable even with signup disabled.
+      signupAllowed: !hasAnyHumanUser() || isSignupAllowed(),
       user: user ? toPublicUser(user) : null,
     },
     { headers: { "Cache-Control": "no-store" } },

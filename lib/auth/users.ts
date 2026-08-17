@@ -179,6 +179,15 @@ export function hasAnyUser(): boolean {
   return listUsers().length > 0;
 }
 
+/** True once a person has created an account of their own. The env-managed
+ * bootstrap account does not count: on a standard Docker install it exists
+ * from the first boot, and the first HUMAN account must still become an
+ * administrator — otherwise nobody who signs up through the login screen
+ * could ever manage users or pick the agent engine. */
+export function hasAnyHumanUser(): boolean {
+  return listUsers().some((user) => user.envManaged !== true);
+}
+
 export function createUser(input: {
   username: string;
   fullName: string;

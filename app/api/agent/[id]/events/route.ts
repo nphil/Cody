@@ -2,6 +2,8 @@ import { readSessionHeader, resolveSessionPath } from "@/lib/session-reader";
 import { getRpcSession, resolveSpawnCwd, startRpcSession } from "@/lib/rpc-manager";
 import { getRequestUser } from "@/lib/auth/guard";
 import { canAccessSession } from "@/lib/auth/session-owners";
+import { getHarness } from "@/lib/harness";
+import { getEngineSession } from "@/lib/harness/engine-sessions";
 
 export const dynamic = "force-dynamic";
 
@@ -24,13 +26,28 @@ export async function GET(
   // inside the stream so it cannot race the client's connect timeout.
   const existing = getRpcSession(id);
   const alive = existing?.isAlive() ? existing : undefined;
+  // A non-omp engine keeps its transcript privately: the index row is what
+  // proves the session exists, and it carries the cwd to resume it in.
+  const harness = getHarness();
+  const engineMode = typeof harness.createSession === "function";
   let filePath = "";
+  let engineCwd = "";
   if (!alive) {
-    const resolved = await resolveSessionPath(id);
-    if (!resolved) {
-      return new Response("Session not found", { status: 404 });
+    if (engineMode) {
+      const row = getEngineSession(id);
+      // Another engine's row is not resumable here (see
+      // resolveEngineSessionOr404) — same 404 as an unknown session.
+      if (!row || row.engine !== harness.id) {
+        return new Response("Session not found", { status: 404 });
+      }
+      engineCwd = row.cwd;
+    } else {
+      const resolved = await resolveSessionPath(id);
+      if (!resolved) {
+        return new Response("Session not found", { status: 404 });
+      }
+      filePath = resolved;
     }
-    filePath = resolved;
   }
 
   const encoder = new TextEncoder();
@@ -118,8 +135,10 @@ export async function GET(
         let session = alive;
         if (!session) {
           try {
-            const cwd = resolveSpawnCwd(readSessionHeader(filePath)?.cwd);
-            ({ session } = await startRpcSession(id, filePath, cwd));
+            const cwd = resolveSpawnCwd(engineMode ? engineCwd : readSessionHeader(filePath)?.cwd);
+            ({ session } = engineMode
+              ? await startRpcSession(id, "", cwd, undefined, false, id)
+              : await startRpcSession(id, filePath, cwd));
           } catch (error) {
             encode({ type: "notice", level: "error", message: `Failed to start agent: ${error}` });
             cleanup();

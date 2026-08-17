@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { deleteMcpServer, parseMcpListOutput, readDiscoveredMcpServers, readMcpConfig, readUserMcpConfig, type McpLiveServer, validateMcpServer, writeMcpServer } from "@/lib/omp/mcp-config";
 import { readSessionHeader, resolveSessionPath } from "@/lib/session-reader";
-import { getRpcSession, resolveSpawnCwd, startRpcSession } from "@/lib/rpc-manager";
+import { AgentSessionWrapper, getRpcSession, resolveSpawnCwd, startRpcSession } from "@/lib/rpc-manager";
 
 export const dynamic = "force-dynamic";
 
@@ -70,6 +70,12 @@ export async function GET(request: Request) {
           const sessionFile = await resolveSessionPath(sessionId);
           if (!sessionFile) throw new Error("Session not found");
           ({ session } = await startRpcSession(sessionId, sessionFile, resolveSpawnCwd(readSessionHeader(sessionFile)?.cwd)));
+        }
+        // `/mcp list` is an omp-protocol command; a session driven by another
+        // engine has no equivalent (its adapter reports capabilities.mcp
+        // false, so the UI hides this surface anyway).
+        if (!(session instanceof AgentSessionWrapper)) {
+          throw new Error("Live MCP inventory is not supported by the active engine");
         }
         liveServers = mergeMcpServers(parseMcpListOutput(await session.getMcpList()), inventory);
       } catch (error) {

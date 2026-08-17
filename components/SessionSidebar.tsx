@@ -510,7 +510,7 @@ function CodyTitle() {
       onClick={handleClick}
       style={{
         background: "none", border: "none", padding: 0, cursor: "pointer",
-        fontWeight: 700, fontSize: 14, letterSpacing: "-0.01em",
+        fontWeight: 700, fontSize: 20, letterSpacing: "-0.01em",
         fontFamily: "var(--font-mono)",
         minWidth: "6ch",
         lineHeight: 1,
@@ -525,6 +525,7 @@ function CodyTitle() {
       ) : (
         <span style={{ color: showVersion ? "var(--accent)" : "var(--text)" }}>{display}</span>
       )}
+      <span className="login-caret" aria-hidden />
     </button>
   );
 }

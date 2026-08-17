@@ -31,6 +31,10 @@ interface Props {
   session: SessionInfo | null;
   newSessionCwd: string | null;
   advisorEnabled?: boolean;
+  /** The active engine serves omp's advanced chat protocol (thinking levels,
+   * model switching, forking, compaction, subagents). False hides those
+   * affordances instead of letting them fail against the engine. */
+  chatExtras?: boolean;
   toolCallsDefaultCollapsed?: boolean;
   onAgentEnd?: () => void;
   onSessionCreated?: (session: SessionInfo) => void;
@@ -207,6 +211,8 @@ interface CommittedTranscriptProps {
   sessionBusy: boolean;
   isNew: boolean;
   forkingEntryId: string | null;
+  /** Forking is omp-only; false renders the transcript without fork actions. */
+  canFork: boolean;
   handleFork: (entryId: string) => void;
   handleNavigate: (entryId: string) => void;
   handleEditContent: (content: string) => void;
@@ -233,7 +239,7 @@ interface CommittedTranscriptProps {
  */
 const CommittedTranscript = memo(function CommittedTranscript({
   messages, entryIds, conversationMeta, messageRefs, isStreaming, sessionBusy, isNew, forkingEntryId,
-  handleFork, handleNavigate, handleEditContent, modelNames, messageCwd, onOpenFile, sessionId,
+  canFork, handleFork, handleNavigate, handleEditContent, modelNames, messageCwd, onOpenFile, sessionId,
   toolCallsDefaultCollapsed, visibleCount, nearBottom, sentinelRef, handleLoadMoreClick,
 }: CommittedTranscriptProps) {
   const { t } = useI18n();
@@ -275,7 +281,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
         cwd={messageCwd}
         onOpenFile={onOpenFile}
         entryId={entryIds[idx]}
-        onFork={sessionBusy || isNew || (idx === 0 && msg.role === "user") ? undefined : handleFork}
+        onFork={!canFork || sessionBusy || isNew || (idx === 0 && msg.role === "user") ? undefined : handleFork}
         forking={forkingEntryId === entryIds[idx]}
         onNavigate={sessionBusy ? undefined : handleNavigate}
         prevAssistantEntryId={sessionBusy ? undefined : prevAssistantEntryId}
@@ -410,7 +416,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
   );
 });
 
-export function ChatWindow({ session, newSessionCwd, advisorEnabled, toolCallsDefaultCollapsed = true, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile }: Props) {
+export function ChatWindow({ session, newSessionCwd, advisorEnabled, chatExtras = true, toolCallsDefaultCollapsed = true, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile }: Props) {
   const { t, tn } = useI18n();
   const { playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -690,30 +696,34 @@ export function ChatWindow({ session, newSessionCwd, advisorEnabled, toolCallsDe
     ? (modelThinkingLevelMaps[`${displayModelValue.provider}:${displayModelValue.modelId}`] ?? null)
     : null;
 
+  // Steering and the follow-up queue are omp-protocol commands; a turn-based
+  // engine answers them "unsupported", so they are not offered at all — the
+  // composer shows a waiting state for the duration of the turn instead.
   const chatInputElement = (
     <ChatInput
       ref={chatInputRef}
       onSend={handleSend}
       onAbort={handleAbort}
-      onSteer={agentRunning ? handleSteer : undefined}
-      onFollowUp={agentRunning ? handleFollowUp : undefined}
-      onPromptWithStreamingBehavior={agentRunning ? handlePromptWithStreamingBehavior : undefined}
+      onSteer={chatExtras && agentRunning ? handleSteer : undefined}
+      onFollowUp={chatExtras && agentRunning ? handleFollowUp : undefined}
+      onPromptWithStreamingBehavior={chatExtras && agentRunning ? handlePromptWithStreamingBehavior : undefined}
       isStreaming={sessionBusy}
+      chatExtras={chatExtras}
       model={displayModelValue}
       isAutoModelSelection={isAutoModelSelection}
       modelNames={modelNames}
       modelList={modelList}
       modelsLoading={modelsLoading}
       modelError={modelError}
-      onModelChange={handleModelChange}
+      onModelChange={chatExtras ? handleModelChange : undefined}
       onAbortCompaction={handleAbortCompaction}
       isCompacting={isCompacting}
       compactResult={compactResult}
       thinkingLevel={thinkingLevel}
-      onThinkingLevelChange={session || isNew ? handleThinkingLevelChange : undefined}
+      onThinkingLevelChange={chatExtras && (session || isNew) ? handleThinkingLevelChange : undefined}
       fastModeEnabled={fastModeEnabled}
       fastModeActive={fastModeActive}
-      fastModeSupported={Boolean(displayModelValue && modelList.some((entry) => entry.provider === displayModelValue.provider && entry.id === displayModelValue.modelId && entry.supportsFastMode))}
+      fastModeSupported={chatExtras && Boolean(displayModelValue && modelList.some((entry) => entry.provider === displayModelValue.provider && entry.id === displayModelValue.modelId && entry.supportsFastMode))}
       onFastModeChange={session || isNew ? handleFastModeChange : undefined}
       onAbortRetry={session ? handleAbortRetry : undefined}
       availableThinkingLevels={availableThinkingLevels}
@@ -722,7 +732,7 @@ export function ChatWindow({ session, newSessionCwd, advisorEnabled, toolCallsDe
       retryInfo={retryInfo}
       activeGoal={activeGoal}
       activePlan={activePlan}
-      advisorEnabled={advisorEnabled}
+      advisorEnabled={chatExtras && advisorEnabled}
       queuedMessages={queuedMessages}
       inputHistory={inputHistory}
       contextUsage={contextUsage}
@@ -885,6 +895,7 @@ export function ChatWindow({ session, newSessionCwd, advisorEnabled, toolCallsDe
               sessionBusy={sessionBusy}
               isNew={isNew}
               forkingEntryId={forkingEntryId}
+              canFork={chatExtras}
               handleFork={handleFork}
               handleNavigate={handleNavigate}
               handleEditContent={handleEditContent}
@@ -988,7 +999,7 @@ export function ChatWindow({ session, newSessionCwd, advisorEnabled, toolCallsDe
           <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
             <ComposerPanels
               todoPhases={todoPhases}
-              subagents={subagents}
+              subagents={chatExtras ? subagents : []}
               onSelectSubagent={setSelectedSubagent}
             />
             <ExtensionWidgets widgets={belowEditorWidgets} />

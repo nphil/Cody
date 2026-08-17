@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import packageJson from "../../../package.json";
 import { getHarness } from "@/lib/harness";
+import type { HarnessCapabilities } from "@/lib/harness/types";
 
 
 export const dynamic = "force-dynamic";
@@ -16,6 +17,11 @@ export interface InfoResponse {
   agentDir: string;
   /** Which agent harness this deployment runs on (see lib/harness). */
   harness: { id: string; name: string };
+  /** What the ACTIVE engine can serve. The client hides the surfaces whose
+   * capability is false (settings tabs, omp-only chat affordances). */
+  capabilities: HarnessCapabilities;
+  /** Identity of the active engine, for labels and the experimental chip. */
+  engine: { id: string; displayName: string; shortName: string; experimental: boolean };
 }
 
 /** Read-only runtime facts for the Info panel. Deliberately minimal: no env
@@ -31,6 +37,13 @@ export async function GET() {
       platform: `${process.platform} ${process.arch}`,
       agentDir: harness.getAgentDir(),
       harness: { id: harness.id, name: harness.displayName },
+      capabilities: harness.capabilities,
+      engine: {
+        id: harness.id,
+        displayName: harness.displayName,
+        shortName: harness.shortName,
+        experimental: harness.experimental === true,
+      },
     };
     return NextResponse.json(body, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {

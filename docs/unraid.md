@@ -110,8 +110,14 @@ scrypt-hashed), so accounts survive image updates like the rest of appdata.
 - The in-app "Updates" panel checks versions but self-update is disabled by
   design in a container: update by rebuilding the image (`docker build …`)
   and recreating the container, the Unraid way.
-- `CODY_HARNESS` selects the agent adapter (`omp` today; see
-  `docs/harnesses.md` for what adding Pi or another harness involves).
+- The agent **engine** is chosen in the UI: a one-time picker after the
+  first admin signs in, and later under Settings → User Accounts → Agent
+  engine. omp ships in the image; Claude Code and Codex install on demand
+  into `/data/agent/tools`, which survives image updates. Their sign-in
+  state lives under `/data/home` — run `claude` or `codex login` once in a
+  Cody terminal, or pass `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` as extra
+  container variables. `CODY_HARNESS` remains the pre-selection default
+  (`omp`); see `docs/harnesses.md`.
 - omp is a **Bun** program (`engines: bun >= 1.3.14`), so the image carries the
   Bun binary alongside Node. Installing omp with npm onto a Node-only image
   looks like it works and then fails at every invocation with
