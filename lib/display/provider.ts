@@ -166,7 +166,10 @@ class RasterWebProvider implements DisplayProvider {
 
 export function attachDisplaySocket(sessionId: string, socket: WebSocket): void {
   const request = getLatestDisplayRequest(sessionId);
-  if (!request || request.transport !== "stream") {
+  // Every ladder terminates in a stream candidate, so any published request is
+  // legitimately streamable — the client either resolved to the floor or fell
+  // back to it. Only a session with nothing published is refused.
+  if (!request) {
     sendJson(socket, { type: "state", state: "error", message: "No streamed preview is available for this session" });
     socket.close(1008, "No display request");
     return;

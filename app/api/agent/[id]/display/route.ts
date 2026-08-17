@@ -16,7 +16,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   if (!(await authorizeDisplaySession(request, id))) return NextResponse.json({ error: "Session not found" }, { status: 404 });
   try {
     const input = parseDisplayRequestInput(await request.json());
-    const display = publishDisplayRequest(id, input);
+    const display = await publishDisplayRequest(id, input);
     return NextResponse.json({ accepted: true, requestId: display.id, request: display }, { status: 202 });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "Invalid display request" }, { status: 400 });

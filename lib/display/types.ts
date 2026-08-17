@@ -1,5 +1,19 @@
 export type DisplayRequestMode = "auto" | "stream" | "native";
-export type DisplayTransport = "stream" | "native";
+export type DisplayCandidateKind = "direct" | "native" | "stream";
+
+/**
+ * One way to show the preview, ordered by fidelity. A "direct" candidate is
+ * the dev server's own origin on a routable interface (probed reachable by the
+ * server), "native" is the authority-minted gateway URL, and "stream" is the
+ * raster Chromium fallback that always works.
+ */
+export interface DisplayCandidate {
+  kind: DisplayCandidateKind;
+  /** Absent only for kind:"stream" (it uses the session WebSocket). */
+  url?: string;
+  /** Hostname the URL targets, for client-side preference ranking. */
+  host?: string;
+}
 
 export interface WebDisplaySource {
   kind: "web";
@@ -15,10 +29,9 @@ export interface DisplayRequestV1 {
   source: WebDisplaySource;
   title?: string;
   requestedMode: DisplayRequestMode;
-  transport: DisplayTransport;
+  /** Ranked best-fidelity-first. ALWAYS ends with { kind: "stream" }. */
+  candidates: DisplayCandidate[];
   requestedAt: number;
-  /** Authority-generated gateway URL; models can never supply it. */
-  nativeUrl?: string;
 }
 
 export interface DisplayRequestInput {

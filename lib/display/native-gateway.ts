@@ -1,8 +1,9 @@
 import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { networkInterfaces } from "node:os";
 import type { Duplex } from "node:stream";
 import HttpProxyServer from "http-proxy";
-import type { DisplayRequestMode, DisplayTransport } from "./types";
+import type { DisplayCandidate, DisplayRequestMode } from "./types";
 import { normalizeLoopbackUrl } from "./validation";
 
 interface NativeRoute {
@@ -22,6 +23,13 @@ declare global {
 
 const ROUTE_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_ROUTES = 128;
+
+/**
+ * Direct probes fan out over every routable interface at once, so this bounds
+ * the whole DIRECT rung rather than each address. Long enough for a dev server
+ * that is mid-compile, short enough that open_preview still feels immediate.
+ */
+const DIRECT_PROBE_TIMEOUT_MS = 1_500;
 
 function state(): NativeState {
   return globalThis.__codyNativeDisplayState ??= { routes: new Map(), proxy: null };
@@ -46,10 +54,47 @@ function prune(): void {
   while (current.routes.size > MAX_ROUTES) current.routes.delete(current.routes.keys().next().value as string);
 }
 
-export function resolveDisplayTransport(sourceUrl: string, mode: DisplayRequestMode): { transport: DisplayTransport; nativeUrl?: string } {
+/**
+ * True when a socket is bound at the URL. Any HTTP answer proves it — a 404 or
+ * 500 still means the dev server is listening on that interface. Only a
+ * connection failure (or the timeout) disqualifies an address.
+ */
+async function answers(url: string): Promise<boolean> {
+  try {
+    const response = await fetch(url, { redirect: "manual", cache: "no-store", signal: AbortSignal.timeout(DIRECT_PROBE_TIMEOUT_MS) });
+    void response.body?.cancel().catch(() => {});
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The dev server's own origin, reachable from the owner's tablet whenever the
+ * server bound 0.0.0.0: same port, same path, but the container's routable
+ * IPv4 address instead of loopback. Probed per interface, concurrently, so a
+ * multi-homed container does not serialize timeouts.
+ */
+async function directCandidates(target: URL): Promise<DisplayCandidate[]> {
+  const hosts = new Set<string>();
+  for (const addresses of Object.values(networkInterfaces())) {
+    for (const address of addresses ?? []) {
+      if (address.internal || address.family !== "IPv4") continue;
+      hosts.add(address.address);
+    }
+  }
+  const probed = await Promise.all([...hosts].map(async (host): Promise<DisplayCandidate | null> => {
+    const candidate = new URL(target.toString());
+    candidate.hostname = host;
+    return (await answers(new URL("/", candidate).toString())) ? { kind: "direct", url: candidate.toString(), host } : null;
+  }));
+  return probed.filter((candidate): candidate is DisplayCandidate => candidate !== null);
+}
+
+/** Mints a single-use wildcard-subdomain route through Cody's own origin. */
+function nativeCandidate(target: URL): DisplayCandidate | null {
   const base = configuredBase();
-  if (!base || mode === "stream") return { transport: "stream" };
-  const target = new URL(normalizeLoopbackUrl(sourceUrl));
+  if (!base) return null;
   const token = randomBytes(18).toString("hex");
   prune();
   state().routes.set(token, { token, targetOrigin: target.origin, expiresAt: Date.now() + ROUTE_TTL_MS });
@@ -58,7 +103,20 @@ export function resolveDisplayTransport(sourceUrl: string, mode: DisplayRequestM
   publicUrl.pathname = target.pathname;
   publicUrl.search = target.search;
   publicUrl.hash = target.hash;
-  return { transport: "native", nativeUrl: publicUrl.toString() };
+  return { kind: "native", url: publicUrl.toString(), host: publicUrl.hostname };
+}
+
+/**
+ * The fidelity ladder, best first: real-origin iframes the client can prove
+ * routable, then the native gateway when one is configured, then the raster
+ * stream as the floor that always works.
+ */
+export async function resolveDisplayCandidates(sourceUrl: string, mode: DisplayRequestMode): Promise<DisplayCandidate[]> {
+  if (mode === "stream") return [{ kind: "stream" }];
+  const target = new URL(normalizeLoopbackUrl(sourceUrl));
+  const direct = mode === "native" ? [] : await directCandidates(target);
+  const native = nativeCandidate(target);
+  return [...direct, ...(native ? [native] : []), { kind: "stream" }];
 }
 
 function routeForHost(hostHeader: string | undefined): NativeRoute | null {

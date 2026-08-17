@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { resolveDisplayTransport } from "./native-gateway";
+import { resolveDisplayCandidates } from "./native-gateway";
 import type { DisplayBusEvent, DisplayRequestV1 } from "./types";
 import { parseDisplayRequestInput } from "./validation";
 
@@ -29,11 +29,13 @@ export function resolveDisplaySessionId(sessionId: string): string {
   return current;
 }
 
-export function publishDisplayRequest(sessionId: string, input: unknown): DisplayRequestV1 {
-  const authoritativeId = resolveDisplaySessionId(sessionId);
-  if (!authoritativeId) throw new Error("Display session is required");
+export async function publishDisplayRequest(sessionId: string, input: unknown): Promise<DisplayRequestV1> {
+  if (!sessionId) throw new Error("Display session is required");
   const parsed = parseDisplayRequestInput(input);
-  const resolved = resolveDisplayTransport(parsed.url, parsed.mode);
+  const candidates = await resolveDisplayCandidates(parsed.url, parsed.mode);
+  // Resolved AFTER probing: an engine rekey can land while interfaces are
+  // being probed, and the request belongs to whoever the session is by then.
+  const authoritativeId = resolveDisplaySessionId(sessionId);
   const request: DisplayRequestV1 = {
     version: 1,
     id: randomUUID(),
@@ -41,9 +43,8 @@ export function publishDisplayRequest(sessionId: string, input: unknown): Displa
     source: { kind: "web", url: parsed.url },
     title: parsed.title,
     requestedMode: parsed.mode,
-    transport: resolved.transport,
+    candidates,
     requestedAt: Date.now(),
-    ...(resolved.nativeUrl ? { nativeUrl: resolved.nativeUrl } : {}),
   };
   const state = bus();
   state.latest.delete(authoritativeId);

@@ -110,6 +110,11 @@ tolerates.
      TOML args (see `claude-stream.ts` / `codex-stream.ts` /
      `turn-session.ts`). The MCP server posts to `/api/internal/display`
      with the capability token minted per session — no Cody cookie needed.
+   Either shape only publishes a loopback URL — an engine never picks how the
+   preview renders. Cody resolves that URL into a ranked `candidates` list
+   (direct real-origin iframe, then the `CODY_PREVIEW_BASE_URL` gateway, then
+   the raster stream as the guaranteed floor) and the client takes the best
+   rung that works.
 6. Run the suite: `npm run typecheck && npm run lint && npm test`.
 
 Cursor, Kilo Code, Cline, Pi and friends are all candidates — anything with

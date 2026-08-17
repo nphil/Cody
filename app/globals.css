@@ -1723,6 +1723,19 @@ html.dark .dropdown-surface :is(select, option) {
   }
 }
 
+/* Transient "which render path is live" pill in the Preview panel. One
+   keyframe covers the whole lifetime (fade in, hold, fade out) so a single
+   dismiss timer can unmount it without a second animation state. Reduced
+   motion is handled in PreviewPanel via usePrefersReducedMotion, which drops
+   the animation entirely: the global reduce block below would otherwise
+   collapse this to its final frame and hide the notice outright. */
+@keyframes preview-mode-notice {
+  0%   { opacity: 0; transform: translateY(-4px); }
+  10%  { opacity: 1; transform: translateY(0); }
+  72%  { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(-2px); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .notice-shelf-item {
     animation-duration: 0.001ms !important;

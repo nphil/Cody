@@ -3,11 +3,14 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from "react";
 import { Camera, ExternalLink, Globe, ListTodo, Loader2, RotateCw } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
+import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { toast } from "./ui/toast";
-import type { DisplayRequestV1, DisplayStreamState } from "@/lib/display/types";
+import type { DisplayCandidate, DisplayCandidateKind, DisplayRequestV1, DisplayStreamState } from "@/lib/display/types";
 // Loopback-only rules + rationale live in lib/preview-url, shared with the
 // agent-facing open_preview host tool and the assistant-URL auto-open path.
-import { normalizePreviewUrl } from "@/lib/preview-url";
+// probeLoopbackUrl itself only answers "did anything reply?", so the ladder
+// reuses it for LAN and gateway candidates too.
+import { normalizePreviewUrl, probeLoopbackUrl } from "@/lib/preview-url";
 
 export interface PreviewPanelProps {
   cwd: string | null;
@@ -142,15 +145,107 @@ function StreamedDisplay({ sessionId, request, active, reloadToken }: { sessionI
   );
 }
 
+/** Lifetime of the transient "which path is live" notice. The
+ *  preview-mode-notice keyframe fades itself out over the same span, so one
+ *  dismiss timer is enough. */
+const MODE_NOTICE_MS = 2_000;
+
+/** Per-candidate probe budget. Tighter than the auto-open probe in AppShell:
+ *  the ladder can walk several candidates in series, and the panel sits on a
+ *  resolving overlay for the whole walk. */
+const CANDIDATE_PROBE_MS = 2_500;
+
+const MODE_LABEL_KEY: Record<DisplayCandidateKind, string> = {
+  direct: "preview.modeDirect",
+  native: "preview.modeGateway",
+  stream: "preview.modeStreamed",
+};
+
+/**
+ * This browser's view of the server's fidelity ladder. The server ranks by
+ * fidelity but cannot know two things only this document knows:
+ *  - mixed content is hard-blocked, so an http: candidate is unusable on an
+ *    https: page and is dropped rather than probed;
+ *  - the hostname in our own address bar provably routes to this device, so a
+ *    candidate on that host outranks the rest of the direct group (LAN and
+ *    Tailscale clients reach Cody under different names).
+ * The stream floor carries no URL and always works, so it survives every
+ * filter and stays last.
+ */
+function orderCandidates(candidates: readonly DisplayCandidate[], pageProtocol: string, pageHostname: string): DisplayCandidate[] {
+  const usable = candidates.filter((candidate) =>
+    candidate.kind === "stream" || (!!candidate.url && !(pageProtocol === "https:" && /^http:\/\//i.test(candidate.url))));
+  const routable = (candidate: DisplayCandidate): boolean => candidate.kind === "direct" && candidate.host === pageHostname;
+  return usable.some(routable) ? [...usable.filter(routable), ...usable.filter((candidate) => !routable(candidate))] : usable;
+}
+
 export function PreviewPanel({ sessionId, active, request, onOpenTasks, onCaptureToChat }: PreviewPanelProps): ReactElement {
   const { t } = useI18n();
   const [input, setInput] = useState(DEFAULT_URL);
   const [inputError, setInputError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [reloadToken, setReloadToken] = useState(0);
-  const [nativeKey, setNativeKey] = useState(0);
+  const [frameKey, setFrameKey] = useState(0);
+  // Resolution is keyed by request id: the server ranks candidates by fidelity,
+  // this browser decides which of them it can actually reach. A re-delivered
+  // snapshot for the live request keeps its winner on screen instead of
+  // flashing back through the resolving state.
+  const [resolution, setResolution] = useState<{ id: string; candidate: DisplayCandidate | null } | null>(null);
+  const [notice, setNotice] = useState<{ id: string; kind: DisplayCandidateKind } | null>(null);
+  // DOM-typed handle (see TerminalPanel): window.setTimeout returns a number,
+  // and window.clearTimeout takes `number | undefined`, so the dismiss timer
+  // needs no null guard before clearing.
+  const noticeTimerRef = useRef<number | undefined>(undefined);
+  const reducedMotion = usePrefersReducedMotion();
 
   useEffect(() => { if (request?.source.kind === "web") setInput(request.source.url); }, [request]);
+
+  useEffect(() => {
+    if (!request) { setResolution(null); return; }
+    const id = request.id;
+    const ladder = orderCandidates(request.candidates, window.location.protocol, window.location.hostname);
+    // Per-run cancellation: a superseding request (or an unmount) runs this
+    // effect's cleanup before the next walk starts, so an in-flight walk can
+    // never commit a stale winner over a newer one.
+    let cancelled = false;
+    void (async () => {
+      for (const candidate of ladder) {
+        // The floor has no URL and always works, so it is never probed.
+        if (candidate.kind === "stream" || !candidate.url) {
+          if (!cancelled) setResolution({ id, candidate });
+          return;
+        }
+        const answered = await probeLoopbackUrl(candidate.url, CANDIDATE_PROBE_MS);
+        if (cancelled) return;
+        if (answered) { setResolution({ id, candidate }); return; }
+      }
+      if (!cancelled) setResolution({ id, candidate: null });
+    })();
+    return () => { cancelled = true; };
+  }, [request]);
+
+  const resolved = request && resolution?.id === request.id ? resolution.candidate : null;
+  const resolving = !!request && resolution?.id !== request.id;
+  const frameUrl = resolved && resolved.kind !== "stream" ? resolved.url ?? null : null;
+
+  // Announce the winner once per resolved request id. The deps are the commit
+  // itself, so re-renders, panel toggles and reload presses stay quiet, while a
+  // fresh open_preview announces again — the winning path may have changed.
+  const committedId = resolution?.id;
+  const committedKind = resolution?.candidate?.kind;
+  useEffect(() => {
+    if (!committedId || !committedKind) return;
+    setNotice({ id: committedId, kind: committedKind });
+    window.clearTimeout(noticeTimerRef.current);
+    noticeTimerRef.current = window.setTimeout(() => setNotice(null), MODE_NOTICE_MS);
+    // Covers unmount and supersession alike, so a stale timer can never hide a
+    // newer notice.
+    return () => window.clearTimeout(noticeTimerRef.current);
+  }, [committedId, committedKind]);
+
+  // A notice whose request is no longer live never shows: a slow walk must not
+  // label the new preview with the previous request's path.
+  const liveNotice = notice && notice.id === request?.id ? notice : null;
 
   const open = useCallback(async () => {
     if (!sessionId) { setInputError(t("preview.sessionRequired")); return; }
@@ -199,18 +294,18 @@ export function PreviewPanel({ sessionId, active, request, onOpenTasks, onCaptur
 
   const reload = useCallback(() => {
     if (!request) { void open(); return; }
-    if (request.transport === "native") setNativeKey((value) => value + 1);
+    if (frameUrl) setFrameKey((value) => value + 1);
     else setReloadToken((value) => value + 1);
-  }, [open, request]);
+  }, [frameUrl, open, request]);
 
   const controlStyle = { flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", width: 20, height: 20, padding: 0, border: "none", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text-muted)", cursor: "pointer" } as const;
-  const detachedUrl = request?.transport === "native" ? request.nativeUrl : null;
 
   return (
     <section aria-label={t("preview.title")} style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, background: "var(--bg)" }}>
       <div className="workspace-subtitle-bar" style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0, borderBottom: "1px solid var(--border)", background: "var(--bg-panel)" }}>
         <Globe size={13} strokeWidth={2} color="var(--text-muted)" aria-hidden="true" style={{ flexShrink: 0 }} />
         <input value={input} onChange={(event) => { setInput(event.target.value); setInputError(""); }} onKeyDown={(event) => { if (event.key === "Enter") void open(); }} placeholder={DEFAULT_URL} aria-label={t("preview.urlLabel")} aria-invalid={!!inputError} spellCheck={false} style={{ flex: 1, minWidth: 0, padding: "2px 7px", fontSize: 11, fontFamily: "var(--font-mono)", border: `1px solid ${inputError ? "var(--status-error)" : "var(--border)"}`, borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }} />
+        {resolved && <span title={frameUrl ?? undefined} style={{ flexShrink: 0, padding: "1px 6px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", color: "var(--text-muted)", fontSize: 10, whiteSpace: "nowrap" }}>{t(MODE_LABEL_KEY[resolved.kind])}</span>}
         <button type="button" className="ui-focus-ring" onClick={reload} disabled={submitting} title={t("preview.reload")} aria-label={t("preview.reload")} style={controlStyle}><RotateCw size={13} strokeWidth={2} aria-hidden="true" style={submitting ? { animation: "spin 0.8s linear infinite" } : undefined} /></button>
         {onCaptureToChat && (
           <button type="button" className="ui-focus-ring" onClick={() => { void captureToChat(); }} disabled={capturing}
@@ -220,18 +315,29 @@ export function PreviewPanel({ sessionId, active, request, onOpenTasks, onCaptur
             <Camera size={13} strokeWidth={2} aria-hidden="true" style={capturing ? { animation: "pulse 1s ease-in-out infinite" } : undefined} />
           </button>
         )}
-        {detachedUrl && <button type="button" className="ui-focus-ring" onClick={() => window.open(detachedUrl, "_blank", "noopener")} title={t("preview.detach")} aria-label={t("preview.detach")} style={controlStyle}><ExternalLink size={13} strokeWidth={2} aria-hidden="true" /></button>}
+        {frameUrl && <button type="button" className="ui-focus-ring" onClick={() => window.open(frameUrl, "_blank", "noopener")} title={t("preview.detach")} aria-label={t("preview.detach")} style={controlStyle}><ExternalLink size={13} strokeWidth={2} aria-hidden="true" /></button>}
       </div>
       {inputError && <div role="alert" style={{ flexShrink: 0, padding: "5px 10px", borderBottom: "1px solid var(--border)", background: "color-mix(in srgb, var(--status-error) 9%, var(--bg-panel))", color: "var(--status-error)", fontSize: 11 }}>{inputError}</div>}
       <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
-        {request?.transport === "native" && request.nativeUrl ? (
-          <iframe key={nativeKey} src={request.nativeUrl} title={request.title ?? t("preview.frameTitle")} referrerPolicy="no-referrer" allow="clipboard-read; clipboard-write" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none", background: "#fff" }} />
-        ) : request?.transport === "stream" && sessionId ? (
+        {resolving ? (
+          <div role="status" style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", padding: 24, background: "var(--bg)", color: "var(--text-muted)", textAlign: "center", fontSize: 12 }}>
+            <div><Loader2 size={20} aria-hidden="true" style={{ display: "block", margin: "0 auto 10px", animation: "spin 0.8s linear infinite" }} />{t("preview.resolving")}</div>
+          </div>
+        ) : frameUrl ? (
+          <iframe key={frameKey} src={frameUrl} title={request?.title ?? t("preview.frameTitle")} referrerPolicy="no-referrer" allow="clipboard-read; clipboard-write" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none", background: "#fff" }} />
+        ) : resolved?.kind === "stream" && sessionId && request ? (
           <StreamedDisplay key={request.id} sessionId={sessionId} request={request} active={active} reloadToken={reloadToken} />
         ) : (
           <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, padding: 20, textAlign: "center", color: "var(--text-dim)", fontSize: 12 }}>
             <span>{t("preview.emptyHint")}</span>
             {onOpenTasks && <button type="button" className="ui-focus-ring" onClick={onOpenTasks} style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "5px 10px", fontSize: 12, border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text)", cursor: "pointer" }}><ListTodo size={13} aria-hidden="true" /> {t("preview.openTasks")}</button>}
+          </div>
+        )}
+        {/* Names the path that won, then dismisses itself. pointer-events are
+            off so it can never swallow a click meant for the app or canvas. */}
+        {liveNotice && (
+          <div role="status" style={{ position: "absolute", top: 8, left: 0, right: 0, width: "fit-content", maxWidth: "calc(100% - 20px)", margin: "0 auto", zIndex: 1, pointerEvents: "none", padding: "3px 9px", border: "1px solid var(--border)", borderRadius: 999, background: "color-mix(in srgb, var(--bg-panel) 92%, transparent)", boxShadow: "var(--shadow-card)", color: "var(--text-muted)", fontSize: 11, whiteSpace: "nowrap", animation: reducedMotion ? undefined : `preview-mode-notice ${MODE_NOTICE_MS}ms var(--ease-out-warm) forwards` }}>
+            {t(liveNotice.kind === "stream" ? "preview.noticeFallback" : "preview.noticeFullFidelity", { mode: t(MODE_LABEL_KEY[liveNotice.kind]) })}
           </div>
         )}
       </div>

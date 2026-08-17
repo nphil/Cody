@@ -110,15 +110,17 @@ lib/
   context-usage.ts     derives idle/reconnect gauge usage from persisted messages
   env.ts               readEnv(): CODY_* config with OMP_WEB_* fallback
   display/             universal display/preview surface:
-    types.ts           DisplayRequestV1 + bus event types
+    types.ts           DisplayRequestV1 + DisplayCandidate + bus event types
     validation.ts      loopback-only http(s) URL normalization (rejects credentials)
     bus.ts             globalThis per-session latest+listeners; publish/subscribe/alias
     capability.ts      HMAC session-scoped tokens (CODY_INTERNAL_DISPLAY_SECRET/ORIGIN)
     provider.ts        RasterWebProvider: puppeteer-core + system Chromium → JPEG WS stream
-    native-gateway.ts  optional CODY_PREVIEW_BASE_URL wildcard-subdomain reverse proxy
+    native-gateway.ts  candidate ranking; optional CODY_PREVIEW_BASE_URL
+                       wildcard-subdomain reverse proxy
     engine-tools.ts    bundled display-MCP launch config for Claude (JSON) / Codex (TOML)
     access.ts          authorizeDisplaySession(): request auth for display routes
-    csp.ts             buildContentSecurityPolicy() — dynamic frame-src for proxy.ts
+    csp.ts             buildContentSecurityPolicy(): loopback + this host's
+                       private LAN/CGNAT frame-src/connect-src for proxy.ts
   file-access.ts       allowed file roots for /api/files and worktrees
   harness/             pluggable engine seam: adapters (omp/claude/codex), runtime
                        selection state, turn-based sessions + stream translators,
@@ -157,9 +159,9 @@ components/
   DiffView.tsx        folding unified-diff renderer (FileViewer + GitPanel)
   GitPanel.tsx        right-panel Git tool: changed files + diffs + branch info
   TasksPanel.tsx      right-panel Tasks tool: .cody/tasks.json runner
-  PreviewPanel.tsx    right-panel Preview: streamed Chromium canvas (WS JPEG + input
-                      forwarding) or native iframe for agent display requests, plus
-                      legacy manual URL mode
+  PreviewPanel.tsx    right-panel Preview: walks the display candidate ladder —
+                      direct/gateway iframe, else streamed Chromium canvas (WS
+                      JPEG + input forwarding) — plus legacy manual URL mode
   UpdatesPanel.tsx    right-panel Updates tool: app/omp/skills update status
   InfoPanel.tsx       right-panel Info tool: versions + workspace diagnostics
   ChatMinimap.tsx     scroll minimap alongside the message list
@@ -345,7 +347,8 @@ appears without a Cody change.
 - Auto-open policy: once per (session, url) pair; explicit host-tool opens
   mark the pair handled so follow-up prose cannot re-open a panel the user
   closed; a session switch abandons pending probes. URL rules are shared in
-  `normalizePreviewUrl` — loopback only (CSP frame-src), with 0.0.0.0 / [::] /
+  `normalizePreviewUrl` — loopback only (an agent may only publish its own dev
+  server; candidate resolution widens it afterwards), with 0.0.0.0 / [::] /
   [::1] canonicalized to localhost.
 - Every trigger — host tool, URL sniffing, manual URL bar — POSTs to
   `/api/agent/[id]/display`, so one pipeline feeds `PreviewPanel`: it consumes
@@ -388,17 +391,27 @@ appears without a Cody change.
   `globalThis` map (latest + listeners, hot-reload safe). Engines that rekey a
   session mid-run (`session_info_update`) call `aliasDisplaySession(old, new)` —
   the alias chain, latest request, and listeners all move to the new id.
-- **Loopback only**: `validation.ts` accepts http(s) URLs on
+- **Loopback-only publication**: `validation.ts` accepts http(s) URLs on
   localhost/127.0.0.1/[::1] and rejects credentials. The preview surface is for
-  dev servers the agent started, not a general browser.
-- **Transport selection** (`native-gateway.ts` `resolveDisplayTransport`):
-  the zero-config default is `stream` — a server-side Chromium
-  (`CODY_CHROMIUM_BIN`, puppeteer-core, CDP screencast) renders the URL and
-  ships JPEG frames + pointer/keyboard input over the
-  `/api/display/socket?sessionId=` WS handled in `bin/cody-server.js`.
-  Setting `CODY_PREVIEW_BASE_URL` opts into `native`: a wildcard-subdomain
-  HTTP+WS reverse proxy that strips cookies/auth headers so the preview iframe
-  never carries Cody credentials into the dev server.
+  dev servers the agent started, not a general browser. Resolution then
+  rewrites that loopback URL into the candidates below.
+- **Fidelity ladder** (`native-gateway.ts`): resolution returns
+  `candidates: DisplayCandidate[]`, ranked best-fidelity-first, and the client
+  uses the first one that works. There is no single `transport` any more, and
+  streaming is NOT the default — it is the floor.
+  1. `direct` — a real iframe against the dev server's own origin. The server
+     probes its non-loopback IPv4 interfaces (`os.networkInterfaces()`) and
+     emits one candidate per address that answers, so a dev server bound to
+     `0.0.0.0` is framed straight from the tablet over LAN/Tailscale. Highest
+     fidelity: real DOM, real fonts, real input, no re-encode.
+  2. `native` — the `CODY_PREVIEW_BASE_URL` wildcard-subdomain HTTP+WS reverse
+     proxy, which strips cookies/auth headers so the iframe never carries Cody
+     credentials into the dev server. Only present when configured.
+  3. `stream` — always last, always present: a server-side Chromium
+     (`CODY_CHROMIUM_BIN`, puppeteer-core, CDP screencast) renders the URL and
+     ships JPEG frames + pointer/keyboard input over the
+     `/api/display/socket?sessionId=` WS handled in `bin/cody-server.js`.
+     Needs nothing of the client's network, so it cannot fail to be available.
 - **Capability tokens** (`capability.ts`): engine-side MCP servers post to
   `/api/internal/display` with an HMAC session-scoped token.
   `CODY_INTERNAL_DISPLAY_SECRET`/`CODY_INTERNAL_DISPLAY_ORIGIN` are minted by
@@ -413,13 +426,32 @@ appears without a Cody change.
 - **Client**: `hooks/useDisplayRequests.ts` subscribes to the SSE route;
   `AppShell` auto-opens the right panel in `preview` mode on live requests —
   the explicit, server-driven trigger alongside the client-side URL sniffing
-  in `lib/preview-autoopen.ts` above; `PreviewPanel` renders the stream
-  canvas or native iframe.
+  in `lib/preview-autoopen.ts` above. `PreviewPanel` then walks `candidates`
+  in order and commits to the first usable rung, subject to two gates:
+  - **Mixed content**: an `http:` candidate is skipped outright when the page
+    is on `https:` — the browser hard-blocks it, no probe can save it.
+  - **Current hostname wins**: a candidate whose `host` equals
+    `window.location.hostname` moves to the front of the direct group. That
+    host is provably routable from this device — it is how the page loaded.
+  A `direct`/`native` rung is confirmed with a no-cors probe (an opaque
+  response proves something answered; a network error falls through to the
+  next rung); `stream` needs no probe.
+- **The active rung is visible**: a quiet persistent badge in the subtitle bar
+  plus a transient pill naming the method (Direct / Gateway / Streamed) once
+  per resolved request. A silent downgrade to the raster fallback is the whole
+  thing we are preventing — if fidelity drops, the user sees why.
 - **CSP**: `proxy.ts` builds `Content-Security-Policy` dynamically via
-  `lib/display/csp.ts` — `frame-src` allows loopback plus the
-  `CODY_PREVIEW_BASE_URL` wildcard when configured.
+  `lib/display/csp.ts`. `frame-src` and `connect-src` (the probe fetch and HMR
+  sockets need the latter) allow loopback, this host's own RFC1918/CGNAT
+  interface addresses on any port, and the `CODY_PREVIEW_BASE_URL` wildcard when
+  configured — nothing else, since candidates are minted as raw interface IPs.
+  **Trap**: CSP has no CIDR notation and permits a wildcard only as the leftmost
+  label, so ranges are emitted as exact per-interface hosts — Chromium silently
+  discards `http://192.168.*.*:*` as an invalid source, which would collapse
+  `frame-src` and block every direct preview. Public origins stay unframeable.
 - The Docker image installs `chromium` and sets `CODY_CHROMIUM_BIN` so both
-  `preview_screenshot` captures and streamed previews work out of the box.
+  `preview_screenshot` captures and the `stream` rung — the fallback that must
+  never be missing — work out of the box.
 - **Trap**: the display bus and the capability secret are process-local. A
   multi-process deployment (multiple Next.js workers or replicas) would need a
   shared store for both before display requests survive crossing processes.

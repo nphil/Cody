@@ -71,7 +71,7 @@ const SERVER_HOST_TOOLS: HostToolDefinition[] = [{
     properties: {
       url: { type: "string", description: "Container-local http(s) URL, for example http://127.0.0.1:3000" },
       title: { type: "string", description: "Optional short preview title." },
-      mode: { type: "string", enum: ["auto", "stream", "native"], description: "Prefer auto unless a transport is specifically required." },
+      mode: { type: "string", enum: ["auto", "stream", "native"], description: "Prefer auto: Cody picks the highest-fidelity preview that actually works. Pass stream or native only when one specifically is required." },
     },
     required: ["url"],
   },
@@ -561,7 +561,7 @@ export class AgentSessionWrapper {
   private async handleServerHostTool(id: string, toolName: string, event: AgentEvent): Promise<void> {
     if (toolName === "open_preview") {
       try {
-        const request = publishDisplayRequest(this._sessionId, event.arguments as Record<string, unknown>);
+        const request = await publishDisplayRequest(this._sessionId, event.arguments as Record<string, unknown>);
         // Tell the model whether anything is actually listening — it may have
         // called before its dev server finished booting. The probe runs where
         // the dev server runs, so it is authoritative in a way a browser
@@ -573,12 +573,22 @@ export class AgentSessionWrapper {
         } catch {
           reachable = false;
         }
+        // A port that answers on loopback but on no routable interface means
+        // the dev server bound 127.0.0.1: the panel still works, but only
+        // through the raster stream. The model is the one who can fix that, so
+        // say how. Deliberate stream/native modes are not second-guessed.
+        const loopbackOnly = reachable && request.requestedMode === "auto"
+          && !request.candidates.some((candidate) => candidate.kind === "direct");
+        const status = reachable
+          ? `Preview panel is now showing ${request.source.url} (request ${request.id}).`
+          : `Preview panel opened for ${request.source.url} (request ${request.id}), but nothing answered there yet — verify the server is running and listening on that port.`;
+        const hint = loopbackOnly
+          ? " That port is bound to loopback only, so the preview falls back to a streamed raster view. Restart the dev server listening on every interface (add `--host 0.0.0.0`, or run `npm run dev:lan` in this repo) and call open_preview again for the full-fidelity preview that loads the real origin."
+          : "";
         this.proc.sendFrame({
           type: "host_tool_result",
           id,
-          result: { content: [{ type: "text", text: reachable
-            ? `Preview panel is now showing ${request.source.url} (request ${request.id}).`
-            : `Preview panel opened for ${request.source.url} (request ${request.id}), but nothing answered there yet — verify the server is running and listening on that port.` }] },
+          result: { content: [{ type: "text", text: `${status}${hint}` }] },
         });
       } catch (error) {
         this.proc.sendFrame({
