@@ -61,6 +61,7 @@ export function SetupWizard({ engine, hasModelsUi, onDone, onDismiss }: {
     <Dialog open onOpenChange={(open) => { if (!open && !finishing) onDismiss(); }}>
       <DialogContent
         ariaLabel={t("setupWizard.title")}
+        onClose={finishing ? undefined : onDismiss}
         style={{
           width: isMobile ? "calc(100vw - 16px)" : 880,
           maxWidth: "calc(100vw - 16px)",
@@ -73,7 +74,7 @@ export function SetupWizard({ engine, hasModelsUi, onDone, onDismiss }: {
         }}
       >
         <div className="setup-wizard-head">
-          <DialogTitle style={{ fontSize: 16, margin: 0, fontWeight: 600 }}>{titles[step].title}</DialogTitle>
+          <DialogTitle style={{ fontSize: 16, margin: 0, fontWeight: 600, paddingRight: 36 }}>{titles[step].title}</DialogTitle>
           <p className="setup-wizard-subtitle">{titles[step].subtitle}</p>
           <p className="setup-wizard-step">
             {t("setupWizard.stepLabel", { current: String(stepIndex + 1), total: String(steps.length) })}

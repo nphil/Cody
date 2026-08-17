@@ -136,6 +136,7 @@ export function ModelCatalogPicker({ open, providerName, providerBaseUrl, existi
     <Dialog open onOpenChange={(o) => { if (!o) onClose(); }}>
       <DialogContent
         ariaLabel={t("modelsConfig.catalogTitle")}
+        onClose={onClose}
         style={{
           width: 720,
           maxWidth: "min(92vw, 720px)",
@@ -146,7 +147,7 @@ export function ModelCatalogPicker({ open, providerName, providerBaseUrl, existi
           overflow: "hidden",
         }}
       >
-        <DialogTitle style={{ margin: "14px 18px 8px", fontSize: 18 }}>{t("modelsConfig.catalogTitle")}</DialogTitle>
+        <DialogTitle style={{ margin: "14px 18px 8px", paddingRight: 36, fontSize: 18 }}>{t("modelsConfig.catalogTitle")}</DialogTitle>
 
         {/* Search */}
         <div style={{ padding: "8px 14px 12px", flexShrink: 0 }}>

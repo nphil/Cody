@@ -534,12 +534,14 @@ export function ConfirmDialog({
             onClick={() => onOpenChange(false)}
             style={{
               padding: "6px 14px",
+              minHeight: 32,
               background: "none",
               border: "1px solid var(--border)",
               borderRadius: "var(--radius-control)",
               color: "var(--text-muted)",
               cursor: "pointer",
               fontSize: 13,
+              touchAction: "manipulation",
             }}
           >
             {cancelLabel ?? "Cancel"}

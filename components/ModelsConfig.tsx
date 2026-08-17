@@ -1679,6 +1679,7 @@ export function AddProviderPicker({
     <Dialog open onOpenChange={(o) => { if (!o) onClose(); }}>
       <DialogContent
         ariaLabel={t("modelsConfig.addProvider")}
+        onClose={onClose}
         style={{
           width: 820,
           maxWidth: "min(92vw, 820px)",
@@ -1689,7 +1690,7 @@ export function AddProviderPicker({
           overflow: "hidden",
         }}
       >
-        <DialogTitle style={{ margin: "14px 18px 8px", fontSize: 18 }}>{t("modelsConfig.addProvider")}</DialogTitle>
+        <DialogTitle style={{ margin: "14px 18px 8px", paddingRight: 36, fontSize: 18 }}>{t("modelsConfig.addProvider")}</DialogTitle>
 
         {/* Search */}
         <div style={{ padding: "8px 14px 12px", flexShrink: 0 }}>
@@ -2136,7 +2137,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
             <DialogTitle style={{ fontSize: 16, margin: 0 }}>{t("modelsConfig.title")}</DialogTitle>
             <code style={{ fontSize: 11, color: "var(--text-muted)", fontFamily: "var(--font-mono)" }}>~/.omp/agent/models.yml</code>
           </div>
-          <button onClick={onClose} aria-label={t("modelsConfig.close")} title={t("modelsConfig.close")} style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 20, lineHeight: 1, padding: "2px 6px" }}>×</button>
+          <button onClick={onClose} aria-label={t("modelsConfig.close")} title={t("modelsConfig.close")} className="ui-focus-ring" style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 20, lineHeight: 1, width: 32, height: 32, minWidth: 32, minHeight: 32, display: "flex", alignItems: "center", justifyContent: "center", touchAction: "manipulation" }}>×</button>
         </div>)}
         {!embedded && onSelectTab && <SettingsTabs active="models" onSelect={onSelectTab} />}
 

@@ -463,7 +463,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                 style={{ width: "100%", height: 28, padding: "0 8px 0 28px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12, outline: "none" }}
               />
             </div>
-            <button type="button" onClick={onClose} aria-label="Close settings" style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 20, lineHeight: 1, padding: "2px 6px" }}>×</button>
+            <button type="button" onClick={onClose} aria-label="Close settings" className="ui-focus-ring" style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 20, lineHeight: 1, width: 32, height: 32, minWidth: 32, minHeight: 32, display: "flex", alignItems: "center", justifyContent: "center", touchAction: "manipulation" }}>×</button>
           </div>
         </header>
 

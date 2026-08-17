@@ -395,7 +395,8 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
                 )}
               </div>
               <DialogClose
-                style={{ flexShrink: 0, background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 18, lineHeight: 1, padding: "2px 6px" }}
+                className="ui-focus-ring"
+                style={{ flexShrink: 0, background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 18, lineHeight: 1, width: 32, height: 32, minWidth: 32, minHeight: 32, display: "flex", alignItems: "center", justifyContent: "center", touchAction: "manipulation" }}
                 aria-label={t("subagentTranscript.close")}
               >
                 ×

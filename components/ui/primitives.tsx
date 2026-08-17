@@ -8,6 +8,7 @@
 import { Dialog as BaseDialog } from "@base-ui/react/dialog";
 import { Tooltip as BaseTooltip } from "@base-ui/react/tooltip";
 import { Collapsible as BaseCollapsible } from "@base-ui/react/collapsible";
+import { X } from "lucide-react";
 import type React from "react";
 
 /* ---------------------------------- Dialog --------------------------------- */
@@ -24,11 +25,26 @@ export function Dialog({ open, onOpenChange, children }: {
   );
 }
 
-export function DialogContent({ children, className, style, ariaLabel }: {
+export function DialogContent({ children, className, style, ariaLabel, onClose }: {
   children: React.ReactNode;
   className?: string;
   style?: React.CSSProperties;
   ariaLabel?: string;
+  /**
+   * When provided, renders a visible close button (lucide X) pinned to the
+   * dialog surface's top-right corner — a touch-friendly close affordance
+   * for callers that have no device-independent Esc key and no close/cancel
+   * control of their own. Skip this prop when the dialog already renders
+   * its own close/cancel control; the button is absolutely positioned
+   * inside BaseDialog.Popup (already a `position: fixed` containing block)
+   * so it never scrolls away, but callers whose content can grow past
+   * `maxHeight` should keep managing their own internal scroll region (as
+   * the existing dialogs already do) rather than relying on this popup's
+   * own overflow, so the button doesn't get carried off with scrolled
+   * content. Callers should give their title element a little right
+   * padding/margin (~36px) so long titles don't run under the button.
+   */
+  onClose?: () => void;
 }) {
   return (
     <BaseDialog.Portal>
@@ -63,6 +79,30 @@ export function DialogContent({ children, className, style, ariaLabel }: {
           ...style,
         }}
       >
+        {onClose && (
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="ui-focus-ring"
+            style={{
+              position: "absolute", top: 8, right: 8, zIndex: 1,
+              width: 32, height: 32, minWidth: 32, minHeight: 32,
+              display: "flex", alignItems: "center", justifyContent: "center",
+              background: "transparent",
+              border: "none",
+              borderRadius: "var(--radius-control)",
+              color: "var(--text-dim)",
+              cursor: "pointer",
+              touchAction: "manipulation",
+              transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
+            }}
+            onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = "var(--text-dim)"; }}
+          >
+            <X size={16} aria-hidden="true" />
+          </button>
+        )}
         {children}
       </BaseDialog.Popup>
     </BaseDialog.Portal>

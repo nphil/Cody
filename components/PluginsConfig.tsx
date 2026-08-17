@@ -785,6 +785,7 @@ export function PluginsConfig({
           <button
             onClick={onClose}
             aria-label={t("pluginsConfig.close")}
+            className="ui-focus-ring"
             style={{
               background: "none",
               border: "none",
@@ -792,7 +793,14 @@ export function PluginsConfig({
               cursor: "pointer",
               fontSize: 20,
               lineHeight: 1,
-              padding: "2px 6px",
+              width: 32,
+              height: 32,
+              minWidth: 32,
+              minHeight: 32,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              touchAction: "manipulation",
             }}
           >
             ×
