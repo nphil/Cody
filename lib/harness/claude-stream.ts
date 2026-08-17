@@ -65,6 +65,7 @@ export function buildClaudeTurnArgv(input: TurnArgvInput): string[] {
     "--permission-mode",
     "acceptEdits",
   ];
+  if (input.displayMcpConfig) argv.push("--mcp-config", input.displayMcpConfig);
   const id = input.engineSessionId;
   if (id) argv.push(...(input.resume ? ["--resume", id] : ["--session-id", id]));
   return argv;

@@ -7,6 +7,7 @@ import type { WebSessionState } from "../pi-types";
 import { buildClaudeTurnArgv, createClaudeTurnState, translateClaudeLine } from "./claude-stream";
 import { buildCodexTurnArgv, createCodexTurnState, translateCodexLine } from "./codex-stream";
 import { resolveEngineBin } from "./engine-bin";
+import { claudeDisplayMcpConfig, codexDisplayMcpArgs } from "../display/engine-tools";
 import { engineSessionTitle, getEngineSession, renameEngineSession, upsertEngineSession } from "./engine-sessions";
 import type { EngineEvent, EngineSession, EngineSessionOptions } from "./types";
 
@@ -84,6 +85,9 @@ export interface TurnArgvInput {
   engineSessionId: string | null;
   /** True when a previous turn already created the engine-side session. */
   resume: boolean;
+  /** Per-turn, session-scoped Cody display MCP launch arguments. */
+  displayMcpConfig?: string;
+  displayMcpArgs?: string[];
 }
 
 /** Everything that differs between one turn-based engine and another. */
@@ -372,12 +376,16 @@ export class TurnEngineSession implements EngineSession {
     // a turn that died before reaching the engine (missing auth, bad argv) look
     // resumable, and every later turn would --resume a session never created.
     const state = this.spec.createState({ engineSessionId: null, model: this.model });
+    const displayMcpConfig = this.spec.id === "claude" ? claudeDisplayMcpConfig(this._sessionId) : undefined;
+    const displayMcpArgs = this.spec.id === "codex" ? codexDisplayMcpArgs(this._sessionId) : undefined;
     const argv = this.spec.buildArgv({
       prompt,
       cwd: this.cwd,
       sessionId: this._sessionId,
       engineSessionId: this.engineSessionId,
       resume: this.engineSessionExists && !!this.engineSessionId,
+      displayMcpConfig,
+      displayMcpArgs,
     });
 
     let child: ChildProcess;

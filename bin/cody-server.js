@@ -5,11 +5,16 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 
 const http = require("node:http");
+const { randomBytes } = require("node:crypto");
+const path = require("node:path");
 const next = require("next");
 const { WebSocket, WebSocketServer } = require("ws");
 const { createJiti } = require("jiti");
 const jiti = createJiti(__filename);
 const { getUserForCredentials, isAuthRequired } = jiti("../lib/auth/guard.ts");
+const { canAccessSession } = jiti("../lib/auth/session-owners.ts");
+const { attachDisplaySocket, disposeDisplayProviders } = jiti("../lib/display/provider.ts");
+const { closeNativeGateway, proxyNativeHttp, proxyNativeUpgrade } = jiti("../lib/display/native-gateway.ts");
 const { getTerminalManager } = jiti("../lib/terminal-manager.ts");
 
 function parseArgs(argv) {
@@ -44,17 +49,35 @@ function originAllowed(request) {
 }
 
 function terminalPath(url) { return /^\/api\/terminals\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/socket$/i.test(new URL(url, "http://localhost").pathname); }
+function displayPath(url) { return new URL(url, "http://localhost").pathname === "/api/display/socket"; }
 
 async function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv);
+  process.env.CODY_INTERNAL_DISPLAY_SECRET ||= randomBytes(32).toString("base64url");
+  process.env.CODY_INTERNAL_DISPLAY_ORIGIN = `http://127.0.0.1:${options.port}`;
+  process.env.CODY_PACKAGE_DIR ||= path.resolve(__dirname, "..");
   const app = next({ dev: options.dev, hostname: options.hostname, port: options.port });
   await app.prepare();
   const handle = app.getRequestHandler();
   const upgrade = app.getUpgradeHandler();
   const terminalWs = new WebSocketServer({ noServer: true, maxPayload: 1_100_000 });
-  const server = http.createServer((request, response) => handle(request, response));
+  const displayWs = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
+  const server = http.createServer((request, response) => {
+    if (!proxyNativeHttp(request, response)) handle(request, response);
+  });
 
   server.on("upgrade", (request, socket, head) => {
+    if (proxyNativeUpgrade(request, socket, head)) return;
+    if (displayPath(request.url || "")) {
+      const user = getUserForCredentials(request.headers.cookie || null, request.headers.authorization || null);
+      if (isAuthRequired() && !user) { reject(socket, 401, "Unauthorized"); return; }
+      if (!originAllowed(request)) { reject(socket, 403, "Forbidden"); return; }
+      const parsed = new URL(request.url, "http://localhost");
+      const sessionId = parsed.searchParams.get("sessionId") || "";
+      if (!sessionId || !canAccessSession(sessionId, user)) { reject(socket, 404, "Not Found"); return; }
+      displayWs.handleUpgrade(request, socket, head, (ws) => attachDisplaySocket(sessionId, ws));
+      return;
+    }
     if (!terminalPath(request.url || "")) {
       void upgrade(request, socket, head).catch(() => socket.destroy());
       return;
@@ -92,6 +115,9 @@ async function main(argv = process.argv.slice(2)) {
   const shutdown = () => {
     getTerminalManager().dispose();
     terminalWs.close();
+    void disposeDisplayProviders();
+    closeNativeGateway();
+    displayWs.close();
     server.close(() => { void app.close(); });
   };
   process.once("SIGINT", shutdown);
@@ -101,4 +127,4 @@ async function main(argv = process.argv.slice(2)) {
 }
 
 if (require.main === module) main().catch((error) => { console.error(error); process.exitCode = 1; });
-module.exports = { main, parseArgs, terminalPath, originAllowed };
+module.exports = { main, parseArgs, terminalPath, displayPath, originAllowed };

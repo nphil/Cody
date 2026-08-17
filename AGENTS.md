@@ -77,6 +77,9 @@ app/api/
   agent/[id]/route.ts             GET state | POST any RPC command
   agent/[id]/events/route.ts      GET SSE stream
   agent/running/events/route.ts   GET SSE stream of currently-running session ids
+  agent/[id]/display/route.ts     POST publish a display request | GET latest (auth-gated)
+  agent/[id]/display/events/route.ts GET SSE stream of display requests (snapshot + live)
+  internal/display/route.ts       POST publish from engine MCP servers (capability-token auth)
   auth/**                         provider list, login/logout, API keys (via RPC)
   cwd/validate/route.ts           POST validate/select a cwd
   default-cwd/route.ts            POST create ~/omp-cwd-YYYYMMDD
@@ -106,6 +109,16 @@ lib/
   draft-store.ts       local draft persistence helpers
   context-usage.ts     derives idle/reconnect gauge usage from persisted messages
   env.ts               readEnv(): CODY_* config with OMP_WEB_* fallback
+  display/             universal display/preview surface:
+    types.ts           DisplayRequestV1 + bus event types
+    validation.ts      loopback-only http(s) URL normalization (rejects credentials)
+    bus.ts             globalThis per-session latest+listeners; publish/subscribe/alias
+    capability.ts      HMAC session-scoped tokens (CODY_INTERNAL_DISPLAY_SECRET/ORIGIN)
+    provider.ts        RasterWebProvider: puppeteer-core + system Chromium → JPEG WS stream
+    native-gateway.ts  optional CODY_PREVIEW_BASE_URL wildcard-subdomain reverse proxy
+    engine-tools.ts    bundled display-MCP launch config for Claude (JSON) / Codex (TOML)
+    access.ts          authorizeDisplaySession(): request auth for display routes
+    csp.ts             buildContentSecurityPolicy() — dynamic frame-src for proxy.ts
   file-access.ts       allowed file roots for /api/files and worktrees
   harness/             pluggable engine seam: adapters (omp/claude/codex), runtime
                        selection state, turn-based sessions + stream translators,
@@ -144,6 +157,9 @@ components/
   DiffView.tsx        folding unified-diff renderer (FileViewer + GitPanel)
   GitPanel.tsx        right-panel Git tool: changed files + diffs + branch info
   TasksPanel.tsx      right-panel Tasks tool: .cody/tasks.json runner
+  PreviewPanel.tsx    right-panel Preview: streamed Chromium canvas (WS JPEG + input
+                      forwarding) or native iframe for agent display requests, plus
+                      legacy manual URL mode
   UpdatesPanel.tsx    right-panel Updates tool: app/omp/skills update status
   InfoPanel.tsx       right-panel Info tool: versions + workspace diagnostics
   ChatMinimap.tsx     scroll minimap alongside the message list
@@ -161,9 +177,17 @@ hooks/
   useAgentSession.ts       messages + streaming + SSE + fork/navigate/reconciliation logic
   useAudio.ts              completion sound + browser AudioContext unlock
   useDragDrop.ts           shared drag/drop state
+  useDisplayRequests.ts    display-request SSE → snapshot/live request state
   useIsMobile.ts           responsive breakpoint hook
   usePrefersReducedMotion.ts OS reduce-motion preference (SMIL-safe)
   useTheme.ts              theme state (localStorage key "omp-theme")
+
+bin/
+  cody-server.js           custom server; also WS upgrade for /api/display/socket
+                           (stream frames + input) and native-gateway host routing;
+                           mints the display capability secret at boot
+  cody-display-mcp.js      bundled stdio MCP server exposing open_preview to
+                           Claude/Codex engines (posts to /api/internal/display)
 ```
 
 ---
@@ -325,7 +349,8 @@ appears without a Cody change.
   is declared before the stored-URL auto-load effect and sets `autoLoadedRef`
   so the stored URL cannot race the requested one on first mount.
 - Host tools exist only on omp's rpc-ui protocol; turn engines (Claude Code /
-  Codex) get the assistant-text detection path only.
+  Codex) get the assistant-text detection path here, plus `open_preview` via
+  the bundled display MCP server (see `lib/display/` below).
 
 ### Preview screenshots (`lib/preview-screenshot.ts`)
 - `preview_screenshot` is a SERVER-implemented host tool (rpc-manager
@@ -353,6 +378,47 @@ appears without a Cody change.
   screenshot rides the existing image-attach path into whichever engine is
   active (turn engines currently reject image prompts with
   `images_unsupported`, same as a manual attach).
+
+### Universal display/preview surface (`lib/display/`)
+- **Session-scoped request bus** (`bus.ts`): `DisplayRequestV1` per session in a
+  `globalThis` map (latest + listeners, hot-reload safe). Engines that rekey a
+  session mid-run (`session_info_update`) call `aliasDisplaySession(old, new)` —
+  the alias chain, latest request, and listeners all move to the new id.
+- **Loopback only**: `validation.ts` accepts http(s) URLs on
+  localhost/127.0.0.1/[::1] and rejects credentials. The preview surface is for
+  dev servers the agent started, not a general browser.
+- **Transport selection** (`native-gateway.ts` `resolveDisplayTransport`):
+  the zero-config default is `stream` — a server-side Chromium
+  (`CODY_CHROMIUM_BIN`, puppeteer-core, CDP screencast) renders the URL and
+  ships JPEG frames + pointer/keyboard input over the
+  `/api/display/socket?sessionId=` WS handled in `bin/cody-server.js`.
+  Setting `CODY_PREVIEW_BASE_URL` opts into `native`: a wildcard-subdomain
+  HTTP+WS reverse proxy that strips cookies/auth headers so the preview iframe
+  never carries Cody credentials into the dev server.
+- **Capability tokens** (`capability.ts`): engine-side MCP servers post to
+  `/api/internal/display` with an HMAC session-scoped token.
+  `CODY_INTERNAL_DISPLAY_SECRET`/`CODY_INTERNAL_DISPLAY_ORIGIN` are minted by
+  `bin/cody-server.js` at boot and live only in the environment — never
+  persisted.
+- **Per-engine wiring**: omp gets a Cody-owned `open_preview` host tool —
+  `lib/rpc-manager.ts` sends `set_host_tools` at session start, merges it into
+  any browser-registered tool list, and routes the `host_tool_call` to
+  `publishDisplayRequest`. Claude/Codex get the bundled stdio MCP server
+  (`bin/cody-display-mcp.js`) via `lib/display/engine-tools.ts` —
+  `--mcp-config` JSON for Claude, `-c` TOML args for Codex.
+- **Client**: `hooks/useDisplayRequests.ts` subscribes to the SSE route;
+  `AppShell` auto-opens the right panel in `preview` mode on live requests —
+  the explicit, server-driven trigger alongside the client-side URL sniffing
+  in `lib/preview-autoopen.ts` above; `PreviewPanel` renders the stream
+  canvas or native iframe.
+- **CSP**: `proxy.ts` builds `Content-Security-Policy` dynamically via
+  `lib/display/csp.ts` — `frame-src` allows loopback plus the
+  `CODY_PREVIEW_BASE_URL` wildcard when configured.
+- The Docker image installs `chromium` and sets `CODY_CHROMIUM_BIN` so both
+  `preview_screenshot` captures and streamed previews work out of the box.
+- **Trap**: the display bus and the capability secret are process-local. A
+  multi-process deployment (multiple Next.js workers or replicas) would need a
+  shared store for both before display requests survive crossing processes.
 
 ### Two kinds of branching — don't confuse them
 - **Fork** (Fork button on user message): creates a new independent `.jsonl` file. Shown as a child in the sidebar tree via `parentSession` header field.

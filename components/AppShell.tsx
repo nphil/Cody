@@ -16,6 +16,7 @@ import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { translate, useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useDisplayRequests } from "@/hooks/useDisplayRequests";
 import { copyText } from "@/lib/clipboard";
 import { getFileName } from "@/lib/file-paths";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
@@ -31,7 +32,7 @@ import type { EnginesPayload } from "./EnginePicker";
 import { STORAGE_KEYS } from "@/lib/storage-keys";
 import { createPreviewAutoOpener, type PreviewAutoOpener } from "@/lib/preview-autoopen";
 import { normalizePreviewUrl, probeLoopbackUrl } from "@/lib/preview-url";
-import type { PreviewOpenRequest } from "./PreviewPanel";
+import type { DisplayRequestV1 } from "@/lib/display/types";
 
 // Loaded on demand: the config modals open on click and the file viewer only
 // renders once a file tab exists, so none of them belong in the first-load chunk.
@@ -560,6 +561,18 @@ export function AppShell() {
     setMountedPanels((prev) => (prev.has(mode) ? prev : new Set([...prev, mode])));
     try { localStorage.setItem(STORAGE_KEYS.workspacePanel, mode); } catch { /* storage may be unavailable */ }
   }, []);
+  const handleLiveDisplayRequest = useCallback((request: DisplayRequestV1) => {
+    // A live request marks its (session, url) pair handled so follow-up prose
+    // mentions of the same URL do not re-open a panel the user closed.
+    if (request.source.kind === "web") {
+      previewAutoOpenerRef.current?.markHandled(normalizePreviewUrl(request.source.url) ?? request.source.url, request.sessionId);
+    }
+    setRightPanelMode("preview");
+    setRightPanelOpen(true);
+    // On mobile the workspace panel is full-screen; close the drawer so it shows.
+    if (isMobile) setSidebarOpen(false);
+  }, [isMobile, setRightPanelMode]);
+  const displayRequest = useDisplayRequests(selectedSession?.id ?? null, handleLiveDisplayRequest);
   // Restore the last-used tool after mount (localStorage is unavailable during SSR).
   useEffect(() => {
     try {
@@ -956,17 +969,23 @@ export function AppShell() {
 
   // --- Preview auto-open --------------------------------------------------
   // Two ways the agent reaches the Preview panel: the open_preview host tool
-  // (deliberate, opens immediately) and loopback URLs mentioned in live
-  // assistant replies (auto-open once the URL actually answers — policy in
-  // lib/preview-autoopen).
-  const previewRequestTokenRef = useRef(0);
-  const [previewRequest, setPreviewRequest] = useState<PreviewOpenRequest | null>(null);
-  const openPreviewPanel = useCallback((url: string) => {
-    setPreviewRequest({ url, token: ++previewRequestTokenRef.current });
+  // (server-settled — it publishes on the display bus and arrives back here
+  // via the display SSE) and loopback URLs mentioned in live assistant
+  // replies (auto-open once the URL actually answers — policy in
+  // lib/preview-autoopen). Both funnel through the same display-request bus
+  // so every trigger renders through the same transport-aware panel.
+  const openPreviewPanel = useCallback((url: string, sessionId?: string | null) => {
     setRightPanelMode("preview");
     setRightPanelOpen(true);
     // On mobile the workspace panel is full-screen; close the drawer so it shows.
     if (isMobile) setSidebarOpen(false);
+    const sid = sessionId ?? previewSessionIdRef.current;
+    if (!sid) return;
+    void fetch(`/api/agent/${encodeURIComponent(sid)}/display`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url, mode: "auto" }),
+    }).catch(() => { /* the panel's manual URL bar remains usable */ });
   }, [isMobile, setRightPanelMode]);
 
   // Latest-value refs: the auto-opener lives for the whole app and settles
@@ -995,7 +1014,7 @@ export function AppShell() {
     const normalized = normalizePreviewUrl(url);
     if (!normalized) return;
     previewAutoOpenerRef.current?.markHandled(normalized, sessionId ?? null);
-    openPreviewPanel(normalized);
+    openPreviewPanel(normalized, sessionId ?? null);
   }, [openPreviewPanel]);
 
   const handlePreviewUrlsSeen = useCallback((urls: string[], sessionId?: string) => {
@@ -1877,8 +1896,9 @@ export function AppShell() {
           {mountedPanels.has("preview") && (
             <PreviewPanel
               cwd={activeCwd}
+              sessionId={selectedSession?.id ?? null}
+              request={displayRequest}
               active={rightPanelMode === "preview" && rightPanelOpen}
-              request={previewRequest}
               onOpenTasks={() => setRightPanelMode("tasks")}
               onCaptureToChat={handleCaptureToChat}
             />

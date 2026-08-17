@@ -1,6 +1,7 @@
 import { existsSync } from "fs";
 import { homedir } from "os";
 import { renameSessionOwner } from "./auth/session-owners";
+import { aliasDisplaySession, publishDisplayRequest } from "./display/bus";
 import { getHarness } from "./harness";
 import type { EngineSession, EngineSessionOptions } from "./harness/types";
 import { validateAgentImages } from "./image-attachments";
@@ -46,7 +47,9 @@ const READY_TIMEOUT_MS = 120_000;
  * ride along every set_host_tools registration and settle in handleFrame with
  * no attached UI required. preview_screenshot renders a loopback URL in a
  * headless Chromium where the dev server actually runs, so the model can SEE
- * its work — including with every browser tab closed.
+ * its work — including with every browser tab closed. open_preview publishes
+ * a display request on the session bus (lib/display/bus.ts), auto-opening
+ * Cody's Preview panel over SSE for any watching browser.
  */
 const SERVER_HOST_TOOLS: HostToolDefinition[] = [{
   name: "preview_screenshot",
@@ -57,6 +60,18 @@ const SERVER_HOST_TOOLS: HostToolDefinition[] = [{
       url: { type: "string", description: "Loopback URL to capture, e.g. http://localhost:3000" },
       width: { type: "number", description: "Viewport width in px (default 1280)" },
       height: { type: "number", description: "Viewport height in px (default 800)" },
+    },
+    required: ["url"],
+  },
+}, {
+  name: "open_preview",
+  description: "Open or refresh a running local web UI in Cody's Preview panel. Call after starting or restarting a dev server and whenever its URL changes. The URL must use localhost or 127.0.0.1.",
+  parameters: {
+    type: "object",
+    properties: {
+      url: { type: "string", description: "Container-local http(s) URL, for example http://127.0.0.1:3000" },
+      title: { type: "string", description: "Optional short preview title." },
+      mode: { type: "string", enum: ["auto", "stream", "native"], description: "Prefer auto unless a transport is specifically required." },
     },
     required: ["url"],
   },
@@ -544,6 +559,37 @@ export class AgentSessionWrapper {
    * reject paths, never routed to a browser.
    */
   private async handleServerHostTool(id: string, toolName: string, event: AgentEvent): Promise<void> {
+    if (toolName === "open_preview") {
+      try {
+        const request = publishDisplayRequest(this._sessionId, event.arguments as Record<string, unknown>);
+        // Tell the model whether anything is actually listening — it may have
+        // called before its dev server finished booting. The probe runs where
+        // the dev server runs, so it is authoritative in a way a browser
+        // probe never was.
+        let reachable = true;
+        try {
+          const probe = await fetch(request.source.url, { signal: AbortSignal.timeout(3_000), redirect: "manual" });
+          void probe.body?.cancel().catch(() => {});
+        } catch {
+          reachable = false;
+        }
+        this.proc.sendFrame({
+          type: "host_tool_result",
+          id,
+          result: { content: [{ type: "text", text: reachable
+            ? `Preview panel is now showing ${request.source.url} (request ${request.id}).`
+            : `Preview panel opened for ${request.source.url} (request ${request.id}), but nothing answered there yet — verify the server is running and listening on that port.` }] },
+        });
+      } catch (error) {
+        this.proc.sendFrame({
+          type: "host_tool_result",
+          id,
+          isError: true,
+          result: { content: [{ type: "text", text: error instanceof Error ? error.message : "Invalid preview request" }] },
+        });
+      }
+      return;
+    }
     if (toolName !== "preview_screenshot") {
       this.rejectUnexpectedHostTool(event);
       return;
@@ -1101,7 +1147,7 @@ export class AgentSessionWrapper {
 
       case "host_tool_result": {
         if (typeof command.id === "string") this.pendingHostTools.delete(command.id);
-        await this.proc.sendCommand(command as { type: string });
+        this.proc.sendFrame(command as { type: string; [key: string]: unknown });
         return null;
       }
 
@@ -1119,7 +1165,7 @@ export class AgentSessionWrapper {
 
       case "host_uri_result": {
         if (typeof command.id === "string") this.pendingHostUris.delete(command.id);
-        await this.proc.sendCommand(command as { type: string });
+        this.proc.sendFrame(command as { type: string; [key: string]: unknown });
         return null;
       }
 
@@ -1296,6 +1342,7 @@ async function startEngineSession(
     // the session becomes "unowned" — visible to every account — as soon as
     // the engine announces its real id (Codex thread ids arrive mid-turn).
     renameSessionOwner(oldId, newId);
+    aliasDisplaySession(oldId, newId);
   });
   // A turn-based engine has no frame pipeline calling notifyRunningChange the
   // way handleFrame does for omp, so drive the sidebar's running indicator (and

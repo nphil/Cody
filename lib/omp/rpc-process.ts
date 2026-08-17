@@ -271,8 +271,9 @@ export class RpcProcess {
     });
   }
 
-  /** Fire-and-forget frame write (extension_ui_response, host_tool_result). */
-  sendFrame(frame: { type: string; [key: string]: unknown }): void {
+  /** Write an already-correlated protocol frame without allocating a command id
+   * or adding an entry to the pending-command map. */
+  sendFrame(frame: RpcFrame): void {
     if (this.exited) return;
     this.writeFrame(frame, () => {});
   }

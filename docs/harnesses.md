@@ -34,10 +34,11 @@ into the event stream the UI renders. That buys a plain, reliable chat:
 prompt, streamed reply, tool activity, abort. What it does not buy (yet):
 forking, compaction, thinking levels, model switching from the composer,
 skills/plugins/MCP management, transcript replay across server restarts, or
-the agent-callable host tools (`open_file` / `open_url` / `open_preview` /
-`notify` / `preview_screenshot` — omp's rpc-ui bridge; loopback URLs in
-assistant replies still auto-open the Preview panel on every engine, and the
-Preview panel's capture button screenshots the app server-side regardless of
+the agent-callable host tools (`open_file` / `open_url` / `notify` /
+`preview_screenshot` — omp's rpc-ui bridge; `open_preview` still works via
+the bundled display MCP server, loopback URLs in assistant replies still
+auto-open the Preview panel on every engine, and the Preview panel's capture
+button screenshots the app server-side regardless of
 engine) — those surfaces hide automatically via capability flags. Both engines run
 non-interactively with edits auto-accepted inside the workspace (there is no
 approval channel in their non-interactive modes) — treat the workspace as
@@ -72,6 +73,11 @@ supports custom providers — local inference stays reachable on both paths.
   their transcripts (`cody-engine-sessions.json`).
 - `engine-bin.ts` / `install.ts` — binary probing and on-demand npm install
   into the tools prefix.
+- `../display/engine-tools.ts` — display-tool launch configs for engines
+  that speak MCP: `claudeDisplayMcpConfig()` (JSON for `--mcp-config`) and
+  `codexDisplayMcpArgs()` (`-c` TOML overrides), both wrapping
+  `createDisplayMcpLaunch()` (bundled `bin/cody-display-mcp.js` + internal
+  endpoint + session-scoped capability token).
 - API: `GET /api/engines`, `POST /api/engines/select`,
   `POST /api/engines/install` (admin-only mutations).
 
@@ -91,7 +97,20 @@ tolerates.
    with a persistent RPC mode comparable to omp's can implement
    `EngineSession` directly instead.
 4. Give it `installSpec`/`authHint` so the picker can install and explain it.
-5. Run the suite: `npm run typecheck && npm run lint && npm test`.
+5. Wire the display tool so the engine can open Cody's Preview panel.
+   Two existing shapes:
+   - **Host tool** (omp): if the engine has a host-tool channel, register a
+     Cody-owned `open_preview` tool at session start (omp uses
+     `set_host_tools` in `lib/rpc-manager.ts`) and route its tool call to
+     `publishDisplayRequest()`.
+   - **Stdio MCP** (Claude Code / Codex): if the engine can load MCP servers,
+     pass the bundled `bin/cody-display-mcp.js` via
+     `lib/display/engine-tools.ts` — `claudeDisplayMcpConfig(sessionId)` as a
+     `--mcp-config` JSON blob, or `codexDisplayMcpArgs(sessionId)` as `-c`
+     TOML args (see `claude-stream.ts` / `codex-stream.ts` /
+     `turn-session.ts`). The MCP server posts to `/api/internal/display`
+     with the capability token minted per session — no Cody cookie needed.
+6. Run the suite: `npm run typecheck && npm run lint && npm test`.
 
 Cursor, Kilo Code, Cline, Pi and friends are all candidates — anything with
 a headless mode and a session-resume story fits the same mold.

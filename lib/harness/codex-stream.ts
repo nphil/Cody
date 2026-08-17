@@ -55,6 +55,7 @@ export function createCodexTurnState(
  * directories.
  */
 export function buildCodexTurnArgv(input: TurnArgvInput): string[] {
+  const prefix = input.displayMcpArgs ?? [];
   const tail = [
     "--json",
     "--color",
@@ -66,9 +67,9 @@ export function buildCodexTurnArgv(input: TurnArgvInput): string[] {
     "--skip-git-repo-check",
   ];
   if (input.resume && input.engineSessionId) {
-    return ["exec", "resume", input.engineSessionId, input.prompt, ...tail];
+    return [...prefix, "exec", "resume", input.engineSessionId, input.prompt, ...tail];
   }
-  return ["exec", input.prompt, ...tail];
+  return [...prefix, "exec", input.prompt, ...tail];
 }
 
 function assistantMessage(state: TurnStreamState, content: Array<Record<string, unknown>>): Record<string, unknown> {

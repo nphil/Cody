@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { isApiRequestOriginAllowed, shouldCheckApiRequestOrigin } from "@/lib/request-security";
 import { getUserForCredentials, isAuthRequired } from "@/lib/auth/guard";
+import { buildContentSecurityPolicy } from "@/lib/display/csp";
 
 /**
  * The auth perimeter. Every request passes through here; a browser signs in on
@@ -24,6 +25,7 @@ const PUBLIC_EXACT = new Set([
   "/icon-512.png",
   "/icon-maskable-192.png",
   "/icon-maskable-512.png",
+  "/api/internal/display",
 ]);
 
 function isPublicPath(pathname: string): boolean {
@@ -57,7 +59,9 @@ export function proxy(request: NextRequest) {
   if (shouldCheckApiRequestOrigin(request) && !isApiRequestOriginAllowed(request)) {
     return NextResponse.json({ error: "Cross-origin API requests are not allowed" }, { status: 403 });
   }
-  return NextResponse.next();
+  const response = NextResponse.next();
+  response.headers.set("Content-Security-Policy", buildContentSecurityPolicy());
+  return response;
 }
 
 export const config = { matcher: "/:path*" };

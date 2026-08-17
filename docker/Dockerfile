@@ -31,12 +31,14 @@ FROM node:22-bookworm-slim AS runtime
 #                      only enabled when credentials are configured)
 #   procps/curl:       healthcheck + debug
 #   chromium/fonts:    headless renderer behind the preview_screenshot host
-#                      tool and the Preview panel's capture button — the
-#                      agent seeing its own work is core product, and a
-#                      post-hoc apt install would not survive image updates.
-#                      Fonts cover what screenshots must render faithfully:
-#                      Latin metrics (liberation), CJK (Cody ships ja/zh-CN
-#                      UIs and the owner's apps use them), and emoji.
+#                      tool, the Preview panel's capture button, and the
+#                      zero-config streamed Preview provider — the agent
+#                      seeing its own work is core product, and a post-hoc
+#                      apt install would not survive image updates.
+#                      Fonts cover what previews and screenshots must render
+#                      faithfully: Latin metrics (liberation), CJK (Cody
+#                      ships ja/zh-CN UIs and the owner's apps use them),
+#                      and emoji.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     git gh curl wget ca-certificates procps openssh-client openssh-server \

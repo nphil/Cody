@@ -20,7 +20,7 @@ const nextConfig = (phase: string): NextConfig => {
     outputFileTracingRoot: process.cwd(),
     // jiti transpiles OMP's settings schema at request time and resolves its
     // own runtime files by path; bundling it breaks those lookups.
-    serverExternalPackages: ["node-pty", "undici", "ws", "jiti"],
+    serverExternalPackages: ["node-pty", "undici", "ws", "jiti", "puppeteer-core", "http-proxy"],
     webpack(config: Parameters<NonNullable<NextConfig["webpack"]>>[0]) {
       // Next's entrypoint tracer does not automatically reject dynamic paths
       // outside the project root. Add parent/profile patterns to its ignore list
@@ -52,11 +52,6 @@ const nextConfig = (phase: string): NextConfig => {
         { key: "X-Frame-Options", value: "DENY" },
         { key: "Referrer-Policy", value: "no-referrer" },
         { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
-        // frame-src: the Preview panel embeds the user's own dev server, so
-        // loopback origins (any port) are allowed to frame INTO Cody. This is
-        // unrelated to frame-ancestors 'none', which still stops anything from
-        // framing Cody itself.
-        { key: "Content-Security-Policy", value: "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; frame-src 'self' http://localhost:* http://127.0.0.1:* https://localhost:* https://127.0.0.1:*; object-src 'none'; worker-src 'self'; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; connect-src 'self' ws: wss: http://localhost:* http://127.0.0.1:* https://localhost:* https://127.0.0.1:*; font-src 'self' data:" },
       ];
       const headers = [
         {

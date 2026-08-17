@@ -11,7 +11,7 @@ import type {
   SessionTreeNode,
 } from "@/lib/types";
 import { normalizeToolCalls } from "@/lib/normalize";
-import { extractLoopbackUrls, normalizePreviewUrl, probeLoopbackUrl } from "@/lib/preview-url";
+import { extractLoopbackUrls, normalizePreviewUrl } from "@/lib/preview-url";
 import { derivePersistedContextUsage, type ContextUsageValue } from "@/lib/context-usage";
 import type { ThinkingModelMeta } from "@/lib/thinking-levels";
 import { sendAgentCommand } from "@/lib/agent-client";
@@ -361,8 +361,9 @@ export interface UseAgentSessionOptions {
   setToolPreset?: (preset: "none" | "default" | "full") => void;
   /** Opens a file in the web UI's file viewer (used by the open_file host tool). */
   onOpenFile?: (filePath: string, name: string, sessionId?: string) => void;
-  /** Shows a loopback URL in the workspace Preview panel (open_preview host
-   *  tool, and open_url calls that target localhost). */
+  /** Shows a loopback URL in the workspace Preview panel (open_url calls that
+   *  target localhost; the open_preview host tool settles server-side and
+   *  reaches the panel through the display-request SSE instead). */
   onOpenPreview?: (url: string, sessionId?: string) => void;
   /** Loopback URLs the assistant mentioned in a live reply — candidates for
    *  auto-opening the Preview panel once something answers there. */
@@ -1280,15 +1281,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       },
     },
     {
-      name: "open_preview",
-      description: "Show a locally served web app in Cody's Preview panel, embedded in the workspace beside the chat. Call this with the full URL (e.g. http://localhost:3000) after starting or restarting a local dev server, or whenever the user should see a local web page. Only loopback URLs (localhost / 127.0.0.1) can be embedded; use open_url for anything else.",
-      parameters: {
-        type: "object",
-        properties: { url: { type: "string", description: "Loopback URL to show, e.g. http://localhost:3000" } },
-        required: ["url"],
-      },
-    },
-    {
       name: "notify",
       description: "Show a browser notification to the user.",
       parameters: {
@@ -1417,26 +1409,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           }
         }
         await respondHostTool(sid, id, path ? `Opened ${path}` : "No path provided", !path);
-        break;
-      }
-      case "open_preview": {
-        const raw = str(args.url) ?? "";
-        const url = normalizePreviewUrl(raw);
-        if (!url) {
-          await respondHostTool(sid, id, "Only loopback URLs (http://localhost:PORT or http://127.0.0.1:PORT) can be shown in the Preview panel. Use open_url for other pages.", true);
-          break;
-        }
-        if (!onOpenPreview) {
-          await respondHostTool(sid, id, "The Preview panel is not available in this view", true);
-          break;
-        }
-        onOpenPreview(url, sid);
-        // Tell the model whether anything is actually listening — it may
-        // have called before its dev server finished booting.
-        const reachable = await probeLoopbackUrl(url, 3_000);
-        await respondHostTool(sid, id, reachable
-          ? `Preview panel is now showing ${url}`
-          : `Preview panel opened for ${url}, but nothing answered there yet — verify the server is running and listening on that port.`);
         break;
       }
       default:
