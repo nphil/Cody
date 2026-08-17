@@ -1,9 +1,10 @@
 "use client";
 
-import { AlertCircle, Check, Cpu, Download, Loader2, LogOut, ShieldCheck, Trash2, Upload, UserRoundPlus, X } from "lucide-react";
+import { AlertCircle, Check, Cpu, Download, Loader2, LogOut, RefreshCw, ShieldCheck, Trash2, Upload, UserRoundPlus, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { chipStyle, nativeInputStyle, nativeOptionStyle, nativeSelectStyle, NativeSetting } from "./primitives";
 import { useEngineInstalls } from "@/hooks/useEngineInstalls";
+import type { EngineUpdateStatus } from "@/lib/harness/updates";
 import type { EngineSummary, EnginesPayload } from "../EnginePicker";
 
 /**
@@ -144,6 +145,9 @@ function AgentEngineSection({ isMobile }: { isMobile: boolean }) {
   const [data, setData] = useState<EnginesPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selecting, setSelecting] = useState<string | null>(null);
+  const [updates, setUpdates] = useState<Record<string, EngineUpdateStatus>>({});
+  const [checkingUpdates, setCheckingUpdates] = useState(false);
+  const [updatesChecked, setUpdatesChecked] = useState(false);
 
   const load = useCallback(async (signal?: AbortSignal) => {
     const response = await fetch("/api/engines", { cache: "no-store", signal });
@@ -172,9 +176,33 @@ function AgentEngineSection({ isMobile }: { isMobile: boolean }) {
     }
   }, []);
 
+  const loadUpdates = useCallback(async (force: boolean) => {
+    setCheckingUpdates(true);
+    try {
+      const response = await fetch(`/api/engines/updates${force ? "?force=1" : ""}`, { cache: "no-store" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload = (await response.json()) as { updates: EngineUpdateStatus[] };
+      setUpdates(Object.fromEntries(payload.updates.map((status) => [status.id, status])));
+      setUpdatesChecked(true);
+    } catch {
+      // Registry unreachable: rows simply keep their generic Update button.
+    } finally {
+      setCheckingUpdates(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadUpdates(false);
+  }, [loadUpdates]);
+
   const onInstallSettled = useCallback((_id: string, ok: boolean) => {
-    if (ok) void load().catch(() => {});
-  }, [load]);
+    if (ok) {
+      void load().catch(() => {});
+      // The installed version just changed; recompute against the cached
+      // registry answer so a finished update flips to "Up to date".
+      void loadUpdates(false);
+    }
+  }, [load, loadUpdates]);
   const {
     installing: installingIds,
     progress: installProgress,
@@ -294,23 +322,42 @@ function AgentEngineSection({ isMobile }: { isMobile: boolean }) {
                     {installBusy ? "Installing…" : "Install"}
                   </button>
                 )}
-                {engine.installed && engine.installable && (
-                  // Same npm run as an install — the spec pins @latest, so a
-                  // re-install IS the update. Updating the active engine
-                  // restarts its live sessions server-side.
-                  <button
-                    type="button"
-                    onClick={() => startInstall(engine.id)}
-                    disabled={busy || installBusy}
-                    title={isActive ? "Update (restarts live agent sessions)" : "Update to the latest release"}
-                    style={{ ...smallButtonStyle, opacity: busy || installBusy ? 0.6 : 1 }}
-                  >
-                    {installBusy
-                      ? <Loader2 size={13} aria-hidden style={{ animation: "spin 0.9s linear infinite" }} />
-                      : <Download size={13} aria-hidden />}
-                    {installBusy ? "Updating…" : "Update"}
-                  </button>
-                )}
+                {engine.installed && engine.installable && (() => {
+                  // An Update button only when the registry actually has a
+                  // newer version — an always-there "Update" reads as "an
+                  // update exists". Unknown comparison (registry offline,
+                  // version probe failed) keeps the generic button as the
+                  // escape hatch; the npm run is the same either way and
+                  // updating the active engine restarts its live sessions.
+                  const status = updates[engine.id];
+                  const upToDate = status?.updateAvailable === false;
+                  if (upToDate && !installBusy) {
+                    return (
+                      <span style={{ ...chipStyle, display: "inline-flex", alignItems: "center", gap: 4 }}>
+                        <Check size={11} aria-hidden /> Up to date
+                      </span>
+                    );
+                  }
+                  const label = installBusy
+                    ? "Updating…"
+                    : status?.updateAvailable
+                      ? `Update to v${status.latestVersion}`
+                      : "Update";
+                  return (
+                    <button
+                      type="button"
+                      onClick={() => startInstall(engine.id)}
+                      disabled={busy || installBusy}
+                      title={isActive ? "Update (restarts live agent sessions)" : "Update to the latest release"}
+                      style={{ ...smallButtonStyle, opacity: busy || installBusy ? 0.6 : 1 }}
+                    >
+                      {installBusy
+                        ? <Loader2 size={13} aria-hidden style={{ animation: "spin 0.9s linear infinite" }} />
+                        : <Download size={13} aria-hidden />}
+                      {label}
+                    </button>
+                  );
+                })()}
                 {engine.installed && !isActive && (
                   <button type="button" onClick={() => select(engine)} disabled={busy} style={{ ...primaryButtonStyle, opacity: busy ? 0.6 : 1 }}>
                     {selecting === engine.id && <Loader2 size={13} aria-hidden style={{ animation: "spin 0.9s linear infinite" }} />}
@@ -327,6 +374,29 @@ function AgentEngineSection({ isMobile }: { isMobile: boolean }) {
           );
         })}
       </section>
+
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+        <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
+          {checkingUpdates
+            ? "Checking the npm registry…"
+            : updatesChecked
+              ? Object.values(updates).some((status) => status.updateAvailable)
+                ? "Engine updates are available."
+                : "All installed engines are up to date."
+              : "Update availability not checked yet."}
+        </span>
+        <button
+          type="button"
+          onClick={() => void loadUpdates(true)}
+          disabled={checkingUpdates}
+          style={{ ...smallButtonStyle, opacity: checkingUpdates ? 0.6 : 1 }}
+        >
+          {checkingUpdates
+            ? <Loader2 size={13} aria-hidden style={{ animation: "spin 0.9s linear infinite" }} />
+            : <RefreshCw size={13} aria-hidden />}
+          Check for updates
+        </button>
+      </div>
     </>
   );
 }
