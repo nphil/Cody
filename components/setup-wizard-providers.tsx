@@ -92,7 +92,10 @@ export function WizardProvidersStep() {
           onSelectOAuth={(id) => setView({ kind: "oauth", id })}
           onSelectApiKey={(id) => setView({ kind: "apiKey", id })}
           onAddCustom={() => setView({ kind: "custom" })}
-          onClose={() => setView({ kind: "list" })}
+          // The picker fires onSelect* and then onClose; a plain reset here
+          // would clobber the just-chosen detail view and bounce back to the
+          // list, so only the still-on-picker case closes.
+          onClose={() => setView((current) => (current.kind === "picker" ? { kind: "list" } : current))}
         />
       </div>
     );
