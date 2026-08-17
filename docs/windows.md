@@ -56,9 +56,16 @@ only desktop awareness is runtime feature detection (below).
    the server) with status.
 2. Checks, in order: WSL2 present → `cody` distro registered → runtime
    version marker matches → server healthy.
-3. Missing WSL → guided enable (link + elevated command, reboot notice).
-   Missing distro → download rootfs (progress UI, sha256 verify) →
-   `wsl --import cody <appdata>\runtime rootfs.tar --version 2`.
+3. Missing WSL → guided enable (link + elevated command, reboot notice);
+   detection is probe-based (`WSL_UTF8=1`, hex HRESULTs like `0x8007019e`
+   feature-off / `0x80370102` no-virtualization — wsl.exe has no exit-code
+   contract). Missing distro → download `rootfs.tar.gz` (progress UI, sha256
+   verify) → stream-import via stdin: decompress in the shell and pipe into
+   `wsl --import cody <dir> - --version 2` (gzip is the recommended tar
+   compression; zstd/xz risk import incompatibility; streaming avoids a
+   multi-GB temp file). Before importing, clear NTFS compress/encrypt
+   attributes on the install dir (they corrupt WSL VHDs) and keep it on the
+   system drive.
 4. Starts the server: a held `wsl -d cody -- env <ENV BLOCK> sh -lc
    '/usr/local/bin/cody-entrypoint'` child (hidden window). The shell owns
    this child; app exit terminates it (`wsl --terminate cody` as cleanup).
@@ -76,19 +83,24 @@ shell's config (`%APPDATA%\Cody\config.json`); collision → next free port.
 [VERIFY: if remote-capability URLs cannot wildcard ports, pin the chosen
 port into the capability at build time and make the config port fixed.]
 
-**Networking contract**: server binds `127.0.0.1` inside WSL; Windows
-reaches it via WSL localhost forwarding. [VERIFY: whether 127.0.0.1-bound
-listeners are forwarded in NAT mode or only 0.0.0.0-bound; whether that
-exposes the port on the LAN; mirrored-mode preference. The answer patches
-this line and `server.rs`.]
+**Networking contract** (verified): the server binds `127.0.0.1` inside
+WSL. Default-NAT `localhostForwarding` covers localhost-bound listeners, so
+Windows reaches it at `localhost:<port>` with no firewall rule or prompt
+(Hyper-V firewall `LoopbackEnabled` is default-on). `127.0.0.1` is also the
+only **mode-agnostic** safe bind: under user-enabled `networkingMode=mirrored`
+a `0.0.0.0` bind would become LAN-reachable, and Cody must stay loopback-only
+regardless of a `.wslconfig` Cody does not own. Never bind wider.
 
 ## Auth on desktop
 
-Single-user machine, loopback-only server. v1 keeps Cody's normal first-run
-setup inside the WebView (zero auth-code changes, no weakening of web
-deployments). [VERIFY from conventions report: if the env-managed account +
-auto-login token path is trivially reusable, the shell will inject it and
-skip the login screen entirely; decide in implementation, not here.]
+Single-user machine, loopback-only server, and **zero new server code**
+(verified against the auth seams): the shell generates a random secret and
+passes it as `CODY_PASSWORD` in the env block — the existing env-managed
+`cody` admin account materializes — then the shell (not the WebView) POSTs
+`/api/accounts/login` once, reads the `cody_session` cookie, and injects it
+into WebView2's cookie store before first navigation. The user never sees a
+login screen; web/Docker deployments are untouched. Fallback if cookie
+injection misbehaves: plain first-run setup in the WebView.
 
 ## Window chrome (Discord/VSCode style, native)
 
@@ -154,7 +166,10 @@ Two independently-versioned artifacts, one Release:
   manifest lists the current rootfs; on mismatch the shell offers "update
   runtime": export `/data` to a tar on the Windows side → `--unregister` →
   import new rootfs → restore `/data` → restart server. `/data` is the only
-  stateful path (same contract as the container).
+  stateful path (same contract as the container). Export→reimport is also
+  the disk-reclaim story: sparse VHDs are disabled by WSL as
+  corruption-prone (`--allow-unsafe`-gated) and shrinking is admin-only, so
+  Cody never enables sparse mode.
 
 Release/tag scheme, manifest name, and the `releases/latest` collision with
 container `vX.Y.Z` releases: per CI research report. [VERIFY]
