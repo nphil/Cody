@@ -460,12 +460,12 @@ export function UpdatesPanel({ cwd, active, engineUpdates = true, onOpenSettings
       style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, overflow: "hidden", background: "var(--bg)" }}
     >
       <div
+        className="workspace-subtitle-bar"
         style={{
           display: "flex",
           alignItems: "center",
           gap: 6,
           flexShrink: 0,
-          padding: "5px 12px",
           borderBottom: "1px solid var(--border)",
           background: "var(--bg-panel)",
         }}

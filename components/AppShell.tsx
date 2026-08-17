@@ -11,7 +11,7 @@ import { ChatWindow } from "./ChatWindow";
 import { TabBar, type Tab } from "./TabBar";
 import { BranchNavigator } from "./BranchNavigator";
 import { ThemePicker } from "./ThemePicker";
-import { AppWindow, Check, CircleArrowUp, Files, GitBranch, History, Info, ListTodo, Menu, PanelLeft, ScrollText, Terminal, Wand2 } from "lucide-react";
+import { AppWindow, CircleArrowUp, Files, GitBranch, History, Info, ListTodo, Menu, PanelLeft, ScrollText, Terminal } from "lucide-react";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { translate, useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
@@ -128,11 +128,6 @@ function ModalLoadingFallback() {
 }
 
 type SessionCopyField = "file" | "id";
-type AutoNameStatus =
-  | { kind: "idle" }
-  | { kind: "naming" }
-  | { kind: "success" }
-  | { kind: "error"; message: string };
 
 export function AppShell() {
   const router = useRouter();
@@ -150,7 +145,6 @@ export function AppShell() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [sessionKey, setSessionKey] = useState(0);
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
-  const [explorerRefreshing, setExplorerRefreshing] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab | null>(null);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   const [advisorEnabled, setAdvisorEnabled] = useState(false);
@@ -397,10 +391,6 @@ export function AppShell() {
 
   // Session stats (tokens + cost) — populated by ChatWindow, displayed in top bar
   const [sessionStats, setSessionStats] = useState<SessionStatsInfo | null>(null);
-  const [autoNameStatus, setAutoNameStatus] = useState<AutoNameStatus>({ kind: "idle" });
-  const autoNameTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const activeSessionIdRef = useRef<string | null>(selectedSession?.id ?? null);
-  activeSessionIdRef.current = selectedSession?.id ?? null;
   const handleSessionStatsChange = useCallback((stats: SessionStatsInfo | null) => {
     setSessionStats(stats);
   }, []);
@@ -417,7 +407,6 @@ export function AppShell() {
   useEffect(() => {
     return () => {
       if (sessionCopyTimerRef.current) clearTimeout(sessionCopyTimerRef.current);
-      if (autoNameTimerRef.current) clearTimeout(autoNameTimerRef.current);
     };
   }, []);
 
@@ -912,51 +901,6 @@ export function AppShell() {
     }
   }, [handleSelectSession, selectedSession]);
 
-  const handleAutoName = useCallback(async () => {
-    const sessionId = selectedSession?.id;
-    if (!sessionId || autoNameStatus.kind === "naming") return;
-    if (autoNameTimerRef.current) clearTimeout(autoNameTimerRef.current);
-    setActiveTopPanel(null);
-    setAutoNameStatus({ kind: "naming" });
-
-    try {
-      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/auto-name`, {
-        method: "POST",
-      });
-      const body = (await response.json().catch(() => ({}))) as { title?: string; error?: string; code?: string };
-      if (!response.ok || !body.title) {
-        throw new Error(body.error || body.code ? formatApiError(body) : `HTTP ${response.status}`);
-      }
-
-      const title = body.title.trim();
-      setRefreshKey((key) => key + 1);
-      if (activeSessionIdRef.current !== sessionId) return;
-      setSelectedSession((current) => current?.id === sessionId ? { ...current, name: title } : current);
-      setSessionStats((current) => current?.sessionId === sessionId ? { ...current, sessionName: title } : current);
-      setAutoNameStatus({ kind: "success" });
-      autoNameTimerRef.current = setTimeout(() => setAutoNameStatus({ kind: "idle" }), 1800);
-    } catch (error) {
-      if (activeSessionIdRef.current !== sessionId) return;
-      const message = error instanceof Error ? error.message : String(error);
-      setAutoNameStatus({ kind: "error", message });
-      autoNameTimerRef.current = setTimeout(() => setAutoNameStatus({ kind: "idle" }), 5000);
-    }
-  }, [autoNameStatus.kind, selectedSession?.id]);
-
-  useEffect(() => {
-    if (autoNameTimerRef.current) clearTimeout(autoNameTimerRef.current);
-    setAutoNameStatus({ kind: "idle" });
-  }, [selectedSession?.id]);
-
-  const handleExplorerRefresh = useCallback(() => {
-    setExplorerRefreshing(true);
-    setExplorerRefreshKey((k) => k + 1);
-  }, []);
-
-  const handleExplorerRefreshDone = useCallback(() => {
-    setExplorerRefreshing(false);
-  }, []);
-
   const handleSessionForked = useCallback((newSessionId: string) => {
     setRefreshKey((k) => k + 1);
     setSessionKey((k) => k + 1);
@@ -1071,9 +1015,6 @@ export function AppShell() {
         onCwdChange={handleCwdChange}
         onOpenFile={handleOpenFile}
         explorerRefreshKey={explorerRefreshKey}
-        onExplorerRefresh={handleExplorerRefresh}
-        explorerRefreshing={explorerRefreshing}
-        onExplorerRefreshDone={handleExplorerRefreshDone}
         onAtMention={handleAtMention}
         onAtMentions={handleAtMentions}
         onOpenSettings={() => setSettingsTab("general")}
@@ -1241,56 +1182,6 @@ export function AppShell() {
                   <span className="shell-btn-caption">{t("appShell.captionHistory")}</span>
                 </button>
               )}
-              {/* Title generation runs against the omp transcript too. */}
-              {capabilities.chatExtras && (() => {
-                const hasMessages = Boolean(
-                  selectedSession
-                  && (sessionStats?.userMessages ?? selectedSession.messageCount) > 0,
-                );
-                const disabled = !selectedSession || !hasMessages || autoNameStatus.kind === "naming";
-                const isSuccess = autoNameStatus.kind === "success";
-                const isError = autoNameStatus.kind === "error";
-                const label = autoNameStatus.kind === "naming"
-                  ? t("appShell.generating")
-                  : isSuccess
-                    ? t("appShell.titleUpdated")
-                    : isError
-                      ? t("appShell.generationFailed")
-                      : t("appShell.generateTitle");
-                const title = !selectedSession
-                  ? t("appShell.titleGenUnavailable")
-                  : !hasMessages
-                    ? t("appShell.titleGenNeedsMessage")
-                    : isError
-                      ? autoNameStatus.message
-                      : t("appShell.generateSessionTitle");
-
-                return (
-                  <button
-                    type="button"
-                    onClick={() => void handleAutoName()}
-                    disabled={disabled}
-                    title={title}
-                    aria-label={label}
-                    className="shell-toolbar-btn shell-captioned-btn ui-focus-ring"
-                    style={{ opacity: autoNameStatus.kind === "naming" ? 1 : undefined }}
-                  >
-                    {autoNameStatus.kind === "naming" ? (
-                      <svg className="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                        <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" opacity="0.25" />
-                        <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-                      </svg>
-                    ) : isSuccess ? (
-                      <Check size={14} strokeWidth={1.8} aria-hidden="true" style={{ color: "var(--accent)" }} />
-                    ) : isError ? (
-                      <Wand2 size={14} strokeWidth={1.8} aria-hidden="true" style={{ color: "var(--status-error)" }} />
-                    ) : (
-                      <Wand2 size={14} strokeWidth={1.8} aria-hidden="true" />
-                    )}
-                    <span className="shell-btn-caption">{t("appShell.captionTitle")}</span>
-                  </button>
-                );
-              })()}
               {/* Branch/fork navigation is an omp-protocol affordance. */}
               {capabilities.chatExtras && (
                 <BranchNavigator

@@ -13,7 +13,7 @@ import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { clearLastOpenSession, setLastOpenSession, workspaceKeyOf } from "@/lib/workspace-memory";
 import { groupSessionsByProject, projectActivityCounts, sortManagedProjects } from "@/lib/project-ordering";
 import { comparableProjectPath } from "@/lib/comparable-path";
-import { Check, ChevronDown, ChevronRight, FileUp, Folder, GitBranch, MoreHorizontal, Plus, RefreshCw, Search, Settings2, SlidersHorizontal, Trash2, Upload } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, FilePlus, FileUp, Folder, FolderPlus, GitBranch, MoreHorizontal, Plus, RefreshCw, Search, Settings2, SlidersHorizontal, Trash2, Upload } from "lucide-react";
 import { STORAGE_KEYS } from "@/lib/storage-keys";
 
 declare global {
@@ -39,9 +39,6 @@ interface Props {
   onCwdChange?: (cwd: string | null, projectRoot?: string | null) => void;
   onOpenFile?: (filePath: string, fileName: string) => void;
   explorerRefreshKey?: number;
-  onExplorerRefresh?: () => void;
-  explorerRefreshing?: boolean;
-  onExplorerRefreshDone?: () => void;
   onAtMention?: (relativePath: string, isDir: boolean) => void;
   onAtMentions?: (relativePaths: string[]) => void;
   /** Opens the app settings (pinned sidebar footer row). */
@@ -529,7 +526,7 @@ function CodyTitle() {
     </button>
   );
 }
-export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, explorerRefreshing, onExplorerRefreshDone, onAtMention, onAtMentions, onOpenSettings, updateAvailable }: Props) {
+export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, onAtMentions, onOpenSettings, updateAvailable }: Props) {
   const { t } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1576,60 +1573,29 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
               {t("sessionSidebar.explorer")}
             </button>
             {explorerOpen && (
-              <Tooltip content={t("sessionSidebar.uploadFilesTitle")} side="top">
-              <button
-                onClick={() => fileExplorerRef.current?.openUploadPicker()}
-                disabled={explorerUploadBusy}
-                title={t("sessionSidebar.uploadFilesTitle")}
-                aria-label={t("sessionSidebar.uploadFiles")}
-                style={{
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  width: 26, height: 26, padding: 0,
-                  background: "none",
-                  border: "none",
-                  color: "var(--text-dim)",
-                  cursor: explorerUploadBusy ? "default" : "pointer",
-                  borderRadius: "var(--radius-control)",
-                  flexShrink: 0,
-                  opacity: explorerUploadBusy ? 0.6 : 1,
-                  transition: "color var(--dur-fast) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm)",
-                }}
-                onMouseEnter={(e) => { if (explorerUploadBusy) return; e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
-                onMouseLeave={(e) => { if (explorerUploadBusy) return; e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}
-              >
-                <Upload size={13} strokeWidth={2} aria-hidden="true" />
-              </button>
-              </Tooltip>
+              <div style={{ display: "flex", alignItems: "center", marginRight: 6 }}>
+                <SidebarIconButton
+                  label={t("fileExplorer.newFile")}
+                  onClick={() => fileExplorerRef.current?.createFile()}
+                >
+                  <FilePlus size={13} strokeWidth={1.9} aria-hidden="true" />
+                </SidebarIconButton>
+                <SidebarIconButton
+                  label={t("fileExplorer.newFolder")}
+                  onClick={() => fileExplorerRef.current?.createFolder()}
+                >
+                  <FolderPlus size={13} strokeWidth={1.9} aria-hidden="true" />
+                </SidebarIconButton>
+                <SidebarIconButton
+                  label={t("sessionSidebar.uploadFiles")}
+                  title={t("sessionSidebar.uploadFilesTitle")}
+                  disabled={explorerUploadBusy}
+                  onClick={() => fileExplorerRef.current?.openUploadPicker()}
+                >
+                  <Upload size={13} strokeWidth={2} aria-hidden="true" />
+                </SidebarIconButton>
+              </div>
             )}
-            <Tooltip content={t("sessionSidebar.refreshExplorer")} side="top">
-            <button
-              aria-label={t("sessionSidebar.refreshExplorer")}
-              onClick={() => {
-                if (onExplorerRefresh) onExplorerRefresh();
-                else setExplorerKey((k) => k + 1);
-              }}
-              title={t("sessionSidebar.refreshExplorer")}
-              style={{
-                display: "flex", alignItems: "center", justifyContent: "center",
-                width: 26, height: 26, padding: 0, marginRight: 6,
-                background: "none",
-                border: "none",
-                color: explorerRefreshing ? "var(--accent)" : "var(--text-dim)",
-                cursor: "pointer",
-                borderRadius: "var(--radius-control)",
-                flexShrink: 0,
-                transition: "color var(--dur-fast) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm)",
-              }}
-              onMouseEnter={(e) => { if (explorerRefreshing) return; e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
-              onMouseLeave={(e) => { if (explorerRefreshing) return; e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}
-            >
-              {explorerRefreshing ? (
-                <RefreshCw size={13} strokeWidth={2} aria-hidden="true" className="icon-spin" />
-              ) : (
-                <RefreshCw size={13} strokeWidth={2} aria-hidden="true" />
-              )}
-            </button>
-            </Tooltip>
           </div>
           {explorerOpen && (
             <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
@@ -1641,7 +1607,6 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
                 onAtMention={onAtMention}
                 onAtMentions={onAtMentions}
                 onUploadBusyChange={setExplorerUploadBusy}
-                onRefreshDone={onExplorerRefreshDone}
               />
             </div>
           )}

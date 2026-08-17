@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import * as pty from "node-pty";
 import type { IPty } from "node-pty";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "./file-access";
+import { getHarness } from "./harness";
 
 export type TerminalInfo = {
   id: string;
@@ -58,9 +59,26 @@ function terminalEnvironment(): Record<string, string> {
   return env;
 }
 
-function interactiveShell(): { command: string; args: string[] } {
-  const command = process.env.CODY_TERMINAL_SHELL || (process.platform === "win32" ? "powershell.exe" : userInfo().shell || "/bin/sh");
-  return { command, args: [] };
+function interactiveShell(launchEngine: boolean): { command: string; args: string[] } {
+  const shell = process.env.CODY_TERMINAL_SHELL || (process.platform === "win32" ? "powershell.exe" : userInfo().shell || "/bin/sh");
+  if (!launchEngine || process.platform === "win32") return { command: shell, args: [] };
+
+  const harness = getHarness();
+  const engine = harness.resolveBinary();
+  if (!engine) return { command: shell, args: [] };
+
+  // The wrapper is exclusive to a user-created Cody PTY. Server subprocesses,
+  // task runners and non-interactive SSH commands never pass through it.
+  const script = [
+    `printf 'Cody: starting %s — exit the engine to drop to a shell.\\n' "$1"`,
+    `"$2" || true`,
+    `printf 'Cody: %s exited — this is a plain shell now.\\n' "$1"`,
+    `exec "$3" -i`,
+  ].join("\n");
+  return {
+    command: "/bin/sh",
+    args: ["-c", script, "cody-terminal", harness.binaryName, engine, shell],
+  };
 }
 
 export class TerminalManager {
@@ -83,7 +101,7 @@ export class TerminalManager {
       replay: "",
       listeners: new Set(),
     };
-    this.spawn(record, cols, rows);
+    this.spawn(record, cols, rows, true);
     this.terminals.set(record.id, record);
     return publicInfo(record);
   }
@@ -127,7 +145,7 @@ export class TerminalManager {
     const marker = "\r\n[continued in interactive shell]\r\n";
     record.replay = (record.replay + marker).slice(-MAX_REPLAY);
     this.emit(record, { type: "output", data: marker });
-    this.spawn(record, cols, rows);
+    this.spawn(record, cols, rows, false);
     return publicInfo(record);
   }
 
@@ -142,8 +160,8 @@ export class TerminalManager {
     for (const id of [...this.terminals.keys()]) this.close(id);
   }
 
-  private spawn(record: TerminalRecord, cols?: number, rows?: number): void {
-    const shell = interactiveShell();
+  private spawn(record: TerminalRecord, cols?: number, rows?: number, launchEngine = false): void {
+    const shell = interactiveShell(launchEngine);
     record.exited = false;
     delete record.exitCode;
     const child = pty.spawn(shell.command, shell.args, {

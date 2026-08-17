@@ -65,3 +65,20 @@ test("renders goal, planning, and advisor indicators at the composer", () => {
   assert.match(html, /(Planning in progress|chatInput\.planningInProgress)/);
   assert.match(html, /(Advisor enabled|chatInput\.advisorEnabled)/);
 });
+
+test("renders an icon-only context gauge with warning and error thresholds", () => {
+  for (const [percent, color] of [[75, "warning"], [95, "error"]]) {
+    const html = renderToStaticMarkup(
+      React.createElement(ChatInput, {
+        onSend() {},
+        onAbort() {},
+        isStreaming: false,
+        contextUsage: { percent, tokens: percent * 1_000, contextWindow: 100_000 },
+      }),
+    );
+
+    assert.match(html, new RegExp(`color:var\\(--status-${color}\\)`));
+    assert.match(html, new RegExp(`aria-label="(?:Context details, ${percent}% used|chatInput\\.contextDetails)"`));
+    assert.doesNotMatch(html, new RegExp(`>${percent}%<`));
+  }
+});

@@ -36,6 +36,10 @@ export const STORAGE_KEYS = {
   gitFileView: "cody:git-file-view",
   /** Right workspace panel width in pixels (unset = CSS default). */
   workspaceWidth: "cody:workspace-width",
+  /** Whether the terminal soft-key toolbar is forced on or off. */
+  terminalSoftKeysVisible: "cody:terminal-soft-keys",
+  /** Individual buttons shown in the terminal soft-key toolbar. */
+  terminalSoftKeyIds: "cody:terminal-soft-key-ids",
 } as const;
 
 /** localStorage prefixes completed with a workspace path. */
@@ -57,6 +61,7 @@ export const SESSION_STORAGE_PREFIXES = {
 export const STORAGE_EVENTS = {
   composerModelsChange: "cody:composer-models-change",
   soundPrefChange: "cody:sound-pref-change",
+  terminalSoftKeysChange: "cody:terminal-soft-keys-change",
 } as const;
 
 /**

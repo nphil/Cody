@@ -906,12 +906,12 @@ export function GitPanel({ cwd, active, refreshKey, onOpenFile, onCountChange, o
       style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, background: "var(--bg)" }}
     >
       <div
+        className="workspace-subtitle-bar"
         style={{
           display: "flex",
           alignItems: "center",
           gap: 6,
           flexShrink: 0,
-          padding: "6px 10px",
           borderBottom: "1px solid var(--border)",
           background: "var(--bg-panel)",
           fontSize: 12,

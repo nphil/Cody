@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogTitle } from "@/components/ui/primitives";
 import { SettingsTabs, type SettingsTab, type ActiveEngineInfo, type EngineCapabilities, ALL_CAPABILITIES, DEFAULT_HARNESS_LABEL, getSettingsCategories, getNormalizedActive } from "./SettingsTabs";
 import { STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
 import { LOCALES, useI18n, type Locale } from "@/lib/i18n";
+import { readTerminalSoftKeyIds, TERMINAL_SOFT_KEYS, writeTerminalSoftKeyIds, type TerminalSoftKeyId } from "@/lib/terminal-preferences";
 import { NativeSetting, SettingsHighlightContext, ToggleSwitch, chipStyle, nativeOptionStyle, nativeSelectStyle, slugify } from "./settings/primitives";
 
 const SettingsTabLoading = () => <div role="status" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 12 }}>Loading settings…</div>;
@@ -75,6 +76,7 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   { tab: "general", section: "Interface & Behavior", label: "Keep tool calls collapsed", description: "Show only compact headers while tools execute.", scope: "Cody only" },
   { tab: "general", section: "Interface & Behavior", label: "Completion sound", description: "Play a tone when the agent completes a run.", scope: "Cody only" },
   { tab: "general", section: "Interface & Behavior", label: "Message during active run", description: "What composer does on submit while agent runs. Steer interrupts; Queue follow-up delivers after finish.", scope: "Cody only" },
+  { tab: "general", section: "Interface & Behavior", label: "Terminal soft keys", description: "Choose the buttons shown below the terminal on touch devices.", scope: "Cody only" },
   // Tool Safety & Approvals
   { tab: "safety", section: "Tool Safety & Approvals", label: "Approval Mode", description: "Choose when OMP asks before tool calls." },
   { tab: "safety", section: "Tool Safety & Approvals", label: "Bash Override", description: "Override default approval policy specifically for terminal commands." },
@@ -176,6 +178,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
   const [searchQuery, setSearchQuery] = useState("");
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const [submitBehavior, setSubmitBehavior] = useState<SubmitDuringRunBehavior>(() => getSubmitDuringRunBehavior());
+  const [terminalSoftKeyIds, setTerminalSoftKeyIds] = useState<TerminalSoftKeyId[]>(() => readTerminalSoftKeyIds());
   const { locale, setLocale } = useI18n();
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() => {
     if (typeof window === "undefined") return true;
@@ -204,6 +207,10 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
   const [harnessLabel, setHarnessLabel] = useState(engine?.shortName ?? DEFAULT_HARNESS_LABEL);
   const [nativeSavesInFlight, setNativeSavesInFlight] = useState(0);
   const [visitedTabs, setVisitedTabs] = useState<Set<SettingsTab>>(() => new Set(["general", activeTab]));
+
+  useEffect(() => {
+    setTerminalSoftKeyIds(readTerminalSoftKeyIds());
+  }, []);
 
   useEffect(() => {
     setVisitedTabs((tabs) => (tabs.has(activeTab) ? tabs : new Set([...tabs, activeTab])));
@@ -427,6 +434,20 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
     setHighlightId(result.kind === "setting" ? result.id : null);
     setSearchQuery("");
   }, [onSelectTab]);
+  const toggleTerminalSoftKey = (id: TerminalSoftKeyId) => {
+    const selected = new Set(terminalSoftKeyIds);
+    if (selected.has(id)) selected.delete(id);
+    else selected.add(id);
+    const next = TERMINAL_SOFT_KEYS.map((key) => key.id).filter((keyId) => selected.has(keyId));
+    setTerminalSoftKeyIds(next);
+    try {
+      writeTerminalSoftKeyIds(next);
+    } catch {
+      // The preference remains live for this page even if storage is blocked.
+    }
+    window.dispatchEvent(new CustomEvent(STORAGE_EVENTS.terminalSoftKeysChange));
+  };
+
 
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
@@ -535,6 +556,39 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                     <option value="queue" style={nativeOptionStyle}>Queue follow-up</option>
                   </select>
                 </NativeSetting>
+                <NativeSetting
+                  label="Terminal soft keys"
+                  description="Choose the buttons shown below the terminal on touch devices. Shift Tab moves backward through terminal UI modes."
+                  scope="Cody only"
+                  control={(
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(74px, 1fr))", gap: 6 }}>
+                      {TERMINAL_SOFT_KEYS.map((key) => {
+                        const selected = terminalSoftKeyIds.includes(key.id);
+                        return (
+                          <button
+                            key={key.id}
+                            type="button"
+                            aria-pressed={selected}
+                            onClick={() => toggleTerminalSoftKey(key.id)}
+                            style={{
+                              minHeight: 28,
+                              padding: "3px 7px",
+                              border: `1px solid ${selected ? "var(--accent)" : "var(--border)"}`,
+                              borderRadius: "var(--radius-control)",
+                              background: selected ? "color-mix(in srgb, var(--accent) 12%, var(--bg-panel))" : "var(--bg)",
+                              color: selected ? "var(--text)" : "var(--text-muted)",
+                              cursor: "pointer",
+                              fontFamily: "var(--font-mono)",
+                              fontSize: 11,
+                            }}
+                          >
+                            {key.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                />
               </div>
             )}
 

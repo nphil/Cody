@@ -6,7 +6,7 @@ import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecuti
 import { translate, useI18n } from "@/lib/i18n";
 import { countToolCallBlocks, getDisplayableAssistantBlocks, splitFinalAssistantBlocks } from "@/lib/message-display";
 import { MessageView } from "./MessageView";
-import { ChatInput, type ChatInputHandle } from "./ChatInput";
+import { ChatInput, type ChatInputHandle, type ContextModelUsage } from "./ChatInput";
 import { ExtensionDialog } from "./ExtensionDialog";
 import { SubagentTranscriptDialog } from "./SubagentTranscriptDialog";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
@@ -696,6 +696,32 @@ export function ChatWindow({ session, newSessionCwd, advisorEnabled, chatExtras 
     ? (modelThinkingLevelMaps[`${displayModelValue.provider}:${displayModelValue.modelId}`] ?? null)
     : null;
 
+  const contextModelUsage = useMemo<ContextModelUsage[]>(() => {
+    const byModel = new Map<string, ContextModelUsage>();
+    for (const message of messages) {
+      if (message.role !== "assistant") continue;
+      const assistant = message as AssistantMessage;
+      if (!assistant.provider || !assistant.model) continue;
+      const key = `${assistant.provider}:${assistant.model}`;
+      const usage = byModel.get(key) ?? {
+        provider: assistant.provider,
+        modelId: assistant.model,
+        turns: 0,
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+      };
+      usage.turns += 1;
+      usage.input += assistant.usage?.input ?? 0;
+      usage.output += assistant.usage?.output ?? 0;
+      usage.cacheRead += assistant.usage?.cacheRead ?? 0;
+      usage.cacheWrite += assistant.usage?.cacheWrite ?? 0;
+      byModel.set(key, usage);
+    }
+    return [...byModel.values()];
+  }, [messages]);
+
   // Steering and the follow-up queue are omp-protocol commands; a turn-based
   // engine answers them "unsupported", so they are not offered at all — the
   // composer shows a waiting state for the duration of the turn instead.
@@ -736,6 +762,7 @@ export function ChatWindow({ session, newSessionCwd, advisorEnabled, chatExtras 
       queuedMessages={queuedMessages}
       inputHistory={inputHistory}
       contextUsage={contextUsage}
+      contextModelUsage={contextModelUsage}
       onRemoveQueuedMessage={removeQueuedMessage}
       onPromoteQueuedToSteer={promoteQueuedToSteer}
       slashCommands={slashCommands}

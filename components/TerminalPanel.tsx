@@ -5,6 +5,8 @@ import { Keyboard, Play, Plus, RotateCw, X } from "lucide-react";
 import { Terminal, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { useI18n } from "@/lib/i18n";
+import { STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
+import { normalizeTerminalPaste, readTerminalSoftKeyIds, TERMINAL_SOFT_KEYS, type TerminalSoftKeyId } from "@/lib/terminal-preferences";
 import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
 import { useIsMobile } from "@/hooks/useIsMobile";
 
@@ -28,13 +30,10 @@ type Props = {
 };
 type ConnectionState = "disconnected" | "connecting" | "connected";
 
-/** Soft-key bar preference: "on"/"off" override, absent = automatic (shown
- * on touch devices, hidden on fine pointers). */
-const SOFT_KEYS_PREF = "cody:terminal-soft-keys";
 
 function readSoftKeysPref(): "on" | "off" | null {
   try {
-    const value = localStorage.getItem(SOFT_KEYS_PREF);
+    const value = localStorage.getItem(STORAGE_KEYS.terminalSoftKeysVisible);
     return value === "on" || value === "off" ? value : null;
   } catch {
     return null;
@@ -50,39 +49,39 @@ async function responseError(response: Response, fallback: string): Promise<stri
   const body = await response.json().catch(() => ({})) as { error?: string };
   return body.error || fallback;
 }
+function copyTerminalText(text: string): void {
+  const fallback = () => {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    textarea.remove();
+  };
+  if (navigator.clipboard?.writeText) {
+    void navigator.clipboard.writeText(text).catch(fallback);
+  } else {
+    fallback();
+  }
+}
 
-function TerminalSoftKeys({ onSend, label }: { onSend: (data: string) => void; label: string }) {
-  // Keys that are awkward on touch keyboards, ordered for driving an agent
-  // TUI (omp: Esc interrupts, Shift+Tab cycles modes, "/" opens commands,
-  // "@" mentions files), then the pi-web parity set of shell chords.
-  const keys = [
-    ["Esc", "\x1b"],
-    ["Tab", "\t"],
-    ["⇧Tab", "\x1b[Z"],
-    ["/", "/"],
-    ["@", "@"],
-    ["↑", "\x1b[A"],
-    ["↓", "\x1b[B"],
-    ["←", "\x1b[D"],
-    ["→", "\x1b[C"],
-    ["Enter", "\r"],
-    ["Ctrl C", "\x03"],
-    ["Ctrl D", "\x04"],
-    ["Ctrl Z", "\x1a"],
-    ["Ctrl L", "\x0c"],
-    ["Ctrl R", "\x12"],
-    ["Ctrl U", "\x15"],
-    ["Ctrl W", "\x17"],
-    ["Home", "\x1b[H"],
-    ["End", "\x1b[F"],
-    ["PgUp", "\x1b[5~"],
-    ["PgDn", "\x1b[6~"],
-    ["Del", "\x1b[3~"],
-  ] as const;
+function TerminalSoftKeys({
+  onSend,
+  label,
+  selectedIds,
+}: {
+  onSend: (data: string) => void;
+  label: string;
+  selectedIds: readonly TerminalSoftKeyId[];
+}) {
+  const selected = new Set(selectedIds);
   return (
     <div className="terminal-soft-keys" role="toolbar" aria-label={label}>
-      {keys.map(([keyLabel, data]) => (
-        <button key={keyLabel} type="button" onClick={() => onSend(data)}>{keyLabel}</button>
+      {TERMINAL_SOFT_KEYS.filter((key) => selected.has(key.id)).map((key) => (
+        <button key={key.id} type="button" onClick={() => onSend(key.data)}>{key.label}</button>
       ))}
     </div>
   );
@@ -99,11 +98,23 @@ export function TerminalPanel({ cwd, onOpen, focusRequest }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [softKeysPref, setSoftKeysPref] = useState<"on" | "off" | null>(null);
+  const [softKeyIds, setSoftKeyIds] = useState<TerminalSoftKeyId[]>(() => readTerminalSoftKeyIds());
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
-  // Read after hydration so server and first client render agree.
+  // Re-read after hydration and when Settings changes the same local preference.
   useEffect(() => {
     setSoftKeysPref(readSoftKeysPref());
+    const refreshSoftKeys = () => setSoftKeyIds(readTerminalSoftKeyIds());
+    refreshSoftKeys();
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key === STORAGE_KEYS.terminalSoftKeyIds) refreshSoftKeys();
+    };
+    window.addEventListener("storage", handleStorage);
+    window.addEventListener(STORAGE_EVENTS.terminalSoftKeysChange, refreshSoftKeys);
+    return () => {
+      window.removeEventListener("storage", handleStorage);
+      window.removeEventListener(STORAGE_EVENTS.terminalSoftKeysChange, refreshSoftKeys);
+    };
   }, []);
   const [connection, setConnection] = useState<ConnectionState>("disconnected");
   const [connectionGeneration, setConnectionGeneration] = useState(0);
@@ -242,7 +253,7 @@ export function TerminalPanel({ cwd, onOpen, focusRequest }: Props) {
     const next = currentlyVisible ? "off" : "on";
     setSoftKeysPref(next);
     try {
-      localStorage.setItem(SOFT_KEYS_PREF, next);
+      localStorage.setItem(STORAGE_KEYS.terminalSoftKeysVisible, next);
     } catch { /* preference simply will not persist */ }
   }, []);
 
@@ -292,16 +303,28 @@ export function TerminalPanel({ cwd, onOpen, focusRequest }: Props) {
       const key = event.key.toLowerCase();
       const copy = key === "c" && ((event.ctrlKey && event.shiftKey) || event.metaKey);
       if (copy && term.hasSelection()) {
-        void navigator.clipboard?.writeText(term.getSelection());
+        copyTerminalText(term.getSelection());
         return false;
       }
-      const paste = key === "v" && ((event.ctrlKey && event.shiftKey) || event.metaKey);
-      if (paste) {
-        void navigator.clipboard?.readText().then((text) => term.paste(text));
-        return false;
-      }
+      // Let the browser raise a ClipboardEvent for paste. The capture handler
+      // below sends its plain text directly instead of xterm wrapping it in
+      // bracketed-paste escape sequences.
       return true;
     });
+
+    const handleCopy = (event: ClipboardEvent) => {
+      if (!term.hasSelection() || !event.clipboardData) return;
+      event.clipboardData.setData("text/plain", term.getSelection());
+      event.preventDefault();
+    };
+    const handlePaste = (event: ClipboardEvent) => {
+      if (!event.clipboardData) return;
+      event.preventDefault();
+      event.stopPropagation();
+      send(normalizeTerminalPaste(event.clipboardData.getData("text/plain")));
+    };
+    host.addEventListener("copy", handleCopy, true);
+    host.addEventListener("paste", handlePaste, true);
 
     const updateTheme = () => {
       term.options.theme = terminalTheme();
@@ -365,6 +388,8 @@ export function TerminalPanel({ cwd, onOpen, focusRequest }: Props) {
       disposed = true;
       themeObserver.disconnect();
       observer.disconnect();
+      host.removeEventListener("copy", handleCopy, true);
+      host.removeEventListener("paste", handlePaste, true);
       input.dispose();
       if (reconnectRef.current) window.clearTimeout(reconnectRef.current);
       socketRef.current?.close();
@@ -461,7 +486,7 @@ export function TerminalPanel({ cwd, onOpen, focusRequest }: Props) {
       {activeId ? (
         <>
           <div ref={hostRef} className="terminal-host" role="tabpanel" aria-labelledby={`terminal-tab-${activeId}`} onClick={() => terminalRef.current?.focus()} />
-          {softKeysVisible && <TerminalSoftKeys onSend={send} label={t("terminal.keys")} />}
+          {softKeysVisible && softKeyIds.length > 0 && <TerminalSoftKeys onSend={send} label={t("terminal.keys")} selectedIds={softKeyIds} />}
         </>
       ) : (
         <div className="terminal-empty">

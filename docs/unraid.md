@@ -154,6 +154,11 @@ the engine and go straight to a shell:
 `ssh -o SetEnv=CODY_NO_AUTO_ENGINE=1 root@server -p 2222` (or run
 `CODY_NO_AUTO_ENGINE=1 bash -l` in the session).
 
+The **New Terminal** action in Cody follows the same engine-then-shell flow,
+but only for that newly created browser PTY. Cody's task runner, server
+subprocesses, agent tool calls, and non-interactive SSH commands never pass
+through the auto-engine wrapper and remain ordinary command processes.
+
 SSH sessions run as root with home at the persistent `/data/home`, the same
 identity the web terminals use — so engine sign-in state, shell history and
 dotfiles are shared, and the container's dev tools (git, `gh`, python3,

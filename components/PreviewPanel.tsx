@@ -144,8 +144,8 @@ export function PreviewPanel({ cwd, active, onOpenTasks }: PreviewPanelProps): R
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    width: 24,
-    height: 24,
+    width: 20,
+    height: 20,
     padding: 0,
     border: "none",
     borderRadius: "var(--radius-control)",
@@ -156,7 +156,7 @@ export function PreviewPanel({ cwd, active, onOpenTasks }: PreviewPanelProps): R
 
   return (
     <section aria-label={t("preview.title")} style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, background: "var(--bg)" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0, padding: "6px 10px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)" }}>
+      <div className="workspace-subtitle-bar" style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0, borderBottom: "1px solid var(--border)", background: "var(--bg-panel)" }}>
         <Globe size={13} strokeWidth={2} color="var(--text-muted)" aria-hidden="true" style={{ flexShrink: 0 }} />
         <input
           type="text"
@@ -170,8 +170,8 @@ export function PreviewPanel({ cwd, active, onOpenTasks }: PreviewPanelProps): R
           style={{
             flex: 1,
             minWidth: 0,
-            padding: "4px 8px",
-            fontSize: 12,
+            padding: "2px 7px",
+            fontSize: 11,
             fontFamily: "var(--font-mono)",
             border: `1px solid ${inputError ? "var(--status-error)" : "var(--border)"}`,
             borderRadius: "var(--radius-control)",

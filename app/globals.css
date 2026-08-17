@@ -1875,6 +1875,14 @@ html.dark .dropdown-surface :is(select, option) {
   }
 }
 
+/* Every tool's inner title/toolbar matches the compact terminal tab bar. */
+.workspace-subtitle-bar {
+  height: 25px;
+  min-height: 25px;
+  box-sizing: border-box;
+  padding: 0 6px;
+}
+
 .terminal-panel {
   display: flex;
   flex-direction: column;

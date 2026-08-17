@@ -283,6 +283,16 @@ appears without a Cody change.
 
 ## Key Design Decisions & Traps
 
+### Human terminal engine launch is entrypoint-scoped
+- `TerminalManager.create()` launches the active engine once, then drops into
+  the configured interactive shell. `continue()` restarts only that shell.
+- The wrapper belongs only to browser PTYs created by the New Terminal action.
+  Never move it into shell profiles or process-global environment handling:
+  task runs, server subprocesses, and agent tool calls must stay plain commands.
+- Container SSH auto-launch is separately guarded in
+  `docker/entrypoint.sh` by `SSH_CONNECTION`, a real TTY, and
+  `CODY_NO_AUTO_ENGINE`; non-interactive SSH commands must bypass it.
+
 ### RPC session lifecycle (`lib/rpc-manager.ts`)
 - One wrapper per session id, keyed in a `globalThis` registry.
 - `globalThis` survives Next.js hot-reload; plain module-level Map does not.

@@ -9,10 +9,8 @@ import {
   CircleAlert,
   CircleMinus,
   Download,
-  FilePlus,
   Folder,
   FolderOpen,
-  FolderPlus,
   Loader2,
   MoreHorizontal,
   Pencil,
@@ -60,11 +58,12 @@ interface Props {
   onAtMention?: (relativePath: string, isDir: boolean) => void;
   onAtMentions?: (relativePaths: string[]) => void;
   onUploadBusyChange?: (busy: boolean) => void;
-  onRefreshDone?: () => void;
 }
 
 export interface FileExplorerHandle {
   openUploadPicker: () => void;
+  createFile: () => void;
+  createFolder: () => void;
 }
 
 type UploadPhase = "idle" | "checking" | "uploading";
@@ -369,14 +368,10 @@ function TreeNode({
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const [renameBusy, setRenameBusy] = useState(false);
-  const [creating, setCreating] = useState<"file" | "folder" | null>(null);
-  const [createValue, setCreateValue] = useState("");
-  const [createBusy, setCreateBusy] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
-  const createInputRef = useRef<HTMLInputElement>(null);
   const renameCancelRef = useRef(false);
 
   const loadChildren = useCallback(async (force = false) => {
@@ -428,36 +423,6 @@ function TreeNode({
   const mentionLabel = t("fileExplorer.insertPathIntoChat");
   const downloadLabel = t("fileExplorer.downloadFile");
 
-  const startCreate = useCallback((kind: "file" | "folder") => {
-    setMenuOpen(false);
-    if (!open) onToggleExpanded(node.fullPath, true);
-    if (!loaded) void loadChildren();
-    setCreateValue("");
-    setCreating(kind);
-    setTimeout(() => createInputRef.current?.focus(), 0);
-  }, [loaded, loadChildren, node.fullPath, open, onToggleExpanded]);
-
-  const commitCreate = useCallback(async () => {
-    if (!creating) return;
-    const name = createValue.trim();
-    if (!name) {
-      setCreating(null);
-      return;
-    }
-    setCreateBusy(true);
-    try {
-      const action = creating === "folder" ? "mkdir" : "create-file";
-      const { ok, data } = await postFileOp({ action, path: node.fullPath, name });
-      if (!ok) throw new Error(formatApiError(data));
-      setCreating(null);
-      setCreateValue("");
-      await loadChildren(true);
-    } catch (cause) {
-      toast.error(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setCreateBusy(false);
-    }
-  }, [creating, createValue, loadChildren, node.fullPath]);
 
   const startRename = useCallback(() => {
     setMenuOpen(false);
@@ -542,7 +507,7 @@ function TreeNode({
           alignItems: "center",
           gap: 4,
           paddingLeft: 8 + depth * 14,
-          paddingRight: 8,
+          paddingRight: hovered || focused || menuOpen ? 8 + 22 * (1 + (onAtMention ? 1 : 0) + (node.isDir ? 0 : 1)) : 8,
           height: 24,
           cursor: renaming ? "default" : "pointer",
           background: hovered ? "var(--bg-hover)" : "transparent",
@@ -647,97 +612,70 @@ function TreeNode({
         {loading && (
           <Loader2 size={10} strokeWidth={2} color="var(--text-dim)" style={{ animation: "spin 0.8s linear infinite", flexShrink: 0 }} aria-hidden="true" />
         )}
-        {onAtMention && hovered && !renaming && (
-          <Tooltip content={mentionLabel}>
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                onAtMention(getRelativeFilePath(node.fullPath, cwd), node.isDir);
-              }}
-              aria-label={mentionLabel}
-              style={{
-                position: "absolute",
-                right: !node.isDir ? 28 : 4,
-                top: "50%",
-                transform: "translateY(-50%)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: 4,
-                padding: "0 8px",
-                height: 20,
-                background: "var(--bg-panel)",
-                border: "1px solid var(--border)",
-                borderRadius: "var(--radius-control)",
-                color: "var(--accent)",
-                cursor: "pointer",
-                fontSize: 11,
-                fontWeight: 600,
-                whiteSpace: "nowrap",
-                transition: `background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)`,
-              }}
-            >
-              <AtSign size={11} strokeWidth={2.2} aria-hidden="true" />
-              {t("fileExplorer.mention")}
-            </button>
-          </Tooltip>
-        )}
-        {hovered && !node.isDir && !renaming && (
-          <Tooltip content={downloadLabel}>
-            <a
-              href={`/api/files/${encodeFilePathForApi(node.fullPath)}?type=download`}
-              download
-              onClick={(e) => e.stopPropagation()}
-              aria-label={downloadLabel}
-              style={{
-                position: "absolute",
-                right: 4,
-                top: "50%",
-                transform: "translateY(-50%)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: 4,
-                padding: "0 5px",
-                height: 20,
-                background: "var(--bg-panel)",
-                border: "1px solid var(--border)",
-                borderRadius: "var(--radius-control)",
-                color: "var(--text-muted)",
-                cursor: "pointer",
-                fontSize: 11,
-                fontWeight: 600,
-                whiteSpace: "nowrap",
-                textDecoration: "none",
-                transition: `background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)`,
-              }}
-            >
-              <Download size={11} strokeWidth={2.2} aria-hidden="true" />
-            </a>
-          </Tooltip>
-        )}
         {!renaming && (
           <div
             className="touch-reveal"
             style={{
               position: "absolute",
-              right: !node.isDir ? (onAtMention ? 52 : 28) : (onAtMention ? 28 : 4),
+              right: 4,
               top: "50%",
               transform: "translateY(-50%)",
+              display: "flex",
+              alignItems: "center",
+              gap: 2,
               visibility: hovered || focused || menuOpen ? "visible" : "hidden",
             }}
           >
+            {onAtMention && (
+              <Tooltip content={mentionLabel}>
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onAtMention(getRelativeFilePath(node.fullPath, cwd), node.isDir);
+                  }}
+                  aria-label={mentionLabel}
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    width: 20, height: 20, padding: 0,
+                    border: "1px solid var(--border)", borderRadius: "var(--radius-control)",
+                    background: "var(--bg-panel)", color: "var(--accent)", cursor: "pointer",
+                  }}
+                >
+                  <AtSign size={11} strokeWidth={2.2} aria-hidden="true" />
+                </button>
+              </Tooltip>
+            )}
+            {!node.isDir && (
+              <Tooltip content={downloadLabel}>
+                <a
+                  href={`/api/files/${encodeFilePathForApi(node.fullPath)}?type=download`}
+                  download
+                  onClick={(event) => event.stopPropagation()}
+                  aria-label={downloadLabel}
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    width: 20, height: 20, padding: 0,
+                    border: "1px solid var(--border)", borderRadius: "var(--radius-control)",
+                    background: "var(--bg-panel)", color: "var(--text-muted)", cursor: "pointer",
+                    textDecoration: "none",
+                  }}
+                >
+                  <Download size={11} strokeWidth={2.2} aria-hidden="true" />
+                </a>
+              </Tooltip>
+            )}
             <Tooltip content={t("fileExplorer.moreActions")}>
               <button
                 type="button"
                 ref={menuButtonRef}
-                onClick={(e) => { e.stopPropagation(); setMenuOpen((v) => !v); }}
+                onClick={(event) => { event.stopPropagation(); setMenuOpen((value) => !value); }}
                 aria-label={t("fileExplorer.moreActions")}
                 aria-expanded={menuOpen}
                 style={{
                   display: "flex", alignItems: "center", justifyContent: "center",
-                  width: 18, height: 18, padding: 0, lineHeight: 0,
-                  border: "none", borderRadius: "var(--radius-control)",
+                  width: 20, height: 20, padding: 0, lineHeight: 0,
+                  border: "1px solid var(--border)", borderRadius: "var(--radius-control)",
                   background: menuOpen ? "var(--bg-selected)" : "var(--bg-panel)",
                   color: menuOpen ? "var(--text)" : "var(--text-dim)",
                   cursor: "pointer",
@@ -747,23 +685,11 @@ function TreeNode({
               </button>
             </Tooltip>
             <FileRowMenu anchor={menuButtonRef} open={menuOpen} onClose={() => setMenuOpen(false)}>
-              {node.isDir && (
-                <>
-                  <FileRowMenuItem onClick={(e) => { e.stopPropagation(); startCreate("file"); }}>
-                    <FilePlus size={12} strokeWidth={2} aria-hidden="true" />
-                    {t("fileExplorer.newFile")}
-                  </FileRowMenuItem>
-                  <FileRowMenuItem onClick={(e) => { e.stopPropagation(); startCreate("folder"); }}>
-                    <FolderPlus size={12} strokeWidth={2} aria-hidden="true" />
-                    {t("fileExplorer.newFolder")}
-                  </FileRowMenuItem>
-                </>
-              )}
-              <FileRowMenuItem onClick={(e) => { e.stopPropagation(); startRename(); }}>
+              <FileRowMenuItem onClick={(event) => { event.stopPropagation(); startRename(); }}>
                 <Pencil size={12} strokeWidth={2} aria-hidden="true" />
                 {t("fileExplorer.rename")}
               </FileRowMenuItem>
-              <FileRowMenuItem danger onClick={(e) => { e.stopPropagation(); void handleDeleteClick(); }}>
+              <FileRowMenuItem danger onClick={(event) => { event.stopPropagation(); void handleDeleteClick(); }}>
                 <Trash2 size={12} strokeWidth={2} aria-hidden="true" />
                 {t("fileExplorer.delete")}
               </FileRowMenuItem>
@@ -784,39 +710,6 @@ function TreeNode({
       />
       {node.isDir && open && (
         <div role="group">
-          {creating && (
-            <div
-              style={{
-                display: "flex", alignItems: "center", gap: 4,
-                paddingLeft: 8 + (depth + 1) * 14, paddingRight: 8, height: 24,
-              }}
-            >
-              <span style={{ width: 10, flexShrink: 0 }} />
-              <span style={{ flexShrink: 0, display: "flex", alignItems: "center", color: "var(--text-dim)" }}>
-                {creating === "folder"
-                  ? <Folder size={14} strokeWidth={1.8} aria-hidden="true" />
-                  : getFileIcon(createValue || "untitled", 14)}
-              </span>
-              <input
-                ref={createInputRef}
-                value={createValue}
-                autoFocus
-                autoComplete="off"
-                spellCheck={false}
-                disabled={createBusy}
-                placeholder={t("fileExplorer.namePlaceholder")}
-                onChange={(e) => setCreateValue(e.target.value)}
-                onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
-                  if (e.key === "Enter") { e.preventDefault(); void commitCreate(); }
-                  if (e.key === "Escape") { e.preventDefault(); setCreating(null); }
-                }}
-                // Discards on blur (like DirectoryPicker's create-folder row):
-                // an accidental click-away should not silently create a file.
-                onBlur={() => { if (!createBusy) setCreating(null); }}
-                style={{ flex: 1, minWidth: 0, height: 19, padding: "0 4px", border: "1px solid var(--accent)", borderRadius: 4, outline: "none", background: "var(--bg)", color: "var(--text)", fontSize: 12 }}
-              />
-            </div>
-          )}
           {children.map((child) => (
             <TreeNode
               key={child.fullPath}
@@ -834,7 +727,7 @@ function TreeNode({
               onMutated={onMutated}
             />
           ))}
-          {children.length === 0 && loaded && !creating && (
+          {children.length === 0 && loaded && (
             <div style={{ paddingLeft: 8 + (depth + 1) * 14, fontSize: 11, color: "var(--text-dim)", height: 22, display: "flex", alignItems: "center" }}>
               {t("fileExplorer.emptyDir")}
             </div>
@@ -852,7 +745,6 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   onAtMention,
   onAtMentions,
   onUploadBusyChange,
-  onRefreshDone,
 }, ref) {
   const { t, tn } = useI18n();
   const [roots, setRoots] = useState<FileNode[]>([]);
@@ -997,11 +889,22 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     void prepareUpload(files);
   }, [prepareUpload]);
 
+  const startRootCreate = useCallback((kind: "file" | "folder") => {
+    setRootCreateValue("");
+    setRootCreating(kind);
+    setTimeout(() => rootCreateInputRef.current?.focus(), 0);
+  }, []);
   useImperativeHandle(ref, () => ({
     openUploadPicker() {
       if (!uploadBusy) uploadInputRef.current?.click();
     },
-  }), [uploadBusy]);
+    createFile() {
+      if (!rootCreating) startRootCreate("file");
+    },
+    createFolder() {
+      if (!rootCreating) startRootCreate("folder");
+    },
+  }), [rootCreating, startRootCreate, uploadBusy]);
 
   useEffect(() => {
     onUploadBusyChange?.(uploadBusy);
@@ -1009,10 +912,6 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
 
   useEffect(() => () => onUploadBusyChange?.(false), [onUploadBusyChange]);
 
-  // Keep the refresh-done callback in a ref so its identity cannot re-trigger
-  // the fetch effect below (AppShell re-renders on every session boundary).
-  const onRefreshDoneRef = useRef(onRefreshDone);
-  onRefreshDoneRef.current = onRefreshDone;
 
   useEffect(() => {
     const cwdChanged = prevCwdRef.current !== cwd;
@@ -1035,7 +934,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     fetchEntries(cwd)
       .then((entries) => { if (!cancelled) setRoots(entries); })
       .catch((e) => { if (!cancelled) setError(e instanceof Error ? e.message : String(e)); })
-      .finally(() => { if (!cancelled) setLoading(false); onRefreshDoneRef.current?.(); });
+      .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [cwd, refreshKey, treeRefreshKey]);
 
@@ -1050,6 +949,23 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       });
     return () => { cancelled = true; };
   }, [cwd, refreshKey, treeRefreshKey]);
+  // Keep the mounted explorer in sync with terminal/agent writes. Background
+  // timers are throttled by browsers, so focus and visibility restoration also
+  // force an immediate refresh.
+  useEffect(() => {
+    const refreshVisibleTree = () => {
+      if (!document.hidden) setTreeRefreshKey((key) => key + 1);
+    };
+    const interval = window.setInterval(refreshVisibleTree, 2500);
+    window.addEventListener("focus", refreshVisibleTree);
+    document.addEventListener("visibilitychange", refreshVisibleTree);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refreshVisibleTree);
+      document.removeEventListener("visibilitychange", refreshVisibleTree);
+    };
+  }, [cwd]);
+
 
   const showUploadFeedback = uploadBusy || pendingConflict !== null || uploadError !== null || uploadSummary !== null;
 
@@ -1060,11 +976,6 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     );
   }, [cwd, onAtMentions, uploadSummary]);
 
-  const startRootCreate = useCallback((kind: "file" | "folder") => {
-    setRootCreateValue("");
-    setRootCreating(kind);
-    setTimeout(() => rootCreateInputRef.current?.focus(), 0);
-  }, []);
 
   const commitRootCreate = useCallback(async () => {
     if (!rootCreating) return;
@@ -1201,34 +1112,6 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
         </div>
       )}
 
-      <div style={{ display: "flex", justifyContent: "flex-end", gap: 2, padding: "2px 6px 0" }}>
-        <Tooltip content={t("fileExplorer.newFile")}>
-          <button
-            type="button"
-            onClick={() => startRootCreate("file")}
-            disabled={rootCreating !== null}
-            aria-label={t("fileExplorer.newFile")}
-            style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, padding: 0, border: "none", borderRadius: "var(--radius-control)", background: "none", color: "var(--text-dim)", cursor: rootCreating ? "default" : "pointer", opacity: rootCreating ? 0.5 : 1 }}
-            onMouseEnter={(e) => { if (!rootCreating) { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "var(--bg-hover)"; } }}
-            onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}
-          >
-            <FilePlus size={13} strokeWidth={1.9} aria-hidden="true" />
-          </button>
-        </Tooltip>
-        <Tooltip content={t("fileExplorer.newFolder")}>
-          <button
-            type="button"
-            onClick={() => startRootCreate("folder")}
-            disabled={rootCreating !== null}
-            aria-label={t("fileExplorer.newFolder")}
-            style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, padding: 0, border: "none", borderRadius: "var(--radius-control)", background: "none", color: "var(--text-dim)", cursor: rootCreating ? "default" : "pointer", opacity: rootCreating ? 0.5 : 1 }}
-            onMouseEnter={(e) => { if (!rootCreating) { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "var(--bg-hover)"; } }}
-            onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}
-          >
-            <FolderPlus size={13} strokeWidth={1.9} aria-hidden="true" />
-          </button>
-        </Tooltip>
-      </div>
 
       <div role="tree" aria-label={t("sessionSidebar.explorer")} style={{ padding: "2px 4px" }}>
         {rootCreating && (

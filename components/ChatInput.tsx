@@ -46,6 +46,16 @@ interface ModelOption {
   name: string;
 }
 
+export interface ContextModelUsage {
+  provider: string;
+  modelId: string;
+  turns: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
 interface Props {
   onSend: (message: string, images?: AttachedImage[]) => void;
   onAbort: () => void;
@@ -80,8 +90,9 @@ interface Props {
   onAbortRetry?: () => void;
   queuedMessages?: QueuedMessages | null;
   inputHistory?: string[];
-  /** Context window usage for the circular indicator (percentage only). */
+  /** Context window usage for the circular indicator and compact details popover. */
   contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null;
+  contextModelUsage?: readonly ContextModelUsage[];
   /** Remove one queued message from the queue panel (Edit/Delete/Steer). */
   onRemoveQueuedMessage?: (text: string) => void;
   /** Relabel the first queued follow-up as a steering message. */
@@ -109,6 +120,7 @@ export interface ChatInputHandle {
 const COMPOSITION_END_ENTER_GRACE_MS = 100;
 /** Circumference of the context ring (r = 9.5). */
 const RING_CIRCUMFERENCE = 2 * Math.PI * 9.5;
+const EMPTY_CONTEXT_MODEL_USAGE: readonly ContextModelUsage[] = [];
 const COMPOSER_MODELS_STORAGE_KEY = STORAGE_KEYS.composerModels;
 
 function readVisibleModelKeys(): Set<string> | null {
@@ -387,7 +399,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   onBuiltinCommand,
   onAudioUnlock,
   onPromptWithStreamingBehavior,
-  contextUsage,
+  contextUsage, contextModelUsage = EMPTY_CONTEXT_MODEL_USAGE,
   onRemoveQueuedMessage,
   onPromoteQueuedToSteer,
   draftKey,
@@ -406,6 +418,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [modelDropdownRect, setModelDropdownRect] = useState<{ top: number; left: number; width: number } | null>(null);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
+  const [contextPopoverOpen, setContextPopoverOpen] = useState(false);
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
     draftKey ? draftImagesToAttachedImages(getDraft(draftKey)?.images) : []
   ));
@@ -432,6 +445,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const modelDropdownPanelRef = useRef<HTMLDivElement>(null);
   const thinkingDropdownRef = useRef<HTMLDivElement>(null);
   const historyMenuRef = useRef<HTMLDivElement>(null);
+  const contextPopoverRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isComposingRef = useRef(false);
   const lastCompositionEndAtRef = useRef(0);
@@ -1371,6 +1385,39 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     return thinkingLevelMap[lvl] ?? lvl;
   })();
   const clampedContextPercent = Math.max(0, Math.min(100, contextUsage?.percent ?? 0));
+  const contextRingColor = clampedContextPercent >= 90
+    ? "var(--status-error)"
+    : clampedContextPercent >= 70
+      ? "var(--status-warning)"
+      : "var(--accent)";
+  const contextTokens = contextUsage?.tokens
+    ?? (contextUsage?.contextWindow
+      ? Math.round(contextUsage.contextWindow * clampedContextPercent / 100)
+      : 0);
+  const contextAvailable = Math.max(0, (contextUsage?.contextWindow ?? 0) - contextTokens);
+  const contextTokenTraffic = React.useMemo(
+    () => contextModelUsage.reduce(
+      (total, entry) => ({
+        input: total.input + entry.input,
+        output: total.output + entry.output,
+        cacheRead: total.cacheRead + entry.cacheRead,
+      }),
+      { input: 0, output: 0, cacheRead: 0 },
+    ),
+    [contextModelUsage],
+  );
+  const contextModelRows = React.useMemo(
+    () => contextModelUsage.map((entry) => ({
+      ...entry,
+      name: modelOptions.find((option) => (
+        option.provider === entry.provider && option.modelId === entry.modelId
+      ))?.name
+        ?? modelNames?.[`${entry.provider}:${entry.modelId}`]
+        ?? (model?.provider === entry.provider && model.modelId === entry.modelId ? modelNameOverride : null)
+        ?? entry.modelId,
+    })),
+    [contextModelUsage, modelOptions, modelNames, model?.provider, model?.modelId, modelNameOverride],
+  );
   const thinkingLevelOptions = React.useMemo(
     () => selectableThinkingLevels(availableThinkingLevels),
     [availableThinkingLevels],
@@ -1397,10 +1444,29 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       if (historyMenuRef.current && !historyMenuRef.current.contains(e.target as Node) && !textareaRef.current?.contains(e.target as Node)) {
         setHistoryMenuOpen(false);
       }
+      if (contextPopoverRef.current && !contextPopoverRef.current.contains(e.target as Node)) {
+        setContextPopoverOpen(false);
+      }
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, []);
+
+  useEffect(() => {
+    if (!contextPopoverOpen) return;
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      setContextPopoverOpen(false);
+    };
+    document.addEventListener("keydown", closeOnEscape, true);
+    return () => document.removeEventListener("keydown", closeOnEscape, true);
+  }, [contextPopoverOpen]);
+
+  useEffect(() => {
+    setContextPopoverOpen(false);
+  }, [draftKey]);
 
   return (
     <div
@@ -2313,26 +2379,158 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
             <div style={{ flex: 1 }} />
 
-            {/* Context usage ring — small, percentage only, no label */}
+            {/* Icon-only context gauge with a compact, locally derived breakdown. */}
             {contextUsage?.percent != null && (
-              <span
-                title={`${Math.round(clampedContextPercent)}% · ${formatCompactNumber(contextUsage.tokens ?? 0, locale)} / ${formatCompactNumber(contextUsage.contextWindow, locale)}`}
-                style={{ position: "relative", width: 26, height: 26, flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center" }}
+              <div
+                ref={contextPopoverRef}
+                style={{ position: "relative", width: 28, height: 28, flexShrink: 0 }}
               >
-                <svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true" style={{ position: "absolute", inset: 0 }}>
-                  <circle cx="13" cy="13" r="9.5" fill="none" stroke="var(--border)" strokeWidth="2.5" />
-                  <circle
-                    cx="13" cy="13" r="9.5" fill="none"
-                    stroke="var(--accent)" strokeWidth="2.5" strokeLinecap="round"
-                    strokeDasharray={RING_CIRCUMFERENCE}
-                    strokeDashoffset={RING_CIRCUMFERENCE * (1 - clampedContextPercent / 100)}
-                    transform="rotate(-90 13 13)"
-                  />
-                </svg>
-                <span style={{ fontSize: 8, fontWeight: 600, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
-                  {Math.round(clampedContextPercent)}%
-                </span>
-              </span>
+                <button
+                  type="button"
+                  title={`${Math.round(clampedContextPercent)}% · ${formatCompactNumber(contextTokens, locale)} / ${formatCompactNumber(contextUsage.contextWindow, locale)}`}
+                  aria-label={t("chatInput.contextDetails", { percent: Math.round(clampedContextPercent) })}
+                  aria-expanded={contextPopoverOpen}
+                  aria-haspopup="dialog"
+                  onClick={() => setContextPopoverOpen((open) => !open)}
+                  style={{
+                    position: "relative",
+                    width: 28,
+                    height: 28,
+                    padding: 0,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    color: contextRingColor,
+                    background: contextPopoverOpen ? "var(--bg-hover)" : "none",
+                    border: "none",
+                    borderRadius: 7,
+                    cursor: "pointer",
+                    transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
+                  }}
+                >
+                  <svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true">
+                    <circle cx="13" cy="13" r="9.5" fill="none" stroke="var(--border)" strokeWidth="2.5" />
+                    <circle
+                      cx="13" cy="13" r="9.5" fill="none"
+                      stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"
+                      strokeDasharray={RING_CIRCUMFERENCE}
+                      strokeDashoffset={RING_CIRCUMFERENCE * (1 - clampedContextPercent / 100)}
+                      transform="rotate(-90 13 13)"
+                      style={{ transition: "stroke-dashoffset var(--dur-med) var(--ease-out-warm), stroke var(--dur-fast) var(--ease-out-warm)" }}
+                    />
+                    <circle cx="13" cy="13" r="2" fill="currentColor" opacity="0.72" />
+                  </svg>
+                </button>
+
+                {contextPopoverOpen && (
+                  <div
+                    role="dialog"
+                    aria-label={t("chatInput.contextUsage")}
+                    className="dropdown-surface"
+                    style={{
+                      position: "absolute",
+                      right: 0,
+                      bottom: "calc(100% + 8px)",
+                      zIndex: 120,
+                      width: 320,
+                      maxWidth: "calc(100vw - 32px)",
+                    }}
+                  >
+                    <div style={{ maxHeight: "min(360px, calc(100vh - 120px))", overflowY: "auto", padding: 14 }}>
+                      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
+                        <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text)" }}>
+                          {t("chatInput.contextUsage")}
+                        </div>
+                        <div style={{ fontSize: 16, fontWeight: 700, color: contextRingColor, fontVariantNumeric: "tabular-nums" }}>
+                          {Math.round(clampedContextPercent)}%
+                        </div>
+                      </div>
+                      <div style={{ height: 5, margin: "8px 0 10px", overflow: "hidden", borderRadius: 999, background: "var(--border)" }}>
+                        <div style={{
+                          width: `${clampedContextPercent}%`,
+                          height: "100%",
+                          borderRadius: 999,
+                          background: contextRingColor,
+                          transition: "width var(--dur-med) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm)",
+                        }} />
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8 }}>
+                        {[
+                          [t("chatInput.contextUsed"), contextTokens],
+                          [t("chatInput.contextAvailable"), contextAvailable],
+                          [t("chatInput.contextLimit"), contextUsage.contextWindow],
+                        ].map(([label, value]) => (
+                          <div key={String(label)} style={{ minWidth: 0 }}>
+                            <div style={{ fontSize: 10, color: "var(--text-dim)", marginBottom: 2 }}>{label}</div>
+                            <div style={{ fontSize: 12, color: "var(--text)", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
+                              {formatCompactNumber(Number(value), locale)}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      {(contextTokenTraffic.input > 0 || contextTokenTraffic.output > 0 || contextTokenTraffic.cacheRead > 0) && (
+                        <div style={{ marginTop: 13, paddingTop: 11, borderTop: "1px solid var(--border)" }}>
+                          <div style={{ marginBottom: 7, fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.045em" }}>
+                            {t("chatInput.tokenTraffic")}
+                          </div>
+                          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8 }}>
+                            {[
+                              [t("chatInput.tokenInput"), contextTokenTraffic.input],
+                              [t("chatInput.tokenOutput"), contextTokenTraffic.output],
+                              [t("chatInput.tokenCached"), contextTokenTraffic.cacheRead],
+                            ].map(([label, value]) => (
+                              <div key={String(label)} style={{ minWidth: 0 }}>
+                                <div style={{ fontSize: 10, color: "var(--text-dim)", marginBottom: 2 }}>{label}</div>
+                                <div style={{ fontSize: 12, color: "var(--text-muted)", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
+                                  {formatCompactNumber(Number(value), locale)}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      <div style={{ marginTop: 13, paddingTop: 11, borderTop: "1px solid var(--border)" }}>
+                        <div style={{ marginBottom: 7, fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.045em" }}>
+                          {t("chatInput.modelsUsed")}
+                        </div>
+                        {contextModelRows.length > 0 ? (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                            {contextModelRows.map((entry) => {
+                              const tokenTotal = entry.input + entry.output + entry.cacheRead + entry.cacheWrite;
+                              const active = model?.provider === entry.provider && model.modelId === entry.modelId;
+                              return (
+                                <div key={`${entry.provider}:${entry.modelId}`} style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                                  <span style={{ width: 6, height: 6, flexShrink: 0, borderRadius: "50%", background: active ? contextRingColor : "var(--border)" }} />
+                                  <div style={{ flex: 1, minWidth: 0 }}>
+                                    <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11.5, fontWeight: 600, color: "var(--text)" }}>
+                                      {entry.name}
+                                    </div>
+                                    <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 10, color: "var(--text-dim)" }}>
+                                      {entry.provider}
+                                    </div>
+                                  </div>
+                                  <div style={{ flexShrink: 0, textAlign: "right", fontSize: 10, lineHeight: 1.35, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
+                                    <div>{tn("chatInput.modelTurns", entry.turns)}</div>
+                                    <div style={{ color: "var(--text-dim)" }}>{formatCompactNumber(tokenTotal, locale)} {t("chatInput.tokens")}</div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div style={{ fontSize: 11, color: "var(--text-dim)" }}>
+                            {currentName
+                              ? t("chatInput.currentModel", { model: currentName })
+                              : t("chatInput.noModelUsage")}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
             )}
 
             {/* Primary action: Send (idle) / Stop (running) */}
