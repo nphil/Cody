@@ -87,6 +87,9 @@ tokens conserved deliberately:
   config-level now, a settings surface once it stabilizes.
 - Preview panel → universal display surface (host allowlist, optional
   noVNC virtual display, Android-emulator side-container recipe).
-- Native Android tablet / iOS clients someday — keep the HTTP API surface
-  clean and documented; it is the contract those clients will consume.
+- Native Android tablet / iOS clients — architecture plan in
+  `docs/android.md` (one UI, two backends: online thin client over
+  Tailscale by default, fully-offline mode via Termux + on-device
+  GPU/NPU models). Keep the HTTP API surface clean and documented; it is
+  the contract those clients will consume.
 - More engines (Pi, Cline, Cursor, …) via `docs/harnesses.md`'s checklist.
