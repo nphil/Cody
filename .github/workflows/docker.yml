@@ -136,8 +136,26 @@ jobs:
 
           # Screenshot capability contract: the preview_screenshot host tool
           # and the Preview capture button need the bundled headless Chromium.
+          # --version alone would not catch a renderer that cannot start in
+          # the slim image, so capture a REAL page served inside the container
+          # end to end through the API.
           docker exec cody-smoke /usr/bin/chromium --version \
             || fail "screenshot support: bundled chromium missing or broken"
+          # Cody ships ja/zh-CN UIs; screenshots of them need CJK + emoji
+          # coverage or they render as tofu boxes.
+          docker exec cody-smoke sh -c 'ls /usr/share/fonts/opentype/noto/ | grep -qi cjk' \
+            || fail "screenshot support: CJK fonts missing from the image"
+          docker exec cody-smoke sh -c 'ls /usr/share/fonts/truetype/noto/ | grep -qi emoji' \
+            || fail "screenshot support: emoji font missing from the image"
+          docker exec -d cody-smoke python3 -m http.server 4655 --bind 127.0.0.1
+          sleep 1
+          shot=$(curl -s -o /tmp/shot-body -w '%{http_code}' -b /tmp/smoke-cookies \
+            -H 'Content-Type: application/json' -d '{"url":"http://127.0.0.1:4655"}' \
+            --max-time 90 \
+            http://127.0.0.1:30177/api/preview/screenshot || echo 000)
+          [ "$shot" = "200" ] || fail "screenshot support: capture expected 200, got $shot ($(head -c 300 /tmp/shot-body))"
+          grep -q '"data":"iVBOR' /tmp/shot-body \
+            || fail "screenshot support: capture returned no PNG payload ($(head -c 300 /tmp/shot-body))"
 
           # Informational: the settings panel degrades to Cody's own controls
           # when OMP's schema cannot be read, so a miss here is worth seeing in
@@ -150,7 +168,7 @@ jobs:
             echo "::warning::omp settings schema did not load in the image"
           fi
           docker rm -f cody-smoke >/dev/null
-          echo "fresh-install verified (locked, setup mints an admin, omp installs from the picker and runs)"
+          echo "fresh-install verified (locked, setup mints an admin, omp installs from the picker and runs, screenshots capture)"
 
           # ------------------------------------------------------------------
           # Password mode + SSH: CODY_PASSWORD still enables the env-managed

@@ -33,13 +33,16 @@ FROM node:22-bookworm-slim AS runtime
 #   chromium/fonts:    headless renderer behind the preview_screenshot host
 #                      tool and the Preview panel's capture button — the
 #                      agent seeing its own work is core product, and a
-#                      post-hoc apt install would not survive image updates
+#                      post-hoc apt install would not survive image updates.
+#                      Fonts cover what screenshots must render faithfully:
+#                      Latin metrics (liberation), CJK (Cody ships ja/zh-CN
+#                      UIs and the owner's apps use them), and emoji.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     git gh curl wget ca-certificates procps openssh-client openssh-server \
     python3 python3-pip python3-venv \
     ripgrep jq nano less unzip zip \
-    chromium fonts-liberation \
+    chromium fonts-liberation fonts-noto-cjk fonts-noto-color-emoji \
   && rm -rf /var/lib/apt/lists/* \
   && mkdir -p /run/sshd
 
