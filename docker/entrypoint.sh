@@ -30,8 +30,9 @@ export PATH
 # the runtime values into a profile script (sourced alphabetically — env
 # first, the engine auto-launch below second), and point root's home at the
 # persistent /data/home where engine sign-in state (~/.claude, ~/.codex)
-# lives.
-usermod -d "${HOME}" root 2>/dev/null || true
+# lives. Edited directly in /etc/passwd: usermod refuses to touch root while
+# root is running the entrypoint ("user root is currently used by process 1").
+sed -i "s#^\(root:[^:]*:0:0:[^:]*\):[^:]*:#\1:${HOME}:#" /etc/passwd
 cat > /etc/profile.d/00-cody-env.sh <<EOF
 export PI_CODING_AGENT_DIR="${PI_CODING_AGENT_DIR}"
 export CODY_TOOLS_DIR="${CODY_TOOLS_DIR}"
