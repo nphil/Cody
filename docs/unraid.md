@@ -145,10 +145,12 @@ behind an authenticating reverse proxy.
 When the agent starts a dev server, the Preview panel embeds it. It picks the
 best option that actually works, in this order:
 
-1. **Direct** — a real iframe against the dev server's own address. Needs the
-   dev server bound to `0.0.0.0` (not `127.0.0.1`), and needs Cody itself
-   reached over plain HTTP, because a browser blocks an `http://` iframe inside
-   an `https://` page as mixed content.
+1. **Direct** — a real iframe against the dev server's own origin. Free and
+   automatic when Cody runs on the machine you are browsing from (the desktop
+   shell, an on-device build, plain `npm run dev`). From another device it
+   additionally needs the dev server bound to `0.0.0.0` rather than
+   `127.0.0.1`, and Cody itself reached over plain HTTP — a browser blocks an
+   `http://` iframe inside an `https://` page as mixed content.
 2. **Gateway** — only when **Preview Domain** (`CODY_PREVIEW_BASE_URL`) is set.
 3. **Streamed** — a server-side Chromium ships frames over Cody's own
    authenticated WebSocket. Always available, needs nothing of your network.

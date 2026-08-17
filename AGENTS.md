@@ -404,11 +404,19 @@ appears without a Cody change.
   `candidates: DisplayCandidate[]`, ranked best-fidelity-first, and the client
   uses the first one that works. There is no single `transport` any more, and
   streaming is NOT the default — it is the floor.
-  1. `direct` — a real iframe against the dev server's own origin. The server
-     probes its non-loopback IPv4 interfaces (`os.networkInterfaces()`) and
-     emits one candidate per address that answers, so a dev server bound to
-     `0.0.0.0` is framed straight from the tablet over LAN/Tailscale. Highest
-     fidelity: real DOM, real fonts, real input, no re-encode.
+  1. `direct` — a real iframe against the dev server's own origin, ranked
+     **local-first**: the loopback URL we were handed leads the group, then one
+     candidate per non-loopback IPv4 interface (`os.networkInterfaces()`) that
+     answers a probe, so a dev server bound to `0.0.0.0` is framed straight
+     from the tablet over LAN/Tailscale. Highest fidelity: real DOM, real
+     fonts, real input, no re-encode.
+     The loopback rung is what makes a co-located install (Windows desktop
+     shell, on-device Android, plain `npm run dev`) render natively with zero
+     configuration and no Chromium — but it is only usable by a browser on this
+     machine, so `lib/display/ladder.ts` **drops it structurally** for any
+     other client. That gate cannot be a probe: a remote device probing
+     `127.0.0.1` may get an opaque success from an unrelated local app and
+     frame the wrong thing.
   2. `native` — the `CODY_PREVIEW_BASE_URL` wildcard-subdomain HTTP+WS reverse
      proxy, which strips cookies/auth headers so the iframe never carries Cody
      credentials into the dev server. Only present when configured.
@@ -417,6 +425,14 @@ appears without a Cody change.
      ships JPEG frames + pointer/keyboard input over the
      `/api/display/socket?sessionId=` WS handled in `bin/cody-server.js`.
      Needs nothing of the client's network, so it cannot fail to be available.
+- **Client-side ranking** (`lib/display/ladder.ts`): `orderDisplayCandidates()`
+  is pure and shared (the panel imports it; future native clients can too). It
+  encodes the three facts only the document knows — mixed content is
+  hard-blocked, loopback means *this* machine, and our own hostname provably
+  routes here so it outranks the rest of the direct group. Unit-tested in
+  `lib/display.test.mjs`; there is deliberately no "remote mode" flag, because
+  one server can serve a local webview and a remote tablet at the same time and
+  each resolves correctly from the same candidate list.
 - **Capability tokens** (`capability.ts`): engine-side MCP servers post to
   `/api/internal/display` with an HMAC session-scoped token.
   `CODY_INTERNAL_DISPLAY_SECRET`/`CODY_INTERNAL_DISPLAY_ORIGIN` are minted by

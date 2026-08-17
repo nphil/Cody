@@ -2,6 +2,7 @@ import { existsSync } from "fs";
 import { homedir } from "os";
 import { renameSessionOwner } from "./auth/session-owners";
 import { aliasDisplaySession, publishDisplayRequest } from "./display/bus";
+import { isLoopbackHost } from "./display/ladder";
 import { getHarness } from "./harness";
 import type { EngineSession, EngineSessionOptions } from "./harness/types";
 import { validateAgentImages } from "./image-attachments";
@@ -574,16 +575,19 @@ export class AgentSessionWrapper {
           reachable = false;
         }
         // A port that answers on loopback but on no routable interface means
-        // the dev server bound 127.0.0.1: the panel still works, but only
-        // through the raster stream. The model is the one who can fix that, so
-        // say how. Deliberate stream/native modes are not second-guessed.
+        // the dev server bound 127.0.0.1. A browser on this machine still gets
+        // a real iframe (the loopback rung), but every other device drops to
+        // the raster stream. The model is the one who can fix that, so say how.
+        // NOTE: this must test for a NON-loopback direct candidate — a live
+        // loopback server always yields a `direct` rung now, so `some(direct)`
+        // would be permanently true and this hint would never fire.
         const loopbackOnly = reachable && request.requestedMode === "auto"
-          && !request.candidates.some((candidate) => candidate.kind === "direct");
+          && !request.candidates.some((candidate) => candidate.kind === "direct" && !isLoopbackHost(candidate.host));
         const status = reachable
           ? `Preview panel is now showing ${request.source.url} (request ${request.id}).`
           : `Preview panel opened for ${request.source.url} (request ${request.id}), but nothing answered there yet — verify the server is running and listening on that port.`;
         const hint = loopbackOnly
-          ? " That port is bound to loopback only, so the preview falls back to a streamed raster view. Restart the dev server listening on every interface (add `--host 0.0.0.0`, or run `npm run dev:lan` in this repo) and call open_preview again for the full-fidelity preview that loads the real origin."
+          ? " That port is bound to loopback only: a browser on this machine frames it directly, but any other device falls back to a streamed raster view. To make it full fidelity everywhere, restart the dev server listening on every interface (add `--host 0.0.0.0`, or run `npm run dev:lan` in this repo) and call open_preview again."
           : "";
         this.proc.sendFrame({
           type: "host_tool_result",

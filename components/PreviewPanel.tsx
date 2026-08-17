@@ -6,6 +6,7 @@ import { useI18n } from "@/lib/i18n";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { toast } from "./ui/toast";
 import type { DisplayCandidate, DisplayCandidateKind, DisplayRequestV1, DisplayStreamState } from "@/lib/display/types";
+import { orderDisplayCandidates } from "@/lib/display/ladder";
 // Loopback-only rules + rationale live in lib/preview-url, shared with the
 // agent-facing open_preview host tool and the assistant-URL auto-open path.
 // probeLoopbackUrl itself only answers "did anything reply?", so the ladder
@@ -161,24 +162,6 @@ const MODE_LABEL_KEY: Record<DisplayCandidateKind, string> = {
   stream: "preview.modeStreamed",
 };
 
-/**
- * This browser's view of the server's fidelity ladder. The server ranks by
- * fidelity but cannot know two things only this document knows:
- *  - mixed content is hard-blocked, so an http: candidate is unusable on an
- *    https: page and is dropped rather than probed;
- *  - the hostname in our own address bar provably routes to this device, so a
- *    candidate on that host outranks the rest of the direct group (LAN and
- *    Tailscale clients reach Cody under different names).
- * The stream floor carries no URL and always works, so it survives every
- * filter and stays last.
- */
-function orderCandidates(candidates: readonly DisplayCandidate[], pageProtocol: string, pageHostname: string): DisplayCandidate[] {
-  const usable = candidates.filter((candidate) =>
-    candidate.kind === "stream" || (!!candidate.url && !(pageProtocol === "https:" && /^http:\/\//i.test(candidate.url))));
-  const routable = (candidate: DisplayCandidate): boolean => candidate.kind === "direct" && candidate.host === pageHostname;
-  return usable.some(routable) ? [...usable.filter(routable), ...usable.filter((candidate) => !routable(candidate))] : usable;
-}
-
 export function PreviewPanel({ sessionId, active, request, onOpenTasks, onCaptureToChat }: PreviewPanelProps): ReactElement {
   const { t } = useI18n();
   const [input, setInput] = useState(DEFAULT_URL);
@@ -203,7 +186,7 @@ export function PreviewPanel({ sessionId, active, request, onOpenTasks, onCaptur
   useEffect(() => {
     if (!request) { setResolution(null); return; }
     const id = request.id;
-    const ladder = orderCandidates(request.candidates, window.location.protocol, window.location.hostname);
+    const ladder = orderDisplayCandidates(request.candidates, window.location.protocol, window.location.hostname);
     // Per-run cancellation: a superseding request (or an unmount) runs this
     // effect's cleanup before the next walk starts, so an in-flight walk can
     // never commit a stale winner over a newer one.

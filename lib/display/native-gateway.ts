@@ -70,13 +70,21 @@ async function answers(url: string): Promise<boolean> {
 }
 
 /**
- * The dev server's own origin, reachable from the owner's tablet whenever the
- * server bound 0.0.0.0: same port, same path, but the container's routable
- * IPv4 address instead of loopback. Probed per interface, concurrently, so a
- * multi-homed container does not serialize timeouts.
+ * Every origin that serves the dev server AS ITSELF, best first:
+ *
+ *  1. The loopback origin we were handed. When Cody runs beside its browser —
+ *     the Windows desktop shell, an on-device Android build, plain
+ *     `npm run dev` — this is the whole answer: the real page, no hops, no
+ *     configuration, and no Chromium to run. Clients that are NOT on this
+ *     machine discard it (see lib/display/ladder.ts); it is offered, not
+ *     imposed.
+ *  2. The container's routable addresses, for a browser elsewhere on the LAN or
+ *     tailnet — same port and path, reachable only if the dev server bound
+ *     0.0.0.0. Probed per interface, concurrently, so a multi-homed host does
+ *     not serialize timeouts.
  */
 async function directCandidates(target: URL): Promise<DisplayCandidate[]> {
-  const hosts = new Set<string>();
+  const hosts = new Set<string>([target.hostname]);
   for (const addresses of Object.values(networkInterfaces())) {
     for (const address of addresses ?? []) {
       if (address.internal || address.family !== "IPv4") continue;
