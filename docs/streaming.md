@@ -29,6 +29,23 @@ transports are evaluated *against* neko rather than presented as a menu.
    hardware here. The answer is a content-switched still/video design, and one
    cheap experiment (§12 item 5) decides whether it is required.
 
+**And the shape to carry away — a latency ladder, not a single number.** On a
+realistic *idle* page, full-viewport repaint latency scales at roughly 9–10 ms per
+megapixel (§2.2c), so the cost is proportional to how much screen the user gives the
+preview:
+
+| Surface | Device px | Mpx | Repaint median |
+| --- | --- | --- | --- |
+| **Docked Preview panel** | 1076×1518 | 1.63 | **≈30 ms** — comfortably immediate |
+| **Popped out / maximised** | 2880×1800 | 5.18 | **≈64 ms** — noticeable |
+| **4K-class surface** | 3840×2400 | 9.22 | **≈100 ms** (154 ms p95) — not native |
+
+So today's path is *fine where it is normally used* and degrades exactly where the
+user is looking hardest: **the penalty becomes visible when they pop the preview out
+to inspect something closely.** The problem is not that the path is bandwidth-hungry
+— idle bandwidth is a modest 1–6 Mbit/s — it is that **density costs interaction
+latency and no amount of bandwidth buys it back.** Everything below follows from that.
+
 Everything named here is verifiable: API names come from the spec or from the
 named project's own source/docs, and every URL was read. Numbers labelled
 **measured** were produced on this machine by the harness in
@@ -152,17 +169,26 @@ cannot both be served sharply from one Chromium, and the first to connect wins.
 For a preview panel that is a wart; for a desktop meant to be reached from a
 tablet *and* a laptop it is disqualifying.
 
-**And it is pixel-rate-bound before it is bandwidth-bound.** This is the limit I
-had missed until `GpuPassthrough` measured the real screencast path (§2.2b).
-Normalising its numbers to pixel throughput is what exposes it: from roughly 4 Mpx
-upward the path holds a **roughly constant ~150–180 Mpx/s** no matter what
-resolution you ask for. That is the signature of a fixed per-second pixel budget,
-and the consequence is the important part: **more density buys proportionally fewer
-frames, at any bitrate.** 2560×1600 manages 44.5 fps; 3840×2400 manages 17.0. The
+**It is pixel-rate-bound — but only when content churns.** `GpuPassthrough`
+measured the real screencast path twice, and the two results say different things.
+Under continuous animation (§2.2b) the path holds a **roughly constant
+~150–180 Mpx/s** from about 4 Mpx upward: a fixed per-second pixel budget, so more
+density buys proportionally fewer frames, at any bitrate. On a realistic
+mostly-idle page (§2.2c) that ceiling never binds — idle frame rate is flat at
+~2.8–3.25 fps across a **10× spread in pixel count**, because it is set by the
+content's damage rate, not by the pipeline. So the throughput ceiling is a genuine
+worst case, not the daily state, and this document is careful not to overclaim it.
+
+**The daily cost is latency, and that one does scale with density.** On the idle
+page a single full-viewport repaint costs **25 ms median at 1280×800 and 115 ms at
+4096×2560** (§2.2c) — roughly a fixed cost plus ~9–10 ms per megapixel. At the
+density the owner actually wants that is around 64 ms, and at DPR 3 it is ~100 ms
+median with a 154 ms p95. This is felt on an *idle* page, on **every keystroke**,
+and it is the single most important consequence of the current design: the
 constraint is a software JPEG encoder running per frame in the browser process, not
-the link — so on this path the sharpness the owner wants is not purchasable by
-spending bandwidth. That is an argument no tuning answers, and it is why §4.2 moves
-the encode off the CPU rather than trying to make CDP faster.
+the link, so **the crispness the owner wants costs interaction latency and cannot be
+bought back with bandwidth.** That is why §4.2 moves the encode off the CPU rather
+than trying to make CDP faster.
 
 ### 2.2 What a JPEG frame actually costs (measured)
 
@@ -285,6 +311,69 @@ One thing these numbers *confirm* rather than challenge: **the geometry contract
 exact** — 1280×800@dpr1 → 1280×800, @dpr2 → 2560×1600, @dpr3 → 3840×2400, and
 2560×1600@dpr3 → 4096×2560 (the `MAX_FRAME_EDGE` clamp). The density plumbing in §1
 works; it is the encoder behind it that runs out of budget.
+
+### 2.2c The daily case: a mostly-idle page (measured by `GpuPassthrough`)
+
+The measurement that actually decides how bad the current path is. §2.2 is a still
+image and §2.2b is a 60 Hz animation; **this is the case the owner lives in.**
+Fixture: a realistic mostly-idle dev-server page — static log and text blocks, a
+blinking caret, a 1 Hz clock, so the only self-generated damage is the caret and the
+clock. Current code, devices absent. "Repaint latency" is a client click that flips
+the body background, guaranteeing **full-viewport** damage, timed to first frame
+back; n = 8–18 per row.
+
+| Viewport / dpr | Device px | Mpx | Idle fps | B/frame | Idle Mbit/s | **Repaint median** | **p95** |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1280×800 dpr1 | 1280×800 | 1.02 | 2.83 | 53,997 | 1.22 | **25 ms** | 51 ms |
+| 1280×800 dpr2 | 2560×1600 | 4.10 | 2.83 | 145,737 | 3.30 | **55 ms** | 78 ms |
+| 1280×800 dpr3 | 3840×2400 | 9.22 | 3.00 | 260,827 | 6.26 | **97 ms** | 106 ms |
+| 2560×1600 dpr3 | 4096×2560 | 10.49 | 3.25 | 167,869 | 4.36 | **115 ms** | 154 ms |
+
+**Three findings, and they reweight this document's argument.**
+
+1. **Idle frame rate is flat** at ~2.8–3.25 fps across a 10.3× spread in pixel
+   count — a 1.15× spread in fps. It is set by the content's damage rate, not the
+   pipeline. So §2.2b's throughput ceiling is a real worst case but **not** the daily
+   state, and §2.1 is scoped accordingly.
+2. **Latency is where density bites, and it scales cleanly.** Median repaint goes
+   25 → 55 → 97 → 115 ms. A linear fit gives roughly **13–16 ms fixed plus
+   ~9–10 ms per megapixel** (`GpuPassthrough` reports ~13 + 9.9; my own
+   least-squares on the four points gives 16.1 + 9.17 — the same answer within the
+   noise of four samples). **Interpolate to the surfaces that actually exist, and
+   the answer is a ladder rather than one number** — both figures below sit
+   *between* measured rows, so neither extrapolates:
+
+   | Surface | CSS viewport | Device px | Mpx | Median |
+   | --- | --- | --- | --- | --- |
+   | Docked Preview panel | 538×759 @dpr2 | 1076×1518 | 1.63 | **≈30 ms** |
+   | Popped out / maximised | 1440×900 @dpr2 | 2880×1800 | 5.18 | **≈64 ms** |
+   | 4K-class | 1920×1200 @dpr2 | 3840×2400 | 9.22 | **≈100 ms**, 154 ms p95 |
+
+   The docked panel is small because it shares the window with chat, the file tree
+   and the rest of the UI (docked figure measured by `StreamClient`, who owns that
+   component). **So ~30 ms is the everyday cost and it is comfortably inside the
+   immediate-feel budget** — I earlier attached the 64 ms figure to everyday use and
+   that was wrong by about 2×. The 64 ms is the price of **popping out or
+   maximising**, and ~100–154 ms is what a 4K-class surface costs. The
+   uncomfortable part is the shape: the penalty grows exactly in proportion to how
+   much screen the user gives the preview, so it becomes visible precisely when they
+   have popped it out to look closely. Any cap the pop-out places on surface size is
+   therefore a latency control, and should be understood as one.
+3. **Idle bandwidth is modest**: 1.22–6.26 Mbit/s, against 30.5–58.6 Mbit/s
+   saturated. So bandwidth is genuinely the *weaker* half of the case against the
+   current path, and latency is the strong half. The 19–27× bandwidth gap in §2.2 is
+   real and worth having, but it is not what the owner feels day to day.
+
+Two cautions carried forward:
+
+- **Row 4 again has fewer bytes/frame than row 3** (167.9 vs 260.8 KB) despite more
+  pixels. Same layout/`captureScale` confound as §2.2b — 1280 CSS px at 3× versus
+  2560 CSS px at 1.6× — so it is not saturation evidence here either.
+- **The GPU branch remains UNMEASURED.** Worth stating precisely what it should be
+  expected to do: GPU rasterization attacks finding 2, because raster is part of the
+  per-repaint cost — but the JPEG encode inside that same cost is **not**
+  accelerated, so it should **shrink the ~9–10 ms/Mpx slope without eliminating it**.
+  That is a falsifiable prediction and §12 item 10 should test it as one.
 
 ---
 
@@ -1713,8 +1802,13 @@ each. Nothing above should be promoted from "expected" to "true" without these.
    at every tested density (§2.2b), so no resample remains in the sizing path. The
    residual softness question is now purely about chroma and quantisation, which is
    §8.8 and item 5, not geometry.
-3. Input-to-photon latency, however crudely (a timestamped div under a click).
-   Without a baseline number, every later "it feels faster" is unfalsifiable.
+3. ~~Input-to-photon latency baseline.~~ **Answered — see §2.2c.** Full-viewport
+   repaint latency on an idle page is 25 ms median at 1280×800 rising to 115 ms at
+   4096×2560, ≈13–16 ms fixed plus ~9–10 ms/Mpx, with ≈64 ms interpolated for the
+   owner's real 2880×1800 panel. Every later "it feels faster" is now falsifiable
+   against those numbers. What is still unmeasured is the *end-to-end* figure
+   including network and client paint on the owner's actual devices over Tailscale,
+   rather than server-side to first frame.
 4. **How much the per-process density limit actually bites.** Connect two clients
    at different DPR to one session and record what the 1× client sees when a 2×
    client connected first, and vice versa. This is the number that decides whether
@@ -1749,7 +1843,12 @@ each. Nothing above should be promoted from "expected" to "true" without these.
 **Phase 2**
 10. **Does `/dev/dri` exist on the Unraid *host*?** The boot probe only sees inside
     the container, and the template `/dev/dri` entry is still pending, so this
-    needs one command on the host. It gates all of Phase 2.
+    needs one command on the host. It gates all of Phase 2. Then test the one
+    **falsifiable prediction** §2.2c makes about it: GPU rasterization should
+    *shrink* the ~9–10 ms/Mpx repaint slope, because raster is part of that cost,
+    but must **not** eliminate it, because the JPEG encode in the same path is not
+    accelerated. If the slope vanishes, my model of where the time goes is wrong; if
+    it does not move at all, the flags are not taking effect.
 11. The NVIDIA card's model, driver version and **actual** NVENC concurrent-session
     cap for that model, from NVIDIA's own support matrix rather than the secondary
     sources I cited. Then: what a Cody pipeline does when the cap is already
