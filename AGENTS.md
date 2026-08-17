@@ -1,5 +1,8 @@
 # Cody - Development Notes
 
+> Owner workflow preferences (release discipline, delegation/token strategy,
+> deployment context) live in **CLAUDE.md**; this file is the codebase map.
+
 ## Git Workflow (project rule)
 
 `main` is the only long-lived branch and is always the latest, up-to-date state.

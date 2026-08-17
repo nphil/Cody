@@ -6,6 +6,10 @@ Cody is a self-hosted web workspace for coding agents — an IDE you keep, with 
 
 Cody is a fork of [kahme247/ompweb](https://github.com/kahme247/ompweb) — see [Credits](#credits).
 
+> **⚠️ 100% vibecoded.** This entire project is built by coding agents, for
+> running coding agents. It works on the author's machines — install and
+> experiment at your own risk.
+
 ![Cody — light theme](docs/screenshot-light.png)
 
 <details>
@@ -49,20 +53,19 @@ For Unraid there is a ready-made template and a full walkthrough in
 that lands directly in the active engine's CLI — exit the engine and you are
 in a plain shell (see [SSH](#ssh-into-the-container)).
 
-### Running from npm (bare metal / development)
+### Running from source (bare metal / development)
 
-```bash
-npx @nphil/cody@latest        # or: npm install -g @nphil/cody && cody
-```
-
+Cody is not published to npm — outside Docker, run it from a checkout.
 Requires Node.js 22.19+ and an engine on `PATH` (omp for the full
-experience). Cody listens on `127.0.0.1:30177` by default and opens your
-browser when ready.
+experience):
 
 ```bash
-cody --port 8080              # custom port
-cody --hostname 0.0.0.0       # expose on a trusted network
-cody --no-open                # do not open the browser automatically
+git clone https://github.com/nphil/Cody && cd Cody
+npm install
+npm run dev            # development server on 127.0.0.1:30178
+
+npm run build          # production build…
+npm start              # …served on 127.0.0.1:30177 (start:lan for 0.0.0.0)
 ```
 
 ## Engines

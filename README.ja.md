@@ -6,6 +6,8 @@ Cody はコーディングエージェントのためのセルフホスト型 We
 
 Cody は [kahme247/ompweb](https://github.com/kahme247/ompweb) のフォークです — [クレジット](#クレジット)を参照してください。
 
+> **⚠️ 100% vibecoded（完全にコーディングエージェント製）。** このプロジェクト全体は、コーディングエージェントを動かすためにコーディングエージェント自身が構築したものです。作者の環境では動作していますが、インストールと利用は自己責任でお願いします。
+
 ![Cody — ライトテーマ](docs/screenshot-light.png)
 
 <details>
@@ -40,18 +42,18 @@ docker run -d -p 30177:30177 \
 
 Unraid 向けには既製のテンプレートと詳しい手順が [docs/unraid.md](docs/unraid.md) にあります。イメージには日常的な開発ツール（git、`gh`、pip/venv 付きの python3、ripgrep、jq）も含まれており、任意で有効化できる **SSH アクセス** は、有効な場合そのままアクティブなエンジンの CLI に直結します — エンジンを終了すると通常のシェルに戻ります（[SSH](#コンテナへの-ssh-接続) を参照）。
 
-### npm から実行する（ベアメタル / 開発用）
+### ソースから実行する（ベアメタル / 開発用）
+
+Cody は npm には公開されていません — Docker 以外では、チェックアウトから実行します。
+Node.js 22.19 以降と、`PATH` 上にあるエンジン（フル機能を使うには omp）が必要です：
 
 ```bash
-npx @nphil/cody@latest        # または: npm install -g @nphil/cody && cody
-```
+git clone https://github.com/nphil/Cody && cd Cody
+npm install
+npm run dev            # 開発サーバー（127.0.0.1:30178）
 
-Node.js 22.19 以降と、`PATH` 上にあるエンジン（フル機能を使うには omp）が必要です。Cody はデフォルトで `127.0.0.1:30177` で待ち受け、準備が整うとブラウザを開きます。
-
-```bash
-cody --port 8080              # カスタムポート
-cody --hostname 0.0.0.0       # 信頼できるネットワークに公開
-cody --no-open                # ブラウザを自動的に開かない
+npm run build          # プロダクションビルド…
+npm start              # …127.0.0.1:30177 で提供（0.0.0.0 は start:lan）
 ```
 
 ## エンジン

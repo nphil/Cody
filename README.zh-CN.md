@@ -6,6 +6,8 @@ Cody 是面向编程智能体的自托管 Web 工作区——一个可以长期�
 
 Cody 分叉自 [kahme247/ompweb](https://github.com/kahme247/ompweb) —— 参见[致谢](#致谢)。
 
+> **⚠️ 100% vibecoded（完全由编码代理构建）。** 整个项目由编码代理编写，用于运行编码代理。它在作者自己的机器上可以正常工作 —— 安装和试用请自担风险。
+
 ![Cody — 浅色主题](docs/screenshot-light.png)
 
 <details>
@@ -40,18 +42,18 @@ docker run -d -p 30177:30177 \
 
 针对 Unraid，[docs/unraid.md](docs/unraid.md) 中提供了现成的模板和完整的操作步骤。镜像还内置了常用开发工具（git、`gh`、带 pip/venv 的 python3、ripgrep、jq），以及可选的 **SSH 访问**，登录后会直接进入当前活动引擎的 CLI —— 退出引擎后即回到普通 shell（参见[SSH](#通过-ssh-连接容器)）。
 
-### 通过 npm 运行（裸机 / 开发环境）
+### 从源码运行（裸机 / 开发环境）
+
+Cody 未发布到 npm —— 在 Docker 之外，请从代码仓库运行。
+需要 Node.js 22.19 及以上版本，并且 `PATH` 中需要有可用引擎（完整体验推荐 omp）：
 
 ```bash
-npx @nphil/cody@latest        # 或者: npm install -g @nphil/cody && cody
-```
+git clone https://github.com/nphil/Cody && cd Cody
+npm install
+npm run dev            # 开发服务器（127.0.0.1:30178）
 
-需要 Node.js 22.19 及以上版本，并且 `PATH` 中需要有可用引擎（完整体验推荐 omp）。Cody 默认监听 `127.0.0.1:30177`，就绪后会自动打开浏览器。
-
-```bash
-cody --port 8080              # 自定义端口
-cody --hostname 0.0.0.0       # 在可信网络中暴露服务
-cody --no-open                # 不自动打开浏览器
+npm run build          # 生产构建…
+npm start              # …在 127.0.0.1:30177 提供服务（0.0.0.0 用 start:lan）
 ```
 
 ## 引擎
