@@ -112,9 +112,12 @@ behind an authenticating reverse proxy.
   VPN/Tailscale.
 - Terminals run as the container's user with full access to `/data` and
   `/workspace` — scope those mounts to what the agent should touch.
-- The in-app "Updates" panel checks versions but self-update is disabled by
-  design in a container: update by rebuilding the image (`docker build …`)
-  and recreating the container, the Unraid way.
+- Updating splits cleanly in two: **Cody itself** updates the Unraid way
+  (new image → Apply Update), while the **engine** updates in-app — the
+  Updates panel and the System tab check omp's version and offer "Update
+  now", and Settings → User Accounts → Agent engine has Update per engine.
+  Engine updates go to `/data/agent/tools`, so they stick across container
+  recreates and never require a new image.
 - The agent **engine** is chosen in the UI: a one-time picker after the
   first admin signs in, and later under Settings → User Accounts → Agent
   engine. No engine ships in the image — omp, Claude Code and Codex all

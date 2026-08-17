@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowRight, Check, Copy, Loader2, RotateCw, Settings2, Sparkles, TriangleAlert } from "lucide-react";
+import { ArrowRight, Check, Copy, Download, Loader2, RotateCw, Settings2, Sparkles, TriangleAlert } from "lucide-react";
 import type { SkillUpdateResult } from "@/lib/api-types";
 import { translate, translatePlural, useI18n } from "@/lib/i18n";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
@@ -204,6 +204,7 @@ export function UpdatesPanel({ cwd, active, engineUpdates = true, onOpenSettings
   const [omp, setOmp] = useState<OmpCard>(IDLE_OMP);
   const [skills, setSkills] = useState<SkillsCard>(IDLE_SKILLS);
   const [restarting, setRestarting] = useState(false);
+  const [updating, setUpdating] = useState(false);
   const [restartNote, setRestartNote] = useState<Note | null>(null);
   const [started, setStarted] = useState(false);
 
@@ -381,6 +382,40 @@ export function UpdatesPanel({ cwd, active, engineUpdates = true, onOpenSettings
     }
   }, [restarting]);
 
+  const updateNow = useCallback(async () => {
+    if (updating || restarting) return;
+    if (!window.confirm(translate("updates.omp.updateConfirm"))) return;
+    setUpdating(true);
+    setRestartNote(null);
+    try {
+      const response = await fetch("/api/omp-update", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "update" }),
+      });
+      const data = await response.json().catch(() => ({})) as { success?: boolean; version?: string; sessionsRestarted?: number; error?: string; detail?: string };
+      if (!mountedRef.current) return;
+      if (!response.ok || data.success !== true) {
+        const detail = data.detail ? ` (${data.detail})` : "";
+        setRestartNote({ kind: "error", text: `${data.error ?? translate("updates.omp.updateFailed")}${detail}` });
+        return;
+      }
+      const count = typeof data.sessionsRestarted === "number" ? data.sessionsRestarted : 0;
+      const version = data.version ?? translate("updates.unknown");
+      // Refresh the card (and its siblings) so the new "up to date" state
+      // lands before the success note — loadAll clears restartNote itself,
+      // so the note is set only after it resolves.
+      await loadAll();
+      if (!mountedRef.current) return;
+      setRestartNote({ kind: "success", text: translatePlural("updates.omp.updated", count, { count, version }) });
+    } catch (error) {
+      if (!mountedRef.current) return;
+      setRestartNote({ kind: "error", text: error instanceof Error ? error.message : translate("updates.omp.updateFailed") });
+    } finally {
+      if (mountedRef.current) setUpdating(false);
+    }
+  }, [updating, restarting, loadAll]);
+
   if (!active) return null;
 
   const loading = app.status === "loading" || omp.status === "loading" || skills.status === "loading";
@@ -494,6 +529,24 @@ export function UpdatesPanel({ cwd, active, engineUpdates = true, onOpenSettings
                 )}
                 {omp.data.updateAvailable && (
                   <>
+                    <div>
+                      <button
+                        type="button"
+                        className="ui-focus-ring"
+                        onClick={() => void updateNow()}
+                        disabled={updating || restarting}
+                        title={t("updates.omp.update")}
+                        aria-label={t("updates.omp.update")}
+                        style={cardButtonStyle(updating || restarting, true)}
+                        onMouseEnter={accentHoverIn}
+                        onMouseLeave={accentHoverOut}
+                      >
+                        {updating
+                          ? <Loader2 size={11} strokeWidth={2.2} style={{ animation: "spin 0.8s linear infinite" }} aria-hidden="true" />
+                          : <Download size={11} strokeWidth={2.2} aria-hidden="true" />}
+                        {updating ? t("updates.omp.updating") : t("updates.omp.update")}
+                      </button>
+                    </div>
                     <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                       <code style={codeChipStyle}>{omp.data.updateCommand}</code>
                       <button
@@ -518,10 +571,10 @@ export function UpdatesPanel({ cwd, active, engineUpdates = true, onOpenSettings
                         type="button"
                         className="ui-focus-ring"
                         onClick={() => void restartSessions()}
-                        disabled={restarting}
+                        disabled={restarting || updating}
                         title={t("updates.omp.restart")}
                         aria-label={t("updates.omp.restart")}
-                        style={cardButtonStyle(restarting, true)}
+                        style={cardButtonStyle(restarting || updating, true)}
                         onMouseEnter={accentHoverIn}
                         onMouseLeave={accentHoverOut}
                       >

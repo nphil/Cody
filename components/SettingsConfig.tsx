@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getSubmitDuringRunBehavior, setSubmitDuringRunBehavior, type SubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import dynamic from "next/dynamic";
-import { Copy, ExternalLink, RefreshCw, RotateCcw, Sparkles, Search, AlertCircle } from "lucide-react";
+import { Copy, Download, ExternalLink, Loader2, RefreshCw, RotateCcw, Sparkles, Search, AlertCircle } from "lucide-react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/primitives";
 import { SettingsTabs, type SettingsTab, type ActiveEngineInfo, type EngineCapabilities, ALL_CAPABILITIES, DEFAULT_HARNESS_LABEL, getSettingsCategories, getNormalizedActive } from "./SettingsTabs";
@@ -191,6 +191,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
   const [appUpdate, setAppUpdate] = useState<UpdateState | null>(null);
   const [checkingAppUpdate, setCheckingAppUpdate] = useState(true);
   const [restarting, setRestarting] = useState(false);
+  const [updating, setUpdating] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [nativeSettings, setNativeSettings] = useState<NativeSettings | null>(null);
   const [nativeSettingsError, setNativeSettingsError] = useState<string | null>(null);
@@ -356,6 +357,26 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
       setRestarting(false);
     }
   }, []);
+
+  const updateNow = useCallback(async () => {
+    setUpdating(true);
+    setMessage(null);
+    try {
+      const response = await fetch("/api/omp-update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "update" }) });
+      const data = (await response.json()) as { success?: boolean; version?: string; sessionsRestarted?: number; error?: string; code?: string; detail?: string };
+      if (!response.ok || data.success !== true) {
+        const detail = data.detail ? ` (${data.detail})` : "";
+        throw new Error(`${data.error ?? `HTTP ${response.status}`}${detail}`);
+      }
+      const count = data.sessionsRestarted ?? 0;
+      setMessage(`Updated to v${data.version ?? "?"} — ${count} session${count === 1 ? "" : "s"} restarted.`);
+      await checkForUpdate();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setUpdating(false);
+    }
+  }, [checkForUpdate]);
 
   const currentTab = getNormalizedActive(activeTab);
 
@@ -935,8 +956,19 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 6 }}>
                     <button
                       type="button"
+                      onClick={() => void updateNow()}
+                      disabled={updating || restarting}
+                      style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", color: "var(--text)", cursor: updating ? "wait" : "pointer", fontSize: 12 }}
+                    >
+                      {updating
+                        ? <Loader2 size={13} aria-hidden="true" style={{ animation: "spin 0.8s linear infinite" }} />
+                        : <Download size={13} aria-hidden="true" />}
+                      {updating ? "Updating…" : "Update now"}
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => void restartSessions()}
-                      disabled={restarting}
+                      disabled={restarting || updating}
                       style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", color: "var(--text)", cursor: restarting ? "wait" : "pointer", fontSize: 12 }}
                     >
                       <RotateCcw size={13} aria-hidden="true" /> {restarting ? "Restarting..." : "Restart OMP sessions"}
