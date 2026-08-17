@@ -329,6 +329,18 @@ handled or safely ignored.
   SSE frames; clicking a chip opens the transcript dialog. `TodoList` keeps a
   non-collapsible default (`collapsible` prop) for SSR tests.
 
+### Composer context gauge
+- An icon-only context ring sits beside Send. It uses the accent color below
+  70% usage, warning from 70%, and error from 90%.
+- Clicking the ring opens its summary popover; clicking outside or pressing
+  Escape closes it.
+- Authoritative context usage drives the ring percentage and the
+  used/available/limit values. Session token traffic and per-model rows are
+  derived locally from loaded assistant-message usage; the active model is
+  labeled and highlighted.
+- Per-model token totals include input, output, cache-read, and cache-write
+  tokens.
+
 ### Subagent integration (`lib/subagent-types.ts`, `lib/subagent-history.ts`)
 - **Live detail**: `subagent_progress` frames carry the full `AgentProgress`
   object — `lib/subagent-types.ts` parses it defensively into

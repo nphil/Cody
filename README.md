@@ -135,7 +135,7 @@ updates.
 - **Chat beside the project**: browse files on the left and preview source, docs, images, audio, and PDFs on the right while the agent works.
 - **Use a real terminal in the workspace**: each newly created xterm starts in the active engine CLI, then becomes a persistent plain shell when the engine exits; reconnect, resize, clipboard, and configurable mobile soft keys are built in.
 - **A full workspace panel**: Files, Git (status, diffs, staging, commits), Terminal, Tasks (`.cody/tasks.json`), Updates, Info — plus workspace checkpoints and an embedded app preview with detach.
-- **See session state clearly**: context usage, cost, compaction state, and system prompt details in the top bar (engine-dependent).
+- **See session state clearly**: context usage, cost, compaction state, and system prompt details in the top bar (engine-dependent), plus an icon-only context ring in the composer that shifts color as usage crosses thresholds and clicks open to a compact summary of used/available/limit, token traffic, and models used.
 - **Configure less from the terminal**: models, provider auth, native omp controls (advisor, approvals, thinking, compaction, memory, retry/fallback), skills, plugins, and project MCP servers — all from Settings when the engine supports them.
 - **Stay current in-app**: version checks and one-click updates for the engine; Cody itself updates with the container image.
 - **Stay informed**: browser notifications when an agent finishes; skill update checks.
