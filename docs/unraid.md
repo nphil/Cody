@@ -140,6 +140,43 @@ behind an authenticating reverse proxy.
   looks like it works and then fails at every invocation with
   `env: 'bun': No such file or directory`.
 
+## Full-fidelity previews behind HTTPS (optional)
+
+When the agent starts a dev server, the Preview panel embeds it. It picks the
+best option that actually works, in this order:
+
+1. **Direct** — a real iframe against the dev server's own address. Needs the
+   dev server bound to `0.0.0.0` (not `127.0.0.1`), and needs Cody itself
+   reached over plain HTTP, because a browser blocks an `http://` iframe inside
+   an `https://` page as mixed content.
+2. **Gateway** — only when **Preview Domain** (`CODY_PREVIEW_BASE_URL`) is set.
+3. **Streamed** — a server-side Chromium ships frames over Cody's own
+   authenticated WebSocket. Always available, needs nothing of your network.
+
+So if you reach Cody through a reverse proxy on HTTPS, previews land on the
+streamed renderer: correct and interactive, but a video of the page rather than
+the page. Setting **Preview Domain** restores a real iframe there. It needs a
+wildcard you terminate TLS on — one DNS record and one proxy route:
+
+- DNS: `*.preview.example.com` → your reverse proxy.
+- A certificate covering `*.preview.example.com` (a `*.example.com` wildcard
+  does **not** cover it — a wildcard matches exactly one label).
+- A proxy route sending that wildcard to this container's WebUI port. Caddy,
+  for instance: `*.preview.example.com { reverse_proxy cody-host:30177 }` with
+  whatever DNS-01 issuer you already use.
+- Template variable: `https://preview.example.com`.
+
+Cody then mints a random single-use hostname under that domain per request and
+reverse-proxies it to the dev server *from inside the container*, stripping
+cookies and auth headers so the iframe never carries your Cody credentials. It
+works even when the dev server listens only on loopback, since the proxy hop
+happens container-side. Leave the variable empty and none of this machinery is
+constructed — no listener, no route table, no change to the CSP.
+
+The panel names the rung it chose: a badge in the preview subtitle bar, plus a
+pill on first open. If it says **Streamed** when you expected **Direct**, the
+dev server is almost always bound to `127.0.0.1` only.
+
 ## SSH into the container
 
 Set the **SSH Password** template variable (or drop public keys into
