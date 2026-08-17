@@ -1384,17 +1384,23 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (lvl === "auto" || !thinkingLevelMap) return lvl;
     return thinkingLevelMap[lvl] ?? lvl;
   })();
-  const clampedContextPercent = Math.max(0, Math.min(100, contextUsage?.percent ?? 0));
-  const contextRingColor = clampedContextPercent >= 90
+  const contextPercent = contextUsage?.percent ?? null;
+  const hasKnownContextUsage = contextPercent != null;
+  const clampedContextPercent = Math.max(0, Math.min(100, contextPercent ?? 0));
+  const contextRingColor = hasKnownContextUsage && clampedContextPercent >= 90
     ? "var(--status-error)"
-    : clampedContextPercent >= 70
+    : hasKnownContextUsage && clampedContextPercent >= 70
       ? "var(--status-warning)"
       : "var(--accent)";
-  const contextTokens = contextUsage?.tokens
-    ?? (contextUsage?.contextWindow
-      ? Math.round(contextUsage.contextWindow * clampedContextPercent / 100)
-      : 0);
-  const contextAvailable = Math.max(0, (contextUsage?.contextWindow ?? 0) - contextTokens);
+  const contextTokens = hasKnownContextUsage
+    ? contextUsage?.tokens
+      ?? (contextUsage?.contextWindow
+        ? Math.round(contextUsage.contextWindow * clampedContextPercent / 100)
+        : 0)
+    : null;
+  const contextAvailable = hasKnownContextUsage
+    ? Math.max(0, (contextUsage?.contextWindow ?? 0) - (contextTokens ?? 0))
+    : null;
   const contextTokenTraffic = React.useMemo(
     () => contextModelUsage.reduce(
       (total, entry) => ({
@@ -2380,15 +2386,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             <div style={{ flex: 1 }} />
 
             {/* Icon-only context gauge with a compact, locally derived breakdown. */}
-            {contextUsage?.percent != null && (
               <div
                 ref={contextPopoverRef}
                 style={{ position: "relative", width: 28, height: 28, flexShrink: 0 }}
               >
                 <button
                   type="button"
-                  title={`${Math.round(clampedContextPercent)}% · ${formatCompactNumber(contextTokens, locale)} / ${formatCompactNumber(contextUsage.contextWindow, locale)}`}
-                  aria-label={t("chatInput.contextDetails", { percent: Math.round(clampedContextPercent) })}
+                  title={hasKnownContextUsage
+                    ? `${Math.round(clampedContextPercent)}% · ${formatCompactNumber(contextTokens ?? 0, locale)} / ${formatCompactNumber(contextUsage?.contextWindow ?? 0, locale)}`
+                    : t("chatInput.contextUsage")}
+                  aria-label={hasKnownContextUsage
+                    ? t("chatInput.contextDetails", { percent: Math.round(clampedContextPercent) })
+                    : t("chatInput.contextUsage")}
                   aria-expanded={contextPopoverOpen}
                   aria-haspopup="dialog"
                   onClick={() => setContextPopoverOpen((open) => !open)}
@@ -2442,7 +2451,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                           {t("chatInput.contextUsage")}
                         </div>
                         <div style={{ fontSize: 16, fontWeight: 700, color: contextRingColor, fontVariantNumeric: "tabular-nums" }}>
-                          {Math.round(clampedContextPercent)}%
+                          {hasKnownContextUsage ? `${Math.round(clampedContextPercent)}%` : "—"}
                         </div>
                       </div>
                       <div style={{ height: 5, margin: "8px 0 10px", overflow: "hidden", borderRadius: 999, background: "var(--border)" }}>
@@ -2458,12 +2467,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                         {[
                           [t("chatInput.contextUsed"), contextTokens],
                           [t("chatInput.contextAvailable"), contextAvailable],
-                          [t("chatInput.contextLimit"), contextUsage.contextWindow],
+                          [t("chatInput.contextLimit"), hasKnownContextUsage ? contextUsage?.contextWindow ?? 0 : null],
                         ].map(([label, value]) => (
                           <div key={String(label)} style={{ minWidth: 0 }}>
                             <div style={{ fontSize: 10, color: "var(--text-dim)", marginBottom: 2 }}>{label}</div>
                             <div style={{ fontSize: 12, color: "var(--text)", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
-                              {formatCompactNumber(Number(value), locale)}
+                              {value == null ? "—" : formatCompactNumber(Number(value), locale)}
                             </div>
                           </div>
                         ))}
@@ -2531,7 +2540,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   </div>
                 )}
               </div>
-            )}
 
             {/* Primary action: Send (idle) / Stop (running) */}
             {isStreaming ? (

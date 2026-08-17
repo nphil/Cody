@@ -81,4 +81,19 @@ test("renders an icon-only context gauge with warning and error thresholds", () 
     assert.match(html, new RegExp(`aria-label="(?:Context details, ${percent}% used|chatInput\\.contextDetails)"`));
     assert.doesNotMatch(html, new RegExp(`>${percent}%<`));
   }
+
+  const unknownHtml = renderToStaticMarkup(
+    React.createElement(ChatInput, {
+      onSend() {},
+      onAbort() {},
+      isStreaming: false,
+    }),
+  );
+  const unknownLabels = unknownHtml.match(/aria-label="(?:Context usage|chatInput\.contextUsage)"/g) ?? [];
+
+  assert.equal(unknownLabels.length, 1);
+  assert.match(unknownHtml, /title="(?:Context usage|chatInput\.contextUsage)"/);
+  assert.match(unknownHtml, /color:var\(--accent\)/);
+  assert.doesNotMatch(unknownHtml, /(?:title|aria-label)="[^"]*0%/);
+  assert.doesNotMatch(unknownHtml, /title="[^"]*\/\s*0"/);
 });

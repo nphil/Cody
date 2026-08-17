@@ -80,6 +80,9 @@ export interface AssistantMessage {
   stopReason?: string;
   errorMessage?: string;
   timestamp?: number;
+  contextSnapshot?: {
+    promptTokens?: number;
+  };
   usage?: {
     input: number;
     output: number;

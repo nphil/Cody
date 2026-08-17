@@ -11,6 +11,7 @@ import type {
   SessionTreeNode,
 } from "@/lib/types";
 import { normalizeToolCalls } from "@/lib/normalize";
+import { derivePersistedContextUsage, type ContextUsageValue } from "@/lib/context-usage";
 import type { ThinkingModelMeta } from "@/lib/thinking-levels";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { translate } from "@/lib/i18n";
@@ -170,7 +171,7 @@ interface LastAssistantTextResponse {
 type AgentStateResponse = {
   // Raw get_state passthrough: the resolved model omp is actually running.
   model?: { provider: string; id: string; name?: string; reasoning?: boolean; thinking?: { efforts?: string[] } };
-  contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null;
+  contextUsage?: ContextUsageValue | null;
   systemPrompt?: string;
   thinkingLevel?: string;
   fastModeEnabled?: boolean;
@@ -190,6 +191,26 @@ type AgentStateResponse = {
   queuedMessageCount?: number;
   todoPhases?: TodoPhase[];
 };
+
+function readLiveContextUsage(value: unknown): ContextUsageValue | null {
+  if (!isRecord(value)) return null;
+  const { percent, contextWindow, tokens } = value;
+  if (typeof contextWindow !== "number" || !Number.isFinite(contextWindow) || contextWindow <= 0) {
+    return null;
+  }
+  if (percent !== null && (typeof percent !== "number" || !Number.isFinite(percent) || percent < 0)) {
+    return null;
+  }
+  if (tokens !== null && (typeof tokens !== "number" || !Number.isFinite(tokens) || tokens < 0)) {
+    return null;
+  }
+  if (percent === null && tokens === null) return null;
+  return {
+    percent: typeof percent === "number" ? percent : (tokens as number) / contextWindow * 100,
+    contextWindow,
+    tokens: typeof tokens === "number" ? tokens : null,
+  };
+}
 
 export interface QueuedMessages {
   steering: string[];
@@ -530,7 +551,7 @@ export interface AttachedImage {
 }
 
 type SelectedModel = { provider: string; modelId: string };
-type ModelEntry = { id: string; name: string; provider: string; supportsFastMode?: boolean };
+type ModelEntry = { id: string; name: string; provider: string; supportsFastMode?: boolean; contextWindow?: number };
 type ModelsResponse = {
   models: Record<string, string>;
   modelList?: ModelEntry[];
@@ -602,7 +623,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [steeringMode, setSteeringMode] = useState<"all" | "one-at-a-time">("all");
   const [followUpMode, setFollowUpMode] = useState<"all" | "one-at-a-time">("all");
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
-  const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
+  const [liveContextUsage, setLiveContextUsage] = useState<ContextUsageValue | null>(null);
   const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
   const [forkingEntryId, setForkingEntryId] = useState<string | null>(null);
   const [currentModelOverride, setCurrentModelOverride] = useState<{ provider: string; modelId: string } | null>(null);
@@ -700,9 +721,24 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     : (currentModelOverride ?? (liveModelMeta
         ? { provider: liveModelMeta.provider, modelId: liveModelMeta.modelId }
         : data?.context.model ?? pendingModel));
+  const displayModelProvider = displayModel?.provider;
+  const displayModelId = displayModel?.modelId;
+  const persistedContextUsage = useMemo(
+    () => derivePersistedContextUsage(
+      messages,
+      displayModelProvider === undefined || displayModelId === undefined
+        ? null
+        : { provider: displayModelProvider, modelId: displayModelId },
+      modelList,
+    ),
+    [messages, displayModelProvider, displayModelId, modelList],
+  );
+  const contextUsage = liveContextUsage ?? persistedContextUsage;
 
   const sessionStats = useMemo(() => {
-    if (sessionStatsOverride) return sessionStatsOverride;
+    if (sessionStatsOverride) {
+      return { ...sessionStatsOverride, contextUsage: contextUsage ?? undefined };
+    }
     const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
     let cost = 0;
     let userMessages = 0;
@@ -751,6 +787,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     setActiveGoal(parseActiveGoal(sessionStorage.getItem(`${SESSION_STORAGE_PREFIXES.goal}${sid}`)));
   }, [session?.id]);
+
+  // Runtime usage belongs to one session identity. Never carry it into a
+  // different existing session or a newly composed workspace.
+  useEffect(() => {
+    setLiveContextUsage(null);
+  }, [session?.id, newSessionCwd]);
 
   // A plan request is in progress only for its current agent turn.
   useEffect(() => {
@@ -934,6 +976,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false, fenceRunId?: number) => {
     let messagesLoaded = false;
+    if (sessionIdRef.current === sid) setLiveContextUsage(null);
     try {
       if (showLoading) setLoading(true);
       const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
@@ -994,7 +1037,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const liveState = agentState.state;
         const modelApplied = applyAuthoritativeModel(toThinkingModelMeta(liveState?.model), token);
         if (liveState) {
-          if (liveState.contextUsage !== undefined) setContextUsage(liveState.contextUsage ?? null);
+          if (liveState.contextUsage !== undefined) setLiveContextUsage(readLiveContextUsage(liveState.contextUsage));
           if (liveState.systemPrompt !== undefined) setSystemPrompt(liveState.systemPrompt || null);
           if (modelApplied && liveState.thinkingLevel !== undefined) setThinkingLevel(normalizeThinkingLevel(liveState.thinkingLevel));
           if (liveState.fastModeEnabled !== undefined) setFastModeEnabled(liveState.fastModeEnabled);
@@ -1638,7 +1681,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         && (state.isStreaming || state.isPromptRunning || state.isCompacting);
       if (busy || !agentRunningRef.current) return;
       if (state) {
-        if (state.contextUsage !== undefined) setContextUsage(state.contextUsage ?? null);
+        if (state.contextUsage !== undefined) setLiveContextUsage(readLiveContextUsage(state.contextUsage));
         if (state.systemPrompt !== undefined) setSystemPrompt(state.systemPrompt ?? null);
         if (state.extensionStatuses !== undefined) setExtensionStatuses(state.extensionStatuses ?? []);
         if (state.extensionWidgets !== undefined) setExtensionWidgets(state.extensionWidgets ?? []);
@@ -1778,7 +1821,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               if (sessionIdRef.current !== endedSid || promptRunIdRef.current !== endedRunId) return;
               const applied = applyAuthoritativeModel(toThinkingModelMeta(d.state.model), endToken);
               if (!applied) return; // stale snapshot — drop everything derived from it
-              if (d.state?.contextUsage !== undefined) setContextUsage(d.state.contextUsage ?? null);
+              if (d.state?.contextUsage !== undefined) setLiveContextUsage(readLiveContextUsage(d.state.contextUsage));
               if (d.state?.systemPrompt !== undefined) setSystemPrompt(d.state.systemPrompt || null);
               // Fast mode is family-scoped in omp: re-sync from the terminal
               // state so a run that switched models/families never leaves the
@@ -2881,7 +2924,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // re-applying this same snapshot here would mint a fresh token and
           // bypass the stale-response guard.
           if (agentState.state.isCompacting !== undefined) setIsCompacting(agentState.state.isCompacting);
-          if (agentState.state.contextUsage !== undefined) setContextUsage(agentState.state.contextUsage ?? null);
+          if (agentState.state.contextUsage !== undefined) setLiveContextUsage(readLiveContextUsage(agentState.state.contextUsage));
           if (agentState.state.systemPrompt !== undefined) setSystemPrompt(agentState.state.systemPrompt || null);
           if (agentState.state.extensionStatuses !== undefined) setExtensionStatuses(agentState.state.extensionStatuses ?? []);
           if (agentState.state.extensionWidgets !== undefined) setExtensionWidgets(agentState.state.extensionWidgets ?? []);
