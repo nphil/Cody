@@ -2,6 +2,7 @@
 
 import { AlertCircle, Check, Download, Loader2, Sparkles, TriangleAlert } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useEngineInstalls } from "@/hooks/useEngineInstalls";
 import { useI18n } from "@/lib/i18n";
 
 /**
@@ -26,6 +27,8 @@ export interface EngineSummary {
   tagline: string;
   experimental: boolean;
   installed: boolean;
+  /** An install/update npm run is in flight server-side right now. */
+  installing: boolean;
   version: string | null;
   /** Cody can npm-install this engine itself. */
   installable: boolean;
@@ -69,7 +72,6 @@ export function EnginePicker({ initial, onDone }: {
   const { t } = useI18n();
   const [data, setData] = useState<EnginesPayload | null>(initial ?? null);
   const [error, setError] = useState<string | null>(null);
-  const [installing, setInstalling] = useState<string | null>(null);
   const [selecting, setSelecting] = useState<string | null>(null);
   // The engine the app booted with: a switch away from it means the loaded UI
   // (models, skills, chat affordances) no longer matches the server.
@@ -93,14 +95,24 @@ export function EnginePicker({ initial, onDone }: {
     return () => controller.abort();
   }, [initial, load]);
 
-  const install = useCallback((engine: EngineSummary) => {
-    setError(null);
-    setInstalling(engine.id);
-    void postEngine("/api/engines/install", engine.id)
-      .then(() => load())
-      .catch((failure: unknown) => setError(failure instanceof Error ? failure.message : String(failure)))
-      .finally(() => setInstalling(null));
+  const onInstallSettled = useCallback((_id: string, ok: boolean) => {
+    if (ok) void load().catch(() => {});
   }, [load]);
+  const {
+    installing: installingIds,
+    progress: installProgress,
+    errors: installErrors,
+    start: startInstall,
+    watch: watchInstall,
+  } = useEngineInstalls(onInstallSettled);
+
+  // Reattach to installs that were already running server-side (page reload,
+  // another admin's click) so the row shows live progress, not a dead button.
+  useEffect(() => {
+    for (const engine of data?.engines ?? []) {
+      if (engine.installing) watchInstall(engine.id);
+    }
+  }, [data, watchInstall]);
 
   const select = useCallback((engine: EngineSummary) => {
     setError(null);
@@ -117,7 +129,9 @@ export function EnginePicker({ initial, onDone }: {
 
   const engines = data?.engines ?? [];
   const active = engines.find((engine) => engine.id === data?.active) ?? null;
-  const busy = installing !== null || selecting !== null;
+  // Only a selection blocks the whole screen (it ends in a navigation).
+  // Installs are per-engine: other rows stay usable while npm runs.
+  const busy = selecting !== null;
 
   return (
     <div className="engine-overlay" role="dialog" aria-modal="true" aria-label={t("engines.title")}>
@@ -151,8 +165,9 @@ export function EnginePicker({ initial, onDone }: {
           <div className="engine-grid">
             {engines.map((engine, index) => {
               const isActive = engine.id === data.active;
-              const installBusy = installing === engine.id;
+              const installBusy = installingIds.has(engine.id);
               const selectBusy = selecting === engine.id;
+              const installError = installErrors[engine.id];
               return (
                 <section
                   key={engine.id}
@@ -213,8 +228,8 @@ export function EnginePicker({ initial, onDone }: {
                       <button
                         type="button"
                         className="login-ghost engine-button"
-                        onClick={() => install(engine)}
-                        disabled={busy}
+                        onClick={() => startInstall(engine.id)}
+                        disabled={busy || installBusy}
                       >
                         {installBusy
                           ? <Loader2 size={14} aria-hidden style={{ animation: "spin 0.9s linear infinite" }} />
@@ -248,6 +263,21 @@ export function EnginePicker({ initial, onDone }: {
                       </button>
                     )}
                   </div>
+
+                  {installBusy && (
+                    <div className="engine-progress" role="status" aria-live="polite">
+                      <span className="engine-progress-bar" aria-hidden><span /></span>
+                      <span className="engine-progress-line">
+                        {installProgress[engine.id] || t("engines.installing")}
+                      </span>
+                    </div>
+                  )}
+                  {installError && (
+                    <div className="login-error engine-alert" role="alert">
+                      <AlertCircle size={14} aria-hidden style={{ flexShrink: 0, marginTop: 1 }} />
+                      <span>{installError}</span>
+                    </div>
+                  )}
                 </section>
               );
             })}

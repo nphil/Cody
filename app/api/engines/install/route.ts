@@ -10,9 +10,9 @@ import { restartAllRpcSessions } from "@/lib/rpc-manager";
  * Install OR update an engine on demand (admin only) — the two are the same
  * npm run against Cody's persistent prefix (the specs pin @latest), so the
  * engine survives container image updates and "Update" in the engine card is
- * simply a re-install. The call is a single await (up to five minutes) rather
- * than a stream — the UI shows a spinner and gets either the installed
- * version or an npm error to display.
+ * simply a re-install. The call is a single await (up to five minutes); live
+ * npm output streams separately over GET ./events?id=, which the UI follows
+ * for its progress readout while this response carries the outcome.
  *
  * Installing does not switch engines: POST /api/engines/select does that, and
  * the picker calls it after a successful install. Updating the ACTIVE engine

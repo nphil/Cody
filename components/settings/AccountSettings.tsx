@@ -3,6 +3,7 @@
 import { AlertCircle, Check, Cpu, Download, Loader2, LogOut, ShieldCheck, Trash2, Upload, UserRoundPlus, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { chipStyle, nativeInputStyle, nativeOptionStyle, nativeSelectStyle, NativeSetting } from "./primitives";
+import { useEngineInstalls } from "@/hooks/useEngineInstalls";
 import type { EngineSummary, EnginesPayload } from "../EnginePicker";
 
 /**
@@ -142,7 +143,6 @@ function ErrorNote({ message }: { message: string | null }) {
 function AgentEngineSection({ isMobile }: { isMobile: boolean }) {
   const [data, setData] = useState<EnginesPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [installing, setInstalling] = useState<string | null>(null);
   const [selecting, setSelecting] = useState<string | null>(null);
 
   const load = useCallback(async (signal?: AbortSignal) => {
@@ -172,14 +172,24 @@ function AgentEngineSection({ isMobile }: { isMobile: boolean }) {
     }
   }, []);
 
-  const install = (engine: EngineSummary) => {
-    setError(null);
-    setInstalling(engine.id);
-    void post("/api/engines/install", engine.id)
-      .then(() => load())
-      .catch((failure: unknown) => setError(failure instanceof Error ? failure.message : String(failure)))
-      .finally(() => setInstalling(null));
-  };
+  const onInstallSettled = useCallback((_id: string, ok: boolean) => {
+    if (ok) void load().catch(() => {});
+  }, [load]);
+  const {
+    installing: installingIds,
+    progress: installProgress,
+    errors: installErrors,
+    start: startInstall,
+    watch: watchInstall,
+  } = useEngineInstalls(onInstallSettled);
+
+  // Reattach to installs already running server-side (page reload, the
+  // onboarding picker, another admin) so the row shows live progress.
+  useEffect(() => {
+    for (const engine of data?.engines ?? []) {
+      if (engine.installing) watchInstall(engine.id);
+    }
+  }, [data, watchInstall]);
 
   const select = (engine: EngineSummary) => {
     setError(null);
@@ -205,7 +215,9 @@ function AgentEngineSection({ isMobile }: { isMobile: boolean }) {
 
   const engines = data?.engines ?? [];
   const active = engines.find((engine) => engine.id === data?.active) ?? null;
-  const busy = installing !== null || selecting !== null;
+  // Only a selection blocks the card (it reloads the page). Installs are
+  // per-engine so the other rows stay usable while npm runs.
+  const busy = selecting !== null;
 
   return (
     <>
@@ -226,6 +238,8 @@ function AgentEngineSection({ isMobile }: { isMobile: boolean }) {
       <section style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", overflow: "hidden" }}>
         {engines.map((engine, index) => {
           const isActive = engine.id === data?.active;
+          const installBusy = installingIds.has(engine.id);
+          const installError = installErrors[engine.id];
           return (
             <div
               key={engine.id}
@@ -259,14 +273,25 @@ function AgentEngineSection({ isMobile }: { isMobile: boolean }) {
                     Install the {engine.binaryName} CLI on the host to use this engine.
                   </span>
                 )}
+                {installBusy && (
+                  <span role="status" aria-live="polite" style={{ display: "flex", flexDirection: "column", gap: 5, marginTop: 2 }}>
+                    <span aria-hidden style={{ display: "block", height: 3, borderRadius: 2, overflow: "hidden", background: "var(--bg-subtle)" }}>
+                      <span style={{ display: "block", height: "100%", width: "40%", borderRadius: 2, background: "var(--accent)", animation: "engine-progress-slide 1.2s ease-in-out infinite" }} />
+                    </span>
+                    <span style={{ fontFamily: "var(--font-mono)", fontSize: 10.5, color: "var(--text-dim)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                      {installProgress[engine.id] || "Installing…"}
+                    </span>
+                  </span>
+                )}
+                {installError && <ErrorNote message={installError} />}
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
                 {!engine.installed && engine.installable && (
-                  <button type="button" onClick={() => install(engine)} disabled={busy} style={{ ...smallButtonStyle, opacity: busy ? 0.6 : 1 }}>
-                    {installing === engine.id
+                  <button type="button" onClick={() => startInstall(engine.id)} disabled={busy || installBusy} style={{ ...smallButtonStyle, opacity: busy || installBusy ? 0.6 : 1 }}>
+                    {installBusy
                       ? <Loader2 size={13} aria-hidden style={{ animation: "spin 0.9s linear infinite" }} />
                       : <Download size={13} aria-hidden />}
-                    {installing === engine.id ? "Installing…" : "Install"}
+                    {installBusy ? "Installing…" : "Install"}
                   </button>
                 )}
                 {engine.installed && engine.installable && (
@@ -275,15 +300,15 @@ function AgentEngineSection({ isMobile }: { isMobile: boolean }) {
                   // restarts its live sessions server-side.
                   <button
                     type="button"
-                    onClick={() => install(engine)}
-                    disabled={busy}
+                    onClick={() => startInstall(engine.id)}
+                    disabled={busy || installBusy}
                     title={isActive ? "Update (restarts live agent sessions)" : "Update to the latest release"}
-                    style={{ ...smallButtonStyle, opacity: busy ? 0.6 : 1 }}
+                    style={{ ...smallButtonStyle, opacity: busy || installBusy ? 0.6 : 1 }}
                   >
-                    {installing === engine.id
+                    {installBusy
                       ? <Loader2 size={13} aria-hidden style={{ animation: "spin 0.9s linear infinite" }} />
                       : <Download size={13} aria-hidden />}
-                    {installing === engine.id ? "Updating…" : "Update"}
+                    {installBusy ? "Updating…" : "Update"}
                   </button>
                 )}
                 {engine.installed && !isActive && (

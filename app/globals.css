@@ -2147,7 +2147,10 @@ html.dark .dropdown-surface :is(select, option) {
   cursor: pointer;
   transition: background var(--dur-fast), border-color var(--dur-fast);
 }
-.login-ghost:hover { background: var(--bg-hover); }
+.login-ghost:hover:not(:disabled) { background: var(--bg-hover); }
+/* Without this a disabled ghost button keeps its pointer cursor and hover
+   glow, reading as clickable while swallowing the click. */
+.login-ghost:disabled { opacity: 0.55; cursor: default; }
 .login-divider {
   display: flex;
   align-items: center;
@@ -2344,6 +2347,41 @@ html.dark .dropdown-surface :is(select, option) {
   font-weight: 600;
 }
 .engine-blocked { font-size: 11.5px; line-height: 1.5; color: var(--text-dim); }
+/* Live install readout: indeterminate bar + the last npm output line. The
+   Settings engine card inlines the same look (it is style-prop based). */
+.engine-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+.engine-progress-bar {
+  display: block;
+  height: 3px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: var(--bg-subtle);
+}
+.engine-progress-bar > span {
+  display: block;
+  height: 100%;
+  width: 40%;
+  border-radius: 2px;
+  background: var(--accent);
+  animation: engine-progress-slide 1.2s ease-in-out infinite;
+}
+.engine-progress-line {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@keyframes engine-progress-slide {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(280%); }
+}
 .engine-footer {
   display: flex;
   flex-direction: column;

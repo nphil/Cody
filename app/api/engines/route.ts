@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireUser } from "@/lib/auth/http";
 import { getHarness, listHarnesses } from "@/lib/harness";
+import { isEngineInstalling } from "@/lib/harness/install";
 import { isEngineOnboarded } from "@/lib/harness/state";
 
 /**
@@ -30,6 +31,9 @@ export async function GET(request: Request) {
         tagline: adapter.tagline,
         experimental: adapter.experimental === true,
         installed: adapter.resolveBinary() !== null,
+        // A truthful "still running" so a reloaded page can reattach to the
+        // install (via the events route) instead of showing a dead button.
+        installing: isEngineInstalling(adapter.id),
         version: versions[index],
         installable: Boolean(adapter.installSpec),
         authHint: adapter.authHint ?? null,

@@ -21,6 +21,8 @@ import { getToolsDir, invalidateEngineBinCache } from "./engine-bin";
 const INSTALL_TIMEOUT_MS = 5 * 60_000;
 /** How much stderr is kept for the error detail shown to the admin. */
 const STDERR_TAIL_LIMIT = 4_000;
+/** How much combined npm output the live progress log retains. */
+const LOG_TAIL_LIMIT = 32_000;
 /** Grace period between SIGTERM and SIGKILL for a timed-out npm. */
 const KILL_GRACE_MS = 5_000;
 
@@ -53,7 +55,94 @@ export class EngineInstallError extends Error {
   }
 }
 
-const inFlight = new Map<string, Promise<EngineInstallResult>>();
+/** Progress of one engine's install, as the SSE route reports it. "idle"
+ * means no install has run since the server started. */
+export type InstallStatus = "idle" | "running" | "succeeded" | "failed";
+
+export interface InstallSnapshot {
+  status: InstallStatus;
+  /** Combined stdout+stderr npm has printed so far (tail-capped). */
+  log: string;
+  error: { message: string; detail: string } | null;
+}
+
+export type InstallEvent =
+  | { type: "log"; chunk: string }
+  | { type: "done"; ok: boolean; error: { message: string; detail: string } | null };
+
+type InstallListener = (event: InstallEvent) => void;
+
+interface InstallJob {
+  status: Exclude<InstallStatus, "idle">;
+  log: string;
+  error: { message: string; detail: string } | null;
+  listeners: Set<InstallListener>;
+}
+
+interface InstallStore {
+  inFlight: Map<string, Promise<EngineInstallResult>>;
+  jobs: Map<string, InstallJob>;
+}
+
+// On globalThis so dedupe and progress survive dev hot reloads (the
+// rpc-manager registry trick): a freshly-reloaded module that forgot an
+// in-flight npm would happily start a second one against the same prefix.
+const installGlobal = globalThis as typeof globalThis & { __codyEngineInstallStore?: InstallStore };
+const store: InstallStore = (installGlobal.__codyEngineInstallStore ??= {
+  inFlight: new Map(),
+  jobs: new Map(),
+});
+const inFlight = store.inFlight;
+
+function beginJob(id: string): InstallJob {
+  const job: InstallJob = { status: "running", log: "", error: null, listeners: new Set() };
+  store.jobs.set(id, job);
+  return job;
+}
+
+function appendJobLog(job: InstallJob, chunk: string): void {
+  // Cap without trimming: tail() strips trailing newlines, which would glue
+  // every chunk boundary onto the previous line.
+  const combined = job.log + chunk;
+  job.log = combined.length <= LOG_TAIL_LIMIT ? combined : `…${combined.slice(-LOG_TAIL_LIMIT)}`;
+  for (const listener of job.listeners) {
+    try {
+      listener({ type: "log", chunk });
+    } catch {
+      // A dead SSE controller must not break the install.
+    }
+  }
+}
+
+function finishJob(job: InstallJob, error: EngineInstallError | null): void {
+  job.status = error ? "failed" : "succeeded";
+  job.error = error ? { message: error.message, detail: error.detail } : null;
+  const event: InstallEvent = { type: "done", ok: !error, error: job.error };
+  for (const listener of job.listeners) {
+    try {
+      listener(event);
+    } catch {
+      // Ditto.
+    }
+  }
+  job.listeners.clear();
+}
+
+/** Current install state for an engine — the SSE route's opening frame. */
+export function getInstallSnapshot(id: string): InstallSnapshot {
+  const job = store.jobs.get(id);
+  if (!job) return { status: "idle", log: "", error: null };
+  return { status: job.status, log: job.log, error: job.error };
+}
+
+/** Follow a running install's output. No-op (immediately-dead unsubscribe)
+ * when nothing is running for this engine — callers read the snapshot first. */
+export function subscribeInstall(id: string, listener: InstallListener): () => void {
+  const job = store.jobs.get(id);
+  if (!job || job.status !== "running") return () => {};
+  job.listeners.add(listener);
+  return () => job.listeners.delete(listener);
+}
 
 /** npm's own CLI shipped with the running Node (mirrors lib/npx.ts). Going
  * through `node .../npm-cli.js` avoids spawning a shell — and on Windows it
@@ -86,12 +175,16 @@ function runInstall(request: EngineInstallRequest): Promise<EngineInstallResult>
   const command = npmCli ? execPath : "npm";
   const commandArgs = npmCli ? [npmCli, ...args] : args;
   const startedAt = Date.now();
+  const job = beginJob(request.id);
+  appendJobLog(job, `$ npm install -g --prefix ${prefix} ${request.installSpec}\n`);
 
   return new Promise<EngineInstallResult>((resolve, reject) => {
     try {
       mkdirSync(prefix, { recursive: true });
     } catch (error) {
-      reject(new EngineInstallError(`Could not create the engine install directory ${prefix}`, String(error)));
+      const failure = new EngineInstallError(`Could not create the engine install directory ${prefix}`, String(error));
+      finishJob(job, failure);
+      reject(failure);
       return;
     }
 
@@ -115,15 +208,18 @@ function runInstall(request: EngineInstallRequest): Promise<EngineInstallResult>
       settled = true;
       clearTimeout(timeout);
       if (killTimer) clearTimeout(killTimer);
+      finishJob(job, error);
       if (error) reject(error);
       else resolve(result as EngineInstallResult);
     };
 
-    child.stdout?.on("data", () => {
-      // npm's progress output is not surfaced; draining keeps the pipe open.
+    child.stdout?.on("data", (chunk: Buffer) => {
+      appendJobLog(job, chunk.toString("utf8"));
     });
     child.stderr?.on("data", (chunk: Buffer) => {
-      stderr = tail(stderr + chunk.toString("utf8"), STDERR_TAIL_LIMIT * 2);
+      const text = chunk.toString("utf8");
+      stderr = tail(stderr + text, STDERR_TAIL_LIMIT * 2);
+      appendJobLog(job, text);
     });
 
     child.on("error", (error) => {
