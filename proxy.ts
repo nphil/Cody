@@ -13,7 +13,18 @@ import { getUserForCredentials, isAuthRequired } from "@/lib/auth/guard";
 /** Paths a signed-out visitor needs: the login screen itself, the account
  * routes that power it, and the hashed build assets it renders with. */
 const PUBLIC_PREFIXES = ["/_next/static", "/_next/image", "/login", "/api/accounts/state", "/api/accounts/login", "/api/accounts/signup"];
-const PUBLIC_EXACT = new Set(["/favicon.ico", "/icon.svg", "/apple-icon.png", "/manifest.webmanifest"]);
+const PUBLIC_EXACT = new Set([
+  "/favicon.ico",
+  "/icon.svg",
+  "/apple-icon.png",
+  "/manifest.webmanifest",
+  // The PWA surface: install probes and the service worker fetch signed-out.
+  "/sw.js",
+  "/icon-192.png",
+  "/icon-512.png",
+  "/icon-maskable-192.png",
+  "/icon-maskable-512.png",
+]);
 
 function isPublicPath(pathname: string): boolean {
   if (PUBLIC_EXACT.has(pathname)) return true;

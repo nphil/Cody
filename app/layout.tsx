@@ -33,6 +33,7 @@ const legacyStorageKeys = JSON.stringify(LEGACY_STORAGE_KEYS);
 export const metadata: Metadata = {
   title: "Cody",
   description: "A self-hosted web workspace for coding agents.",
+  manifest: "/manifest.webmanifest",
   // PWA-like behavior on iOS: standalone chrome, no telephone autodetect.
   appleWebApp: {
     capable: true,
@@ -51,7 +52,12 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
-  themeColor: "#EFF1F5",
+  // Light/dark pair so first paint matches before the theme bootstrap script
+  // rewrites the meta tag; an installed window reads the manifest instead.
+  themeColor: [
+    { media: "(prefers-color-scheme: dark)", color: "#1E1E2E" },
+    { media: "(prefers-color-scheme: light)", color: "#EFF1F5" },
+  ],
 };
 
 export default function RootLayout({
@@ -86,6 +92,13 @@ export default function RootLayout({
       </head>
       <body translate="no" className="notranslate" style={{ height: "100dvh", display: "flex", flexDirection: "column" }}>
         {children}
+        {/* Register the no-op service worker after load: Chromium's PWA
+            install prompt requires one; it caches nothing (see public/sw.js). */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `if("serviceWorker" in navigator){window.addEventListener("load",function(){navigator.serviceWorker.register("/sw.js").catch(function(){})})}`,
+          }}
+        />
       </body>
     </html>
   );
