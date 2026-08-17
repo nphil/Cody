@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { requireUser } from "@/lib/auth/http";
 import { getHarness, listHarnesses } from "@/lib/harness";
 import { isEngineInstalling } from "@/lib/harness/install";
-import { isEngineOnboarded } from "@/lib/harness/state";
+import { isEngineOnboarded, isSetupWizardDone } from "@/lib/harness/state";
 
 /**
  * The engine roster: everything the onboarding picker and the Settings →
@@ -41,6 +41,7 @@ export async function GET(request: Request) {
       })),
       active: getHarness().id,
       onboarded: isEngineOnboarded(),
+      setupDone: isSetupWizardDone(),
       canManage: resolved.user.role === "admin",
     },
     { headers: { "Cache-Control": "no-store" } },

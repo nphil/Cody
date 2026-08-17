@@ -101,6 +101,9 @@ const CommandPalette = dynamic(() => import("./CommandPalette").then((m) => m.Co
 });
 // Onboarding-only: the picker ships in its own chunk so the shell never pays
 // for a screen that renders once per instance.
+const SetupWizard = dynamic(() => import("./SetupWizard").then((m) => m.SetupWizard), {
+  ssr: false,
+});
 const EnginePicker = dynamic(() => import("./EnginePicker").then((m) => m.EnginePicker), {
   ssr: false,
 });
@@ -130,10 +133,6 @@ type AutoNameStatus =
   | { kind: "naming" }
   | { kind: "success" }
   | { kind: "error"; message: string };
-
-// First-launch handoff flag: set when the engine picker triggers a reload so
-// the fresh page still opens Settings → API Keys & Providers once.
-const OPEN_PROVIDERS_AFTER_ONBOARDING = "cody:open-providers-after-onboarding";
 
 export function AppShell() {
   const router = useRouter();
@@ -209,6 +208,7 @@ export function AppShell() {
   // may choose (admin) and nobody has chosen yet.
   const [engineRoster, setEngineRoster] = useState<EnginesPayload | null>(null);
   const [enginePickerOpen, setEnginePickerOpen] = useState(false);
+  const [setupWizardOpen, setSetupWizardOpen] = useState(false);
   useEffect(() => {
     const controller = new AbortController();
     void fetch("/api/info", { cache: "no-store", signal: controller.signal })
@@ -255,29 +255,27 @@ export function AppShell() {
   const handleEnginePickerDone = useCallback((engineChanged: boolean) => {
     setEnginePickerOpen(false);
     // A different engine invalidates everything the shell loaded from the old
-    // one (models, capabilities, live sessions), so start from a clean page.
-    // Either way, the natural next step after picking an engine is connecting
-    // a provider — open Settings → API Keys & Providers (capability-gated:
-    // claude/codex have no providers UI; they sign in from their own CLIs).
-    // Across the reload the intent survives in sessionStorage.
+    // one (models, capabilities, live sessions), so start from a clean page —
+    // the fresh load re-derives setupDone from the roster and opens the setup
+    // wizard itself. Same engine: chain straight into the wizard.
     if (engineChanged) {
-      try {
-        sessionStorage.setItem(OPEN_PROVIDERS_AFTER_ONBOARDING, "1");
-      } catch { /* storage unavailable: the user finds Settings themselves */ }
       window.location.reload();
       return;
     }
-    if (capabilities.models) setSettingsTab("providers");
-  }, [capabilities.models]);
+    setSetupWizardOpen(true);
+  }, []);
+  // The setup wizard runs once per instance, right after engine onboarding
+  // (and on upgraded instances that predate it — skipping persists).
   useEffect(() => {
-    if (!capabilitiesLoaded) return;
-    let flagged = false;
-    try {
-      flagged = sessionStorage.getItem(OPEN_PROVIDERS_AFTER_ONBOARDING) === "1";
-      if (flagged) sessionStorage.removeItem(OPEN_PROVIDERS_AFTER_ONBOARDING);
-    } catch { /* storage unavailable */ }
-    if (flagged && capabilities.models) setSettingsTab("providers");
-  }, [capabilitiesLoaded, capabilities.models]);
+    if (!engineRoster) return;
+    if (engineRoster.canManage && engineRoster.onboarded && !engineRoster.setupDone) {
+      setSetupWizardOpen(true);
+    }
+  }, [engineRoster]);
+  const handleSetupWizardDone = useCallback(() => {
+    setSetupWizardOpen(false);
+    setEngineRoster((current) => (current ? { ...current, setupDone: true } : current));
+  }, []);
   // On mobile the sidebar is an overlay drawer; hide it by default so the chat
   // is visible on load. Runs once the breakpoint resolves after hydration.
   useEffect(() => {
@@ -1998,6 +1996,13 @@ export function AppShell() {
     </button>
     {settingsTab && <SettingsConfig activeTab={settingsTab} advisorEnabled={advisorEnabled} onAdvisorChange={handleAdvisorChange} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} onToolCallsDefaultCollapsedChange={handleToolCallsDefaultCollapsedChange} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd} sessionId={selectedSession?.id ?? null} capabilities={capabilities} engine={activeEngine} onModelsSaved={() => setModelsRefreshKey((k) => k + 1)} onPluginsReloaded={() => setSessionKey((k) => k + 1)} onOmpUpdateAvailabilityChange={setOmpUpdateAvailable} onSelectTab={setSettingsTab} onClose={() => setSettingsTab(null)} />}
     {enginePickerOpen && <EnginePicker initial={engineRoster} onDone={handleEnginePickerDone} />}
+    {setupWizardOpen && !enginePickerOpen && (
+      <SetupWizard
+        engine={engineRoster?.engines.find((item) => item.id === engineRoster.active) ?? null}
+        hasModelsUi={capabilities.models}
+        onDone={handleSetupWizardDone}
+      />
+    )}
     </ToastProvider>
     </>
   );

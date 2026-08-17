@@ -2421,6 +2421,67 @@ html.dark .dropdown-surface :is(select, option) {
 .engine-link:hover:not(:disabled) { color: var(--text); }
 .engine-link:disabled { opacity: 0.6; cursor: default; }
 
+/* ------------------------- Post-onboarding wizard ------------------------- */
+.setup-wizard-column { width: min(880px, 100%); }
+.setup-wizard-step {
+  margin: 6px 0 0;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+/* Bounded frame for the embedded provider editor: it manages its own
+   scrolling, the wizard just gives it a card-shaped viewport. */
+.setup-wizard-body {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: min(60vh, 620px);
+  min-height: 320px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-panel);
+  overflow: hidden;
+}
+.setup-wizard-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(600px, 100%);
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+.setup-wizard-card p { margin: 0; }
+.setup-wizard-tips {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.setup-wizard-tips li {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+.setup-wizard-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: min(600px, 100%);
+}
+.setup-wizard-btn {
+  width: auto;
+  min-height: 38px;
+  padding-inline: 18px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .engine-card { animation: none; }
 }

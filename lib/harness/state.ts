@@ -20,10 +20,12 @@ export interface EngineState {
   activeEngine: string | null;
   /** True once the onboarding picker ran (or an admin picked in Settings). */
   onboarded: boolean;
+  /** True once the post-onboarding setup wizard finished (or was skipped). */
+  setupDone: boolean;
   updatedAt: string;
 }
 
-const EMPTY_STATE: EngineState = { version: 1, activeEngine: null, onboarded: false, updatedAt: "" };
+const EMPTY_STATE: EngineState = { version: 1, activeEngine: null, onboarded: false, setupDone: false, updatedAt: "" };
 
 let cache: { state: EngineState; mtimeMs: number } | null = null;
 
@@ -47,6 +49,7 @@ export function readEngineState(): EngineState {
       version: 1,
       activeEngine: typeof parsed.activeEngine === "string" && parsed.activeEngine ? parsed.activeEngine : null,
       onboarded: parsed.onboarded === true,
+      setupDone: parsed.setupDone === true,
       updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : "",
     };
     cache = { state, mtimeMs };
@@ -58,12 +61,13 @@ export function readEngineState(): EngineState {
   }
 }
 
-export function writeEngineState(next: Partial<Pick<EngineState, "activeEngine" | "onboarded">>): EngineState {
+export function writeEngineState(next: Partial<Pick<EngineState, "activeEngine" | "onboarded" | "setupDone">>): EngineState {
   const current = readEngineState();
   const state: EngineState = {
     version: 1,
     activeEngine: next.activeEngine !== undefined ? next.activeEngine : current.activeEngine,
     onboarded: next.onboarded !== undefined ? next.onboarded : current.onboarded,
+    setupDone: next.setupDone !== undefined ? next.setupDone : current.setupDone,
     updatedAt: new Date().toISOString(),
   };
   const file = getEngineStatePath();
@@ -81,6 +85,12 @@ export function writeEngineState(next: Partial<Pick<EngineState, "activeEngine" 
  * confirms (or switches), and the choice is persisted. */
 export function isEngineOnboarded(): boolean {
   return readEngineState().onboarded && existsSync(getEngineStatePath());
+}
+
+/** Whether the post-onboarding setup wizard (providers + starter guidance)
+ * should still be offered to an administrator. */
+export function isSetupWizardDone(): boolean {
+  return readEngineState().setupDone;
 }
 
 /** Test hook — state is mtime-cached and tests swap the agent dir. */

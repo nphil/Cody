@@ -41,6 +41,8 @@ export interface EnginesPayload {
   engines: EngineSummary[];
   active: string;
   onboarded: boolean;
+  /** The post-onboarding setup wizard already ran (or was skipped). */
+  setupDone: boolean;
   canManage: boolean;
 }
 
