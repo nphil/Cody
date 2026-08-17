@@ -2325,7 +2325,16 @@ html.dark .dropdown-surface :is(select, option) {
   gap: 8px;
   align-items: stretch;
 }
-.engine-button { width: 100%; }
+.engine-button {
+  width: 100%;
+  /* The login buttons these extend are plain text-align'd blocks; with an
+     icon sibling the SVG lands on its own line ahead of the label. Center
+     both on one flex row instead. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
 .engine-active-note {
   display: inline-flex;
   align-items: center;
