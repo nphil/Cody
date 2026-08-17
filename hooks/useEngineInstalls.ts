@@ -116,12 +116,12 @@ export function useEngineInstalls(onSettled: (id: string, ok: boolean) => void) 
     return true;
   }, [follow]);
 
-  const start = useCallback((id: string) => {
+  const start = useCallback((id: string, options?: { version?: string }) => {
     if (!begin(id, "start")) return;
     void fetch("/api/engines/install", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id }),
+      body: JSON.stringify({ id, ...(options?.version ? { version: options.version } : {}) }),
     })
       .then(async (response) => {
         const body = (await response.json().catch(() => null)) as { error?: string; detail?: string } | null;

@@ -3,6 +3,7 @@ import { jsonError, requireAdmin } from "@/lib/auth/http";
 import { parseJsonWithinLimit } from "@/lib/bounded-form-data";
 import { getHarness, getHarnessById } from "@/lib/harness";
 import { EngineInstallError, installEngine } from "@/lib/harness/install";
+import { packageNameFromSpec } from "@/lib/harness/updates";
 import { invalidateOmpCliCache } from "@/lib/omp/omp-cli";
 import { restartAllRpcSessions } from "@/lib/rpc-manager";
 
@@ -25,7 +26,7 @@ export async function POST(request: Request) {
   const resolved = requireAdmin(request);
   if ("response" in resolved) return resolved.response;
 
-  let body: { id?: unknown };
+  let body: { id?: unknown; version?: unknown };
   try {
     body = await parseJsonWithinLimit(request, 1_024);
   } catch {
@@ -36,13 +37,24 @@ export async function POST(request: Request) {
   const adapter = id ? getHarnessById(id) : undefined;
   if (!adapter) return jsonError(`Unknown engine "${id}"`, 400, "unknown_engine");
 
-  const installSpec = adapter.installSpec;
-  if (!installSpec) {
+  if (!adapter.installSpec) {
     return jsonError(`${adapter.displayName} cannot be installed by Cody.`, 400, "not_installable");
+  }
+  // Optional version pin — the revert path after a broken update. Anything
+  // else keeps the adapter's own spec (@latest).
+  let installSpec = adapter.installSpec;
+  if (body.version !== undefined) {
+    const version = typeof body.version === "string" ? body.version.trim() : "";
+    if (!/^\d+\.\d+\.\d+(-[\w.]+)?$/.test(version)) {
+      return jsonError("version must be a plain semver string", 400);
+    }
+    installSpec = `${packageNameFromSpec(adapter.installSpec)}@${version}`;
   }
 
   try {
-    await installEngine({ id: adapter.id, installSpec, binaryName: adapter.binaryName });
+    // Probed before npm runs so a successful install records what it replaced.
+    const currentVersion = await adapter.getVersion();
+    await installEngine({ id: adapter.id, installSpec, binaryName: adapter.binaryName, currentVersion });
   } catch (error) {
     const detail = error instanceof EngineInstallError ? error.detail : "";
     return NextResponse.json(

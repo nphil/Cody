@@ -31,7 +31,7 @@ export function getWizardSteps(engineId: string | null, hasModelsUi: boolean): W
   return hasModelsUi ? ["providers", "webSearch", "model", "theme"] : ["signIn", "theme"];
 }
 
-const ModelsConfig = dynamic(() => import("./ModelsConfig").then((module) => module.ModelsConfig), {
+const WizardProvidersStep = dynamic(() => import("./setup-wizard-providers").then((module) => module.WizardProvidersStep), {
   loading: () => (
     <div role="status" style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--text-dim)" }}>
       <Loader2 size={14} aria-hidden style={{ animation: "spin 0.9s linear infinite" }} />
@@ -39,12 +39,10 @@ const ModelsConfig = dynamic(() => import("./ModelsConfig").then((module) => mod
   ),
 });
 
+/** Empty-first provider list + Add flow (see setup-wizard-providers.tsx);
+ * deliberately NOT the full Settings editor. */
 export function ProvidersStep() {
-  return (
-    <div className="setup-wizard-body">
-      <ModelsConfig embedded onClose={() => {}} />
-    </div>
-  );
+  return <WizardProvidersStep />;
 }
 
 export function SignInStep({ engine }: { engine: EngineSummary | null }) {

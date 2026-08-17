@@ -36,6 +36,25 @@ export function parseOmpUpdateStatus(output: string): OmpUpdateStatus {
 }
 
 export async function checkOmpUpdate(): Promise<OmpUpdateStatus> {
-  return parseOmpUpdateStatus(await runOmpUpdate(["--check"]));
+  const status = parseOmpUpdateStatus(await runOmpUpdate(["--check"]));
+  if (status.currentVersion !== null) return status;
+  // The stdout scrape is a wording contract with omp; when an update reworks
+  // that output, fall back to the registry comparison instead of silently
+  // reporting "up to date" forever.
+  try {
+    const { checkEngineUpdates } = await import("../harness/updates");
+    const registry = (await checkEngineUpdates()).find((entry) => entry.id === "omp");
+    if (registry) {
+      return {
+        currentVersion: registry.installedVersion,
+        availableVersion: registry.updateAvailable ? registry.latestVersion : null,
+        updateAvailable: registry.updateAvailable === true,
+        updateCommand: status.updateCommand,
+      };
+    }
+  } catch {
+    // Registry unreachable too: return the scrape result as-is.
+  }
+  return status;
 }
 

@@ -1,5 +1,6 @@
 import { listHarnesses } from ".";
 import { isNewerVersion } from "../npm-update";
+import { readInstallHistory } from "./install";
 
 /**
  * Update checks for installable engines: the npm registry's latest version
@@ -17,6 +18,9 @@ export interface EngineUpdateStatus {
   /** true/false when both versions are known; null when either side is not
    * (registry unreachable, or the binary's version probe failed). */
   updateAvailable: boolean | null;
+  /** Version the last successful install replaced — the revert target when
+   * an update breaks the engine. Null when no history exists. */
+  previousVersion: string | null;
 }
 
 /** "@oh-my-pi/pi-coding-agent@latest" → "@oh-my-pi/pi-coding-agent". */
@@ -52,18 +56,22 @@ export async function checkEngineUpdates(force = false): Promise<EngineUpdateSta
   const adapters = listHarnesses().filter(
     (adapter) => adapter.installSpec && adapter.resolveBinary() !== null,
   );
+  const history = readInstallHistory();
   return Promise.all(
     adapters.map(async (adapter) => {
       const [installedVersion, latestVersion] = await Promise.all([
         adapter.getVersion(),
         fetchLatestVersion(packageNameFromSpec(adapter.installSpec as string), force),
       ]);
+      const previous = history[adapter.id]?.previousVersion ?? null;
       return {
         id: adapter.id,
         installedVersion,
         latestVersion,
         updateAvailable:
           installedVersion && latestVersion ? isNewerVersion(latestVersion, installedVersion) : null,
+        // Offering a "revert" to the version already running is noise.
+        previousVersion: previous && previous !== installedVersion ? previous : null,
       };
     }),
   );

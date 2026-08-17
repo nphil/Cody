@@ -93,6 +93,19 @@ module.exports = makeAny();
 `;
 
 /** Walk up from the omp binary to the package root that owns it. */
+/** The installed omp package's CHANGELOG.md, when the package ships one
+ * (it is in omp's npm `files` list; a future omp dropping it fails soft). */
+export function getOmpChangelogPath(): string | null {
+  const root = findOmpPackageRoot();
+  if (!root) return null;
+  const file = path.join(root, "CHANGELOG.md");
+  try {
+    return fs.existsSync(file) ? file : null;
+  } catch {
+    return null;
+  }
+}
+
 function findOmpPackageRoot(): string | null {
   const bin = resolveOmpBin();
   if (!bin) return null;

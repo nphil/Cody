@@ -1,5 +1,5 @@
 import { spawn } from "child_process";
-import { existsSync, mkdirSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { execPath } from "process";
 import { getToolsDir, invalidateEngineBinCache } from "./engine-bin";
@@ -33,6 +33,10 @@ export interface EngineInstallRequest {
   installSpec: string;
   /** Binary whose resolution cache must be dropped once npm finishes. */
   binaryName: string;
+  /** Version installed BEFORE this run (probed by the route); recorded on
+   * success so a broken update can be reverted. Omit to leave the record
+   * untouched. */
+  currentVersion?: string | null;
 }
 
 export interface EngineInstallResult {
@@ -144,6 +148,51 @@ export function subscribeInstall(id: string, listener: InstallListener): () => v
   return () => job.listeners.delete(listener);
 }
 
+/** Per-engine record of the version replaced by the last successful install,
+ * beside the tools prefix so it survives container image updates. This is
+ * what makes "revert to the previous version" possible after an engine
+ * update breaks something. */
+export interface InstallHistoryEntry {
+  previousVersion: string | null;
+  updatedAt: string;
+}
+
+function installHistoryPath(): string {
+  return join(getToolsDir(), "install-history.json");
+}
+
+export function readInstallHistory(): Record<string, InstallHistoryEntry> {
+  try {
+    const parsed = JSON.parse(readFileSync(installHistoryPath(), "utf8")) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const entries: Record<string, InstallHistoryEntry> = {};
+    for (const [id, value] of Object.entries(parsed as Record<string, Partial<InstallHistoryEntry>>)) {
+      if (!value || typeof value !== "object") continue;
+      entries[id] = {
+        previousVersion: typeof value.previousVersion === "string" ? value.previousVersion : null,
+        updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : "",
+      };
+    }
+    return entries;
+  } catch {
+    return {};
+  }
+}
+
+function recordInstallHistory(id: string, previousVersion: string | null): void {
+  try {
+    const history = readInstallHistory();
+    history[id] = { previousVersion, updatedAt: new Date().toISOString() };
+    const file = installHistoryPath();
+    mkdirSync(dirname(file), { recursive: true });
+    const temp = `${file}.${process.pid}.tmp`;
+    writeFileSync(temp, `${JSON.stringify(history, null, 2)}\n`);
+    renameSync(temp, file);
+  } catch {
+    // Best-effort: losing the revert record must never fail an install.
+  }
+}
+
 /** npm's own CLI shipped with the running Node (mirrors lib/npx.ts). Going
  * through `node .../npm-cli.js` avoids spawning a shell — and on Windows it
  * sidesteps npm.cmd, which Node refuses to spawn without one. */
@@ -251,10 +300,17 @@ export function installEngine(request: EngineInstallRequest): Promise<EngineInst
   const existing = inFlight.get(request.id);
   if (existing) return existing;
 
-  const pending = runInstall(request).finally(() => {
-    inFlight.delete(request.id);
-    invalidateEngineBinCache(request.binaryName);
-  });
+  const pending = runInstall(request)
+    .then((result) => {
+      if (request.currentVersion !== undefined) {
+        recordInstallHistory(request.id, request.currentVersion);
+      }
+      return result;
+    })
+    .finally(() => {
+      inFlight.delete(request.id);
+      invalidateEngineBinCache(request.binaryName);
+    });
   inFlight.set(request.id, pending);
   return pending;
 }

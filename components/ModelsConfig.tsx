@@ -109,14 +109,14 @@ const PROVIDER_ICONS: Record<string, { Icon: IconComponent; hasColor: boolean }>
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-interface OAuthProvider {
+export interface OAuthProvider {
   id: string;
   name: string;
   usesCallbackServer: boolean;
   loggedIn: boolean;
 }
 
-interface ApiKeyProvider {
+export interface ApiKeyProvider {
   id: string;
   displayName: string;
   configured: boolean;
@@ -1291,7 +1291,7 @@ function ModelDetail({
 
 // ── OAuth detail ──────────────────────────────────────────────────────────────
 
-function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefresh: () => void }) {
+export function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefresh: () => void }) {
   const { t, tn } = useI18n();
   const [loginState, setLoginState] = useState<OAuthLoginState>({ phase: "idle" });
   const [inputValue, setInputValue] = useState("");
@@ -1567,7 +1567,7 @@ function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefre
 // omp keeps API keys in its own encrypted credential store (agent.db), which
 // Cody never reads or writes — this panel is status-only.
 
-function ApiKeyDetail({ provider }: { provider: ApiKeyProvider }) {
+export function ApiKeyDetail({ provider }: { provider: ApiKeyProvider }) {
   const { t, tn } = useI18n();
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -1645,7 +1645,7 @@ interface AddProviderPickerProps {
   onClose: () => void;
 }
 
-function AddProviderPicker({
+export function AddProviderPicker({
   oauthProviders, apiKeyProviders,
   onSelectOAuth, onSelectApiKey, onAddCustom, onClose,
 }: AddProviderPickerProps) {

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowRight, Check, Copy, Download, Loader2, RotateCw, Settings2, Sparkles, TriangleAlert } from "lucide-react";
+import { ArrowRight, Check, Copy, Download, Loader2, RotateCw, ScrollText, Settings2, Sparkles, TriangleAlert } from "lucide-react";
 import type { SkillUpdateResult } from "@/lib/api-types";
 import { translate, translatePlural, useI18n } from "@/lib/i18n";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
@@ -207,6 +207,38 @@ export function UpdatesPanel({ cwd, active, engineUpdates = true, onOpenSettings
   const [updating, setUpdating] = useState(false);
   const [restartNote, setRestartNote] = useState<Note | null>(null);
   const [started, setStarted] = useState(false);
+  const [changelog, setChangelog] = useState<{
+    open: boolean;
+    loading: boolean;
+    entries: Array<{ heading: string; body: string }> | null;
+    reason: string | null;
+  }>({ open: false, loading: false, entries: null, reason: null });
+
+  const toggleChangelog = useCallback(async () => {
+    if (changelog.open) {
+      setChangelog((current) => ({ ...current, open: false }));
+      return;
+    }
+    if (changelog.entries) {
+      setChangelog((current) => ({ ...current, open: true }));
+      return;
+    }
+    setChangelog((current) => ({ ...current, open: true, loading: true }));
+    try {
+      const response = await fetch("/api/engines/changelog?id=omp", { cache: "no-store" });
+      const data = (await response.json().catch(() => null)) as
+        | { entries?: Array<{ heading: string; body: string }> | null; reason?: string }
+        | null;
+      setChangelog({
+        open: true,
+        loading: false,
+        entries: Array.isArray(data?.entries) ? data.entries : null,
+        reason: data?.reason ?? null,
+      });
+    } catch (error) {
+      setChangelog({ open: true, loading: false, entries: null, reason: String(error) });
+    }
+  }, [changelog.entries, changelog.open]);
 
   const appCopy = useCopyFeedback();
   const ompCopy = useCopyFeedback();
@@ -587,6 +619,33 @@ export function UpdatesPanel({ cwd, active, engineUpdates = true, onOpenSettings
                   </>
                 )}
               </>
+            )}
+            {ompInstalledLabel && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <button
+                  type="button"
+                  className="ui-focus-ring"
+                  onClick={() => void toggleChangelog()}
+                  style={cardButtonStyle(changelog.loading)}
+                  onMouseEnter={hoverIn}
+                  onMouseLeave={hoverOut}
+                  aria-expanded={changelog.open}
+                >
+                  {changelog.loading
+                    ? <Loader2 size={11} strokeWidth={2.2} style={{ animation: "spin 0.8s linear infinite" }} aria-hidden="true" />
+                    : <ScrollText size={11} strokeWidth={2.2} aria-hidden="true" />}
+                  {changelog.open ? t("updates.omp.changelogHide") : t("updates.omp.changelog")}
+                </button>
+                {changelog.open && changelog.entries && changelog.entries.map((entry) => (
+                  <div key={entry.heading} style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-control)", padding: "8px 10px" }}>
+                    <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-mono)" }}>{entry.heading}</div>
+                    <pre style={{ margin: "6px 0 0", whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontSize: 11, lineHeight: 1.55, color: "var(--text-muted)", fontFamily: "inherit" }}>{entry.body}</pre>
+                  </div>
+                ))}
+                {changelog.open && !changelog.entries && !changelog.loading && (
+                  <div style={dimLineStyle}>{changelog.reason ?? t("updates.omp.changelogUnavailable")}</div>
+                )}
+              </div>
             )}
             {restartNote && (
               restartNote.kind === "error"

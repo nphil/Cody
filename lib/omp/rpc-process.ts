@@ -205,6 +205,15 @@ export class RpcProcess {
   /** Enables bounded protocol-v2 framing when the ready frame advertises it. */
   async negotiateProtocol(ready: RpcFrame): Promise<RpcProtocolVersion> {
     const supported = Array.isArray(ready.supportedProtocolVersions) ? ready.supportedProtocolVersions : [];
+    // A future omp that drops every protocol this build speaks must fail
+    // loudly here — falling through to v1 would silently mis-decode every
+    // frame, which presents as an unexplained hang.
+    if (supported.length > 0 && !supported.includes(1) && !supported.includes(2)) {
+      throw new Error(
+        `omp speaks RPC protocol versions [${supported.join(", ")}] but this Cody build understands 1 and 2 — `
+        + "update Cody, or revert the engine update from Settings → User Accounts → Agent engine.",
+      );
+    }
     if (!supported.includes(2)) return this.protocolVersion;
     const response = await this.sendCommand<{ protocolVersion?: unknown }>({ type: "negotiate_protocol", protocolVersion: 2 });
     if (response?.protocolVersion !== 2) throw new Error("OMP rejected RPC protocol v2 negotiation");

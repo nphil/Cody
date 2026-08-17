@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
+import { requireAdmin, requireUser } from "@/lib/auth/http";
 import { getHarnessById } from "@/lib/harness";
-import { EngineInstallError, installEngine } from "@/lib/harness/install";
+import { EngineInstallError, installEngine, readInstallHistory } from "@/lib/harness/install";
 import { invalidateOmpCliCache } from "@/lib/omp/omp-cli";
+import { runIsolatedUtilityCommand } from "@/lib/omp/rpc-utility";
 import { checkOmpUpdate } from "@/lib/omp/updates";
 import { restartAllRpcSessions } from "@/lib/rpc-manager";
 
@@ -10,7 +12,15 @@ export const dynamic = "force-dynamic";
 export async function POST(request: Request) {
   try {
     const body = await request.json() as { action?: unknown };
-    if (body.action === "check") return NextResponse.json(await checkOmpUpdate());
+    if (body.action === "check") {
+      // Read-only: any signed-in user may see update status.
+      const resolved = requireUser(request);
+      if ("response" in resolved) return resolved.response;
+      return NextResponse.json(await checkOmpUpdate());
+    }
+    // Mutations are admin territory, same as the engine install routes.
+    const resolved = requireAdmin(request);
+    if ("response" in resolved) return resolved.response;
     if (body.action === "update") {
       // Same mechanism as the engine card: npm against the persistent tools
       // prefix (spec pins @latest), which the runtime resolves ahead of any
@@ -20,7 +30,8 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: "The omp engine is not installable here.", code: "not_installable" }, { status: 400 });
       }
       try {
-        await installEngine({ id: adapter.id, installSpec: adapter.installSpec, binaryName: adapter.binaryName });
+        const currentVersion = await adapter.getVersion();
+        await installEngine({ id: adapter.id, installSpec: adapter.installSpec, binaryName: adapter.binaryName, currentVersion });
       } catch (error) {
         const detail = error instanceof EngineInstallError ? error.detail : "";
         return NextResponse.json(
@@ -30,7 +41,25 @@ export async function POST(request: Request) {
       }
       invalidateOmpCliCache();
       const sessionsRestarted = await restartAllRpcSessions().catch(() => 0);
-      return NextResponse.json({ success: true, version: await adapter.getVersion(), sessionsRestarted });
+      // A version probe can succeed while RPC-mode boot is broken, so health
+      // is a real throwaway RPC round-trip. On failure, name the escape
+      // hatch: the recorded previous version in the engine card.
+      let healthy = true;
+      let healthError: string | null = null;
+      try {
+        await runIsolatedUtilityCommand({ type: "get_state" });
+      } catch (error) {
+        healthy = false;
+        healthError = error instanceof Error ? error.message : String(error);
+      }
+      const previousVersion = readInstallHistory().omp?.previousVersion ?? null;
+      return NextResponse.json({
+        success: healthy,
+        version: await adapter.getVersion(),
+        sessionsRestarted,
+        healthy,
+        ...(healthError ? { error: `The updated engine failed a health check: ${healthError}${previousVersion ? ` — you can revert to v${previousVersion} in Settings → User Accounts → Agent engine.` : ""}`, code: "unhealthy_after_update" } : {}),
+      }, healthy ? undefined : { status: 502 });
     }
     if (body.action === "restart") {
       const sessionsRestarted = await restartAllRpcSessions();

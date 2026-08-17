@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertCircle, Check, Cpu, Download, Loader2, LogOut, RefreshCw, ShieldCheck, Trash2, Upload, UserRoundPlus, X } from "lucide-react";
+import { AlertCircle, Check, Cpu, Download, Loader2, LogOut, RefreshCw, RotateCcw, ShieldCheck, Trash2, Upload, UserRoundPlus, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { chipStyle, nativeInputStyle, nativeOptionStyle, nativeSelectStyle, NativeSetting } from "./primitives";
 import { useEngineInstalls } from "@/hooks/useEngineInstalls";
@@ -344,18 +344,34 @@ function AgentEngineSection({ isMobile }: { isMobile: boolean }) {
                       ? `Update to v${status.latestVersion}`
                       : "Update";
                   return (
-                    <button
-                      type="button"
-                      onClick={() => startInstall(engine.id)}
-                      disabled={busy || installBusy}
-                      title={isActive ? "Update (restarts live agent sessions)" : "Update to the latest release"}
-                      style={{ ...smallButtonStyle, opacity: busy || installBusy ? 0.6 : 1 }}
-                    >
-                      {installBusy
-                        ? <Loader2 size={13} aria-hidden style={{ animation: "spin 0.9s linear infinite" }} />
-                        : <Download size={13} aria-hidden />}
-                      {label}
-                    </button>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                      <button
+                        type="button"
+                        onClick={() => startInstall(engine.id)}
+                        disabled={busy || installBusy}
+                        title={isActive ? "Update (restarts live agent sessions)" : "Update to the latest release"}
+                        style={{ ...smallButtonStyle, opacity: busy || installBusy ? 0.6 : 1 }}
+                      >
+                        {installBusy
+                          ? <Loader2 size={13} aria-hidden style={{ animation: "spin 0.9s linear infinite" }} />
+                          : <Download size={13} aria-hidden />}
+                        {label}
+                      </button>
+                      {status?.previousVersion && !installBusy && (
+                        // The escape hatch after an update breaks the engine:
+                        // reinstall exactly the version the update replaced.
+                        <button
+                          type="button"
+                          onClick={() => startInstall(engine.id, { version: status.previousVersion as string })}
+                          disabled={busy}
+                          title="Reinstall the version the last update replaced"
+                          style={{ ...smallButtonStyle, opacity: busy ? 0.6 : 1 }}
+                        >
+                          <RotateCcw size={13} aria-hidden />
+                          {`Revert to v${status.previousVersion}`}
+                        </button>
+                      )}
+                    </span>
                   );
                 })()}
                 {engine.installed && !isActive && (
