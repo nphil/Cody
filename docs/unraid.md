@@ -94,7 +94,8 @@ The template asks for:
 
 Then open the WebUI: a fresh instance shows the first-run setup screen where
 you create your admin account, followed by the engine picker (keep omp, or
-install Claude Code/Codex). Add `/workspace/<your-project>` as a workspace
+install Claude Code/Codex) and a one-time setup wizard — provider sign-ins,
+local model endpoints, and a starter primer for the chosen engine. Add `/workspace/<your-project>` as a workspace
 and everything — chat, Git panel, checkpoints, terminals, tasks, preview —
 runs against the engine you chose.
 
