@@ -91,6 +91,9 @@ The template asks for:
 | Password (optional, advanced) | Leave empty — first-run setup happens in the browser. Setting it additionally enables the built-in `cody` account over HTTP Basic Auth for scripts and probes. |
 | Allow Account Signup | Leave empty to let the login screen offer "Create an account". Set `0` to restrict account creation to administrators. |
 | Anthropic API Key | Optional provider credential for the agent; add other provider env vars the same way |
+| GPU Device (advanced) | Optional `/dev/dri` for Intel GPU acceleration — see [Hardware GPU acceleration](#hardware-gpu-acceleration-optional) |
+| NVIDIA Visible Devices (advanced) | Optional, for an NVIDIA card; needs the Nvidia Driver plugin and `--runtime=nvidia` |
+| NVIDIA Driver Capabilities (advanced) | Optional; must include `video` or hardware encode stays unavailable |
 
 Then open the WebUI: a fresh instance shows the first-run setup screen where
 you create your admin account, followed by the engine picker (keep omp, or
@@ -178,6 +181,143 @@ constructed — no listener, no route table, no change to the CSP.
 The panel names the rung it chose: a badge in the preview subtitle bar, plus a
 pill on first open. If it says **Streamed** when you expected **Direct**, the
 dev server is almost always bound to `127.0.0.1` only.
+
+## Hardware GPU acceleration (optional)
+
+The streamed preview rung runs a headless Chromium inside the container and
+ships JPEG frames over Cody's WebSocket. By default that is software all the
+way through: the CPU rasterizes the page *and* encodes every frame. Passing a
+GPU in moves rasterization onto the GPU and leaves the CPU to the encode.
+
+Nothing needs installing in the container — the image already carries the Intel
+VAAPI userspace (iHD driver, libva, `vainfo`) and the native EGL entry point
+Chromium's ANGLE backend needs, about 15MB in total.
+
+All of this is opt-in. With no GPU passed through the container behaves exactly
+as it always has, and says so once at startup:
+
+```
+[Cody] GPU: no passthrough devices — previews use software rendering
+```
+
+### Intel QuickSync / VAAPI — the primary path
+
+One template field, under **Show more settings**:
+
+| Field | Value |
+| --- | --- |
+| GPU Device | `/dev/dri` |
+
+Pass the whole `/dev/dri` directory, not a single `renderD128` node — Chromium
+enumerates the directory. Apply, and the container recreates with the device
+attached. Nothing else changes.
+
+### NVIDIA NVENC — optional
+
+Requires the Unraid **Nvidia Driver** plugin (which you already run):
+
+| Field | Value |
+| --- | --- |
+| NVIDIA Visible Devices | `all`, or a GPU UUID from `nvidia-smi -L` |
+| NVIDIA Driver Capabilities | `compute,utility,video` — or `all` |
+| Extra Parameters | `--runtime=nvidia` |
+
+**The one that bites:** `NVIDIA_DRIVER_CAPABILITIES` must contain `video`. The
+value copied around most often is `compute,utility`, which silently omits NVENC
+— the card shows up in `nvidia-smi`, everything looks configured, and hardware
+encode is simply never offered, with no error naming the cause. Cody checks this
+at startup and warns when it finds NVIDIA devices without `video`.
+
+Without `--runtime=nvidia` in Extra Parameters, both variables do nothing at all.
+
+### Verifying it worked
+
+1. **The container log**, on the Docker tab. One line names what was found:
+
+   ```
+   [Cody] GPU: Intel render node /dev/dri/renderD128 — previews render with GPU rasterization
+   ```
+
+2. **VAAPI**, from a Cody terminal. This is the check that proves QuickSync is
+   reachable, and it must name the `iHD` driver:
+
+   ```bash
+   vainfo --display drm --device /dev/dri/renderD128
+   ```
+
+   Expect `Driver version: Intel iHD driver ...` followed by a profile list, and
+   look for an H.264 entry point beginning `VAEntrypointEnc` — `EncSliceLP` is
+   the low-power VDENC encoder Gen9.5 uses. That line is the hardware encoder.
+   `Failed to open the given device!` means the device did not actually reach the
+   container; `vaInitialize failed` usually means it did, but the render node is
+   not readable by the container's user.
+
+   The image installs `intel-media-va-driver` from Debian main, not the
+   `-non-free` variant, and that is deliberate rather than a compromise: the
+   `+dfsg` repack strips only Xe-HPM/Xe-XPM (Arc, DG1) kernels and a profiling
+   tool, so H.264 encode on Gen9.5 is entirely present.
+
+3. **NVIDIA**, if you configured it:
+
+   ```bash
+   nvidia-smi
+   ```
+
+   `nvidia-smi` is provided by the host driver through the NVIDIA runtime, not by
+   this image, so its presence is itself the proof the runtime is wired up.
+
+4. **Open a preview** and look at the log again. When Chromium reaches real
+   hardware it prints the GL renderer it got:
+
+   ```
+   [Cody] display: GPU rasterization on /dev/dri/renderD128 — ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 ...)
+   ```
+
+   If the GPU stack is broken, that line is replaced by a downgrade line and the
+   preview keeps working on the software path — a broken driver costs you a log
+   line, never your preview:
+
+   ```
+   [Cody] display: GPU launch failed on /dev/dri/renderD128 (...) — falling back to software rendering
+   ```
+
+   Trust that renderer string rather than Chromium's own `chrome://gpu` table.
+   Measured on this image with the GPU flags but no usable device, `chrome://gpu`
+   reported *"Rasterization: Hardware accelerated"* while the renderer was
+   actually `llvmpipe` — a CPU rasterizer wearing a hardware label. The renderer
+   string has to mention `Intel`/`Mesa Intel` (or `NVIDIA`); `llvmpipe`,
+   `swrast` or `SwiftShader` all mean software.
+
+### What it buys now, and what it buys later
+
+**Now:** page rasterization and compositing move off the CPU, so the CPU that is
+already JPEG-encoding every frame has less to do, and the frame-rate ceiling
+rises. That ceiling is real — on this host the software path tops out well under
+30 fps once the captured frame gets large.
+
+**Later:** hardware H.264/AV1 *encode*. This is the bigger prize and it is not
+available yet, because today's rung encodes JPEG through Chromium's CDP
+screencast, which neither QuickSync nor NVENC accelerates. A codec-based
+provider is what turns the GPU into a bandwidth and latency win; passing the
+device through now is what lets that land as a config change rather than a
+redeployment. See `docs/streaming.md`.
+
+### NVENC concurrent sessions
+
+One caveat specific to this deployment shape, worth knowing before you plan
+around NVENC: consumer GeForce cards cap the number of **simultaneous NVENC
+encode sessions** in the driver. That cap has been raised repeatedly — 2, then 3
+(2020), 5 (2023), and 8 with Linux driver 550.54.14 or newer — and NVIDIA's
+own SDK notes describe it as 8 **per system** on non-qualified GPUs. Data-center
+and professional cards are unrestricted.
+
+Two consequences. Cody is one container serving many sessions, so once a codec
+provider exists each live streamed preview wants its own encode session and they
+contend for that pool. And because the limit is per *system*, anything else on
+the box using NVENC — Plex, Jellyfin, Frigate — draws from the same budget; a
+GeForce card is a shared resource, not this container's to spend. Intel
+QuickSync has no comparable session cap, which is the other reason it is the
+documented default here.
 
 ## SSH into the container
 

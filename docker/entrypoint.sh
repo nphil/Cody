@@ -98,6 +98,67 @@ else
   echo "[Cody] SSH disabled — set CODY_SSH_PASSWORD or add keys to /data/home/.ssh/authorized_keys"
 fi
 
+# ---------------------------------------------------------------------------
+# GPU capability probe. Passthrough is opt-in on the host (Unraid: a --device
+# for /dev/dri, and/or the Nvidia Driver plugin's runtime), so on a default
+# install these devices are simply absent — a fully supported configuration,
+# not a fault. This block therefore reports, never warns, and never fails the
+# boot. What it publishes is the signal lib/display/provider.ts reads to pick
+# its Chromium launch flags:
+#   CODY_GPU              vendors found, or "none" — a human/diagnostic summary
+#   CODY_GPU_RENDER_NODE  the DRM render node, empty when there is none
+# provider.ts gates GPU rasterization on CODY_GPU_RENDER_NODE specifically,
+# because a render node is the thing Mesa needs; NVIDIA's nodes do not provide
+# one unless /dev/dri is also passed through.
+CODY_GPU_RENDER_NODE=""
+CODY_GPU_VENDOR=""
+for _node in /dev/dri/renderD*; do
+  [ -e "${_node}" ] || continue
+  CODY_GPU_RENDER_NODE="${_node}"
+  # PCI vendor id straight from sysfs, so the log names the real device
+  # instead of assuming the Intel case.
+  case "$(cat "/sys/class/drm/${_node##*/}/device/vendor" 2>/dev/null || true)" in
+    0x8086) CODY_GPU_VENDOR="Intel" ;;
+    0x1002) CODY_GPU_VENDOR="AMD" ;;
+    0x10de) CODY_GPU_VENDOR="NVIDIA" ;;
+    *) CODY_GPU_VENDOR="DRM" ;;
+  esac
+  break
+done
+
+CODY_GPU_NVIDIA=""
+for _node in /dev/nvidia[0-9]*; do
+  if [ -e "${_node}" ]; then
+    CODY_GPU_NVIDIA=1
+    break
+  fi
+done
+
+if [ -n "${CODY_GPU_RENDER_NODE}" ]; then
+  CODY_GPU="$(echo "${CODY_GPU_VENDOR}" | tr '[:upper:]' '[:lower:]')"
+  if [ -n "${CODY_GPU_NVIDIA}" ] && [ "${CODY_GPU}" != "nvidia" ]; then
+    CODY_GPU="${CODY_GPU},nvidia"
+  fi
+  echo "[Cody] GPU: ${CODY_GPU_VENDOR} render node ${CODY_GPU_RENDER_NODE} — previews render with GPU rasterization"
+elif [ -n "${CODY_GPU_NVIDIA}" ]; then
+  CODY_GPU="nvidia"
+  echo "[Cody] GPU: NVIDIA nodes present but no /dev/dri render node — previews use software rendering (add a /dev/dri device to the container for GPU rasterization)"
+else
+  CODY_GPU="none"
+  echo "[Cody] GPU: no passthrough devices — previews use software rendering"
+fi
+# NVENC is the one capability the common NVIDIA_DRIVER_CAPABILITIES default
+# ("compute,utility") silently omits, and the symptom is a codec that simply
+# never appears. Say so once, only when an NVIDIA GPU is actually attached.
+if [ -n "${CODY_GPU_NVIDIA}" ]; then
+  case ",${NVIDIA_DRIVER_CAPABILITIES:-}," in
+    *,all,* | *,video,*) ;;
+    *) echo "[Cody] GPU: NVIDIA_DRIVER_CAPABILITIES='${NVIDIA_DRIVER_CAPABILITIES:-unset}' does not include 'video' — NVENC will be unavailable (use 'compute,utility,video' or 'all')" ;;
+  esac
+fi
+export CODY_GPU CODY_GPU_RENDER_NODE
+unset _node CODY_GPU_VENDOR CODY_GPU_NVIDIA
+
 # Containers keep the wide bind (Docker port mapping needs it, and auth is
 # always on). The Windows desktop shell overrides with 127.0.0.1: inside WSL2
 # loopback is still forwarded to the host, and a wider bind would become

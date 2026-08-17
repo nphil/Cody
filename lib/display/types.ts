@@ -49,18 +49,33 @@ export interface DisplayStreamHello {
   version: 1;
   renderer: "raster";
   media: "jpeg";
-  input: Array<"pointer" | "keyboard" | "resize" | "reload">;
+  /**
+   * Input channels this provider actually implements. The client MUST gate its
+   * UI on this array rather than on `renderer`: a future X11/Wayland or Android
+   * provider is free to advertise a different subset, and an older provider
+   * that predates a channel simply omits it.
+   */
+  input: Array<"pointer" | "keyboard" | "resize" | "reload" | "clipboard">;
   requestId: string;
+}
+
+/** Answer to a client `{ type: "clipboard", action: "read" }`. Always sent, even empty. */
+export interface DisplayStreamClipboard {
+  type: "clipboard";
+  text: string;
 }
 
 export type DisplayStreamState =
   | { type: "state"; state: "connecting" | "ready" | "error"; message?: string }
-  | DisplayStreamHello;
+  | DisplayStreamHello
+  | DisplayStreamClipboard;
 
 export type DisplayClientControl =
   | { type: "resize"; width: number; height: number; deviceScaleFactor?: number }
   | { type: "pointer"; action: "move" | "down" | "up" | "wheel"; x: number; y: number; button?: "left" | "middle" | "right"; deltaX?: number; deltaY?: number }
   | { type: "keyboard"; action: "down" | "up" | "text"; key?: string; code?: string; text?: string; modifiers?: number }
+  | { type: "clipboard"; action: "read" }
+  | { type: "clipboard"; action: "write"; text: string }
   | { type: "reload" };
 
 /** Future providers (Android/X11/Wayland) implement this seam, commonly with WebRTC. */

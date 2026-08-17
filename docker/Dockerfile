@@ -39,12 +39,35 @@ FROM node:22-bookworm-slim AS runtime
 #                      faithfully: Latin metrics (liberation), CJK (Cody
 #                      ships ja/zh-CN UIs and the owner's apps use them),
 #                      and emoji.
+#   libegl1/libegl-mesa0: GPU rasterization for the streamed preview, but only
+#                      once the host passes /dev/dri in. ANGLE's gl-egl
+#                      backend dlopens the NATIVE libEGL.so.1, which the slim
+#                      base does not carry — Chromium's own bundled
+#                      /usr/lib/chromium/libEGL.so is ANGLE's front-end, not a
+#                      driver — so without these two the GPU flags are a
+#                      silent no-op ("Could not dlopen native EGL:
+#                      libEGL.so.1"). Mesa's DRI drivers (iris_dri.so, for the
+#                      host's UHD 630) and libgbm/libdrm already arrive as
+#                      chromium dependencies, so this is only the EGL entry
+#                      point: 435KB.
+#   libva + iHD:       Intel VAAPI userspace, so QuickSync is usable the
+#                      moment passthrough is granted instead of after an image
+#                      rebuild. intel-media-va-driver ships iHD_drv_video.so
+#                      (covers Gen8+; the host's UHD 630 is Gen9.5) and is
+#                      13.8MB of the 15.2MB this whole group costs — the
+#                      driver IS the cost, and it is the part that makes
+#                      hardware encode possible at all. vainfo is the
+#                      diagnosis command docs/unraid.md tells the operator to
+#                      run. Deliberately NO ffmpeg and NO GStreamer: nothing
+#                      in the app consumes them yet, and they would dwarf this.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     git gh curl wget ca-certificates procps openssh-client openssh-server \
     python3 python3-pip python3-venv \
     ripgrep jq nano less unzip zip \
     chromium fonts-liberation fonts-noto-cjk fonts-noto-color-emoji \
+    libegl1 libegl-mesa0 \
+    libva-drm2 intel-media-va-driver vainfo \
   && rm -rf /var/lib/apt/lists/* \
   && mkdir -p /run/sshd
 

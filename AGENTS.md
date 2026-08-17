@@ -160,8 +160,12 @@ components/
   GitPanel.tsx        right-panel Git tool: changed files + diffs + branch info
   TasksPanel.tsx      right-panel Tasks tool: .cody/tasks.json runner
   PreviewPanel.tsx    right-panel Preview: walks the display candidate ladder —
-                      direct/gateway iframe, else streamed Chromium canvas (WS
-                      JPEG + input forwarding) — plus legacy manual URL mode
+                      direct/gateway iframe, else the streamed surface below —
+                      plus clipboard/pop-out controls and manual URL mode
+  StreamedDisplay.tsx streamed-rung client: display socket + canvas + input,
+                      shared by PreviewPanel and the pop-out window route
+  DisplayWindow.tsx   /display/<sessionId>: the streamed surface alone, full
+                      viewport, no chat chrome
   UpdatesPanel.tsx    right-panel Updates tool: app/omp/skills update status
   InfoPanel.tsx       right-panel Info tool: versions + workspace diagnostics
   ChatMinimap.tsx     scroll minimap alongside the message list
@@ -461,6 +465,43 @@ appears without a Cody change.
   plus a transient pill naming the method (Direct / Gateway / Streamed) once
   per resolved request. A silent downgrade to the raster fallback is the whole
   thing we are preventing — if fidelity drops, the user sees why.
+- **Streamed-rung client** (`components/StreamedDisplay.tsx`): one implementation
+  of the socket protocol, shared by the panel and the pop-out route. The canvas
+  **backing store is `cssSize × devicePixelRatio`** (capped at 3) with the CSS box
+  untouched, and that same factor rides every `resize` as `deviceScaleFactor` —
+  the provider launches Chromium at that density, so the frame lands 1:1 and
+  nothing resamples at either end. Frames decode off-thread via
+  `createImageBitmap` and present through an `ImageBitmapRenderingContext`
+  (`transferFromImageBitmap`), which also skips a blit; Chromium leaves the
+  canvas's intrinsic size alone, so the backing store stays authoritative. A
+  `new Image()` + `drawImage` path covers engines without `createImageBitmap`,
+  and a binary frame is accepted as a `Blob` or an `ArrayBuffer`.
+  **Trap**: pointer coordinates map into the reported viewport's CSS pixels, NOT
+  the backing store — remote input space is CSS px, so scaling by
+  `canvas.width / rect.width` sends every click at `deviceScaleFactor`× too far.
+  The first `resize` goes out on `socket.onopen`, not on `ready`: the provider
+  reads its launch density from it and waits only briefly.
+- **Clipboard bridge**: `hello.input` may advertise `"clipboard"`. Only then does
+  the panel show copy/paste controls, and only then does the surface intercept
+  Ctrl/Cmd+C and Ctrl/Cmd+V rather than forwarding them (every other key,
+  Ctrl+A and Tab included, is forwarded untouched). Copy is a round-trip —
+  `{type:"clipboard",action:"read"}` → `{type:"clipboard",text}` →
+  `navigator.clipboard.writeText`; paste reads the local clipboard on the click
+  gesture and sends `{type:"clipboard",action:"write",text}`, clamped to 8192
+  chars to match the provider's `insertText` slice and stay inside the socket's
+  64 KiB frame cap. The gate is the advertised capability, NEVER
+  `renderer === "raster"` — a surface that cannot bridge the clipboard offers no
+  clipboard UI, which is what keeps the protocol usable for X11/Android later.
+- **Pop-out window** (`app/display/[id]/page.tsx` → `components/DisplayWindow.tsx`):
+  the streamed surface at full viewport on the same authenticated socket, auth-
+  gated by `proxy.ts` like any page. It follows the display SSE, so a newly
+  published request re-targets it instead of going dark when the server recycles
+  the provider. The point is size: a real window measures larger and reports its
+  own size and density, so the remote surface renders at that size natively
+  instead of being upscaled from a sidebar. Distinct from the panel's detach
+  button, which hands a direct/gateway URL to the browser. Every client of a
+  session shares ONE remote surface, so the panel re-asserts its own viewport
+  when focus returns and the pop-out is gone.
 - **CSP**: `proxy.ts` builds `Content-Security-Policy` dynamically via
   `lib/display/csp.ts`. `frame-src` and `connect-src` (the probe fetch and HMR
   sockets need the latter) allow loopback, this host's own RFC1918/CGNAT
