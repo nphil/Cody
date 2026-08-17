@@ -1,6 +1,7 @@
 "use client";
 
-import { forwardRef, useState, useCallback, useEffect, useImperativeHandle, useMemo, useRef } from "react";
+import { forwardRef, useState, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, type CSSProperties, type KeyboardEvent, type RefObject } from "react";
+import { createPortal } from "react-dom";
 import {
   AtSign,
   Check,
@@ -8,16 +9,25 @@ import {
   CircleAlert,
   CircleMinus,
   Download,
+  FilePlus,
   Folder,
   FolderOpen,
+  FolderPlus,
   Loader2,
+  MoreHorizontal,
+  Pencil,
+  Trash2,
   TriangleAlert,
   Upload,
   X,
 } from "lucide-react";
 import { getFileIcon } from "./FileIcons";
 import { Tooltip } from "./ui/primitives";
+import { ConfirmDialog } from "./ui/field";
+import { toast } from "./ui/toast";
 import { translate, useI18n } from "@/lib/i18n";
+import { formatApiError } from "@/lib/i18n/api-error";
+import { postFileOp } from "@/lib/file-ops-client";
 import {
   encodeFilePathForApi,
   getFileDirectory,
@@ -195,6 +205,123 @@ function DismissButton({ onClick, title }: { onClick: () => void; title: string 
   );
 }
 
+const ROW_MENU_MARGIN = 5;
+const ROW_MENU_VIEWPORT_PAD = 8;
+
+/** Small floating action menu for a tree row (new file/folder, rename,
+ * delete), portaled to <body> and positioned from the anchor button's
+ * viewport rect. Mirrors SidebarPortalMenu in SessionSidebar.tsx — kept as a
+ * local copy here since that one isn't exported. */
+function FileRowMenu({
+  anchor,
+  open,
+  onClose,
+  children,
+}: {
+  anchor: RefObject<HTMLElement | null>;
+  open: boolean;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+
+  const computePos = useCallback((el: HTMLElement | null, menu: HTMLDivElement | null) => {
+    if (!el || !menu) return;
+    const r = el.getBoundingClientRect();
+    const width = menu.offsetWidth;
+    const height = menu.offsetHeight;
+    let top = r.bottom + ROW_MENU_MARGIN;
+    if (top + height > window.innerHeight - ROW_MENU_VIEWPORT_PAD) {
+      top = r.top - height - ROW_MENU_MARGIN;
+    }
+    if (top < ROW_MENU_VIEWPORT_PAD) top = ROW_MENU_VIEWPORT_PAD;
+    const left = Math.max(
+      ROW_MENU_VIEWPORT_PAD,
+      Math.min(r.left, window.innerWidth - width - ROW_MENU_VIEWPORT_PAD),
+    );
+    setPos({ top, left });
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    computePos(anchor.current, menuRef.current);
+  }, [open, computePos, anchor]);
+
+  useEffect(() => {
+    if (!open) return;
+    const update = () => computePos(anchor.current, menuRef.current);
+    window.addEventListener("scroll", update, true);
+    window.addEventListener("resize", update);
+    return () => {
+      window.removeEventListener("scroll", update, true);
+      window.removeEventListener("resize", update);
+    };
+  }, [open, computePos, anchor]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (event: MouseEvent | TouchEvent) => {
+      const target = event.target as Node;
+      if (anchor.current?.contains(target)) return;
+      if (menuRef.current?.contains(target)) return;
+      onClose();
+    };
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        onClose();
+      }
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("touchstart", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("touchstart", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open, onClose, anchor]);
+
+  if (!open || typeof document === "undefined") return null;
+
+  return createPortal(
+    <div
+      ref={menuRef}
+      role="menu"
+      style={{
+        position: "fixed",
+        top: pos ? pos.top : -9999,
+        left: pos ? pos.left : -9999,
+        visibility: pos ? "visible" : "hidden",
+        zIndex: 1000,
+        minWidth: 132,
+        padding: 4,
+        border: "1px solid var(--border)",
+        borderRadius: "var(--radius-control)",
+        background: "var(--bg-panel)",
+        boxShadow: "var(--shadow-pop)",
+      }}
+    >
+      {children}
+    </div>,
+    document.body,
+  );
+}
+
+function FileRowMenuItem({ danger, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement> & { danger?: boolean }) {
+  const style: CSSProperties = {
+    display: "flex",
+    alignItems: "center",
+    gap: 7,
+    padding: "6px 9px",
+    borderRadius: 6,
+    fontSize: 11,
+    color: danger ? "var(--status-error)" : "var(--text-muted)",
+  };
+  return <button type="button" role="menuitem" className="sidebar-menu-item" style={style} {...props} />;
+}
+
 function TreeNode({
   node,
   depth,
@@ -207,6 +334,7 @@ function TreeNode({
   highlightedPaths,
   gitStatusByPath,
   changedDirectoryPaths,
+  onMutated,
 }: {
   node: FileNode;
   depth: number;
@@ -219,6 +347,10 @@ function TreeNode({
   highlightedPaths: Set<string>;
   gitStatusByPath: Map<string, GitFileStatus>;
   changedDirectoryPaths: Set<string>;
+  /** Bump the tree-wide refresh token — used after a rename/delete, since
+   * those change the *parent* directory's listing, not just this node's own
+   * (still-loaded) children. */
+  onMutated: () => void;
 }) {
   const { t } = useI18n();
   const open = expandedPaths.has(node.fullPath);
@@ -233,6 +365,19 @@ function TreeNode({
   const [loading, setLoading] = useState(false);
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState("");
+  const [renameBusy, setRenameBusy] = useState(false);
+  const [creating, setCreating] = useState<"file" | "folder" | null>(null);
+  const [createValue, setCreateValue] = useState("");
+  const [createBusy, setCreateBusy] = useState(false);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const renameInputRef = useRef<HTMLInputElement>(null);
+  const createInputRef = useRef<HTMLInputElement>(null);
+  const renameCancelRef = useRef(false);
 
   const loadChildren = useCallback(async (force = false) => {
     if (loaded && !force) return;
@@ -283,10 +428,104 @@ function TreeNode({
   const mentionLabel = t("fileExplorer.insertPathIntoChat");
   const downloadLabel = t("fileExplorer.downloadFile");
 
+  const startCreate = useCallback((kind: "file" | "folder") => {
+    setMenuOpen(false);
+    if (!open) onToggleExpanded(node.fullPath, true);
+    if (!loaded) void loadChildren();
+    setCreateValue("");
+    setCreating(kind);
+    setTimeout(() => createInputRef.current?.focus(), 0);
+  }, [loaded, loadChildren, node.fullPath, open, onToggleExpanded]);
+
+  const commitCreate = useCallback(async () => {
+    if (!creating) return;
+    const name = createValue.trim();
+    if (!name) {
+      setCreating(null);
+      return;
+    }
+    setCreateBusy(true);
+    try {
+      const action = creating === "folder" ? "mkdir" : "create-file";
+      const { ok, data } = await postFileOp({ action, path: node.fullPath, name });
+      if (!ok) throw new Error(formatApiError(data));
+      setCreating(null);
+      setCreateValue("");
+      await loadChildren(true);
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setCreateBusy(false);
+    }
+  }, [creating, createValue, loadChildren, node.fullPath]);
+
+  const startRename = useCallback(() => {
+    setMenuOpen(false);
+    setRenameValue(node.name);
+    setRenaming(true);
+    setTimeout(() => renameInputRef.current?.select(), 0);
+  }, [node.name]);
+
+  const commitRename = useCallback(async () => {
+    if (renameCancelRef.current) {
+      renameCancelRef.current = false;
+      setRenaming(false);
+      return;
+    }
+    const name = renameValue.trim();
+    setRenaming(false);
+    if (!name || name === node.name) return;
+    setRenameBusy(true);
+    try {
+      const { ok, data } = await postFileOp({ action: "rename", path: node.fullPath, newName: name });
+      if (!ok) throw new Error(formatApiError(data));
+      onMutated();
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRenameBusy(false);
+    }
+  }, [node.fullPath, node.name, onMutated, renameValue]);
+
+  const handleDeleteClick = useCallback(async () => {
+    setMenuOpen(false);
+    setDeleteBusy(true);
+    try {
+      const { ok, data } = await postFileOp({ action: "delete", path: node.fullPath, recursive: false });
+      if (ok) {
+        onMutated();
+        return;
+      }
+      if (data.code === "directory_not_empty") {
+        setConfirmDelete(true);
+        return;
+      }
+      toast.error(formatApiError(data));
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setDeleteBusy(false);
+    }
+  }, [node.fullPath, onMutated]);
+
+  const confirmForceDelete = useCallback(async () => {
+    setConfirmDelete(false);
+    setDeleteBusy(true);
+    try {
+      const { ok, data } = await postFileOp({ action: "delete", path: node.fullPath, recursive: true });
+      if (!ok) throw new Error(formatApiError(data));
+      onMutated();
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setDeleteBusy(false);
+    }
+  }, [node.fullPath, onMutated]);
+
   return (
     <div>
       <div
-        onClick={handleClick}
+        onClick={renaming ? undefined : handleClick}
         onKeyDown={handleKeyDown}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
@@ -305,13 +544,14 @@ function TreeNode({
           paddingLeft: 8 + depth * 14,
           paddingRight: 8,
           height: 24,
-          cursor: "pointer",
+          cursor: renaming ? "default" : "pointer",
           background: hovered ? "var(--bg-hover)" : "transparent",
           borderRadius: "var(--radius-control)",
           userSelect: "none",
+          opacity: deleteBusy ? 0.5 : 1,
           boxShadow: focused ? "inset 0 0 0 1px color-mix(in srgb, var(--accent) 70%, transparent)" : "none",
           outline: "none",
-          transition: `background var(--dur-fast) var(--ease-out-warm)`,
+          transition: `background var(--dur-fast) var(--ease-out-warm), opacity var(--dur-fast) var(--ease-out-warm)`,
         }}
       >
         {node.isDir && (
@@ -335,19 +575,38 @@ function TreeNode({
             getFileIcon(node.name, 14)
           )}
         </span>
-        <span
-          style={{
-            fontSize: 12,
-            color: "var(--text)",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-            flex: 1,
-          }}
-          title={node.fullPath}
-        >
-          {node.name}
-        </span>
+        {renaming ? (
+          <input
+            ref={renameInputRef}
+            value={renameValue}
+            autoFocus
+            autoComplete="off"
+            spellCheck={false}
+            disabled={renameBusy}
+            onClick={(e) => e.stopPropagation()}
+            onChange={(e) => setRenameValue(e.target.value)}
+            onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
+              if (e.key === "Enter") { e.preventDefault(); void commitRename(); }
+              if (e.key === "Escape") { e.preventDefault(); renameCancelRef.current = true; setRenaming(false); }
+            }}
+            onBlur={() => void commitRename()}
+            style={{ flex: 1, minWidth: 0, height: 19, padding: "0 4px", border: "1px solid var(--accent)", borderRadius: 4, outline: "none", background: "var(--bg)", color: "var(--text)", fontSize: 12 }}
+          />
+        ) : (
+          <span
+            style={{
+              fontSize: 12,
+              color: "var(--text)",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              flex: 1,
+            }}
+            title={node.fullPath}
+          >
+            {node.name}
+          </span>
+        )}
         {highlighted && (
           <span
             title={t("fileExplorer.newlyUploaded")}
@@ -388,7 +647,7 @@ function TreeNode({
         {loading && (
           <Loader2 size={10} strokeWidth={2} color="var(--text-dim)" style={{ animation: "spin 0.8s linear infinite", flexShrink: 0 }} aria-hidden="true" />
         )}
-        {onAtMention && hovered && (
+        {onAtMention && hovered && !renaming && (
           <Tooltip content={mentionLabel}>
             <button
               onClick={(e) => {
@@ -423,7 +682,7 @@ function TreeNode({
             </button>
           </Tooltip>
         )}
-        {hovered && !node.isDir && (
+        {hovered && !node.isDir && !renaming && (
           <Tooltip content={downloadLabel}>
             <a
               href={`/api/files/${encodeFilePathForApi(node.fullPath)}?type=download`}
@@ -457,9 +716,107 @@ function TreeNode({
             </a>
           </Tooltip>
         )}
+        {!renaming && (
+          <div
+            className="touch-reveal"
+            style={{
+              position: "absolute",
+              right: !node.isDir ? (onAtMention ? 52 : 28) : (onAtMention ? 28 : 4),
+              top: "50%",
+              transform: "translateY(-50%)",
+              visibility: hovered || focused || menuOpen ? "visible" : "hidden",
+            }}
+          >
+            <Tooltip content={t("fileExplorer.moreActions")}>
+              <button
+                type="button"
+                ref={menuButtonRef}
+                onClick={(e) => { e.stopPropagation(); setMenuOpen((v) => !v); }}
+                aria-label={t("fileExplorer.moreActions")}
+                aria-expanded={menuOpen}
+                style={{
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  width: 18, height: 18, padding: 0, lineHeight: 0,
+                  border: "none", borderRadius: "var(--radius-control)",
+                  background: menuOpen ? "var(--bg-selected)" : "var(--bg-panel)",
+                  color: menuOpen ? "var(--text)" : "var(--text-dim)",
+                  cursor: "pointer",
+                }}
+              >
+                <MoreHorizontal size={12} strokeWidth={2} aria-hidden="true" />
+              </button>
+            </Tooltip>
+            <FileRowMenu anchor={menuButtonRef} open={menuOpen} onClose={() => setMenuOpen(false)}>
+              {node.isDir && (
+                <>
+                  <FileRowMenuItem onClick={(e) => { e.stopPropagation(); startCreate("file"); }}>
+                    <FilePlus size={12} strokeWidth={2} aria-hidden="true" />
+                    {t("fileExplorer.newFile")}
+                  </FileRowMenuItem>
+                  <FileRowMenuItem onClick={(e) => { e.stopPropagation(); startCreate("folder"); }}>
+                    <FolderPlus size={12} strokeWidth={2} aria-hidden="true" />
+                    {t("fileExplorer.newFolder")}
+                  </FileRowMenuItem>
+                </>
+              )}
+              <FileRowMenuItem onClick={(e) => { e.stopPropagation(); startRename(); }}>
+                <Pencil size={12} strokeWidth={2} aria-hidden="true" />
+                {t("fileExplorer.rename")}
+              </FileRowMenuItem>
+              <FileRowMenuItem danger onClick={(e) => { e.stopPropagation(); void handleDeleteClick(); }}>
+                <Trash2 size={12} strokeWidth={2} aria-hidden="true" />
+                {t("fileExplorer.delete")}
+              </FileRowMenuItem>
+            </FileRowMenu>
+          </div>
+        )}
       </div>
+      <ConfirmDialog
+        open={confirmDelete}
+        onOpenChange={setConfirmDelete}
+        title={t("fileExplorer.deleteFolderTitle", { name: node.name })}
+        description={t("fileExplorer.deleteNonEmptyDescription")}
+        confirmLabel={t("fileExplorer.deleteFolderConfirm")}
+        cancelLabel={t("fileExplorer.cancel")}
+        danger
+        busy={deleteBusy}
+        onConfirm={() => void confirmForceDelete()}
+      />
       {node.isDir && open && (
         <div role="group">
+          {creating && (
+            <div
+              style={{
+                display: "flex", alignItems: "center", gap: 4,
+                paddingLeft: 8 + (depth + 1) * 14, paddingRight: 8, height: 24,
+              }}
+            >
+              <span style={{ width: 10, flexShrink: 0 }} />
+              <span style={{ flexShrink: 0, display: "flex", alignItems: "center", color: "var(--text-dim)" }}>
+                {creating === "folder"
+                  ? <Folder size={14} strokeWidth={1.8} aria-hidden="true" />
+                  : getFileIcon(createValue || "untitled", 14)}
+              </span>
+              <input
+                ref={createInputRef}
+                value={createValue}
+                autoFocus
+                autoComplete="off"
+                spellCheck={false}
+                disabled={createBusy}
+                placeholder={t("fileExplorer.namePlaceholder")}
+                onChange={(e) => setCreateValue(e.target.value)}
+                onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
+                  if (e.key === "Enter") { e.preventDefault(); void commitCreate(); }
+                  if (e.key === "Escape") { e.preventDefault(); setCreating(null); }
+                }}
+                // Discards on blur (like DirectoryPicker's create-folder row):
+                // an accidental click-away should not silently create a file.
+                onBlur={() => { if (!createBusy) setCreating(null); }}
+                style={{ flex: 1, minWidth: 0, height: 19, padding: "0 4px", border: "1px solid var(--accent)", borderRadius: 4, outline: "none", background: "var(--bg)", color: "var(--text)", fontSize: 12 }}
+              />
+            </div>
+          )}
           {children.map((child) => (
             <TreeNode
               key={child.fullPath}
@@ -474,9 +831,10 @@ function TreeNode({
               highlightedPaths={highlightedPaths}
               gitStatusByPath={gitStatusByPath}
               changedDirectoryPaths={changedDirectoryPaths}
+              onMutated={onMutated}
             />
           ))}
-          {children.length === 0 && loaded && (
+          {children.length === 0 && loaded && !creating && (
             <div style={{ paddingLeft: 8 + (depth + 1) * 14, fontSize: 11, color: "var(--text-dim)", height: 22, display: "flex", alignItems: "center" }}>
               {t("fileExplorer.emptyDir")}
             </div>
@@ -509,8 +867,12 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadSummary, setUploadSummary] = useState<UploadSummary | null>(null);
   const [pendingConflict, setPendingConflict] = useState<PendingConflict | null>(null);
+  const [rootCreating, setRootCreating] = useState<"file" | "folder" | null>(null);
+  const [rootCreateValue, setRootCreateValue] = useState("");
+  const [rootCreateBusy, setRootCreateBusy] = useState(false);
   const prevCwdRef = useRef<string | null>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
+  const rootCreateInputRef = useRef<HTMLInputElement>(null);
   const refreshToken = `${refreshKey ?? 0}:${treeRefreshKey}`;
   const uploadBusy = uploadPhase !== "idle";
 
@@ -540,6 +902,12 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       if (open) next.add(fullPath); else next.delete(fullPath);
       return next;
     });
+  }, []);
+
+  // Bumped after a rename/delete anywhere in the tree so every open directory
+  // (including the mutated entry's parent) re-fetches its listing.
+  const handleMutated = useCallback(() => {
+    setTreeRefreshKey((key) => key + 1);
   }, []);
 
   const applyUploadResult = useCallback((data: UploadResponse) => {
@@ -657,6 +1025,8 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       setUploadSummary(null);
       setPendingConflict(null);
       setUploadError(null);
+      setRootCreating(null);
+      setRootCreateValue("");
     }
 
     setLoading(cwdChanged);
@@ -689,6 +1059,34 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       uploadSummary.uploaded.map((name) => getRelativeFilePath(joinFilePath(cwd, name), cwd)),
     );
   }, [cwd, onAtMentions, uploadSummary]);
+
+  const startRootCreate = useCallback((kind: "file" | "folder") => {
+    setRootCreateValue("");
+    setRootCreating(kind);
+    setTimeout(() => rootCreateInputRef.current?.focus(), 0);
+  }, []);
+
+  const commitRootCreate = useCallback(async () => {
+    if (!rootCreating) return;
+    const name = rootCreateValue.trim();
+    if (!name) {
+      setRootCreating(null);
+      return;
+    }
+    setRootCreateBusy(true);
+    try {
+      const action = rootCreating === "folder" ? "mkdir" : "create-file";
+      const { ok, data } = await postFileOp({ action, path: cwd, name });
+      if (!ok) throw new Error(formatApiError(data));
+      setRootCreating(null);
+      setRootCreateValue("");
+      setTreeRefreshKey((key) => key + 1);
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setRootCreateBusy(false);
+    }
+  }, [cwd, rootCreateValue, rootCreating]);
 
   return (
     <div style={{ minHeight: "100%" }}>
@@ -803,7 +1201,62 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
         </div>
       )}
 
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 2, padding: "2px 6px 0" }}>
+        <Tooltip content={t("fileExplorer.newFile")}>
+          <button
+            type="button"
+            onClick={() => startRootCreate("file")}
+            disabled={rootCreating !== null}
+            aria-label={t("fileExplorer.newFile")}
+            style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, padding: 0, border: "none", borderRadius: "var(--radius-control)", background: "none", color: "var(--text-dim)", cursor: rootCreating ? "default" : "pointer", opacity: rootCreating ? 0.5 : 1 }}
+            onMouseEnter={(e) => { if (!rootCreating) { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "var(--bg-hover)"; } }}
+            onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}
+          >
+            <FilePlus size={13} strokeWidth={1.9} aria-hidden="true" />
+          </button>
+        </Tooltip>
+        <Tooltip content={t("fileExplorer.newFolder")}>
+          <button
+            type="button"
+            onClick={() => startRootCreate("folder")}
+            disabled={rootCreating !== null}
+            aria-label={t("fileExplorer.newFolder")}
+            style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 22, height: 22, padding: 0, border: "none", borderRadius: "var(--radius-control)", background: "none", color: "var(--text-dim)", cursor: rootCreating ? "default" : "pointer", opacity: rootCreating ? 0.5 : 1 }}
+            onMouseEnter={(e) => { if (!rootCreating) { e.currentTarget.style.color = "var(--text-muted)"; e.currentTarget.style.background = "var(--bg-hover)"; } }}
+            onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}
+          >
+            <FolderPlus size={13} strokeWidth={1.9} aria-hidden="true" />
+          </button>
+        </Tooltip>
+      </div>
+
       <div role="tree" aria-label={t("sessionSidebar.explorer")} style={{ padding: "2px 4px" }}>
+        {rootCreating && (
+          <div style={{ display: "flex", alignItems: "center", gap: 4, paddingLeft: 8, paddingRight: 8, height: 24 }}>
+            <span style={{ width: 10, flexShrink: 0 }} />
+            <span style={{ flexShrink: 0, display: "flex", alignItems: "center", color: "var(--text-dim)" }}>
+              {rootCreating === "folder"
+                ? <Folder size={14} strokeWidth={1.8} aria-hidden="true" />
+                : getFileIcon(rootCreateValue || "untitled", 14)}
+            </span>
+            <input
+              ref={rootCreateInputRef}
+              value={rootCreateValue}
+              autoFocus
+              autoComplete="off"
+              spellCheck={false}
+              disabled={rootCreateBusy}
+              placeholder={t("fileExplorer.namePlaceholder")}
+              onChange={(e) => setRootCreateValue(e.target.value)}
+              onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
+                if (e.key === "Enter") { e.preventDefault(); void commitRootCreate(); }
+                if (e.key === "Escape") { e.preventDefault(); setRootCreating(null); }
+              }}
+              onBlur={() => { if (!rootCreateBusy) setRootCreating(null); }}
+              style={{ flex: 1, minWidth: 0, height: 19, padding: "0 4px", border: "1px solid var(--accent)", borderRadius: 4, outline: "none", background: "var(--bg)", color: "var(--text)", fontSize: 12 }}
+            />
+          </div>
+        )}
         {loading ? (
           <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--text-dim)" }}>{t("fileExplorer.loadingFiles")}</div>
         ) : error ? (
@@ -823,6 +1276,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
               highlightedPaths={highlightedPaths}
               gitStatusByPath={gitStatusByPath}
               changedDirectoryPaths={changedDirectoryPaths}
+              onMutated={handleMutated}
             />
           ))
         )}

@@ -1135,6 +1135,27 @@ pre, code {
   outline-offset: -2px;
 }
 
+/* Directory picker rows: hover reveals rename/delete (CSS-only, so it works
+   without per-row React hover state); .touch-reveal keeps them visible where
+   hover does not exist. */
+.directory-picker-row {
+  color: var(--text-muted);
+  transition: background-color var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm);
+}
+.directory-picker-row:hover,
+.directory-picker-row:focus-within {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.directory-picker-row-actions {
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out-warm);
+}
+.directory-picker-row:hover .directory-picker-row-actions,
+.directory-picker-row:focus-within .directory-picker-row-actions {
+  opacity: 1;
+}
+
 /* Sidebar session rows: keyboard access */
 .session-item-button {
   font: inherit;
