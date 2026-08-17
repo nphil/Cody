@@ -331,10 +331,13 @@ appears without a Cody change.
 
 ### Agent-driven Preview panel (`lib/preview-url.ts`, `lib/preview-autoopen.ts`)
 - The agent reaches the Preview tab two ways. Deliberately: the `open_preview`
-  host tool (and `open_url` host-tool calls carrying a loopback URL — a
-  host_tool_call arrives outside any user gesture, so `window.open` would be
-  popup-blocked) opens the panel immediately and reports probe-checked
-  reachability back to the model. Implicitly: loopback URLs in **live**
+  host tool settles SERVER-side (rpc-manager `SERVER_HOST_TOOLS`) — it
+  publishes on the display-request bus (`lib/display/bus.ts`), the panel
+  auto-opens via the display SSE, and the tool result reports server-probed
+  reachability back to the model. `open_url` host-tool calls carrying a
+  loopback URL funnel into the same bus from the browser (a host_tool_call
+  arrives outside any user gesture, so `window.open` would be
+  popup-blocked). Implicitly: loopback URLs in **live**
   assistant replies (`message_end` frames only — history loads and reconnect
   hydration never trigger) are offered to `createPreviewAutoOpener`, which
   opens the panel only once a no-cors probe confirms something answers,
@@ -344,10 +347,11 @@ appears without a Cody change.
   closed; a session switch abandons pending probes. URL rules are shared in
   `normalizePreviewUrl` — loopback only (CSP frame-src), with 0.0.0.0 / [::] /
   [::1] canonicalized to localhost.
-- `PreviewPanel` consumes one-shot `PreviewOpenRequest { url, token }` props
-  (consumed-token guard, like the terminal focus request); its request effect
-  is declared before the stored-URL auto-load effect and sets `autoLoadedRef`
-  so the stored URL cannot race the requested one on first mount.
+- Every trigger — host tool, URL sniffing, manual URL bar — POSTs to
+  `/api/agent/[id]/display`, so one pipeline feeds `PreviewPanel`: it consumes
+  the latest `DisplayRequestV1` from `useDisplayRequests` (SSE snapshot + live
+  events), and a live event both opens the panel and marks the (session, url)
+  pair handled for the auto-opener.
 - Host tools exist only on omp's rpc-ui protocol; turn engines (Claude Code /
   Codex) get the assistant-text detection path here, plus `open_preview` via
   the bundled display MCP server (see `lib/display/` below).
