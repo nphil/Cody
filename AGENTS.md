@@ -102,6 +102,7 @@ lib/
   omp/                 shared omp foundations (paths, CLI probe, RpcProcess)
   agent-client.ts      typed fetch helper for /api/agent commands
   draft-store.ts       local draft persistence helpers
+  context-usage.ts     derives idle/reconnect gauge usage from persisted messages
   env.ts               readEnv(): CODY_* config with OMP_WEB_* fallback
   file-access.ts       allowed file roots for /api/files and worktrees
   harness/             pluggable engine seam: adapters (omp/claude/codex), runtime
@@ -338,6 +339,14 @@ handled or safely ignored.
   used/available/limit values. Session token traffic and per-model rows are
   derived locally from loaded assistant-message usage; the active model is
   labeled and highlighted.
+- `useAgentSession` prefers authoritative live usage when it includes a
+  percentage. While idle or reconnecting, `derivePersistedContextUsage()` falls
+  back to the latest assistant `contextSnapshot.promptTokens` (or
+  input + cache-read + cache-write usage) divided by the active model's
+  `contextWindow`, which `/api/models` deliberately projects for this purpose.
+  Live usage is cleared on session load/switch so one conversation cannot leak
+  a stale gauge into another; genuinely unknown usage keeps an empty ring
+  mounted instead of removing the control.
 - Per-model token totals include input, output, cache-read, and cache-write
   tokens.
 
