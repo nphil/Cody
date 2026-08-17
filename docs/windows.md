@@ -78,10 +78,11 @@ only desktop awareness is runtime feature detection (below).
 6. Crash/exit of the server child → bootstrap page returns with the error and
    a retry action.
 
-**Port**: fixed default `30179`, chosen at first run, persisted in the
-shell's config (`%APPDATA%\Cody\config.json`); collision → next free port.
-[VERIFY: if remote-capability URLs cannot wildcard ports, pin the chosen
-port into the capability at build time and make the config port fixed.]
+**Port**: default `30179`, persisted in the shell's config
+(`%APPDATA%\Cody\config.json`); collision → next free port. The remote
+capability grants `http://localhost:*` / `http://127.0.0.1:*` (port and
+path wildcards are supported — an omitted `:*` would match only port 80),
+so the port is free to move.
 
 **Networking contract** (verified): the server binds `127.0.0.1` inside
 WSL. Default-NAT `localhostForwarding` covers localhost-bound listeners, so
@@ -110,8 +111,10 @@ injection misbehaves: plain first-run setup in the WebView.
 - Titlebar: drag region via `data-tauri-drag-region`, theme-styled
   min/max/close buttons calling the IPC surface, maximize-state reactive via
   window events, double-click maximizes. i18n for tooltips (en/ja/zh-CN).
-- Snap Layouts: [VERIFY decorum/WCO recommendation; otherwise accept
-  Discord-level behavior (Win+Z and edge-drag still work).]
+- Snap Layouts: ship without a plugin (decorum is abandoned; the
+  alternatives add surface for one hover flyout). Win+Z and edge-drag snap
+  still work — Discord-level behavior, accepted. Undecorated windows keep
+  native resize borders and Win11 rounded corners (`shadow: true`).
 
 ## IPC surface (shell ⇄ web app)
 
