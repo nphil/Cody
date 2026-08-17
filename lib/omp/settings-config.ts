@@ -28,6 +28,9 @@ export type NativeSettings = {
   autolearn?: { enabled?: boolean; autoContinue?: boolean; minToolCalls?: number };
   mnemopi?: { scoping?: "global" | "per-project" | "per-project-tagged"; autoRecall?: boolean; autoRetain?: boolean; noEmbeddings?: boolean };
   mcp?: { enableProjectConfig?: boolean; renderMarkdownResults?: boolean; notifications?: boolean; notificationDebounceMs?: number };
+  /** Web-search provider priority (omp's providers.webSearchOrder): the
+   * preferred provider first; empty array = automatic. */
+  providers?: { webSearchOrder?: string[] };
 };
 
 const THINKING_LEVELS = new Set(["auto", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -81,6 +84,7 @@ export function readNativeSettings(): { path: string; settings: NativeSettings }
   const autolearn = isRecord(data.autolearn) ? data.autolearn : {};
   const mnemopi = isRecord(data.mnemopi) ? data.mnemopi : {};
   const mcp = isRecord(data.mcp) ? data.mcp : {};
+  const providers = isRecord(data.providers) ? data.providers : {};
   const registryHasScopedEntries = [data.enabledModels, data.disabledProviders, data.modelProviderOrder]
     .some((value) => Array.isArray(value) && !value.every((item) => typeof item === "string"));
   return {
@@ -143,6 +147,7 @@ export function readNativeSettings(): { path: string; settings: NativeSettings }
         ...(typeof mcp.notifications === "boolean" ? { notifications: mcp.notifications } : {}),
         ...(typeof mcp.notificationDebounceMs === "number" && Number.isInteger(mcp.notificationDebounceMs) ? { notificationDebounceMs: mcp.notificationDebounceMs } : {}),
       } } : {}),
+      ...(stringArray(providers.webSearchOrder) ? { providers: { webSearchOrder: stringArray(providers.webSearchOrder) } } : {}),
     },
   };
 }
@@ -159,6 +164,12 @@ export function writeNativeSettings(settings: NativeSettings): void {
   assertOptionalRecord(settings.autolearn, "autolearn");
   assertOptionalRecord(settings.mnemopi, "mnemopi");
   assertOptionalRecord(settings.mcp, "mcp");
+  assertOptionalRecord(settings.providers, "providers");
+  if (settings.providers?.webSearchOrder !== undefined
+    && (!Array.isArray(settings.providers.webSearchOrder)
+      || settings.providers.webSearchOrder.some((value) => typeof value !== "string" || !value.trim()))) {
+    throw new Error("providers.webSearchOrder must contain non-empty strings");
+  }
   for (const [name, value] of Object.entries({
     hideThinkingBlock: settings.hideThinkingBlock,
     externalThinking: settings.externalThinking,
@@ -231,6 +242,7 @@ export function writeNativeSettings(settings: NativeSettings): void {
   for (const [key, value] of Object.entries(settings.autolearn ?? {})) doc.setIn(["autolearn", key], value);
   for (const [key, value] of Object.entries(settings.mnemopi ?? {})) doc.setIn(["mnemopi", key], value);
   for (const [key, value] of Object.entries(settings.mcp ?? {})) doc.setIn(["mcp", key], value);
+  if (settings.providers?.webSearchOrder !== undefined) doc.setIn(["providers", "webSearchOrder"], settings.providers.webSearchOrder);
   const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
   writeFileSync(temp, doc.toString(), "utf8");
   renameSync(temp, path);

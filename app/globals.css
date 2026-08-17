@@ -2422,21 +2422,41 @@ html.dark .dropdown-surface :is(select, option) {
 .engine-link:disabled { opacity: 0.6; cursor: default; }
 
 /* ------------------------- Post-onboarding wizard ------------------------- */
-.setup-wizard-column { width: min(880px, 100%); }
+.setup-wizard-head {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.setup-wizard-subtitle {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-muted);
+}
 .setup-wizard-step {
-  margin: 6px 0 0;
+  margin: 2px 0 0;
   font-size: 11px;
   letter-spacing: 0.04em;
   color: var(--text-dim);
+}
+.setup-wizard-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 14px 18px;
+  overflow-y: auto;
 }
 /* Bounded frame for the embedded provider editor: it manages its own
    scrolling, the wizard just gives it a card-shaped viewport. */
 .setup-wizard-body {
   display: flex;
   flex-direction: column;
-  width: 100%;
-  height: min(60vh, 620px);
-  min-height: 320px;
+  flex: 1;
+  min-height: 280px;
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
   background: var(--bg-panel);
@@ -2446,8 +2466,7 @@ html.dark .dropdown-surface :is(select, option) {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  width: min(600px, 100%);
-  padding: 18px;
+  padding: 16px;
   border: 1px solid var(--border);
   border-radius: var(--radius-card);
   background: var(--bg-panel);
@@ -2456,30 +2475,99 @@ html.dark .dropdown-surface :is(select, option) {
   line-height: 1.65;
 }
 .setup-wizard-card p { margin: 0; }
-.setup-wizard-tips {
+.setup-wizard-options {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
+  gap: 4px;
+  max-height: 340px;
+  overflow-y: auto;
 }
-.setup-wizard-tips li {
-  display: flex;
+.setup-wizard-option {
+  display: grid;
+  grid-template-columns: 20px minmax(96px, auto) 1fr;
+  align-items: center;
   gap: 8px;
-  align-items: flex-start;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.setup-wizard-option:hover:not(:disabled) { background: var(--bg-hover); }
+.setup-wizard-option[data-selected] {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  color: var(--text);
+}
+.setup-wizard-option-check { display: inline-flex; justify-content: center; color: var(--accent); }
+.setup-wizard-option-label { font-weight: 600; color: inherit; }
+.setup-wizard-option-desc {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.setup-wizard-swatch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid;
+  border-radius: 5px;
+}
+.setup-wizard-swatch > span {
+  display: block;
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+}
+.setup-wizard-search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg);
+  color: var(--text-dim);
+}
+.setup-wizard-search input {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 12.5px;
+}
+.setup-wizard-note { font-size: 11px; color: var(--text-dim); }
+.setup-wizard-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--status-error);
+  font-size: 11.5px;
 }
 .setup-wizard-actions {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  width: min(600px, 100%);
+  padding: 12px 18px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
 }
 .setup-wizard-btn {
   width: auto;
-  min-height: 38px;
-  padding-inline: 18px;
+  min-height: 36px;
+  padding-inline: 16px;
 }
 
 @media (prefers-reduced-motion: reduce) {

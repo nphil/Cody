@@ -265,9 +265,11 @@ export function AppShell() {
     setSetupWizardOpen(true);
   }, []);
   // The setup wizard runs once per instance, right after engine onboarding
-  // (and on upgraded instances that predate it — skipping persists).
+  // (and on upgraded instances that predate it — skipping persists). A
+  // dismissed dialog stays closed for this page load only.
+  const setupWizardDismissedRef = useRef(false);
   useEffect(() => {
-    if (!engineRoster) return;
+    if (!engineRoster || setupWizardDismissedRef.current) return;
     if (engineRoster.canManage && engineRoster.onboarded && !engineRoster.setupDone) {
       setSetupWizardOpen(true);
     }
@@ -275,6 +277,10 @@ export function AppShell() {
   const handleSetupWizardDone = useCallback(() => {
     setSetupWizardOpen(false);
     setEngineRoster((current) => (current ? { ...current, setupDone: true } : current));
+  }, []);
+  const handleSetupWizardDismiss = useCallback(() => {
+    setupWizardDismissedRef.current = true;
+    setSetupWizardOpen(false);
   }, []);
   // On mobile the sidebar is an overlay drawer; hide it by default so the chat
   // is visible on load. Runs once the breakpoint resolves after hydration.
@@ -2001,6 +2007,7 @@ export function AppShell() {
         engine={engineRoster?.engines.find((item) => item.id === engineRoster.active) ?? null}
         hasModelsUi={capabilities.models}
         onDone={handleSetupWizardDone}
+        onDismiss={handleSetupWizardDismiss}
       />
     )}
     </ToastProvider>
