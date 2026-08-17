@@ -8,7 +8,7 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/nphil/Cody/issues</Support>
   <Project>https://github.com/nphil/Cody</Project>
-  <Overview>Cody — a self-hosted web workspace for coding agents. Session browsing, live chat, Git panel with staging and checkpoints, persistent terminals, workspace tasks, and an embedded app preview. The agent engine is swappable from the UI: omp (oh-my-pi) ships in the container, and Claude Code or Codex can be installed and selected as experimental engines. Point /workspace at your projects share and open the WebUI.</Overview>
+  <Overview>Cody — a self-hosted web workspace for coding agents. Session browsing, live chat, Git panel with staging and checkpoints, persistent terminals, workspace tasks, and an embedded app preview. Bring your own engine: omp (oh-my-pi), Claude Code or Codex install from the onboarding picker and update independently of this image. Includes everyday dev tools (git, gh, python3, ripgrep, jq) and optional SSH access that drops you straight into the active engine's CLI. Point /workspace at your projects share, open the WebUI and create your admin account.</Overview>
   <Category>Tools: Productivity:</Category>
   <WebUI>http://[IP]:[PORT:30177]/</WebUI>
   <TemplateURL/>
@@ -18,9 +18,11 @@
   <DonateText/>
   <DonateLink/>
   <Config Name="WebUI Port" Target="30177" Default="30177" Mode="tcp" Description="Cody web interface" Type="Port" Display="always" Required="true" Mask="false">30177</Config>
+  <Config Name="SSH Port" Target="2222" Default="2222" Mode="tcp" Description="SSH into the container (only active once SSH Password is set, or keys exist in appdata/home/.ssh/authorized_keys). Logging in lands in the active coding engine's CLI; exiting it drops to a shell." Type="Port" Display="always" Required="false" Mask="false">2222</Config>
   <Config Name="App Data" Target="/data" Default="/mnt/user/appdata/cody" Mode="rw" Description="Agent state, checkpoints and shell home. Keep on appdata." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/cody</Config>
   <Config Name="Projects" Target="/workspace" Default="/mnt/user/projects" Mode="rw" Description="Your repositories — the workspaces Cody and the agent operate on." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/projects</Config>
   <Config Name="Password (optional)" Target="CODY_PASSWORD" Default="" Mode="" Description="Leave empty: on first open the WebUI walks you through creating your admin account. Setting a password additionally enables the built-in 'cody' account for HTTP Basic Auth (scripts, health probes)." Type="Variable" Display="advanced" Required="false" Mask="true"></Config>
   <Config Name="Allow Account Signup" Target="CODY_ALLOW_SIGNUP" Default="" Mode="" Description="Leave empty (or 1) to allow creating new accounts from the login screen. Set to 0 to restrict account creation to administrators in Settings &gt; User Accounts." Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="SSH Password" Target="CODY_SSH_PASSWORD" Default="" Mode="" Description="Optional: root password for SSH access. Leave empty to keep SSH off (or use key-only auth by adding public keys to appdata/home/.ssh/authorized_keys)." Type="Variable" Display="always" Required="false" Mask="true"></Config>
   <Config Name="Anthropic API Key" Target="ANTHROPIC_API_KEY" Default="" Mode="" Description="Optional: API key for the agent's model provider. Any provider env var omp understands can be added the same way." Type="Variable" Display="advanced" Required="false" Mask="true"></Config>
 </Container>

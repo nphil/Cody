@@ -125,16 +125,28 @@ jobs:
           echo "fresh-install verified (locked, setup mints an admin, omp installs from the picker and runs)"
 
           # ------------------------------------------------------------------
-          # Password mode: CODY_PASSWORD still enables the env-managed account
-          # over HTTP Basic — the contract scripts and bookmarks depend on.
+          # Password mode + SSH: CODY_PASSWORD still enables the env-managed
+          # account over HTTP Basic (the contract scripts and bookmarks depend
+          # on), and CODY_SSH_PASSWORD must bring sshd up on its port with the
+          # engine-first login profile installed.
           # ------------------------------------------------------------------
-          docker run -d --name cody-smoke -p 30177:30177 \
-            -e CODY_PASSWORD=smoke-test-password cody:smoke
+          docker run -d --name cody-smoke -p 30177:30177 -p 2222:2222 \
+            -e CODY_PASSWORD=smoke-test-password \
+            -e CODY_SSH_PASSWORD=smoke-ssh-password cody:smoke
           wait_ready
           basic=$(curl -s -o /dev/null -w '%{http_code}' -u cody:smoke-test-password http://127.0.0.1:30177/api/sessions || echo 000)
           [ "$basic" = "200" ] || fail "password mode: GET /api/sessions with Basic Auth expected 200, got $basic"
+          banner=$(timeout 5 bash -c 'read -r line < /dev/tcp/127.0.0.1/2222; echo "$line"' || echo '')
+          case "$banner" in
+            SSH-2.0*) ;;
+            *) fail "sshd did not answer on 2222 (banner: '$banner')" ;;
+          esac
+          docker exec cody-smoke test -f /etc/profile.d/50-cody-engine.sh \
+            || fail "engine-first SSH login profile is missing"
+          docker exec cody-smoke sh -c 'grep -q "root:.*:/data/home:" /etc/passwd' \
+            || fail "root home was not moved to the persistent /data/home"
           docker rm -f cody-smoke >/dev/null
-          echo "password-mode Basic Auth verified"
+          echo "password-mode Basic Auth + SSH verified"
 
       - name: Build and push
         uses: docker/build-push-action@v6

@@ -20,10 +20,23 @@ RUN npm run build && npm prune --omit=dev
 
 FROM node:22-bookworm-slim AS runtime
 
-# git: Git panel, checkpoints and worktrees. procps/curl: healthcheck + debug.
+# The container doubles as the dev box the agent works in, so it carries a
+# curated set of everyday tools on top of the slim Debian base — enough to
+# develop with, small enough to stay lightweight (~120MB over the base):
+#   git/gh:            version control + GitHub CLI
+#   python3(+pip/venv): scripts, tooling, agent-written code
+#   ripgrep/jq:        search and JSON plumbing agents and humans both use
+#   nano/less/unzip/zip: quality of life in SSH/terminal sessions
+#   openssh-server:    direct SSH into the workspace (entrypoint-managed,
+#                      only enabled when credentials are configured)
+#   procps/curl:       healthcheck + debug
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends git curl ca-certificates procps openssh-client \
-  && rm -rf /var/lib/apt/lists/*
+  && apt-get install -y --no-install-recommends \
+    git gh curl wget ca-certificates procps openssh-client openssh-server \
+    python3 python3-pip python3-venv \
+    ripgrep jq nano less unzip zip \
+  && rm -rf /var/lib/apt/lists/* \
+  && mkdir -p /run/sshd
 
 # No engine is baked in — but omp is a Bun program (`#!/usr/bin/env bun`,
 # `engines: { bun: ">=1.3.14" }`), so the runtime that a picker-installed omp
@@ -51,7 +64,10 @@ COPY --from=build /app/lib ./lib
 COPY docker/entrypoint.sh /usr/local/bin/cody-entrypoint
 RUN chmod 0755 /usr/local/bin/cody-entrypoint
 
-EXPOSE 30177
+# 30177 = WebUI (PORT env), 2222 = SSH (CODY_SSH_PORT env; the daemon only
+# starts when CODY_SSH_PASSWORD is set or authorized keys exist — see
+# entrypoint).
+EXPOSE 30177 2222
 VOLUME ["/data", "/workspace"]
 # The container always runs with auth on (accounts are required from the
 # first request), so an unauthenticated probe of / normally answers 307 or

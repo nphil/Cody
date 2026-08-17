@@ -77,8 +77,10 @@ The template asks for:
 | Setting | Meaning |
 | --- | --- |
 | WebUI Port | Host port for the interface (default 30177) |
+| SSH Port | Host port for SSH into the container (container port 2222; inactive until SSH credentials are configured — see below) |
 | App Data (`/data`) | Agent state, checkpoints, terminal shell home — keep on appdata |
 | Projects (`/workspace`) | The share holding your repositories |
+| SSH Password | Optional root password for SSH; leave empty for no SSH (or key-only via authorized_keys) |
 | Password (optional, advanced) | Leave empty — first-run setup happens in the browser. Setting it additionally enables the built-in `cody` account over HTTP Basic Auth for scripts and probes. |
 | Allow Account Signup | Leave empty to let the login screen offer "Create an account". Set `0` to restrict account creation to administrators. |
 | Anthropic API Key | Optional provider credential for the agent; add other provider env vars the same way |
@@ -126,3 +128,25 @@ behind an authenticating reverse proxy.
   Bun binary alongside Node. Installing omp with npm onto a Node-only image
   looks like it works and then fails at every invocation with
   `env: 'bun': No such file or directory`.
+
+## SSH into the container
+
+Set the **SSH Password** template variable (or drop public keys into
+`appdata/cody/home/.ssh/authorized_keys` for key-only auth) and map the SSH
+port (container `2222`). Without either credential the daemon never starts.
+
+Connecting with Termius or plain `ssh root@server -p 2222` lands you
+**directly in the active coding engine's CLI** (omp, claude, or codex —
+whatever the instance's engine is). Exiting the engine drops to a normal
+shell rather than closing the connection; `exit` again disconnects. To skip
+the engine and go straight to a shell:
+`ssh -o SetEnv=CODY_NO_AUTO_ENGINE=1 root@server -p 2222` (or run
+`CODY_NO_AUTO_ENGINE=1 bash -l` in the session).
+
+SSH sessions run as root with home at the persistent `/data/home`, the same
+identity the web terminals use — so engine sign-in state, shell history and
+dotfiles are shared, and the container's dev tools (git, `gh`, python3,
+ripgrep, jq) are on PATH. Host keys persist in `appdata/cody/ssh`, so the
+server identity survives image updates. The usual caveat applies: SSH here
+is root on the container with full access to `/data` and `/workspace` —
+keep the port on your LAN or behind a VPN.

@@ -2,7 +2,7 @@
 
 [English](./README.md) | [简体中文](./README.zh-CN.md) | [日本語](./README.ja.md)
 
-Cody is a self-hosted web workspace for coding agents. The interface — session browsing, real-time chat, files, git, persistent terminals, settings — stays constant while the **engine** underneath is swappable: [oh-my-pi (omp)](https://github.com/can1357/oh-my-pi) is the founding, fully-featured engine, with Claude Code and Codex available as experimental engines you can install and switch to from the UI (see [docs/harnesses.md](docs/harnesses.md)).
+Cody is a self-hosted web workspace for coding agents. The interface — session browsing, real-time chat, files, git, persistent terminals, settings — stays constant while the **engine** underneath is swappable: [oh-my-pi (omp)](https://github.com/can1357/oh-my-pi) is the founding, fully-featured engine, with Claude Code and Codex available as experimental engines you can install and switch to from the UI (see [docs/harnesses.md](docs/harnesses.md)). The container ships with everyday dev tools (git, `gh`, python3, ripgrep, jq) and optional SSH access that lands directly in the active engine's CLI.
 
 Cody is a fork of [kahme247/ompweb](https://github.com/kahme247/ompweb) — see [Credits](#credits).
 
