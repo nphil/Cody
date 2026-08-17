@@ -190,28 +190,49 @@ Two independently-versioned artifacts, one CI run, two Releases:
   by WSL as corruption-prone (`--allow-unsafe`-gated) and shrinking is
   admin-only, so Cody never enables sparse mode.
 
-Release/tag scheme: every dispatch publishes **two** releases, both marked
-`prerelease: true` — a namespace-isolation device, not a quality signal, so
-neither can ever win the container's `/releases/latest` (that endpoint
-resolves to the newest non-prerelease release repo-wide by creation date,
-with no notion of tag prefixes — a plain, non-prerelease desktop release
-would risk shadowing, or being shadowed by, a container `vX.Y.Z` release).
-`desktop-latest` is force-recreated every run — the fixed URL above, and the
-only thing the shell's updater ever polls. `desktop-vX.Y.Z` is immutable,
-one per version, kept forever as desktop's own changelog alongside the
-installer, rootfs, and `desktop-manifest.json`.
+Release/tag scheme: every release run publishes **two** releases.
+`desktop-vX.Y.Z` is immutable, one per version, kept forever as desktop's own
+changelog alongside the installer, rootfs, and `desktop-manifest.json` — an
+ordinary **visible** release (not a prerelease), created with `--latest=false`
+so it can never win the repo's single `/releases/latest` slot. That slot
+belongs to the container train, which ShipLog reads as the server's changelog;
+GitHub only moves the pointer for a release published with `make_latest`
+true/legacy, so the explicit false is the whole isolation mechanism. (Marking
+desktop releases `prerelease: true` used to do that job, at the cost of
+burying every one of them below every container release.) `desktop-latest` is
+force-moved to the new commit every run — the fixed URL above, the only thing
+the shell's updater ever polls — and stays `prerelease: true`: it is a
+machine-facing pointer, not a changelog entry, so keeping it out of the human
+release list is deliberate.
 
 ## CI
 
-- `.github/workflows/desktop.yml` — push to `main` filtered to `desktop/**`
-  builds and validates only: shell build (windows-latest, NSIS installer)
-  uploaded as a CI artifact, no release. Manual dispatch (required
-  `version` + `notes`) additionally runs rootfs build (ubuntu, flatten +
-  **gzip** the published container image — gzip, not zstd, is WSL's own
-  recommended `wsl --import` compression; other formats risk import
-  incompatibility on older WSL versions) and release publish (installer +
-  rootfs + manifest, to both the immutable `desktop-vX.Y.Z` and the rolling
-  `desktop-latest`).
+- `.github/workflows/desktop.yml` — **every push to `main` that touches
+  `desktop/**` or the workflow file itself publishes a release.** There is no
+  build-only mode: shell build (windows-latest, NSIS installer), rootfs build
+  (ubuntu, flatten + **gzip** the published container image — gzip, not zstd,
+  is WSL's own recommended `wsl --import` compression; other formats risk
+  import incompatibility on older WSL versions), then publish installer +
+  rootfs + manifest to both the immutable `desktop-vX.Y.Z` and the rolling
+  `desktop-latest`.
+  - **Version** — computed from the tags, never committed anywhere: the
+    highest existing `desktop-v*` tag compared *numerically* (0.1.10 > 0.1.9)
+    plus one patch, or 0.1.0 if no desktop tag exists yet. It is patched into
+    `tauri.conf.json`, `Cargo.toml` and `Cargo.lock` at build time and verified
+    there. A computed tag that already exists fails the run loudly rather than
+    clobbering an immutable release.
+  - **Changelog** — generated from the commits touching `desktop/**` between
+    the previous `desktop-v*` tag and the released commit: one
+    `- subject (short sha)` bullet each, newest first, de-duplicated. A run
+    with no such commits (a CI-only change, say) says so in the body instead of
+    shipping an empty section. The artifact/SHA-256 table and the rootfs
+    provenance line follow it.
+  - **Dispatch overrides**, all optional: `version` (exact X.Y.Z, wins over
+    everything), `bump` (patch/minor/major, default patch), `notes` (prepended
+    to the generated changelog).
+  - The release job pushes **tags only** and never commits back to `main`, and
+    the push trigger is branch-filtered — which a tag push does not match — so
+    a release cannot re-trigger the workflow.
 - `.github/workflows/docker.yml` gains a paths guard so `desktop/**`-only
   pushes stop cutting container releases (and vice versa: web/docker pushes
   never build the desktop app — the runtime picks up web changes through

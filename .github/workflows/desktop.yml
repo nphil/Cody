@@ -1,41 +1,62 @@
 name: Cody Desktop
 
-# Two trigger shapes, two very different jobs run:
+# WHAT TRIGGERS A RELEASE
 #
-#   - Plain push to main touching desktop/** -> shell-build ONLY. This is
-#     build-and-validate: prove desktop/ still compiles and bundles into an
-#     NSIS installer, upload it as a CI artifact for a human to grab. No
-#     rootfs snapshot, no GitHub Release. (docker.yml's paths-ignore is the
-#     other half of this split: it stops desktop-only pushes from cutting a
-#     container release, see docs/windows.md's CI section.)
-#   - workflow_dispatch (version + notes both required) -> shell-build AND
-#     rootfs-build run, then release publishes. Every dispatch builds AND
-#     publishes; there is no separate "rebuild only" dispatch mode here
-#     (unlike docker.yml) because the push trigger already covers that case.
+# Every push to main that touches the desktop app -- `desktop/**` or this
+# workflow file -- publishes a release. There is no build-only mode: the two
+# build jobs run and then `release` publishes, on every trigger. The version
+# number is computed from the tags that already exist (see the `version` job)
+# and injected into the build; it is not stored in the repo. workflow_dispatch
+# runs the identical pipeline with manual overrides: `version` pins an exact
+# number, `bump` picks patch/minor/major, `notes` is prepended to the
+# generated changelog.
 #
-# Release namespace: container releases live at tags vX.Y.Z (docker.yml).
-# Desktop publishes to a separate, clearly-prefixed namespace so the two
-# never collide in the repo's Releases list or in GitHub's single
-# /releases/latest slot (that endpoint picks the newest non-draft,
-# non-prerelease release across the WHOLE repo by created_at, with no
-# awareness of tag prefixes). Every release run moves:
-#   - `desktop-latest` (rolling release, force-moved tag): the
-#     machine-facing update-check target. The Rust shell polls this by
-#     fixed tag/asset name via a direct asset-download URL, never GitHub's
-#     own "latest" concept -- immune to whatever the container namespace is
-#     doing, and vice versa. Managed with the `gh` CLI (preinstalled on the
-#     runner) rather than an upsert-style action, because the tag must move
-#     to a new commit on every run. The release is updated in place, never
-#     deleted: it is a live download channel, and deleting it would take
-#     every asset offline for the minutes the multi-gigabyte re-upload
-#     takes. See the step for the ordering that keeps it coherent.
-#   - `desktop-vX.Y.Z` (immutable, one per version): human-facing history,
-#     so desktop keeps a real changelog the way the container does.
-# Both are marked prerelease:true -- not a quality signal (these are
-# ordinary, stable releases) but purely so neither can ever win the
-# container's /releases/latest slot. Direct-tag and direct-asset-download
-# lookups (what this pipeline and the desktop app both use) ignore that
-# flag entirely, so nothing about *fetching* them changes.
+# (docker.yml's paths-ignore is the other half of this split: it lists
+# `desktop/**`, `docs/windows.md` and this file, so a desktop-only push never
+# cuts a container release. See docs/windows.md's CI section.)
+#
+# LOOP SAFETY -- two properties, both load-bearing, stop automatic releases
+# from feeding themselves:
+#   1. This workflow NEVER commits to main. The computed version is patched
+#      into tauri.conf.json / Cargo.toml / Cargo.lock on the runner and thrown
+#      away with it; only TAGS are pushed (desktop-vX.Y.Z, plus desktop-latest
+#      force-moved).
+#   2. The push trigger is filtered to `branches: [main]`, and GitHub matches a
+#      branch-filtered push trigger only against branch pushes -- a tag push
+#      does not match a trigger that has no `tags:` filter, so the tags pushed
+#      below cannot re-enter here. (Belt and braces: a push made with the
+#      built-in GITHUB_TOKEN does not start workflow runs at all.)
+# Adding a `tags:` filter here, or committing a version bump back to main,
+# turns every release into an infinite loop.
+#
+# RELEASE NAMESPACE AND VISIBILITY
+#
+# Container releases live at tags vX.Y.Z (docker.yml); desktop publishes to a
+# separate, clearly-prefixed namespace. Every release run moves two releases:
+#   - `desktop-vX.Y.Z` (immutable, one per version): the human-facing history.
+#     An ORDINARY, VISIBLE release -- prerelease:false, so it appears in the
+#     Releases list like any other -- created with `--latest=false` so it can
+#     never take the repo's single /releases/latest slot. That slot belongs to
+#     the container train: the ShipLog plugin on Unraid reads this repo's
+#     releases as the container's changelog, and a desktop build answering
+#     /releases/latest would misreport the server version. GitHub moves that
+#     pointer only for a release published with make_latest true/legacy, so an
+#     explicit `--latest=false` IS the isolation mechanism. (prerelease:true
+#     used to be that mechanism, at the cost of burying every desktop release
+#     below every container release.) The release job asserts the outcome
+#     afterwards and re-hides the release if the assertion ever fails.
+#   - `desktop-latest` (rolling release, force-moved tag): the machine-facing
+#     update-check target, and the one release that stays prerelease:true -- it
+#     is a pointer, not a changelog entry, so keeping it out of the human list
+#     is deliberate. The Rust shell polls it by fixed tag/asset name via a
+#     direct asset-download URL, never GitHub's own "latest" concept -- immune
+#     to whatever the container namespace is doing, and vice versa. Managed
+#     with the `gh` CLI (preinstalled on the runner) rather than an
+#     upsert-style action, because the tag must move to a new commit on every
+#     run. The release is updated in place, never deleted: it is a live
+#     download channel, and deleting it would take every asset offline for the
+#     minutes the several-hundred-megabyte re-upload takes. See the step for
+#     the ordering that keeps it coherent.
 #
 # Rootfs compression is gzip, NOT zstd/xz: WSL's own docs call gzip the
 # *recommended* format for `wsl --import` tarballs and warn that other
@@ -48,25 +69,167 @@ on:
     branches: [main]
     paths:
       - "desktop/**"
+      - ".github/workflows/desktop.yml"
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version (X.Y.Z, no leading v). Every dispatch builds AND publishes, so this is required."
-        required: true
+        description: "Exact version (X.Y.Z, no leading v). Empty = auto-increment from the newest desktop-v* tag."
+        required: false
         type: string
+      bump:
+        description: "Increment to apply when `version` is empty."
+        required: false
+        default: patch
+        type: choice
+        options: [patch, minor, major]
       notes:
-        description: "Release notes / changelog (markdown) for the versioned desktop-vX.Y.Z release"
+        description: "Extra release notes (markdown), prepended to the auto-generated changelog"
         required: false
         type: string
 
 # desktop-latest is a single shared mutation target for every release run,
-# so this serializes across the whole workflow rather than per-ref the way
-# docker.yml does.
+# and so is the tag namespace the version number is derived from: this
+# serializes across the whole workflow rather than per-ref the way docker.yml
+# does, so two pushes in quick succession release one after the other (0.1.1
+# then 0.1.2) instead of racing for the same number.
 concurrency:
   group: desktop-release
   cancel-in-progress: false
 
 jobs:
+  # ---------------------------------------------------------------------
+  # The single source of the release's identity: version number and
+  # changelog, computed once and consumed by every job below, so the number
+  # patched into the binary, the tag, and the manifest can never disagree.
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.compute.outputs.version }}
+      prev_tag: ${{ steps.compute.outputs.prev_tag }}
+      changelog: ${{ steps.changelog.outputs.changelog }}
+    steps:
+      # Full history, because the changelog walks commits back to the
+      # previous desktop tag; the default depth-1 checkout has nothing to
+      # walk.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute next version
+        id: compute
+        env:
+          EXPLICIT_VERSION: ${{ inputs.version }}
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+
+          # Tags come from the REMOTE, not from whatever the checkout happened
+          # to fetch: git only auto-follows tags that point into the fetched
+          # history, and a tag missed here becomes a version number that
+          # collides with an already-published, immutable release.
+          tags=$(git ls-remote --tags --refs origin | sed 's#.*refs/tags/##')
+
+          # NUMERIC comparison, field by field -- lexical order would rank
+          # 0.1.9 above 0.1.10 and hand out a version that already exists.
+          # The sed also enforces the shape: anything that is not a bare
+          # X.Y.Z (a `-rc1` suffix, say) is not a candidate for "highest".
+          prev_version=$(printf '%s\n' "$tags" \
+            | sed -n 's/^desktop-v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p' \
+            | sort -t. -k1,1n -k2,2n -k3,3n \
+            | tail -n1)
+
+          prev_tag=""
+          if [ -n "$prev_version" ]; then
+            prev_tag="desktop-v${prev_version}"
+          fi
+
+          if [ -n "$EXPLICIT_VERSION" ]; then
+            # A dispatch that names a version wins over everything, including
+            # the bump choice -- but it still has to be a version.
+            version="$EXPLICIT_VERSION"
+            printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || {
+              echo "::error::version input '${version}' is not X.Y.Z"
+              exit 1
+            }
+          elif [ -z "$prev_version" ]; then
+            # No desktop release has ever been cut.
+            version="0.1.0"
+          else
+            IFS=. read -r major minor patch <<< "$prev_version"
+            # Deliberately NOT implemented: inferring the bump from commit
+            # subjects (`feat:` -> minor). This repo writes plain imperative
+            # subjects, not Conventional Commits, so that heuristic could only
+            # ever misfire. Ask for a bigger bump with the `bump` input.
+            case "${BUMP:-patch}" in
+              major) major=$((major + 1)); minor=0; patch=0 ;;
+              minor) minor=$((minor + 1)); patch=0 ;;
+              patch|"") patch=$((patch + 1)) ;;
+              *) echo "::error::unknown bump '${BUMP}' (expected patch|minor|major)"; exit 1 ;;
+            esac
+            version="${major}.${minor}.${patch}"
+          fi
+
+          tag="desktop-v${version}"
+          # desktop-vX.Y.Z is immutable. Refuse loudly rather than let a
+          # later step half-overwrite a published release's assets.
+          if printf '%s\n' "$tags" | grep -Fxq "$tag"; then
+            echo "::error::${tag} already exists. desktop-vX.Y.Z releases are immutable -- dispatch with a different version, or a larger bump."
+            exit 1
+          fi
+
+          echo "previous: ${prev_tag:-<none>}  ->  releasing: ${tag}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prev_tag=$prev_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Generate changelog
+        id: changelog
+        env:
+          PREV_TAG: ${{ steps.compute.outputs.prev_tag }}
+        run: |
+          set -euo pipefail
+
+          # The previous tag may point at a commit the checkout did not fetch
+          # (see above), so ask for that one ref by name. A miss is not fatal:
+          # the range simply falls back to the whole history.
+          if [ -n "$PREV_TAG" ]; then
+            git fetch --force --no-tags origin "refs/tags/${PREV_TAG}:refs/tags/${PREV_TAG}" >/dev/null 2>&1 || true
+          fi
+
+          if [ -n "$PREV_TAG" ] && git rev-parse -q --verify "refs/tags/${PREV_TAG}^{commit}" >/dev/null; then
+            range="${PREV_TAG}..HEAD"
+            since="since ${PREV_TAG}"
+          else
+            range="HEAD"
+            since="in the repository's history"
+          fi
+
+          # Only commits that touched the app itself: the rootfs half of the
+          # release comes from the container image, and its provenance is the
+          # digest line at the bottom of the body, not this list.
+          # De-duplicated by subject (a cherry-pick or a re-landed commit
+          # would otherwise appear twice), newest first, which is git log's
+          # own order.
+          bullets=$(git log --no-merges --format='%s%x09%h' "$range" -- desktop/ \
+            | awk -F'\t' 'NF && !seen[$1]++ { printf "- %s (%s)\n", $1, $2 }')
+
+          delim="DESKTOP_EOF_$(openssl rand -hex 8)"
+          {
+            echo "changelog<<${delim}"
+            if [ -n "$bullets" ]; then
+              printf '%s\n' "$bullets"
+            else
+              # Say so out loud rather than publish an empty section: a
+              # release with no app commits is a real thing here (a CI change
+              # triggers one), and it still ships a freshly snapshotted
+              # runtime.
+              echo "_No \`desktop/\` changes ${since}. This release rebuilds the shell and re-snapshots the runtime from the current container image._"
+            fi
+            echo "${delim}"
+          } >> "$GITHUB_OUTPUT"
+
   # ---------------------------------------------------------------------
   # Windows installer. windows-latest is Windows Server 2025 + VS2026 as of
   # the June 2026 image migration. Verified against the live runner-images
@@ -87,6 +250,7 @@ jobs:
   #     dtolnay/rust-toolchain for a reproducible, explicit version instead
   #     of depending on whatever the image happens to preinstall.
   shell-build:
+    needs: version
     runs-on: windows-latest
     timeout-minutes: 45
     permissions:
@@ -94,19 +258,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Read version
-        id: meta
-        shell: bash
-        env:
-          DISPATCH_VERSION: ${{ inputs.version }}
-        run: |
-          v="${DISPATCH_VERSION:-}"
-          [ -n "$v" ] || v=$(node -p "require('./desktop/src-tauri/tauri.conf.json').version")
-          echo "version=$v" >> "$GITHUB_OUTPUT"
-
-      # Only a workflow_dispatch cuts a specific version; a plain push just
-      # validates that desktop/ still builds, using whatever version is
-      # already committed in tauri.conf.json.
+      # Runs on EVERY trigger, because every trigger releases: the version is
+      # computed from the tags, never committed, so the working tree always
+      # arrives here carrying a stale number.
       #
       # All three files move together. tauri.conf.json alone names the bundle,
       # but the binary reports CARGO_PKG_VERSION, and that is what the updater
@@ -115,11 +269,10 @@ jobs:
       # the manifest "newer" and reinstalls, forever. desktop/src-tauri/
       # build.rs asserts the two agree, so a miss here fails the build below
       # rather than shipping.
-      - name: Set app version (dispatch only)
-        if: github.event_name == 'workflow_dispatch'
+      - name: Set app version
         shell: bash
         env:
-          VERSION: ${{ steps.meta.outputs.version }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
           tmp=$(mktemp)
@@ -171,10 +324,9 @@ jobs:
         shell: bash
         env:
           # Fixed regardless of which version is being built (it's the
-          # rolling channel, not a per-version URL), so it is set on every
-          # build, push or dispatch. The Rust shell reads it via
-          # option_env! at compile time; exact consumption is reconciled at
-          # integration.
+          # rolling channel, not a per-version URL). The Rust shell reads it
+          # via option_env! at compile time; exact consumption is reconciled
+          # at integration.
           CODY_DESKTOP_MANIFEST_URL: https://github.com/nphil/Cody/releases/download/desktop-latest/desktop-manifest.json
         run: npx tauri build
 
@@ -197,7 +349,7 @@ jobs:
       - name: Stage installer artifact
         shell: bash
         env:
-          VERSION: ${{ steps.meta.outputs.version }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -216,10 +368,11 @@ jobs:
   # Rootfs snapshot of the ALREADY-published container image, so the
   # desktop app can offer "install the Cody server locally" without the
   # user needing Docker/GHCR access themselves. Image is public
-  # (docs/unraid.md), so no registry login needed to pull it. Dispatch-only:
-  # a plain validate-only push has no release to attach this to.
+  # (docs/unraid.md), so no registry login needed to pull it. Runs on every
+  # trigger now that every trigger publishes -- and it deliberately does not
+  # depend on the `version` job: the artifact is keyed by the CONTAINER's
+  # version, so it can build in parallel with the shell.
   rootfs-build:
-    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -306,10 +459,13 @@ jobs:
     # for an `if:` with no status-check function -- explicit here so a
     # failed shell-build/rootfs-build visibly skips this job instead of
     # relying on a reader already knowing that default.
-    if: success() && github.event_name == 'workflow_dispatch'
-    needs: [shell-build, rootfs-build]
+    if: success()
+    needs: [version, shell-build, rootfs-build]
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Generous: the rootfs is uploaded twice (once per release) at several
+    # hundred megabytes a time, and a timeout here means a build that already
+    # passed never ships.
+    timeout-minutes: 25
     permissions:
       contents: write
     steps:
@@ -327,10 +483,10 @@ jobs:
           name: desktop-rootfs
           path: dist
 
-      - name: Build desktop-manifest.json + release body
-        id: meta
+      - name: Build desktop-manifest.json + release notes
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ needs.version.outputs.version }}
+          CHANGELOG: ${{ needs.version.outputs.changelog }}
           NOTES_INPUT: ${{ inputs.notes }}
           CODY_VERSION: ${{ needs.rootfs-build.outputs.cody_version }}
           IMAGE_DIGEST: ${{ needs.rootfs-build.outputs.image_digest }}
@@ -343,6 +499,14 @@ jobs:
           rootfs_sha=$(cut -d' ' -f1 "dist/${rootfs}.sha256")
           base="https://github.com/${REPO}/releases/download/desktop-latest"
           published_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          # Operator notes (dispatch only) come first, then the generated
+          # changelog -- one text used for both the manifest and the release
+          # body, so the two can never tell different stories.
+          notes_text="$CHANGELOG"
+          if [ -n "$NOTES_INPUT" ]; then
+            notes_text=$(printf '%s\n\n%s' "$NOTES_INPUT" "$CHANGELOG")
+          fi
 
           # Shape is the Rust updater's Manifest struct (desktop/src-tauri/
           # src/update.rs): {shell, runtime} of {version, url, sha256, size},
@@ -364,7 +528,7 @@ jobs:
             --argjson runtimeSize "$rootfs_size" \
             --arg publishedAt "$published_at" \
             --arg imageDigest "$IMAGE_DIGEST" \
-            --arg notes "$NOTES_INPUT" \
+            --arg notes "$notes_text" \
             '{shell: {version:$shellVersion, url:$shellUrl, sha256:$shellSha, size:$shellSize},
               runtime: {version:$runtimeVersion, url:$runtimeUrl, sha256:$runtimeSha, size:$runtimeSize,
                         imageDigest:$imageDigest},
@@ -372,13 +536,17 @@ jobs:
             > dist/desktop-manifest.json
           cat dist/desktop-manifest.json
 
-          # Randomized delimiter: the notes are arbitrary operator input, and
-          # a line reading exactly `DESKTOP_EOF` would otherwise end the
-          # heredoc early and corrupt every later write to $GITHUB_OUTPUT.
-          delim="DESKTOP_EOF_$(openssl rand -hex 8)"
+          # Written to a file, not $GITHUB_OUTPUT: `gh release create` takes
+          # --notes-file, and a file needs no delimiter games with arbitrary
+          # commit subjects. RUNNER_TEMP, not dist/, so it never gets picked
+          # up by the asset globs below.
           {
-            echo "body<<${delim}"
-            printf '%s\n\n' "$NOTES_INPUT"
+            if [ -n "$NOTES_INPUT" ]; then
+              printf '%s\n\n' "$NOTES_INPUT"
+            fi
+            echo '### Changes'
+            echo
+            printf '%s\n\n' "$CHANGELOG"
             echo '## Artifacts'
             echo
             echo '| Asset | SHA-256 |'
@@ -388,26 +556,86 @@ jobs:
             echo '| `desktop-manifest.json` | see file |'
             echo
             echo "Rootfs flattened from \`ghcr.io/nphil/cody:latest\` at \`${IMAGE_DIGEST}\` (Cody ${CODY_VERSION})."
-            echo "${delim}"
-          } >> "$GITHUB_OUTPUT"
+          } > "${RUNNER_TEMP}/release-notes.md"
+          cat "${RUNNER_TEMP}/release-notes.md"
 
-      # Immutable per-version release: desktop's own history/changelog.
-      # prerelease:true is a namespace-isolation device here, not a quality
-      # signal -- see the top-of-file comment. Plain create (not upsert):
-      # desktop-vX.Y.Z never gets republished under the same tag.
+      # Immutable per-version release: desktop's own history/changelog, and an
+      # ordinary visible release. `--latest=false` is the load-bearing flag --
+      # see the top-of-file comment: without it GitHub would hand this release
+      # the repo's /releases/latest slot, which the container train owns. No
+      # --prerelease, deliberately: these are stable builds and burying them
+      # was the old workaround for exactly the problem --latest=false solves.
+      # `gh` rather than an action so the flags are the API's own vocabulary.
       - name: Publish desktop-vX.Y.Z (history)
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: desktop-v${{ inputs.version }}
-          name: Cody Desktop ${{ inputs.version }}
-          prerelease: true
-          body: ${{ steps.meta.outputs.body }}
-          files: |
-            dist/cody-desktop-*-x64-setup.exe
-            dist/cody-desktop-*-x64-setup.exe.sha256
-            dist/rootfs-cody-*.tar.gz
-            dist/rootfs-cody-*.tar.gz.sha256
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "desktop-v${VERSION}" \
+            --title "Cody Desktop ${VERSION}" \
+            --notes-file "${RUNNER_TEMP}/release-notes.md" \
+            --target "${GITHUB_SHA}" \
+            --latest=false \
+            dist/cody-desktop-*-x64-setup.exe \
+            dist/cody-desktop-*-x64-setup.exe.sha256 \
+            dist/rootfs-cody-*.tar.gz \
+            dist/rootfs-cody-*.tar.gz.sha256 \
             dist/desktop-manifest.json
+
+      # Backfill, kept because it is idempotent and costs one API call once it
+      # has converged: desktop releases published before the visibility change
+      # are still prerelease:true and would stay buried forever. Only
+      # `desktop-v*` is touched -- desktop-latest stays a prerelease on
+      # purpose, and container releases never match the prefix. make_latest is
+      # passed explicitly because PATCHing a release without it defaults to
+      # true, which is exactly the slot-grab this whole design prevents.
+      - name: Make older desktop releases visible
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${REPO}/releases?per_page=100" \
+            --jq '.[] | select(.prerelease) | select(.tag_name | startswith("desktop-v")) | .id' \
+          | while read -r id; do
+              [ -n "$id" ] || continue
+              gh api --method PATCH "repos/${REPO}/releases/${id}" \
+                -F prerelease=false -f make_latest=false \
+                --jq '"made visible: " + .tag_name'
+            done
+
+      # The acceptance check for the namespace split, asserted rather than
+      # assumed: this release must be visible, and the repo's single
+      # /releases/latest slot must still answer with a container release --
+      # the ShipLog plugin on Unraid reads it as the server's version. If a
+      # desktop release ever wins that slot, hide it again immediately (the
+      # old prerelease trick, applied surgically) and fail the run.
+      - name: Verify visibility and that the container keeps /releases/latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          pre=$(gh api "repos/${REPO}/releases/tags/desktop-v${VERSION}" --jq '.prerelease')
+          [ "$pre" = "false" ] || {
+            echo "::error::desktop-v${VERSION} published as a prerelease; it will be buried in the Releases list."
+            exit 1
+          }
+
+          # A 404 here means no release owns the slot at all, which is not a
+          # desktop hijack -- only a desktop tag answering it is a failure.
+          latest=$(gh api "repos/${REPO}/releases/latest" --jq '.tag_name' 2>/dev/null || echo "<none>")
+          echo "repo /releases/latest -> ${latest}"
+          case "$latest" in
+            desktop-*)
+              echo "::error::${latest} took the repo's /releases/latest slot, which belongs to the container train. Re-hiding it."
+              gh release edit "$latest" --prerelease
+              exit 1
+              ;;
+          esac
+          echo "desktop-v${VERSION} is visible and the container still owns /releases/latest"
 
       # Rolling pointer: this is the ONLY thing the desktop app's Rust
       # updater ever polls -- by fixed tag + fixed asset name, never
@@ -417,17 +645,17 @@ jobs:
       # move to a new commit on every run.
       #
       # The release itself is NEVER deleted and re-created. Deleting it takes
-      # every asset offline for the several minutes the ~2 GB rootfs upload
-      # runs, so every client polling in that window 404s and every first run
-      # started in it fails outright. Updating in place means the worst a
-      # client sees is the *previous*, entirely coherent set: the old manifest
-      # still names the old assets, and those stay in place until the new
-      # manifest replaces them (the rootfs and installer names carry their
-      # version, so the new uploads never clobber the old ones).
+      # every asset offline for the several minutes the rootfs upload runs, so
+      # every client polling in that window 404s and every first run started in
+      # it fails outright. Updating in place means the worst a client sees is
+      # the *previous*, entirely coherent set: the old manifest still names the
+      # old assets, and those stay in place until the new manifest replaces
+      # them (the rootfs and installer names carry their version, so the new
+      # uploads never clobber the old ones).
       - name: Move desktop-latest (rolling update channel)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
           if ! gh release view desktop-latest > /dev/null 2>&1; then
@@ -442,6 +670,8 @@ jobs:
           # identity, and its assets, while the tag moves under it.
           # actions/checkout leaves its credentials in place, so this pushes
           # with the same GITHUB_TOKEN (the job holds contents: write).
+          # Pushing a TAG cannot re-trigger this workflow -- see the loop
+          # safety note at the top of the file.
           git tag -f desktop-latest "${GITHUB_SHA}"
           git push -f origin refs/tags/desktop-latest
 
