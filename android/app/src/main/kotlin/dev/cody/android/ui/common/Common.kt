@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -40,7 +41,11 @@ val CodyTopBarHeight = 48.dp
 @Composable
 fun CodyTopBar(
     modifier: Modifier = Modifier,
-    content: @Composable () -> Unit,
+    // RowScope, so `Modifier.weight(1f)` inside the bar means "share the bar's
+    // width" rather than resolving against whatever Column happens to enclose the
+    // call site. Source-compatible: a content lambda that ignores the receiver is
+    // unaffected.
+    content: @Composable RowScope.() -> Unit,
 ) {
     Surface(
         modifier = modifier.fillMaxWidth(),
@@ -55,7 +60,7 @@ fun CodyTopBar(
                     .height(CodyTopBarHeight)
                     .padding(horizontal = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                content = { content() },
+                content = content,
             )
             Hairline()
         }

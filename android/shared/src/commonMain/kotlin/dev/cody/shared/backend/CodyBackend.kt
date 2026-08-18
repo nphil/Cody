@@ -2,6 +2,7 @@ package dev.cody.shared.backend
 
 import dev.cody.shared.model.AgentEvent
 import dev.cody.shared.model.ServerCapabilities
+import dev.cody.shared.model.SessionActivity
 import dev.cody.shared.model.SessionListPage
 import dev.cody.shared.model.SessionTranscript
 import kotlinx.coroutines.flow.Flow
@@ -93,8 +94,43 @@ public interface CodyBackend {
 
     public suspend fun loadTranscript(sessionId: String): SessionTranscript
 
+    /**
+     * Creates a session rooted at [cwd] and returns its id.
+     *
+     * With no [firstPrompt] this creates the runtime only, which is what a "new
+     * session" affordance wants: the user gets an empty transcript and types the
+     * first message themselves.
+     *
+     * CAVEAT worth knowing, from `docs/api.md`: some engines only reveal their
+     * real session id once the first turn starts, and the server re-keys the
+     * session (carrying ownership across the rename) when that happens. The id
+     * returned here is therefore the id to USE now, not necessarily the id this
+     * session will have forever. Refreshing the session list after the first turn
+     * is what surfaces the final one.
+     */
+    public suspend fun createSession(cwd: String, firstPrompt: String? = null): String
+
     /** Submits a prompt. Starts the engine for [sessionId] if it is not running. */
     public suspend fun sendPrompt(sessionId: String, text: String)
+
+    /**
+     * Aborts the turn in flight for [sessionId].
+     *
+     * Fire-and-forget by nature: the turn is not over when this returns, it is
+     * over when the stream reports its terminal `agent_end`. A session with
+     * nothing running accepts it and does nothing.
+     */
+    public suspend fun cancelTurn(sessionId: String)
+
+    /**
+     * Whether a live engine exists for [sessionId] and what it is doing.
+     *
+     * Cheap and safe on an already-running session; it does NOT spawn anything —
+     * the route answers `{running:false}` when no engine is alive rather than
+     * starting one. This is the only way to tell a warm-but-idle session from one
+     * mid-turn, which [SessionListPage.runningSessionIds] cannot do.
+     */
+    public suspend fun sessionActivity(sessionId: String): SessionActivity
 
     /**
      * Live frames for one session.
@@ -102,10 +138,10 @@ public interface CodyBackend {
      * CALLER BEWARE, and this is a property of the server rather than of this
      * interface: subscribing to a session whose engine is not already running
      * STARTS it (`app/api/agent/[id]/events/route.ts` calls `startRpcSession`
-     * when no live session exists). Collect this only for a session already
-     * reported in [SessionListPage.runningSessionIds], or straight after
-     * [sendPrompt], which spawns the engine anyway. Opening it merely to look at
-     * an idle session would spin up an engine process per tap.
+     * when no live session exists). Collect this only for a session whose engine
+     * is known to be alive — [sessionActivity] is how you find that out — or
+     * straight after [sendPrompt], which spawns the engine anyway. Opening it
+     * merely to look at an idle session would spin up an engine process per tap.
      */
     public fun events(sessionId: String): Flow<AgentEvent>
 

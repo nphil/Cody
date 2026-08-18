@@ -56,11 +56,27 @@ class CodyViewModel(application: CodyApplication) : ViewModel() {
                     // backend; rebuilding here would throw away a loaded session
                     // list for nothing.
                     _connected.value?.backend === backend -> Unit
-                    else -> _connected.value = ConnectedModels(
-                        backend = backend,
-                        sessions = SessionsModel(backend, viewModelScope, app::signOut),
-                        chat = ChatModel(backend, viewModelScope, app::signOut),
-                    )
+                    else -> {
+                        val sessions = SessionsModel(backend, viewModelScope, app::signOut)
+                        _connected.value = ConnectedModels(
+                            backend = backend,
+                            sessions = sessions,
+                            chat = ChatModel(
+                                backend = backend,
+                                scope = viewModelScope,
+                                onUnauthorized = app::signOut,
+                                // A session the chat screen created is not in the
+                                // list yet. Selecting it keeps the list's highlight
+                                // honest, and the refresh is what surfaces the id
+                                // the server settled on (some engines re-key on the
+                                // first turn — see CodyBackend.createSession).
+                                onSessionCreated = { created ->
+                                    sessions.select(created.id)
+                                    sessions.refresh()
+                                },
+                            ),
+                        )
+                    }
                 }
             }
         }

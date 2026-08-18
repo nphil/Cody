@@ -582,13 +582,33 @@ jobs:
           git tag -f android-latest "${GITHUB_SHA}"
           git push -f origin refs/tags/android-latest
 
-          # The TITLE is the version string Obtainium reads (see THE VERSION
-          # STRING IS THE RELEASE TITLE at the top). It must be the bare version
-          # and nothing else: any decoration ends up displayed as the app's
-          # version number on the tablet.
+          # Converge the release to the shape Obtainium needs, whatever state a
+          # previous run -- or a hand-cut release -- left it in. Every flag here
+          # is set explicitly and unconditionally, because `gh release edit`
+          # changes only what it is passed:
+          #
+          #   --title      The version string Obtainium reads (see THE VERSION
+          #                STRING IS THE RELEASE TITLE at the top). It must be
+          #                the bare version and nothing else -- any decoration
+          #                is displayed as the app's version on the tablet, and
+          #                a CONSTANT title (e.g. "Cody Android (latest)") means
+          #                the version never changes and no update is ever
+          #                offered.
+          #   --prerelease=false
+          #                Load-bearing, and the reason this is not just
+          #                --title: Obtainium's includePrereleases defaults to
+          #                FALSE and skips prereleases outright, so a rolling
+          #                release left marked prerelease is invisible to a
+          #                default client. Omitting the flag would leave an
+          #                already-prerelease release exactly as it was, and the
+          #                verification step below would then fail the run
+          #                rather than repair it.
+          #   --latest=false
+          #                Keeps the container train's /releases/latest slot.
           gh release edit android-latest \
             --title "${VERSION}" \
             --notes-file "${RUNNER_TEMP}/notes.md" \
+            --prerelease=false \
             --latest=false
 
           # ORDER MATTERS, and it is the whole point of this step: every asset

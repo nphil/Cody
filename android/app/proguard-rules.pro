@@ -50,3 +50,39 @@
 -keepclassmembers class kotlinx.coroutines.** {
     volatile <fields>;
 }
+
+# ---- Shizuku ---------------------------------------------------------------
+# Same release-only risk as the block above, and worse here: dev.rikka.shizuku:api
+# ships an EMPTY consumer proguard.txt (verified against api-13.1.5.aar), and the
+# AIDL artifact ships none at all. Only :provider carries rules, and only for its
+# Parcelable. Everything reached across a binder or by name is therefore ours to
+# keep, and a miss does not fail the build -- it ships an APK whose Logs screen
+# reports "Shizuku is not running" on a device where it plainly is.
+#
+# The whole surface is ~35 KB of classes, so keeping it wholesale costs less than
+# reasoning about which half is reflective.
+
+# Named from AndroidManifest.xml, and it throws at attach time if its own
+# attributes do not survive.
+-keep class rikka.shizuku.ShizukuProvider { *; }
+
+# Shizuku.java installs an anonymous IShizukuApplication.Stub and resolves
+# IShizukuService.Stub.asInterface over the binder. Binder dispatch is by
+# transaction code against a DESCRIPTOR string, so a renamed class is not
+# immediately fatal -- but a pruned Stub method is, and the failure surfaces
+# only on a device with Shizuku actually running.
+-keep class rikka.shizuku.** { *; }
+-keep interface rikka.shizuku.** { *; }
+-keep class rikka.sui.** { *; }
+-keep class moe.shizuku.server.** { *; }
+-keep interface moe.shizuku.server.** { *; }
+-keep class moe.shizuku.api.** { *; }
+
+# HiddenApiBypass locates ART's field offsets by reading Helper.NeverCall's
+# members in DECLARATION ORDER and differencing their addresses. Its own
+# consumer rule keeps those members, but the arithmetic assumes the class is
+# untouched, so the library is kept whole rather than trusted to survive
+# whatever R8 decides to do to a 15 KB dependency.
+-keep class org.lsposed.hiddenapibypass.** { *; }
+-dontwarn dalvik.system.VMRuntime
+-dontwarn sun.misc.Unsafe

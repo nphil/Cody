@@ -129,6 +129,26 @@ public data class MentionedFile(
 )
 
 /**
+ * Decodes one transcript entry, degrading an unrecognised or malformed role to
+ * [ChatMessage.Unknown] rather than throwing.
+ *
+ * Shared by the transcript decoder below and by [AgentEvent], because a
+ * `message_end` frame carries exactly the same entry shape as a line of the
+ * session file. One implementation, so the live stream and the file can never
+ * disagree about what a message is.
+ */
+public fun decodeChatMessage(element: JsonElement, json: Json = CodyJson): ChatMessage =
+    try {
+        json.decodeFromJsonElement(ChatMessage.serializer(), element)
+    } catch (_: SerializationException) {
+        ChatMessage.Unknown(role = (element as? JsonObject)?.stringOrNull("role") ?: "unknown")
+    }
+
+/** `this[key]` as a string, or null when absent or not a primitive. */
+internal fun JsonObject.stringOrNull(key: String): String? =
+    (this[key] as? JsonPrimitive)?.content
+
+/**
  * Decodes `context.messages` element by element so a single unrecognised or
  * malformed entry becomes [ChatMessage.Unknown] instead of throwing away the
  * whole transcript. This is the difference between "the app shows one grey
@@ -141,7 +161,7 @@ public object ChatMessagesSerializer : KSerializer<List<ChatMessage>> {
         val input = decoder as? JsonDecoder
             ?: throw SerializationException("Transcript messages can only be read from JSON")
         val array = input.decodeJsonElement() as? JsonArray ?: return emptyList()
-        return array.map { message(it, input.json) }
+        return array.map { decodeChatMessage(it, input.json) }
     }
 
     override fun serialize(encoder: Encoder, value: List<ChatMessage>) {
@@ -150,17 +170,5 @@ public object ChatMessagesSerializer : KSerializer<List<ChatMessage>> {
         output.encodeJsonElement(
             JsonArray(value.map { output.json.encodeToJsonElement(ChatMessage.serializer(), it) }),
         )
-    }
-
-    private fun message(element: JsonElement, json: Json): ChatMessage =
-        try {
-            json.decodeFromJsonElement(ChatMessage.serializer(), element)
-        } catch (_: SerializationException) {
-            ChatMessage.Unknown(role = wireRole(element))
-        }
-
-    private fun wireRole(element: JsonElement): String {
-        val role = (element as? JsonObject)?.get("role") as? JsonPrimitive
-        return role?.content ?: "unknown"
     }
 }

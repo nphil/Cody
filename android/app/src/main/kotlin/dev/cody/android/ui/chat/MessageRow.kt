@@ -24,6 +24,7 @@ import dev.cody.android.ui.theme.ToolCardRadius
 import dev.cody.shared.model.ChatMessage
 import dev.cody.shared.model.ContentBlock
 import dev.cody.shared.model.MessageContent
+import dev.cody.shared.presentation.StreamingTurn
 
 /**
  * One transcript row.
@@ -317,6 +318,85 @@ private fun Chip(label: String, color: Color) {
     }
 }
 
+/**
+ * The live item: the assistant message currently arriving.
+ *
+ * The one row in the list that is invalidated by a token delta, which is why it
+ * draws from pre-flattened strings ([StreamingTurn], built on `Dispatchers.Default`
+ * in `ChatModel`) rather than walking a block list here. No markdown parsing and
+ * no string joining happen in this composable — docs/android-ux.md §6.8.
+ *
+ * The tail marker is a text glyph appended to the same `Text`, not a second
+ * composable beside it: a separate node would have to be measured and positioned
+ * against a paragraph whose last line moves on every frame.
+ */
+@Composable
+fun StreamingRow(turn: StreamingTurn, modifier: Modifier = Modifier) {
+    val cody = LocalCodyColors.current
+    Column(
+        modifier = modifier.fillMaxWidth().padding(vertical = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        RoleLabel(stringResource(R.string.chat_role_assistant))
+
+        if (turn.thinking.isNotBlank()) {
+            Text(
+                text = turn.thinking,
+                style = MaterialTheme.typography.bodySmall,
+                fontStyle = FontStyle.Italic,
+                color = cody.textDim,
+                maxLines = THINKING_MAX_LINES,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+
+        if (turn.text.isNotEmpty()) {
+            Text(
+                text = turn.text + TAIL_MARKER,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+        }
+
+        turn.toolCalls.forEach { call ->
+            ToolCard(
+                title = stringResource(R.string.chat_tool_call, call.toolName),
+                body = call.input.toString(),
+                accent = cody.success,
+            )
+        }
+    }
+}
+
+/**
+ * LazyColumn reuse bucket for a row.
+ *
+ * Rows of different shapes must not reuse each other's nodes: a `UserRow` slot
+ * recycled into a `ToolCard` throws away every measured subtree it had. String
+ * constants rather than `::class`, because a `KClass` lookup allocates and this
+ * runs for every visible item on every relayout.
+ */
+fun ChatMessage.contentTypeKey(): String = when (this) {
+    is ChatMessage.User -> "user"
+    is ChatMessage.Assistant -> "assistant"
+    is ChatMessage.ToolResult -> "toolResult"
+    is ChatMessage.Bash -> "bash"
+    is ChatMessage.Python -> "python"
+    is ChatMessage.Developer -> "developer"
+    is ChatMessage.Custom -> "custom"
+    is ChatMessage.FileMention -> "fileMention"
+    is ChatMessage.Unknown -> "unknown"
+}
+
 private const val OUTPUT_MAX_LINES = 14
 private const val THINKING_MAX_LINES = 8
 private const val META_MAX_LINES = 6
+
+/**
+ * Tail marker on the streaming paragraph.
+ *
+ * A character, not an animated cursor: a blinking node inside a `LazyColumn` item
+ * would re-lay-out that item on every blink, which is exactly the pattern
+ * docs/android-ux.md §6.6 forbids inside the transcript.
+ */
+private const val TAIL_MARKER = "\u2588"

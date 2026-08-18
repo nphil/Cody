@@ -3,6 +3,50 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!--
+      Termux companion integration (docs/android-ux.md §5.1). This is a DANGEROUS
+      custom permission owned by Termux, not by Android: the system grants it from
+      Cody's App info -> Permissions -> Additional permissions, and Termux
+      independently refuses the intent unless the user has also set
+      allow-external-apps=true in ~/.termux/termux.properties. Both are required;
+      neither implies the other.
+    -->
+    <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
+
+    <!--
+      Shizuku-granted device log access (docs/android-ux.md §5.2). READ_LOGS is
+      signature|privileged|development; the DEVELOPMENT flag is the only reason
+      `pm grant` can hand it to a sideloaded app at all. Declaring it here does
+      NOT grant it. The system will not grant it and the app never asks the
+      system for it. It has to be declared anyway, because a permission absent
+      from the manifest cannot be granted by anyone, Shizuku included.
+
+      Nothing about the app depends on holding it: without it the Logs screen
+      explains itself and every other screen is unaffected.
+    -->
+    <uses-permission android:name="android.permission.READ_LOGS" />
+
+    <!--
+      Package visibility. A manifest may contain exactly ONE <queries> element, so
+      every package this app needs to see is listed here rather than in a block
+      per feature. Mandatory from targetSdk 30 onward: without the entry,
+      getPackageInfo("com.termux") throws NameNotFound even when Termux IS
+      installed, startService() on its RunCommandService quietly does nothing, and
+      the failure reads like a Termux bug. It is the single most common way this
+      integration is broken.
+    -->
+    <queries>
+        <package android:name="com.termux" />
+        <!--
+          Shizuku's manager app. Needed to tell "Shizuku is not installed" apart
+          from "Shizuku is installed but not running", which are different
+          problems with different fixes. Only consulted when the binder is
+          absent: a live binder means Shizuku (or Sui, which has no package at
+          all) is already serving us and the package check is irrelevant.
+        -->
+        <package android:name="moe.shizuku.privileged.api" />
+    </queries>
+
     <!-- Tablet-first, but nothing here is phone-hostile; both are supported. -->
     <supports-screens
         android:largeScreens="true"
@@ -28,6 +72,24 @@
           only fail. (SecureCredentialStore handles that case anyway, but not
           shipping the broken state at all is cleaner.)
         -->
+
+        <!--
+          Shizuku delivers its binder by calling into this provider when the app
+          process starts. All three attributes are enforced by the library at
+          attach time and it throws on a mismatch:
+            exported=true      : the Shizuku server runs as shell and must reach it
+            multiprocess=false : the server records the uid once, at app start
+            permission=...     : INTERACT_ACROSS_USERS_FULL is held by shell and
+                                 by no normal app, so the provider is reachable
+                                 by the Shizuku server and by nothing else.
+        -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:multiprocess="false"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
 
         <activity
             android:name=".MainActivity"

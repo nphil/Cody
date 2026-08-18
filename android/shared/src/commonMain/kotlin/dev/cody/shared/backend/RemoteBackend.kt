@@ -5,6 +5,7 @@ import dev.cody.shared.model.AgentEvent
 import dev.cody.shared.model.ApiError
 import dev.cody.shared.model.CodyJson
 import dev.cody.shared.model.ServerInfo
+import dev.cody.shared.model.SessionActivity
 import dev.cody.shared.model.SessionListPage
 import dev.cody.shared.model.SessionTranscript
 import io.ktor.client.HttpClient
@@ -116,6 +117,47 @@ public class RemoteBackend(
         }
     }
 
+    override suspend fun createSession(cwd: String, firstPrompt: String?): String {
+        val prompt = firstPrompt?.takeIf { it.isNotBlank() }
+        val created = call {
+            http.post(endpoint("agent", "new")) {
+                contentType(ContentType.Application.Json)
+                setBody(
+                    NewSessionCommand(
+                        // `ensure_session` builds the runtime and stops there;
+                        // `prompt` builds it and runs the first turn. Both are
+                        // documented on POST /api/agent/new.
+                        type = if (prompt == null) "ensure_session" else "prompt",
+                        cwd = cwd,
+                        message = prompt,
+                    ),
+                )
+            }
+        }.decode<CreatedSession>()
+
+        // A 2xx that names no session is unusable, and every other route takes
+        // this id: fail here rather than let an empty id 404 somewhere later.
+        return created.sessionId.takeIf { it.isNotBlank() }
+            ?: throw BackendException(
+                failure = BackendFailure.Malformed,
+                detail = "POST /api/agent/new returned no sessionId",
+            )
+    }
+
+    override suspend fun cancelTurn(sessionId: String) {
+        call {
+            http.post(endpoint("agent", sessionId)) {
+                contentType(ContentType.Application.Json)
+                // `abort` is the command the web client sends to stop a turn and
+                // is on rpc-manager's forwarding allow-list.
+                setBody(AgentCommand(type = "abort"))
+            }
+        }
+    }
+
+    override suspend fun sessionActivity(sessionId: String): SessionActivity =
+        call { http.get(endpoint("agent", sessionId)) }.decode()
+
     override fun events(sessionId: String): Flow<AgentEvent> = channelFlow {
         try {
             http.sse(
@@ -217,6 +259,30 @@ public class RemoteBackend(
         val type: String,
         val message: String,
     )
+
+    /**
+     * A command with no payload beyond its discriminator (`abort`). Same
+     * no-default rule as [PromptCommand] and for the same reason.
+     */
+    @Serializable
+    private data class AgentCommand(val type: String)
+
+    /**
+     * `POST /api/agent/new`. [cwd] is where the engine runs; [message] is present
+     * only for the `prompt` form and is omitted from the wire when null
+     * (`explicitNulls = false` on [CodyJson]), which is what keeps
+     * `ensure_session` a create-only call.
+     */
+    @Serializable
+    private data class NewSessionCommand(
+        val type: String,
+        val cwd: String,
+        val message: String?,
+    )
+
+    /** The envelope `POST /api/agent/new` answers with. */
+    @Serializable
+    private data class CreatedSession(val sessionId: String = "")
 
     private companion object {
         const val REQUEST_TIMEOUT_MS = 30_000L

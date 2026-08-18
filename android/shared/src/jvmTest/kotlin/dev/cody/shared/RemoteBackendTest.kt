@@ -185,6 +185,94 @@ class RemoteBackendTest {
     }
 
     @Test
+    fun `createSession posts ensure_session with a cwd and no message`() = runTest {
+        val engine = jsonEngine(HttpStatusCode.OK, """{"success":true,"sessionId":"01a0-new","data":null}""")
+        val backend = RemoteBackend(config, engine)
+
+        assertEquals("01a0-new", backend.createSession("/data/home/Cody"))
+
+        val request = engine.requestHistory.single()
+        assertEquals("POST", request.method.value)
+        assertEquals("/api/agent/new", request.url.encodedPath)
+        val body = (request.body as io.ktor.http.content.TextContent).text
+        assertTrue(body.contains(""""type":"ensure_session""""), body)
+        assertTrue(body.contains(""""cwd":"/data/home/Cody""""), body)
+        // `message` must be absent, not null: the create-only form is what makes
+        // "new session" an empty transcript rather than a turn nobody asked for.
+        assertTrue(!body.contains("message"), body)
+
+        backend.close()
+    }
+
+    @Test
+    fun `createSession with a first prompt posts the prompt form instead`() = runTest {
+        val engine = jsonEngine(HttpStatusCode.OK, """{"success":true,"sessionId":"s-9"}""")
+        val backend = RemoteBackend(config, engine)
+
+        backend.createSession("/w", firstPrompt = "start here")
+
+        val body = (engine.requestHistory.single().body as io.ktor.http.content.TextContent).text
+        assertTrue(body.contains(""""type":"prompt""""), body)
+        assertTrue(body.contains(""""message":"start here""""), body)
+
+        backend.close()
+    }
+
+    @Test
+    fun `a create that names no session is Malformed rather than a usable empty id`() = runTest {
+        // Every other route takes this id. An empty one would 404 somewhere far
+        // from the cause.
+        val engine = jsonEngine(HttpStatusCode.OK, """{"success":true,"data":null}""")
+        val backend = RemoteBackend(config, engine)
+
+        val failure = assertFailsWith<BackendException> { backend.createSession("/w") }
+        assertEquals(BackendFailure.Malformed, failure.failure)
+
+        backend.close()
+    }
+
+    @Test
+    fun `cancelTurn posts the abort command to the session's agent route`() = runTest {
+        val engine = jsonEngine(HttpStatusCode.OK, """{"success":true,"data":null}""")
+        val backend = RemoteBackend(config, engine)
+
+        backend.cancelTurn("s-1")
+
+        val request = engine.requestHistory.single()
+        assertEquals("POST", request.method.value)
+        assertEquals("/api/agent/s-1", request.url.encodedPath)
+        // `abort` is the command the web client sends and the one on
+        // rpc-manager's forwarding allow-list; `interrupt` is a different verb.
+        assertEquals("""{"type":"abort"}""", (request.body as io.ktor.http.content.TextContent).text)
+
+        backend.close()
+    }
+
+    @Test
+    fun `a warm engine is not a running turn`() = runTest {
+        // THE distinction. `running` is process liveness and is true of every
+        // session with a warm engine; only isStreaming/isPromptRunning mean a turn
+        // is in flight. Reading the wrong one puts a Stop button on an idle session.
+        val warm = RemoteBackend(config, jsonEngine(HttpStatusCode.OK, """{"running":true,"state":{"isStreaming":false,"isPromptRunning":false}}"""))
+        val warmActivity = warm.sessionActivity("s-1")
+        assertTrue(warmActivity.running)
+        assertTrue(!warmActivity.turnInFlight, "a warm idle engine is not a turn")
+        warm.close()
+
+        val busy = RemoteBackend(config, jsonEngine(HttpStatusCode.OK, """{"running":true,"state":{"isStreaming":true,"isPromptRunning":false}}"""))
+        assertTrue(busy.sessionActivity("s-1").turnInFlight)
+        busy.close()
+
+        // No engine at all: the route answers this rather than starting one, which
+        // is why probing is safe where opening the event stream is not.
+        val dead = RemoteBackend(config, jsonEngine(HttpStatusCode.OK, """{"running":false}"""))
+        val deadActivity = dead.sessionActivity("s-1")
+        assertNull(deadActivity.state)
+        assertTrue(!deadActivity.turnInFlight)
+        dead.close()
+    }
+
+    @Test
     fun `identify falls back to core capabilities when info cannot be read`() = runTest {
         // accounts/me succeeds, info 500s. A server that cannot describe itself is
         // still perfectly able to serve sessions, so the app must clamp rather

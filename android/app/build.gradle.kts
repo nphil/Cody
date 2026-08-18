@@ -112,6 +112,23 @@ composeCompiler {
     // kotlinx.collections.immutable to avoid per-item recomposition.
     // See docs/android-ux.md §6.3.
     stabilityConfigurationFiles.add(layout.projectDirectory.file("compose-stability.conf"))
+
+    // The §6.3 gate, off by default because it makes every Kotlin compilation
+    // write two reports. Turn it on to check that nothing reachable from the
+    // transcript has become unstable:
+    //
+    //   ./gradlew :app:compileDebugKotlin -Pcody.composeReports=true \
+    //     --rerun-tasks -Pkotlin.incremental=false
+    //   grep 'unstable class' app/build/compose-reports/app-classes.txt
+    //   grep -A20 'fun .*ui\.chat\.' app/build/compose-reports/app-composables.txt
+    //
+    // Incremental compilation must be off: the reports only describe the files
+    // that particular invocation compiled, so an incremental run silently
+    // produces a report covering almost nothing.
+    if (providers.gradleProperty("cody.composeReports").orNull.toBoolean()) {
+        reportsDestination = layout.buildDirectory.dir("compose-reports")
+        metricsDestination = layout.buildDirectory.dir("compose-metrics")
+    }
 }
 
 dependencies {
@@ -129,5 +146,13 @@ dependencies {
     implementation(libs.compose.material3)
     implementation(libs.compose.material.icons.core)
     implementation(libs.compose.ui.tooling.preview)
+
+    // Shizuku (docs/android-ux.md §5.2). Optional at runtime in every sense:
+    // the library is inert until something calls it, the provider is a no-op
+    // when no Shizuku server exists to call it, and nothing on the startup path
+    // touches either.
+    implementation(libs.shizuku.api)
+    implementation(libs.shizuku.provider)
+    implementation(libs.hiddenapibypass)
     debugImplementation(libs.compose.ui.tooling)
 }

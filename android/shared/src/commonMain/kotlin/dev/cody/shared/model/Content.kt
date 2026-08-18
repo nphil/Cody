@@ -14,6 +14,7 @@ import kotlinx.serialization.json.JsonClassDiscriminator
 import kotlinx.serialization.json.JsonDecoder
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonEncoder
+import kotlinx.serialization.json.JsonNames
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.encodeToJsonElement
@@ -62,12 +63,26 @@ public sealed interface ContentBlock {
         public val url: String? get() = source?.url
     }
 
+    /**
+     * A tool invocation.
+     *
+     * Two field spellings reach this client and both are load-bearing. The
+     * session file — and therefore `GET /api/sessions/{id}` — carries
+     * `{toolCallId, toolName, input}` because `lib/normalize.ts` rewrites it on
+     * the way out. The LIVE event stream does not go through that rewrite: its
+     * `message_*` frames carry the raw on-disk spelling `{id, name, arguments}`
+     * (see `lib/harness/claude-stream.ts`, and `normalizeToolCalls` being called
+     * again on every streamed frame in `hooks/useAgentSession.ts`). Accepting
+     * both here is what makes one model serve both sources; without it a
+     * streamed tool call decodes with an empty id and no result can ever be
+     * matched to it.
+     */
     @Serializable
     @SerialName("toolCall")
     public data class ToolCall(
-        public val toolCallId: String = "",
-        public val toolName: String = "",
-        public val input: JsonObject = JsonObject(emptyMap()),
+        @JsonNames("id") public val toolCallId: String = "",
+        @JsonNames("name") public val toolName: String = "",
+        @JsonNames("arguments") public val input: JsonObject = JsonObject(emptyMap()),
     ) : ContentBlock
 
     /** A block type this build does not understand. [kind] is the wire `type`. */

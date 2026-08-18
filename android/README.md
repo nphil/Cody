@@ -26,7 +26,10 @@ in the app is faked, mocked, or stubbed to look finished.
 | Session list, with the running ones marked | `GET /api/sessions` |
 | Transcript rendering: user/assistant text, tool calls, tool results, bash and python blocks, images, file mentions | `GET /api/sessions/{id}?deferThinking=1&deferMedia=1` |
 | Sending a prompt | `POST /api/agent/{id}` |
-| Live updates while a turn runs | SSE `GET /api/agent/{id}/events` |
+| Incremental streaming while a turn runs: assistant text grows token by token, tool calls and results land as they happen | SSE `GET /api/agent/{id}/events` |
+| Telling a warm-but-idle engine from a turn actually in flight | `GET /api/agent/{id}` |
+| Stopping a turn in flight | `POST /api/agent/{id}` `{"type":"abort"}` |
+| Creating a session, given a working directory | `POST /api/agent/new` `{"type":"ensure_session"}` |
 | Token persistence across launches | Android Keystore, AES-256-GCM (below) |
 | Sign-out, and automatic sign-out on any `401` | local |
 
@@ -34,16 +37,39 @@ Onboarding never stores anything until the credential has actually answered
 `200` on `GET /api/accounts/me` against that exact address, so the app cannot get
 stuck holding a credential it has never proven.
 
-### Deliberately coarse, and why
+### How streaming actually works, and the one rule that matters
 
-**Live updates refetch, they do not stream incrementally.** An event on the SSE
-stream marks the session live and schedules a debounced (350 ms) refetch of the
-transcript; frames are not applied to messages directly. The server's
-`message_update` frames carry the full accumulated message and must *replace*
-rather than append, and getting that wrong silently duplicates text. Refetching
-is the coarse option that cannot be subtly wrong. In practice the transcript
-updates about a third of a second behind the web UI. The seam for incremental
-rendering is `ChatModel` and nothing above it would change.
+Frames are applied to the transcript in place. There is no debounced refetch: a
+turn costs **two** HTTP requests — the opening transcript snapshot and one
+authoritative reload when the turn ends — no matter how many frames arrive in
+between.
+
+The rule that must never be got wrong: **`message_update` carries the full
+accumulated message, so it replaces and is never appended to.** The server
+coalesces consecutive update frames under backpressure (`docs/api.md`), which is
+only safe because each one restates the whole message. A client that appended
+would duplicate text silently and drop it under load. `TranscriptStreamTest`
+pins both halves of that.
+
+Everything else follows from two decisions:
+
+- **A turn must be known to be running before its frames are applied.** Frames
+  buffered by the transport and flushed after a turn settled belong to a
+  superseded run; applying them resurrects a dead streaming bubble or duplicates
+  a message. The frames carry no run id, so this flag is the only fence there is —
+  the web client fences the same way. The corollary is that joining a session that
+  was *already* running has to seed that flag from the server's own
+  `runningSessionIds`, because the stream replays nothing and no `agent_start`
+  will ever arrive for a turn that began before the attach.
+- **The snapshot and the stream never overlap.** The transcript load is a snapshot
+  of the session file; the stream is a tail from the attach point. Running them
+  together either duplicates a row or drops one, so the stream attaches only once
+  the load has resolved, and the composer refuses to send before then.
+
+The application rules live in one pure function, `ChatState.reduce(AgentEvent)`,
+which is why they are testable without a server, an emulator or a clock.
+
+### Deliberately coarse, and why
 
 **Thinking bodies and tool-result images are requested deferred.** The transcript
 shows that a thinking block exists but not its text, because asking for
@@ -58,10 +84,11 @@ No placeholder screens were shipped for these — they simply do not exist:
 - Settings of any kind (theme picker, server switching beyond sign-out)
 - File browser / workspace tools / diff views
 - Model picker, skills, plugins, MCP panels, engine settings, update checks
-- Creating, forking, renaming or deleting a session (the list is read-only;
-  prompts go to sessions that already exist)
+- Forking, renaming, archiving or deleting a session. Creating one works (a
+  directory and a "+", nothing more); the rest of the lifecycle does not.
 - Checkpoints / restore
-- Cancelling a running turn
+- Steering or queueing a second prompt while a turn runs — the composer offers
+  **Stop**, not send, until the turn ends
 - Attachments, image upload, voice
 - Local (on-device) backend — `BackendKind.Local` is defined in the interface so
   that adding one later is not a rewrite, but there is no implementation
@@ -318,8 +345,8 @@ git tag android-v0.2.0 && git push origin android-v0.2.0
 ./gradlew :shared:jvmTest
 ```
 
-30 tests, no emulator, about ten seconds. They cover the things that fail
-silently rather than loudly:
+No emulator, about ten seconds. They cover the things that fail silently rather
+than loudly:
 
 - **`WireFormatTest`** — the decoding contract against the payload shapes in
   `docs/api.md`. Most importantly the *forward-compatibility* rules: a field a
@@ -328,13 +355,26 @@ silently rather than loudly:
   taking the whole transcript down.
 - **`RemoteBackendTest`** — the transport. Status-to-failure mapping, the bearer
   header, path encoding of session ids, the deferred-content query parameters,
-  and the `401 auth_required` body byte-for-byte as a live server sends it.
+  the create/abort command bodies, and the `401 auth_required` body byte-for-byte
+  as a live server sends it.
+- **`TranscriptStreamTest`** — how a stream becomes a transcript. Every frame in
+  it is a real wire payload fed through `AgentEvent.from`, because the two bugs it
+  exists to prevent are decoding bugs wearing a state-machine costume: a
+  `message_update` treated as a delta (silently duplicated text), and a streamed
+  `toolCall` decoded from the wrong field names — the live stream carries the
+  on-disk spelling `{id, name, arguments}` while the transcript route carries
+  `{toolCallId, toolName, input}`, and getting that wrong gives every tool call an
+  empty id so no result can ever be matched to it. Also: deltas accumulate without
+  duplicating, results attach to the right call, frames from a superseded run are
+  ignored, and the terminal frame settles the turn.
 - **`ChatModelSpawnPolicyTest`** — the spawn policy, and the most consequential
   file here. `GET /api/agent/{id}/events` **cold-spawns an engine process** when
   the session is not already running, so the app may only attach the stream to a
   session the server reported as running, or straight after a prompt (which
   spawns the engine anyway). A regression would not fail anything visibly; it
-  would just quietly fork an engine per tap.
+  would just quietly fork an engine per tap. Also pins that creating a session is
+  not a third attach point, that a whole streamed turn costs one reload rather
+  than one per frame, and that a session joined mid-turn actually renders.
 - **`ServerConfigTest`** — what a typed-on-a-tablet address normalises to.
 
 CI additionally asserts that R8 kept the `kotlinx.serialization` generated

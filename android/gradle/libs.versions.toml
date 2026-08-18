@@ -22,6 +22,14 @@ lifecycle = "2.11.0"
 datastore = "1.2.1"
 core-ktx = "1.19.0"
 
+# Shizuku 13.1.5 is the current release of dev.rikka.shizuku:{api,provider} on
+# Maven Central (maven-metadata.xml <release>, published 2023-09-21) -- the API
+# surface has been stable since 13.0. hiddenapibypass 6.1 is the current release
+# of org.lsposed.hiddenapibypass:hiddenapibypass (2025-02-11); see the comment on
+# the library entries for why it is needed at all.
+shizuku = "13.1.5"
+hiddenapibypass = "6.1"
+
 [libraries]
 # --- :shared (multiplatform; kotlinx + ktor ONLY, no androidx) ----------------
 kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }
@@ -51,6 +59,21 @@ compose-ui-tooling = { module = "androidx.compose.ui:ui-tooling" }
 compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview" }
 compose-material3 = { module = "androidx.compose.material3:material3" }
 compose-material-icons-core = { module = "androidx.compose.material:material-icons-core" }
+
+# --- :app / Shizuku (docs/android-ux.md §5.2) --------------------------------
+# Resolved from mavenCentral, which settings.gradle.kts already declares; the
+# google() repository is content-filtered to com.android/com.google/androidx and
+# is therefore never asked for these coordinates.
+shizuku-api = { module = "dev.rikka.shizuku:api", version.ref = "shizuku" }
+shizuku-provider = { module = "dev.rikka.shizuku:provider", version.ref = "shizuku" }
+
+# Granting READ_LOGS means calling IPackageManager#grantRuntimePermission, and
+# AOSP lists Landroid/content/pm/IPackageManager$Stub$Proxy;->grantRuntimePermission
+# in boot/hiddenapi/hiddenapi-max-target-o.txt -- blocked for anything targeting
+# past API 26, which is every build of this app. This library is the documented
+# way past that (docs/android-ux.md §5.2 names it), and it is used lazily: it is
+# not touched until the user taps Grant.
+hiddenapibypass = { module = "org.lsposed.hiddenapibypass:hiddenapibypass", version.ref = "hiddenapibypass" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
