@@ -1,6 +1,13 @@
 import puppeteer, { type Browser, type CDPSession, type MouseButton, type Page } from "puppeteer-core";
 import type { WebSocket } from "ws";
+// Mutually recursive with this module by design: the two providers are one
+// subsystem — the H.264 one degrades INTO the raster one and reuses its
+// Chromium flags, input table and clamps. Both directions are referenced only
+// inside function bodies, never at module-evaluation time, so the cycle
+// resolves under both jiti/CJS and native ESM.
+import { H264WebProvider, h264Available } from "./h264-provider";
 import { getLatestDisplayRequest } from "./bus";
+import { attachAppLogCapture, type AppLogDetach } from "../logs/capture";
 import type { DisplayClientControl, DisplayProviderDescriptor, DisplayRequestV1, DisplayStreamState } from "./types";
 
 export interface DisplayProvider {
@@ -11,15 +18,15 @@ export interface DisplayProvider {
 }
 
 interface ProviderState {
-  providers: Map<string, RasterWebProvider>;
+  providers: Map<string, DisplayProvider>;
 }
 
 declare global {
   var __codyDisplayProviders: ProviderState | undefined;
 }
 
-const IDLE_DISPOSE_MS = 30_000;
-const MAX_BUFFERED_BYTES = 2 * 1024 * 1024;
+export const IDLE_DISPOSE_MS = 30_000;
+export const MAX_BUFFERED_BYTES = 2 * 1024 * 1024;
 /**
  * Text-friendly encode. 82 was cheap but visibly muddied antialiased glyph
  * edges — the one thing a dev-server preview cannot afford — and 90 is the knee
@@ -27,10 +34,10 @@ const MAX_BUFFERED_BYTES = 2 * 1024 * 1024;
  */
 const JPEG_QUALITY = 90;
 /** Clamp on the client's reported device pixel ratio (CDP `deviceScaleFactor`). */
-const MIN_DEVICE_SCALE = 1;
-const MAX_DEVICE_SCALE = 3;
+export const MIN_DEVICE_SCALE = 1;
+export const MAX_DEVICE_SCALE = 3;
 /** Per-axis ceiling on the captured bitmap, so a large panel at high density cannot ask for an absurd surface. */
-const MAX_FRAME_EDGE = 4_096;
+export const MAX_FRAME_EDGE = 4_096;
 /**
  * How long the first attach waits for a client `resize` before launching
  * Chromium anyway. Capture density is a launch-time property (see `start`), and
@@ -38,13 +45,13 @@ const MAX_FRAME_EDGE = 4_096;
  * choice is a sub-RTT pause here or a soft stream for the whole session. A real
  * client answers in one round trip and never spends the full grace.
  */
-const START_GRACE_MS = 400;
+export const START_GRACE_MS = 400;
 /** Retry cadence for an ack withheld by socket backpressure. */
 const ACK_DRAIN_MS = 16;
 /** Upper bound on a clipboard payload in either direction. */
-const MAX_CLIPBOARD_CHARS = 1024 * 1024;
+export const MAX_CLIPBOARD_CHARS = 1024 * 1024;
 /** `Input.insertText` is a synthetic typing burst, not a paste; keep it bounded. */
-const MAX_INSERT_TEXT_CHARS = 8_192;
+export const MAX_INSERT_TEXT_CHARS = 8_192;
 /**
  * Flags every launch carries, GPU or not. `--no-sandbox` +
  * `--disable-setuid-sandbox`: the container runs as uid 0, where Chromium's
@@ -53,12 +60,12 @@ const MAX_INSERT_TEXT_CHARS = 8_192;
  * branches append `--force-device-scale-factor` after these — see `start()` for
  * why that one is load-bearing.
  */
-const CHROMIUM_BASE_ARGS = ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check"];
+export const CHROMIUM_BASE_ARGS = ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check"];
 /**
  * No GPU: rasterize and composite on the CPU. Portable, correct on every host,
  * and the only honest choice when no render node was passed into the container.
  */
-const CHROMIUM_SOFTWARE_ARGS = ["--disable-gpu"];
+export const CHROMIUM_SOFTWARE_ARGS = ["--disable-gpu"];
 /**
  * GPU rasterization, used only when the boot probe found a DRM render node.
  * Every name here was verified against the Chromium this image ships
@@ -90,7 +97,7 @@ const CHROMIUM_SOFTWARE_ARGS = ["--disable-gpu"];
  * driver. docker/Dockerfile installs libegl1 + libegl-mesa0 for exactly this;
  * without them the GPU process logs `Could not dlopen native EGL: libEGL.so.1`.
  */
-const CHROMIUM_GPU_ARGS = ["--use-gl=angle", "--use-angle=gl-egl", "--enable-gpu-rasterization", "--ignore-gpu-blocklist"];
+export const CHROMIUM_GPU_ARGS = ["--use-gl=angle", "--use-angle=gl-egl", "--enable-gpu-rasterization", "--ignore-gpu-blocklist"];
 /**
  * Substrings that mark a SOFTWARE GL renderer. Needed because Chromium's own
  * feature table cannot be trusted for this question: measured on this image with
@@ -103,7 +110,7 @@ const CHROMIUM_GPU_ARGS = ["--use-gl=angle", "--use-angle=gl-egl", "--enable-gpu
  */
 const SOFTWARE_RENDERERS = ["llvmpipe", "swiftshader", "softpipe", "swrast"];
 
-interface Viewport {
+export interface Viewport {
   width: number;
   height: number;
   deviceScaleFactor: number;
@@ -115,7 +122,7 @@ interface Viewport {
  * `activeElement` first or "copy from the preview" silently returns nothing on
  * exactly the elements people select text in.
  */
-const READ_SELECTION_JS = `(() => {
+export const READ_SELECTION_JS = `(() => {
   try {
     const el = document.activeElement;
     if (el && (el.tagName === "TEXTAREA" || el.tagName === "INPUT")) {
@@ -149,7 +156,7 @@ const VIRTUAL_KEY_BY_CODE: Record<string, number> = {
   BracketRight: 221, Quote: 222,
 };
 
-function virtualKeyCode(key: string, code: string): number {
+export function virtualKeyCode(key: string, code: string): number {
   const named = VIRTUAL_KEY_BY_CODE[code];
   if (named !== undefined) return named;
   // KeyA -> 65, Digit1 -> 49: for letters and digits the trailing character of
@@ -159,11 +166,11 @@ function virtualKeyCode(key: string, code: string): number {
   return key.length === 1 ? key.toUpperCase().charCodeAt(0) : 0;
 }
 
-function providerState(): ProviderState {
+export function providerState(): ProviderState {
   return globalThis.__codyDisplayProviders ??= { providers: new Map() };
 }
 
-function chromiumPath(): string {
+export function chromiumPath(): string {
   const configured = process.env.CODY_CHROMIUM_BIN?.trim();
   if (configured) return configured;
   if (process.platform === "win32") return "chrome.exe";
@@ -177,7 +184,7 @@ function chromiumPath(): string {
  * the system — and so the desktop shells, which never run that entrypoint, stay
  * on the software path by simply leaving the variable unset.
  */
-function gpuRenderNode(): string | null {
+export function gpuRenderNode(): string | null {
   const node = process.env.CODY_GPU_RENDER_NODE?.trim();
   return node ? node : null;
 }
@@ -187,7 +194,7 @@ function gpuRenderNode(): string | null {
  * read. Never throws: an unanswerable probe reads as "not hardware", which sends
  * the caller down the software relaunch — the safe direction.
  */
-async function hardwareRenderer(browser: Browser): Promise<string | null> {
+export async function hardwareRenderer(browser: Browser): Promise<string | null> {
   try {
     const cdp = await browser.target().createCDPSession();
     const info = await cdp.send("SystemInfo.getInfo");
@@ -204,11 +211,11 @@ async function hardwareRenderer(browser: Browser): Promise<string | null> {
   }
 }
 
-function sendJson(socket: WebSocket, value: DisplayStreamState): void {
+export function sendJson(socket: WebSocket, value: DisplayStreamState): void {
   if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(value));
 }
 
-class RasterWebProvider implements DisplayProvider {
+export class RasterWebProvider implements DisplayProvider {
   readonly descriptor = { renderer: "raster", media: ["image/jpeg"], audio: false, interactive: true } as const;
   readonly requestId: string;
   private request: DisplayRequestV1;
@@ -243,6 +250,8 @@ class RasterWebProvider implements DisplayProvider {
   /** Screencast frame awaiting an ack that backpressure is holding back. */
   private pendingAck: number | null = null;
   private ackTimer: NodeJS.Timeout | null = null;
+  /** Teardown for the console/network capture feeding lib/logs/ring. */
+  private detachLogs: AppLogDetach | null = null;
 
   constructor(sessionId: string, request: DisplayRequestV1) {
     this.sessionId = sessionId;
@@ -327,6 +336,11 @@ class RasterWebProvider implements DisplayProvider {
         if (sent === 0 && stalled > 0) { this.pendingAck = frame.sessionId; this.scheduleAckDrain(); return; }
         void this.cdp?.send("Page.screencastFrameAck", { sessionId: frame.sessionId }).catch(() => {});
       });
+      // Attached before navigation so the first load's own errors are caught.
+      // This page's console is the only view the model has of the app it is
+      // building, and the capture is shared with the H.264 rung — one copy of
+      // the protocol handling, in lib/logs/capture.
+      this.detachLogs = await attachAppLogCapture(this.sessionId, this.page);
       await this.page.goto(this.request.source.url, { waitUntil: "domcontentloaded", timeout: 30_000 });
       await this.startScreencast();
       for (const client of this.clients) sendJson(client, { type: "state", state: "ready" });
@@ -555,6 +569,8 @@ class RasterWebProvider implements DisplayProvider {
     this.pendingAck = null;
     for (const client of this.clients) client.close(1001, "Display closed");
     this.clients.clear();
+    this.detachLogs?.();
+    this.detachLogs = null;
     await this.cdp?.send("Page.stopScreencast").catch(() => {});
     await this.browser?.close().catch(() => {});
     this.page = null;
@@ -579,7 +595,13 @@ export function attachDisplaySocket(sessionId: string, socket: WebSocket): void 
   let provider = state.providers.get(sessionId);
   if (!provider || provider.requestId !== request.id) {
     if (provider) void provider.dispose();
-    provider = new RasterWebProvider(sessionId, request);
+    // The H.264 rung is chosen optimistically, before the client has said a
+    // word: the wire demands `hello` first, and `hello` carries the renderer.
+    // Everything the encoder needs that a client can veto — a supported
+    // `avc1.*` decoder, a working Xvfb/ffmpeg pipeline, a first frame — is
+    // checked afterwards, and any of those failing hands the session's sockets
+    // to a fresh RasterWebProvider (see H264WebProvider.degrade).
+    provider = h264Available() ? new H264WebProvider(sessionId, request) : new RasterWebProvider(sessionId, request);
     state.providers.set(sessionId, provider);
   }
   provider.attach(socket);

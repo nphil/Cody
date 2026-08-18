@@ -1203,8 +1203,8 @@ already uses it.** The reasoning is not that NVENC is worse — it is better —
    one-container-many-sessions model.
 2. **No contention with the media server**, which is usually the dGPU tenant and
    whose failures are far more visible to the household than a soft preview.
-3. **Lower blast radius**: `--device /dev/dri/renderD128` is a device node, not a
-   runtime swap; it does not require the Nvidia Driver plugin or `--runtime=nvidia`.
+3. **Lower blast radius**: `--device /dev/dri` is a device node, not a runtime
+   swap; it does not require the Nvidia Driver plugin or `--runtime=nvidia`.
 4. The quality difference is real but small at desktop bitrates, and it is
    dominated by the 19–27× win from moving off JPEG at all (§2.2).
 
@@ -1268,21 +1268,36 @@ design philosophy already rejects.
 
 **For the Intel iGPU (recommended):** on the container template use **Add another
 Path, Port, Variable, Label or Device** → type **Device**, value
-`/dev/dri` (or specifically `/dev/dri/renderD128`). The Docker equivalents
-Jellyfin documents are `--device /dev/dri/renderD128:/dev/dri/renderD128` plus
+`/dev/dri` — the whole directory, not one node. The Docker equivalent Jellyfin
+documents is `--device /dev/dri/renderD128:/dev/dri/renderD128` plus
 `--group-add="<gid>"`, where the gid comes from the host:
 
 ```bash
 getent group render | cut -d: -f3
 ```
 
-The group matters: Jellyfin's listing shows `renderD128` owned by `render` while
-`card*` is owned by `video`, and warns "On some releases, the group may be `video`
-or `input` instead". Miss the group and every VAAPI call fails in a way that reads
-as "no hardware". Verify inside the container with:
+**`renderD128` is not a portable name.** The numbers are assigned in device-probe
+order, so on a box with a discrete card the iGPU can land higher: on this host
+`renderD128` is the NVIDIA P40 and `renderD129` is the Intel UHD 630. Identify
+the node by PCI vendor id rather than by number (`0x8086` Intel, `0x1002` AMD,
+`0x10de` NVIDIA):
 
 ```bash
-vainfo --display drm --device /dev/dri/renderD128
+for d in /sys/class/drm/render*/device; do echo "$d $(cat $d/vendor)"; done
+```
+
+Passing the whole directory sidesteps the question entirely, and Cody's boot
+probe then ranks the nodes it finds and picks an Intel/AMD one over an
+NVIDIA/unknown one (`docker/entrypoint.sh`; it logs every node with its vendor).
+
+The group matters: Jellyfin's listing shows the render node owned by `render`
+while `card*` is owned by `video`, and warns "On some releases, the group may be
+`video` or `input` instead". Miss the group and every VAAPI call fails in a way
+that reads as "no hardware". Verify inside the container against the node the
+vendor check identified:
+
+```bash
+vainfo --display drm --device /dev/dri/renderD129
 ```
 
 **For NVENC (if §8.4 goes the other way):** install Unraid's **Nvidia Driver**
@@ -1461,8 +1476,9 @@ Three worth a sentence more:
   RFB specification… in order to support modern technologies", and its feature
   list now includes "WebCodecs video streaming with H.264, H.265, and AV1
   support" alongside a `video_streaming_mode` with `codec`/`quality`/`gop` and a
-  `gpu.drinode: /dev/dri/renderD128` setting. Independent convergence on
-  WebCodecs + a render node is a good sign for §4.2.
+  `gpu.drinode` setting (their example value is `/dev/dri/renderD128`, which is
+  the usual single-GPU case and not this host's Intel node). Independent
+  convergence on WebCodecs + a render node is a good sign for §4.2.
 - **Sunshine/Moonlight is not vendorable for a browser**, and Moonlight's own FAQ
   explains exactly why: "there is not a pure web-based Moonlight client. The
   GameStream protocol requires us to use raw TCP and UDP sockets which is not

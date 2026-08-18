@@ -142,6 +142,18 @@ behind an authenticating reverse proxy.
   Bun binary alongside Node. Installing omp with npm onto a Node-only image
   looks like it works and then fails at every invocation with
   `env: 'bun': No such file or directory`.
+- PID 1 in the container is **tini**, not Node. Node reaps only the children it
+  spawned itself, so anything the kernel reparents onto it — a browser helper
+  whose parent died, the far side of a kill — would stay a zombie for the life of
+  the container, holding a PID slot that no `pkill` can free. `entrypoint.sh`
+  hands PID 1 to tini and re-execs itself as tini's child; `docker stop` still
+  reaches Node's graceful shutdown, because tini forwards SIGTERM to it. This is
+  done in the script rather than in the image's `ENTRYPOINT` deliberately: if you
+  enable Unraid's built-in **Tailscale** integration for this container, Unraid
+  adds `--entrypoint='/opt/unraid/tailscale'` when it creates it, which discards
+  the image's own `ENTRYPOINT` entirely. The hook then execs `entrypoint.sh`, so
+  the arrangement survives — but an `ENTRYPOINT`-based init would not, and would
+  fail silently.
 
 ## Full-fidelity previews behind HTTPS (optional)
 
@@ -184,20 +196,27 @@ dev server is almost always bound to `127.0.0.1` only.
 
 ## Hardware GPU acceleration (optional)
 
-The streamed preview rung runs a headless Chromium inside the container and
-ships JPEG frames over Cody's WebSocket. By default that is software all the
-way through: the CPU rasterizes the page *and* encodes every frame. Passing a
-GPU in moves rasterization onto the GPU and leaves the CPU to the encode.
+The streamed preview rung runs a Chromium inside the container and ships frames
+over Cody's WebSocket. By default that is software all the way through: the CPU
+rasterizes the page *and* encodes every frame as JPEG. Passing a GPU in moves
+rasterization onto the GPU and, on Intel, unlocks the hardware H.264 encoder,
+which is the larger win of the two — it is what turns a 33 Mbit/s JPEG stream
+into a few hundred kbit/s of video.
 
 Nothing needs installing in the container — the image already carries the Intel
-VAAPI userspace (iHD driver, libva, `vainfo`) and the native EGL entry point
-Chromium's ANGLE backend needs, about 15MB in total.
+VAAPI userspace (iHD driver, libva, `vainfo`, about 15MB), the native EGL entry
+point Chromium's ANGLE backend needs, and the encode/capture toolchain the video
+path uses: `ffmpeg` with `h264_vaapi`, a headless `weston` plus `Xwayland` for
+Chromium to render into with hardware rasterization intact, and `Xvfb` as the
+software fallback display — 190MB in total.
 
 All of this is opt-in. With no GPU passed through the container behaves exactly
 as it always has, and says so once at startup:
 
 ```
 [Cody] GPU: no passthrough devices — previews use software rendering
+[Cody] GPU: X display backends: xvfb (strongest first)
+[Cody] GPU: no hardware H.264 (no DRM render node) — previews stream JPEG
 ```
 
 ### Intel QuickSync / VAAPI — the primary path
@@ -208,9 +227,39 @@ One template field, under **Show more settings**:
 | --- | --- |
 | GPU Device | `/dev/dri` |
 
-Pass the whole `/dev/dri` directory, not a single `renderD128` node — Chromium
-enumerates the directory. Apply, and the container recreates with the device
-attached. Nothing else changes.
+That field is a **Device** entry in the container template — value `/dev/dri`,
+which Unraid turns into `--device=/dev/dri` on the `docker run` line. Pass the
+whole directory, not a single `renderD…` node: Chromium enumerates the
+directory, and the node numbering is host-specific (see below), so a template
+that names one node keeps working right up until a driver update or a new card
+renumbers it. Apply, and the container recreates with the device attached.
+Nothing else changes.
+
+**Which node is the Intel one?** `renderD128` is *not* a reliable answer. The
+numbers are assigned in device-probe order, so on a box with a discrete card the
+iGPU can land on `renderD129` or higher — on the owner's host `renderD128` is an
+NVIDIA Tesla P40 and `renderD129` is the Intel UHD 630. Ask sysfs, from any
+shell on the host or in the container:
+
+```bash
+for d in /sys/class/drm/render*/device; do echo "$d $(cat $d/vendor)"; done
+```
+
+Run inside the container and the answer covers the whole host, because `/sys` is
+the host's — on the owner's box that prints `renderD128 0x10de` and
+`renderD129 0x8086` even though only `renderD129` is passed in. (`card*/device`
+works too and reports the same vendor ids, but the glob also matches connector
+directories like `card1-HDMI-A-1` that have no `vendor` file.)
+
+`0x8086` is Intel, `0x1002` AMD, `0x10de` NVIDIA. Cody does the same lookup at
+startup, prefers an Intel/AMD node over an NVIDIA/unknown one no matter what
+order the kernel listed them in, and logs every node it found with its vendor —
+so you can pass all of `/dev/dri` and let it choose:
+
+```
+[Cody] GPU: DRM render nodes: renderD128 NVIDIA, renderD129 Intel
+[Cody] GPU: Intel render node /dev/dri/renderD129 — previews render with GPU rasterization
+```
 
 ### NVIDIA NVENC — optional
 
@@ -232,17 +281,37 @@ Without `--runtime=nvidia` in Extra Parameters, both variables do nothing at all
 
 ### Verifying it worked
 
-1. **The container log**, on the Docker tab. One line names what was found:
+1. **The container log**, on the Docker tab. Four lines name what was found,
+   which node was chosen, which display backend will host the page, and whether
+   the video path is available (substitute your own node number — see above, it
+   is host-specific):
 
    ```
-   [Cody] GPU: Intel render node /dev/dri/renderD128 — previews render with GPU rasterization
+   [Cody] GPU: DRM render nodes: renderD128 NVIDIA, renderD129 Intel
+   [Cody] GPU: Intel render node /dev/dri/renderD129 — previews render with GPU rasterization
+   [Cody] GPU: X display backends: xwayland,xvfb (strongest first)
+   [Cody] GPU: h264_vaapi encode on /dev/dri/renderD129 — previews stream H.264
    ```
+
+   The backend list is ordered strongest first and is what the streamed preview
+   walks down: `xwayland` is Xwayland on a headless weston, which keeps hardware
+   rasterization; `xvfb` is the software-rasterized fallback; an empty list means
+   the preview renders headless and streams JPEG. A rung that fails to start at
+   session time falls through to the next one, so the worst case is a slower
+   preview, never a broken one.
+
+   When the last line instead reads `no hardware H.264 (…) — previews stream
+   JPEG`, the parenthesis is the reason: `no DRM render node`, `NVIDIA render
+   node, and VAAPI encode needs Intel or AMD`, `no X display backend to
+   capture`, `this ffmpeg has no h264_vaapi encoder`, or `Intel VAAPI driver
+   exposes no H.264 encode entrypoint`. It is a statement of configuration, not
+   a failure — previews keep working on the JPEG path.
 
 2. **VAAPI**, from a Cody terminal. This is the check that proves QuickSync is
    reachable, and it must name the `iHD` driver:
 
    ```bash
-   vainfo --display drm --device /dev/dri/renderD128
+   vainfo --display drm --device /dev/dri/renderD129
    ```
 
    Expect `Driver version: Intel iHD driver ...` followed by a profile list, and
@@ -257,7 +326,32 @@ Without `--runtime=nvidia` in Extra Parameters, both variables do nothing at all
    `+dfsg` repack strips only Xe-HPM/Xe-XPM (Arc, DG1) kernels and a profiling
    tool, so H.264 encode on Gen9.5 is entirely present.
 
-3. **NVIDIA**, if you configured it:
+3. **Hardware H.264**, from a Cody terminal. `vainfo` says the entry point
+   exists; this proves ffmpeg can actually drive it. It writes three seconds of
+   synthetic video and should take well under a second:
+
+   ```bash
+   ffmpeg -f lavfi -i testsrc2=size=1280x800:rate=30 -t 3 \
+     -vaapi_device /dev/dri/renderD129 -vf 'format=nv12,hwupload' \
+     -c:v h264_vaapi -f h264 /tmp/x.h264
+   ```
+
+   The proof of hardware use is in ffmpeg's own log, not in the file appearing:
+
+   ```
+   [h264_vaapi] Using VAAPI profile VAProfileH264High (7).
+   [h264_vaapi] Using VAAPI entrypoint VAEntrypointEncSliceLP (8).
+   [h264_vaapi] RC mode: CQP.
+   frame=   90 fps=0.0 q=-0.0 Lsize=    2766kB time=00:00:03.00 bitrate=7552.4kbits/s speed=13.2x
+   ```
+
+   `speed=13.2x` at 1280x800 is the iGPU; a software fallback cannot reach it.
+   Measured on the owner's UHD 630 the same test runs 2.97x realtime at
+   2560x1600 and 1.27x at 3840x2400, and the driver refuses anything larger than
+   4096x4096 outright (`Hardware does not support encoding at size 5120x3200
+   (constraints: width 32-4096 height 32-4096)`).
+
+4. **NVIDIA**, if you configured it:
 
    ```bash
    nvidia-smi
@@ -266,11 +360,11 @@ Without `--runtime=nvidia` in Extra Parameters, both variables do nothing at all
    `nvidia-smi` is provided by the host driver through the NVIDIA runtime, not by
    this image, so its presence is itself the proof the runtime is wired up.
 
-4. **Open a preview** and look at the log again. When Chromium reaches real
+5. **Open a preview** and look at the log again. When Chromium reaches real
    hardware it prints the GL renderer it got:
 
    ```
-   [Cody] display: GPU rasterization on /dev/dri/renderD128 — ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 ...)
+   [Cody] display: GPU rasterization on /dev/dri/renderD129 — ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 ...)
    ```
 
    If the GPU stack is broken, that line is replaced by a downgrade line and the
@@ -278,7 +372,7 @@ Without `--runtime=nvidia` in Extra Parameters, both variables do nothing at all
    line, never your preview:
 
    ```
-   [Cody] display: GPU launch failed on /dev/dri/renderD128 (...) — falling back to software rendering
+   [Cody] display: GPU launch failed on /dev/dri/renderD129 (...) — falling back to software rendering
    ```
 
    Trust that renderer string rather than Chromium's own `chrome://gpu` table.
@@ -288,19 +382,53 @@ Without `--runtime=nvidia` in Extra Parameters, both variables do nothing at all
    string has to mention `Intel`/`Mesa Intel` (or `NVIDIA`); `llvmpipe`,
    `swrast` or `SwiftShader` all mean software.
 
-### What it buys now, and what it buys later
+### What it buys, measured on this host
 
-**Now:** page rasterization and compositing move off the CPU, so the CPU that is
-already JPEG-encoding every frame has less to do, and the frame-rate ceiling
-rises. That ceiling is real — on this host the software path tops out well under
-30 fps once the captured frame gets large.
+The passthrough is live on the owner's box (`/dev/dri/renderD129`, UHD 630), so
+these are measurements rather than expectations.
 
-**Later:** hardware H.264/AV1 *encode*. This is the bigger prize and it is not
-available yet, because today's rung encodes JPEG through Chromium's CDP
-screencast, which neither QuickSync nor NVENC accelerates. A codec-based
-provider is what turns the GPU into a bandwidth and latency win; passing the
-device through now is what lets that land as a config change rather than a
-redeployment. See `docs/streaming.md`.
+**Rasterization.** Chromium reports
+`ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL ES 3.2)` and
+`rasterization: enabled_force`. A rAF-capped paint loop reached **59.4 fps at
+2560x1600 and 59.4 fps at 2880x1800**, against **41.2 fps and 32.7 fps** for the
+same page with `--disable-gpu` (SwiftShader). So the GPU removes the resolution
+penalty entirely up to retina sizes: the software path degrades as the frame
+grows, the hardware path does not.
+
+**Encode.** With rasterization solved, bandwidth became the binding constraint —
+JPEG at q90 costs 68.9 KB per frame at 2560x1600 (33.5 Mbit/s) and 82.2 KB at
+2880x1800 (40 Mbit/s), every frame, forever, because JPEG has no notion of what
+did not change. `h264_vaapi` on the same chip encodes a live animated page at
+2560x1600/30 for **235–352 kbit/s** (2 s and 1 s keyframe intervals
+respectively), and even a pathological full-frame-motion synthetic source stays
+at 14.3 Mbit/s — under half the JPEG floor. That is roughly **100x less
+bandwidth** for real UI content, at 2.97x realtime encode headroom.
+
+The encoder on this generation has exactly one rate-control mode, CQP
+(`vainfo` shows `VAEntrypointEncSliceLP` only, and the driver rejects CBR/VBR/
+QVBR outright), so quality is set by a fixed QP rather than a target bitrate.
+HEVC is decode-only here and there is no VP9 or AV1 encode at all, which is why
+H.264 is the codec Cody streams.
+
+**Why the video path needs weston.** Chromium has to render into an X display
+for the encoder to capture raw frames, and the choice of X server decides
+whether rasterization stays on the GPU. Measured here with the same page and the
+same rAF paint loop, three ways:
+
+| Display backend | Chromium's `glRenderer` | Paint fps | With capture+encode running |
+| --- | --- | --- | --- |
+| headless (the JPEG path) | `ANGLE (Intel, … UHD Graphics 630 (CFL GT2))` | 44.4 @2559x1456 | — |
+| `Xvfb` | `ANGLE (Mesa/X.org, llvmpipe …)` | 34.7 @2559x1599 | 22.3 |
+| `Xwayland` on headless `weston` | `ANGLE (Intel, … UHD Graphics 630 (CFL GT2))` | 60.2 @2559x1599 | 60.0 |
+
+Xvfb has no DRI3, so Mesa falls back to the llvmpipe CPU rasterizer and the page
+then competes with the capture for CPU. A headless weston renders through the
+DRM render node itself — no DRM master and no `card` node required, which is
+exactly the access `--device=/dev/dri` grants — and Xwayland on top of it hands
+Chromium back DRI3. That rung holds the 60 Hz cap even while the encoder runs,
+which is why it is preferred and Xvfb is only the fallback.
+
+See `docs/streaming.md` for how the provider uses this.
 
 ### NVENC concurrent sessions
 

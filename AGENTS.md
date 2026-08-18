@@ -463,24 +463,79 @@ appears without a Cody change.
   next rung); `stream` needs no probe.
 - **The active rung is visible**: a quiet persistent badge in the subtitle bar
   plus a transient pill naming the method (Direct / Gateway / Streamed) once
-  per resolved request. A silent downgrade to the raster fallback is the whole
-  thing we are preventing — if fidelity drops, the user sees why.
+  per resolved request. On the streamed rung the badge also names the CODEC —
+  `Streamed · H.264` vs `Streamed · JPEG stills` — because those are the same
+  rung and would otherwise look identical. A silent downgrade is the whole thing
+  we are preventing, and it has two flavours now: falling to the streamed rung at
+  all, and falling from video to stills inside it. If fidelity drops, the user
+  sees why. The pop-out window has no subtitle bar, so it carries the same label
+  in `document.title` and flashes a pill on every change.
 - **Streamed-rung client** (`components/StreamedDisplay.tsx`): one implementation
-  of the socket protocol, shared by the panel and the pop-out route. The canvas
-  **backing store is `cssSize × devicePixelRatio`** (capped at 3) with the CSS box
-  untouched, and that same factor rides every `resize` as `deviceScaleFactor` —
-  the provider launches Chromium at that density, so the frame lands 1:1 and
-  nothing resamples at either end. Frames decode off-thread via
-  `createImageBitmap` and present through an `ImageBitmapRenderingContext`
-  (`transferFromImageBitmap`), which also skips a blit; Chromium leaves the
-  canvas's intrinsic size alone, so the backing store stays authoritative. A
-  `new Image()` + `drawImage` path covers engines without `createImageBitmap`,
-  and a binary frame is accepted as a `Blob` or an `ArrayBuffer`.
-  **Trap**: pointer coordinates map into the reported viewport's CSS pixels, NOT
-  the backing store — remote input space is CSS px, so scaling by
-  `canvas.width / rect.width` sends every click at `deviceScaleFactor`× too far.
-  The first `resize` goes out on `socket.onopen`, not on `ready`: the provider
-  reads its launch density from it and waits only briefly.
+  of the socket protocol, shared by the panel and the pop-out route. It presents
+  two ways over one socket, with the same controls and the same geometry: JPEG
+  stills and H.264. The canvas **backing store is `cssSize × devicePixelRatio`**
+  (capped at 3) with the CSS box untouched, and that same factor rides every
+  `resize` as `deviceScaleFactor` — the provider renders at that density, so the
+  frame lands 1:1 and nothing resamples at either end. The first `resize` goes out
+  on `socket.onopen`, not on `ready`: the provider reads its launch density from
+  it and waits only briefly.
+  - **Stills**: frames decode off-thread via `createImageBitmap` and present
+    through an `ImageBitmapRenderingContext` (`transferFromImageBitmap`), which
+    also skips a blit; Chromium leaves the canvas's intrinsic size alone, so the
+    backing store stays authoritative. A `new Image()` + `drawImage` path covers
+    engines without `createImageBitmap`, and a binary frame is accepted as a
+    `Blob` or an `ArrayBuffer`.
+  - **H.264 negotiation**: `hello` is answered with
+    `{type:"capabilities",decoders:[…]}` — RFC 6381 strings this engine actually
+    verified with `VideoDecoder.isConfigSupported`, and `[]` when it has no
+    `VideoDecoder` at all, which keeps the session on stills. The probe walks
+    levels DESCENDING per profile (High, Main, Constrained Baseline) and
+    advertises ONE ceiling string per profile. That is deliberate: a level in a
+    capability string is a ceiling and H.264 levels are nested, so the highest
+    accepted level states the entire answer for that profile, and probing
+    downward can never advertise a level below what the engine decodes — which
+    matters because the encoder derives `level_idc` from frame size (5.0 at
+    2560×1600, 5.1 at 2880×1800). Do not "simplify" it into advertising every
+    string. The codec in the provider's `video` message is opaque input to
+    `configure`: it is parsed from the real SPS and its level need not appear in
+    the advertised list, so never require an exact match against it.
+  - **H.264 frames**: one binary message is exactly one access unit. `key` vs
+    `delta` comes from scanning every Annex-B start code for NAL type 5 — no AUD
+    is emitted, so there is nothing else to key off — and deltas are DISCARDED
+    until the first key, because a decoder handed a delta first throws and the
+    throw kills the decoder, not the frame. Every IDR repeats its SPS/PPS, which
+    is what lets a late joiner and a just-reset decoder recover. A decoder error
+    closes the decoder, reopens it, reports `H.264 — recovering` and sends
+    `{type:"keyframe"}`; four consecutive faults stop and say so rather than
+    cycling keyframe requests forever. A second `hello` is authoritative: tear the
+    decoder down and go back to stills, mid-stream if need be.
+  - **Trap — one context kind per canvas**: `getContext` refuses a second kind
+    forever, and stills hold a `bitmaprenderer` while video needs a 2d context.
+    The negotiated renderer therefore keys the canvas **ELEMENT**, and each
+    context is cached against the element it came from; presenting into the
+    swapped-out canvas paints something nobody is showing.
+  - **Trap — Annex-B means no `description`**: the WebCodecs AVC registration
+    signals Annex-B by the ABSENCE of an `AVCDecoderConfigurationRecord`, so
+    `configure` must be called without one. Filling it in from the `video` message
+    configures the wrong format outright.
+  - **Trap — close every `VideoFrame`**: in a `finally`, superseded frames
+    included. A frame pins a decoder buffer, the pool is a handful deep, and
+    leaking one per frame stalls the stream within a second — the classic
+    WebCodecs bug, and it looks like a network fault.
+  - **Trap — crop the alignment padding**: coded axes are macroblock-aligned, so
+    up to 15 px of the right and bottom edge is padding, not content.
+    `visibleRect` is honored first (for a provider that sets SPS cropping), then
+    an axis is cropped to `round(viewport × deviceScaleFactor)` when it overshoots
+    by less than a macroblock; a bigger difference is a resize the encoder has not
+    caught up with and is presented whole so CSS scales it, exactly as a
+    wrong-sized JPEG behaves. Crop, never letterbox, never stretch. And
+    `codedWidth`/`codedHeight` on a decoded frame are no substitute for either
+    bound — a decoder can report 1026 rows for a 1008-row picture.
+  - **Trap — pointer space is the viewport's CSS pixels**: NOT the backing store
+    and NOT the coded size. Remote input space is CSS px, so scaling by
+    `canvas.width / rect.width` sends every click at `deviceScaleFactor`× too far,
+    and folding in macroblock padding skews it by a few pixels that get blamed on
+    everything else.
 - **Clipboard bridge**: `hello.input` may advertise `"clipboard"`. Only then does
   the panel show copy/paste controls, and only then does the surface intercept
   Ctrl/Cmd+C and Ctrl/Cmd+V rather than forwarding them (every other key,

@@ -5,7 +5,7 @@ import { Camera, Clipboard, ClipboardPaste, ExternalLink, Globe, ListTodo, Loade
 import { useI18n } from "@/lib/i18n";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { toast } from "./ui/toast";
-import { StreamedDisplay, type StreamedDisplayHandle } from "./StreamedDisplay";
+import { codecLabelFor, StreamedDisplay, type StreamRenderMode, type StreamedDisplayHandle } from "./StreamedDisplay";
 import type { DisplayCandidate, DisplayCandidateKind, DisplayRequestV1 } from "@/lib/display/types";
 import { orderDisplayCandidates } from "@/lib/display/ladder";
 // Loopback-only rules + rationale live in lib/preview-url, shared with the
@@ -68,6 +68,10 @@ export function PreviewPanel({ sessionId, active, request, onOpenTasks, onCaptur
   const streamRef = useRef<StreamedDisplayHandle | null>(null);
   const popoutRef = useRef<Window | null>(null);
   const [streamInput, setStreamInput] = useState<{ id: string; input: readonly string[] } | null>(null);
+  // The streamed rung's own answer about what it is presenting. Kept beside
+  // `streamInput` rather than folded into it: one is the provider's input
+  // capabilities, this is the codec actually decoding in this browser.
+  const [streamMode, setStreamMode] = useState<{ id: string; mode: StreamRenderMode } | null>(null);
 
   useEffect(() => { if (request?.source.kind === "web") setInput(request.source.url); }, [request]);
 
@@ -103,6 +107,14 @@ export function PreviewPanel({ sessionId, active, request, onOpenTasks, onCaptur
   // clipboard never advertises it and gets no clipboard UI — the capability is
   // never inferred from the renderer being raster.
   const clipboardReady = streamedRequest !== null && streamInput !== null && streamInput.id === streamedRequest.id && streamInput.input.includes("clipboard");
+  // A streamed session names its CODEC next to its method, in the badge and in
+  // the transient pill: H.264 and JPEG stills are the same "Streamed" rung and
+  // would otherwise look identical, and a silent drop to stills is precisely the
+  // fidelity loss the badge exists to expose.
+  const liveMode = streamedRequest && streamMode?.id === streamedRequest.id ? streamMode.mode : null;
+  const streamedLabel = liveMode
+    ? t("preview.modeStreamedVia", { mode: t(MODE_LABEL_KEY.stream), codec: codecLabelFor(liveMode, t) })
+    : t(MODE_LABEL_KEY.stream);
 
   // Announce the winner once per resolved request id. The deps are the commit
   // itself, so re-renders, panel toggles and reload presses stay quiet, while a
@@ -207,7 +219,7 @@ export function PreviewPanel({ sessionId, active, request, onOpenTasks, onCaptur
       <div className="workspace-subtitle-bar" style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0, borderBottom: "1px solid var(--border)", background: "var(--bg-panel)" }}>
         <Globe size={13} strokeWidth={2} color="var(--text-muted)" aria-hidden="true" style={{ flexShrink: 0 }} />
         <input value={input} onChange={(event) => { setInput(event.target.value); setInputError(""); }} onKeyDown={(event) => { if (event.key === "Enter") void open(); }} placeholder={DEFAULT_URL} aria-label={t("preview.urlLabel")} aria-invalid={!!inputError} spellCheck={false} style={{ flex: 1, minWidth: 0, padding: "2px 7px", fontSize: 11, fontFamily: "var(--font-mono)", border: `1px solid ${inputError ? "var(--status-error)" : "var(--border)"}`, borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }} />
-        {resolved && <span title={frameUrl ?? undefined} style={{ flexShrink: 0, padding: "1px 6px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", color: "var(--text-muted)", fontSize: 10, whiteSpace: "nowrap" }}>{t(MODE_LABEL_KEY[resolved.kind])}</span>}
+        {resolved && <span title={frameUrl ?? undefined} style={{ flexShrink: 0, padding: "1px 6px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", color: "var(--text-muted)", fontSize: 10, whiteSpace: "nowrap" }}>{resolved.kind === "stream" ? streamedLabel : t(MODE_LABEL_KEY[resolved.kind])}</span>}
         {clipboardReady && (
           <>
             <button type="button" className="ui-focus-ring" onClick={() => streamRef.current?.copyFromRemote()} title={t("preview.clipboardCopy")} aria-label={t("preview.clipboardCopy")} style={controlStyle}><Clipboard size={13} strokeWidth={2} aria-hidden="true" /></button>
@@ -238,7 +250,7 @@ export function PreviewPanel({ sessionId, active, request, onOpenTasks, onCaptur
         ) : frameUrl ? (
           <iframe key={frameKey} src={frameUrl} title={request?.title ?? t("preview.frameTitle")} referrerPolicy="no-referrer" allow="clipboard-read; clipboard-write" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", border: "none", background: "#fff" }} />
         ) : streamedRequest && sessionId ? (
-          <StreamedDisplay key={streamedRequest.id} ref={streamRef} sessionId={sessionId} request={streamedRequest} active={active} reloadToken={reloadToken} onCapabilities={(requestId, input) => setStreamInput({ id: requestId, input })} />
+          <StreamedDisplay key={streamedRequest.id} ref={streamRef} sessionId={sessionId} request={streamedRequest} active={active} reloadToken={reloadToken} onCapabilities={(requestId, input) => setStreamInput({ id: requestId, input })} onRenderMode={(requestId, mode) => setStreamMode({ id: requestId, mode })} />
         ) : (
           <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, padding: 20, textAlign: "center", color: "var(--text-dim)", fontSize: 12 }}>
             <span>{t("preview.emptyHint")}</span>
@@ -249,7 +261,7 @@ export function PreviewPanel({ sessionId, active, request, onOpenTasks, onCaptur
             off so it can never swallow a click meant for the app or canvas. */}
         {liveNotice && (
           <div role="status" style={{ position: "absolute", top: 8, left: 0, right: 0, width: "fit-content", maxWidth: "calc(100% - 20px)", margin: "0 auto", zIndex: 1, pointerEvents: "none", padding: "3px 9px", border: "1px solid var(--border)", borderRadius: 999, background: "color-mix(in srgb, var(--bg-panel) 92%, transparent)", boxShadow: "var(--shadow-card)", color: "var(--text-muted)", fontSize: 11, whiteSpace: "nowrap", animation: reducedMotion ? undefined : `preview-mode-notice ${MODE_NOTICE_MS}ms var(--ease-out-warm) forwards` }}>
-            {t(liveNotice.kind === "stream" ? "preview.noticeFallback" : "preview.noticeFullFidelity", { mode: t(MODE_LABEL_KEY[liveNotice.kind]) })}
+            {t(liveNotice.kind === "stream" ? "preview.noticeFallback" : "preview.noticeFullFidelity", { mode: liveNotice.kind === "stream" ? streamedLabel : t(MODE_LABEL_KEY[liveNotice.kind]) })}
           </div>
         )}
       </div>
