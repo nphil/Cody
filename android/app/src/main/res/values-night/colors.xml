@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Cody's dark bg token (Catppuccin Mocha); keep in step with CodyDarkPalette.bg -->
+    <color name="window_background">#1E1E2E</color>
+</resources>

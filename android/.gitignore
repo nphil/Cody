@@ -1,0 +1,18 @@
+# Gradle build outputs. Scoped to this directory rather than added to the repo
+# root .gitignore: the Android client is a separate Gradle build (see
+# settings.gradle.kts) and its ignore rules should travel with it. The root file
+# ignores `/build`, which is anchored and does not reach android/app/build.
+build/
+.gradle/
+.kotlin/
+
+# Machine-specific SDK location. The build reads ANDROID_HOME/ANDROID_SDK_ROOT
+# from the environment instead, which is what CI and the container toolchain do;
+# a committed local.properties would override it and break both.
+local.properties
+
+# Signing material. Nothing here is ever committed -- the release key reaches CI
+# as the ANDROID_KEYSTORE_BASE64 secret and lands in RUNNER_TEMP. See README.md.
+*.jks
+*.keystore
+keystore.properties

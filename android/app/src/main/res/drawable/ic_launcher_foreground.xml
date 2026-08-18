@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  A shell prompt: chevron plus cursor. Drawn as strokes inside the adaptive-icon
+  safe zone (the central 72x72 of the 108x108 viewport), so no launcher mask can
+  clip it. A vector drawable, which is the Android platform's own icon format;
+  the repo's "no inline SVG" rule is about React components, and there is no
+  lucide equivalent of a launcher icon.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M40,40 L54,54 L40,68"
+        android:strokeColor="#FFFFFF"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="7" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M62,68 L76,68"
+        android:strokeColor="#FFFFFF"
+        android:strokeLineCap="round"
+        android:strokeWidth="7" />
+</vector>

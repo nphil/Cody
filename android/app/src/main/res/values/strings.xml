@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Cody ships en / ja / zh-CN UIs, so the Android client does too: values-ja and
+  values-zh-rCN carry real translations of every string below, not placeholders.
+  Adding a string here without adding it to both is a regression.
+-->
+<resources>
+    <string name="app_name">Cody</string>
+
+    <!-- Onboarding -->
+    <string name="onboarding_title">Connect to Cody</string>
+    <string name="onboarding_subtitle">Point this tablet at your Cody server. The address and credential are checked before anything is saved.</string>
+    <string name="onboarding_address_label">Server address</string>
+    <string name="onboarding_address_hint">cody.your-tailnet.ts.net:30177</string>
+    <string name="onboarding_address_help">A bare host works; http:// is assumed unless you type https://.</string>
+    <string name="onboarding_mode_sign_in">Sign in</string>
+    <string name="onboarding_mode_paste_token">Paste a token</string>
+    <string name="onboarding_username">Username</string>
+    <string name="onboarding_password">Password</string>
+    <string name="onboarding_sign_in_help">Your password is used once to create a token for this device, then discarded.</string>
+    <string name="onboarding_token">Personal access token</string>
+    <string name="onboarding_token_help">Create one in Cody\'s account settings, then paste it here.</string>
+    <string name="onboarding_connect">Connect</string>
+    <string name="onboarding_checking">Checking…</string>
+    <string name="onboarding_show_password">Show password</string>
+    <string name="onboarding_hide_password">Hide password</string>
+
+    <!-- Failures -->
+    <string name="error_address_unusable">That is not a server address. Try a host name, or host:port.</string>
+    <string name="error_token_missing">Enter the token to continue.</string>
+    <string name="error_credentials_missing">Enter your username and password.</string>
+    <string name="error_token_rejected">The server rejected that token. Check that you pasted all of it, and that it has not been revoked.</string>
+    <string name="error_sign_in_rejected">Wrong username or password.</string>
+    <string name="error_bearer_forbidden">This device\'s token cannot create another token. Sign in with your password instead, or paste a token made in Cody\'s settings.</string>
+    <string name="error_token_limit">This account already has the maximum number of tokens. Revoke one in Cody\'s account settings and try again.</string>
+    <string name="error_forbidden">The server refused that request.</string>
+    <string name="error_unreachable">Cannot reach that address. Check the host, the port, and that you are on the same network or tailnet.</string>
+    <string name="error_not_found">Not found on that server. It may be a different Cody, or an older one.</string>
+    <string name="error_rate_limited">Too many attempts. Wait a moment and try again.</string>
+    <string name="error_server">The server returned an error.</string>
+    <string name="error_malformed">The server\'s answer could not be read. It may be a newer or older Cody than this app expects.</string>
+    <string name="error_signed_out">Your token is no longer valid. Connect again.</string>
+
+    <!-- Shell -->
+    <string name="action_retry">Retry</string>
+    <string name="action_refresh">Refresh</string>
+    <string name="action_dismiss">Dismiss</string>
+    <string name="action_back">Back</string>
+    <string name="action_sign_out">Sign out</string>
+    <string name="badge_remote">Remote</string>
+    <string name="badge_local">On device</string>
+    <string name="status_connecting">Connecting…</string>
+    <string name="status_server_unreachable">Server unreachable</string>
+
+    <!-- Session list -->
+    <string name="sessions_title">Sessions</string>
+    <string name="sessions_empty">No sessions yet. Start one in Cody and it will appear here.</string>
+    <string name="sessions_loading">Loading sessions…</string>
+    <string name="sessions_running">Running</string>
+    <string name="sessions_message_count">%1$d messages</string>
+    <string name="sessions_message_count_one">1 message</string>
+    <string name="sessions_worktree">on %1$s</string>
+
+    <!-- Chat -->
+    <string name="chat_pick_session">Pick a session to read it here.</string>
+    <string name="chat_empty">This session has no messages yet.</string>
+    <string name="chat_loading">Loading transcript…</string>
+    <string name="chat_composer_hint">Message Cody</string>
+    <string name="chat_send">Send</string>
+    <string name="chat_sending">Sending…</string>
+    <string name="chat_live">Live</string>
+    <string name="chat_role_user">You</string>
+    <string name="chat_role_assistant">Cody</string>
+    <string name="chat_role_developer">System</string>
+    <string name="chat_thinking">Thinking</string>
+    <string name="chat_thinking_deferred">Thinking (not loaded)</string>
+    <string name="chat_tool_call">Tool: %1$s</string>
+    <string name="chat_tool_result">Result: %1$s</string>
+    <string name="chat_tool_result_untitled">Tool result</string>
+    <string name="chat_tool_failed">failed</string>
+    <string name="chat_turn_failed">This turn failed: %1$s</string>
+    <string name="chat_image">Image attachment</string>
+    <string name="chat_shell">Shell</string>
+    <string name="chat_python">Python</string>
+    <string name="chat_exit_code">exit %1$d</string>
+    <string name="chat_cancelled">cancelled</string>
+    <string name="chat_truncated">output truncated</string>
+    <string name="chat_files_read">Read %1$d files</string>
+    <string name="chat_unsupported_message">This build cannot display a “%1$s” message.</string>
+    <string name="chat_unsupported_block">Unsupported content (%1$s)</string>
+</resources>

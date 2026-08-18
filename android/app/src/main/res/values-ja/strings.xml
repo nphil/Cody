@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- app_name is a product name and stays untranslated. -->
+
+    <!-- Onboarding -->
+    <string name="onboarding_title">Cody に接続</string>
+    <string name="onboarding_subtitle">このタブレットを Cody サーバーに接続します。アドレスと認証情報は保存する前に確認されます。</string>
+    <string name="onboarding_address_label">サーバーアドレス</string>
+    <string name="onboarding_address_hint">cody.your-tailnet.ts.net:30177</string>
+    <string name="onboarding_address_help">ホスト名だけでも入力できます。https:// を明示しない場合は http:// として扱われます。</string>
+    <string name="onboarding_mode_sign_in">サインイン</string>
+    <string name="onboarding_mode_paste_token">トークンを貼り付け</string>
+    <string name="onboarding_username">ユーザー名</string>
+    <string name="onboarding_password">パスワード</string>
+    <string name="onboarding_sign_in_help">パスワードはこの端末用のトークンを作成するために一度だけ使われ、その後は保存されません。</string>
+    <string name="onboarding_token">パーソナルアクセストークン</string>
+    <string name="onboarding_token_help">Cody のアカウント設定で作成し、ここに貼り付けてください。</string>
+    <string name="onboarding_connect">接続</string>
+    <string name="onboarding_checking">確認中…</string>
+    <string name="onboarding_show_password">パスワードを表示</string>
+    <string name="onboarding_hide_password">パスワードを非表示</string>
+
+    <!-- Failures -->
+    <string name="error_address_unusable">サーバーアドレスとして認識できません。ホスト名、または ホスト:ポート の形式で入力してください。</string>
+    <string name="error_token_missing">続けるにはトークンを入力してください。</string>
+    <string name="error_credentials_missing">ユーザー名とパスワードを入力してください。</string>
+    <string name="error_token_rejected">サーバーがこのトークンを拒否しました。全体を正しく貼り付けたか、失効していないかを確認してください。</string>
+    <string name="error_sign_in_rejected">ユーザー名またはパスワードが違います。</string>
+    <string name="error_bearer_forbidden">この端末のトークンでは新しいトークンを作成できません。パスワードでサインインするか、Cody の設定で作成したトークンを貼り付けてください。</string>
+    <string name="error_token_limit">このアカウントのトークン数が上限に達しています。Cody のアカウント設定で不要なものを失効させてから、もう一度お試しください。</string>
+    <string name="error_forbidden">サーバーがこのリクエストを拒否しました。</string>
+    <string name="error_unreachable">このアドレスに接続できません。ホスト名とポート、そして同じネットワークまたは tailnet 上にいるかを確認してください。</string>
+    <string name="error_not_found">このサーバーには存在しません。別の Cody か、古いバージョンの可能性があります。</string>
+    <string name="error_rate_limited">試行回数が多すぎます。しばらく待ってからお試しください。</string>
+    <string name="error_server">サーバーがエラーを返しました。</string>
+    <string name="error_malformed">サーバーの応答を読み取れませんでした。このアプリが想定しているより新しい、または古い Cody の可能性があります。</string>
+    <string name="error_signed_out">トークンが無効になりました。もう一度接続してください。</string>
+
+    <!-- Shell -->
+    <string name="action_retry">再試行</string>
+    <string name="action_refresh">更新</string>
+    <string name="action_dismiss">閉じる</string>
+    <string name="action_back">戻る</string>
+    <string name="action_sign_out">サインアウト</string>
+    <string name="badge_remote">リモート</string>
+    <string name="badge_local">端末内</string>
+    <string name="status_connecting">接続中…</string>
+    <string name="status_server_unreachable">サーバーに接続できません</string>
+
+    <!-- Session list -->
+    <string name="sessions_title">セッション</string>
+    <string name="sessions_empty">セッションがまだありません。Cody で開始すると、ここに表示されます。</string>
+    <string name="sessions_loading">セッションを読み込み中…</string>
+    <string name="sessions_running">実行中</string>
+    <string name="sessions_message_count">%1$d 件のメッセージ</string>
+    <string name="sessions_message_count_one">1 件のメッセージ</string>
+    <string name="sessions_worktree">%1$s 上</string>
+
+    <!-- Chat -->
+    <string name="chat_pick_session">セッションを選ぶと、ここに表示されます。</string>
+    <string name="chat_empty">このセッションにはまだメッセージがありません。</string>
+    <string name="chat_loading">履歴を読み込み中…</string>
+    <string name="chat_composer_hint">Cody にメッセージを送る</string>
+    <string name="chat_send">送信</string>
+    <string name="chat_sending">送信中…</string>
+    <string name="chat_live">ライブ</string>
+    <string name="chat_role_user">あなた</string>
+    <string name="chat_role_assistant">Cody</string>
+    <string name="chat_role_developer">システム</string>
+    <string name="chat_thinking">思考中</string>
+    <string name="chat_thinking_deferred">思考（未読み込み）</string>
+    <string name="chat_tool_call">ツール: %1$s</string>
+    <string name="chat_tool_result">結果: %1$s</string>
+    <string name="chat_tool_result_untitled">ツールの結果</string>
+    <string name="chat_tool_failed">失敗</string>
+    <string name="chat_turn_failed">このターンは失敗しました: %1$s</string>
+    <string name="chat_image">画像の添付</string>
+    <string name="chat_shell">シェル</string>
+    <string name="chat_python">Python</string>
+    <string name="chat_exit_code">終了コード %1$d</string>
+    <string name="chat_cancelled">中止</string>
+    <string name="chat_truncated">出力は省略されています</string>
+    <string name="chat_files_read">%1$d 件のファイルを読み込みました</string>
+    <string name="chat_unsupported_message">このビルドでは「%1$s」メッセージを表示できません。</string>
+    <string name="chat_unsupported_block">未対応のコンテンツ (%1$s)</string>
+</resources>

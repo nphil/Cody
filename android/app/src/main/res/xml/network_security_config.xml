@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Cleartext HTTP is permitted, and this is a considered decision rather than a
+  default left on.
+  
+  The server address is typed in by the user at runtime, so there is no domain to
+  put on an allow-list: a per-domain exception cannot express "whatever host the
+  owner runs Cody on". And the realistic deployment is plain HTTP over a
+  Tailscale tailnet or a LAN, where the transport is already authenticated and
+  encrypted by WireGuard rather than by TLS. Forbidding cleartext would break the
+  normal case to protect against one the network layer already covers.
+  
+  `user` trust anchors are included so a homelab certificate the owner installed
+  on the device is honoured for https:// addresses.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The launch theme only. Everything the user actually sees is Compose; this
+  exists so the window between process start and first frame is already Cody's
+  page colour instead of a white flash.
+-->
+<resources>
+    <style name="Theme.Cody" parent="android:Theme.DeviceDefault.DayNight">
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowBackground">@color/window_background</item>
+        <!-- Edge-to-edge: the bars are transparent and Compose insets the content. -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+</resources>

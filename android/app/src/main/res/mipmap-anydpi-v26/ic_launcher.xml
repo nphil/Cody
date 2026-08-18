@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  No bitmap fallback is needed: minSdk is 29, so the -v26 qualifier always
+  matches and the adaptive icon is the only icon any supported device will ask
+  for. The monochrome layer reuses the foreground so Android 13+ themed icons
+  work without a second asset.
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+    <monochrome android:drawable="@drawable/ic_launcher_foreground" />
+</adaptive-icon>
