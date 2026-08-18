@@ -414,7 +414,7 @@ HTTP/1.1 200 OK
 content-type: text/event-stream
 cache-control: no-cache
 
-data: {"type":"connected","sessionId":"01a01320-5f8a-7000-b61a-6c288d285aa7"}
+data: {"type":"connected","sessionId":"01a01320-5f8a-7000-b61a-6c288d285aa7","running":false}
 
 ```
 
@@ -426,10 +426,15 @@ Wire format, all **Stable**:
 - A comment line `:\n\n` arrives every 30 seconds as a heartbeat. Ignore it —
   but do use it as your liveness signal, and do not set a read timeout below
   ~60 seconds.
-- The **first** frame is always `{"type":"connected","sessionId":"<id>"}`, sent
-  before the engine is spawned. It means "the stream is open", not "the agent is
-  ready": a cold start takes seconds, and commands sent immediately afterwards
-  queue behind the same startup lock rather than failing.
+- The **first** frame is always
+  `{"type":"connected","sessionId":"<id>","running":<bool>}`, sent before the
+  engine is spawned. It means "the stream is open", not "the agent is ready":
+  a cold start takes seconds, and commands sent immediately afterwards queue
+  behind the same startup lock rather than failing. `running` is the engine's
+  actual turn state at connect time — a freshly resumed session is always
+  `false`, so a client that believed a turn was in flight must treat it as
+  lost rather than keep waiting (additive field: absent means unknown, infer
+  nothing).
 - `{"type":"notice","level":"error"|"warn"|"info","message":"…"}` reports
   failures that are not tied to a message, including a failed engine spawn.
 - Opening this stream **starts the session** if it is not already running. It is

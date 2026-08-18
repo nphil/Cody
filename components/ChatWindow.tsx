@@ -1,7 +1,7 @@
 "use client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, TriangleAlert, X } from "lucide-react";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, ImageContent, SessionInfo, SessionTreeNode, TextContent, ToolCallContent, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
 import { countToolCallBlocks, getDisplayableAssistantBlocks, splitFinalAssistantBlocks } from "@/lib/message-display";
@@ -14,7 +14,7 @@ import { SubagentTranscriptDialog } from "./SubagentTranscriptDialog";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ComposerPanels } from "./ComposerPanels";
 import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-layout";
-import { useAgentSession, type AgentPhase, type NoticeItem, type SubagentInfo } from "@/hooks/useAgentSession";
+import { useAgentSession, type AgentPhase, type NoticeItem, type StreamAlert, type SubagentInfo } from "@/hooks/useAgentSession";
 import { useAudio } from "@/hooks/useAudio";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -625,7 +625,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     slashCommands, slashCommandsLoading, queuedMessages,
     notices, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     isAutoModelSelection,
-    agentPhase, activeGoal, activePlan,
+    agentPhase, streamDegraded, streamAlert, dismissStreamAlert, retryEventStream, activeGoal, activePlan,
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases,
     isNew,
     sessionIdRef, messagesEndRef, scrollContainerRef,
@@ -1155,6 +1155,16 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
               </div>
             ))}
 
+            {/* A stream that broke under a running turn, said out loud: the
+                spinner alone cannot distinguish "thinking" from "wedged". */}
+            {streamAlert && (
+              <StreamAlertBanner
+                alert={streamAlert}
+                onRetry={retryEventStream}
+                onDismiss={dismissStreamAlert}
+              />
+            )}
+
             {agentRunning && !streamState.streamingMessage && pendingToolHeaders.length === 0 && (
               <div role="status" aria-live="polite" className="py-2 text-[13px] text-text-muted flex items-center gap-2">
                 <span
@@ -1163,7 +1173,14 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
                 />
                 <span>
                   {[
-                    phaseLabel(agentPhase),
+                    // A degraded stream must never read as a healthy wait, and
+                    // once the retries are exhausted it must not claim to be
+                    // reconnecting either — the banner beside it says it is not.
+                    streamAlert?.kind === "stream_lost"
+                      ? t("agentStream.disconnected")
+                      : streamDegraded
+                        ? t("agentStream.reconnecting")
+                        : phaseLabel(agentPhase),
                     activeSubagentCount > 0 ? tn("chatWindow.subagentCount", activeSubagentCount) : null,
                     currentTodoPhase
                       ? t("chatWindow.todoPhaseStatus", {
@@ -1288,6 +1305,89 @@ function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: st
           </pre>
         </div>
       ))}
+    </div>
+  );
+}
+
+/**
+ * Persistent, dismissible banner for a broken chat stream — deliberately not a
+ * NoticeShelf toast, which fades after five seconds. Both cases leave the user
+ * with something to do: re-send the lost prompt, or retry the connection.
+ */
+function StreamAlertBanner({
+  alert,
+  onRetry,
+  onDismiss,
+}: {
+  alert: NonNullable<StreamAlert>;
+  onRetry: () => void;
+  onDismiss: () => void;
+}) {
+  const { t } = useI18n();
+  const color = alert.kind === "stream_lost" ? "var(--status-error)" : "var(--status-warning)";
+  return (
+    <div
+      role="alert"
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        margin: "8px 0",
+        padding: "8px 10px",
+        borderRadius: "var(--radius-control)",
+        border: `1px solid color-mix(in srgb, ${color} 35%, transparent)`,
+        background: `color-mix(in srgb, ${color} 6%, transparent)`,
+        color: "var(--text)",
+        fontSize: 12,
+        lineHeight: 1.4,
+      }}
+    >
+      <span aria-hidden style={{ color, flexShrink: 0 }}>
+        <TriangleAlert size={14} />
+      </span>
+      <span style={{ flex: 1, minWidth: 0 }}>
+        {alert.kind === "stream_lost" ? t("agentStream.streamLost") : t("agentStream.turnLost")}
+      </span>
+      {alert.kind === "stream_lost" && (
+        <button
+          type="button"
+          onClick={onRetry}
+          className="ui-smooth ui-focus-ring"
+          style={{
+            flexShrink: 0,
+            cursor: "pointer",
+            padding: "3px 8px",
+            borderRadius: "var(--radius-control)",
+            border: "1px solid var(--border)",
+            background: "var(--bg-panel)",
+            color: "var(--text)",
+            fontSize: 11,
+          }}
+        >
+          {t("agentStream.retry")}
+        </button>
+      )}
+      <button
+        type="button"
+        onClick={onDismiss}
+        aria-label={t("agentStream.dismiss")}
+        title={t("agentStream.dismiss")}
+        className="ui-smooth ui-focus-ring"
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flexShrink: 0,
+          cursor: "pointer",
+          padding: 3,
+          borderRadius: "var(--radius-control)",
+          border: "none",
+          background: "transparent",
+          color: "var(--text-muted)",
+        }}
+      >
+        <X size={13} />
+      </button>
     </div>
   );
 }

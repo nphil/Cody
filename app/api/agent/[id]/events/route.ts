@@ -129,7 +129,15 @@ export async function GET(
       // (extensions, LSP) and the client gives up waiting for `connected` long
       // before that. Commands sent right after this frame still block on the
       // same startRpcSession lock, so nothing runs against a missing process.
-      encode({ type: "connected", sessionId: id });
+      //
+      // `running` is the engine's ACTUAL run state, and it is what lets a
+      // reconnecting client tell "my turn is still going" from "the engine died
+      // and took my turn with it". An already-alive session answers for itself
+      // (a turn in flight, a shell command, a compaction); anything we are about
+      // to resume below is idle by definition — the spawn is a brand-new child
+      // that inherited no turn, and no agent_end will ever arrive for the one
+      // that died. A client waiting on that turn must stop waiting.
+      encode({ type: "connected", sessionId: id, running: alive ? alive.isRunning() : false });
 
       void (async () => {
         let session = alive;

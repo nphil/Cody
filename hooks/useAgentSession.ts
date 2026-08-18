@@ -18,6 +18,12 @@ import { sendAgentCommand } from "@/lib/agent-client";
 import { translate } from "@/lib/i18n";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { createMessageUpdateCoalescer, type MessageUpdateCoalescer } from "@/lib/message-update-coalescer";
+import {
+  evaluateStreamHealth,
+  reconnectDelayMs,
+  shouldClearLostTurn,
+  shouldGiveUpReconnecting,
+} from "@/lib/stream-recovery";
 import { getToolNamesForPreset, type ToolPreset } from "@/lib/tool-presets";
 import { getPreferredToolPreset, setPreferredToolPreset } from "@/lib/tool-preset-preference";
 import { toast } from "@/components/ui/toast";
@@ -324,6 +330,20 @@ export type AgentPhase =
   | { kind: "running_tools"; tools: { id: string; name: string }[] }
   | null;
 
+/**
+ * A stream problem the user must be told about, rather than left to infer from
+ * a spinner that never stops.
+ *
+ * `turn_lost`: the server reported an idle engine on (re)connect while this
+ * client was waiting for a turn — the engine restarted and the pending turn
+ * died with it. The prompt is deliberately NOT re-sent: silently repeating a
+ * mutating instruction is worse than losing one.
+ *
+ * `stream_lost`: manual reconnects failed for the whole budget. The retry is
+ * the user's to make now.
+ */
+export type StreamAlert = { kind: "turn_lost" } | { kind: "stream_lost" } | null;
+
 export interface CompactResultInfo {
   reason: "manual" | "threshold" | "overflow" | "auto" | string;
   tokensBefore: number;
@@ -387,6 +407,9 @@ const BASH_STATE_RECONCILE_MS = 1_000;
 const EVENT_STREAM_CONNECT_TIMEOUT_MS = 60_000;
 // Tell the user something is happening if the stream is still connecting.
 const EVENT_STREAM_SLOW_CONNECT_MS = 4_000;
+// How often the stream watchdog re-checks a believed-running turn. Cheap: it
+// reads two refs and sets a boolean React bails out of when unchanged.
+const STREAM_HEALTH_POLL_MS = 2_000;
 const MAX_NOTICES = 5;
 const NOTICE_VISIBLE_MS = 5000;
 const NOTICE_EXIT_ANIMATION_MS = 180;
@@ -648,6 +671,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [compactError, setCompactError] = useState<string | null>(null);
   const [compactResult, setCompactResult] = useState<CompactResultInfo | null>(null);
   const [agentPhase, setAgentPhase] = useState<AgentPhase>(null);
+  // Event-stream health, surfaced so a believed-running turn is never rendered
+  // as a healthy "Waiting for model…" against a stream that is not delivering.
+  const [streamDegraded, setStreamDegraded] = useState(false);
+  const [streamAlert, setStreamAlert] = useState<StreamAlert>(null);
   const [slashCommands, setSlashCommands] = useState<SlashCommandInfo[]>([]);
   const [slashCommandsLoading, setSlashCommandsLoading] = useState(false);
   const [noticeState, dispatchNotice] = useReducer(noticeReducer, { visible: [], pending: [] });
@@ -667,6 +694,26 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Stream-health bookkeeping (see lib/stream-recovery). framesSeen counts
+  // frames of the CURRENT connection and resets on every connect; the failure
+  // streak drives the reconnect backoff and its give-up budget.
+  const streamFramesRef = useRef(0);
+  const streamUnhealthySinceRef = useRef<number | null>(null);
+  // False until this session has opened a stream at all. A brand-new session
+  // can sit in agentRunning for a long time while ensure_session spawns the
+  // engine, and "no stream yet" is not a broken stream.
+  const streamAttachedRef = useRef(false);
+  const reconnectAttemptRef = useRef(0);
+  const reconnectFailingSinceRef = useRef<number | null>(null);
+  // Assigned after finishPromptWithoutStream exists: connectEvents is declared
+  // long before it, and the connected-frame reconciliation needs it.
+  const lostTurnRecoveryRef = useRef<((sid: string) => void) | null>(null);
+  // True once the SERVER acknowledged the current run (agent_start, or a
+  // get_state that reported it streaming). handleSend flips agentRunning
+  // optimistically BEFORE opening the stream and posting the prompt, so that
+  // connection's `connected` frame legitimately says idle — reconciling on it
+  // would cancel every send. Only an acknowledged run can be "lost".
+  const runConfirmedRef = useRef(false);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
   // Guards stale branch/leaf context responses: two rapid navigate clicks must
   // not let the older response overwrite the newer branch's messages.
@@ -1217,6 +1264,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     // A pending coalesced update belongs to the stream being replaced.
     eventCoalescer.reset();
+    // Health is per-connection: the new socket has delivered nothing yet, and
+    // the previous one's unhealthy stretch does not carry over.
+    streamFramesRef.current = 0;
+    streamUnhealthySinceRef.current = null;
+    streamAttachedRef.current = true;
     const es = new EventSource(`/api/agent/${encodeURIComponent(sid)}/events`);
     eventSourceRef.current = es;
 
@@ -1235,9 +1287,24 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       es.onopen = () => settle("connected");
 
       es.onmessage = (e) => {
+        // Liveness first: even a frame we cannot parse proves the stream is
+        // delivering, which is all the watchdog asks of it.
+        streamFramesRef.current += 1;
         try {
           const event = JSON.parse(e.data) as AgentEvent;
-          if (event.type === "connected") settle("connected");
+          if (event.type === "connected") {
+            settle("connected");
+            // A frame arrived, so this connection succeeded: end the failure
+            // streak that drives the backoff and its give-up budget.
+            reconnectAttemptRef.current = 0;
+            reconnectFailingSinceRef.current = null;
+            // Ground truth. The server stamps the engine's real run state on
+            // every (re)connect; an idle engine under a client that is still
+            // waiting means the turn died with the old process.
+            if (shouldClearLostTurn(agentRunningRef.current && runConfirmedRef.current, event)) {
+              lostTurnRecoveryRef.current?.(sid);
+            }
+          }
           // message_update frames arrive at network rate (often 30-100+/s);
           // the coalescer buffers the latest one and dispatches at display
           // rate, flushing synchronously before any other event type.
@@ -1252,10 +1319,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // auto-reconnect. Settle the Promise and manually reconnect for
           // already-running sessions. Keep the timer in a ref so unmount or a
           // session switch cancels it — otherwise an orphaned stream respawns
-          // (and can 404-loop) after the hook is torn down.
+          // after the hook is torn down.
           settle("closed");
           if (eventSourceRef.current === es && agentRunningRef.current) {
             eventSourceRef.current = null;
+            const now = Date.now();
+            reconnectFailingSinceRef.current ??= now;
+            if (shouldGiveUpReconnecting(reconnectFailingSinceRef.current, now)) {
+              // The session is not coming back on its own. Stop retrying (the
+              // old fixed-interval loop could hammer a 404 forever) and hand
+              // the user an explicit retry instead of an endless spinner.
+              setStreamAlert({ kind: "stream_lost" });
+              return;
+            }
+            // Exponential backoff, capped: 1s, 2s, 4s, 8s, then 15s.
+            const retryDelay = reconnectDelayMs(reconnectAttemptRef.current);
+            reconnectAttemptRef.current += 1;
             if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
             reconnectTimerRef.current = setTimeout(() => {
               reconnectTimerRef.current = null;
@@ -1266,7 +1345,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
                 // connection — re-register them so the agent keeps working.
                 reconnectActionsRef.current?.(sid);
               }
-            }, 1000);
+            }, retryDelay);
           }
         }
         // Recoverable errors (CONNECTING): let EventSource auto-reconnect.
@@ -1643,6 +1722,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [loadSession, onAgentEnd, refreshSubagentHistory, resetSubagentActivityState]);
 
+  // The engine restarted (container restart, crash) while this client was
+  // waiting for a turn: the resumed engine is idle and no agent_end will ever
+  // arrive for the dead turn. Settle the run through the same path a missed
+  // agent_end takes — it re-reads the transcript, so whatever the turn managed
+  // to persist still shows — and raise a banner saying the prompt was lost.
+  // The prompt is NOT re-sent: a duplicated mutating instruction is worse than
+  // a lost one. Assigned during render like reconnectActionsRef below, because
+  // connectEvents is declared before finishPromptWithoutStream exists.
+  lostTurnRecoveryRef.current = (sid: string) => {
+    setStreamAlert({ kind: "turn_lost" });
+    void finishPromptWithoutStream(sid, promptRunIdRef.current);
+  };
+
   const waitForPromptSettlement = useCallback(async (sid: string, runId?: number) => {
     await delay(PROMPT_SETTLE_INITIAL_DELAY_MS);
     const startedAt = Date.now();
@@ -1765,6 +1857,68 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
   }, [agentRunning, reconcileAgentState]);
 
+  // Reconnect by hand after the automatic attempts were exhausted (the
+  // stream_lost banner's action). Clears the failure streak so the backoff
+  // starts over, and re-checks the run against the server — the stream may
+  // have been down across a turn that has since ended.
+  const retryEventStream = useCallback(() => {
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    reconnectAttemptRef.current = 0;
+    reconnectFailingSinceRef.current = null;
+    setStreamAlert(null);
+    void connectEvents(sid);
+    reconnectActionsRef.current?.(sid);
+    void reconcileAgentState(sid);
+  }, [connectEvents, reconcileAgentState]);
+
+  const dismissStreamAlert = useCallback(() => setStreamAlert(null), []);
+
+  // Watchdog: while a turn is believed to be in flight, a stream that is not
+  // OPEN — or that has never delivered a single frame, which is what a
+  // half-open connection looks like — must stop being rendered as a healthy
+  // "Waiting for model…". Verdict and grace period live in lib/stream-recovery.
+  useEffect(() => {
+    if (!agentRunning) {
+      streamUnhealthySinceRef.current = null;
+      setStreamDegraded(false);
+      return;
+    }
+    const tick = () => {
+      // Nothing has been connected yet (a new session is still being minted):
+      // there is no stream to call unhealthy.
+      if (!streamAttachedRef.current) {
+        streamUnhealthySinceRef.current = null;
+        setStreamDegraded(false);
+        return;
+      }
+      const health = evaluateStreamHealth({
+        agentRunning: true,
+        readyState: eventSourceRef.current?.readyState ?? null,
+        framesSeen: streamFramesRef.current,
+        unhealthySince: streamUnhealthySinceRef.current,
+        now: Date.now(),
+      });
+      streamUnhealthySinceRef.current = health.unhealthySince;
+      setStreamDegraded(health.degraded);
+    };
+    tick();
+    const interval = setInterval(tick, STREAM_HEALTH_POLL_MS);
+    return () => clearInterval(interval);
+  }, [agentRunning]);
+
+  // A stream problem belongs to one session; never carry its banner — or the
+  // previous session's stream bookkeeping — across a session switch or into a
+  // freshly composed workspace.
+  useEffect(() => {
+    setStreamAlert(null);
+    setStreamDegraded(false);
+    streamAttachedRef.current = false;
+    streamUnhealthySinceRef.current = null;
+    reconnectAttemptRef.current = 0;
+    reconnectFailingSinceRef.current = null;
+  }, [session?.id, newSessionCwd]);
+
   useEffect(() => {
     agentRunningRef.current = agentRunning;
   }, [agentRunning]);
@@ -1828,6 +1982,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "agent_start":
         interruptReplyPendingRef.current = false;
         agentRunningRef.current = true;
+        // The engine acknowledged this run, so from here a `connected` frame
+        // reporting an idle engine means the run was lost, not that it never
+        // started. A new run also resolves any stale lost-turn banner.
+        runConfirmedRef.current = true;
+        setStreamAlert(null);
         setAgentRunning(true);
         setAgentPhase({ kind: "waiting_model" });
         dispatch({ type: "start" });
@@ -2253,6 +2412,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     optimisticUserMessageKeyRef.current = userMessageKey(userMsg);
     promptRunIdRef.current = promptRunId;
     agentRunningRef.current = true;
+    // Optimistic: the stream is opened and the prompt posted below, so the
+    // server has not acknowledged this run yet (see runConfirmedRef).
+    runConfirmedRef.current = false;
+    setStreamAlert(null);
     setAgentRunning(true);
     setAgentPhase(isSlashCommandPrompt ? { kind: "running_command" } : { kind: "waiting_model" });
     dispatch({ type: "start" });
@@ -2962,6 +3125,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (agentState?.running) {
           if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
             agentRunningRef.current = true;
+            // The server itself reported this run in flight, so it counts as
+            // acknowledged: if the engine dies later, the reconnect's
+            // `connected` frame is allowed to declare the turn lost.
+            runConfirmedRef.current = true;
             setAgentRunning(true);
             setAgentPhase(agentState.state.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
             dispatch({ type: "start" });
@@ -3170,6 +3337,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     notices: noticeState.visible, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     isAutoModelSelection: isNew && newSessionModel === null,
     agentPhase,
+    // Event-stream health: `streamDegraded` replaces the "Waiting for model…"
+    // label while the stream is not delivering; `streamAlert` is the banner for
+    // a lost turn or an exhausted reconnect, with its two actions.
+    streamDegraded, streamAlert, dismissStreamAlert, retryEventStream,
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases,
     activeGoal, activePlan,
     isNew,
