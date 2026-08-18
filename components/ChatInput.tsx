@@ -28,6 +28,9 @@ import {
 } from "@/lib/file-fuzzy";
 import { FolderIcon, getFileIcon } from "./FileIcons";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useUsage } from "@/hooks/useUsage";
+import { selectBindingWindow } from "@/lib/usage/select";
+import type { UsageSnapshot, UsageWindowState } from "@/lib/usage/types";
 import { useI18n } from "@/lib/i18n";
 import { selectableThinkingLevels } from "@/lib/thinking-levels";
 import { STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
@@ -118,8 +121,12 @@ export interface ChatInputHandle {
 }
 
 const COMPOSITION_END_ENTER_GRACE_MS = 100;
-/** Circumference of the context ring (r = 9.5). */
+/** Circumference of the composer ring (r = 9.5). */
 const RING_CIRCUMFERENCE = 2 * Math.PI * 9.5;
+/** Dashed track drawn when there is no quota to fill the ring with. */
+const RING_ABSENT_DASH = "2.5 3.5";
+/** How often the popover re-renders so "updated 2 min ago" stays true. */
+const USAGE_FRESHNESS_TICK_MS = 30_000;
 const EMPTY_CONTEXT_MODEL_USAGE: readonly ContextModelUsage[] = [];
 const COMPOSER_MODELS_STORAGE_KEY = STORAGE_KEYS.composerModels;
 
@@ -136,6 +143,214 @@ function compareModelOptions(collator: Intl.Collator, a: ModelOption, b: ModelOp
   return collator.compare(a.name || a.modelId, b.name || b.modelId)
     || collator.compare(a.provider, b.provider)
     || collator.compare(a.modelId, b.modelId);
+}
+
+/** Shipped ring thresholds, shared by the arc, the headline and every bar:
+ *  under 70 is the accent, 70–89 warns, 90 and up is an error.
+ *
+ *  The percentage alone is not the whole story: a provider can reject requests
+ *  against a window that reads 12% full (a hard cap Cody cannot see, a
+ *  suspended account, a per-model block). Painting that accent-coloured would
+ *  tell the composer "plenty left" about a window nothing can be spent on, so
+ *  the engine-reported state overrides the number upward — never downward. */
+export function quotaToneColor(percent: number, state?: UsageWindowState): string {
+  if (state === "exhausted") return "var(--status-error)";
+  if (percent >= 90) return "var(--status-error)";
+  if (state === "warning" || percent >= 70) return "var(--status-warning)";
+  return "var(--accent)";
+}
+
+export interface QuotaWindowView {
+  key: string;
+  label: string;
+  percent: number;
+  color: string;
+  state: UsageWindowState;
+  exhausted: boolean;
+  resetsAt: string | null;
+}
+
+export interface QuotaKnownView {
+  known: true;
+  percent: number;
+  color: string;
+  state: UsageWindowState;
+  label: string;
+  resetsAt: string | null;
+  windows: QuotaWindowView[];
+  fetchedAt: string | null;
+  stale: boolean;
+}
+
+export interface QuotaAbsentView {
+  known: false;
+  color: string;
+  /** i18n key standing in for the headline percentage's meaning. */
+  titleKey: string;
+  /** i18n key for the explanation under the divider, if any. */
+  noteKey: string | null;
+  /** i18n key for the footer's scope line. */
+  scopeKey: string;
+  /** Engine-supplied prose explaining the gap, when it gave one. */
+  reason: string | null;
+}
+
+/** What the ring and the popover's quota half should say. A missing signal is
+ *  a distinct shape — never a zero-percent reading — so nothing downstream can
+ *  accidentally paint "0%" over an engine that simply does not report limits. */
+export type QuotaView = QuotaKnownView | QuotaAbsentView;
+
+/** The engine answered and reported no plan limits at all. Only reachable from
+ *  an actual response — nothing else may claim this about an engine. */
+const QUOTA_UNREPORTED: QuotaAbsentView = {
+  known: false,
+  color: "var(--text-muted)",
+  titleKey: "usage.notReported",
+  noteKey: "usage.notReportedNote",
+  scopeKey: "usage.noQuotaSignal",
+  reason: null,
+};
+
+/** Cody never got an answer: the first read has not landed, or the last one
+ *  failed (server restarting, proxy error page). Says nothing about the
+ *  engine's limits, because nothing has established anything about them. */
+const QUOTA_UNAVAILABLE: QuotaAbsentView = {
+  known: false,
+  color: "var(--text-muted)",
+  titleKey: "usage.unavailableTitle",
+  noteKey: "usage.unavailableNote",
+  scopeKey: "usage.unavailableScope",
+  reason: null,
+};
+
+/** A read is out and nothing has come back yet. */
+const QUOTA_CHECKING: QuotaAbsentView = {
+  known: false,
+  color: "var(--text-muted)",
+  titleKey: "usage.checking",
+  noteKey: null,
+  scopeKey: "usage.checkingScope",
+  reason: null,
+};
+
+/** Machine reason codes ("engine_unsupported") must not reach the popover;
+ *  only a sentence the server actually wrote for a human does. */
+function readableReason(reason: string | null | undefined): string | null {
+  if (typeof reason !== "string") return null;
+  const trimmed = reason.trim();
+  return trimmed.includes(" ") && trimmed.length <= 200 ? trimmed : null;
+}
+
+function clampQuotaPercent(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, value));
+}
+
+/** Turns the usage snapshot into the ring's states. Pure, so the thresholds and
+ *  the absence cases are testable without a DOM.
+ *
+ *  Absence comes in three flavours and they must not be conflated: still
+ *  checking, could-not-read (never loaded, or the last read failed), and the
+ *  engine having genuinely answered "no limits here". Only the last one is
+ *  entitled to say anything about the engine. */
+export function buildQuotaView(
+  snapshot: UsageSnapshot | null,
+  loading: boolean,
+  failed = false,
+): QuotaView {
+  if (!snapshot) {
+    // A first read still in flight says "checking"; once one has failed, the
+    // retries keep saying "could not read" rather than flipping back to
+    // "checking" every poll. Neither one may speak for the engine.
+    if (loading && !failed) return QUOTA_CHECKING;
+    return QUOTA_UNAVAILABLE;
+  }
+  const accounts = snapshot.accounts ?? [];
+  if (!snapshot.available || accounts.length === 0) {
+    return { ...QUOTA_UNREPORTED, reason: readableReason(snapshot.reason) };
+  }
+  // Every account the engine reports is unlimited (a local runtime, say):
+  // there is no quota to gauge, which is different from having no signal.
+  if (accounts.every((account) => account.unlimited)) {
+    return {
+      known: false,
+      color: "var(--text-muted)",
+      titleKey: "usage.unlimitedTitle",
+      noteKey: "usage.unlimitedNote",
+      scopeKey: "usage.unlimited",
+      reason: readableReason(snapshot.reason),
+    };
+  }
+
+  const binding = selectBindingWindow(accounts);
+  if (!binding) return { ...QUOTA_UNREPORTED, reason: readableReason(snapshot.reason) };
+
+  // One account needs no disambiguation; several do, so each window carries
+  // the account it belongs to.
+  const multipleAccounts = accounts.length > 1;
+  const nameWindow = (accountLabel: string, windowLabel: string) => (
+    multipleAccounts && accountLabel ? `${accountLabel} · ${windowLabel}` : windowLabel
+  );
+
+  const windows: QuotaWindowView[] = accounts
+    // Window ids are unique only WITHIN an account, so two subscriptions on
+    // one provider can report the same id. The row key carries the account's
+    // position too — the list is re-sorted on every refresh, and duplicate
+    // keys freeze the second account's row on stale numbers.
+    .flatMap((account, accountIndex) => (account.windows ?? []).map((quotaWindow) => {
+      const percent = clampQuotaPercent(quotaWindow.utilization);
+      return {
+        key: `${accountIndex}:${account.provider}:${quotaWindow.id}`,
+        label: nameWindow(account.label, quotaWindow.label),
+        percent,
+        color: quotaToneColor(percent, quotaWindow.state),
+        state: quotaWindow.state,
+        exhausted: quotaWindow.state === "exhausted",
+        resetsAt: quotaWindow.resetsAt,
+      };
+    }))
+    .sort((a, b) => b.percent - a.percent);
+
+  const percent = clampQuotaPercent(binding.window.utilization);
+  return {
+    known: true,
+    percent,
+    color: quotaToneColor(percent, binding.window.state),
+    state: binding.window.state,
+    label: nameWindow(binding.account.label, binding.window.label),
+    resetsAt: binding.window.resetsAt,
+    windows,
+    fetchedAt: snapshot.fetchedAt ?? null,
+    stale: snapshot.stale === true,
+  };
+}
+
+/** "18:20" for a reset later today, "Sun 09:00" once it crosses a day —
+ *  matching how MessageView renders wall-clock times. */
+function formatResetTime(iso: string | null, locale: string, now: number): string | null {
+  if (!iso) return null;
+  const at = new Date(iso);
+  const ts = at.getTime();
+  if (!Number.isFinite(ts)) return null;
+  const sameDay = at.toDateString() === new Date(now).toDateString();
+  return sameDay
+    ? at.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" })
+    : at.toLocaleString(locale, { weekday: "short", hour: "2-digit", minute: "2-digit" });
+}
+
+/** Snapshot age as a short relative string, mirroring the sidebar's helper
+ *  (which is private to that component). */
+function formatSnapshotAge(iso: string | null, locale: string, now: number): string | null {
+  if (!iso) return null;
+  const ts = new Date(iso).getTime();
+  if (!Number.isFinite(ts)) return null;
+  const minutes = Math.max(0, Math.floor((now - ts) / 60_000));
+  const formatter = new Intl.RelativeTimeFormat(locale, { numeric: "auto", style: "narrow" });
+  if (minutes < 1) return formatter.format(0, "minute");
+  if (minutes < 60) return formatter.format(-minutes, "minute");
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return formatter.format(-hours, "hour");
+  return formatter.format(-Math.floor(hours / 24), "day");
 }
 
 const THINKING_LEVEL_DESC_KEYS: Record<string, string> = {
@@ -410,6 +625,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 }: Props, ref) {
   const isMobile = useIsMobile();
   const { t, tn, locale } = useI18n();
+  const {
+    snapshot: usageSnapshot,
+    loading: usageLoading,
+    failed: usageFailed,
+    refresh: refreshUsage,
+  } = useUsage();
   const modelCollator = React.useMemo(
     () => new Intl.Collator(locale, { numeric: true, sensitivity: "base" }),
     [locale],
@@ -1437,6 +1658,41 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     })),
     [contextModelUsage, modelOptions, modelNames, model?.provider, model?.modelId, modelNameOverride],
   );
+  // The ring gauges the binding PLAN QUOTA window; the context window has its
+  // own readout in the top bar, and keeps its detail inside this popover.
+  const quota = React.useMemo(
+    () => buildQuotaView(usageSnapshot, usageLoading, usageFailed),
+    [usageSnapshot, usageLoading, usageFailed],
+  );
+  const quotaPercentText = quota.known ? `${Math.round(quota.percent)}%` : "—";
+  const quotaRingTitle = quota.known
+    ? `${quota.label} ${quotaPercentText}`
+    : t("usage.ringUnknown", { reason: t(quota.titleKey) });
+  const quotaRingLabel = quota.known
+    ? t("usage.ringDetails", { label: quota.label, percent: Math.round(quota.percent) })
+    : quotaRingTitle;
+  // Only ticks while the popover is open — "updated 2 min ago" has to stay
+  // true while someone reads it, but nothing else in the composer cares.
+  const [usageNow, setUsageNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!contextPopoverOpen) return;
+    setUsageNow(Date.now());
+    const timer = setInterval(() => setUsageNow(Date.now()), USAGE_FRESHNESS_TICK_MS);
+    return () => clearInterval(timer);
+  }, [contextPopoverOpen]);
+  // Opening the popover is the one moment the number is being read closely.
+  useEffect(() => {
+    if (contextPopoverOpen) refreshUsage();
+  }, [contextPopoverOpen, refreshUsage]);
+  const quotaHeadlineReset = quota.known ? formatResetTime(quota.resetsAt, locale, usageNow) : null;
+  const quotaAge = quota.known ? formatSnapshotAge(quota.fetchedAt, locale, usageNow) : null;
+  // Age is only claimed when the snapshot carries a usable timestamp, and a
+  // snapshot the server flagged stale says so rather than passing for fresh.
+  const quotaFreshness = quotaAge
+    ? [t("usage.updatedAgo", { ago: quotaAge }), quota.known && quota.stale ? t("usage.stale") : null]
+      .filter(Boolean).join(" · ")
+    : null;
+
   const thinkingLevelOptions = React.useMemo(
     () => selectableThinkingLevels(availableThinkingLevels),
     [availableThinkingLevels],
@@ -2398,19 +2654,17 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
             <div style={{ flex: 1 }} />
 
-            {/* Icon-only context gauge with a compact, locally derived breakdown. */}
+            {/* Icon-only plan-quota gauge. The arc tracks the binding quota
+                window; context usage lives in the top bar and, in detail,
+                below the divider inside this popover. */}
               <div
                 ref={contextPopoverRef}
                 style={{ position: "relative", width: 28, height: 28, flexShrink: 0 }}
               >
                 <button
                   type="button"
-                  title={hasKnownContextUsage
-                    ? `${Math.round(clampedContextPercent)}% · ${formatCompactNumber(contextTokens ?? 0, locale)} / ${formatCompactNumber(contextUsage?.contextWindow ?? 0, locale)}`
-                    : t("chatInput.contextUsage")}
-                  aria-label={hasKnownContextUsage
-                    ? t("chatInput.contextDetails", { percent: Math.round(clampedContextPercent) })
-                    : t("chatInput.contextUsage")}
+                  title={quotaRingTitle}
+                  aria-label={quotaRingLabel}
                   aria-expanded={contextPopoverOpen}
                   aria-haspopup="dialog"
                   onClick={() => setContextPopoverOpen((open) => !open)}
@@ -2422,7 +2676,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     display: "inline-flex",
                     alignItems: "center",
                     justifyContent: "center",
-                    color: contextRingColor,
+                    color: quota.color,
                     background: contextPopoverOpen ? "var(--bg-hover)" : "none",
                     border: "none",
                     borderRadius: 7,
@@ -2431,15 +2685,22 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   }}
                 >
                   <svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true">
-                    <circle cx="13" cy="13" r="9.5" fill="none" stroke="var(--border)" strokeWidth="2.5" />
                     <circle
-                      cx="13" cy="13" r="9.5" fill="none"
-                      stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"
-                      strokeDasharray={RING_CIRCUMFERENCE}
-                      strokeDashoffset={RING_CIRCUMFERENCE * (1 - clampedContextPercent / 100)}
-                      transform="rotate(-90 13 13)"
-                      style={{ transition: "stroke-dashoffset var(--dur-med) var(--ease-out-warm), stroke var(--dur-fast) var(--ease-out-warm)" }}
+                      cx="13" cy="13" r="9.5" fill="none" stroke="var(--border)" strokeWidth="2.5"
+                      strokeDasharray={quota.known ? undefined : RING_ABSENT_DASH}
                     />
+                    {/* No arc at all when there is nothing to report: an
+                        absence has to read as one, not as 0%. */}
+                    {quota.known && (
+                      <circle
+                        cx="13" cy="13" r="9.5" fill="none"
+                        stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"
+                        strokeDasharray={RING_CIRCUMFERENCE}
+                        strokeDashoffset={RING_CIRCUMFERENCE * (1 - quota.percent / 100)}
+                        transform="rotate(-90 13 13)"
+                        style={{ transition: "stroke-dashoffset var(--dur-med) var(--ease-out-warm), stroke var(--dur-fast) var(--ease-out-warm)" }}
+                      />
+                    )}
                     <circle cx="13" cy="13" r="2" fill="currentColor" opacity="0.72" />
                   </svg>
                 </button>
@@ -2447,7 +2708,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 {contextPopoverOpen && (
                   <div
                     role="dialog"
-                    aria-label={t("chatInput.contextUsage")}
+                    aria-label={t("usage.title")}
                     className="dropdown-surface"
                     style={{
                       position: "absolute",
@@ -2459,6 +2720,107 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     }}
                   >
                     <div style={{ maxHeight: "min(360px, calc(100vh - 120px))", overflowY: "auto", padding: 14 }}>
+                      {/* Section 1 — plan quota, the ring's own subject. */}
+                      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
+                        <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text)" }}>
+                          {t("usage.title")}
+                        </div>
+                        <div style={{ fontSize: 16, fontWeight: 700, color: quota.color, fontVariantNumeric: "tabular-nums" }}>
+                          {quotaPercentText}
+                        </div>
+                      </div>
+                      {/* The headline always names the window it is quoting —
+                          a bare percentage would not say what ran out. */}
+                      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10, marginTop: 3 }}>
+                        <div style={{ minWidth: 0, fontSize: 11, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {quota.known ? quota.label : t(quota.titleKey)}
+                        </div>
+                        {quotaHeadlineReset && (
+                          <div style={{ flexShrink: 0, fontSize: 11, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
+                            {t("usage.resetsAt", { time: quotaHeadlineReset })}
+                          </div>
+                        )}
+                      </div>
+                      {/* No bar without a reading: an empty track reads as 0%. */}
+                      {quota.known && (
+                        <div style={{ height: 5, margin: "9px 0 4px", overflow: "hidden", borderRadius: 999, background: "var(--border)" }}>
+                          <div style={{
+                            width: `${quota.percent}%`,
+                            height: "100%",
+                            borderRadius: 999,
+                            background: quota.color,
+                            transition: "width var(--dur-med) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm)",
+                          }} />
+                        </div>
+                      )}
+
+                      {quota.known && quota.windows.length > 0 && (
+                        <div style={{ marginTop: 12, paddingTop: 11, borderTop: "1px solid var(--border)", display: "flex", flexDirection: "column", gap: 11 }}>
+                          {quota.windows.map((entry) => {
+                            const reset = formatResetTime(entry.resetsAt, locale, usageNow);
+                            return (
+                              <div key={entry.key} style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                                <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10 }}>
+                                  <div style={{ display: "flex", alignItems: "baseline", gap: 7, minWidth: 0 }}>
+                                    <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                      {entry.label}
+                                    </div>
+                                    {entry.exhausted && (
+                                      <div style={{
+                                        flexShrink: 0,
+                                        fontSize: 9, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase",
+                                        color: "var(--status-error)",
+                                        border: "1px solid var(--status-error)",
+                                        borderRadius: 999,
+                                        padding: "1px 5px",
+                                        whiteSpace: "nowrap",
+                                      }}>
+                                        {t("usage.exhausted")}
+                                      </div>
+                                    )}
+                                  </div>
+                                  <div style={{ flexShrink: 0, fontSize: 12, fontWeight: 700, color: entry.color, fontVariantNumeric: "tabular-nums" }}>
+                                    {`${Math.round(entry.percent)}%`}
+                                  </div>
+                                </div>
+                                <div style={{ height: 4, overflow: "hidden", borderRadius: 999, background: "var(--border)" }}>
+                                  <div style={{ width: `${entry.percent}%`, height: "100%", borderRadius: 999, background: entry.color }} />
+                                </div>
+                                {reset && (
+                                  <div style={{ fontSize: 10, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
+                                    {t("usage.resetsAt", { time: reset })}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {!quota.known && (quota.noteKey || quota.reason) && (
+                        <div style={{ marginTop: 11, paddingTop: 11, borderTop: "1px solid var(--border)", fontSize: 11, lineHeight: 1.5, color: "var(--text-muted)" }}>
+                          {quota.noteKey ? t(quota.noteKey) : quota.reason}
+                          {quota.noteKey && quota.reason && (
+                            <div style={{ marginTop: 4, color: "var(--text-dim)" }}>{quota.reason}</div>
+                          )}
+                        </div>
+                      )}
+
+                      <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--border)", display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10 }}>
+                        <div style={{ fontSize: 10, color: "var(--text-muted)" }}>
+                          {quota.known ? t("usage.accountWide") : t(quota.scopeKey)}
+                        </div>
+                        {quotaFreshness && (
+                          <div style={{ flexShrink: 0, fontSize: 10, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
+                            {quotaFreshness}
+                          </div>
+                        )}
+                      </div>
+
+                      <div style={{ margin: "14px 0 13px", borderTop: "1px solid var(--border)" }} />
+
+                      {/* Section 2 — context window and token traffic, kept
+                          from the gauge's previous life. */}
                       <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
                         <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text)" }}>
                           {t("chatInput.contextUsage")}

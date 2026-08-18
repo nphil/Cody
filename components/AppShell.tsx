@@ -13,8 +13,8 @@ import { BranchNavigator } from "./BranchNavigator";
 import { ThemePicker } from "./ThemePicker";
 import { TitleBar } from "./TitleBar";
 import { useDesktopShell } from "@/hooks/useDesktopShell";
-import { AppWindow, CircleArrowUp, Files, GitBranch, History, Info, ListTodo, Menu, PanelLeft, ScrollText, Terminal } from "lucide-react";
-import { formatCompactNumber, formatPercent } from "@/lib/format";
+import { AppWindow, CircleArrowUp, Files, GitBranch, History, Info, ListTodo, Menu, PanelLeft, ScrollText, Terminal, TriangleAlert } from "lucide-react";
+import { formatApiCost, formatCompactNumber, formatPercent } from "@/lib/format";
 import { translate, useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -1301,7 +1301,25 @@ export function AppShell() {
           {showChat && (sessionStats || contextUsage) && (() => {
             const tok = sessionStats?.tokens;
             const c = sessionStats?.cost ?? 0;
-            const costStr = c > 0 ? (c >= 0.01 ? `$${c.toFixed(2)}` : `<$0.01`) : null;
+            const unpricedModels = sessionStats?.unpricedModels ?? [];
+            // Only a truly idle session (no token usage at all) hides the
+            // readout entirely. Any usage gets a readout — but a zero sum is
+            // reported as "not priced" rather than as money, because an
+            // uncatalogued model prices at zero, which means "unknown".
+            const hasUsage = !!tok && tok.total > 0;
+            // Real tokens summing to exactly zero is not a free session, it is
+            // an unpriced one: nothing in it carried a published price. There
+            // is no figure to print, so none is printed — "$0.00+" would put a
+            // number where the honest answer is "unknown".
+            const costUnpriced = hasUsage && c <= 0;
+            // A nonzero sum the aggregator flagged as missing specific models
+            // is a genuine lower bound: shown, and marked as one.
+            const costPartial = hasUsage && c > 0 && unpricedModels.length > 0;
+            const costStr = !hasUsage
+              ? null
+              : costUnpriced
+                ? t("usage.notPriced")
+                : `${formatApiCost(c, 2)}${costPartial ? "+" : ""}`;
 
             let ctxColor = "var(--text-muted)";
             let ctxStr: string | null = null;
@@ -1318,7 +1336,14 @@ export function AppShell() {
               tooltipParts.push(t("appShell.tooltipOutput", { value: tok.output.toLocaleString(locale) }));
               tooltipParts.push(t("appShell.tooltipCacheRead", { value: tok.cacheRead.toLocaleString(locale) }));
               tooltipParts.push(t("appShell.tooltipCacheWrite", { value: tok.cacheWrite.toLocaleString(locale) }));
-              if (c > 0) tooltipParts.push(t("appShell.tooltipCost", { value: c.toFixed(4) }));
+              if (hasUsage) {
+                const preciseCost = costUnpriced
+                  ? t("usage.notPriced")
+                  : `${formatApiCost(c, 4)}${costPartial ? "+" : ""}`;
+                tooltipParts.push(`${t("usage.apiEquivalent")}: ${preciseCost}`);
+                if (costUnpriced) tooltipParts.push(t("usage.notPricedNote"));
+                else if (costPartial) tooltipParts.push(t("usage.partial"));
+              }
             }
             if (contextUsage?.contextWindow) {
               const pct = contextUsage.percent;
@@ -1394,7 +1419,7 @@ export function AppShell() {
                   </span>
                 )}
                 {!isMobile && costStr && (
-                  <span style={{ display: "flex", alignItems: "center", color: "var(--text)", fontWeight: 500 }}>
+                  <span style={{ display: "flex", alignItems: "center", color: costPartial || costUnpriced ? "var(--text-muted)" : "var(--text)", fontWeight: 500 }}>
                     {costStr}
                   </span>
                 )}
@@ -1482,8 +1507,24 @@ export function AppShell() {
                       [t("appShell.statTotal"), sessionStats.tokens.total.toLocaleString(locale)],
                     ];
                     const ctx = contextUsage ?? sessionStats.contextUsage;
+                    // Mirrors the chip's own partial/undercount detection
+                    // (see the stats-chip IIFE above) — kept local to this
+                    // popover closure rather than shared state, same as
+                    // every other row here.
+                    const rawCost = sessionStats.cost ?? 0;
+                    const unpricedModels = sessionStats.unpricedModels ?? [];
+                    const hasTokenUsage = sessionStats.tokens.total > 0;
+                    // Same reading as the chip above: a zero sum against real
+                    // tokens means nothing here was priced, so no dollar
+                    // figure is rendered at all.
+                    const costUnpriced = hasTokenUsage && rawCost <= 0;
+                    const costIsPartial = hasTokenUsage && rawCost > 0 && unpricedModels.length > 0;
+                    const costDisplay = hasTokenUsage && !costUnpriced
+                      ? `${formatApiCost(rawCost, 4)}${costIsPartial ? "+" : ""}`
+                      : null;
+                    const costRowValue = costUnpriced ? t("usage.notPriced") : costDisplay;
                     const extraTokenRows = [
-                      ...(sessionStats.cost > 0 ? [[t("appShell.statCost"), `$${sessionStats.cost.toFixed(4)}`]] : []),
+                      ...(costRowValue ? [[t("usage.apiEquivalent"), costRowValue]] : []),
                       ...(ctx?.contextWindow ? [[t("appShell.statContext"), `${ctx.percent !== null ? formatPercent(ctx.percent) : "?"} / ${formatCompactNumber(ctx.contextWindow)}`]] : []),
                     ];
                     const section = (
@@ -1585,20 +1626,81 @@ export function AppShell() {
                     );
 
                     return (
-                      <div style={{
-                        display: "grid",
-                        gridTemplateColumns: isMobile
-                          ? "1fr"
-                          : "minmax(300px, 1.7fr) minmax(120px, 0.55fr) minmax(160px, 0.75fr)",
-                        gap: isMobile ? 16 : 24,
-                        fontSize: 12,
-                        lineHeight: 1.5,
-                        fontFamily: "var(--font-mono)",
-                      }}>
-                        {sessionInfoSection}
-                        {section(t("appShell.sectionMessages"), messageRows)}
-                        {section(t("appShell.sectionTokens"), [...tokenRows, ...extraTokenRows], "right", true)}
-                      </div>
+                      <>
+                        <div style={{
+                          display: "grid",
+                          gridTemplateColumns: isMobile
+                            ? "1fr"
+                            : "minmax(300px, 1.7fr) minmax(120px, 0.55fr) minmax(160px, 0.75fr)",
+                          gap: isMobile ? 16 : 24,
+                          fontSize: 12,
+                          lineHeight: 1.5,
+                          fontFamily: "var(--font-mono)",
+                        }}>
+                          {sessionInfoSection}
+                          {section(t("appShell.sectionMessages"), messageRows)}
+                          {section(t("appShell.sectionTokens"), [...tokenRows, ...extraTokenRows], "right", true)}
+                        </div>
+                        {/* API-equivalent spend framing: this is what the
+                            session would have cost on pay-as-you-go pricing,
+                            never money actually charged on a plan. Only
+                            shown alongside a rendered cost row above. */}
+                        {costRowValue && (
+                          <div style={{
+                            marginTop: 12,
+                            paddingTop: 11,
+                            borderTop: "1px solid var(--border)",
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: 8,
+                            fontSize: 11,
+                            lineHeight: 1.5,
+                            color: "var(--text-muted)",
+                          }}>
+                            {costUnpriced ? (
+                              /* No published price for anything this session
+                                 ran, so there is no figure to caveat — say
+                                 that, rather than dressing a zero up as one. */
+                              <div>{t("usage.notPricedNote")}</div>
+                            ) : (
+                              <>
+                                <div>{t("usage.apiEquivalentHint")}</div>
+                                {/* The engine prices an uncatalogued model at
+                                    zero rather than flagging it, and Cody has
+                                    no per-model breakdown to check it against,
+                                    so the figure is stated as a floor. */}
+                                <div>{t("usage.apiEquivalentUnpriced")}</div>
+                              </>
+                            )}
+                            {/* Itemized only when the engine actually named the
+                                unpriced models — an empty warning box would be
+                                a claim with nothing behind it. */}
+                            {costIsPartial && unpricedModels.length > 0 && (
+                              <div style={{
+                                display: "flex",
+                                gap: 8,
+                                alignItems: "flex-start",
+                                padding: "9px 10px",
+                                borderRadius: "var(--radius-control)",
+                                border: "1px solid var(--status-warning)",
+                              }}>
+                                <TriangleAlert size={13} strokeWidth={2.2} style={{ flexShrink: 0, marginTop: 1, color: "var(--status-warning)" }} aria-hidden="true" />
+                                <div style={{ minWidth: 0 }}>
+                                  <div>{t("usage.partial")}</div>
+                                  <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 2, fontFamily: "var(--font-mono)" }}>
+                                    {unpricedModels.map((model) => (
+                                      <div key={model} style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                                        <span style={{ overflowWrap: "anywhere" }}>{model}</span>
+                                        <span style={{ whiteSpace: "nowrap" }}>{t("usage.noPrice")}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </>
                     );
                   })() : (
                     <div style={{ fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>

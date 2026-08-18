@@ -155,7 +155,26 @@ export interface SessionStatsInfo {
     total: number;
   };
   premiumRequests?: number;
+  /**
+   * Sum of each assistant message's `usage.cost.total` — a genuine
+   * pay-as-you-go API-list-price figure (omp sources it from models.dev plus
+   * curated overrides), not money actually charged on a subscription plan.
+   */
   cost: number;
+  /**
+   * Model identifiers that reported nonzero token usage but $0 cost — omp
+   * returns zero for an uncatalogued model rather than flagging it unknown,
+   * so a nonempty list here means `cost` undercounts the true total. Absent
+   * (rather than empty) when no partial-pricing signal was computed.
+   *
+   * DORMANT: nothing populates this yet — the per-model breakdown it needs
+   * lives in the session aggregator. It is a forward-compatible seam, so the
+   * UI must treat absence as "no per-model signal", never as "every model was
+   * priced": an itemized caveat is only rendered when this array actually
+   * carries names, and a zero `cost` against real tokens is reported as
+   * unpriced rather than as $0.
+   */
+  unpricedModels?: string[];
   contextUsage?: ContextUsage;
 }
 
