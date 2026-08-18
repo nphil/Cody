@@ -32,6 +32,7 @@ in the app is faked, mocked, or stubbed to look finished.
 | Creating a session, given a working directory | `POST /api/agent/new` `{"type":"ensure_session"}` |
 | Token persistence across launches | Android Keystore, AES-256-GCM (below) |
 | Sign-out, and automatic sign-out on any `401` | local |
+| Settings: server address and connection state, signed-in identity, theme, token hygiene, device prerequisites, and an About section carrying the server's version, active engine and advertised capability list | `GET /api/accounts/me`, `GET /api/info` (rendered from the identity probe; no route of its own) |
 
 Onboarding never stores anything until the credential has actually answered
 `200` on `GET /api/accounts/me` against that exact address, so the app cannot get
@@ -81,7 +82,9 @@ retrievable in the app*.
 
 No placeholder screens were shipped for these — they simply do not exist:
 
-- Settings of any kind (theme picker, server switching beyond sign-out)
+- Switching servers without signing out. The address is changed by forgetting the
+  stored token and connecting again, which is what Settings offers; there is no
+  list of servers to pick from.
 - File browser / workspace tools / diff views
 - Model picker, skills, plugins, MCP panels, engine settings, update checks
 - Forking, renaming, archiving or deleting a session. Creating one works (a
@@ -94,9 +97,11 @@ No placeholder screens were shipped for these — they simply do not exist:
   that adding one later is not a rewrite, but there is no implementation
 
 The server reports capability flags for most of the above and `:shared` decodes
-all of them; the UI reads only `liveEvents` and `prompts`. The rest are wired
-through to nothing, on purpose, so the screens can gate on them the day they are
-written.
+all of them; the UI still *gates* on only `liveEvents` and `prompts`. The rest are
+wired through to nothing, on purpose, so the screens can gate on them the day they
+are written — and **Settings → About lists every flag the backend advertised**,
+beside whether this build has a surface for it, so a missing panel says which of
+the two reasons it is missing for.
 
 ### Security notes
 
@@ -120,7 +125,9 @@ written.
 
 Catppuccin **Latte** (light) and **Mocha** (dark), which is what Cody actually
 ships as its default — not the warm-paper/warm-ember palette in the older design
-drafts. Follows the system light/dark setting. The palette is a data class of
+drafts. Follows the system light/dark setting, or either one pinned in Settings →
+Appearance (stored in a plain preferences DataStore, separate from the credential
+one so a `401` cannot take the palette with it). The palette is a data class of
 semantic tokens (`ui/theme/CodyPalette.kt`) mirroring the CSS custom properties,
 so adding the other nine families is adding entries, not rewriting screens.
 

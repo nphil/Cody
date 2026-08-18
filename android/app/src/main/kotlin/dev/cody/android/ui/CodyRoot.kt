@@ -13,7 +13,7 @@ import dev.cody.android.R
 import dev.cody.android.ui.common.StatusPane
 import dev.cody.android.ui.home.HomeScreen
 import dev.cody.android.ui.onboarding.OnboardingScreen
-import dev.cody.android.ui.theme.CodyTheme
+import dev.cody.android.ui.settings.CodyPreferredTheme
 import dev.cody.android.vm.CodyViewModel
 import dev.cody.shared.presentation.AppState
 
@@ -28,7 +28,7 @@ import dev.cody.shared.presentation.AppState
  */
 @Composable
 fun CodyRoot(viewModel: CodyViewModel) {
-    CodyTheme {
+    CodyPreferredTheme {
         Surface(
             // safeDrawing covers status/navigation bars AND the IME, which is
             // required from targetSdk 35 onward where edge-to-edge is enforced.

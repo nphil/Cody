@@ -19,6 +19,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.cody.android.R
 import dev.cody.android.ui.chat.ChatPane
 import dev.cody.android.ui.sessions.SessionListPane
+import dev.cody.android.ui.settings.SettingsScreen
 import dev.cody.android.ui.sessions.VerticalHairline
 import dev.cody.android.ui.theme.LocalCodyColors
 import dev.cody.android.ui.theme.LocalCodyPalette
@@ -83,10 +84,16 @@ fun HomeScreen(
             WorkspaceRail(destination = destination, onSelect = { destination = it })
             VerticalHairline()
             when (destination) {
-                // Both own their view models and take nothing from session state,
-                // so they are leaves here rather than panes in the split.
+                // These own their view models and take nothing from session
+                // state, so they are leaves here rather than panes in the split.
                 HomeDestination.Terminal -> TerminalScreen(modifier = Modifier.fillMaxSize())
                 HomeDestination.Logs -> LogsScreen(onBack = null, modifier = Modifier.fillMaxSize())
+                HomeDestination.Settings -> SettingsScreen(
+                    identity = identity,
+                    onSignOut = onSignOut,
+                    onBack = null,
+                    modifier = Modifier.fillMaxSize(),
+                )
                 HomeDestination.Chat -> ChatWorkspace(
                     sessions = sessions,
                     sessionsState = sessionsState,
@@ -108,7 +115,7 @@ fun HomeScreen(
  * no `NavHost`: there is no back-stack to model — the rail is always visible and
  * every destination is one tap from every other.
  */
-private enum class HomeDestination { Chat, Terminal, Logs }
+private enum class HomeDestination { Chat, Terminal, Logs, Settings }
 
 /**
  * The always-visible rail. Text rather than icons deliberately: the icon set is
@@ -133,6 +140,10 @@ private fun WorkspaceRail(destination: HomeDestination, onSelect: (HomeDestinati
         Spacer(modifier = Modifier.height(4.dp))
         RailItem(stringResource(R.string.logs_title), destination == HomeDestination.Logs, colors.accent) {
             onSelect(HomeDestination.Logs)
+        }
+        Spacer(modifier = Modifier.height(4.dp))
+        RailItem(stringResource(R.string.settings_title), destination == HomeDestination.Settings, colors.accent) {
+            onSelect(HomeDestination.Settings)
         }
     }
 }

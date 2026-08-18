@@ -71,9 +71,11 @@ android {
 
     buildFeatures {
         compose = true
-        // Nothing reads BuildConfig; leaving it on generates a class per variant
-        // for no reader.
-        buildConfig = false
+        // Settings → About reports the app's own version and versionCode, and
+        // BuildConfig is the only place they exist at runtime: versionName and
+        // versionCode come from CI as Gradle properties, so there is no resource
+        // or manifest constant to read them from instead.
+        buildConfig = true
     }
 
     compileOptions {
