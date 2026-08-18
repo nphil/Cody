@@ -6,6 +6,8 @@ import { isLoopbackHost } from "./display/ladder";
 import { getHarness } from "./harness";
 import type { EngineSession, EngineSessionOptions } from "./harness/types";
 import { validateAgentImages } from "./image-attachments";
+import { APP_LOG_SHADOW_NOTE, DEFAULT_LIMIT, MAX_LIMIT, appLogNotice, formatAppLogDigest, markAppLogsRead, parseSince, readAppLogs } from "./logs/ring";
+import { APP_LOG_LEVELS, type AppLogQuery } from "./logs/types";
 import { invalidateModelsCache } from "./models-cache";
 import { RpcCommandError, RpcProcess, type RpcFrame } from "./omp/rpc-process";
 import { readNativeSettings } from "./omp/settings-config";
@@ -50,7 +52,10 @@ const READY_TIMEOUT_MS = 120_000;
  * headless Chromium where the dev server actually runs, so the model can SEE
  * its work — including with every browser tab closed. open_preview publishes
  * a display request on the session bus (lib/display/bus.ts), auto-opening
- * Cody's Preview panel over SSE for any watching browser.
+ * Cody's Preview panel over SSE for any watching browser. read_app_logs hands
+ * back the previewed app's own console and failed requests (lib/logs), so a
+ * dev server throwing in the browser is something the model can read instead
+ * of something only the user ever sees.
  */
 const SERVER_HOST_TOOLS: HostToolDefinition[] = [{
   name: "preview_screenshot",
@@ -75,6 +80,18 @@ const SERVER_HOST_TOOLS: HostToolDefinition[] = [{
       mode: { type: "string", enum: ["auto", "stream", "native"], description: "Prefer auto: Cody picks the highest-fidelity preview that actually works. Pass stream or native only when one specifically is required." },
     },
     required: ["url"],
+  },
+}, {
+  name: "read_app_logs",
+  description: `Read the previewed app's browser console and failed network requests: uncaught exceptions, console.error/warn output, 4xx/5xx responses and refused connections. Returns a deduped digest, oldest first — identical repeated lines collapse into ONE entry with a count, so a render loop reads as one line rather than thousands. Call it after changing code and reloading the preview, and whenever another tool result reports new app errors. ${APP_LOG_SHADOW_NOTE}`,
+  parameters: {
+    type: "object",
+    properties: {
+      level: { type: "string", enum: [...APP_LOG_LEVELS], description: "Minimum severity: error, warning, info or debug. Omit for everything captured." },
+      since: { type: "string", description: "Only entries last seen since then: a relative age like 90s, 5m or 2h, or an ISO timestamp." },
+      grep: { type: "string", description: "Case-insensitive regular expression the message or URL must match." },
+      limit: { type: "number", description: `Newest N entries (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT}).` },
+    },
   },
 }];
 const SERVER_HOST_TOOL_NAMES = new Set(SERVER_HOST_TOOLS.map((tool) => tool.name));
@@ -589,10 +606,13 @@ export class AgentSessionWrapper {
         const hint = loopbackOnly
           ? " That port is bound to loopback only: a browser on this machine frames it directly, but any other device falls back to a streamed raster view. To make it full fidelity everywhere, restart the dev server listening on every interface (add `--host 0.0.0.0`, or run `npm run dev:lan` in this repo) and call open_preview again."
           : "";
+        // The app may have started throwing since the model last looked. One
+        // line, never the log content itself — the model asks for that.
+        const notice = appLogNotice(this._sessionId);
         this.proc.sendFrame({
           type: "host_tool_result",
           id,
-          result: { content: [{ type: "text", text: `${status}${hint}` }] },
+          result: { content: [{ type: "text", text: `${status}${hint}${notice ? ` ${notice}` : ""}` }] },
         });
       } catch (error) {
         this.proc.sendFrame({
@@ -602,6 +622,26 @@ export class AgentSessionWrapper {
           result: { content: [{ type: "text", text: error instanceof Error ? error.message : "Invalid preview request" }] },
         });
       }
+      return;
+    }
+    if (toolName === "read_app_logs") {
+      const input = (typeof event.arguments === "object" && event.arguments !== null ? event.arguments : {}) as { level?: unknown; since?: unknown; grep?: unknown; limit?: unknown };
+      const requested = typeof input.level === "string" ? input.level : "";
+      const query: AppLogQuery = {
+        level: APP_LOG_LEVELS.find((candidate) => candidate === requested),
+        since: parseSince(input.since) ?? undefined,
+        grep: typeof input.grep === "string" && input.grep !== "" ? input.grep : undefined,
+        limit: typeof input.limit === "number" ? input.limit : undefined,
+      };
+      const digest = readAppLogs(this._sessionId, query);
+      // Reading is what clears the notice, and only the model's read does: a
+      // UI panel on the same ring must not silence it (see markAppLogsRead).
+      markAppLogsRead(this._sessionId);
+      this.proc.sendFrame({
+        type: "host_tool_result",
+        id,
+        result: { content: [{ type: "text", text: formatAppLogDigest(digest, query) }] },
+      });
       return;
     }
     if (toolName !== "preview_screenshot") {
@@ -615,13 +655,14 @@ export class AgentSessionWrapper {
         width: typeof args.width === "number" ? args.width : undefined,
         height: typeof args.height === "number" ? args.height : undefined,
       });
+      const notice = appLogNotice(this._sessionId);
       this.proc.sendFrame({
         type: "host_tool_result",
         id,
         result: {
           content: [
             { type: "image", data: shot.data, mimeType: shot.mimeType },
-            { type: "text", text: `Screenshot of ${shot.url} at ${shot.width}x${shot.height}.` },
+            { type: "text", text: `Screenshot of ${shot.url} at ${shot.width}x${shot.height}.${notice ? ` ${notice}` : ""}` },
           ],
         },
       });
