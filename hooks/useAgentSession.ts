@@ -24,7 +24,8 @@ import { toast } from "@/components/ui/toast";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import { createActiveGoal, parseActiveGoal, type ActiveGoal, type ActivePlan } from "@/lib/web-mode-state";
 import type { HostToolDefinition, HostUriSchemeDefinition, RpcAvailableSlashCommand, SessionStatsInfo, TodoPhase } from "@/lib/pi-types";
-import { isRecord } from "@/lib/type-guards";
+import { asCount, isRecord } from "@/lib/type-guards";
+import { addUsageTotals, aggregateMessageUsage, emptyUsageTotals, usageTokenTotal, type UsageTotals } from "@/lib/session-usage";
 import { SESSION_STORAGE_PREFIXES } from "@/lib/storage-keys";
 import {
   parseSubagentActivityEvent,
@@ -632,6 +633,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [followUpMode, setFollowUpMode] = useState<"all" | "one-at-a-time">("all");
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
   const [liveContextUsage, setLiveContextUsage] = useState<ContextUsageValue | null>(null);
+  // Usage recorded outside the parent transcript, kept apart so the headline
+  // adds each source exactly once. `subagentUsage` is summed from the
+  // children's own transcripts (server-side, see the subagents route);
+  // `engineUsage` accumulates the additive usage_event frames that Claude Code
+  // and codex report instead of recording usage on the messages they emit.
+  const [subagentUsage, setSubagentUsage] = useState<UsageTotals | null>(null);
+  const [engineUsage, setEngineUsage] = useState<UsageTotals | null>(null);
   const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
   const [forkingEntryId, setForkingEntryId] = useState<string | null>(null);
   const [currentModelOverride, setCurrentModelOverride] = useState<{ provider: string; modelId: string } | null>(null);
@@ -744,11 +752,24 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const contextUsage = liveContextUsage ?? persistedContextUsage;
 
   const sessionStats = useMemo(() => {
+    // Usage that is real but absent from `messages`: every subagent's own
+    // transcript (omp writes those beside the parent file, where the session
+    // walk never looks) plus engines that report usage as stream frames. Both
+    // are counted once, at the event that reported them — the subagent roster's
+    // per-child tokens/cost are DISPLAY values for those very events, so adding
+    // them here would count every child twice.
+    const external = addUsageTotals(subagentUsage ?? emptyUsageTotals(), engineUsage ?? emptyUsageTotals());
     if (sessionStatsOverride) {
+      // The engine's own account of the session, left exactly as it reported
+      // it. omp's getSessionStats already folds subagent usage in from each
+      // `task` toolResult's `details.usage` rollup (session/session-stats.ts),
+      // so adding `external` here would count the children a second time —
+      // once from the rollup and once from their transcripts. Where that rollup
+      // is absent (async/detached spawns never write it) omp under-reports, but
+      // silently doubling a number this UI did not compute is the worse of the
+      // two errors: it cannot be told apart from real spend.
       return { ...sessionStatsOverride, contextUsage: contextUsage ?? undefined };
     }
-    const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
-    let cost = 0;
     let userMessages = 0;
     let assistantMessages = 0;
     let toolResults = 0;
@@ -758,16 +779,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (msg.role === "toolResult") toolResults += 1;
       if (msg.role !== "assistant") continue;
       assistantMessages += 1;
-      const u = (msg as import("@/lib/types").AssistantMessage).usage;
-      toolCalls += (msg as import("@/lib/types").AssistantMessage).content.filter((c) => c.type === "toolCall").length;
-      if (!u) continue;
-      tokens.input += u.input ?? 0;
-      tokens.output += u.output ?? 0;
-      tokens.cacheRead += u.cacheRead ?? 0;
-      tokens.cacheWrite += u.cacheWrite ?? 0;
-      cost += u.cost?.total ?? 0;
+      toolCalls += msg.content.filter((c) => c.type === "toolCall").length;
     }
-    tokens.total = tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite;
+    const usage = addUsageTotals(aggregateMessageUsage(messages), external);
+    const tokens = {
+      input: usage.input,
+      output: usage.output,
+      cacheRead: usage.cacheRead,
+      cacheWrite: usage.cacheWrite,
+      total: usageTokenTotal(usage),
+    };
     if (tokens.total === 0 && messages.length === 0) return null;
     return {
       sessionFile: data?.filePath || undefined,
@@ -779,10 +800,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       toolResults,
       totalMessages: messages.length,
       tokens,
-      cost,
+      cost: usage.cost,
+      // Absent rather than empty when nothing was flagged: the UI reads absence
+      // as "no per-model signal", never as "everything was priced".
+      ...(usage.unpricedModels.length > 0 ? { unpricedModels: usage.unpricedModels } : {}),
       ...(contextUsage ? { contextUsage } : {}),
     } satisfies SessionStatsInfo;
-  }, [messages, sessionStatsOverride, contextUsage, data?.filePath, session?.id, session?.name]);
+  }, [messages, sessionStatsOverride, subagentUsage, engineUsage, contextUsage, data?.filePath, session?.id, session?.name]);
 
   // Goal mode is web-hosted because omp's native /goal is TUI-only. Keep it
   // scoped to its session so switching conversations never leaks objectives.
@@ -800,6 +824,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // different existing session or a newly composed workspace.
   useEffect(() => {
     setLiveContextUsage(null);
+    setEngineUsage(null);
+    setSubagentUsage(null);
   }, [session?.id, newSessionCwd]);
 
   // A plan request is in progress only for its current agent turn.
@@ -856,12 +882,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     try {
       const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/subagents`);
       if (!res.ok) return;
-      const data = await res.json() as { subagents?: SubagentHistoryEntry[] };
+      const data = await res.json() as { subagents?: SubagentHistoryEntry[]; subagentUsage?: UsageTotals | null };
       // Fence AFTER the awaited json: the session or roster generation may
       // have changed while the response was in flight.
       if (sessionIdRef.current !== sid || subagentRosterGenerationRef.current !== generation) return;
       const entries = (data.subagents ?? []).map(historyEntryToSubagentInfo);
       mergeSubagents(entries);
+      // A fresh snapshot, not a delta: the route re-sums every child transcript
+      // on each call, so this replaces the running total rather than adding to
+      // it. Live children's transcripts grow while they work, so the figure
+      // sharpens with each refresh and settles at run end.
+      setSubagentUsage(data.subagentUsage ?? null);
     } catch {
       // Best effort; live frames take precedence while a run is active.
     }
@@ -2025,6 +2056,24 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "auto_retry_end":
         setRetryInfo(null);
         break;
+      case "usage_event": {
+        // Claude Code and codex account for themselves instead of recording
+        // usage on the messages they emit, so their figures arrive as frames.
+        // Every frame is a delta to add: no frame restates an earlier one (see
+        // lib/harness/types.ts), so a turn that dies after reporting still
+        // leaves what it spent counted, and a reconnect cannot inflate a total.
+        const usage = event.usage;
+        if (!isRecord(usage)) break;
+        setEngineUsage((prev) => addUsageTotals(prev ?? emptyUsageTotals(), {
+          input: asCount(usage.input),
+          output: asCount(usage.output),
+          cacheRead: asCount(usage.cacheRead),
+          cacheWrite: asCount(usage.cacheWrite),
+          cost: asCount(usage.cost),
+          unpricedModels: [],
+        }));
+        break;
+      }
       case "auto_compaction_start":
         setIsCompacting(true);
         setCompactError(null);

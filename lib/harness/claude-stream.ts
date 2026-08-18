@@ -1,6 +1,6 @@
-import { asString, isRecord } from "../type-guards";
+import { asCount, asString, isRecord } from "../type-guards";
 import type { TurnArgvInput, TurnStreamState } from "./turn-session";
-import type { EngineEvent } from "./types";
+import type { EngineEvent, EngineUsage } from "./types";
 
 /**
  * Claude Code stream-json → pi event vocabulary.
@@ -14,6 +14,12 @@ import type { EngineEvent } from "./types";
  *   {type:"assistant", message:{content:[text|thinking|tool_use …]}}
  *   {type:"user", message:{content:[{type:"tool_result", …}]}}
  *   {type:"result", subtype:"success"|…, usage, total_cost_usd}
+ *
+ * Usage is reported as `usage_event` frames (lib/harness/types.ts). Tokens ride
+ * the `assistant` frames, one per API call, which sum to the turn; the `result`
+ * frame's `usage` is that same sum restated, so only its `total_cost_usd` —
+ * Claude Code's own price for the turn, which has no per-message counterpart —
+ * is forwarded from there. Emitting both would double every token in the turn.
  *
  * Partial frames drive the live bubble (message_start/message_update); the
  * `assistant` frame is authoritative and closes it with message_end. Tool calls
@@ -104,6 +110,27 @@ function resetStream(state: TurnStreamState): void {
   state.thinking = "";
 }
 
+/** Anthropic reports cache tokens BESIDE a cache-free `input_tokens`, so the
+ *  four fields are disjoint and map straight across. */
+function readAnthropicUsage(value: Record<string, unknown>): EngineUsage | null {
+  const input = asCount(value.input_tokens);
+  const output = asCount(value.output_tokens);
+  const cacheRead = asCount(value.cache_read_input_tokens);
+  const cacheWrite = asCount(value.cache_creation_input_tokens);
+  if (input + output + cacheRead + cacheWrite === 0) return null;
+  return { input, output, cacheRead, cacheWrite };
+}
+
+/** Tokens the assistant frames have reported so far this turn. `state.usage`
+ *  carries the running per-message total (handleAssistant), which is the only
+ *  thing that can tell a result frame apart as a restatement or as the turn's
+ *  sole account. */
+function turnTokens(state: TurnStreamState): number {
+  const usage = state.usage;
+  if (!usage) return 0;
+  return asCount(usage.input) + asCount(usage.output) + asCount(usage.cacheRead) + asCount(usage.cacheWrite);
+}
+
 /** tool_result content is a string, a block array, or something structured. */
 function flattenResultContent(value: unknown): string {
   if (typeof value === "string") return value;
@@ -164,7 +191,18 @@ function handleAssistant(frame: Record<string, unknown>, state: TurnStreamState)
   if (!message) return [];
   const model = asString(message.model);
   if (model) state.model = model;
-  if (isRecord(message.usage)) state.usage = message.usage;
+  const usage = isRecord(message.usage) ? readAnthropicUsage(message.usage) : null;
+  // Accumulate the turn's per-message tokens on `state.usage`: the result frame
+  // needs to know whether these figures arrived at all before deciding to fall
+  // back to its own restated total.
+  if (usage) {
+    state.usage = {
+      input: asCount(state.usage?.input) + usage.input,
+      output: asCount(state.usage?.output) + usage.output,
+      cacheRead: asCount(state.usage?.cacheRead) + usage.cacheRead,
+      cacheWrite: asCount(state.usage?.cacheWrite) + usage.cacheWrite,
+    };
+  }
 
   const content: Array<Record<string, unknown>> = [];
   const calls: Array<{ id: string; name: string; args: Record<string, unknown> }> = [];
@@ -185,12 +223,14 @@ function handleAssistant(frame: Record<string, unknown>, state: TurnStreamState)
   }
 
   // An assistant frame with nothing renderable still has to close whatever the
-  // partial stream put on screen.
+  // partial stream put on screen — and still reports its usage either way.
+  const events: EngineEvent[] = [];
   const blocks = content.length > 0 ? content : streamingContent(state);
-  if (blocks.length === 0) return [];
-
-  const events: EngineEvent[] = [{ type: "message_end", message: assistantMessage(state, blocks) }];
-  resetStream(state);
+  if (blocks.length > 0) {
+    events.push({ type: "message_end", message: assistantMessage(state, blocks) });
+    resetStream(state);
+  }
+  if (usage) events.push({ type: "usage_event", usage });
   for (const call of calls) {
     if (call.id && state.startedTools.has(call.id)) continue;
     if (call.id) state.startedTools.add(call.id);
@@ -220,7 +260,24 @@ function handleUser(frame: Record<string, unknown>, state: TurnStreamState): Eng
 }
 
 function handleResult(frame: Record<string, unknown>, state: TurnStreamState): EngineEvent[] {
-  if (isRecord(frame.usage)) state.usage = frame.usage;
+  const events: EngineEvent[] = [];
+  const restated = isRecord(frame.usage) ? readAnthropicUsage(frame.usage) : null;
+  // The result frame restates the turn's token total, which the assistant
+  // frames already reported one API call at a time. Forwarding it as well would
+  // double every token in the turn, so its tokens are taken ONLY when nothing
+  // else reported any — an older CLI, or a stream that surfaced just the
+  // summary. Then it is the whole account rather than a duplicate of it.
+  const tokens = turnTokens(state) === 0 ? restated : null;
+  // `total_cost_usd` is Claude Code's own price for the turn and has no
+  // per-message counterpart anywhere in the stream, so it always comes from
+  // here. Cody prices nothing itself for this engine.
+  const cost = asCount(frame.total_cost_usd);
+  if (tokens || cost > 0) {
+    events.push({
+      type: "usage_event",
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, ...tokens, ...(cost > 0 ? { cost } : {}) },
+    });
+  }
   const failed = frame.is_error === true || (frame.subtype !== undefined && frame.subtype !== "success");
   if (failed) {
     state.errorMessage =
@@ -229,7 +286,7 @@ function handleResult(frame: Record<string, unknown>, state: TurnStreamState): E
       asString(frame.subtype) ??
       "the turn ended with an error";
   }
-  return [];
+  return events;
 }
 
 /**

@@ -34,10 +34,44 @@ export interface HarnessCapabilities {
   chatExtras: boolean;
 }
 
-/** An event frame streamed to the browser (omp rpc-ui event vocabulary). */
+/**
+ * An event frame streamed to the browser (omp rpc-ui event vocabulary).
+ *
+ * Cody adds one frame to that vocabulary for engines that report their own
+ * accounting instead of recording it on the messages they emit:
+ * `{type: "usage_event", usage: EngineUsage}`.
+ *
+ * Every usage frame is a DELTA to ADD, never a running total. That is what
+ * makes it safe: a turn killed after reporting still leaves the tokens it did
+ * spend counted, a reconnect cannot resurrect a stale total, and no frame can
+ * be counted twice. Translators must therefore never forward an engine's
+ * cumulative turn total alongside the per-message figures that already sum to
+ * it — see lib/harness/claude-stream.ts, where the result frame contributes
+ * only the cost that has no per-message counterpart.
+ */
 export interface EngineEvent {
   type: string;
   [key: string]: unknown;
+}
+
+/**
+ * Usage an engine reports for itself, normalized to the fields Cody sums.
+ *
+ * Cody's arithmetic is `total = input + output + cacheRead + cacheWrite`, so
+ * each translator resolves overlapping engine fields before they arrive here:
+ * Anthropic reports cache tokens beside a cache-free `input_tokens`, while
+ * codex reports an `input_tokens` that already contains its cached and
+ * cache-write counts. Reasoning tokens are deliberately absent — both engines
+ * report them as a subset of output, so carrying them would count the same
+ * tokens twice.
+ */
+export interface EngineUsage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  /** First-party spend in USD, when the engine reports one at all. */
+  cost?: number;
 }
 
 export interface EngineSessionOptions {

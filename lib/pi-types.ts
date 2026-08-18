@@ -156,21 +156,28 @@ export interface SessionStatsInfo {
   };
   premiumRequests?: number;
   /**
-   * Sum of each assistant message's `usage.cost.total` — a genuine
-   * pay-as-you-go API-list-price figure (omp sources it from models.dev plus
-   * curated overrides), not money actually charged on a subscription plan.
+   * API-equivalent spend: what the session would have cost on pay-as-you-go
+   * pricing, never money actually charged on a subscription plan.
+   *
+   * Summed once per source (lib/session-usage.ts): each assistant message's
+   * `usage.cost.total` in the parent transcript (omp prices those from
+   * models.dev plus curated overrides), the same figure inside every subagent
+   * transcript, and the first-party cost an engine reports for itself. The
+   * parent's `task` toolResults carry a per-child cost too, but that is a
+   * display value for events already counted here.
    */
   cost: number;
   /**
-   * Model identifiers that reported nonzero token usage but $0 cost — omp
-   * returns zero for an uncatalogued model rather than flagging it unknown,
-   * so a nonempty list here means `cost` undercounts the true total. Absent
-   * (rather than empty) when no partial-pricing signal was computed.
+   * Model identifiers that reported nonzero token usage while their whole
+   * contribution priced at zero — omp prices an uncatalogued model at zero
+   * rather than flagging it unknown, so a nonempty list here means `cost` is a
+   * floor rather than a total.
    *
-   * DORMANT: nothing populates this yet — the per-model breakdown it needs
-   * lives in the session aggregator. It is a forward-compatible seam, so the
-   * UI must treat absence as "no per-model signal", never as "every model was
-   * priced": an itemized caveat is only rendered when this array actually
+   * Populated by the session aggregator over every transcript the session
+   * touched, so a child that ran an uncatalogued model is named here as well.
+   * Absent (rather than empty) when no per-model signal was computed at all:
+   * the UI must read absence as "no signal", never as "every model was
+   * priced". An itemized caveat is only rendered when this array actually
    * carries names, and a zero `cost` against real tokens is reported as
    * unpriced rather than as $0.
    */

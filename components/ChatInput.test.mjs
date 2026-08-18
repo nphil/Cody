@@ -8,7 +8,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { ChatInput, ModelErrorBanner, buildQuotaView, quotaToneColor } = await jiti.import("./ChatInput.tsx");
+const { ChatInput, ModelErrorBanner, buildQuotaView } = await jiti.import("./ChatInput.tsx");
 
 const usageWindow = (overrides) => ({
   id: "anthropic:7d:opus",
@@ -188,24 +188,6 @@ test("buildQuotaView keys every window uniquely across accounts on one provider"
     "Anthropic (Work Org) · 5-hour window",
     "Anthropic (personal@example.invalid) · 5-hour window",
   ]);
-});
-
-test("quotaToneColor lets the reported state override a reassuring percentage", () => {
-  // Percentage alone: the shipped thresholds.
-  assert.equal(quotaToneColor(12), "var(--accent)");
-  assert.equal(quotaToneColor(69.9), "var(--accent)");
-  assert.equal(quotaToneColor(70), "var(--status-warning)");
-  assert.equal(quotaToneColor(89.9), "var(--status-warning)");
-  assert.equal(quotaToneColor(90), "var(--status-error)");
-  // State overrides upward — a window the provider is rejecting is never
-  // painted "plenty left", however low its percentage reads.
-  assert.equal(quotaToneColor(12, "exhausted"), "var(--status-error)");
-  assert.equal(quotaToneColor(0, "exhausted"), "var(--status-error)");
-  assert.equal(quotaToneColor(12, "warning"), "var(--status-warning)");
-  // ...and never downward: a high percentage still errors under a mild state.
-  assert.equal(quotaToneColor(95, "warning"), "var(--status-error)");
-  assert.equal(quotaToneColor(95, "ok"), "var(--status-error)");
-  assert.equal(quotaToneColor(12, "ok"), "var(--accent)");
 });
 
 test("buildQuotaView paints an exhausted low-percentage window as exhausted", () => {

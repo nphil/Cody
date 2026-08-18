@@ -8,7 +8,8 @@
 // page reload without the live RPC registry (get_subagent_messages is
 // registry-gated and rejects unknown session files).
 
-import { closeSync, existsSync, openSync, readFileSync, readSync, realpathSync, statSync } from "fs";
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from "fs";
+import type { Dirent, Stats } from "fs";
 import { basename, dirname, join } from "path";
 import { getSessionEntries, entryToUiMessage } from "./session-reader";
 import { parseJsonlLenient } from "./omp/session-files";
@@ -17,6 +18,7 @@ import type { SubagentHistoryEntry, SubagentHistoryResult, SubagentAgentSource }
 import type { AgentMessage, SessionEntry } from "./types";
 import { asNumber, asString, isRecord } from "./type-guards";
 import { taskResultStructuredOutput, taskResultUsageCost } from "./task-result-details";
+import { addUsageTotals, aggregateMessageUsage, emptyUsageTotals, type UsageTotals } from "./session-usage";
 
 /** Sibling artifacts directory for a parent session file. */
 export function siblingDirForSession(sessionFilePath: string): string {
@@ -308,6 +310,163 @@ export function readSubagentTranscriptPage(sessionFilePath: string, fromByte = 0
   // it instead of returning the same offset forever.
   if (nextByte === startByte && endByte < size) nextByte = endByte;
   return { sessionFile: sessionFilePath, fromByte: startByte, nextByte, reset, messages, totalBytes: size };
+}
+
+/**
+ * Usage recovered from a parent session's subagent transcripts, plus how many
+ * transcripts contributed — zero tells "no subagent ran" apart from "their
+ * transcripts reported nothing".
+ */
+export interface SubagentTranscriptUsage extends UsageTotals {
+  transcripts: number;
+}
+
+/** A child's own children land in `<parent-dir>/<child-id>/`, so the walk
+ *  covers a few generations of orchestration without being unbounded. */
+const MAX_SUBAGENT_USAGE_DEPTH = 4;
+/** Transcripts tracked for incremental re-scanning (one entry per file). */
+const MAX_USAGE_SCAN_CACHE_ENTRIES = 1024;
+
+interface TranscriptUsageScan {
+  size: number;
+  mtimeMs: number;
+  /** Byte offset just past the last complete line already accounted for. */
+  offset: number;
+  totals: UsageTotals;
+}
+
+declare global {
+  var __ompSubagentUsageCache: Map<string, TranscriptUsageScan> | undefined;
+}
+
+// Transcripts are append-only, so a re-scan reads only what was appended since
+// the last one. Without this, every roster refresh during an orchestration
+// would re-parse every child transcript from byte zero.
+function getTranscriptUsageCache(): Map<string, TranscriptUsageScan> {
+  if (!globalThis.__ompSubagentUsageCache) globalThis.__ompSubagentUsageCache = new Map();
+  return globalThis.__ompSubagentUsageCache;
+}
+
+/** Bytes held in memory at once while accounting for a transcript. The dialog's
+ *  cap bounds a whole transcript because it materializes messages for display;
+ *  accounting only needs a sliding window, so an arbitrarily long transcript
+ *  costs time rather than memory — and is never skipped, which would put back
+ *  the very under-count this accounting exists to remove. */
+const USAGE_SCAN_WINDOW_BYTES = 4 * 1024 * 1024;
+
+/** Account for every COMPLETE line in `[from, to)`, one bounded window at a
+ *  time. A transcript being appended to right now ends mid-line; that line is
+ *  left for the next scan instead of being parsed half-written. */
+function scanTranscriptRange(
+  filePath: string,
+  from: number,
+  to: number,
+): { totals: UsageTotals; consumed: number } {
+  if (to <= from) return { totals: emptyUsageTotals(), consumed: 0 };
+  let totals = emptyUsageTotals();
+  let consumed = 0;
+  const fd = openSync(filePath, "r");
+  try {
+    const buffer = Buffer.allocUnsafe(Math.min(to - from, USAGE_SCAN_WINDOW_BYTES));
+    while (from + consumed < to) {
+      const length = Math.min(to - from - consumed, buffer.length);
+      const read = readSync(fd, buffer, 0, length, from + consumed);
+      if (read <= 0) break;
+      const lastNewline = buffer.lastIndexOf(0x0a, read - 1);
+      // No newline in a full window means one JSONL line is longer than the
+      // window: skip past it rather than stalling on it forever. Lines are one
+      // message each, so this can only lose a single outsized message.
+      if (lastNewline < 0) {
+        if (read < length || from + consumed + read >= to) break;
+        consumed += read;
+        continue;
+      }
+      // Each window starts on a line boundary, so its bytes decode without the
+      // offset skew that slicing the decoded string would introduce.
+      const entries = parseJsonlLenient<SessionEntry>(buffer.subarray(0, lastNewline + 1).toString("utf8"));
+      const messages = entries
+        .map((entry) => entryToUiMessage(entry, {}))
+        .filter((message): message is AgentMessage => message !== null);
+      totals = addUsageTotals(totals, aggregateMessageUsage(messages));
+      consumed += lastNewline + 1;
+    }
+  } finally {
+    closeSync(fd);
+  }
+  return { totals, consumed };
+}
+
+function transcriptUsage(filePath: string): UsageTotals | null {
+  let stat: Stats;
+  try {
+    stat = statSync(filePath);
+  } catch {
+    return null;
+  }
+  if (!stat.isFile()) return null;
+  const cache = getTranscriptUsageCache();
+  const cached = cache.get(filePath);
+  if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
+    cache.delete(filePath);
+    cache.set(filePath, cached);
+    return cached.totals;
+  }
+  // A file that shrank below what was already counted was replaced rather than
+  // appended to, so it is re-read from the start — the alternative is a total
+  // that keeps a vanished turn's tokens forever.
+  const resume = cached && stat.size >= cached.offset ? cached : null;
+  const from = resume ? resume.offset : 0;
+  // No size cap here on purpose: accounting reads a sliding window, so a
+  // transcript larger than the dialog can display still contributes its tokens.
+  const scan = scanTranscriptRange(filePath, from, stat.size);
+  const totals = resume ? addUsageTotals(resume.totals, scan.totals) : scan.totals;
+  cache.delete(filePath);
+  cache.set(filePath, { size: stat.size, mtimeMs: stat.mtimeMs, offset: from + scan.consumed, totals });
+  while (cache.size > MAX_USAGE_SCAN_CACHE_ENTRIES) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+  return totals;
+}
+
+/**
+ * Sum the usage every subagent transcript in a parent session's sibling
+ * artifacts dir recorded — the only place those tokens exist, and the half of
+ * an orchestrated session's account that the session walk skips.
+ *
+ * Deliberately NOT sourced from the parent's `task` toolResult rollups: those
+ * are display values for these very events, so adding them double-counts.
+ */
+export function sumSubagentTranscriptUsage(sessionFilePath: string): SubagentTranscriptUsage {
+  let combined = emptyUsageTotals();
+  let transcripts = 0;
+  const pending: Array<{ dir: string; depth: number }> = [{ dir: siblingDirForSession(sessionFilePath), depth: 0 }];
+  while (pending.length > 0) {
+    const next = pending.pop();
+    if (!next) break;
+    let dirents: Dirent[];
+    try {
+      dirents = readdirSync(next.dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const dirent of dirents) {
+      // Neither isDirectory() nor isFile() is true for a symlink, so a link
+      // planted in the artifacts dir cannot pull a file from outside it into
+      // the session's accounting.
+      if (dirent.isDirectory()) {
+        if (next.depth < MAX_SUBAGENT_USAGE_DEPTH) pending.push({ dir: join(next.dir, dirent.name), depth: next.depth + 1 });
+        continue;
+      }
+      if (!dirent.isFile() || !dirent.name.endsWith(".jsonl")) continue;
+      const totals = transcriptUsage(join(next.dir, dirent.name));
+      if (!totals) continue;
+      transcripts += 1;
+      combined = addUsageTotals(combined, totals);
+    }
+  }
+  return { ...combined, transcripts };
 }
 
 /** Cap on completion bytes materialized for the dialog (final outputs are small). */

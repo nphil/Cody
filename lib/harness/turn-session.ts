@@ -70,7 +70,15 @@ export interface TurnStreamState {
   toolNames: Map<string, string>;
   /** toolCallIds already announced with tool_execution_start. */
   startedTools: Set<string>;
-  /** Usage/cost payload from the engine's terminal frame, when present. */
+  /**
+   * The turn's usage so far, normalized to EngineUsage fields (input, output,
+   * cacheRead, cacheWrite) as the translator reports each `usage_event`.
+   *
+   * It is a translator-private accumulator, not an output: the browser learns
+   * usage from the `usage_event` frames themselves. It exists so a terminal
+   * frame restating the turn's total can tell whether that total was already
+   * reported piece by piece — see lib/harness/claude-stream.ts.
+   */
   usage: Record<string, unknown> | null;
   /** Failure text from the engine's own frames; surfaced as an error notice. */
   errorMessage: string | null;

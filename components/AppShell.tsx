@@ -14,7 +14,7 @@ import { ThemePicker } from "./ThemePicker";
 import { TitleBar } from "./TitleBar";
 import { useDesktopShell } from "@/hooks/useDesktopShell";
 import { AppWindow, CircleArrowUp, Files, GitBranch, History, Info, ListTodo, Menu, PanelLeft, ScrollText, Terminal, TriangleAlert } from "lucide-react";
-import { formatApiCost, formatCompactNumber, formatPercent } from "@/lib/format";
+import { formatApiCost, formatCompactNumber, formatPercent, usageToneColor } from "@/lib/format";
 import { translate, useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -1321,12 +1321,15 @@ export function AppShell() {
                 ? t("usage.notPriced")
                 : `${formatApiCost(c, 2)}${costPartial ? "+" : ""}`;
 
+            // Muted until there is a percentage to colour; from there the
+            // composer's shipped thresholds decide, so the same 90.0% cannot be
+            // an error in the ring and a warning here (it was: `>= 90` there
+            // against `> 90` in this chip).
             let ctxColor = "var(--text-muted)";
             let ctxStr: string | null = null;
             if (contextUsage?.contextWindow) {
               const pct = contextUsage.percent;
-              if (pct !== null && pct > 90) ctxColor = "var(--status-error)";
-              else if (pct !== null && pct > 70) ctxColor = "var(--status-warning)";
+              if (pct !== null) ctxColor = usageToneColor(pct);
               ctxStr = pct !== null ? `${formatPercent(pct)} / ${formatCompactNumber(contextUsage.contextWindow)}` : `? / ${formatCompactNumber(contextUsage.contextWindow)}`;
             }
 

@@ -1,6 +1,6 @@
-import { asNumber, asString, isRecord } from "../type-guards";
+import { asCount, asNumber, asString, isRecord } from "../type-guards";
 import type { TurnArgvInput, TurnStreamState } from "./turn-session";
-import type { EngineEvent } from "./types";
+import type { EngineEvent, EngineUsage } from "./types";
 
 /**
  * Codex `exec --json` → pi event vocabulary.
@@ -12,6 +12,14 @@ import type { EngineEvent } from "./types";
  *   {type:"item.started"|"item.updated"|"item.completed", item:{…}}
  *   {type:"turn.completed", usage}
  *   {type:"error", message} / {type:"turn.failed", error:{message}}
+ *
+ * `turn.completed` is the only usage codex reports, and it reports it once per
+ * turn, so it becomes exactly one `usage_event` (lib/harness/types.ts). Its
+ * `input_tokens` INCLUDES the cached and cache-write counts it itemizes
+ * separately (codex-rs/tui/src/token_usage.rs derives its own display total as
+ * `input_tokens - cached_input_tokens`), so those are subtracted out before the
+ * figures reach Cody, whose total adds the four fields up. codex reports no
+ * cost, so none is claimed.
  *
  * Item kinds Cody renders: agent_message (assistant text), reasoning (thinking),
  * command_execution / file_change / mcp_tool_call / web_search (tool calls).
@@ -112,6 +120,18 @@ function stringify(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+/** codex itemizes cached and cache-write tokens INSIDE `input_tokens`, so the
+ *  itemized halves come out of the input figure — otherwise Cody's
+ *  input+output+cacheRead+cacheWrite total counts them twice. */
+function readCodexUsage(value: Record<string, unknown>): EngineUsage | null {
+  const cacheRead = asCount(value.cached_input_tokens);
+  const cacheWrite = asCount(value.cache_write_input_tokens);
+  const input = Math.max(0, asCount(value.input_tokens) - cacheRead - cacheWrite);
+  const output = asCount(value.output_tokens);
+  if (input + output + cacheRead + cacheWrite === 0) return null;
+  return { input, output, cacheRead, cacheWrite };
 }
 
 interface ToolShape {
@@ -270,9 +290,17 @@ export function translateCodexLine(line: unknown, state: TurnStreamState): Engin
       if (threadId) state.engineSessionId = threadId;
       return [];
     }
-    case "turn.completed":
-      if (isRecord(line.usage)) state.usage = line.usage;
-      return flushStream(state);
+    case "turn.completed": {
+      // Any open bubble closes first, so the turn's usage lands after the
+      // messages it paid for rather than in the middle of them.
+      const events = flushStream(state);
+      const usage = isRecord(line.usage) ? readCodexUsage(line.usage) : null;
+      if (usage) {
+        state.usage = { ...usage };
+        events.push({ type: "usage_event", usage });
+      }
+      return events;
+    }
     case "turn.failed":
       state.errorMessage = errorText(line.error);
       return flushStream(state);

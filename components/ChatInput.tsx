@@ -7,7 +7,7 @@ import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, Slas
 import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
 import { formatGoalElapsed } from "@/lib/web-mode-state";
 import { toast } from "@/components/ui/toast";
-import { formatCompactNumber } from "@/lib/format";
+import { formatCompactNumber, formatRelativeTime, usageToneColor } from "@/lib/format";
 import { clearDraft, getDraft, setDraft, type ChatDraftFile, type ChatDraftImage } from "@/lib/draft-store";
 import { WEB_SLASH_COMMANDS, expandWebSlashCommand } from "@/lib/web-slash-commands";
 import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-layout";
@@ -143,21 +143,6 @@ function compareModelOptions(collator: Intl.Collator, a: ModelOption, b: ModelOp
   return collator.compare(a.name || a.modelId, b.name || b.modelId)
     || collator.compare(a.provider, b.provider)
     || collator.compare(a.modelId, b.modelId);
-}
-
-/** Shipped ring thresholds, shared by the arc, the headline and every bar:
- *  under 70 is the accent, 70–89 warns, 90 and up is an error.
- *
- *  The percentage alone is not the whole story: a provider can reject requests
- *  against a window that reads 12% full (a hard cap Cody cannot see, a
- *  suspended account, a per-model block). Painting that accent-coloured would
- *  tell the composer "plenty left" about a window nothing can be spent on, so
- *  the engine-reported state overrides the number upward — never downward. */
-export function quotaToneColor(percent: number, state?: UsageWindowState): string {
-  if (state === "exhausted") return "var(--status-error)";
-  if (percent >= 90) return "var(--status-error)";
-  if (state === "warning" || percent >= 70) return "var(--status-warning)";
-  return "var(--accent)";
 }
 
 export interface QuotaWindowView {
@@ -303,7 +288,7 @@ export function buildQuotaView(
         key: `${accountIndex}:${account.provider}:${quotaWindow.id}`,
         label: nameWindow(account.label, quotaWindow.label),
         percent,
-        color: quotaToneColor(percent, quotaWindow.state),
+        color: usageToneColor(percent, quotaWindow.state),
         state: quotaWindow.state,
         exhausted: quotaWindow.state === "exhausted",
         resetsAt: quotaWindow.resetsAt,
@@ -315,7 +300,7 @@ export function buildQuotaView(
   return {
     known: true,
     percent,
-    color: quotaToneColor(percent, binding.window.state),
+    color: usageToneColor(percent, binding.window.state),
     state: binding.window.state,
     label: nameWindow(binding.account.label, binding.window.label),
     resetsAt: binding.window.resetsAt,
@@ -336,21 +321,6 @@ function formatResetTime(iso: string | null, locale: string, now: number): strin
   return sameDay
     ? at.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" })
     : at.toLocaleString(locale, { weekday: "short", hour: "2-digit", minute: "2-digit" });
-}
-
-/** Snapshot age as a short relative string, mirroring the sidebar's helper
- *  (which is private to that component). */
-function formatSnapshotAge(iso: string | null, locale: string, now: number): string | null {
-  if (!iso) return null;
-  const ts = new Date(iso).getTime();
-  if (!Number.isFinite(ts)) return null;
-  const minutes = Math.max(0, Math.floor((now - ts) / 60_000));
-  const formatter = new Intl.RelativeTimeFormat(locale, { numeric: "auto", style: "narrow" });
-  if (minutes < 1) return formatter.format(0, "minute");
-  if (minutes < 60) return formatter.format(-minutes, "minute");
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return formatter.format(-hours, "hour");
-  return formatter.format(-Math.floor(hours / 24), "day");
 }
 
 const THINKING_LEVEL_DESC_KEYS: Record<string, string> = {
@@ -1621,11 +1591,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const contextPercent = contextUsage?.percent ?? null;
   const hasKnownContextUsage = contextPercent != null;
   const clampedContextPercent = Math.max(0, Math.min(100, contextPercent ?? 0));
-  const contextRingColor = hasKnownContextUsage && clampedContextPercent >= 90
-    ? "var(--status-error)"
-    : hasKnownContextUsage && clampedContextPercent >= 70
-      ? "var(--status-warning)"
-      : "var(--accent)";
+  // Same thresholds as the quota ring above and the top bar's context chip: an
+  // unknown percentage stays on the accent rather than colouring a guess.
+  const contextRingColor = hasKnownContextUsage ? usageToneColor(clampedContextPercent) : "var(--accent)";
   const contextTokens = hasKnownContextUsage
     ? contextUsage?.tokens
       ?? (contextUsage?.contextWindow
@@ -1685,7 +1653,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (contextPopoverOpen) refreshUsage();
   }, [contextPopoverOpen, refreshUsage]);
   const quotaHeadlineReset = quota.known ? formatResetTime(quota.resetsAt, locale, usageNow) : null;
-  const quotaAge = quota.known ? formatSnapshotAge(quota.fetchedAt, locale, usageNow) : null;
+  const quotaAge = quota.known && quota.fetchedAt ? formatRelativeTime(quota.fetchedAt, locale, usageNow) : null;
   // Age is only claimed when the snapshot carries a usable timestamp, and a
   // snapshot the server flagged stale says so rather than passing for fresh.
   const quotaFreshness = quotaAge

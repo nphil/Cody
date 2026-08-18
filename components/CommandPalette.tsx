@@ -6,6 +6,7 @@ import { Command } from "cmdk";
 import { Moon, Plus, Sun, MessageSquare } from "lucide-react";
 import type { SessionInfo } from "@/lib/types";
 import { useI18n } from "@/lib/i18n";
+import { formatRelativeTime } from "@/lib/format";
 import { useTheme } from "@/hooks/useTheme";
 
 type Props = {
@@ -14,15 +15,6 @@ type Props = {
   currentModel?: string | null;
 };
 
-function relativeTime(value: string, locale: string): string {
-  const diff = Date.now() - new Date(value).getTime();
-  const mins = Math.max(0, Math.floor(diff / 60000));
-  if (mins < 1) return new Intl.RelativeTimeFormat(locale, { numeric: "auto" }).format(0, "minute");
-  if (mins < 60) return new Intl.RelativeTimeFormat(locale, { numeric: "always" }).format(-mins, "minute");
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return new Intl.RelativeTimeFormat(locale, { numeric: "always" }).format(-hours, "hour");
-  return new Intl.RelativeTimeFormat(locale, { numeric: "always" }).format(-Math.floor(hours / 24), "day");
-}
 
 export function CommandPalette({ onSelectSession, onNewSession, currentModel }: Props) {
   const { t, locale } = useI18n();
@@ -30,6 +22,10 @@ export function CommandPalette({ onSelectSession, onNewSession, currentModel }: 
   const [open, setOpen] = useState(false);
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(false);
+  // Ages are "as of when the palette opened": read in the open effect below,
+  // never during render (a render-time clock is impure, and the palette is
+  // open for seconds at a time, so it has nothing to tick for).
+  const [relativeTimeNow, setRelativeTimeNow] = useState(0);
 
   const loadSessions = useCallback(() => {
     setLoading(true);
@@ -55,7 +51,11 @@ export function CommandPalette({ onSelectSession, onNewSession, currentModel }: 
     return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [open]);
 
-  useEffect(() => { if (open) loadSessions(); }, [open, loadSessions]);
+  useEffect(() => {
+    if (!open) return;
+    setRelativeTimeNow(Date.now());
+    loadSessions();
+  }, [open, loadSessions]);
   if (!open || typeof document === "undefined") return null;
 
   const choose = (action: () => void) => { action(); setOpen(false); };
@@ -68,7 +68,7 @@ export function CommandPalette({ onSelectSession, onNewSession, currentModel }: 
         <Command.List style={{ padding: "8px", overflowY: "auto", maxHeight: "min(55vh, 440px)" }}>
           <Command.Empty style={{ padding: 20, textAlign: "center", color: "var(--text-muted)", fontSize: 13 }}>{loading ? "Loading sessions..." : t("commandPalette.empty")}</Command.Empty>
           <Command.Group heading={t("commandPalette.sessions")}>
-            {sessions.map((session) => <Command.Item key={session.id} value={`${session.name ?? session.id} ${session.cwd}`} onSelect={() => choose(() => onSelectSession(session))} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 10px", borderRadius: "var(--radius-control)", color: "var(--text)", cursor: "pointer" }}><MessageSquare size={15} color="var(--accent)" /><span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{session.name || session.id}</span><span style={{ color: "var(--text-dim)", fontSize: 11 }}>{relativeTime(session.modified, locale)}</span></Command.Item>)}
+            {sessions.map((session) => <Command.Item key={session.id} value={`${session.name ?? session.id} ${session.cwd}`} onSelect={() => choose(() => onSelectSession(session))} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 10px", borderRadius: "var(--radius-control)", color: "var(--text)", cursor: "pointer" }}><MessageSquare size={15} color="var(--accent)" /><span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{session.name || session.id}</span><span style={{ color: "var(--text-dim)", fontSize: 11 }}>{formatRelativeTime(session.modified, locale, relativeTimeNow) ?? ""}</span></Command.Item>)}
           </Command.Group>
           <Command.Group heading={t("commandPalette.actions")}>
             <Command.Item value={t("commandPalette.newSession")} onSelect={() => choose(onNewSession)} style={{ display: "flex", gap: 10, padding: "9px 10px", borderRadius: "var(--radius-control)", color: "var(--text)", cursor: "pointer" }}><Plus size={15} color="var(--accent)" />{t("commandPalette.newSession")}</Command.Item>

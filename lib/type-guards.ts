@@ -13,3 +13,10 @@ export function asString(value: unknown): string | undefined {
 export function asNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
+
+/** A token/usage count from an engine payload: a missing, malformed or
+ *  negative figure contributes nothing rather than corrupting a sum. */
+export function asCount(value: unknown): number {
+  const parsed = asNumber(value);
+  return parsed !== undefined && parsed > 0 ? parsed : 0;
+}

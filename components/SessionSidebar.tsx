@@ -4,6 +4,7 @@ import { memo, useEffect, useLayoutEffect, useState, useCallback, useRef, useMem
 import { createPortal } from "react-dom";
 import type { ManagedProject, SessionInfo } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
+import { formatRelativeTime } from "@/lib/format";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
@@ -178,20 +179,6 @@ function PathLabel({ text, style }: { text: string; style?: CSSProperties }) {
       <span style={{ unicodeBidi: "plaintext" }}>{text}</span>
     </span>
   );
-}
-
-function formatRelativeTime(value: string, locale: string, now: number): string | null {
-  const timestamp = new Date(value).getTime();
-  if (!Number.isFinite(timestamp)) return null;
-
-  const minutes = Math.max(0, Math.floor((now - timestamp) / 60_000));
-  const formatter = new Intl.RelativeTimeFormat(locale, { numeric: "auto", style: "narrow" });
-  if (minutes < 1) return formatter.format(0, "minute");
-  if (minutes < 60) return formatter.format(-minutes, "minute");
-
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return formatter.format(-hours, "hour");
-  return formatter.format(-Math.floor(hours / 24), "day");
 }
 
 const SIDEBAR_BUTTON_TRANSITION = "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm), border-color var(--dur-fast) var(--ease-out-warm)";
