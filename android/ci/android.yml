@@ -1,0 +1,663 @@
+name: Cody Android
+
+# WHAT THIS PUBLISHES, AND WHY IT LOOKS LIKE THIS
+#
+# One APK, one rolling download URL, forever:
+#
+#   https://github.com/nphil/Cody/releases/download/android-latest/cody-android.apk
+#
+# That URL is the product. It is what the tablet's updater (Obtainium) is
+# pointed at once and never again, so every design choice below is subordinate
+# to keeping it valid, current and coherent.
+#
+# The house precedent is .github/workflows/desktop.yml and this file mirrors it
+# deliberately: a rolling tag whose release is updated IN PLACE (never deleted
+# and re-created, because deleting takes the download offline for every client
+# polling in that window), `gh` rather than an upsert action (because the tag
+# has to move to a new commit every run), and -- the rule desktop.yml calls out
+# in capitals -- EVERY ASSET IS UPLOADED BEFORE THE MANIFEST THAT NAMES IT.
+#
+# Where this file deviates from desktop.yml, it is for a reason written down at
+# the point of deviation. The two deviations are the visibility of the rolling
+# release (see RELEASE NAMESPACE) and the absence of a `paths:` trigger filter
+# (see TRIGGERS).
+#
+# TRIGGERS
+#
+# Push to main, push of an `android-v*` tag, or manual dispatch. Unlike
+# desktop.yml there is NO `paths:` filter on the trigger, and that is not an
+# oversight: GitHub applies `paths:` to tag pushes as well as branch pushes, and
+# a tag that points at an already-pushed commit carries no changed-file list, so
+# a `paths:`-filtered workflow silently does not run when you tag a release --
+# the one moment you most want it to. The filtering is therefore done in the
+# `decide` job, which can tell the two cases apart and treats a tag or a
+# dispatch as an unconditional release.
+#
+# LOOP SAFETY
+#
+# This workflow force-moves the `android-latest` tag on every run. Two
+# independent properties stop that from re-entering here:
+#   1. The tag filter is `android-v*`. `android-latest` does not match it, so
+#      the rolling tag cannot satisfy this workflow's own trigger. This is
+#      structural -- it holds even if GitHub's token semantics change.
+#   2. A push made with the built-in GITHUB_TOKEN does not start workflow runs.
+# Renaming the rolling tag to something matching `android-v*` would turn every
+# release into an infinite loop. Do not.
+#
+# RELEASE NAMESPACE AND VISIBILITY
+#
+# Three release pointers exist in this repo. Container releases own `vX.Y.Z`
+# and, critically, the repo's single /releases/latest slot -- the ShipLog plugin
+# on Unraid reads it as the server's version. Desktop owns `desktop-*`. Android
+# owns `android-*` and must never take that slot, so every `gh release create`
+# below passes `--latest=false`. That flag, not prerelease, is the isolation
+# mechanism (desktop.yml's own top-of-file note says so).
+#
+#   - `android-latest` -- rolling, force-moved, updated in place. Asset name is
+#     the fixed `cody-android.apk`. This is the install and update channel.
+#
+#     DEVIATION FROM desktop.yml: this release is NOT marked prerelease, where
+#     `desktop-latest` is. The reason is Obtainium. Its GitHub source lists
+#     /repos/{o}/{r}/releases and walks the sorted list in
+#     _selectGitHubTargetRelease(); its `includePrereleases` switch defaults to
+#     FALSE, and a prerelease is skipped outright. Marking the rolling release
+#     prerelease would therefore make Obtainium's DEFAULT configuration select
+#     the wrong release, and the owner would have to know to flip a switch to
+#     get updates at all. desktop-latest can afford to be hidden because a
+#     bespoke Rust updater polls it by exact tag; Obtainium is not bespoke.
+#     Visibility here is load-bearing, not cosmetic.
+#
+#   - `android-v<X.Y.Z>` -- immutable per-version archive, created only when a
+#     human pushes an `android-v*` tag. Marked `--prerelease` for the mirror
+#     image of the reason above: it must be invisible to Obtainium's default
+#     configuration so it can never win the selection loop against the rolling
+#     release. Its APK is version-stamped (`cody-android-<version>.apk`) so it
+#     also fails any APK-name filter aimed at the rolling asset. Belt and
+#     braces, because getting this wrong means the tablet silently pins itself
+#     to an old build.
+#
+# THE VERSION STRING IS THE RELEASE TITLE, DELIBERATELY
+#
+# Obtainium derives an app's version from the release TAG unless the
+# `releaseTitleAsVersion` switch is on. Our tag is `android-latest` on every
+# single release -- a constant -- so with the default setting Obtainium would
+# see the same version forever and never offer an update. The rolling release is
+# therefore TITLED with the bare version string and android/README.md tells the
+# owner to turn `Release title as version` on. That switch is the one piece of
+# non-default configuration the whole scheme needs, and it is why the title
+# below is `0.1.0+abc1234` and not something prettier.
+#
+# SIGNING
+#
+# Release signing is opt-in. When the four ANDROID_KEYSTORE_* secrets are
+# present the APK is signed with the owner's upload key; when they are absent
+# the build falls back to the AGP debug key (app/build.gradle.kts resolves
+# this) and publishes anyway. A pipeline that cannot ship until a secret exists
+# is a pipeline that is broken on the day it is written. The release notes say
+# in plain language which of the two happened, because the difference decides
+# whether the next update installs over this one or has to be uninstalled
+# first -- see android/README.md.
+
+on:
+  push:
+    branches: [main]
+    tags: ["android-v*"]
+  workflow_dispatch:
+    inputs:
+      base_version:
+        description: "Base version for a non-tag build (X.Y.Z). The short SHA is appended."
+        required: false
+        default: ""
+        type: string
+
+# The rolling release and its tag are a single shared mutation target, exactly
+# as in desktop.yml: serialize the whole workflow rather than per-ref, so two
+# pushes in quick succession publish one after the other instead of racing to
+# clobber the same asset.
+concurrency:
+  group: android-release
+  cancel-in-progress: false
+
+env:
+  # Bumped by hand. Only ever used for non-tag builds, which append the short
+  # SHA; a tag build takes its version from the tag and ignores this.
+  BASE_VERSION: "0.1.0"
+  # Must match libs.versions.toml's compileSdk/targetSdk and the build-tools the
+  # local toolchain uses (/tmp/atk/provision.sh installed the same pair).
+  ANDROID_PLATFORM: "37"
+  ANDROID_BUILD_TOOLS: "37.0.0"
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Single source of the release's identity, and the only place that decides
+  # whether a release happens at all.
+  decide:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      release: ${{ steps.plan.outputs.release }}
+      version: ${{ steps.plan.outputs.version }}
+      version_code: ${{ steps.plan.outputs.version_code }}
+      tagged: ${{ steps.plan.outputs.tagged }}
+    steps:
+      # Two commits deep so a branch push can be diffed against its parent
+      # without fetching the entire history.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Plan the release
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+          RUN_NUMBER: ${{ github.run_number }}
+          DISPATCH_BASE: ${{ inputs.base_version }}
+        run: |
+          set -euo pipefail
+
+          # --- version name -------------------------------------------------
+          # A tag is an explicit, human decision and wins outright. Everything
+          # else is a rolling build off main and is marked as such by the short
+          # SHA, so a version string is never ambiguous about which it is.
+          case "$REF" in
+            refs/tags/android-v*)
+              version="${REF#refs/tags/android-v}"
+              printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || {
+                echo "::error::tag ${REF#refs/tags/} does not carry an X.Y.Z version"
+                exit 1
+              }
+              tagged=true
+              ;;
+            *)
+              base="${DISPATCH_BASE:-}"
+              [ -n "$base" ] || base="${BASE_VERSION}"
+              printf '%s' "$base" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || {
+                echo "::error::base version '${base}' is not X.Y.Z"
+                exit 1
+              }
+              version="${base}+$(printf '%s' "$SHA" | cut -c1-7)"
+              tagged=false
+              ;;
+          esac
+
+          # --- version code -------------------------------------------------
+          # github.run_number is monotonic for the life of the workflow file and
+          # never repeats, which is the ONLY property Android requires and the
+          # only one a derived-from-version scheme keeps getting wrong. It is
+          # also why this workflow must not be renamed: a new name restarts the
+          # counter at 1 and every existing install refuses the downgrade.
+          version_code="$RUN_NUMBER"
+
+          # --- should this run publish? --------------------------------------
+          # A tag or a dispatch is always deliberate. A push to main only
+          # releases when it actually touched the app or this workflow -- the
+          # check `paths:` cannot safely do for tags (see TRIGGERS at the top).
+          release=true
+          if [ "$EVENT" = "push" ] && [ "$tagged" = "false" ]; then
+            release=false
+            if [ -z "${BEFORE:-}" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
+               || ! git rev-parse -q --verify "${BEFORE}^{commit}" >/dev/null 2>&1; then
+              # First push, force push, or a parent this shallow checkout does
+              # not have. Unknowable => build. Wrong here costs three minutes;
+              # wrong the other way silently skips a release.
+              release=true
+            elif git diff --name-only "$BEFORE" "$SHA" \
+                 | grep -Eq '^(android/|\.github/workflows/android\.yml$)'; then
+              release=true
+            fi
+          fi
+
+          {
+            echo "release=$release"
+            echo "version=$version"
+            echo "version_code=$version_code"
+            echo "tagged=$tagged"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "::notice::android ${version} (versionCode ${version_code}) release=${release} tagged=${tagged}"
+
+  # ---------------------------------------------------------------------
+  build:
+    needs: decide
+    if: needs.decide.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    outputs:
+      signed: ${{ steps.sign.outputs.signed }}
+      sha256: ${{ steps.stage.outputs.sha256 }}
+      size: ${{ steps.stage.outputs.size }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # JDK 21, Temurin -- the SAME artifact /tmp/atk/provision.sh fetches by
+      # hand from api.adoptium.net, but resolved from the runner's own tool
+      # cache and checksum-verified by the action. Reproducing the curl here
+      # would be slower and strictly less safe, so this is the one place the
+      # workflow uses an action instead of copying the provisioning script.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      # The SDK, on the other hand, IS provisioned exactly as provision.sh does
+      # it -- sdkmanager, explicit package names, `yes | sdkmanager --licenses`.
+      # No third-party action: this workflow signs and publishes an APK that
+      # installs on the owner's tablet, and the supply chain for that artifact
+      # should be GitHub's runner image plus Google's SDK repository and nothing
+      # else. It is nine lines; an action would not be shorter, only opaquer.
+      #
+      # ubuntu-latest ships cmdline-tools preinstalled, so the download branch
+      # is a fallback for an image that stops doing so rather than the norm.
+      - name: Provision the Android SDK
+        run: |
+          set -euo pipefail
+          export ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/android-sdk}}"
+
+          if [ ! -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            echo "cmdline-tools missing from the runner image; fetching"
+            mkdir -p "$ANDROID_HOME/cmdline-tools/_x"
+            curl -sSL --retry 3 -o /tmp/cmdline.zip \
+              "https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip"
+            ( cd "$ANDROID_HOME/cmdline-tools/_x" && unzip -q /tmp/cmdline.zip )
+            mv "$ANDROID_HOME/cmdline-tools/_x/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+            rmdir "$ANDROID_HOME/cmdline-tools/_x"
+          fi
+
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes 2>/dev/null | "$sdkmanager" --licenses > /dev/null || true
+          "$sdkmanager" \
+            "platforms;android-${ANDROID_PLATFORM}" \
+            "build-tools;${ANDROID_BUILD_TOOLS}" \
+            "platform-tools" > /dev/null
+
+          {
+            echo "ANDROID_HOME=$ANDROID_HOME"
+            echo "ANDROID_SDK_ROOT=$ANDROID_HOME"
+          } >> "$GITHUB_ENV"
+
+      # Keyed on the things that actually change the resolved dependency graph.
+      # restore-keys lets an unrelated catalog bump start from the previous
+      # cache instead of a cold download of the whole Compose/Ktor tree.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/gradle/libs.versions.toml', 'android/gradle/wrapper/gradle-wrapper.properties', 'android/**/*.gradle.kts') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      # Only when all four secrets are present. A half-configured keystore must
+      # fail loudly rather than half-apply: AGP would otherwise build a release
+      # with a store path and no password and die deep inside the signing task
+      # with a message that does not mention secrets at all.
+      - name: Decode the release keystore
+        id: sign
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          present=0
+          for v in "$KEYSTORE_B64" "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD"; do
+            [ -n "$v" ] && present=$((present + 1))
+          done
+
+          if [ "$present" -eq 0 ]; then
+            echo "::warning::No ANDROID_KEYSTORE_* secrets configured. Publishing a DEBUG-SIGNED APK; see android/README.md before relying on it as an update channel."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$present" -ne 4 ]; then
+            echo "::error::${present} of 4 ANDROID_KEYSTORE_* secrets are set. Set all four or none -- a partial keystore configuration fails inside AGP with an unrelated-looking error."
+            exit 1
+          fi
+
+          # Absolute: app/build.gradle.kts resolves CODY_KEYSTORE_FILE with
+          # `file(...)`, which is relative to the :app project directory.
+          keystore="${RUNNER_TEMP}/cody-release.jks"
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$keystore"
+          # Three checks, each for a failure that otherwise surfaces as an
+          # unreadable error deep inside AGP's packaging task.
+
+          # 1. A truncated or mis-pasted secret is not a keystore at all.
+          keytool -list -keystore "$keystore" -storepass "$KEYSTORE_PASSWORD" > /dev/null 2>&1 || {
+            echo "::error::ANDROID_KEYSTORE_BASE64 did not decode to a keystore readable with ANDROID_KEYSTORE_PASSWORD. Re-create the secret with 'base64 -w0' and no trailing newline."
+            exit 1
+          }
+
+          # 2. The alias has to exist. AGP reports a missing one as a null
+          #    KeytoolException, which names neither the alias nor the secret.
+          keytool -list -keystore "$keystore" -storepass "$KEYSTORE_PASSWORD" \
+                  -alias "$KEY_ALIAS" > /dev/null 2>&1 || {
+            echo "::error::ANDROID_KEY_ALIAS '${KEY_ALIAS}' is not in the keystore. Aliases present:"
+            keytool -list -keystore "$keystore" -storepass "$KEYSTORE_PASSWORD" 2>/dev/null \
+              | sed -n 's/^\([^,]*\), .*PrivateKeyEntry.*/  - \1/p'
+            exit 1
+          }
+
+          # 3. THE ONE THAT ACTUALLY BITES. Since JDK 9 keytool creates PKCS12
+          #    keystores by default, and PKCS12 cannot hold a key password that
+          #    differs from the store password -- keytool PRINTS A WARNING and
+          #    silently ignores `-keypass`. So a keystore generated the obvious
+          #    way has key password == store password, and setting
+          #    ANDROID_KEY_PASSWORD to anything else makes AGP fail with
+          #    `KeytoolException: Failed to read key <alias> from store ...: null`
+          #    -- a message that mentions neither passwords nor PKCS12. Verified
+          #    the hard way; see android/README.md.
+          storetype=$(keytool -list -keystore "$keystore" -storepass "$KEYSTORE_PASSWORD" 2>/dev/null \
+            | sed -n 's/^Keystore type: //p' | tr -d '\r')
+          echo "keystore type: ${storetype:-unknown}, alias: ${KEY_ALIAS}"
+          if [ "$storetype" = "PKCS12" ] && [ "$KEY_PASSWORD" != "$KEYSTORE_PASSWORD" ]; then
+            echo "::error::This is a PKCS12 keystore, which cannot have a separate key password, but ANDROID_KEY_PASSWORD differs from ANDROID_KEYSTORE_PASSWORD. Set ANDROID_KEY_PASSWORD to the SAME value as ANDROID_KEYSTORE_PASSWORD, or regenerate the keystore with -storetype JKS."
+            exit 1
+          fi
+          echo "CODY_KEYSTORE_FILE=${keystore}" >> "$GITHUB_ENV"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      # The wire-format tests run on the JVM target, with no emulator and no
+      # device. They are cheap and they guard the one class of bug R8 cannot be
+      # asked about at build time: a response shape that stopped decoding.
+      - name: Wire-format tests
+        working-directory: android
+        run: |
+          set -euo pipefail
+          # First Gradle invocation of the job, so the exec bit is restored here.
+          # git preserves it, but a zip-sourced checkout or a Windows-authored
+          # commit would not, and the failure looks like a missing file.
+          chmod +x ./gradlew
+          ./gradlew :shared:jvmTest --no-daemon --console=plain
+
+      - name: assembleRelease
+        working-directory: android
+        env:
+          CODY_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          CODY_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          CODY_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          VERSION: ${{ needs.decide.outputs.version }}
+          VERSION_CODE: ${{ needs.decide.outputs.version_code }}
+        run: |
+          set -euo pipefail
+
+          # Identity is injected, never committed -- same rule as the desktop
+          # train, and what keeps a release from ever feeding itself.
+          ./gradlew :app:assembleRelease \
+            --no-daemon --console=plain --stacktrace \
+            "-Pcody.versionCode=${VERSION_CODE}" \
+            "-Pcody.versionName=${VERSION}"
+
+      # R8 does not fail on a MISSING keep rule; it produces an APK that throws
+      # the first time it decodes a response. The only cheap proof that the
+      # kotlinx.serialization rules in app/proguard-rules.pro actually took is
+      # to look for the generated serializers in the shipped dex. If this ever
+      # goes to zero, the app is broken on the tablet and green in CI.
+      - name: Verify R8 kept the serializers
+        working-directory: android
+        run: |
+          set -euo pipefail
+          apk=app/build/outputs/apk/release/app-release.apk
+          analyzer="${ANDROID_HOME}/cmdline-tools/latest/bin/apkanalyzer"
+          found=$("$analyzer" dex packages --defined-only "$apk" \
+            | awk '$1 == "C"' | grep -c 'dev\.cody\.shared\.model\..*\$\$serializer' || true)
+          echo "kotlinx.serialization serializers present in dex: ${found}"
+          [ "$found" -ge 20 ] || {
+            echo "::error::only ${found} \$\$serializer classes survived R8; the keep rules in app/proguard-rules.pro are not taking effect and the APK will crash when it decodes a server response."
+            exit 1
+          }
+
+      # Rename once, here, so every consumer downstream -- the release upload,
+      # the manifest, the checksum -- agrees on the filename by construction
+      # rather than by three separate string literals staying in sync.
+      - name: Stage the APK
+        id: stage
+        env:
+          VERSION: ${{ needs.decide.outputs.version }}
+          TAGGED: ${{ needs.decide.outputs.tagged }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          src=android/app/build/outputs/apk/release/app-release.apk
+
+          # The fixed name the rolling URL serves forever.
+          cp "$src" dist/cody-android.apk
+          # The archive release gets a version-stamped copy instead, so it can
+          # never be mistaken for the rolling asset by a name filter.
+          if [ "$TAGGED" = "true" ]; then
+            cp "$src" "dist/cody-android-${VERSION}.apk"
+          fi
+
+          ( cd dist && sha256sum cody-android.apk > cody-android.apk.sha256 )
+          sha256=$(cut -d' ' -f1 dist/cody-android.apk.sha256)
+          size=$(stat -c%s dist/cody-android.apk)
+
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+          echo "size=$size" >> "$GITHUB_OUTPUT"
+          ls -la dist/
+
+      # The R8 mapping file, kept for as long as the runner's retention allows:
+      # without it a crash report from the tablet is unreadable stack noise.
+      # Deliberately NOT a release asset -- it is a deobfuscation key for the
+      # shipped binary and does not belong on a public download page.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-mapping-${{ needs.decide.outputs.version }}
+          path: android/app/build/outputs/mapping/release/mapping.txt
+          if-no-files-found: warn
+          retention-days: 90
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: dist/*
+
+  # ---------------------------------------------------------------------
+  release:
+    needs: [decide, build]
+    if: needs.decide.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: android-apk
+          path: dist
+
+      - name: Build android-manifest.json + release notes
+        env:
+          VERSION: ${{ needs.decide.outputs.version }}
+          VERSION_CODE: ${{ needs.decide.outputs.version_code }}
+          SIGNED: ${{ needs.build.outputs.signed }}
+          SHA256: ${{ needs.build.outputs.sha256 }}
+          SIZE: ${{ needs.build.outputs.size }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          url="https://github.com/${REPO}/releases/download/android-latest/cody-android.apk"
+
+          jq -n \
+            --arg version "$VERSION" \
+            --argjson versionCode "$VERSION_CODE" \
+            --arg url "$url" \
+            --arg sha256 "$SHA256" \
+            --argjson size "$SIZE" \
+            --argjson signed "$SIGNED" \
+            --arg commit "$GITHUB_SHA" \
+            '{
+               version: $version,
+               versionCode: $versionCode,
+               apk: { url: $url, sha256: $sha256, size: $size },
+               releaseSigned: $signed,
+               commit: $commit
+             }' > dist/android-manifest.json
+
+          if [ "$SIGNED" = "true" ]; then
+            signing_line="Signed with the repository's release key."
+          else
+            signing_line="**Debug-signed.** No \`ANDROID_KEYSTORE_*\` secrets are configured, so this APK carries AGP's debug key. It installs and runs, but it cannot be upgraded in place by a future release-signed build -- Android will refuse the update and it must be uninstalled first. See \`android/README.md\` to add the key."
+          fi
+
+          cat > "${RUNNER_TEMP}/notes.md" <<EOF
+          Cody for Android — \`${VERSION}\` (versionCode \`${VERSION_CODE}\`)
+
+          ${signing_line}
+
+          | | |
+          | --- | --- |
+          | APK | \`cody-android.apk\` (${SIZE} bytes) |
+          | sha256 | \`${SHA256}\` |
+          | commit | \`${GITHUB_SHA}\` |
+
+          Install and auto-update with [Obtainium](https://github.com/ImranR98/Obtainium): add \`https://github.com/${REPO}\` and turn on **Release title as version**. Full setup, including why that switch is required, is in \`android/README.md\`.
+
+          Direct download (this URL is stable across every release):
+          \`${url}\`
+          EOF
+
+          cat dist/android-manifest.json
+          cat "${RUNNER_TEMP}/notes.md"
+
+      # Immutable archive, tag builds only. Marked --prerelease so Obtainium's
+      # default configuration cannot select it over the rolling release, and
+      # --latest=false so it cannot take the container train's /releases/latest
+      # slot. Both flags are load-bearing; see RELEASE NAMESPACE at the top.
+      - name: Publish android-v<version> (archive)
+        if: needs.decide.outputs.tagged == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.decide.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "android-v${VERSION}" > /dev/null 2>&1; then
+            echo "::notice::android-v${VERSION} already exists; leaving it untouched (archive releases are immutable)."
+            exit 0
+          fi
+          gh release create "android-v${VERSION}" \
+            --title "Cody Android v${VERSION} (archive)" \
+            --notes-file "${RUNNER_TEMP}/notes.md" \
+            --target "${GITHUB_SHA}" \
+            --prerelease \
+            --latest=false \
+            "dist/cody-android-${VERSION}.apk" \
+            dist/cody-android.apk.sha256 \
+            dist/android-manifest.json
+
+      # The rolling channel. Updated in place, never deleted and re-created:
+      # deleting would take cody-android.apk offline for every client polling in
+      # that window, and this release IS the download URL.
+      - name: Move android-latest (rolling update channel)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.decide.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          if ! gh release view android-latest > /dev/null 2>&1; then
+            gh release create android-latest \
+              --title "${VERSION}" \
+              --notes-file "${RUNNER_TEMP}/notes.md" \
+              --target "${GITHUB_SHA}" \
+              --latest=false
+          fi
+
+          # Retarget the rolling tag at this commit. The release keeps its
+          # identity and its assets while the tag moves under it. actions/checkout
+          # leaves its credentials in place, so this pushes with the same
+          # GITHUB_TOKEN (the job holds contents: write). Pushing `android-latest`
+          # cannot re-trigger this workflow -- see LOOP SAFETY at the top.
+          git tag -f android-latest "${GITHUB_SHA}"
+          git push -f origin refs/tags/android-latest
+
+          # The TITLE is the version string Obtainium reads (see THE VERSION
+          # STRING IS THE RELEASE TITLE at the top). It must be the bare version
+          # and nothing else: any decoration ends up displayed as the app's
+          # version number on the tablet.
+          gh release edit android-latest \
+            --title "${VERSION}" \
+            --notes-file "${RUNNER_TEMP}/notes.md" \
+            --latest=false
+
+          # ORDER MATTERS, and it is the whole point of this step: every asset
+          # goes up before the manifest that names it. A reader takes
+          # android-manifest.json and then follows its url/sha256, so the
+          # manifest must never be the first thing to land -- for the window
+          # between the two it would be describing an APK that is not there yet,
+          # or worse, still describing the previous one while claiming the new
+          # version. Same rule, same reason, as desktop.yml.
+          gh release upload android-latest dist/cody-android.apk --clobber
+          gh release upload android-latest dist/cody-android.apk.sha256 --clobber
+          gh release upload android-latest dist/android-manifest.json --clobber
+
+          # Drop anything the new manifest does not reference -- on a tag build
+          # a version-stamped APK also passes through dist/, and without this
+          # the rolling release would accumulate one per version forever. The
+          # keep-set is derived from the MANIFEST, never from what this run
+          # uploaded, so it stays correct if the asset list ever changes.
+          keep="android-manifest.json $(jq -r '.apk.url' dist/android-manifest.json | sed 's#.*/##')"
+          keep="${keep} $(jq -r '.apk.url' dist/android-manifest.json | sed 's#.*/##').sha256"
+          echo "keeping: ${keep}"
+          for asset in $(gh release view android-latest --json assets --jq '.assets[].name'); do
+            case " ${keep} " in
+              *" ${asset} "*) ;;
+              *) gh release delete-asset android-latest "$asset" --yes ;;
+            esac
+          done
+
+      # Asserted, not assumed. Three things must hold or the tablet quietly
+      # stops updating: the rolling release must be visible to a default
+      # Obtainium (not a prerelease), its title must be the bare version (that
+      # title IS the version Obtainium compares), and the container train must
+      # still own the repo's /releases/latest slot.
+      - name: Verify the rolling channel is coherent
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ needs.decide.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          rel=$(gh api "repos/${REPO}/releases/tags/android-latest")
+
+          pre=$(printf '%s' "$rel" | jq -r '.prerelease')
+          [ "$pre" = "false" ] || {
+            echo "::error::android-latest is marked prerelease. Obtainium's includePrereleases switch defaults to false, so the tablet will silently stop seeing updates."
+            exit 1
+          }
+
+          title=$(printf '%s' "$rel" | jq -r '.name')
+          [ "$title" = "$VERSION" ] || {
+            echo "::error::android-latest is titled '${title}', expected the bare version '${VERSION}'. Obtainium reads the title as the version number."
+            exit 1
+          }
+
+          printf '%s' "$rel" | jq -e '.assets[] | select(.name == "cody-android.apk")' > /dev/null || {
+            echo "::error::android-latest has no cody-android.apk asset; the fixed download URL is dead."
+            exit 1
+          }
+
+          # A 404 means nothing owns the slot, which is not an Android hijack.
+          latest=$(gh api "repos/${REPO}/releases/latest" --jq '.tag_name' 2>/dev/null || echo "<none>")
+          echo "repo /releases/latest -> ${latest}"
+          case "$latest" in
+            android-*)
+              echo "::error::${latest} took the repo's /releases/latest slot, which belongs to the container train. Re-hiding it."
+              gh release edit "$latest" --prerelease
+              exit 1
+              ;;
+          esac
+
+          echo "android-latest is visible, titled ${VERSION}, and serving cody-android.apk"

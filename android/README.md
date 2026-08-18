@@ -341,3 +341,20 @@ CI additionally asserts that R8 kept the `kotlinx.serialization` generated
 serializers in the shipped dex. That check exists because a missing keep rule
 does not fail the build — it produces an APK that throws the first time it
 decodes a server response.
+
+## CI workflow: one manual step required
+
+`ci/android.yml` is the release workflow. It could not be committed to
+`.github/workflows/` from this environment: the git credential lacks the GitHub
+`workflow` OAuth scope, and both `git push` and the contents API refuse workflow
+files without it. Move it once, from a machine whose credential has that scope:
+
+```bash
+git mv android/ci/android.yml .github/workflows/android.yml
+git commit -m "Add the Android release workflow"
+git push
+```
+
+Until then the release channel is still live — the APK at `android-latest` was
+built and signed locally with the project release key, so Obtainium works today
+and CI takes over the moment the workflow lands.
