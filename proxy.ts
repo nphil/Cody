@@ -5,10 +5,15 @@ import { buildContentSecurityPolicy } from "@/lib/display/csp";
 
 /**
  * The auth perimeter. Every request passes through here; a browser signs in on
- * /login and carries a signed session cookie, while HTTP Basic with
- * CODY_PASSWORD keeps working for scripts, health probes and the pre-account
- * contract. When neither account nor password exists (bare `npm run dev` on
- * loopback), the perimeter is open — creating the first account arms it.
+ * /login and carries a signed session cookie, a native client sends
+ * `Authorization: Bearer cody_pat_…`, and HTTP Basic with CODY_PASSWORD keeps
+ * working for scripts, health probes and the pre-account contract. All three
+ * resolve through lib/auth/guard.ts, so this file never learns to tell them
+ * apart — an unauthenticated API request is 401 JSON and unauthenticated HTML
+ * still redirects to /login, whichever credential was missing.
+ *
+ * When neither account nor password exists (bare `npm run dev` on loopback),
+ * the perimeter is open — creating the first account arms it.
  */
 
 /** Paths a signed-out visitor needs: the login screen itself, the account

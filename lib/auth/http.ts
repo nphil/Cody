@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getRequestUser, isAuthRequired } from "./guard";
+import { getRequestCredential, isAuthRequired, type ResolvedCredential } from "./guard";
 import type { UserRecord } from "./users";
 
 /**
@@ -13,17 +13,27 @@ export function jsonError(message: string, status: number, code?: string): NextR
   return NextResponse.json({ error: message, ...(code ? { code } : {}) }, { status, headers: { "Cache-Control": "no-store" } });
 }
 
-/** The signed-in account, or a ready-to-return 401. */
-export function requireUser(request: Request): { user: UserRecord } | { response: NextResponse } {
-  const user = getRequestUser(request);
-  if (!user) {
+/** The signed-in account plus which credential it arrived with, or a
+ * ready-to-return 401. Routes that only need identity use requireUser; this
+ * exists because minting an access token must not be something an access token
+ * can do. */
+export function requireCredential(request: Request): { credential: ResolvedCredential } | { response: NextResponse } {
+  const credential = getRequestCredential(request);
+  if (!credential) {
     return {
       response: isAuthRequired()
         ? jsonError("Authentication required", 401, "auth_required")
         : jsonError("No accounts exist yet", 409, "no_accounts"),
     };
   }
-  return { user };
+  return { credential };
+}
+
+/** The signed-in account, or a ready-to-return 401. */
+export function requireUser(request: Request): { user: UserRecord } | { response: NextResponse } {
+  const resolved = requireCredential(request);
+  if ("response" in resolved) return resolved;
+  return { user: resolved.credential.user };
 }
 
 /** The signed-in admin, or a ready-to-return 401/403. */

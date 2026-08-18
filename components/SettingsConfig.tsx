@@ -72,7 +72,7 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   // User Accounts
   { tab: "accounts", section: "User Accounts", label: "Full name", description: "Shown on your profile and, for administrators, in the account roster.", scope: "Cody only" },
   { tab: "accounts", section: "User Accounts", label: "Profile picture", description: "PNG, JPEG or WebP. Cropped square and downscaled in your browser before upload.", scope: "Cody only" },
-  { tab: "accounts", section: "User Accounts", label: "Change password", description: "Changing your password signs out your other devices." },
+  { tab: "accounts", section: "User Accounts", label: "Change password", description: "Signs out your other devices and revokes this account's access tokens." },
   // Interface & Behavior
   { tab: "general", section: "Interface & Behavior", label: "Keep tool calls collapsed", description: "Show only compact headers while tools execute.", scope: "Cody only" },
   { tab: "general", section: "Interface & Behavior", label: "Completion sound", description: "Play a tone when the agent completes a run.", scope: "Cody only" },

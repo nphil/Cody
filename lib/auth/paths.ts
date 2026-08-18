@@ -24,6 +24,12 @@ export function getSessionSecretPath(): string {
   return path.join(getAccountsDir(), "session-secret");
 }
 
+/** Personal access tokens for native/API clients. Written 0600: it holds
+ * credential digests, exactly like the account store. */
+export function getAccessTokensPath(): string {
+  return path.join(getAccountsDir(), "access-tokens.json");
+}
+
 /** Uploaded profile pictures, one file per account id. */
 export function getAvatarsDir(): string {
   return path.join(getAccountsDir(), "avatars");

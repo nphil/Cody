@@ -11,7 +11,7 @@ const next = require("next");
 const { WebSocket, WebSocketServer } = require("ws");
 const { createJiti } = require("jiti");
 const jiti = createJiti(__filename);
-const { getUserForCredentials, isAuthRequired } = jiti("../lib/auth/guard.ts");
+const { isAuthRequired, resolveCredentials } = jiti("../lib/auth/guard.ts");
 const { canAccessDisplaySession } = jiti("../lib/display/access.ts");
 const { attachDisplaySocket, disposeDisplayProviders } = jiti("../lib/display/provider.ts");
 const { closeNativeGateway, proxyNativeHttp, proxyNativeUpgrade } = jiti("../lib/display/native-gateway.ts");
@@ -36,9 +36,24 @@ function reject(socket, status, message, headers = {}) {
   socket.destroy();
 }
 
-function originAllowed(request) {
+/**
+ * Same-origin gate for WebSocket upgrades. `credential` is the resolved
+ * credential (lib/auth/guard.ts), because whether a missing Origin is
+ * acceptable depends on which one arrived.
+ *
+ * Browsers ALWAYS send Origin on a handshake, so no Origin means a non-browser
+ * client. Refusing that by default protects the credentials a browser attaches
+ * by itself — the session cookie rides along on a cross-site upgrade the page
+ * never consented to. A bearer token is different in kind: nothing attaches it
+ * automatically, so it cannot be replayed from someone else's page, and an
+ * Origin-less bearer upgrade is exactly the native client this exists for.
+ *
+ * A PRESENT but foreign Origin is still refused whatever the credential: that
+ * is a browser telling us where it came from, and we believe it.
+ */
+function originAllowed(request, credential) {
   const origin = request.headers.origin;
-  if (!origin) return false;
+  if (!origin) return credential?.kind === "bearer";
   try {
     const url = new URL(origin);
     const host = request.headers.host;
@@ -69,9 +84,10 @@ async function main(argv = process.argv.slice(2)) {
   server.on("upgrade", (request, socket, head) => {
     if (proxyNativeUpgrade(request, socket, head)) return;
     if (displayPath(request.url || "")) {
-      const user = getUserForCredentials(request.headers.cookie || null, request.headers.authorization || null);
+      const credential = resolveCredentials(request.headers.cookie || null, request.headers.authorization || null);
+      const user = credential?.user ?? null;
       if (isAuthRequired() && !user) { reject(socket, 401, "Unauthorized"); return; }
-      if (!originAllowed(request)) { reject(socket, 403, "Forbidden"); return; }
+      if (!originAllowed(request, credential)) { reject(socket, 403, "Forbidden"); return; }
       const parsed = new URL(request.url, "http://localhost");
       const sessionId = parsed.searchParams.get("sessionId") || "";
       // Ownership alone would admit any id: an UNKNOWN session is indistinguishable
@@ -90,12 +106,15 @@ async function main(argv = process.argv.slice(2)) {
       return;
     }
     // Browsers attach the session cookie to same-origin upgrades automatically;
-    // Basic Auth stays accepted for pre-account clients.
-    if (isAuthRequired() && !getUserForCredentials(request.headers.cookie || null, request.headers.authorization || null)) {
+    // a native client sends `Authorization: Bearer cody_pat_…` instead, and
+    // Basic Auth stays accepted for pre-account clients. All three resolve in
+    // lib/auth/guard.ts, so this gate never enumerates them.
+    const credential = resolveCredentials(request.headers.cookie || null, request.headers.authorization || null);
+    if (isAuthRequired() && !credential) {
       reject(socket, 401, "Unauthorized");
       return;
     }
-    if (!originAllowed(request)) { reject(socket, 403, "Forbidden"); return; }
+    if (!originAllowed(request, credential)) { reject(socket, 403, "Forbidden"); return; }
     const parsed = new URL(request.url, "http://localhost");
     const id = parsed.pathname.split("/")[3];
     const cols = Number(parsed.searchParams.get("cols") || 80);

@@ -1,8 +1,10 @@
 "use client";
 
-import { AlertCircle, Check, Cpu, Download, Loader2, LogOut, RefreshCw, RotateCcw, ShieldCheck, Trash2, Upload, UserRoundPlus, X } from "lucide-react";
+import { Check, Cpu, Download, Loader2, LogOut, RefreshCw, RotateCcw, ShieldCheck, Trash2, Upload, UserRoundPlus, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { chipStyle, nativeInputStyle, nativeOptionStyle, nativeSelectStyle, NativeSetting } from "./primitives";
+import { dangerButtonStyle, ErrorNote, primaryButtonStyle, requestJson, smallButtonStyle, useAsyncAction } from "./account-controls";
+import { AccessTokensSection } from "./AccessTokensSection";
 import { useEngineInstalls } from "@/hooks/useEngineInstalls";
 import type { EngineUpdateStatus } from "@/lib/harness/updates";
 import type { EngineSummary, EnginesPayload } from "../EnginePicker";
@@ -76,63 +78,6 @@ function Avatar({ user, size }: { user: PublicUser; size: number }) {
     <span aria-hidden style={{ width: size, height: size, borderRadius: "50%", background: "color-mix(in srgb, var(--accent) 18%, var(--bg))", color: "var(--accent)", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize, fontWeight: 650, letterSpacing: "0.02em", flexShrink: 0, userSelect: "none" }}>
       {initials(user)}
     </span>
-  );
-}
-
-const smallButtonStyle = {
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 6,
-  minHeight: 30,
-  padding: "4px 10px",
-  border: "1px solid var(--border)",
-  borderRadius: "var(--radius-control)",
-  background: "transparent",
-  color: "var(--text)",
-  fontSize: 12,
-  cursor: "pointer",
-} as const;
-
-const primaryButtonStyle = {
-  ...smallButtonStyle,
-  border: "none",
-  background: "var(--accent-strong)",
-  color: "var(--on-accent)",
-  fontWeight: 600,
-} as const;
-
-const dangerButtonStyle = {
-  ...smallButtonStyle,
-  color: "var(--status-error)",
-  borderColor: "color-mix(in srgb, var(--status-error) 45%, transparent)",
-} as const;
-
-function useAsyncAction(): [boolean, string | null, (run: () => Promise<void>) => void, (message: string | null) => void] {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const invoke = useCallback((run: () => Promise<void>) => {
-    setBusy(true);
-    setError(null);
-    void run()
-      .catch((failure: unknown) => setError(failure instanceof Error ? failure.message : String(failure)))
-      .finally(() => setBusy(false));
-  }, []);
-  return [busy, error, invoke, setError];
-}
-
-async function requestJson<T>(input: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(input, init);
-  const body = (await response.json().catch(() => null)) as (T & { error?: string }) | null;
-  if (!response.ok) throw new Error(body?.error || `HTTP ${response.status}`);
-  return body as T;
-}
-
-function ErrorNote({ message }: { message: string | null }) {
-  if (!message) return null;
-  return (
-    <div role="alert" style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--status-error)", fontSize: 12 }}>
-      <AlertCircle size={13} aria-hidden style={{ flexShrink: 0 }} /> {message}
-    </div>
   );
 }
 
@@ -689,7 +634,7 @@ export function AccountSettings({ isMobile }: { isMobile: boolean }) {
         label="Change password"
         description={me.envManaged
           ? "This account signs in with the CODY_PASSWORD environment variable. Change it in your container settings — for example the Unraid template — and restart."
-          : "Changing your password signs out your other devices."}
+          : "Changing your password signs out your other devices and revokes this account's access tokens — apps signed in with a token will need a new one."}
         control={me.envManaged ? undefined : (
           <div style={{ display: "flex", flexDirection: "column", gap: 8, maxWidth: 420 }}>
             <input type="password" placeholder="Current password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} style={nativeInputStyle} />
@@ -711,6 +656,8 @@ export function AccountSettings({ isMobile }: { isMobile: boolean }) {
           </div>
         )}
       />
+
+      <AccessTokensSection />
 
       {isAdmin && (
         <>

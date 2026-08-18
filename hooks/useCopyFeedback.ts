@@ -23,9 +23,15 @@ export function useCopyFeedback(): { copied: boolean; copy: (text: string) => vo
     });
   }, []);
 
-  useEffect(() => () => {
-    mountedRef.current = false;
-    if (timerRef.current) clearTimeout(timerRef.current);
+  // Re-arm on mount, not just disarm on unmount: StrictMode's simulated
+  // unmount/remount would otherwise leave this latched false for the rest of
+  // the component's life, and every copy button would stay silent in dev.
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
   }, []);
 
   return { copied, copy };
