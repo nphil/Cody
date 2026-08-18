@@ -190,6 +190,11 @@ function buildWindow(
     utilization,
     resetsAt: toIsoString(readNumber(windowInfo.resetsAt) ?? readString(windowInfo.resetsAt)),
     state: deriveUsageWindowState(utilization, status),
+    // The scope survives past the label so a window can be matched against the
+    // selected model later: the label alone cannot say whether "Opus · weekly"
+    // constrains the model in the composer right now.
+    tier: readString(scope.tier)?.trim().toLowerCase() ?? null,
+    shared: scope.shared === true,
   };
 }
 

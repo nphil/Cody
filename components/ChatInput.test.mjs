@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -285,4 +286,62 @@ test("buildQuotaView distinguishes unlimited, unreported, and still-loading", ()
     assert.equal(view.percent, undefined);
     assert.equal(view.color, "var(--text-muted)");
   }
+});
+/**
+ * The attach path, pinned at the seam.
+ *
+ * Compression itself is a canvas operation (lib/image-compress.ts, decision half
+ * unit-tested in lib/image-compress.test.mjs) and cannot run here; what CAN be
+ * pinned without a browser is the wiring — that every attached image goes
+ * through the compressor, that a file the browser cannot decode is reported per
+ * file instead of vanishing, and that nothing can be sent while an attachment is
+ * still being prepared or once it would overflow one RPC frame.
+ */
+const composerSource = await readFile(new URL("./ChatInput.tsx", import.meta.url), "utf8");
+
+test("every attached image goes through the compressor, and failures are named", () => {
+  const attach = composerSource.slice(
+    composerSource.indexOf("const processImageFiles = useCallback"),
+    composerSource.indexOf("const processTextFiles = useCallback"),
+  );
+  assert.match(attach, /prepareImageForAttachment\(file,/);
+  // Per file, never a silent drop: an undecodable photo says which one and what
+  // the browser can read.
+  assert.match(attach, /error instanceof UnsupportedImageError/);
+  assert.match(attach, /chatInput\.imageUndecodable/);
+  assert.match(attach, /chatInput\.imageReadFailed/);
+  assert.match(attach, /setAttachError\(failures\.length \? failures\.join\("\\n"\) : null\)/);
+  // The composer shows it is busy, and stops showing it whatever happens.
+  assert.match(attach, /setPreparingImageCount\(\(count\) => count \+ imageFiles\.length\)/);
+  assert.match(attach, /finally \{[\s\S]*setPreparingImageCount/);
+});
+
+test("nothing is sent while an attachment is still being prepared or over budget", () => {
+  const send = composerSource.slice(
+    composerSource.indexOf("const handleSend = useCallback"),
+    composerSource.indexOf("const slashQuery"),
+  );
+  assert.match(send, /if \(preparingImageCount > 0\) return;/);
+  assert.match(send, /const tooLarge = budgetError\(composedMessage, attachedImages\);/);
+  assert.match(send, /setAttachError\(tooLarge\)/);
+  // The guard runs BEFORE the message leaves the composer.
+  assert.ok(send.indexOf("const tooLarge") < send.indexOf("onSend(composedMessage"));
+
+  // The send button cannot be clicked into the same race.
+  assert.match(composerSource, /disabled=\{preparingImageCount > 0 \|\| \(!value\.trim\(\)/);
+  // The attach affordance itself is what reports the work in progress.
+  assert.match(composerSource, /preparingImageCount > 0 \? t\("chatInput\.imagePreparing"\)/);
+  assert.match(composerSource, /preparingImageCount > 0 \? \(\s*\n\s*<Loader2/);
+});
+
+test("the over-budget message names the attachment to remove", () => {
+  const budget = composerSource.slice(
+    composerSource.indexOf("const budgetError = useCallback"),
+    composerSource.indexOf("const handleSend = useCallback"),
+  );
+  assert.match(budget, /checkPromptFrameBudget\(\{ message: composedMessage, images \}\)/);
+  assert.match(budget, /chatInput\.attachmentsTooLargeNamed/);
+  assert.match(budget, /chatInput\.attachmentsTooLarge/);
+  // A text-only overflow has no attachment to blame and must not claim one.
+  assert.match(budget, /if \(!verdict\.largest\) return t\("chatInput\.messageTooLarge"/);
 });

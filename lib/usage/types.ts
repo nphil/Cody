@@ -21,6 +21,15 @@ export interface UsageWindow {
   /** ISO timestamp of the next reset, or null when the engine reports none. */
   resetsAt: string | null;
   state: UsageWindowState;
+  /**
+   * Model tier this window is scoped to, lowercased (e.g. "opus"), or null when
+   * it covers the whole account. A tiered window constrains only the models of
+   * that tier, so it must not be charged against a model of another one.
+   */
+  tier?: string | null;
+  /** True when the engine reports this window as shared across every model on
+   * the account, which makes it binding no matter which model is selected. */
+  shared?: boolean;
 }
 
 /** One authenticated account, with every quota window it reports. */

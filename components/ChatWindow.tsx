@@ -1324,7 +1324,7 @@ function StreamAlertBanner({
   onDismiss: () => void;
 }) {
   const { t } = useI18n();
-  const color = alert.kind === "stream_lost" ? "var(--status-error)" : "var(--status-warning)";
+  const color = alert.kind === "turn_lost" ? "var(--status-warning)" : "var(--status-error)";
   return (
     <div
       role="alert"
@@ -1345,8 +1345,12 @@ function StreamAlertBanner({
       <span aria-hidden style={{ color, flexShrink: 0 }}>
         <TriangleAlert size={14} />
       </span>
-      <span style={{ flex: 1, minWidth: 0 }}>
-        {alert.kind === "stream_lost" ? t("agentStream.streamLost") : t("agentStream.turnLost")}
+      <span style={{ flex: 1, minWidth: 0, overflowWrap: "anywhere" }}>
+        {alert.kind === "send_failed"
+          // The reason the send failed is the actionable half (a too-large
+          // attachment names itself), so it is shown, not just logged.
+          ? `${t("agentStream.sendFailed")}${alert.detail ? ` ${alert.detail}` : ""}`
+          : alert.kind === "stream_lost" ? t("agentStream.streamLost") : t("agentStream.turnLost")}
       </span>
       {alert.kind === "stream_lost" && (
         <button

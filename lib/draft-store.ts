@@ -1,6 +1,9 @@
 export interface ChatDraftImage {
   data: string;
   mimeType: string;
+  /** Original file name, kept so a restored draft can still name an
+   *  over-budget attachment in the error that blocks the send. */
+  name?: string;
 }
 
 export interface ChatDraftFile {

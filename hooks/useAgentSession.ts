@@ -341,8 +341,18 @@ export type AgentPhase =
  *
  * `stream_lost`: manual reconnects failed for the whole budget. The retry is
  * the user's to make now.
+ *
+ * `send_failed`: the prompt never reached the engine at all — the POST was
+ * refused (an attachment over the transport's frame limit, say), timed out, or
+ * the network dropped it. The optimistic bubble and the running state are rolled
+ * back, and this banner is what stops that from reading as a turn still in
+ * flight. Not auto-resent, for the same reason `turn_lost` is not.
  */
-export type StreamAlert = { kind: "turn_lost" } | { kind: "stream_lost" } | null;
+export type StreamAlert =
+  | { kind: "turn_lost" }
+  | { kind: "stream_lost" }
+  | { kind: "send_failed"; detail?: string }
+  | null;
 
 export interface CompactResultInfo {
   reason: "manual" | "threshold" | "overflow" | "auto" | string;
@@ -407,6 +417,12 @@ const BASH_STATE_RECONCILE_MS = 1_000;
 const EVENT_STREAM_CONNECT_TIMEOUT_MS = 60_000;
 // Tell the user something is happening if the stream is still connecting.
 const EVENT_STREAM_SLOW_CONNECT_MS = 4_000;
+// The prompt POST is an acknowledgement — the engine answers it in milliseconds
+// and the turn itself streams over SSE. The stream is already connected by the
+// time it is sent (ensureEventsConnected waits for `connected`), so a POST still
+// unanswered after this is not a slow start: it is a request that will never
+// come back, and waiting on it forever is exactly the wedge this cap removes.
+const PROMPT_SEND_TIMEOUT_MS = 30_000;
 // How often the stream watchdog re-checks a believed-running turn. Cheap: it
 // reads two refs and sets a boolean React bails out of when unchanged.
 const STREAM_HEALTH_POLL_MS = 2_000;
@@ -2451,7 +2467,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             type: "prompt",
             message,
             ...(piImages?.length ? { images: piImages } : {}),
-          });
+          }, { timeoutMs: PROMPT_SEND_TIMEOUT_MS });
         }
       } else if (session) {
         sentSessionId = session.id;
@@ -2463,7 +2479,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           type: "prompt",
           message,
           ...(piImages?.length ? { images: piImages } : {}),
-        });
+        }, { timeoutMs: PROMPT_SEND_TIMEOUT_MS });
       }
       if (isSlashCommandPrompt && sentSessionId) {
         void waitForPromptSettlement(sentSessionId, promptRunId);
@@ -2483,12 +2499,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             : prev;
         });
       }
+      const detail = e instanceof Error ? e.message : String(e);
       addNotice({
         type: "error",
         message: e instanceof EventStreamConnectionError
           ? e.message
-          : translate("agentSession.sendFailed", { detail: e instanceof Error ? e.message : String(e) }),
+          : translate("agentSession.sendFailed", { detail }),
       });
+      // A toast fades; the wedge this replaces did not. The banner stays until
+      // dismissed so a prompt that never started can never read as one still
+      // running — whatever the failure was (refused frame, timeout, network).
+      setStreamAlert({ kind: "send_failed", detail });
       // Restore the user's text into the input instead of losing it. Mirrors the
       // shell-command recovery in executeBash; insertIfEmpty avoids clobbering
       // anything typed since.
@@ -2534,7 +2555,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         type: "abort_and_prompt",
         message: trimmedMessage,
         ...(piImages?.length ? { images: piImages } : {}),
-      });
+      }, { timeoutMs: PROMPT_SEND_TIMEOUT_MS });
       return true;
     } catch (e) {
       console.error("Failed to interrupt and reply:", e);
@@ -2549,7 +2570,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
       }
       optimisticUserMessageKeyRef.current = null;
-      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
+      const detail = e instanceof Error ? e.message : String(e);
+      addNotice({ type: "error", message: detail });
+      // The interrupted turn keeps running; what failed is THIS message, and it
+      // was never delivered. Same banner as a failed first send.
+      setStreamAlert({ kind: "send_failed", detail });
       return false;
     }
   }, [addNotice, ensureEventsConnected, refreshSubagentRoster]);

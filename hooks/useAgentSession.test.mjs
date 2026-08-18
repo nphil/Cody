@@ -107,14 +107,74 @@ test("the degraded and lost states reach the UI with a retry affordance", () => 
   assert.match(chatWindow, /onDismiss=\{dismissStreamAlert\}/);
 });
 
+test("a send that never lands clears the turn and raises a banner", () => {
+  // The wedge: the prompt POST hung (an oversized frame was chunked toward an
+  // omp that cannot reassemble), nothing ever answered, and the composer sat on
+  // "Waiting for model…". The POST is an ack — cap it, and treat any failure as
+  // "this turn never started".
+  const send = hook.slice(hook.indexOf("const handleSend = useCallback"), hook.indexOf("const handleInterruptAndReply"));
+  assert.match(send, /timeoutMs: PROMPT_SEND_TIMEOUT_MS/);
+  assert.equal(send.match(/timeoutMs: PROMPT_SEND_TIMEOUT_MS/g).length, 2, "both prompt POSTs are capped");
+  assert.match(hook, /const PROMPT_SEND_TIMEOUT_MS = 30_000;/);
+
+  const failure = send.slice(send.indexOf("} catch (e) {"));
+  assert.match(failure, /setStreamAlert\(\{ kind: "send_failed", detail \}\)/);
+  assert.match(failure, /agentRunningRef\.current = false/);
+  assert.match(failure, /setAgentRunning\(false\)/);
+  assert.match(failure, /setAgentPhase\(null\)/);
+  assert.match(failure, /dispatch\(\{ type: "end" \}\)/);
+  // Never silently repeat a mutating instruction the user cannot see.
+  assert.doesNotMatch(failure, /sendAgentCommand/);
+
+  // The interrupt-and-reply path posts the same kind of ack and fails the same way.
+  const interrupt = hook.slice(hook.indexOf("const handleInterruptAndReply = useCallback"), hook.indexOf("const executeBash = useCallback"));
+  assert.match(interrupt, /timeoutMs: PROMPT_SEND_TIMEOUT_MS/);
+  assert.match(interrupt, /setStreamAlert\(\{ kind: "send_failed", detail \}\)/);
+});
+
+test("the send-failure banner shows why, and offers no retry button", () => {
+  assert.match(hook, /\| \{ kind: "send_failed"; detail\?: string \}/);
+  assert.match(chatWindow, /alert\.kind === "send_failed"/);
+  assert.match(chatWindow, /t\("agentStream\.sendFailed"\)/);
+  // The reason (a named too-large attachment, a timeout) is the actionable half.
+  assert.match(chatWindow, /alert\.detail/);
+  // Only a lost stream gets the reconnect action; a refused send has nothing to retry.
+  assert.match(chatWindow, /alert\.kind === "stream_lost" && \(/);
+});
+
+test("a send failure the transport refused arrives with a localized reason", async () => {
+  // The transport rejects an oversized frame with RpcCommandError(code
+  // frame_too_large); the route maps any RpcCommandError to 400 + code, and the
+  // client renders errors.<code> from the dictionary.
+  const process = await readFile(new URL("../lib/omp/rpc-process.ts", import.meta.url), "utf8");
+  assert.match(process, /new RpcCommandError\(frame\.type, error\.message, "frame_too_large"\)/);
+  const route = await readFile(new URL("../app/api/agent/[id]/route.ts", import.meta.url), "utf8");
+  assert.match(route, /error instanceof RpcCommandError[\s\S]*code: error\.code \?\? "rpc_command_failed"[\s\S]*status: 400/);
+  const client = await readFile(new URL("../lib/agent-client.ts", import.meta.url), "utf8");
+  assert.match(client, /formatApiError\(body\)/);
+  assert.match(client, /controller\?\.signal\.aborted/);
+  for (const [name, dictionary] of Object.entries(locales)) {
+    assert.equal(typeof dictionary["errors.frame_too_large"], "string", `${name} cannot explain frame_too_large`);
+  }
+});
+
 test("the new stream copy is translated in all three locales", () => {
   const keys = [
     "agentStream.disconnected",
     "agentStream.dismiss",
     "agentStream.reconnecting",
     "agentStream.retry",
+    "agentStream.sendFailed",
     "agentStream.streamLost",
     "agentStream.turnLost",
+    "chatInput.attachmentsTooLarge",
+    "chatInput.attachmentsTooLargeNamed",
+    "chatInput.imagePreparing",
+    "chatInput.imageReadFailed",
+    "chatInput.imageUndecodable",
+    "chatInput.messageTooLarge",
+    "errors.frame_too_large",
+    "errors.request_timed_out",
   ];
   for (const key of keys) {
     for (const [name, dictionary] of Object.entries(locales)) {

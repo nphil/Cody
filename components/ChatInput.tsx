@@ -23,6 +23,13 @@ import {
   isBase64ImageWithinLimits,
 } from "@/lib/image-attachments";
 import {
+  checkPromptFrameBudget,
+  formatAttachmentSize,
+  prepareImageForAttachment,
+  SUPPORTED_IMAGE_FORMAT_LABEL,
+  UnsupportedImageError,
+} from "@/lib/image-compress";
+import {
   buildEntriesFromFiles, buildAtInsertText, extractAtQuery, filterFileEntries,
   type AtQueryMatch, type FileIndexEntry,
 } from "@/lib/file-fuzzy";
@@ -36,9 +43,11 @@ import { selectableThinkingLevels } from "@/lib/thinking-levels";
 import { STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
 
 export interface AttachedImage {
-  data: string;   // base64, no prefix
+  data: string;   // base64, no prefix (already compressed if it needed to be)
   mimeType: string;
   previewUrl: string; // object URL for display
+  /** Original file name, when there was one — named in over-budget errors. */
+  name?: string;
 }
 
 export type AttachedTextFile = AttachedTextFileData;
@@ -398,7 +407,7 @@ function slashMatchRank(command: SlashCommandPaletteItem, query: string): number
 }
 
 function imageToDraftImage(image: AttachedImage): ChatDraftImage {
-  return { data: image.data, mimeType: image.mimeType };
+  return { data: image.data, mimeType: image.mimeType, ...(image.name ? { name: image.name } : {}) };
 }
 
 function draftImageToAttachedImage(image: ChatDraftImage): AttachedImage {
@@ -617,6 +626,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     draftKey ? draftFilesToAttachedFiles(getDraft(draftKey)?.files) : []
   ));
   const [attachError, setAttachError] = useState<string | null>(null);
+  /** Images being decoded/compressed right now — the attach button spins and
+   *  the composer will not send until they have landed. */
+  const [preparingImageCount, setPreparingImageCount] = useState(0);
   const trimmedValue = value.trimStart();
   const bashMode = attachedImages.length === 0 && attachedTextFiles.length === 0 && trimmedValue.startsWith("!");
   const bashExcluded = bashMode && trimmedValue.startsWith("!!");
@@ -757,26 +769,38 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     }
     const revision = attachmentRevisionRef.current;
     pendingImageCountRef.current += imageFiles.length;
-    const created: AttachedImage[] = [];
+    setPreparingImageCount((count) => count + imageFiles.length);
+    const newImages: AttachedImage[] = [];
+    const failures: string[] = [];
     try {
-      const newImages = await Promise.all(
-        imageFiles.map(
-          (file) =>
-            new Promise<AttachedImage>((resolve, reject) => {
-              const reader = new FileReader();
-              reader.onload = () => {
-                const result = reader.result as string;
-                // result is "data:<mime>;base64,<data>"
-                const base64 = result.split(",")[1];
-                const image = { data: base64, mimeType: file.type, previewUrl: URL.createObjectURL(file) };
-                created.push(image);
-                resolve(image);
-              };
-              reader.onerror = reject;
-              reader.readAsDataURL(file);
-            })
-        )
-      );
+      // Sequential on purpose: a batch of phone photos decoded in parallel is
+      // several hundred MB of bitmaps on a tablet. The composer shows the
+      // attach spinner for the whole batch either way.
+      for (const file of imageFiles) {
+        // Cleared or sent mid-batch: stop burning CPU on attachments that are
+        // already stale (the ones prepared so far are revoked below).
+        if (attachmentRevisionRef.current !== revision) break;
+        try {
+          // Anything over the pass-through budget is downscaled and re-encoded
+          // here, in the browser: the whole prompt must fit in one RPC frame
+          // (see lib/image-compress.ts), and a raw photo never would.
+          const prepared = await prepareImageForAttachment(file, (fileName) => t("chatInput.imageUndecodable", {
+            name: fileName,
+            formats: SUPPORTED_IMAGE_FORMAT_LABEL,
+          }));
+          newImages.push({
+            data: prepared.data,
+            mimeType: prepared.mimeType,
+            previewUrl: URL.createObjectURL(file),
+            name: file.name,
+          });
+        } catch (error) {
+          // Per file, and never silent: the user must know which one dropped out.
+          failures.push(error instanceof UnsupportedImageError
+            ? error.message
+            : t("chatInput.imageReadFailed", { name: file.name }));
+        }
+      }
       // The composer was cleared/sent while the reads were in flight —
       // drop the batch instead of re-appending stale attachments.
       if (attachmentRevisionRef.current !== revision) {
@@ -788,15 +812,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         newImages.slice(accepted.length).forEach(revokeImagePreview);
         return [...prev, ...accepted];
       });
-      setAttachError(null);
-    } catch {
-      // A failed read in the batch must not leak the siblings' blob URLs.
-      created.forEach(revokeImagePreview);
-      setAttachError("One or more images could not be read. Try a different file.");
+      setAttachError(failures.length ? failures.join("\n") : null);
     } finally {
       pendingImageCountRef.current -= imageFiles.length;
+      setPreparingImageCount((count) => Math.max(0, count - imageFiles.length));
     }
-  }, []);
+  }, [t]);
 
   const processTextFiles = useCallback(async (files: File[]) => {
     const remaining = Math.max(
@@ -948,12 +969,37 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     };
   }, []);
 
+  /**
+   * Last stop before a message leaves the composer: everything here has to fit
+   * in ONE RPC frame, so a prompt that would overflow is refused where the user
+   * can still remove something — never handed to the transport to bounce.
+   */
+  const budgetError = useCallback((composedMessage: string, images: AttachedImage[]): string | null => {
+    const verdict = checkPromptFrameBudget({ message: composedMessage, images });
+    if (verdict.ok) return null;
+    const size = formatAttachmentSize(verdict.totalBytes);
+    const limit = formatAttachmentSize(verdict.limit);
+    const name = verdict.largest?.name;
+    if (!verdict.largest) return t("chatInput.messageTooLarge", { size, limit });
+    return name
+      ? t("chatInput.attachmentsTooLargeNamed", { size, limit, name })
+      : t("chatInput.attachmentsTooLarge", { size, limit });
+  }, [t]);
+
   const handleSend = useCallback(async () => {
     const msg = value.trim();
     if (!msg && !attachedImages.length && !attachedTextFiles.length) return;
     if (isStreaming) return;
+    // An image still being compressed is not in attachedImages yet; sending now
+    // would quietly drop it.
+    if (preparingImageCount > 0) return;
     onAudioUnlock?.();
     const composedMessage = composeMessageWithTextAttachments(msg, attachedTextFiles);
+    const tooLarge = budgetError(composedMessage, attachedImages);
+    if (tooLarge) {
+      setAttachError(tooLarge);
+      return;
+    }
     if (!attachedImages.length && !attachedTextFiles.length && msg.startsWith("/") && onBuiltinCommand) {
       const result = await onBuiltinCommand(msg);
       if (result.handled) {
@@ -963,7 +1009,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     }
     onSend(composedMessage, attachedImages.length ? attachedImages : undefined);
     clearInput();
-  }, [value, attachedImages, attachedTextFiles, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock]);
+  }, [value, attachedImages, attachedTextFiles, isStreaming, preparingImageCount, budgetError, onBuiltinCommand, onSend, clearInput, onAudioUnlock]);
 
   const slashQuery = value.startsWith("/") && !/\s/.test(value.slice(1))
     ? value.slice(1).toLowerCase()
@@ -1799,6 +1845,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             marginBottom: 8, padding: "5px 10px",
             background: "color-mix(in srgb, var(--status-error) 7%, transparent)", border: "1px solid color-mix(in srgb, var(--status-error) 30%, transparent)",
             borderRadius: 6, fontSize: 12, color: "var(--status-error)",
+            // One line per rejected file when a batch fails for several reasons.
+            whiteSpace: "pre-wrap",
           }}>
             {attachError}
           </div>
@@ -2347,21 +2395,21 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             {/* Attachment */}
             <button
               onClick={() => fileInputRef.current?.click()}
-              disabled={isStreaming}
-              title={t("chatInput.attachFile")}
-              aria-label={t("chatInput.attachFile")}
+              disabled={isStreaming || preparingImageCount > 0}
+              title={preparingImageCount > 0 ? t("chatInput.imagePreparing") : t("chatInput.attachFile")}
+              aria-label={preparingImageCount > 0 ? t("chatInput.imagePreparing") : t("chatInput.attachFile")}
               style={{
                 flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
                 width: 28, height: 28, padding: 0,
                 background: "none", border: "none",
                 borderRadius: 7,
                 color: (attachedImages.length || attachedTextFiles.length) ? "var(--accent)" : "var(--text-muted)",
-                cursor: isStreaming ? "not-allowed" : "pointer",
+                cursor: isStreaming || preparingImageCount > 0 ? "not-allowed" : "pointer",
                 opacity: isStreaming ? 0.5 : 1,
                 transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
               }}
               onMouseEnter={(e) => {
-                if (isStreaming) return;
+                if (isStreaming || preparingImageCount > 0) return;
                 e.currentTarget.style.background = "var(--bg-hover)";
                 e.currentTarget.style.color = (attachedImages.length || attachedTextFiles.length) ? "var(--accent)" : "var(--text)";
               }}
@@ -2370,10 +2418,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 e.currentTarget.style.color = (attachedImages.length || attachedTextFiles.length) ? "var(--accent)" : "var(--text-muted)";
               }}
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                <polyline points="14 2 14 8 20 8" />
-              </svg>
+              {preparingImageCount > 0 ? (
+                <Loader2 size={14} strokeWidth={2} style={{ animation: "spin 0.8s linear infinite" }} aria-hidden="true" />
+              ) : (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                  <polyline points="14 2 14 8 20 8" />
+                </svg>
+              )}
             </button>
 
             {/* Model selector — compact text button with dropdown */}
@@ -2913,7 +2965,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               <button
                 type="button"
                 onClick={handleSend}
-                disabled={!value.trim() && !attachedImages.length && !attachedTextFiles.length}
+                // Sending while an attachment is still being prepared would
+                // send the message without it.
+                disabled={preparingImageCount > 0 || (!value.trim() && !attachedImages.length && !attachedTextFiles.length)}
                 style={{
                   display: "flex", alignItems: "center", gap: 6,
                   height: 28,

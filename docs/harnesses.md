@@ -86,6 +86,34 @@ cards and composer affordances — rather than breaking it. Commands an engine
 cannot serve fail soft with the `unsupported` error code the UI already
 tolerates.
 
+### omp's RPC framing is asymmetric — and images pay for it
+
+omp's rpc-ui transport is NDJSON over stdio, one JSON object per line, capped at
+1 MiB per line (`MAX_RPC_FRAME_BYTES` in `lib/omp/rpc-frame.ts`). Protocol v2
+adds `rpc_chunk` records for frames above that cap, but **only in the omp → Cody
+direction**: omp's own stdin reader
+(`packages/coding-agent/src/modes/rpc/rpc-input.ts`) parses each line as a
+complete command and has no chunk reassembly. A chunked command therefore lands
+as an unknown, id-less line, the real command never materializes, no response is
+ever produced, and — since `sendCommand` has no default timeout — the HTTP POST
+behind it hangs forever while the chat sits on "Waiting for model…". So Cody
+keeps the inbound decoder (big tool results genuinely arrive chunked) and never
+chunks outbound: `encodeOutboundRpcFrame` rejects an oversized frame with
+`RpcCommandError(code: "frame_too_large")`, which the agent route maps to a 400
+and the composer shows as a dismissible banner.
+
+That 1 MiB ceiling is also why `lib/image-compress.ts` exists. An attached image
+travels as base64 *inside* the prompt command — omp's `ImageContent` is
+`{type, data, mimeType}`, with no file-path alternative — so a phone photo
+(3–8 MB, i.e. 4–11 MB base64) could never be delivered as-is. The composer
+passes anything ≤600 KB of base64 through untouched (screenshots stay crisp) and
+otherwise downscales to 2048px and re-encodes JPEG down a quality ladder, then
+1568px, until it fits; a message whose assembled frame would still exceed
+~900 KB is refused in the composer, naming the attachment to remove, rather than
+being bounced by the transport. Host-tool results (a `preview_screenshot` PNG,
+say) ride the same one-line limit — one over the cap is dropped with a logged
+error instead of chunked, since there is no pending command to reject.
+
 ## Adding an engine, concretely
 
 1. Implement `HarnessAdapter` in `lib/harness/<id>.ts`; register it in

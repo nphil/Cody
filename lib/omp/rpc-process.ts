@@ -1,15 +1,22 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "child_process";
 import { createInterface } from "readline";
 import { resolveOmpBin } from "./omp-cli";
-import { encodeRpcFrames, RpcFrameDecoder, type RpcFrameRecord, type RpcProtocolVersion } from "./rpc-frame";
+import { encodeOutboundRpcFrame, RpcFrameDecoder, RpcFrameTooLargeError, type RpcFrameRecord, type RpcProtocolVersion } from "./rpc-frame";
 
 /**
  * Process + protocol layer for `omp --mode rpc-ui` (NDJSON over stdio).
  * Protocol v1: commands `{id, type, ...}` on stdin; `{type:"response", id, ...}`
  * plus interleaved event frames on stdout. omp announces readiness with a
  * `{type:"ready"}` frame before accepting commands. When readiness advertises
- * protocol v2, callers negotiate it before sending normal commands; oversized
- * logical frames are then carried as bounded `rpc_chunk` sequences.
+ * protocol v2, callers negotiate it before sending normal commands, which lets
+ * omp deliver oversized frames (big tool results) as bounded `rpc_chunk`
+ * sequences.
+ *
+ * That chunking is one-way only. omp's stdin reader
+ * (packages/coding-agent/src/modes/rpc/rpc-input.ts) has no reassembly, so this
+ * side never chunks toward omp: a command that will not fit in one 1 MiB line
+ * is rejected before it is written (`frame_too_large`) instead of being sent
+ * into a void that never answers.
  */
 
 export interface RpcResponseFrame {
@@ -74,12 +81,10 @@ export class RpcProcess {
   private exited = false;
   private exitInfo: { code: number | null; signal: NodeJS.Signals | null } | null = null;
   private protocolVersion: RpcProtocolVersion = 1;
-  private nextChunkId = 1;
   private readonly spawnProcess: typeof spawn;
-  // Serializes physical stdin writes: a v2 logical frame can span multiple
-  // `rpc_chunk` records (>1 MiB payloads), and two frames written concurrently
-  // would interleave their chunk sequences on stdin, which RpcFrameDecoder
-  // rejects. Each logical frame is enqueued whole.
+  // Serializes physical stdin writes so commands reach omp in the order their
+  // callers issued them, and so a write error is reported to the frame that
+  // caused it. Each logical frame is enqueued whole.
   private writeQueue: Promise<void> = Promise.resolve();
 
   constructor(options: RpcProcessOptions) {
@@ -272,18 +277,32 @@ export class RpcProcess {
   }
 
   /** Write an already-correlated protocol frame without allocating a command id
-   * or adding an entry to the pending-command map. */
+   * or adding an entry to the pending-command map. There is no pending entry to
+   * reject here, so a frame too large to write is dropped — say so loudly, since
+   * whatever omp is waiting on (a host tool result, say) will never arrive. */
   sendFrame(frame: RpcFrame): void {
     if (this.exited) return;
-    this.writeFrame(frame, () => {});
+    this.writeFrame(frame, (error) => {
+      if (error instanceof RpcCommandError && error.code === "frame_too_large") {
+        console.error(`omp RPC: dropped an oversized "${frame.type}" frame — ${error.message}`);
+      }
+    });
   }
 
   private writeFrame(frame: RpcFrame, callback: (error?: Error | null) => void): void {
     let lines: string[];
     try {
-      lines = encodeRpcFrames(frame, this.protocolVersion, `web-${this.nextChunkId++}`);
+      // One line per logical frame, at BOTH protocol versions: omp cannot
+      // reassemble inbound chunks (see encodeOutboundRpcFrame). An oversized
+      // frame is rejected here, immediately, rather than written into a void
+      // that would never answer.
+      lines = encodeOutboundRpcFrame(frame);
     } catch (error) {
-      callback(error instanceof Error ? error : new Error(String(error)));
+      callback(
+        error instanceof RpcFrameTooLargeError
+          ? new RpcCommandError(frame.type, error.message, "frame_too_large")
+          : error instanceof Error ? error : new Error(String(error)),
+      );
       return;
     }
     // Enqueue the entire encoded logical frame; the next frame's physical

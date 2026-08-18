@@ -78,7 +78,45 @@ export class RpcFrameDecoder {
   }
 }
 
-/** Physical JSONL records for a logical RPC frame at the selected protocol. */
+/** A logical frame that cannot be written toward omp because no single NDJSON
+ * line may exceed the transport limit. Carries the numbers so callers can say
+ * how far over the line the payload was. */
+export class RpcFrameTooLargeError extends Error {
+  readonly frameType: string;
+  readonly byteLength: number;
+  readonly limit = MAX_RPC_FRAME_BYTES;
+
+  constructor(frameType: string, byteLength: number) {
+    super(
+      `RPC frame "${frameType}" is ${byteLength} bytes, over the ${MAX_RPC_FRAME_BYTES}-byte limit for a single message to the engine`,
+    );
+    this.name = "RpcFrameTooLargeError";
+    this.frameType = frameType;
+    this.byteLength = byteLength;
+  }
+}
+
+/**
+ * The one physical stdin record for a logical frame sent TO omp.
+ *
+ * Protocol v2 chunking is ASYMMETRIC and this direction never uses it: omp's
+ * stdin reader (packages/coding-agent/src/modes/rpc/rpc-input.ts) has no chunk
+ * reassembly — it parses each line as a complete command, so an `rpc_chunk`
+ * line reads as an unknown command carrying no id, the real command never
+ * materializes, and the caller's pending entry is never resolved (a permanent,
+ * silent hang). Oversized frames therefore fail fast here instead.
+ */
+export function encodeOutboundRpcFrame(frame: RpcFrameRecord): string[] {
+  const json = JSON.stringify(frame);
+  const bytes = lineByteLength(json);
+  if (bytes > MAX_RPC_FRAME_BYTES) throw new RpcFrameTooLargeError(frame.type, bytes);
+  return [`${json}\n`];
+}
+
+/** Physical JSONL records for a logical RPC frame at the selected protocol —
+ * the omp→Cody direction, where chunking is real. Nothing writes these toward
+ * omp (see encodeOutboundRpcFrame); it is the reference encoder that the
+ * inbound RpcFrameDecoder is exercised against. */
 export function encodeRpcFrames(frame: RpcFrameRecord, protocolVersion: RpcProtocolVersion, chunkId: string): string[] {
   const json = JSON.stringify(frame);
   if (lineByteLength(json) <= MAX_RPC_FRAME_BYTES) return [`${json}\n`];
