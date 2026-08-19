@@ -6,20 +6,21 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTheme } from "@/hooks/useTheme";
 import { useI18n } from "@/lib/i18n";
 import { THEMES } from "@/lib/theme-catalog";
+import { ModelPlanPanel } from "./settings/ModelPlanPanel";
 import type { EngineSummary } from "./EnginePicker";
 
 /**
  * The setup wizard's per-engine step framework, mirroring omp's own TUI
  * setup flow (src/modes/setup-wizard in oh-my-pi): providers → web search →
- * default model → theme. Steps are resolved per engine: capability-driven by
- * default (an engine with the models surface gets the full flow, a
- * CLI-authenticating engine gets sign-in guidance + theme), with an explicit
- * per-engine override map for future engines whose onboarding needs its own
- * shape. Every step writes through the same routes Settings uses, so manual
- * setup stays a first-class alternative to the wizard.
+ * default model → theme, then Cody's own model-plan step. Steps are resolved
+ * per engine: capability-driven by default (an engine with the models surface
+ * gets the full flow, a CLI-authenticating engine gets sign-in guidance +
+ * theme), with an explicit per-engine override map for future engines whose
+ * onboarding needs its own shape. Every step writes through the same routes
+ * Settings uses, so manual setup stays a first-class alternative to the wizard.
  */
 
-export type WizardStepId = "providers" | "webSearch" | "model" | "signIn" | "theme";
+export type WizardStepId = "providers" | "webSearch" | "model" | "signIn" | "theme" | "modelPlan";
 
 /** Future engines: name an explicit step list here when the capability-driven
  * default doesn't fit (keyed by engine id). */
@@ -28,7 +29,9 @@ const ENGINE_STEP_OVERRIDES: Record<string, WizardStepId[]> = {};
 export function getWizardSteps(engineId: string | null, hasModelsUi: boolean): WizardStepId[] {
   const override = engineId ? ENGINE_STEP_OVERRIDES[engineId] : undefined;
   if (override) return override;
-  return hasModelsUi ? ["providers", "webSearch", "model", "theme"] : ["signIn", "theme"];
+  // modelPlan runs last: it reasons over the accounts linked earlier in this
+  // same run. Engines without the models surface have nothing to plan.
+  return hasModelsUi ? ["providers", "webSearch", "model", "theme", "modelPlan"] : ["signIn", "theme"];
 }
 
 const WizardProvidersStep = dynamic(() => import("./setup-wizard-providers").then((module) => module.WizardProvidersStep), {
@@ -306,4 +309,11 @@ export function ThemeStep() {
       <p className="setup-wizard-note">{t("setupWizard.themeNote")}</p>
     </div>
   );
+}
+
+/** Last step: the roles and fallback chains for everything linked in the
+ * earlier steps. Both callbacks leave the step, so it can never trap the
+ * wizard short of finishing. */
+export function ModelPlanStep({ onApplied, onSkip }: { onApplied: () => void; onSkip: () => void }) {
+  return <ModelPlanPanel compact onApplied={onApplied} onSkip={onSkip} />;
 }

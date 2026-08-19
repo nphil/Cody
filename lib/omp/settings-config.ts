@@ -20,6 +20,9 @@ export type NativeSettings = {
     enabled?: boolean;
     maxRetries?: number;
     modelFallback?: boolean;
+    /** Skip a provider whose coding-plan quota is already depleted instead of
+     * spending a doomed request on it first (omp default: off). */
+    usageAwareFallback?: boolean;
     fallbackRevertPolicy?: "cooldown-expiry" | "never";
     fallbackChains?: Record<string, string[]>;
   };
@@ -118,6 +121,7 @@ export function readNativeSettings(): { path: string; settings: NativeSettings }
         ...(typeof retry.enabled === "boolean" ? { enabled: retry.enabled } : {}),
         ...(typeof retry.maxRetries === "number" && Number.isInteger(retry.maxRetries) ? { maxRetries: retry.maxRetries } : {}),
         ...(typeof retry.modelFallback === "boolean" ? { modelFallback: retry.modelFallback } : {}),
+        ...(typeof retry.usageAwareFallback === "boolean" ? { usageAwareFallback: retry.usageAwareFallback } : {}),
         ...(FALLBACK_REVERT_POLICIES.has(retry.fallbackRevertPolicy as string) ? { fallbackRevertPolicy: retry.fallbackRevertPolicy as "cooldown-expiry" | "never" } : {}),
         ...(Object.keys(fallbackChains).length ? { fallbackChains } : {}),
       } } : {}),
@@ -177,6 +181,7 @@ export function writeNativeSettings(settings: NativeSettings): void {
     "advisor.subagents": settings.advisor?.subagents,
     "retry.enabled": settings.retry?.enabled,
     "retry.modelFallback": settings.retry?.modelFallback,
+    "retry.usageAwareFallback": settings.retry?.usageAwareFallback,
     "compaction.enabled": settings.compaction?.enabled,
     "compaction.midTurnEnabled": settings.compaction?.midTurnEnabled,
     "compaction.autoContinue": settings.compaction?.autoContinue,

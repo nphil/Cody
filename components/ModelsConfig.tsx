@@ -26,6 +26,7 @@ import { Plus, Trash2, RefreshCw, AlertCircle, Cpu, Settings, Sparkles, Check as
 import { toast } from "@/components/ui/toast";
 import { SettingsTabs, type SettingsTab } from "./SettingsTabs";
 import { ModelCatalogPicker } from "./ModelCatalogPicker";
+import { ModelPlanPanel } from "./settings/ModelPlanPanel";
 // Color icons (have their own fill colors — no background needed)
 import AnthropicIcon from "@lobehub/icons/es/Anthropic/components/Mono";
 import OpenAIIcon from "@lobehub/icons/es/OpenAI/components/Mono";
@@ -185,7 +186,8 @@ type Selection =
   | { type: "roles" }
   | { type: "picker" }
   | { type: "registry" }
-  | { type: "fallbacks" };
+  | { type: "fallbacks" }
+  | { type: "modelPlan" };
 
 function ModelsConfigSurface({ embedded, isMobile, onClose, children }: { embedded: boolean; isMobile: boolean; onClose: () => void; children: React.ReactNode }) {
   if (embedded) return <>{children}</>;
@@ -2058,6 +2060,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
     if (selection.type === "roles") return <ModelRolesDetail models={runtimeModels} />;
     if (selection.type === "registry") return <NativeRegistryDetail models={runtimeModels} connectedProviders={connectedProviders} onChanged={loadRuntimeModels} />;
     if (selection.type === "fallbacks") return <RetryFallbackDetail models={runtimeModels} />;
+    if (selection.type === "modelPlan") return <ModelPlanPanel />;
     if (selection.type === "picker") return (
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
@@ -2175,6 +2178,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
               <TreeNavButton icon={RotateCcw} label="Retry & fallback" selected={selection?.type === "fallbacks"} onClick={() => setSelection({ type: "fallbacks" })} />
               <TreeNavButton icon={BookOpen} label="Composer model picker" selected={selection?.type === "picker"} onClick={() => setSelection({ type: "picker" })} />
               <TreeNavButton icon={SlidersHorizontal} label="OMP model roles" selected={selection?.type === "roles"} onClick={() => setSelection({ type: "roles" })} />
+              <TreeNavButton icon={Sparkles} label="Plan roles & fallbacks" selected={selection?.type === "modelPlan"} onClick={() => setSelection({ type: "modelPlan" })} />
 
               {(activeOAuth.length > 0 || activeApiKey.length > 0) && (
                 <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "14px 10px 6px", color: "var(--text-dim)", fontSize: 10, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase" }}>

@@ -5,7 +5,7 @@ import { useCallback, useMemo, useState } from "react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/lib/i18n";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/primitives";
-import { DefaultModelStep, ProvidersStep, SignInStep, ThemeStep, WebSearchStep, getWizardSteps, type WizardStepId } from "./setup-wizard-steps";
+import { DefaultModelStep, ModelPlanStep, ProvidersStep, SignInStep, ThemeStep, WebSearchStep, getWizardSteps, type WizardStepId } from "./setup-wizard-steps";
 import type { EngineSummary } from "./EnginePicker";
 
 /**
@@ -46,6 +46,11 @@ export function SetupWizard({ engine, hasModelsUi, onDone, onDismiss }: {
     onDone();
   }, [onDone]);
 
+  const advance = useCallback(() => {
+    if (stepIndex >= steps.length - 1) void finish();
+    else setStepIndex((index) => index + 1);
+  }, [finish, stepIndex, steps.length]);
+
   const titles: Record<WizardStepId, { title: string; subtitle: string }> = {
     providers: { title: t("setupWizard.providersTitle"), subtitle: t("setupWizard.providersSubtitle") },
     webSearch: { title: t("setupWizard.webSearchTitle"), subtitle: t("setupWizard.webSearchSubtitle") },
@@ -55,6 +60,7 @@ export function SetupWizard({ engine, hasModelsUi, onDone, onDismiss }: {
       subtitle: t("setupWizard.authSubtitle", { name: engine?.shortName ?? "the engine" }),
     },
     theme: { title: t("setupWizard.themeTitle"), subtitle: t("setupWizard.themeSubtitle") },
+    modelPlan: { title: t("setupWizard.modelPlanTitle"), subtitle: t("setupWizard.modelPlanSubtitle") },
   };
 
   return (
@@ -87,6 +93,7 @@ export function SetupWizard({ engine, hasModelsUi, onDone, onDismiss }: {
           {step === "model" && <DefaultModelStep />}
           {step === "signIn" && <SignInStep engine={engine} />}
           {step === "theme" && <ThemeStep />}
+          {step === "modelPlan" && <ModelPlanStep onApplied={advance} onSkip={advance} />}
         </div>
 
         <div className="setup-wizard-actions">
@@ -104,7 +111,7 @@ export function SetupWizard({ engine, hasModelsUi, onDone, onDismiss }: {
             <button
               type="button"
               className="login-primary engine-button setup-wizard-btn"
-              onClick={() => (isLast ? void finish() : setStepIndex((index) => index + 1))}
+              onClick={advance}
               disabled={finishing}
             >
               {finishing
