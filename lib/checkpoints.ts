@@ -212,7 +212,7 @@ async function restoreCheckpointLocked(cwd: string, hash: string, safetyLabel: s
     return {
       ok: false,
       safetyHash: null,
-      error: "Could not snapshot the current state before restoring, so the restore was cancelled — nothing was changed.",
+      error: "Could not snapshot the current state before restoring, so the restore was cancelled. Nothing was changed.",
     };
   }
   try {

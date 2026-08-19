@@ -274,7 +274,7 @@ export class TurnEngineSession implements EngineSession {
     if (this.child) {
       throw new EngineCommandError(
         "prompt",
-        `The ${this.spec.name} engine runs one turn at a time — wait for the current turn to finish`,
+        `The ${this.spec.name} engine runs one turn at a time. Wait for the current turn to finish`,
         "session_busy",
       );
     }
@@ -288,7 +288,7 @@ export class TurnEngineSession implements EngineSession {
     if (Array.isArray(command.images) && command.images.length > 0) {
       throw new EngineCommandError(
         "prompt",
-        `The ${this.spec.name} engine does not support image attachments yet — send the prompt without images`,
+        `The ${this.spec.name} engine does not support image attachments yet. Send the prompt without images`,
         "images_unsupported",
       );
     }
@@ -296,7 +296,7 @@ export class TurnEngineSession implements EngineSession {
     if (!bin) {
       throw new EngineCommandError(
         "prompt",
-        `The ${this.spec.name} binary was not found — install the engine from Settings → Agent engine`,
+        `The ${this.spec.name} binary was not found. Install the engine from Settings → Agent engine`,
         "engine_not_installed",
       );
     }

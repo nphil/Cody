@@ -215,8 +215,8 @@ export class RpcProcess {
     // frame, which presents as an unexplained hang.
     if (supported.length > 0 && !supported.includes(1) && !supported.includes(2)) {
       throw new Error(
-        `omp speaks RPC protocol versions [${supported.join(", ")}] but this Cody build understands 1 and 2 — `
-        + "update Cody, or revert the engine update from Settings → User Accounts → Agent engine.",
+        `omp speaks RPC protocol versions [${supported.join(", ")}] but this Cody build understands 1 and 2. `
+        + "Update Cody, or revert the engine update from Settings → User Accounts → Agent engine.",
       );
     }
     if (!supported.includes(2)) return this.protocolVersion;

@@ -98,7 +98,7 @@ const SERVER_HOST_TOOLS: HostToolDefinition[] = [{
 const SERVER_HOST_TOOL_NAMES = new Set(SERVER_HOST_TOOLS.map((tool) => tool.name));
 const MCP_LIST_TIMEOUT_MS = 15_000;
 
-const RESTARTING_MESSAGE = "This session is restarting — retry in a moment.";
+const RESTARTING_MESSAGE = "This session is restarting. Retry in a moment.";
 const BASH_EXCLUDE_MESSAGE =
   "omp cannot run a shell command with its output excluded from the model context (`!!`): the RPC bash command has no exclusion option, so the output would silently enter the context anyway. Run it with a single `!` to share the output with the model, or use a terminal outside omp web.";
 

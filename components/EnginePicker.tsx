@@ -59,7 +59,7 @@ async function postEngine(path: string, id: string): Promise<unknown> {
   });
   const body = (await response.json().catch(() => null)) as { error?: string; detail?: string } | null;
   if (!response.ok) {
-    throw new Error([body?.error, body?.detail].filter(Boolean).join(" — ") || `HTTP ${response.status}`);
+    throw new Error([body?.error, body?.detail].filter(Boolean).join(": ") || `HTTP ${response.status}`);
   }
   return body;
 }

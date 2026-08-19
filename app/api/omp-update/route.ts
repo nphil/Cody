@@ -22,7 +22,7 @@ export async function POST(request: Request) {
     const resolved = requireAdmin(request);
     if ("response" in resolved) return resolved.response;
     if (body.action === "update") {
-      // Same mechanism as the engine card: npm against the persistent tools
+      // Same mechanism as the engine install route: npm against the persistent tools
       // prefix (spec pins @latest), which the runtime resolves ahead of any
       // stale copy. Live sessions restart so nothing runs the old binary.
       const adapter = getHarnessById("omp");
@@ -58,7 +58,7 @@ export async function POST(request: Request) {
         version: await adapter.getVersion(),
         sessionsRestarted,
         healthy,
-        ...(healthError ? { error: `The updated engine failed a health check: ${healthError}${previousVersion ? ` — you can revert to v${previousVersion} in Settings → User Accounts → Agent engine.` : ""}`, code: "unhealthy_after_update" } : {}),
+        ...(healthError ? { error: `The updated engine failed a health check: ${healthError}${previousVersion ? ` (revert to v${previousVersion} from Settings, System & Updates)` : ""}`, code: "unhealthy_after_update" } : {}),
       }, healthy ? undefined : { status: 502 });
     }
     if (body.action === "restart") {

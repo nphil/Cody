@@ -4,8 +4,8 @@
 > personal use right now (run from a checkout, or the Docker bundle in
 > `docker/` — see `docs/unraid.md`). Publishing to npm is on the long-term
 > roadmap for when the product is ready to share. Nothing depends on it
-> except the Updates panel's version check, which degrades to
-> "update check unavailable" until then. The steps below are ready to run
+> except the version check in Settings › System & Updates, which degrades to
+> "Update check unavailable" until then. The steps below are ready to run
 > whenever that day comes.
 
 Each release publishes two artifacts:

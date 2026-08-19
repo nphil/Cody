@@ -30,7 +30,7 @@ export const STORAGE_KEYS = {
   composerModels: "cody:composer-models",
   /** Whether the turn-completion sound plays. */
   soundEnabled: "cody:sound-enabled",
-  /** Selected right-panel tool (files / git / terminal / tasks / updates / info). */
+  /** Selected right-panel tool (files / git / terminal / preview / tasks / info). */
   workspacePanel: "cody:workspace-panel",
   /** Git panel changed-file presentation ("list" | "tree"). */
   gitFileView: "cody:git-file-view",

@@ -124,20 +124,19 @@ behind an authenticating reverse proxy.
 - Terminals run as the container's user with full access to `/data` and
   `/workspace` — scope those mounts to what the agent should touch.
 - Updating splits cleanly in two: **Cody itself** updates the Unraid way
-  (new image → Apply Update), while the **engine** updates in-app — the
-  Updates panel and the System tab check omp's version and offer "Update
-  now", and Settings → User Accounts → Agent engine has Update per engine.
-  Engine updates go to `/data/agent/tools`, so they stick across container
-  recreates and never require a new image.
+  (new image → Apply Update), while **engines** update in-app — Settings ›
+  System & Updates checks every installed engine and offers an Update action
+  when a newer version is known (updating the active engine restarts its
+  live sessions). Engine updates go to `/data/agent/tools`, so they stick
+  across container recreates and never require a new image.
 - The agent **engine** is chosen in the UI: a one-time picker after the
   first admin signs in, and later under Settings → User Accounts → Agent
-  engine. No engine ships in the image — omp, Claude Code and Codex all
-  install on demand into `/data/agent/tools`, which survives image updates,
-  and each has an Update action in the same card (updating the active
-  engine restarts its live sessions). Claude/Codex sign-in state lives
-  under `/data/home` — run `claude` or `codex login` once in a Cody
-  terminal, or pass `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` as extra
-  container variables. See `docs/harnesses.md`.
+  engine (install and switch; updates live in System & Updates). No engine
+  ships in the image — omp, Claude Code and Codex all install on demand
+  into `/data/agent/tools`, which survives image updates. Claude/Codex
+  sign-in state lives under `/data/home` — run `claude` or `codex login`
+  once in a Cody terminal, or pass `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`
+  as extra container variables. See `docs/harnesses.md`.
 - omp is a **Bun** program (`engines: bun >= 1.3.14`), so the image carries the
   Bun binary alongside Node. Installing omp with npm onto a Node-only image
   looks like it works and then fails at every invocation with

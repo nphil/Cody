@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getSubmitDuringRunBehavior, setSubmitDuringRunBehavior, type SubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import dynamic from "next/dynamic";
-import { Copy, Download, ExternalLink, Loader2, RefreshCw, RotateCcw, Sparkles, Search, AlertCircle } from "lucide-react";
+import { RefreshCw, Sparkles, Search, AlertCircle } from "lucide-react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/primitives";
 import { SettingsTabs, type SettingsTab, type ActiveEngineInfo, type EngineCapabilities, ALL_CAPABILITIES, DEFAULT_HARNESS_LABEL, getSettingsCategories, getNormalizedActive } from "./SettingsTabs";
@@ -20,13 +20,7 @@ const McpConfig = dynamic(() => import("./McpConfig").then((module) => module.Mc
 const OmpSchemaSettings = dynamic(() => import("./settings/OmpSchemaSettings").then((module) => module.OmpSchemaSettings), { loading: SettingsTabLoading });
 const AccountSettings = dynamic(() => import("./settings/AccountSettings").then((module) => module.AccountSettings), { loading: SettingsTabLoading });
 const LocalAiConfig = dynamic(() => import("./settings/LocalAiConfig").then((module) => module.LocalAiConfig), { loading: SettingsTabLoading });
-
-type UpdateState = {
-  currentVersion: string | null;
-  availableVersion: string | null;
-  updateAvailable: boolean;
-  updateCommand?: string;
-};
+const SystemUpdates = dynamic(() => import("./settings/SystemUpdates").then((module) => module.SystemUpdates), { loading: SettingsTabLoading });
 
 type NativeSettings = {
   defaultThinkingLevel?: "auto" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -190,13 +184,6 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
       return true;
     }
   });
-  const [update, setUpdate] = useState<UpdateState | null>(null);
-  const [checking, setChecking] = useState(true);
-  const [appUpdate, setAppUpdate] = useState<UpdateState | null>(null);
-  const [checkingAppUpdate, setCheckingAppUpdate] = useState(true);
-  const [restarting, setRestarting] = useState(false);
-  const [updating, setUpdating] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
   const [nativeSettings, setNativeSettings] = useState<NativeSettings | null>(null);
   const [nativeSettingsError, setNativeSettingsError] = useState<string | null>(null);
   // The curated panels and the schema-driven OMP panel write the same file.
@@ -310,81 +297,6 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
     const tools = base.tools ?? {};
     void saveNativeSettings({ ...base, tools: { ...tools, approval: { ...(tools.approval ?? {}), ...patch } } });
   };
-
-  const checkForUpdate = useCallback(async () => {
-    setChecking(true);
-    setMessage(null);
-    try {
-      const response = await fetch("/api/omp-update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "check" }) });
-      const data = (await response.json()) as UpdateState & { error?: string };
-      if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
-      setUpdate(data);
-      onOmpUpdateAvailabilityChange(data.updateAvailable);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setChecking(false);
-    }
-  }, [onOmpUpdateAvailabilityChange]);
-
-  useEffect(() => {
-    // Only the omp runtime knows how to check itself for updates; engines
-    // without the capability have no card to fill and no route to ask.
-    if (!capabilities.updates) return;
-    void checkForUpdate();
-  }, [checkForUpdate, capabilities.updates]);
-
-  const checkForAppUpdate = useCallback(async (force = false) => {
-    setCheckingAppUpdate(true);
-    try {
-      const response = await fetch(force ? "/api/app-update?force=1" : "/api/app-update");
-      const data = (await response.json()) as UpdateState & { error?: string };
-      if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
-      setAppUpdate(data);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setCheckingAppUpdate(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void checkForAppUpdate();
-  }, [checkForAppUpdate]);
-
-  const restartSessions = useCallback(async () => {
-    setRestarting(true);
-    try {
-      const response = await fetch("/api/omp-update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "restart" }) });
-      const data = (await response.json()) as { error?: string; sessionsRestarted?: number };
-      if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
-      setMessage(`Restarted ${data.sessionsRestarted ?? 0} active agent session(s).`);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setRestarting(false);
-    }
-  }, []);
-
-  const updateNow = useCallback(async () => {
-    setUpdating(true);
-    setMessage(null);
-    try {
-      const response = await fetch("/api/omp-update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "update" }) });
-      const data = (await response.json()) as { success?: boolean; version?: string; sessionsRestarted?: number; error?: string; code?: string; detail?: string };
-      if (!response.ok || data.success !== true) {
-        const detail = data.detail ? ` (${data.detail})` : "";
-        throw new Error(`${data.error ?? `HTTP ${response.status}`}${detail}`);
-      }
-      const count = data.sessionsRestarted ?? 0;
-      setMessage(`Updated to v${data.version ?? "?"} — ${count} session${count === 1 ? "" : "s"} restarted.`);
-      await checkForUpdate();
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setUpdating(false);
-    }
-  }, [checkForUpdate]);
 
   const currentTab = getNormalizedActive(activeTab);
 
@@ -937,118 +849,15 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
               />
             )}
 
-            {/* SYSTEM & UPDATES TAB */}
+            {/* SYSTEM & UPDATES TAB — the consolidated home for app, engine,
+                and skill updates (components/settings/SystemUpdates.tsx). */}
             {currentTab === "system" && (
-              <div role="tabpanel" id="settings-panel-system" aria-labelledby="settings-tab-system" style={{ padding: 20, display: "flex", flexDirection: "column", gap: 18 }}>
-                <div>
-                  <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>System & Updates</h3>
-                  <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)" }}>
-                    {capabilities.updates
-                      ? `App version status, ${harnessLabel} runtime updates, and active session management.`
-                      : "App version status. The active engine manages its own runtime and updates."}
-                  </p>
-                </div>
-
-                {/* Cody app update card */}
-                <section style={{ padding: 14, border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", display: "flex", flexDirection: "column", gap: 10 }}>
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-                    <div>
-                      <div style={{ fontSize: 13, fontWeight: 600 }}>Cody application</div>
-                      <div style={{ marginTop: 4, color: appUpdate?.updateAvailable ? "var(--accent)" : "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 12 }}>
-                        {checkingAppUpdate ? "Checking for updates..." : appUpdate?.updateAvailable ? `v${appUpdate.currentVersion ?? "?"} -> v${appUpdate.availableVersion}` : appUpdate?.currentVersion ? `v${appUpdate.currentVersion} is up to date` : "Version unavailable"}
-                      </div>
-                    </div>
-                    <button type="button" onClick={() => void checkForAppUpdate(true)} disabled={checkingAppUpdate} aria-label="Check Cody updates" style={{ padding: "6px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text)", cursor: checkingAppUpdate ? "wait" : "pointer", fontSize: 12, display: "inline-flex", alignItems: "center", gap: 5 }}>
-                      <RefreshCw size={13} aria-hidden="true" /> Refresh
-                    </button>
-                  </div>
-                  {appUpdate?.updateAvailable && (
-                    <div style={{ marginTop: 6, padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", display: "flex", flexDirection: "column", gap: 6 }}>
-                      <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Run this command in terminal to update Cody:</div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <code style={{ flex: 1, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--accent)", wordBreak: "break-all" }}>{appUpdate.updateCommand || "npm install -g @nphil/cody"}</code>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            void navigator.clipboard.writeText(appUpdate.updateCommand || "npm install -g @nphil/cody");
-                            setMessage("Copied update command to clipboard.");
-                          }}
-                          style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", color: "var(--text)", cursor: "pointer", fontSize: 11 }}
-                        >
-                          <Copy size={12} aria-hidden="true" /> Copy
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </section>
-
-                {/* Engine runtime update card — only engines that can check and
-                    restart themselves (omp) have anything to show here. */}
-                {capabilities.updates && (
-                <section style={{ padding: 14, border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", display: "flex", flexDirection: "column", gap: 10 }}>
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-                    <div>
-                      <div style={{ fontSize: 13, fontWeight: 600 }}>{harnessLabel} runtime</div>
-                      <div style={{ marginTop: 4, color: update?.updateAvailable ? "var(--accent)" : "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 12 }}>
-                        {checking ? "Checking for updates..." : update?.updateAvailable ? `v${update.currentVersion ?? "?"} -> v${update.availableVersion}` : update?.currentVersion ? `v${update.currentVersion} is up to date` : "Version unavailable"}
-                      </div>
-                    </div>
-                    <button type="button" onClick={() => void checkForUpdate()} disabled={checking} aria-label={`Check ${harnessLabel} updates`} style={{ padding: "6px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text)", cursor: checking ? "wait" : "pointer", fontSize: 12, display: "inline-flex", alignItems: "center", gap: 5 }}>
-                      <RefreshCw size={13} aria-hidden="true" /> Refresh
-                    </button>
-                  </div>
-                  {update?.updateAvailable && (
-                    <div style={{ marginTop: 6, padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", display: "flex", flexDirection: "column", gap: 6 }}>
-                      <div style={{ fontSize: 12, color: "var(--text-muted)" }}>Run this command in terminal to update the {harnessLabel} runtime:</div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <code style={{ flex: 1, fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--accent)", wordBreak: "break-all" }}>{update.updateCommand || "omp update"}</code>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            void navigator.clipboard.writeText(update.updateCommand || "omp update");
-                            setMessage("Copied update command to clipboard.");
-                          }}
-                          style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", color: "var(--text)", cursor: "pointer", fontSize: 11 }}
-                        >
-                          <Copy size={12} aria-hidden="true" /> Copy
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 6 }}>
-                    <button
-                      type="button"
-                      onClick={() => void updateNow()}
-                      disabled={updating || restarting}
-                      style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", color: "var(--text)", cursor: updating ? "wait" : "pointer", fontSize: 12 }}
-                    >
-                      {updating
-                        ? <Loader2 size={13} aria-hidden="true" style={{ animation: "spin 0.8s linear infinite" }} />
-                        : <Download size={13} aria-hidden="true" />}
-                      {updating ? "Updating…" : "Update now"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void restartSessions()}
-                      disabled={restarting || updating}
-                      style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", color: "var(--text)", cursor: restarting ? "wait" : "pointer", fontSize: 12 }}
-                    >
-                      <RotateCcw size={13} aria-hidden="true" /> {restarting ? "Restarting..." : "Restart OMP sessions"}
-                    </button>
-                    <a
-                      href="https://github.com/can1357/oh-my-pi/releases"
-                      target="_blank"
-                      rel="noreferrer"
-                      style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", color: "var(--text-muted)", textDecoration: "none", fontSize: 12 }}
-                    >
-                      <ExternalLink size={13} aria-hidden="true" /> Changelog
-                    </a>
-                  </div>
-                </section>
-                )}
-
-                {message && <p role="status" style={{ margin: 0, color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>{message}</p>}
-              </div>
+              <SystemUpdates
+                cwd={cwd}
+                capabilities={capabilities}
+                onOmpUpdateAvailabilityChange={onOmpUpdateAvailabilityChange}
+                onOpenSkills={() => onSelectTab("skills")}
+              />
             )}
               </div>
             </SettingsHighlightContext.Provider>

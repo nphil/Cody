@@ -33,7 +33,7 @@ function lastLine(text: string): string {
 
 function outcomeMessage(error: InstallOutcome): string {
   if (!error) return "Install failed";
-  return [error.message, error.detail].filter(Boolean).join(" — ");
+  return [error.message, error.detail].filter(Boolean).join(": ");
 }
 
 export function useEngineInstalls(onSettled: (id: string, ok: boolean) => void) {
@@ -126,7 +126,7 @@ export function useEngineInstalls(onSettled: (id: string, ok: boolean) => void) 
       .then(async (response) => {
         const body = (await response.json().catch(() => null)) as { error?: string; detail?: string } | null;
         if (!response.ok) {
-          throw new Error([body?.error, body?.detail].filter(Boolean).join(" — ") || `HTTP ${response.status}`);
+          throw new Error([body?.error, body?.detail].filter(Boolean).join(": ") || `HTTP ${response.status}`);
         }
       })
       .then(() => settle(id, true))

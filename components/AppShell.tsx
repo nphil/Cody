@@ -13,7 +13,7 @@ import { BranchNavigator } from "./BranchNavigator";
 import { ThemePicker } from "./ThemePicker";
 import { TitleBar } from "./TitleBar";
 import { useDesktopShell } from "@/hooks/useDesktopShell";
-import { AppWindow, CircleArrowUp, Files, GitBranch, History, Info, ListTodo, Menu, PanelLeft, ScrollText, Terminal, TriangleAlert } from "lucide-react";
+import { AppWindow, Files, GitBranch, History, Info, ListTodo, Menu, PanelLeft, ScrollText, Terminal, TriangleAlert } from "lucide-react";
 import { formatApiCost, formatCompactNumber, formatPercent, usageToneColor } from "@/lib/format";
 import { translate, useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
@@ -54,10 +54,6 @@ const TasksPanel = dynamic(() => import("./TasksPanel").then((module) => module.
   ssr: false,
   loading: () => <PanelLoadingFallback />,
 });
-const UpdatesPanel = dynamic(() => import("./UpdatesPanel").then((module) => module.UpdatesPanel), {
-  ssr: false,
-  loading: () => <PanelLoadingFallback />,
-});
 const InfoPanel = dynamic(() => import("./InfoPanel").then((module) => module.InfoPanel), {
   ssr: false,
   loading: () => <PanelLoadingFallback />,
@@ -68,12 +64,32 @@ const PreviewPanel = dynamic(() => import("./PreviewPanel").then((module) => mod
 });
 
 /** The tools of the right workspace panel, in tab order (pi-web parity:
- * Files | Git | Terminal | Tasks | Updates | Info). */
-type WorkspacePanelId = "file" | "git" | "terminal" | "preview" | "tasks" | "updates" | "info";
-const WORKSPACE_PANEL_IDS: readonly WorkspacePanelId[] = ["file", "git", "terminal", "preview", "tasks", "updates", "info"];
+ * Files | Git | Terminal | Tasks | Info). Update status lives in Settings ›
+ * System & Updates, not in a panel. */
+type WorkspacePanelId = "file" | "git" | "terminal" | "preview" | "tasks" | "info";
+const WORKSPACE_PANEL_IDS: readonly WorkspacePanelId[] = ["file", "git", "terminal", "preview", "tasks", "info"];
 
 function isWorkspacePanelId(value: string | null): value is WorkspacePanelId {
   return (WORKSPACE_PANEL_IDS as readonly string[]).includes(value ?? "");
+}
+
+/** Body of the "update available" toasts: the version delta plus a deep link
+ * into Settings › System & Updates, which owns every update action. */
+function UpdateNoticeBody({ current, next, onOpen }: { current: string | null; next: string; onOpen: () => void }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4 }}>
+      <div style={{ fontFamily: "var(--font-mono)" }}>v{current ?? "?"} -&gt; v{next}</div>
+      <div>
+        <button
+          type="button"
+          onClick={onOpen}
+          style={{ padding: "3px 7px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", fontSize: 11 }}
+        >
+          {translate("updates.openSystemSettings")}
+        </button>
+      </div>
+    </div>
+  );
 }
 
 // Resizable desktop sidebar: the width is stored on the container as the
@@ -310,61 +326,27 @@ export function AppShell() {
       signal: controller.signal,
     })
       .then((response) => response.ok ? response.json() : null)
-      .then((data: { currentVersion?: string | null; availableVersion?: string | null; updateAvailable?: boolean; updateCommand?: string } | null) => {
+      .then((data: { currentVersion?: string | null; availableVersion?: string | null; updateAvailable?: boolean } | null) => {
         setOmpUpdateAvailable(Boolean(data?.updateAvailable));
         if (!data?.updateAvailable || !data.availableVersion) return;
-        const cmd = data.updateCommand || "omp update";
         toast.info(
-          "OMP update available",
-          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4 }}>
-            <div>v{data.currentVersion ?? "?"} -&gt; v{data.availableVersion}</div>
-            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <code style={{ background: "var(--bg-panel)", padding: "3px 7px", borderRadius: "var(--radius-control)", fontSize: 11, fontFamily: "var(--font-mono)" }}>
-                {cmd}
-              </code>
-              <button
-                type="button"
-                onClick={() => {
-                  void copyText(cmd).then(() => toast.success("Command copied to clipboard"));
-                }}
-                style={{ padding: "3px 7px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", fontSize: 11 }}
-              >
-                Copy
-              </button>
-            </div>
-          </div>
+          translate("updates.notice.engineTitle", { name: activeEngine?.shortName ?? "OMP" }),
+          <UpdateNoticeBody current={data.currentVersion ?? null} next={data.availableVersion} onOpen={() => setSettingsTab("system")} />
         );
       })
       .catch(() => {});
     return () => controller.abort();
-  }, [capabilitiesLoaded, capabilities.updates]);
+  }, [capabilitiesLoaded, capabilities.updates, activeEngine]);
   useEffect(() => {
     const controller = new AbortController();
     void fetch("/api/app-update", { signal: controller.signal })
       .then((response) => response.ok ? response.json() : null)
-      .then((data: { currentVersion?: string; availableVersion?: string | null; updateAvailable?: boolean; updateCommand?: string } | null) => {
+      .then((data: { currentVersion?: string; availableVersion?: string | null; updateAvailable?: boolean } | null) => {
         setAppUpdateAvailable(Boolean(data?.updateAvailable));
         if (!data?.updateAvailable || !data.availableVersion) return;
-        const cmd = data.updateCommand || "npm install -g @nphil/cody";
         toast.info(
-          "Cody update available",
-          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4 }}>
-            <div>v{data.currentVersion ?? "?"} -&gt; v{data.availableVersion}</div>
-            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <code style={{ background: "var(--bg-panel)", padding: "3px 7px", borderRadius: "var(--radius-control)", fontSize: 11, fontFamily: "var(--font-mono)" }}>
-                {cmd}
-              </code>
-              <button
-                type="button"
-                onClick={() => {
-                  void copyText(cmd).then(() => toast.success("Command copied to clipboard"));
-                }}
-                style={{ padding: "3px 7px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", fontSize: 11 }}
-              >
-                Copy
-              </button>
-            </div>
-          </div>
+          translate("updates.notice.appTitle"),
+          <UpdateNoticeBody current={data.currentVersion ?? null} next={data.availableVersion} onOpen={() => setSettingsTab("system")} />
         );
       })
       .catch(() => {});
@@ -591,7 +573,6 @@ export function AppShell() {
   const [gitBadgeCount, setGitBadgeCount] = useState<number | null>(null);
   const [gitMeta, setGitMeta] = useState<{ branch: string | null; repoRoot: string | null }>({ branch: null, repoRoot: null });
   const [tasksConfigInvalid, setTasksConfigInvalid] = useState(false);
-  const [updatesBadgeCount, setUpdatesBadgeCount] = useState(0);
   // One-shot: the token makes each dispatch distinct, so a stale request is
   // never replayed by later cwd changes (TerminalPanel tracks consumed tokens).
   const [focusTerminalRequest, setFocusTerminalRequest] = useState<{ id: string; token: number } | null>(null);
@@ -719,7 +700,6 @@ export function AppShell() {
   const handleTasksConfigStateChange = useCallback((state: "missing" | "invalid" | "loaded" | null) => {
     setTasksConfigInvalid(state === "invalid");
   }, []);
-  const handleUpdatesAvailableCountChange = useCallback((count: number) => setUpdatesBadgeCount(count), []);
 
   // Same @mention format as the chat input's @ autocomplete, so the agent's
   // read tool resolves it the same way (it strips the @ prefix).
@@ -1867,12 +1847,6 @@ export function AppShell() {
               { id: "terminal", icon: <Terminal size={15} aria-hidden="true" />, label: t("workspace.terminal") },
               { id: "preview", icon: <AppWindow size={15} aria-hidden="true" />, label: t("workspace.preview") },
               { id: "tasks", icon: <ListTodo size={15} aria-hidden="true" />, label: t("workspace.tasks"), badge: tasksConfigInvalid ? "!" : null },
-              {
-                id: "updates",
-                icon: <CircleArrowUp size={15} aria-hidden="true" />,
-                label: t("workspace.updates"),
-                badge: updatesBadgeCount > 0 ? String(updatesBadgeCount) : null,
-              },
               { id: "info", icon: <Info size={15} aria-hidden="true" />, label: t("workspace.info") },
             ];
             const selectPanelAt = (index: number) => {
@@ -1999,7 +1973,7 @@ export function AppShell() {
           aria-labelledby="workspace-terminal-tab"
           style={{ flex: 1, minHeight: 0, overflow: "hidden", display: rightPanelMode === "terminal" ? "flex" : "none" }}
         >
-          <TerminalPanel cwd={activeCwd} focusRequest={focusTerminalRequest} onOpen={() => { setRightPanelMode("terminal"); setRightPanelOpen(true); }} />
+          <TerminalPanel cwd={activeCwd} sessionId={selectedSession?.id ?? null} focusRequest={focusTerminalRequest} onOpen={() => { setRightPanelMode("terminal"); setRightPanelOpen(true); }} />
         </div>
         <div
           id="workspace-preview-tool"
@@ -2034,22 +2008,6 @@ export function AppShell() {
                 setRightPanelOpen(true);
               }}
               onConfigStateChange={handleTasksConfigStateChange}
-            />
-          )}
-        </div>
-        <div
-          id="workspace-updates-tool"
-          role="tabpanel"
-          aria-labelledby="workspace-updates-tab"
-          style={{ flex: 1, minHeight: 0, overflow: "hidden", display: rightPanelMode === "updates" ? "flex" : "none", flexDirection: "column" }}
-        >
-          {mountedPanels.has("updates") && (
-            <UpdatesPanel
-              cwd={activeCwd}
-              active={rightPanelMode === "updates" && rightPanelOpen}
-              engineUpdates={capabilities.updates}
-              onOpenSettings={(tab) => setSettingsTab(tab)}
-              onAvailableCountChange={handleUpdatesAvailableCountChange}
             />
           )}
         </div>

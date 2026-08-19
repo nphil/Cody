@@ -161,7 +161,7 @@ export async function deleteEntry(targetPath: string, recursive: boolean): Promi
       const code = (error as NodeJS.ErrnoException).code;
       if (code === "ENOTEMPTY" || code === "EEXIST") {
         throw new FileOpError(
-          "This folder isn't empty — delete recursively to remove it",
+          "This folder is not empty. Delete recursively to remove it",
           "directory_not_empty",
           409,
         );

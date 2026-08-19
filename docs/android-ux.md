@@ -698,12 +698,13 @@ On dispatch, switch to the Terminal panel with the new terminal focused.
 States: `none` / `loading` / `missing` (with the config example) / `invalid`
 (field-level errors, rail badge `!`) / `loaded` / empty.
 
-**Updates** — `UpdatesPanel.tsx`. Cards for the Cody app, the engine runtime,
-and skills; each shows current vs available and a **copyable** command. Nothing
-self-updates. Badge = number of sources reporting an update.
-On Android the app-update card is different in kind: distribution is sideloaded
-APK / GitHub releases, so the card links a release and states the installed
-`versionName`/`versionCode`; it never attempts an in-app install.
+**Updates** — no panel. Update status for the Cody app, agent engines, and
+skills lives in Settings › System & Updates
+(`components/settings/SystemUpdates.tsx`): one "Check for updates" control,
+with an update action (admin button or **copyable** command) only when a newer
+version is known. On Android the app row is different in kind: distribution is
+sideloaded APK / GitHub releases, so it links a release and states the
+installed `versionName`/`versionCode`; it never attempts an in-app install.
 
 **Info** — `InfoPanel.tsx`. A two-column definition grid
 (`minmax(96px, auto) minmax(0, 1fr)`), sections: Cody, engine runtime,
@@ -1577,7 +1578,8 @@ For diffing an Android screen against its original.
 | terminal | `components/TerminalPanel.tsx`, `lib/terminal-preferences.ts` |
 | preview, streamed surface | `components/PreviewPanel.tsx`, `components/StreamedDisplay.tsx`, `lib/display/*` |
 | tasks | `components/TasksPanel.tsx`, `lib/workspace-tasks.ts` |
-| updates, info, diagnostics | `components/UpdatesPanel.tsx`, `components/InfoPanel.tsx` |
+| updates | `components/settings/SystemUpdates.tsx` |
+| info, diagnostics | `components/InfoPanel.tsx` |
 | lightbox | `components/ImageLightbox.tsx` |
 | onboarding card styling | `components/LoginScreen.tsx`, `.login-*` in `app/globals.css` |
 | token auth | `docs/api.md` (authoritative contract), `lib/auth/tokens.ts`, `app/api/accounts/me/tokens/route.ts`, `app/api/accounts/me/route.ts` |
