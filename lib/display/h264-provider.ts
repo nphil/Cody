@@ -4,8 +4,6 @@ import puppeteer, { type Browser, type CDPSession, type MouseButton, type Page }
 import type { WebSocket } from "ws";
 import {
   CHROMIUM_BASE_ARGS,
-  CHROMIUM_GPU_ARGS,
-  CHROMIUM_SOFTWARE_ARGS,
   IDLE_DISPOSE_MS,
   MAX_BUFFERED_BYTES,
   MAX_CLIPBOARD_CHARS,
@@ -17,7 +15,6 @@ import {
   RasterWebProvider,
   START_GRACE_MS,
   chromiumPath,
-  gpuRenderNode,
   hardwareRenderer,
   providerState,
   sendJson,
@@ -25,6 +22,7 @@ import {
   type DisplayProvider,
   type Viewport,
 } from "./provider";
+import { CHROMIUM_GPU_ARGS, CHROMIUM_SOFTWARE_ARGS, gpuRenderNode } from "../chromium-gpu";
 import { attachAppLogCapture, type AppLogDetach } from "../logs/capture";
 import type { DisplayClientControl, DisplayRequestV1, DisplayStreamVideo } from "./types";
 

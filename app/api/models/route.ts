@@ -1,4 +1,5 @@
 import { loadModelsWithCache, withModelRuntimeError, type ModelsData } from "@/lib/models-cache";
+import { supportsPriorityFastMode } from "@/lib/fast-mode";
 import { type OmpModel, runUtilityCommand } from "@/lib/omp/rpc-utility";
 import { readDisabledProviders } from "@/lib/omp/model-roles";
 
@@ -27,12 +28,6 @@ function thinkingLevelsFor(model: OmpModel): string[] {
   return ["off", ...(model.thinking?.efforts ?? [])];
 }
 
-// OMP's /fast maps to a priority service tier. These are the provider families
-// OMP currently resolves for that control (ModelControls.setFastMode).
-function supportsFastMode(model: OmpModel): boolean {
-  return model.provider === "anthropic" || model.provider === "openai" || model.provider === "google";
-}
-
 async function loadModels(): Promise<ModelsData> {
   const { models: available } = await runUtilityCommand<{ models: OmpModel[] }>(
     { type: "get_available_models" },
@@ -47,7 +42,7 @@ async function loadModels(): Promise<ModelsData> {
       name: model.name,
       provider: model.provider,
       thinkingLevels: thinkingLevelsFor(model),
-      supportsFastMode: supportsFastMode(model),
+      supportsFastMode: supportsPriorityFastMode(model),
       ...(typeof model.contextWindow === "number"
         && Number.isFinite(model.contextWindow)
         && model.contextWindow > 0

@@ -6,6 +6,7 @@ import { delimiter, join } from "path";
 import { readEnv } from "./env";
 import { fitWithinEdge } from "./image-compress";
 import { normalizePreviewUrl } from "./preview-url";
+import { CHROMIUM_GPU_ARGS, CHROMIUM_SOFTWARE_ARGS, gpuRenderNode } from "./chromium-gpu";
 
 /**
  * Server-side screenshots of loopback web apps, shared by the
@@ -290,7 +291,10 @@ export async function runScreenshotLadder(
 }
 
 /** Pure arg builder (unit-tested). `asRoot` decides --no-sandbox: container
- * deployments run as uid 0, where Chromium's sandbox cannot start. */
+ * deployments run as uid 0, where Chromium's sandbox cannot start. `gpu`
+ * selects the same ANGLE/EGL configuration the display provider uses, so a
+ * capture of a WebGL or canvas page is rasterized by the same GPU that renders
+ * the streamed preview of it. */
 export function buildScreenshotArgs(options: {
   url: string;
   outPath: string;
@@ -298,6 +302,7 @@ export function buildScreenshotArgs(options: {
   width: number;
   height: number;
   asRoot: boolean;
+  gpu: boolean;
 }): string[] {
   const args = [
     // Plain --headless is the new headless mode on every Chromium this
@@ -308,7 +313,7 @@ export function buildScreenshotArgs(options: {
     `--window-size=${options.width},${options.height}`,
     `--user-data-dir=${options.userDataDir}`,
     "--hide-scrollbars",
-    "--disable-gpu",
+    ...(options.gpu ? CHROMIUM_GPU_ARGS : CHROMIUM_SOFTWARE_ARGS),
     "--disable-dev-shm-usage",
     "--disable-extensions",
     "--no-first-run",
@@ -327,6 +332,13 @@ const CAPTURE_TIMEOUT_MS = 30_000;
 const INSTALL_HINT =
   "Install a Chromium (Debian/Ubuntu: `apt-get install chromium`; or `npx playwright install chromium`) "
   + "or point CODY_CHROMIUM_BIN at an existing Chrome/Chromium binary.";
+
+/**
+ * Whether GPU flags are usable for captures in this process: null until a
+ * capture has settled the question, then sticky. A host with no render node
+ * never asks, so it stays null and every capture goes straight to software.
+ */
+let gpuUsable: boolean | null = null;
 
 /**
  * Capture a screenshot of a loopback URL, small enough to actually deliver.
@@ -362,23 +374,49 @@ export async function captureLoopbackScreenshot(
     // what selects the encoder, and a per-attempt profile keeps a previous
     // run's lock out of the next one's way.
     const image = await runScreenshotLadder(async (step, viewport, attempt) => {
-      const outPath = join(workDir, screenshotFileName(step, attempt));
-      const args = buildScreenshotArgs({
-        url,
-        outPath,
-        userDataDir: join(workDir, `profile-${attempt}`),
-        width: viewport.width,
-        height: viewport.height,
-        asRoot,
-      });
-      await new Promise<void>((resolve, reject) => {
-        execFile(bin, args, { timeout: CAPTURE_TIMEOUT_MS, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (error, _stdout, stderr) => {
-          if (error) reject(new Error(`${error.message}${stderr ? `\n${String(stderr).slice(-500)}` : ""}`));
-          else resolve();
+      // Mirrors the display provider's posture: prefer the GPU, but never let a
+      // broken GPU stack cost the capture itself. The verdict is learned once
+      // per process, so the retry is paid on the first failing capture rather
+      // than on every one.
+      const runOnce = async (gpu: boolean, tag: string) => {
+        const name = screenshotFileName(step, attempt);
+        // The suffix goes BEFORE the extension: the extension is what selects
+        // Chromium's encoder, and the ladder's budget logic is measuring the
+        // format it asked for.
+        const dot = name.lastIndexOf(".");
+        const outPath = join(workDir, tag ? `${name.slice(0, dot)}${tag}${name.slice(dot)}` : name);
+        const args = buildScreenshotArgs({
+          url,
+          outPath,
+          userDataDir: join(workDir, `profile-${attempt}${tag}`),
+          width: viewport.width,
+          height: viewport.height,
+          asRoot,
+          gpu,
         });
-      });
-      const bytes = await readFile(outPath);
-      if (bytes.length === 0) throw new Error("Chromium produced an empty screenshot file");
+        await new Promise<void>((resolve, reject) => {
+          execFile(bin, args, { timeout: CAPTURE_TIMEOUT_MS, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (error, _stdout, stderr) => {
+            if (error) reject(new Error(`${error.message}${stderr ? `\n${String(stderr).slice(-500)}` : ""}`));
+            else resolve();
+          });
+        });
+        const bytes = await readFile(outPath);
+        if (bytes.length === 0) throw new Error("Chromium produced an empty screenshot file");
+        return bytes;
+      };
+
+      const wantsGpu = gpuUsable ?? Boolean(gpuRenderNode());
+      let bytes: Buffer;
+      try {
+        bytes = await runOnce(wantsGpu, "");
+        if (wantsGpu) gpuUsable = true;
+      } catch (error) {
+        // Only a GPU-flagged attempt earns a retry, and only the first one:
+        // a software failure is the real answer.
+        if (!wantsGpu || gpuUsable === false) throw error;
+        gpuUsable = false;
+        bytes = await runOnce(false, "-sw");
+      }
       return {
         data: bytes.toString("base64"),
         byteLength: bytes.length,
@@ -414,4 +452,10 @@ export async function captureLoopbackScreenshot(
 export function clearChromiumBinCache(): void {
   cachedBin = null;
   binMissAt = 0;
+}
+
+/** Test hook — pairs with clearChromiumBinCache() so a test starts from an
+ * undecided GPU verdict rather than inheriting a previous test's. */
+export function clearScreenshotGpuCache(): void {
+  gpuUsable = null;
 }
