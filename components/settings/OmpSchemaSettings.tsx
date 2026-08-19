@@ -4,7 +4,7 @@ import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "r
 import { AlertCircle, RefreshCw, RotateCcw } from "lucide-react";
 import { SETTING_CONDITIONS, isConditionSatisfied } from "@/lib/omp/settings-conditions";
 import type { OmpSetting, OmpSettingOption, OmpSettingsSchema } from "@/lib/omp/settings-schema";
-import { NativeSetting, SettingsHighlightContext, ToggleSwitch, nativeInputStyle, nativeOptionStyle, nativeSelectStyle } from "./primitives";
+import { NativeSetting, SettingsHighlightContext, TERMINAL_ONLY_BADGE, ToggleSwitch, nativeInputStyle, nativeOptionStyle, nativeSelectStyle } from "./primitives";
 
 /**
  * Renders OMP's settings from OMP's own schema: its tabs, its section order,
@@ -29,12 +29,6 @@ interface SchemaResponse {
 }
 
 const SAVE_DEBOUNCE_MS = 350;
-
-/** Marks settings that only configure the harness's terminal UI. Half of a
- * coding agent's schema is TUI chrome, and toggling one of those here does
- * nothing visible in the browser — the row still belongs in the panel, because
- * the same file drives the CLI, but it must say so. */
-const TERMINAL_ONLY_BADGE = "Terminal only";
 
 /** Beyond this, an option label will not fit a select sitting beside the
  * setting's name, so the control moves to its own full-width row. */

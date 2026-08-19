@@ -1,27 +1,64 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  A shell prompt: chevron plus cursor. Drawn as strokes inside the adaptive-icon
-  safe zone (the central 72x72 of the 108x108 viewport), so no launcher mask can
-  clip it. A vector drawable, which is the Android platform's own icon format;
-  the repo's "no inline SVG" rule is about React components, and there is no
-  lucide equivalent of a launcher icon.
+  The Cody mark: lowercase "c" + terminal caret, identical to app/icon.svg,
+  docker/icon.svg and public/icon-512.png.
+
+  The two path strings below are copied VERBATIM from that 512-unit artwork and
+  must stay that way — re-drawing them in 108dp space is how the launcher icon
+  drifted away from the container icon in the first place. A group transform does
+  the whole adaptation instead:
+
+      scale    = (108/512) * (2/3) = 9/64 = 0.140625
+      translate = 54 - 256 * 0.140625 = 18
+
+  With pivot 0,0 a group maps p -> scale*p + translate, so the artwork's centre
+  (256,256) lands on the canvas centre (54,54). The 2/3 factor is what makes the
+  glyph 58.6% of the visible 72dp tile — the same proportion it occupies in the
+  512px source, so the two icons look like one icon.
+
+  Clipping: measured off the raster, the mark occupies x 32.3..74.6, y 37.9..70.1
+  and its farthest opaque pixel sits 24.4dp from centre — 8.6dp inside the 33dp
+  radius of the 66dp keyline circle, so no launcher mask (circle, teardrop and
+  every squircle included) can clip it, and it stays clear of the outer 18dp the
+  platform reserves for parallax.
+
+  Themed icons (Android 13+) reuse this drawable as the <monochrome> layer, which
+  the platform tints: colour is discarded and ALPHA becomes the silhouette. Keep
+  every fill/stroke here fully opaque — a translucent flourish would tint into a
+  washed-out patch rather than part of the mark.
 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <path
-        android:fillColor="#00000000"
-        android:pathData="M40,40 L54,54 L40,68"
-        android:strokeColor="#FFFFFF"
-        android:strokeLineCap="round"
-        android:strokeLineJoin="round"
-        android:strokeWidth="7" />
-    <path
-        android:fillColor="#00000000"
-        android:pathData="M62,68 L76,68"
-        android:strokeColor="#FFFFFF"
-        android:strokeLineCap="round"
-        android:strokeWidth="7" />
+    <group
+        android:scaleX="0.140625"
+        android:scaleY="0.140625"
+        android:translateX="18"
+        android:translateY="18">
+        <!-- the "c" -->
+        <path
+            android:fillColor="#00000000"
+            android:pathData="M 266.5 184 A 88 88 0 1 0 266.5 328"
+            android:strokeColor="#FFCDD6F4"
+            android:strokeLineCap="round"
+            android:strokeWidth="52" />
+        <!-- the caret -->
+        <path android:pathData="M354,150h30a18,18 0 0 1 18,18v176a18,18 0 0 1 -18,18h-30a18,18 0 0 1 -18,-18V168a18,18 0 0 1 18,-18z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:type="linear"
+                    android:startX="0"
+                    android:startY="150"
+                    android:endX="0"
+                    android:endY="362"
+                    android:tileMode="clamp">
+                    <item android:offset="0" android:color="#FFDDC2FF" />
+                    <item android:offset="1" android:color="#FFB583F0" />
+                </gradient>
+            </aapt:attr>
+        </path>
+    </group>
 </vector>

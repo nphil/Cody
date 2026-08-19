@@ -31,6 +31,14 @@ const TERMINAL_ONLY_KEYS = new Set([
   "terminal.showImages",
   "terminal.showProgress",
   "task.showResolvedModelBadge",
+  // Thinking-block rendering. Both are consumed only by the harness's
+  // transcript components (assistant-message, chat-transcript-builder,
+  // agent-hub, streaming-reveal) and by its Ctrl+T toggle; nothing on the
+  // rpc-ui protocol reads either, so thinking blocks reach Cody unchanged and
+  // Cody draws them itself. See "Expand thinking blocks" in Interface &
+  // Behavior for the browser-side control.
+  "hideThinkingBlock",
+  "proseOnlyThinking",
   "power.sleepPrevention",
   // Input handling belongs to the TUI's own composer; Cody has its own.
   "steeringMode",

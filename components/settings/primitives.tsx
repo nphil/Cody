@@ -53,6 +53,14 @@ export const chipStyle = {
   fontWeight: 500,
 } as const;
 
+/** Marks settings that only configure the harness's terminal UI. A good part of
+ * a coding agent's schema is TUI chrome, and toggling one of those here does
+ * nothing visible in the browser. The row still belongs in the panel, because
+ * the same config file drives the CLI, but it must say so. Cody's curated
+ * panels and the schema-driven one share this wording, so a terminal-only
+ * setting reads the same whichever surface shows it. */
+export const TERMINAL_ONLY_BADGE = "Terminal only";
+
 export function slugify(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 }

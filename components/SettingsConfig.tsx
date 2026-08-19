@@ -10,7 +10,7 @@ import { SettingsTabs, type SettingsTab, type ActiveEngineInfo, type EngineCapab
 import { STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
 import { LOCALES, useI18n, type Locale } from "@/lib/i18n";
 import { readTerminalSoftKeyIds, TERMINAL_SOFT_KEYS, writeTerminalSoftKeyIds, type TerminalSoftKeyId } from "@/lib/terminal-preferences";
-import { NativeSetting, SettingsHighlightContext, ToggleSwitch, chipStyle, nativeOptionStyle, nativeSelectStyle, slugify } from "./settings/primitives";
+import { NativeSetting, SettingsHighlightContext, TERMINAL_ONLY_BADGE, ToggleSwitch, chipStyle, nativeOptionStyle, nativeSelectStyle, slugify } from "./settings/primitives";
 
 const SettingsTabLoading = () => <div role="status" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 12 }}>Loading settings…</div>;
 const ModelsConfig = dynamic(() => import("./ModelsConfig").then((module) => module.ModelsConfig), { loading: SettingsTabLoading });
@@ -53,7 +53,7 @@ type SettingIndexEntry = {
   section: string;
   label: string;
   description: string;
-  scope?: "Cody only" | "Workspace";
+  scope?: "Cody only" | "Workspace" | typeof TERMINAL_ONLY_BADGE;
   /** Overrides the label-derived anchor; schema settings key theirs by path so
    * two panels sharing a label do not fight over the highlight. */
   searchId?: string;
@@ -69,6 +69,7 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   { tab: "accounts", section: "User Accounts", label: "Change password", description: "Signs out your other devices and revokes this account's access tokens." },
   // Interface & Behavior
   { tab: "general", section: "Interface & Behavior", label: "Keep tool calls collapsed", description: "Show only compact headers while tools execute.", scope: "Cody only" },
+  { tab: "general", section: "Interface & Behavior", label: "Expand thinking blocks", description: "Show the model's reasoning open by default instead of behind a collapsed header.", scope: "Cody only" },
   { tab: "general", section: "Interface & Behavior", label: "Completion sound", description: "Play a tone when the agent completes a run.", scope: "Cody only" },
   { tab: "general", section: "Interface & Behavior", label: "Message during active run", description: "What composer does on submit while agent runs. Steer interrupts; Queue follow-up delivers after finish.", scope: "Cody only" },
   { tab: "general", section: "Interface & Behavior", label: "Terminal soft keys", description: "Choose the buttons shown below the terminal on touch devices.", scope: "Cody only" },
@@ -80,7 +81,7 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   { tab: "models", section: "AI Model Defaults", label: "Reasoning", description: "Default effort level for thinking-capable models." },
   { tab: "models", section: "AI Model Defaults", label: "Verbosity", description: "Response detail level for supporting providers." },
   { tab: "models", section: "AI Model Defaults", label: "Personality", description: "Style included in OMP's system prompt." },
-  { tab: "models", section: "AI Model Defaults", label: "Thinking Blocks", description: "Hide model reasoning from output view." },
+  { tab: "models", section: "AI Model Defaults", label: "Hide thinking blocks", description: "Removes reasoning from the harness's own terminal transcript. Cody draws its own thinking blocks; use Expand thinking blocks under Interface & Behavior.", scope: TERMINAL_ONLY_BADGE, searchId: "hide-thinking-blocks-curated" },
   { tab: "models", section: "AI Model Defaults", label: "External Thinking", description: "Private scratchpad reasoning via think tool." },
   // Agent & Intelligence — Advisor Review
   { tab: "intelligence", section: "Advisor Review", label: "Enable Advisor", description: "Enable Advisor for new sessions with the advisor role." },
@@ -150,12 +151,14 @@ function SearchResultsList({ results, query, onSelect }: { results: SearchResult
   );
 }
 
-export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, toolCallsDefaultCollapsed, onToolCallsDefaultCollapsedChange, cwd, sessionId, capabilities = ALL_CAPABILITIES, engine = null, onModelsSaved, onPluginsReloaded, onOmpUpdateAvailabilityChange, onSelectTab, onClose }: {
+export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, toolCallsDefaultCollapsed, onToolCallsDefaultCollapsedChange, thinkingDefaultExpanded, onThinkingDefaultExpandedChange, cwd, sessionId, capabilities = ALL_CAPABILITIES, engine = null, onModelsSaved, onPluginsReloaded, onOmpUpdateAvailabilityChange, onSelectTab, onClose }: {
   activeTab: SettingsTab;
   advisorEnabled: boolean;
   onAdvisorChange: (enabled: boolean) => void;
   toolCallsDefaultCollapsed: boolean;
   onToolCallsDefaultCollapsedChange: (collapsed: boolean) => void;
+  thinkingDefaultExpanded: boolean;
+  onThinkingDefaultExpandedChange: (expanded: boolean) => void;
   cwd: string | null;
   sessionId: string | null;
   /** Active engine capabilities: surfaces the engine cannot serve are hidden. */
@@ -225,7 +228,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
     const controller = new AbortController();
     fetch("/api/omp-settings/schema", { signal: controller.signal })
       .then((response) => (response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`))))
-      .then((data: { harness?: { shortName?: string }; schema?: { tabs?: Array<{ id: string; label: string }>; settings?: Array<{ key: string; tab: string; group?: string; label: string; description?: string }> } | null }) => {
+      .then((data: { harness?: { shortName?: string }; schema?: { tabs?: Array<{ id: string; label: string }>; settings?: Array<{ key: string; tab: string; group?: string; label: string; description?: string; terminalOnly?: boolean }> } | null }) => {
         if (data.harness?.shortName) setHarnessLabel(data.harness.shortName);
         const tabLabels = new Map((data.schema?.tabs ?? []).map((tab) => [tab.id, tab.label]));
         setSchemaSearchIndex((data.schema?.settings ?? []).map((setting) => ({
@@ -233,6 +236,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
           section: [tabLabels.get(setting.tab) ?? setting.tab, setting.group].filter(Boolean).join(" › "),
           label: setting.label,
           description: setting.description ?? setting.key,
+          ...(setting.terminalOnly ? { scope: TERMINAL_ONLY_BADGE } : {}),
           searchId: `omp-${setting.key}`,
         })));
       })
@@ -433,6 +437,9 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                   <NativeSetting label="Keep tool calls collapsed" description="Show only compact headers while tools execute." scope="Cody only">
                     <ToggleSwitch checked={toolCallsDefaultCollapsed} onChange={onToolCallsDefaultCollapsedChange} />
                   </NativeSetting>
+                  <NativeSetting label="Expand thinking blocks" description="Show the model's reasoning open by default instead of behind a collapsed header." scope="Cody only">
+                    <ToggleSwitch checked={thinkingDefaultExpanded} onChange={onThinkingDefaultExpandedChange} />
+                  </NativeSetting>
                   <NativeSetting label="Completion sound" description="Play a tone when the agent completes a run." scope="Cody only">
                     <ToggleSwitch
                       checked={soundEnabled}
@@ -590,7 +597,12 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                       ))}
                     </select>
                   </NativeSetting>
-                  <NativeSetting label="Thinking Blocks" description="Hide model reasoning from output view.">
+                  <NativeSetting
+                    label="Hide thinking blocks"
+                    description="Removes reasoning from the harness's own terminal transcript. Cody draws its own thinking blocks; use Expand thinking blocks under Interface & Behavior."
+                    badge={TERMINAL_ONLY_BADGE}
+                    searchId="hide-thinking-blocks-curated"
+                  >
                     <ToggleSwitch
                       checked={nativeSettings?.hideThinkingBlock ?? false}
                       onChange={(checked) => patchSettings({ hideThinkingBlock: checked })}

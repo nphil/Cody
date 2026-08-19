@@ -2,6 +2,4 @@
 <resources>
     <!-- Cody's bg token (Catppuccin Latte); keep in step with CodyLightPalette.bg -->
     <color name="window_background">#EFF1F5</color>
-    <!-- Launcher icon background: Cody's light accent. -->
-    <color name="ic_launcher_background">#8839EF</color>
 </resources>

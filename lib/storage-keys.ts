@@ -14,6 +14,8 @@ export const STORAGE_KEYS = {
   sidebarWidth: "cody:sidebar-width",
   /** Whether tool-call cards render collapsed by default. */
   toolCallsCollapsed: "cody:tool-calls-collapsed",
+  /** Whether thinking blocks render expanded by default. */
+  thinkingExpanded: "cody:thinking-expanded",
   /** Project folders left expanded in the session tree. */
   expandedProjects: "cody:expanded-projects",
   /** Session ids with unseen agent output. */
