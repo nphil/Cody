@@ -373,8 +373,20 @@ appears without a Cody change.
   `SERVER_HOST_TOOLS`): registered at wrapper initialize, merged into every UI
   `set_host_tools` (omp replaces the roster per call, so a reconnect
   re-register must never drop it), and settled in `handleFrame` with
-  `sendFrame` — no attached browser required. The result carries the PNG as an
+  `sendFrame` — no attached browser required. The result carries the image as an
   image content block plus a text line, so vision models see their own work.
+- **Every capture must fit one RPC frame.** The image rides to omp as base64
+  inside a single NDJSON line (1 MiB, no outbound chunking), and a dropped
+  result hangs the tool call forever — so captures walk a ladder against
+  `SCREENSHOT_MAX_BYTES` (600 KiB raw ≈ 800 KiB base64): PNG at the requested
+  size → WebP same size → WebP capped to 1280 long edge → WebP capped to 800.
+  First rung within budget wins, so an ordinary capture stays crisp PNG; the
+  extension in `--screenshot=out.<ext>` is what selects the encoder (verified on
+  Chromium 151). `ScreenshotResult.mimeType` reports what was actually produced
+  (sniffed from the bytes) and width/height report what was actually rendered.
+  Nothing over budget is ever returned: the last rung throws
+  `ScreenshotError("too_large")`, which the API maps to 413 and the host tool
+  answers as a normal tool error.
 - Rendering shells out to a headless Chromium in one-shot `--screenshot` mode
   (no CDP, no new dependency). Binary resolution: `CODY_CHROMIUM_BIN` →
   Playwright caches → PATH → common install paths; the Docker image bundles
@@ -390,7 +402,8 @@ appears without a Cody change.
   predicate the deferral used (`isDeferrableToolResultImage`) or indexes
   drift.
 - The Preview panel's camera button posts `/api/preview/screenshot` and
-  attaches the PNG to the composer via `ChatInputHandle.addFiles` — the
+  attaches the image to the composer via `ChatInputHandle.addFiles`, carrying
+  the mime type the server actually produced (never an assumed PNG) — the
   screenshot rides the existing image-attach path into whichever engine is
   active (turn engines currently reject image prompts with
   `images_unsupported`, same as a manual attach).

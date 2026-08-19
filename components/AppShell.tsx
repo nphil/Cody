@@ -1029,7 +1029,11 @@ export function AppShell() {
   const handleCaptureToChat = useCallback((image: { data: string; mimeType: string }) => {
     try {
       const bytes = Uint8Array.from(atob(image.data), (c) => c.charCodeAt(0));
-      const ext = image.mimeType === "image/png" ? "png" : (image.mimeType.split("/")[1] ?? "png");
+      // The server picks the format (PNG normally, WebP when the page is too
+      // heavy for PNG to fit — see lib/preview-screenshot.ts), so the file must
+      // carry the mime type it actually came back as, not an assumed PNG.
+      const subtype = image.mimeType.split("/")[1]?.toLowerCase() ?? "";
+      const ext = subtype === "jpeg" ? "jpg" : (subtype || "png");
       const file = new File([bytes], `preview-screenshot-${Date.now()}.${ext}`, { type: image.mimeType });
       chatInputRef.current?.addFiles([file]);
     } catch {

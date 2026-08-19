@@ -36,8 +36,8 @@ import {
 import { FolderIcon, getFileIcon } from "./FileIcons";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useUsage } from "@/hooks/useUsage";
-import { selectBindingWindow } from "@/lib/usage/select";
-import type { UsageSnapshot, UsageWindowState } from "@/lib/usage/types";
+import { selectBindingWindow, selectWindowsForModel, type ModelRef } from "@/lib/usage/select";
+import type { UsageAccount, UsageSnapshot, UsageWindow, UsageWindowState } from "@/lib/usage/types";
 import { useI18n } from "@/lib/i18n";
 import { selectableThinkingLevels } from "@/lib/thinking-levels";
 import { STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
@@ -164,6 +164,20 @@ export interface QuotaWindowView {
   resetsAt: string | null;
 }
 
+/** One quota window the ring is deliberately NOT gauging — another provider's
+ *  subscription, or another model tier on this one. Reported so a spent window
+ *  is never a surprise, but kept out of everything that colours the ring. */
+export interface QuotaOtherWindowView {
+  key: string;
+  /** Account label, which already carries the provider (e.g. "Openai Codex"). */
+  account: string;
+  /** That account's binding window among the ones not shown above. */
+  label: string;
+  percent: number;
+  state: UsageWindowState;
+  exhausted: boolean;
+}
+
 export interface QuotaKnownView {
   known: true;
   percent: number;
@@ -172,6 +186,8 @@ export interface QuotaKnownView {
   label: string;
   resetsAt: string | null;
   windows: QuotaWindowView[];
+  /** Everything the section above does not cover, de-emphasised. */
+  others: QuotaOtherWindowView[];
   fetchedAt: string | null;
   stale: boolean;
 }
@@ -187,6 +203,7 @@ export interface QuotaAbsentView {
   scopeKey: string;
   /** Engine-supplied prose explaining the gap, when it gave one. */
   reason: string | null;
+  others: QuotaOtherWindowView[];
 }
 
 /** What the ring and the popover's quota half should say. A missing signal is
@@ -203,6 +220,33 @@ const QUOTA_UNREPORTED: QuotaAbsentView = {
   noteKey: "usage.notReportedNote",
   scopeKey: "usage.noQuotaSignal",
   reason: null,
+  others: [],
+};
+
+/** No quota-reporting account serves the selected model's provider at all — a
+ *  local runtime, say. Nothing this model spends is metered anywhere. */
+const QUOTA_MODEL_UNMETERED: QuotaAbsentView = {
+  known: false,
+  color: "var(--text-muted)",
+  titleKey: "usage.modelUnmetered",
+  noteKey: "usage.modelUnmeteredNote",
+  scopeKey: "usage.modelUnmeteredScope",
+  reason: null,
+  others: [],
+};
+
+/** The provider DOES report quota and none of it constrains this model (every
+ *  window it reports is scoped to another model tier). Emphatically not the
+ *  same as "no limits reported": the quota exists, it just cannot stop this
+ *  model, and saying the former would hide a real limit the next model hits. */
+const QUOTA_MODEL_UNCONSTRAINED: QuotaAbsentView = {
+  known: false,
+  color: "var(--text-muted)",
+  titleKey: "usage.modelUnconstrained",
+  noteKey: "usage.modelUnconstrainedNote",
+  scopeKey: "usage.modelUnconstrainedScope",
+  reason: null,
+  others: [],
 };
 
 /** Cody never got an answer: the first read has not landed, or the last one
@@ -215,6 +259,7 @@ const QUOTA_UNAVAILABLE: QuotaAbsentView = {
   noteKey: "usage.unavailableNote",
   scopeKey: "usage.unavailableScope",
   reason: null,
+  others: [],
 };
 
 /** A read is out and nothing has come back yet. */
@@ -225,6 +270,7 @@ const QUOTA_CHECKING: QuotaAbsentView = {
   noteKey: null,
   scopeKey: "usage.checkingScope",
   reason: null,
+  others: [],
 };
 
 /** Machine reason codes ("engine_unsupported") must not reach the popover;
@@ -240,17 +286,68 @@ function clampQuotaPercent(value: number): number {
   return Math.max(0, Math.min(100, value));
 }
 
+/** Severity ranking for the de-emphasised list: a refused window outranks a
+ *  merely-full one, exactly as lib/usage/select ranks the binding one. */
+const OTHER_STATE_RANK: Record<UsageWindowState, number> = { exhausted: 2, warning: 1, ok: 0 };
+
+/**
+ * Everything the primary section does not cover, one row per account.
+ *
+ * Scoping the ring to one model drops two things out of view: the other
+ * providers' subscriptions, and this provider's windows that belong to another
+ * model tier. Neither may colour the ring — they cannot stop this turn — but
+ * neither may vanish either: discovering a spent week by running into it is
+ * exactly the failure this whole change is fixing. So each account reports its
+ * own binding window among whatever is left over.
+ */
+function buildOtherWindows(
+  accounts: UsageAccount[],
+  primary: { account: UsageAccount; windows: UsageWindow[] } | null,
+): QuotaOtherWindowView[] {
+  const shown = new Set((primary?.windows ?? []).map((window) => window.id));
+  const rows: QuotaOtherWindowView[] = [];
+  accounts.forEach((account, index) => {
+    if (!account) return;
+    const leftover = (account.windows ?? []).filter((window) => (
+      Boolean(window) && !(account === primary?.account && shown.has(window.id))
+    ));
+    // Same comparator as the ring's own pick, so the row a user reads first is
+    // the one that would stop them first on that account.
+    const binding = selectBindingWindow([{ ...account, windows: leftover }]);
+    if (!binding) return;
+    rows.push({
+      key: `${index}:${account.provider}:${binding.window.id}`,
+      account: account.label || account.provider,
+      label: binding.window.label,
+      percent: clampQuotaPercent(binding.window.utilization),
+      state: binding.window.state,
+      exhausted: binding.window.state === "exhausted",
+    });
+  });
+  return rows.sort((a, b) => (
+    (OTHER_STATE_RANK[b.state] ?? 0) - (OTHER_STATE_RANK[a.state] ?? 0) || b.percent - a.percent
+  ));
+}
+
 /** Turns the usage snapshot into the ring's states. Pure, so the thresholds and
  *  the absence cases are testable without a DOM.
  *
- *  Absence comes in three flavours and they must not be conflated: still
- *  checking, could-not-read (never loaded, or the last read failed), and the
- *  engine having genuinely answered "no limits here". Only the last one is
- *  entitled to say anything about the engine. */
+ *  Quota is per provider, so the ring answers for the SELECTED model: an
+ *  exhausted week on another provider says nothing about whether this model can
+ *  run, and letting it drive the ring makes the gauge scream about a resource
+ *  the conversation does not spend. With no model selected there is nothing to
+ *  scope to, and the account-wide reading stands.
+ *
+ *  Absence comes in five flavours and they must not be conflated: still
+ *  checking, could-not-read (never loaded, or the last read failed), the engine
+ *  having genuinely answered "no limits here", this model's provider reporting
+ *  no limits, and this model's provider reporting limits none of which apply to
+ *  it. Only an actual answer is entitled to say anything about the engine. */
 export function buildQuotaView(
   snapshot: UsageSnapshot | null,
   loading: boolean,
   failed = false,
+  model?: ModelRef | null,
 ): QuotaView {
   if (!snapshot) {
     // A first read still in flight says "checking"; once one has failed, the
@@ -273,11 +370,9 @@ export function buildQuotaView(
       noteKey: "usage.unlimitedNote",
       scopeKey: "usage.unlimited",
       reason: readableReason(snapshot.reason),
+      others: [],
     };
   }
-
-  const binding = selectBindingWindow(accounts);
-  if (!binding) return { ...QUOTA_UNREPORTED, reason: readableReason(snapshot.reason) };
 
   // One account needs no disambiguation; several do, so each window carries
   // the account it belongs to.
@@ -285,6 +380,59 @@ export function buildQuotaView(
   const nameWindow = (accountLabel: string, windowLabel: string) => (
     multipleAccounts && accountLabel ? `${accountLabel} · ${windowLabel}` : windowLabel
   );
+
+  if (model) {
+    const match = selectWindowsForModel(accounts, model);
+    // windows[0] is the pick selectBindingWindowForModel makes — taking it here
+    // selects once over the snapshot instead of twice, and guarantees the ring
+    // and the list below it name the same window.
+    const modelBinding = match?.windows[0] ?? null;
+    const others = buildOtherWindows(accounts, modelBinding ? match : null);
+    const reason = readableReason(snapshot.reason);
+
+    if (!match || !modelBinding) {
+      // Three different silences, and the copy has to tell them apart: no
+      // account serves this provider / the account is unmetered / the account
+      // reports quota that all belongs to other models.
+      const providerReportsQuota = match !== null
+        && match.account.unlimited !== true
+        && (match.account.windows ?? []).some(Boolean);
+      return providerReportsQuota
+        ? { ...QUOTA_MODEL_UNCONSTRAINED, reason, others }
+        : { ...QUOTA_MODEL_UNMETERED, reason, others };
+    }
+
+    const accountIndex = accounts.indexOf(match.account);
+    const modelPercent = clampQuotaPercent(modelBinding.utilization);
+    return {
+      known: true,
+      percent: modelPercent,
+      color: usageToneColor(modelPercent, modelBinding.state),
+      state: modelBinding.state,
+      label: nameWindow(match.account.label, modelBinding.label),
+      resetsAt: modelBinding.resetsAt,
+      // Already most-binding-first from the selector, and left in that order:
+      // the row a user reads first is the one that stops them first.
+      windows: match.windows.map((quotaWindow) => {
+        const percent = clampQuotaPercent(quotaWindow.utilization);
+        return {
+          key: `${accountIndex}:${match.account.provider}:${quotaWindow.id}`,
+          label: nameWindow(match.account.label, quotaWindow.label),
+          percent,
+          color: usageToneColor(percent, quotaWindow.state),
+          state: quotaWindow.state,
+          exhausted: quotaWindow.state === "exhausted",
+          resetsAt: quotaWindow.resetsAt,
+        };
+      }),
+      others,
+      fetchedAt: snapshot.fetchedAt ?? null,
+      stale: snapshot.stale === true,
+    };
+  }
+
+  const binding = selectBindingWindow(accounts);
+  if (!binding) return { ...QUOTA_UNREPORTED, reason: readableReason(snapshot.reason) };
 
   const windows: QuotaWindowView[] = accounts
     // Window ids are unique only WITHIN an account, so two subscriptions on
@@ -314,6 +462,8 @@ export function buildQuotaView(
     label: nameWindow(binding.account.label, binding.window.label),
     resetsAt: binding.window.resetsAt,
     windows,
+    // The account-wide list above already shows every window there is.
+    others: [],
     fetchedAt: snapshot.fetchedAt ?? null,
     stale: snapshot.stale === true,
   };
@@ -1672,18 +1822,38 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     })),
     [contextModelUsage, modelOptions, modelNames, model?.provider, model?.modelId, modelNameOverride],
   );
-  // The ring gauges the binding PLAN QUOTA window; the context window has its
-  // own readout in the top bar, and keeps its detail inside this popover.
+  // The ring gauges the binding PLAN QUOTA window OF THE SELECTED MODEL; the
+  // context window has its own readout in the top bar, and keeps its detail
+  // inside this popover.
+  //
+  // A model switch is pure re-filtering: one `omp usage --json` read already
+  // carries every provider and every tier, so the cached snapshot already
+  // answers for whichever model is now selected. Switching must NOT fetch.
+  const quotaProvider = model?.provider;
+  const quotaModelId = model?.modelId;
   const quota = React.useMemo(
-    () => buildQuotaView(usageSnapshot, usageLoading, usageFailed),
-    [usageSnapshot, usageLoading, usageFailed],
+    () => buildQuotaView(
+      usageSnapshot,
+      usageLoading,
+      usageFailed,
+      quotaProvider && quotaModelId ? { provider: quotaProvider, modelId: quotaModelId } : null,
+    ),
+    [usageSnapshot, usageLoading, usageFailed, quotaProvider, quotaModelId],
   );
   const quotaPercentText = quota.known ? `${Math.round(quota.percent)}%` : "—";
+  // The tooltip names the window AND the model it is about, so a ring read at a
+  // glance can never be attributed to the wrong conversation.
   const quotaRingTitle = quota.known
-    ? `${quota.label} ${quotaPercentText}`
-    : t("usage.ringUnknown", { reason: t(quota.titleKey) });
+    ? (displayModelName
+        ? t("usage.ringModel", { model: displayModelName, label: quota.label, percent: Math.round(quota.percent) })
+        : `${quota.label} ${quotaPercentText}`)
+    : (displayModelName
+        ? t("usage.ringModelUnknown", { model: displayModelName, reason: t(quota.titleKey) })
+        : t("usage.ringUnknown", { reason: t(quota.titleKey) }));
   const quotaRingLabel = quota.known
-    ? t("usage.ringDetails", { label: quota.label, percent: Math.round(quota.percent) })
+    ? (displayModelName
+        ? t("usage.ringDetailsModel", { model: displayModelName, label: quota.label, percent: Math.round(quota.percent) })
+        : t("usage.ringDetails", { label: quota.label, percent: Math.round(quota.percent) }))
     : quotaRingTitle;
   // Only ticks while the popover is open — "updated 2 min ago" has to stay
   // true while someone reads it, but nothing else in the composer cares.
@@ -1698,6 +1868,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   useEffect(() => {
     if (contextPopoverOpen) refreshUsage();
   }, [contextPopoverOpen, refreshUsage]);
+  // A brand-new conversation must open with an honest ring, and the composer
+  // may have been idle for a whole background poll before it. Keyed on the
+  // session (draftKey), never on the model: switching models re-filters the
+  // snapshot that is already in hand. The read hits omp's own 5-minute cache
+  // through the server's — no model call, no tokens, and never a forced
+  // upstream refresh — and the hook keeps its own 90s/5min cadence, so this
+  // adds no polling loop.
+  useEffect(() => {
+    refreshUsage();
+  }, [draftKey, refreshUsage]);
   const quotaHeadlineReset = quota.known ? formatResetTime(quota.resetsAt, locale, usageNow) : null;
   const quotaAge = quota.known && quota.fetchedAt ? formatRelativeTime(quota.fetchedAt, locale, usageNow) : null;
   // Age is only claimed when the snapshot carries a usable timestamp, and a
@@ -2740,10 +2920,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     }}
                   >
                     <div style={{ maxHeight: "min(360px, calc(100vh - 120px))", overflowY: "auto", padding: 14 }}>
-                      {/* Section 1 — plan quota, the ring's own subject. */}
+                      {/* Section 1 — plan quota FOR THE SELECTED MODEL, the
+                          ring's own subject. The title names that model: the
+                          numbers below are about it and nothing else. */}
                       <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
-                        <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text)" }}>
-                          {t("usage.title")}
+                        <div style={{ minWidth: 0, fontSize: 12, fontWeight: 700, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {displayModelName ? t("usage.titleForModel", { model: displayModelName }) : t("usage.title")}
                         </div>
                         <div style={{ fontSize: 16, fontWeight: 700, color: quota.color, fontVariantNumeric: "tabular-nums" }}>
                           {quotaPercentText}
@@ -2826,9 +3008,45 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                         </div>
                       )}
 
+                      {/* Everything the model above is NOT charged against —
+                          other providers' subscriptions and this one's other
+                          tiers. Deliberately de-emphasised: a spent window here
+                          must be visible, and must never colour the ring. */}
+                      {quota.others.length > 0 && (
+                        <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
+                          <div style={{ marginBottom: 7, fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.045em" }}>
+                            {t("usage.notForThisModel")}
+                          </div>
+                          <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                            {quota.others.map((entry) => (
+                              <div key={entry.key} style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
+                                <div style={{ minWidth: 0, fontSize: 11, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                  {t("usage.notForThisModelRow", { account: entry.account, window: entry.label })}
+                                </div>
+                                <div style={{ display: "flex", flexShrink: 0, alignItems: "baseline", gap: 6 }}>
+                                  {entry.exhausted && (
+                                    <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", color: "var(--status-error)" }}>
+                                      {t("usage.exhausted")}
+                                    </span>
+                                  )}
+                                  <span style={{ fontSize: 11, fontWeight: 600, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
+                                    {`${Math.round(entry.percent)}%`}
+                                  </span>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                          <div style={{ marginTop: 7, fontSize: 10, lineHeight: 1.45, color: "var(--text-dim)" }}>
+                            {t("usage.notForThisModelNote")}
+                          </div>
+                        </div>
+                      )}
+
                       <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--border)", display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10 }}>
                         <div style={{ fontSize: 10, color: "var(--text-muted)" }}>
-                          {quota.known ? t("usage.accountWide") : t(quota.scopeKey)}
+                          {!quota.known
+                            ? t(quota.scopeKey)
+                            : displayModelName ? t("usage.modelScope") : t("usage.accountWide")}
                         </div>
                         {quotaFreshness && (
                           <div style={{ flexShrink: 0, fontSize: 10, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>

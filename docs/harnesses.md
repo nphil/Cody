@@ -110,9 +110,14 @@ passes anything ≤600 KB of base64 through untouched (screenshots stay crisp) a
 otherwise downscales to 2048px and re-encodes JPEG down a quality ladder, then
 1568px, until it fits; a message whose assembled frame would still exceed
 ~900 KB is refused in the composer, naming the attachment to remove, rather than
-being bounced by the transport. Host-tool results (a `preview_screenshot` PNG,
-say) ride the same one-line limit — one over the cap is dropped with a logged
-error instead of chunked, since there is no pending command to reject.
+being bounced by the transport. Host-tool results (a `preview_screenshot`
+image, say) ride the same one-line limit, and there is no pending command to
+reject — so `rpc-manager` measures every `host_tool_result` before writing it
+(`guardHostToolResultFrame`) and, when it would not fit, sends a small error
+result with the SAME call id instead. The engine's tool call then completes
+with an honest failure rather than waiting forever on a dropped frame.
+Screenshots avoid that path in the first place by capturing down a
+format/size ladder (`lib/preview-screenshot.ts`).
 
 ## Adding an engine, concretely
 

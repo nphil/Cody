@@ -161,6 +161,11 @@ jobs:
           [ "$shot" = "200" ] || fail "screenshot support: capture expected 200, got $shot ($(head -c 300 /tmp/shot-body))"
           grep -q '"data":"iVBOR' /tmp/shot-body \
             || fail "screenshot support: capture returned no PNG payload ($(head -c 300 /tmp/shot-body))"
+          # Captures walk a format ladder to stay inside the engine's 1 MiB
+          # frame budget, but an ordinary page must still come back as crisp
+          # PNG on the first rung — WebP here would mean the ladder mis-fired.
+          grep -q '"mimeType":"image/png"' /tmp/shot-body \
+            || fail "screenshot support: an ordinary page must capture as PNG ($(head -c 300 /tmp/shot-body))"
 
           # Informational: the settings panel degrades to Cody's own controls
           # when OMP's schema cannot be read, so a miss here is worth seeing in

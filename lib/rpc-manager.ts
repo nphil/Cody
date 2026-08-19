@@ -9,6 +9,7 @@ import { validateAgentImages } from "./image-attachments";
 import { APP_LOG_SHADOW_NOTE, DEFAULT_LIMIT, MAX_LIMIT, appLogNotice, formatAppLogDigest, markAppLogsRead, parseSince, readAppLogs } from "./logs/ring";
 import { APP_LOG_LEVELS, type AppLogQuery } from "./logs/types";
 import { invalidateModelsCache } from "./models-cache";
+import { MAX_RPC_FRAME_BYTES } from "./omp/rpc-frame";
 import { RpcCommandError, RpcProcess, type RpcFrame } from "./omp/rpc-process";
 import { readNativeSettings } from "./omp/settings-config";
 import { captureLoopbackScreenshot, ScreenshotError } from "./preview-screenshot";
@@ -161,6 +162,42 @@ const UNSUPPORTED_COMMANDS: Record<string, string> = {
 // the pi names (lib/tool-presets.ts), so translate before building --tools.
 const TOOL_NAME_ALIASES: Record<string, string> = { find: "glob", search: "grep" };
 const DROPPED_TOOL_NAMES = new Set(["ls"]);
+
+/**
+ * Keep a `host_tool_result` inside what the transport can actually deliver.
+ *
+ * omp's stdin reader parses one line as one whole command and cannot reassemble
+ * chunks (see `lib/omp/rpc-frame.ts`), so `RpcProcess.sendFrame` DROPS a frame
+ * over `MAX_RPC_FRAME_BYTES` — and a dropped tool result is a tool call omp
+ * waits on forever, i.e. an agent turn hung with no explanation. An oversized
+ * result is therefore replaced by a small error result carrying the SAME id, so
+ * the call completes with an honest failure the model can act on.
+ */
+export function guardHostToolResultFrame(
+  frame: RpcFrame,
+  limit: number = MAX_RPC_FRAME_BYTES,
+): { frame: RpcFrame; oversizedBytes: number | null } {
+  // +1 for the newline the encoder appends — the same arithmetic the transport
+  // measures the line with.
+  const bytes = Buffer.byteLength(JSON.stringify(frame), "utf8") + 1;
+  if (bytes <= limit) return { frame, oversizedBytes: null };
+  return {
+    frame: {
+      type: frame.type,
+      id: typeof frame.id === "string" ? frame.id : "",
+      isError: true,
+      result: {
+        content: [{
+          type: "text",
+          text: `This tool result could not be returned: it serializes to ${bytes} bytes, over the ${limit}-byte limit `
+            + "for a single message to the engine, so Cody replaced it with this error rather than dropping it. "
+            + "Retry asking for less at once — a smaller screenshot viewport, a narrower log query, or fewer results.",
+        }],
+      },
+    },
+    oversizedBytes: bytes,
+  };
+}
 
 /** Translate pi-web preset tool names into omp builtin tool names. */
 export function mapPresetToolNames(toolNames: string[]): string[] {
@@ -572,6 +609,24 @@ export class AgentSessionWrapper {
   }
 
   /**
+   * The one way a host_tool_result leaves this process. Anything too large for
+   * a single RPC frame is swapped for a small error result with the same id
+   * (see guardHostToolResultFrame) — dropping it instead would hang the agent's
+   * tool call forever.
+   */
+  private sendHostToolResult(frame: RpcFrame): void {
+    const { frame: outgoing, oversizedBytes } = guardHostToolResultFrame(frame);
+    if (oversizedBytes !== null) {
+      this.emit({
+        type: "notice",
+        level: "warning",
+        message: `A tool result was too large to return to the engine (${oversizedBytes} bytes); it answered with an error instead.`,
+      });
+    }
+    this.proc.sendFrame(outgoing);
+  }
+
+  /**
    * Settle a SERVER-implemented host tool call (see SERVER_HOST_TOOLS) —
    * executed here in the Node process, answered with sendFrame like the
    * reject paths, never routed to a browser.
@@ -609,13 +664,13 @@ export class AgentSessionWrapper {
         // The app may have started throwing since the model last looked. One
         // line, never the log content itself — the model asks for that.
         const notice = appLogNotice(this._sessionId);
-        this.proc.sendFrame({
+        this.sendHostToolResult({
           type: "host_tool_result",
           id,
           result: { content: [{ type: "text", text: `${status}${hint}${notice ? ` ${notice}` : ""}` }] },
         });
       } catch (error) {
-        this.proc.sendFrame({
+        this.sendHostToolResult({
           type: "host_tool_result",
           id,
           isError: true,
@@ -637,7 +692,7 @@ export class AgentSessionWrapper {
       // Reading is what clears the notice, and only the model's read does: a
       // UI panel on the same ring must not silence it (see markAppLogsRead).
       markAppLogsRead(this._sessionId);
-      this.proc.sendFrame({
+      this.sendHostToolResult({
         type: "host_tool_result",
         id,
         result: { content: [{ type: "text", text: formatAppLogDigest(digest, query) }] },
@@ -656,13 +711,19 @@ export class AgentSessionWrapper {
         height: typeof args.height === "number" ? args.height : undefined,
       });
       const notice = appLogNotice(this._sessionId);
-      this.proc.sendFrame({
+      // A non-PNG result means the ladder had to trade fidelity for a payload
+      // that fits one engine message — say so, so the model reads the image for
+      // what it is (and knows a smaller viewport is the way to get crisp text).
+      const traded = shot.mimeType === "image/png"
+        ? ""
+        : " Re-encoded as WebP at this size so it fits one message to the engine.";
+      this.sendHostToolResult({
         type: "host_tool_result",
         id,
         result: {
           content: [
             { type: "image", data: shot.data, mimeType: shot.mimeType },
-            { type: "text", text: `Screenshot of ${shot.url} at ${shot.width}x${shot.height}.${notice ? ` ${notice}` : ""}` },
+            { type: "text", text: `Screenshot of ${shot.url} at ${shot.width}x${shot.height}.${traded}${notice ? ` ${notice}` : ""}` },
           ],
         },
       });
@@ -670,7 +731,7 @@ export class AgentSessionWrapper {
       const message = error instanceof ScreenshotError
         ? `${error.message}${error.hint ? ` ${error.hint}` : ""}`
         : `Screenshot failed: ${error instanceof Error ? error.message : String(error)}`;
-      this.proc.sendFrame({
+      this.sendHostToolResult({
         type: "host_tool_result",
         id,
         isError: true,
@@ -689,7 +750,7 @@ export class AgentSessionWrapper {
     const id = typeof event.id === "string" ? event.id : "";
     if (!id) return;
     const toolName = typeof event.toolName === "string" ? event.toolName : "unknown";
-    this.proc.sendFrame({
+    this.sendHostToolResult({
       type: "host_tool_result",
       id,
       isError: true,
@@ -706,7 +767,7 @@ export class AgentSessionWrapper {
   /** Reject every outstanding host tool call (browser disconnected / destroy). */
   private rejectPendingHostTools(message: string): void {
     for (const id of this.pendingHostTools.keys()) {
-      this.proc.sendFrame({
+      this.sendHostToolResult({
         type: "host_tool_result",
         id,
         isError: true,
@@ -1202,7 +1263,10 @@ export class AgentSessionWrapper {
 
       case "host_tool_result": {
         if (typeof command.id === "string") this.pendingHostTools.delete(command.id);
-        this.proc.sendFrame(command as { type: string; [key: string]: unknown });
+        // Browser-answered host tools can carry big payloads too (a UI
+        // screenshot, a file read): guard the same way, keeping the id, so an
+        // undeliverable answer still settles the call.
+        this.sendHostToolResult(command as RpcFrame);
         return null;
       }
 
