@@ -71,6 +71,31 @@ test("streaming tool calls can still start expanded when the preference is disab
   assert.match(html, /<pre/);
 });
 
+test("thinking blocks stay collapsed by default", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    message: {
+      role: "assistant",
+      content: [{ type: "thinking", thinking: "weighing the options" }],
+    },
+  }));
+
+  assert.match(html, /aria-expanded="false"/);
+  assert.doesNotMatch(html, /weighing the options/);
+});
+
+test("thinking blocks render open when the interface preference is enabled", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    thinkingDefaultExpanded: true,
+    message: {
+      role: "assistant",
+      content: [{ type: "thinking", thinking: "weighing the options" }],
+    },
+  }));
+
+  assert.match(html, /aria-expanded="true"/);
+  assert.match(html, /weighing the options/);
+});
+
 
 test("task tool results render a per-subagent summary panel", () => {
   const html = renderToStaticMarkup(React.createElement(TaskResultPanel, {

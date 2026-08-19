@@ -1555,28 +1555,67 @@ html.dark .dropdown-surface :is(select, option) {
    in as they appear. The class only animates OUTSIDE committed turns — the
    streaming tail message and pending headers render outside .chat-turn — so
    revealing a lazy-loaded page or expanding a process group stays static and
-   only genuinely new blocks move. Compositor-only: transform + opacity. */
+   only genuinely new blocks move. Compositor-only: transform + opacity.
+   Own keyframes rather than chat-message-in: at the fast duration the
+   shared 6px rise read as a jump, so these blocks take the medium duration
+   with a hint of scale settle instead. */
+@keyframes chat-block-rise {
+  from { opacity: 0; transform: translateY(7px) scale(0.99); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
 .chat-block-in {
-  animation: chat-message-in var(--dur-fast) var(--ease-out-warm) backwards;
+  animation: chat-block-rise var(--dur-med) var(--ease-out-warm) backwards;
 }
 .chat-turn .chat-block-in {
   animation: none;
 }
 
+/* ── Paced streaming reveal ──
+   The live message's growing text splits into a markdown-rendered committed
+   prefix and a plain-text tail of the words that just arrived (MessageView's
+   PacedMarkdownText). Tail words fade in once — their keys are character
+   offsets, so an already-shown word never re-animates — and the global
+   prefers-reduced-motion block below collapses the fade to instant (the JS
+   pacing itself is also disabled under reduced motion).
+
+   The prefix's trailing margin is zeroed so the gap to the in-flight tail is
+   owned by the tail: paragraph-sized when a blank line precedes it,
+   line-sized when it continues a block (list item, quote line). Matching the
+   final layout keeps the column from bouncing when the line migrates into
+   the markdown prefix. */
+.stream-reveal-prefix > :last-child {
+  margin-bottom: 0;
+}
+.stream-reveal-tail {
+  margin: 2px 0 0;
+  white-space: pre-wrap;
+}
+.stream-reveal-tail--para {
+  margin-top: 10px;
+}
+.stream-word {
+  animation: stream-word-in var(--dur-med) var(--ease-out-warm) both;
+}
+@keyframes stream-word-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
 /* ── Collapsible message boxes (tool call / bash / thinking / extension) ──
    Collapsed boxes hug their header (width: fit-content); expanded boxes grow
-   to their content, capped at 75% of the message column. The cap uses
+   to their content, capped only by the message column. The cap uses
    container-query units resolved against .collapse-scope (the message root),
    so dragging the panel splitter re-resolves it live — never a px snapshot.
 
    Grow mechanism: the box keeps `width: fit-content` and follows its panel,
-   whose height transitions 0 ↔ open size and max-width 0 ↔ 75cqi. Chromium
+   whose height transitions 0 ↔ open size and max-width 0 ↔ 100cqi. Chromium
    (`interpolate-size: allow-keywords`) interpolates height straight to
    `auto`; other engines transition to Base UI's measured
    --collapsible-panel-height pixel value, and engines without container
    queries degrade to an instant width change. Inner content is width-pinned
-   (max-content capped at the same 75cqi) so text wraps once at its final
-   width and never reflows mid-resize; it enters with compositor-only
+   (max-content capped at the same 100cqi) so text wraps once at its final
+   width — only when the column is genuinely too narrow — and never
+   reflows mid-resize; it enters with compositor-only
    transform + opacity. The global prefers-reduced-motion block collapses
    all of this to instant states. */
 .collapse-scope {
@@ -1588,12 +1627,12 @@ html.dark .dropdown-surface :is(select, option) {
   max-width: 100%;
 }
 .collapse-box[data-expanded] {
-  max-width: min(100%, 75cqi);
+  max-width: 100%;
 }
 .collapse-box-panel {
   overflow: clip;
   height: var(--collapsible-panel-height, auto);
-  max-width: 75cqi;
+  max-width: 100cqi;
   transition: height var(--dur-med) var(--ease-out-warm),
               max-width var(--dur-med) var(--ease-out-warm);
 }
@@ -1619,12 +1658,47 @@ html.dark .dropdown-surface :is(select, option) {
 .collapse-box-inner {
   width: max-content;
   min-width: 100%;
-  max-width: 75cqi;
+  max-width: 100cqi;
   animation: collapse-content-in var(--dur-med) var(--ease-out-warm) backwards;
 }
 @keyframes collapse-content-in {
-  from { opacity: 0; transform: translateY(-4px); }
+  from { opacity: 0; transform: translateY(6px); }
   to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Live status line above the composer ──────────────────────────────────
+   The slot exists for the whole run, sized to the row it holds (matches the
+   old py-2 rows: 2×8px + the 13px/1.5 line), so the row mounting and
+   unmounting (streaming content taking over, tool headers resolving) never
+   shifts the transcript or the follow-scroll target. */
+.chat-status-slot {
+  min-height: 36px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+/* Text-swap crossfade: outgoing and incoming labels share one grid cell so
+   neither reflows the row; both animations are compositor-only and collapse
+   to instant under the global prefers-reduced-motion block. */
+.chat-status-swap {
+  display: inline-grid;
+}
+.chat-status-swap > span {
+  grid-area: 1 / 1;
+}
+.chat-status-swap-in {
+  animation: chat-status-text-in var(--dur-fast) var(--ease-out-warm) both;
+}
+.chat-status-swap-out {
+  animation: chat-status-text-out var(--dur-fast) var(--ease-out-warm) both;
+}
+@keyframes chat-status-text-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes chat-status-text-out {
+  from { opacity: 1; transform: translateY(0); }
+  to   { opacity: 0; transform: translateY(-3px); }
 }
 
 @keyframes toast-in {

@@ -38,6 +38,8 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { useUsage } from "@/hooks/useUsage";
 import { selectBindingWindow, selectWindowsForModel, type ModelRef } from "@/lib/usage/select";
 import type { UsageAccount, UsageSnapshot, UsageWindow, UsageWindowState } from "@/lib/usage/types";
+import { brandAccountLabel } from "@/lib/provider-brand";
+import { ProviderIcon } from "./ProviderIcon";
 import { useI18n } from "@/lib/i18n";
 import { selectableThinkingLevels } from "@/lib/thinking-levels";
 import { STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
@@ -56,16 +58,6 @@ interface ModelOption {
   provider: string;
   modelId: string;
   name: string;
-}
-
-export interface ContextModelUsage {
-  provider: string;
-  modelId: string;
-  turns: number;
-  input: number;
-  output: number;
-  cacheRead: number;
-  cacheWrite: number;
 }
 
 interface Props {
@@ -102,9 +94,6 @@ interface Props {
   onAbortRetry?: () => void;
   queuedMessages?: QueuedMessages | null;
   inputHistory?: string[];
-  /** Context window usage for the circular indicator and compact details popover. */
-  contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null;
-  contextModelUsage?: readonly ContextModelUsage[];
   /** Remove one queued message from the queue panel (Edit/Delete/Steer). */
   onRemoveQueuedMessage?: (text: string) => void;
   /** Relabel the first queued follow-up as a steering message. */
@@ -136,7 +125,6 @@ const RING_CIRCUMFERENCE = 2 * Math.PI * 9.5;
 const RING_ABSENT_DASH = "2.5 3.5";
 /** How often the popover re-renders so "updated 2 min ago" stays true. */
 const USAGE_FRESHNESS_TICK_MS = 30_000;
-const EMPTY_CONTEXT_MODEL_USAGE: readonly ContextModelUsage[] = [];
 const COMPOSER_MODELS_STORAGE_KEY = STORAGE_KEYS.composerModels;
 
 function readVisibleModelKeys(): Set<string> | null {
@@ -169,17 +157,22 @@ export interface QuotaWindowView {
  *  is never a surprise, but kept out of everything that colours the ring. */
 export interface QuotaOtherWindowView {
   key: string;
-  /** Account label, which already carries the provider (e.g. "Openai Codex"). */
+  /** Engine provider id, so the row can draw its brand mark. */
+  provider: string;
+  /** Account label, already branded ("Codex", never "Openai Codex"). */
   account: string;
   /** That account's binding window among the ones not shown above. */
   label: string;
   percent: number;
   state: UsageWindowState;
   exhausted: boolean;
+  resetsAt: string | null;
 }
 
 export interface QuotaKnownView {
   known: true;
+  /** Engine provider id of the binding account, for the header's brand mark. */
+  provider: string;
   percent: number;
   color: string;
   state: UsageWindowState;
@@ -317,11 +310,13 @@ function buildOtherWindows(
     if (!binding) return;
     rows.push({
       key: `${index}:${account.provider}:${binding.window.id}`,
-      account: account.label || account.provider,
+      provider: account.provider,
+      account: brandAccountLabel(account.provider, account.label || account.provider),
       label: binding.window.label,
       percent: clampQuotaPercent(binding.window.utilization),
       state: binding.window.state,
       exhausted: binding.window.state === "exhausted",
+      resetsAt: binding.window.resetsAt,
     });
   });
   return rows.sort((a, b) => (
@@ -375,11 +370,14 @@ export function buildQuotaView(
   }
 
   // One account needs no disambiguation; several do, so each window carries
-  // the account it belongs to.
+  // the account it belongs to — under its brand name, which is how the owner
+  // knows the subscription ("Claude", not "Anthropic").
   const multipleAccounts = accounts.length > 1;
-  const nameWindow = (accountLabel: string, windowLabel: string) => (
-    multipleAccounts && accountLabel ? `${accountLabel} · ${windowLabel}` : windowLabel
-  );
+  const nameWindow = (account: UsageAccount, windowLabel: string) => {
+    if (!multipleAccounts) return windowLabel;
+    const accountLabel = brandAccountLabel(account.provider, account.label || account.provider);
+    return accountLabel ? `${accountLabel} · ${windowLabel}` : windowLabel;
+  };
 
   if (model) {
     const match = selectWindowsForModel(accounts, model);
@@ -406,10 +404,11 @@ export function buildQuotaView(
     const modelPercent = clampQuotaPercent(modelBinding.utilization);
     return {
       known: true,
+      provider: match.account.provider,
       percent: modelPercent,
       color: usageToneColor(modelPercent, modelBinding.state),
       state: modelBinding.state,
-      label: nameWindow(match.account.label, modelBinding.label),
+      label: nameWindow(match.account, modelBinding.label),
       resetsAt: modelBinding.resetsAt,
       // Already most-binding-first from the selector, and left in that order:
       // the row a user reads first is the one that stops them first.
@@ -417,7 +416,7 @@ export function buildQuotaView(
         const percent = clampQuotaPercent(quotaWindow.utilization);
         return {
           key: `${accountIndex}:${match.account.provider}:${quotaWindow.id}`,
-          label: nameWindow(match.account.label, quotaWindow.label),
+          label: nameWindow(match.account, quotaWindow.label),
           percent,
           color: usageToneColor(percent, quotaWindow.state),
           state: quotaWindow.state,
@@ -443,7 +442,7 @@ export function buildQuotaView(
       const percent = clampQuotaPercent(quotaWindow.utilization);
       return {
         key: `${accountIndex}:${account.provider}:${quotaWindow.id}`,
-        label: nameWindow(account.label, quotaWindow.label),
+        label: nameWindow(account, quotaWindow.label),
         percent,
         color: usageToneColor(percent, quotaWindow.state),
         state: quotaWindow.state,
@@ -456,10 +455,11 @@ export function buildQuotaView(
   const percent = clampQuotaPercent(binding.window.utilization);
   return {
     known: true,
+    provider: binding.account.provider,
     percent,
     color: usageToneColor(percent, binding.window.state),
     state: binding.window.state,
-    label: nameWindow(binding.account.label, binding.window.label),
+    label: nameWindow(binding.account, binding.window.label),
     resetsAt: binding.window.resetsAt,
     windows,
     // The account-wide list above already shows every window there is.
@@ -480,6 +480,250 @@ function formatResetTime(iso: string | null, locale: string, now: number): strin
   return sameDay
     ? at.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" })
     : at.toLocaleString(locale, { weekday: "short", hour: "2-digit", minute: "2-digit" });
+}
+
+/** The one bar geometry every quota row shares: 4px track, pill radius. The
+ *  de-emphasised rows dim the fill rather than changing shape, so the whole
+ *  popover reads as one system. */
+function QuotaBar({ percent, color, dimmed = false }: { percent: number; color: string; dimmed?: boolean }) {
+  return (
+    <div style={{ height: 4, overflow: "hidden", borderRadius: 999, background: "var(--border)" }}>
+      <div style={{
+        width: `${percent}%`,
+        height: "100%",
+        borderRadius: 999,
+        background: color,
+        opacity: dimmed ? 0.55 : 1,
+        transition: "width var(--dur-med) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm)",
+      }} />
+    </div>
+  );
+}
+
+/** One window row: label / % / bar / reset. The primary list and the "not
+ *  counted" list share this exact layout — the de-emphasised rows are the same
+ *  design at a quieter volume, never a bar-less footnote. */
+function QuotaWindowRow({
+  icon,
+  label,
+  percent,
+  color,
+  exhausted,
+  resetsAt,
+  now,
+  muted = false,
+}: {
+  icon?: React.ReactNode;
+  label: string;
+  percent: number;
+  /** Bar fill; muted rows pass their quieter tone here, exhausted ones red. */
+  color: string;
+  exhausted: boolean;
+  resetsAt: string | null;
+  now: number;
+  muted?: boolean;
+}) {
+  const { t, locale } = useI18n();
+  const reset = formatResetTime(resetsAt, locale, now);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+          {icon}
+          <div style={{
+            fontSize: muted ? 11 : 12,
+            fontWeight: 600,
+            color: muted ? "var(--text-muted)" : "var(--text)",
+            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+          }}>
+            {label}
+          </div>
+          {exhausted && (
+            <div style={{
+              flexShrink: 0,
+              fontSize: 9, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase",
+              color: "var(--status-error)",
+              border: "1px solid var(--status-error)",
+              borderRadius: 999,
+              padding: "1px 5px",
+              whiteSpace: "nowrap",
+            }}>
+              {t("usage.exhausted")}
+            </div>
+          )}
+        </div>
+        <div style={{
+          flexShrink: 0,
+          fontSize: muted ? 11 : 12,
+          fontWeight: 700,
+          // A muted row's number stays quiet too — unless it is exhausted,
+          // which keeps the error tone at full volume in both places.
+          color: muted && !exhausted ? "var(--text-muted)" : color,
+          fontVariantNumeric: "tabular-nums",
+        }}>
+          {`${Math.round(percent)}%`}
+        </div>
+      </div>
+      <QuotaBar percent={percent} color={color} dimmed={muted && !exhausted} />
+      {reset && (
+        <div style={{ fontSize: 10, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
+          {t("usage.resetsAt", { time: reset })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The quota ring's popover: plan quota for the selected model and nothing
+ *  else — context usage and token traffic live in the top bar. Exported so the
+ *  SSR tests can render it open, which the composer's own state never is. */
+export function QuotaPopover({
+  quota,
+  provider,
+  modelName,
+  now,
+}: {
+  quota: QuotaView;
+  /** Selected model's provider, naming the header before anything binds. */
+  provider: string | null;
+  modelName: string | null;
+  now: number;
+}) {
+  const { t, locale } = useI18n();
+  const percentText = quota.known ? `${Math.round(quota.percent)}%` : "—";
+  const headlineReset = quota.known ? formatResetTime(quota.resetsAt, locale, now) : null;
+  const age = quota.known && quota.fetchedAt ? formatRelativeTime(quota.fetchedAt, locale, now) : null;
+  // Age is only claimed when the snapshot carries a usable timestamp, and a
+  // snapshot the server flagged stale says so rather than passing for fresh.
+  const freshness = age
+    ? [t("usage.updatedAgo", { ago: age }), quota.known && quota.stale ? t("usage.stale") : null]
+      .filter(Boolean).join(" · ")
+    : null;
+
+  return (
+    <div
+      role="dialog"
+      aria-label={t("usage.title")}
+      className="dropdown-surface"
+      style={{
+        position: "absolute",
+        right: 0,
+        bottom: "calc(100% + 8px)",
+        zIndex: 120,
+        width: 320,
+        maxWidth: "calc(100vw - 32px)",
+      }}
+    >
+      <div style={{ maxHeight: "min(400px, calc(100vh - 120px))", overflowY: "auto", padding: 16 }}>
+        {/* Header — whose quota (brand mark + model) and the binding number. */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <ProviderIcon
+            provider={quota.known ? quota.provider : provider}
+            size={14}
+            style={{ flexShrink: 0, color: "var(--text-muted)" }}
+          />
+          <div style={{ flex: 1, minWidth: 0, fontSize: 12, fontWeight: 700, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {modelName ? t("usage.titleForModel", { model: modelName }) : t("usage.title")}
+          </div>
+          <div style={{ flexShrink: 0, fontSize: 16, fontWeight: 700, color: quota.color, fontVariantNumeric: "tabular-nums" }}>
+            {percentText}
+          </div>
+        </div>
+        {/* The headline always names the window it is quoting — a bare
+            percentage would not say what ran out. */}
+        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8, marginTop: 4 }}>
+          <div style={{ minWidth: 0, fontSize: 11, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {quota.known ? quota.label : t(quota.titleKey)}
+          </div>
+          {headlineReset && (
+            <div style={{ flexShrink: 0, fontSize: 11, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
+              {t("usage.resetsAt", { time: headlineReset })}
+            </div>
+          )}
+        </div>
+        {/* No bar without a reading: an empty track reads as 0%. */}
+        {quota.known && (
+          <div style={{ marginTop: 8 }}>
+            <QuotaBar percent={quota.percent} color={quota.color} />
+          </div>
+        )}
+
+        {/* Every OTHER window that constrains this model, most binding first —
+            the binding one is already the headline above, and repeating it as
+            the first row read as clutter (owner pass, 2026-08). Matched by
+            label+reset rather than position: the account-wide view sorts its
+            list by fullness, so the headline is not always windows[0]. */}
+        {quota.known && quota.windows.some((entry) => entry.label !== quota.label || entry.resetsAt !== quota.resetsAt) && (
+          <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)", display: "flex", flexDirection: "column", gap: 12 }}>
+            {quota.windows.filter((entry) => entry.label !== quota.label || entry.resetsAt !== quota.resetsAt).map((entry) => (
+              <QuotaWindowRow
+                key={entry.key}
+                label={entry.label}
+                percent={entry.percent}
+                color={entry.color}
+                exhausted={entry.exhausted}
+                resetsAt={entry.resetsAt}
+                now={now}
+              />
+            ))}
+          </div>
+        )}
+
+        {!quota.known && (quota.noteKey || quota.reason) && (
+          <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)", fontSize: 11, lineHeight: 1.5, color: "var(--text-muted)" }}>
+            {quota.noteKey ? t(quota.noteKey) : quota.reason}
+            {quota.noteKey && quota.reason && (
+              <div style={{ marginTop: 4, color: "var(--text-dim)" }}>{quota.reason}</div>
+            )}
+          </div>
+        )}
+
+        {/* Everything the model above is NOT charged against — other
+            providers' subscriptions and this one's other tiers. Same row
+            design as the list above, dimmed: a spent window here must stay
+            visible, and must never colour the ring. */}
+        {quota.others.length > 0 && (
+          <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+            <div style={{ marginBottom: 8, fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.045em" }}>
+              {t("usage.notForThisModel")}
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {quota.others.map((entry) => (
+                <QuotaWindowRow
+                  key={entry.key}
+                  icon={<ProviderIcon provider={entry.provider} size={11} style={{ flexShrink: 0, color: "var(--text-dim)" }} />}
+                  label={t("usage.notForThisModelRow", { account: entry.account, window: entry.label })}
+                  percent={entry.percent}
+                  color={entry.exhausted ? "var(--status-error)" : "var(--text-dim)"}
+                  exhausted={entry.exhausted}
+                  resetsAt={entry.resetsAt}
+                  now={now}
+                  muted
+                />
+              ))}
+            </div>
+            <div style={{ marginTop: 8, fontSize: 10, lineHeight: 1.45, color: "var(--text-dim)" }}>
+              {t("usage.notForThisModelNote")}
+            </div>
+          </div>
+        )}
+
+        {/* Footer — whose limits these are, and how fresh the reading is. */}
+        <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)", display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
+          <div style={{ fontSize: 10, color: "var(--text-muted)" }}>
+            {!quota.known
+              ? t(quota.scopeKey)
+              : modelName ? t("usage.modelScope") : t("usage.accountWide")}
+          </div>
+          {freshness && (
+            <div style={{ flexShrink: 0, fontSize: 10, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
+              {freshness}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 const THINKING_LEVEL_DESC_KEYS: Record<string, string> = {
@@ -743,7 +987,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   onBuiltinCommand,
   onAudioUnlock,
   onPromptWithStreamingBehavior,
-  contextUsage, contextModelUsage = EMPTY_CONTEXT_MODEL_USAGE,
   onRemoveQueuedMessage,
   onPromoteQueuedToSteer,
   draftKey,
@@ -1784,47 +2027,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (lvl === "auto" || !thinkingLevelMap) return lvl;
     return thinkingLevelMap[lvl] ?? lvl;
   })();
-  const contextPercent = contextUsage?.percent ?? null;
-  const hasKnownContextUsage = contextPercent != null;
-  const clampedContextPercent = Math.max(0, Math.min(100, contextPercent ?? 0));
-  // Same thresholds as the quota ring above and the top bar's context chip: an
-  // unknown percentage stays on the accent rather than colouring a guess.
-  const contextRingColor = hasKnownContextUsage ? usageToneColor(clampedContextPercent) : "var(--accent)";
-  const contextTokens = hasKnownContextUsage
-    ? contextUsage?.tokens
-      ?? (contextUsage?.contextWindow
-        ? Math.round(contextUsage.contextWindow * clampedContextPercent / 100)
-        : 0)
-    : null;
-  const contextAvailable = hasKnownContextUsage
-    ? Math.max(0, (contextUsage?.contextWindow ?? 0) - (contextTokens ?? 0))
-    : null;
-  const contextTokenTraffic = React.useMemo(
-    () => contextModelUsage.reduce(
-      (total, entry) => ({
-        input: total.input + entry.input,
-        output: total.output + entry.output,
-        cacheRead: total.cacheRead + entry.cacheRead,
-      }),
-      { input: 0, output: 0, cacheRead: 0 },
-    ),
-    [contextModelUsage],
-  );
-  const contextModelRows = React.useMemo(
-    () => contextModelUsage.map((entry) => ({
-      ...entry,
-      name: modelOptions.find((option) => (
-        option.provider === entry.provider && option.modelId === entry.modelId
-      ))?.name
-        ?? modelNames?.[`${entry.provider}:${entry.modelId}`]
-        ?? (model?.provider === entry.provider && model.modelId === entry.modelId ? modelNameOverride : null)
-        ?? entry.modelId,
-    })),
-    [contextModelUsage, modelOptions, modelNames, model?.provider, model?.modelId, modelNameOverride],
-  );
   // The ring gauges the binding PLAN QUOTA window OF THE SELECTED MODEL; the
-  // context window has its own readout in the top bar, and keeps its detail
-  // inside this popover.
+  // context window has its own readout in the top bar.
   //
   // A model switch is pure re-filtering: one `omp usage --json` read already
   // carries every provider and every tier, so the cached snapshot already
@@ -1878,14 +2082,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   useEffect(() => {
     refreshUsage();
   }, [draftKey, refreshUsage]);
-  const quotaHeadlineReset = quota.known ? formatResetTime(quota.resetsAt, locale, usageNow) : null;
-  const quotaAge = quota.known && quota.fetchedAt ? formatRelativeTime(quota.fetchedAt, locale, usageNow) : null;
-  // Age is only claimed when the snapshot carries a usable timestamp, and a
-  // snapshot the server flagged stale says so rather than passing for fresh.
-  const quotaFreshness = quotaAge
-    ? [t("usage.updatedAgo", { ago: quotaAge }), quota.known && quota.stale ? t("usage.stale") : null]
-      .filter(Boolean).join(" · ")
-    : null;
 
   const thinkingLevelOptions = React.useMemo(
     () => selectableThinkingLevels(availableThinkingLevels),
@@ -2902,251 +3098,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 </button>
 
                 {contextPopoverOpen && (
-                  <div
-                    role="dialog"
-                    aria-label={t("usage.title")}
-                    className="dropdown-surface"
-                    style={{
-                      position: "absolute",
-                      right: 0,
-                      bottom: "calc(100% + 8px)",
-                      zIndex: 120,
-                      width: 320,
-                      maxWidth: "calc(100vw - 32px)",
-                    }}
-                  >
-                    <div style={{ maxHeight: "min(360px, calc(100vh - 120px))", overflowY: "auto", padding: 14 }}>
-                      {/* Section 1 — plan quota FOR THE SELECTED MODEL, the
-                          ring's own subject. The title names that model: the
-                          numbers below are about it and nothing else. */}
-                      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
-                        <div style={{ minWidth: 0, fontSize: 12, fontWeight: 700, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {displayModelName ? t("usage.titleForModel", { model: displayModelName }) : t("usage.title")}
-                        </div>
-                        <div style={{ fontSize: 16, fontWeight: 700, color: quota.color, fontVariantNumeric: "tabular-nums" }}>
-                          {quotaPercentText}
-                        </div>
-                      </div>
-                      {/* The headline always names the window it is quoting —
-                          a bare percentage would not say what ran out. */}
-                      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10, marginTop: 3 }}>
-                        <div style={{ minWidth: 0, fontSize: 11, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                          {quota.known ? quota.label : t(quota.titleKey)}
-                        </div>
-                        {quotaHeadlineReset && (
-                          <div style={{ flexShrink: 0, fontSize: 11, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
-                            {t("usage.resetsAt", { time: quotaHeadlineReset })}
-                          </div>
-                        )}
-                      </div>
-                      {/* No bar without a reading: an empty track reads as 0%. */}
-                      {quota.known && (
-                        <div style={{ height: 5, margin: "9px 0 4px", overflow: "hidden", borderRadius: 999, background: "var(--border)" }}>
-                          <div style={{
-                            width: `${quota.percent}%`,
-                            height: "100%",
-                            borderRadius: 999,
-                            background: quota.color,
-                            transition: "width var(--dur-med) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm)",
-                          }} />
-                        </div>
-                      )}
-
-                      {quota.known && quota.windows.length > 0 && (
-                        <div style={{ marginTop: 12, paddingTop: 11, borderTop: "1px solid var(--border)", display: "flex", flexDirection: "column", gap: 11 }}>
-                          {quota.windows.map((entry) => {
-                            const reset = formatResetTime(entry.resetsAt, locale, usageNow);
-                            return (
-                              <div key={entry.key} style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-                                <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10 }}>
-                                  <div style={{ display: "flex", alignItems: "baseline", gap: 7, minWidth: 0 }}>
-                                    <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                                      {entry.label}
-                                    </div>
-                                    {entry.exhausted && (
-                                      <div style={{
-                                        flexShrink: 0,
-                                        fontSize: 9, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase",
-                                        color: "var(--status-error)",
-                                        border: "1px solid var(--status-error)",
-                                        borderRadius: 999,
-                                        padding: "1px 5px",
-                                        whiteSpace: "nowrap",
-                                      }}>
-                                        {t("usage.exhausted")}
-                                      </div>
-                                    )}
-                                  </div>
-                                  <div style={{ flexShrink: 0, fontSize: 12, fontWeight: 700, color: entry.color, fontVariantNumeric: "tabular-nums" }}>
-                                    {`${Math.round(entry.percent)}%`}
-                                  </div>
-                                </div>
-                                <div style={{ height: 4, overflow: "hidden", borderRadius: 999, background: "var(--border)" }}>
-                                  <div style={{ width: `${entry.percent}%`, height: "100%", borderRadius: 999, background: entry.color }} />
-                                </div>
-                                {reset && (
-                                  <div style={{ fontSize: 10, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
-                                    {t("usage.resetsAt", { time: reset })}
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-
-                      {!quota.known && (quota.noteKey || quota.reason) && (
-                        <div style={{ marginTop: 11, paddingTop: 11, borderTop: "1px solid var(--border)", fontSize: 11, lineHeight: 1.5, color: "var(--text-muted)" }}>
-                          {quota.noteKey ? t(quota.noteKey) : quota.reason}
-                          {quota.noteKey && quota.reason && (
-                            <div style={{ marginTop: 4, color: "var(--text-dim)" }}>{quota.reason}</div>
-                          )}
-                        </div>
-                      )}
-
-                      {/* Everything the model above is NOT charged against —
-                          other providers' subscriptions and this one's other
-                          tiers. Deliberately de-emphasised: a spent window here
-                          must be visible, and must never colour the ring. */}
-                      {quota.others.length > 0 && (
-                        <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
-                          <div style={{ marginBottom: 7, fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.045em" }}>
-                            {t("usage.notForThisModel")}
-                          </div>
-                          <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-                            {quota.others.map((entry) => (
-                              <div key={entry.key} style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8 }}>
-                                <div style={{ minWidth: 0, fontSize: 11, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                  {t("usage.notForThisModelRow", { account: entry.account, window: entry.label })}
-                                </div>
-                                <div style={{ display: "flex", flexShrink: 0, alignItems: "baseline", gap: 6 }}>
-                                  {entry.exhausted && (
-                                    <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", color: "var(--status-error)" }}>
-                                      {t("usage.exhausted")}
-                                    </span>
-                                  )}
-                                  <span style={{ fontSize: 11, fontWeight: 600, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
-                                    {`${Math.round(entry.percent)}%`}
-                                  </span>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                          <div style={{ marginTop: 7, fontSize: 10, lineHeight: 1.45, color: "var(--text-dim)" }}>
-                            {t("usage.notForThisModelNote")}
-                          </div>
-                        </div>
-                      )}
-
-                      <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid var(--border)", display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10 }}>
-                        <div style={{ fontSize: 10, color: "var(--text-muted)" }}>
-                          {!quota.known
-                            ? t(quota.scopeKey)
-                            : displayModelName ? t("usage.modelScope") : t("usage.accountWide")}
-                        </div>
-                        {quotaFreshness && (
-                          <div style={{ flexShrink: 0, fontSize: 10, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
-                            {quotaFreshness}
-                          </div>
-                        )}
-                      </div>
-
-                      <div style={{ margin: "14px 0 13px", borderTop: "1px solid var(--border)" }} />
-
-                      {/* Section 2 — context window and token traffic, kept
-                          from the gauge's previous life. */}
-                      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 }}>
-                        <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text)" }}>
-                          {t("chatInput.contextUsage")}
-                        </div>
-                        <div style={{ fontSize: 16, fontWeight: 700, color: contextRingColor, fontVariantNumeric: "tabular-nums" }}>
-                          {hasKnownContextUsage ? `${Math.round(clampedContextPercent)}%` : "—"}
-                        </div>
-                      </div>
-                      <div style={{ height: 5, margin: "8px 0 10px", overflow: "hidden", borderRadius: 999, background: "var(--border)" }}>
-                        <div style={{
-                          width: `${clampedContextPercent}%`,
-                          height: "100%",
-                          borderRadius: 999,
-                          background: contextRingColor,
-                          transition: "width var(--dur-med) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm)",
-                        }} />
-                      </div>
-                      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8 }}>
-                        {[
-                          [t("chatInput.contextUsed"), contextTokens],
-                          [t("chatInput.contextAvailable"), contextAvailable],
-                          [t("chatInput.contextLimit"), hasKnownContextUsage ? contextUsage?.contextWindow ?? 0 : null],
-                        ].map(([label, value]) => (
-                          <div key={String(label)} style={{ minWidth: 0 }}>
-                            <div style={{ fontSize: 10, color: "var(--text-dim)", marginBottom: 2 }}>{label}</div>
-                            <div style={{ fontSize: 12, color: "var(--text)", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
-                              {value == null ? "—" : formatCompactNumber(Number(value), locale)}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-
-                      {(contextTokenTraffic.input > 0 || contextTokenTraffic.output > 0 || contextTokenTraffic.cacheRead > 0) && (
-                        <div style={{ marginTop: 13, paddingTop: 11, borderTop: "1px solid var(--border)" }}>
-                          <div style={{ marginBottom: 7, fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.045em" }}>
-                            {t("chatInput.tokenTraffic")}
-                          </div>
-                          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8 }}>
-                            {[
-                              [t("chatInput.tokenInput"), contextTokenTraffic.input],
-                              [t("chatInput.tokenOutput"), contextTokenTraffic.output],
-                              [t("chatInput.tokenCached"), contextTokenTraffic.cacheRead],
-                            ].map(([label, value]) => (
-                              <div key={String(label)} style={{ minWidth: 0 }}>
-                                <div style={{ fontSize: 10, color: "var(--text-dim)", marginBottom: 2 }}>{label}</div>
-                                <div style={{ fontSize: 12, color: "var(--text-muted)", fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>
-                                  {formatCompactNumber(Number(value), locale)}
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-
-                      <div style={{ marginTop: 13, paddingTop: 11, borderTop: "1px solid var(--border)" }}>
-                        <div style={{ marginBottom: 7, fontSize: 10, fontWeight: 700, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.045em" }}>
-                          {t("chatInput.modelsUsed")}
-                        </div>
-                        {contextModelRows.length > 0 ? (
-                          <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-                            {contextModelRows.map((entry) => {
-                              const tokenTotal = entry.input + entry.output + entry.cacheRead + entry.cacheWrite;
-                              const active = model?.provider === entry.provider && model.modelId === entry.modelId;
-                              return (
-                                <div key={`${entry.provider}:${entry.modelId}`} style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-                                  <span style={{ width: 6, height: 6, flexShrink: 0, borderRadius: "50%", background: active ? contextRingColor : "var(--border)" }} />
-                                  <div style={{ flex: 1, minWidth: 0 }}>
-                                    <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11.5, fontWeight: 600, color: "var(--text)" }}>
-                                      {entry.name}
-                                    </div>
-                                    <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 10, color: "var(--text-dim)" }}>
-                                      {entry.provider}
-                                    </div>
-                                  </div>
-                                  <div style={{ flexShrink: 0, textAlign: "right", fontSize: 10, lineHeight: 1.35, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
-                                    <div>{tn("chatInput.modelTurns", entry.turns)}</div>
-                                    <div style={{ color: "var(--text-dim)" }}>{formatCompactNumber(tokenTotal, locale)} {t("chatInput.tokens")}</div>
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        ) : (
-                          <div style={{ fontSize: 11, color: "var(--text-dim)" }}>
-                            {currentName
-                              ? t("chatInput.currentModel", { model: currentName })
-                              : t("chatInput.noModelUsage")}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
+                  <QuotaPopover
+                    quota={quota}
+                    provider={quotaProvider ?? null}
+                    modelName={displayModelName}
+                    now={usageNow}
+                  />
                 )}
               </div>
 

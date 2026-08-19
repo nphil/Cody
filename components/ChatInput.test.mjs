@@ -9,7 +9,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { ChatInput, ModelErrorBanner, buildQuotaView } = await jiti.import("./ChatInput.tsx");
+const { ChatInput, ModelErrorBanner, QuotaPopover, buildQuotaView } = await jiti.import("./ChatInput.tsx");
 
 const usageWindow = (overrides) => ({
   id: "anthropic:7d:opus",
@@ -107,14 +107,13 @@ test("renders goal, planning, and advisor indicators at the composer", () => {
 });
 
 test("renders the composer ring as an absence before the first usage read lands", () => {
-  // Context usage no longer drives the ring — the top bar owns that readout,
-  // and the ring gauges the plan quota, which nothing has reported yet.
+  // The ring gauges the plan quota, which nothing has reported yet — context
+  // usage lives in the top bar and never drove this gauge.
   const html = renderToStaticMarkup(
     React.createElement(ChatInput, {
       onSend() {},
       onAbort() {},
       isStreaming: false,
-      contextUsage: { percent: 95, tokens: 95_000, contextWindow: 100_000 },
     }),
   );
 
@@ -128,7 +127,7 @@ test("renders the composer ring as an absence before the first usage read lands"
   assert.doesNotMatch(ring, /(?:title|aria-label)="[^"]*\d+%/);
   // First paint is "still checking", never a verdict on the engine: nothing
   // has answered yet, so nothing may be asserted about what it reports.
-  assert.match(ring, /title="(?:Plan usage: Checking plan usage…|usage\.ringUnknown)"/);
+  assert.match(ring, /title="(?:Usage: Checking usage…|usage\.ringUnknown)"/);
   assert.doesNotMatch(ring, /Not reported by this engine/);
   assert.doesNotMatch(ring, /does not report plan limits/);
 });
@@ -200,10 +199,11 @@ test("buildQuotaView keys every window uniquely across accounts on one provider"
   assert.equal(view.known, true);
   assert.equal(view.windows.length, 2);
   assert.equal(new Set(view.windows.map((w) => w.key)).size, 2, "window keys must be unique");
-  // The labels disambiguate too, so the two rows are also visually distinct.
+  // The labels disambiguate too — under the brand name the owner knows the
+  // subscription by, never the raw provider id.
   assert.deepEqual(view.windows.map((w) => w.label), [
-    "Anthropic (Work Org) · 5-hour window",
-    "Anthropic (personal@example.invalid) · 5-hour window",
+    "Claude (Work Org) · 5-hour window",
+    "Claude (personal@example.invalid) · 5-hour window",
   ]);
 });
 
@@ -342,7 +342,7 @@ test("the ring gauges the selected model's provider, not the worst one on the bo
   assert.equal(view.known, true);
   assert.equal(view.percent, 14);
   assert.equal(view.state, "ok");
-  assert.equal(view.label, "Anthropic · weekly");
+  assert.equal(view.label, "Claude · weekly");
   // Not red, not full: the ring reports what this conversation actually spends.
   assert.equal(view.color, "var(--accent)");
   assert.notEqual(view.color, "var(--status-error)");
@@ -352,7 +352,7 @@ test("the ring gauges the selected model's provider, not the worst one on the bo
   // …and the spent Codex week is still reported, just never in the ring.
   assert.deepEqual(
     view.others.map((entry) => [entry.account, entry.label, entry.percent, entry.exhausted]),
-    [["Openai Codex", "weekly", 100, true]],
+    [["Codex", "weekly", 100, true]],
   );
 });
 
@@ -375,7 +375,7 @@ test("a window scoped to another model tier neither binds the ring nor disappear
   // Excluded from the gauge, not from the popover.
   assert.deepEqual(
     other.others.map((entry) => [entry.account, entry.label, entry.exhausted]),
-    [["Anthropic", "Tier-a · weekly", true]],
+    [["Claude", "Tier-a · weekly", true]],
   );
 
   // The tier's own models still see it bind, in red.
@@ -457,7 +457,7 @@ test("an unmetered account for the selected model reads as unmetered, not as a l
   assert.equal(view.titleKey, "usage.modelUnmetered");
   assert.equal(view.color, "var(--text-muted)");
   // The metered account next door does not colour anything here.
-  assert.deepEqual(view.others.map((entry) => [entry.account, entry.percent]), [["Anthropic", 80]]);
+  assert.deepEqual(view.others.map((entry) => [entry.account, entry.percent]), [["Claude", 80]]);
 });
 
 test("the model-scoped ring keeps the shipped 70/90 thresholds and the exhausted override", () => {
@@ -644,28 +644,144 @@ test("a new conversation refreshes usage; switching models only re-filters the c
 
 test("the popover answers for the selected model and still shows what it excluded", () => {
   const quotaSection = composerSource.slice(
-    composerSource.indexOf("{/* Section 1 — plan quota"),
-    composerSource.indexOf("{/* Section 2 — context window"),
+    composerSource.indexOf("function QuotaBar"),
+    composerSource.indexOf("const THINKING_LEVEL_DESC_KEYS"),
   );
-  // Headline: the model it is about, the window it is quoting, then the number.
-  assert.match(quotaSection, /usage\.titleForModel", \{ model: displayModelName \}/);
+  // Headline: brand mark, the model it is about, the window it is quoting.
+  assert.match(quotaSection, /<ProviderIcon/);
+  assert.match(quotaSection, /usage\.titleForModel", \{ model: modelName \}/);
   assert.match(quotaSection, /\{quota\.known \? quota\.label : t\(quota\.titleKey\)\}/);
-  // Every window that constrains this model, in the selector's order.
-  assert.match(quotaSection, /quota\.known && quota\.windows\.length > 0/);
+  // Every OTHER constraining window: the binding one lives in the headline
+  // and is filtered out of the list rather than repeated as its first row.
+  assert.match(quotaSection, /entry\.label !== quota\.label \|\| entry\.resetsAt !== quota\.resetsAt/);
   // The de-emphasised list of everything the ring is not gauging.
   assert.match(quotaSection, /quota\.others\.length > 0/);
   assert.match(quotaSection, /quota\.others\.map\(/);
   assert.match(quotaSection, /t\("usage\.notForThisModel"\)/);
   assert.match(quotaSection, /usage\.notForThisModelRow", \{ account: entry\.account, window: entry\.label \}/);
   assert.match(quotaSection, /t\("usage\.notForThisModelNote"\)/);
-  // It reports exhaustion, but never in a tone that could pass for the ring's.
-  assert.match(quotaSection, /entry\.exhausted && \(/);
-  assert.doesNotMatch(
-    quotaSection.slice(quotaSection.indexOf("quota.others.map(")),
-    /background: entry\.color/,
-  );
+  // Both lists render through the same row component: one designed system,
+  // and the excluded rows keep real bars rather than shrinking to a footnote.
+  assert.match(quotaSection, /quota\.windows\.filter\([\s\S]*?\.map\(\(entry\) => \([\s\S]*?<QuotaWindowRow/);
+  assert.match(quotaSection, /quota\.others\.map\(\(entry\) => \([\s\S]*?<QuotaWindowRow/);
+  // De-emphasised tone for the bar — except exhaustion, which stays red.
+  assert.match(quotaSection, /color=\{entry\.exhausted \? "var\(--status-error\)" : "var\(--text-dim\)"\}/);
   // The footer says whose limits these are.
-  assert.match(quotaSection, /displayModelName \? t\("usage\.modelScope"\) : t\("usage\.accountWide"\)/);
-  // The context/token half below the divider is untouched.
-  assert.match(composerSource, /\{t\("chatInput\.contextUsage"\)\}/);
+  assert.match(quotaSection, /modelName \? t\("usage\.modelScope"\) : t\("usage\.accountWide"\)/);
+  // The context/token/models readouts left with the top bar — nothing in the
+  // composer renders them anymore.
+  assert.doesNotMatch(composerSource, /chatInput\.contextUsage/);
+  assert.doesNotMatch(composerSource, /chatInput\.tokenTraffic/);
+  assert.doesNotMatch(composerSource, /chatInput\.modelsUsed/);
+  assert.doesNotMatch(composerSource, /Section 2/);
+});
+
+test("the ring gauges the shortest healthy window; an exhausted longer one still binds", () => {
+  const fiveHour = () => usageWindow({ id: "5h", label: "5-hour window", utilization: 14, windowMs: 18_000_000, resetsAt: "2026-08-18T17:00:00.000Z" });
+  const healthy = buildQuotaView(usageSnapshot({
+    accounts: [usageAccount({
+      windows: [
+        usageWindow({ id: "7d", label: "weekly", utilization: 73, state: "warning", windowMs: 604_800_000 }),
+        fiveHour(),
+      ],
+    })],
+  }), false, false, { provider: "anthropic", modelId: "claude-fable-5" });
+
+  // The fuller week is context; the current five hours are what this turn
+  // spends against, so they take the ring and the first row.
+  assert.equal(healthy.percent, 14);
+  assert.equal(healthy.label, "5-hour window");
+  assert.deepEqual(healthy.windows.map((w) => [w.label, w.percent]), [
+    ["5-hour window", 14],
+    ["weekly", 73],
+  ]);
+
+  // …but a refused week stops the model whatever the 5h window says.
+  const spent = buildQuotaView(usageSnapshot({
+    accounts: [usageAccount({
+      windows: [
+        usageWindow({ id: "7d", label: "weekly", utilization: 100, state: "exhausted", windowMs: 604_800_000 }),
+        fiveHour(),
+      ],
+    })],
+  }), false, false, { provider: "anthropic", modelId: "claude-fable-5" });
+  assert.equal(spent.percent, 100);
+  assert.equal(spent.label, "weekly");
+  assert.equal(spent.state, "exhausted");
+  assert.equal(spent.color, "var(--status-error)");
+});
+
+test("the rendered popover keeps only quota content, branded and barred", () => {
+  const snapshot = usageSnapshot({
+    accounts: [
+      usageAccount({
+        windows: [
+          usageWindow({ id: "5h", label: "5-hour window", utilization: 62, windowMs: 18_000_000, resetsAt: "2026-08-18T17:00:00.000Z" }),
+          usageWindow({ id: "7d", label: "weekly", utilization: 23, windowMs: 604_800_000 }),
+        ],
+      }),
+      usageAccount({
+        provider: "openai-codex",
+        label: "Openai Codex",
+        planType: "plus",
+        windows: [usageWindow({ id: "7d", label: "weekly", utilization: 100, state: "exhausted", windowMs: 604_800_000 })],
+      }),
+      usageAccount({
+        provider: "google",
+        label: "Google",
+        planType: null,
+        windows: [usageWindow({ id: "daily", label: "daily", utilization: 12, windowMs: 86_400_000 })],
+      }),
+    ],
+  });
+  const quota = buildQuotaView(snapshot, false, false, { provider: "anthropic", modelId: "claude-fable-5" });
+  const html = renderToStaticMarkup(
+    React.createElement(QuotaPopover, {
+      quota,
+      provider: "anthropic",
+      modelName: "Fable",
+      now: Date.parse("2026-08-18T12:30:00.000Z"),
+    }),
+  );
+
+  // Quota only: the context and token readouts belong to the top bar now.
+  assert.doesNotMatch(html, /Context usage/);
+  assert.doesNotMatch(html, /token traffic/i);
+  assert.doesNotMatch(html, /Models used/);
+  // Header: brand mark + "Usage · <model>" + the binding number (5h, 62%).
+  assert.match(html, /Usage · Fable/);
+  assert.match(html, /fill="currentColor"/);
+  assert.match(html, />62%</);
+  // Never the raw provider id or the corporate name — the owner runs Claude.
+  assert.doesNotMatch(html, /anthropic/i);
+  assert.match(html, /Codex — weekly/);
+  assert.match(html, /Gemini — daily/);
+  // Every excluded row carries a real bar in the shared geometry: the spent
+  // Codex week stays red at full volume, the healthy Gemini day is dimmed.
+  assert.match(html, /Not counted for this model/);
+  assert.match(html, /width:100%[^"]*background:var\(--status-error\)/);
+  assert.match(html, /width:12%[^"]*background:var\(--text-dim\);opacity:0\.55/);
+  // …including their reset times, exactly like the primary rows.
+  assert.ok(html.match(/resets/g).length >= 3, "excluded rows keep their reset lines");
+  // The footer scopes the reading to the selected model.
+  assert.match(html, /For the selected model/);
+});
+
+test("the absent popover names the silence without inventing sections", () => {
+  const quota = buildQuotaView(usageSnapshot({
+    accounts: [usageAccount({
+      windows: [usageWindow({ id: "5h", label: "5-hour window", utilization: 80, state: "warning" })],
+    })],
+  }), false, false, { provider: "llama-swap", modelId: "qwen3-coder" });
+  const html = renderToStaticMarkup(
+    React.createElement(QuotaPopover, { quota, provider: "llama-swap", modelName: "Qwen3 Coder", now: Date.now() }),
+  );
+
+  // No reading: an em dash where the number would be, never a fake 0%.
+  assert.match(html, />—</);
+  assert.match(html, /No plan limits for this provider/);
+  // The metered account next door stays visible — branded, with its bar.
+  assert.match(html, /Claude — 5-hour window/);
+  assert.match(html, /width:80%/);
+  assert.doesNotMatch(html, /anthropic/i);
 });

@@ -10,6 +10,8 @@ import { isEmptyThinkingBlock } from "@/lib/message-display";
 import { parseUnifiedPatch, type SplitDiffCell } from "@/lib/patch";
 import { Tooltip, Collapsible, CollapsibleTrigger, CollapsiblePanel } from "./ui/primitives";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
+import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
+import { useSmoothStreamText, shouldPaceStream, splitMarkdownReveal, splitPlainReveal, chunkRevealWords } from "@/hooks/useSmoothStreamText";
 import { SubagentStatusIcon } from "./SubagentStatusIcon";
 import { formatCost, formatDuration, formatTokens, shortModel } from "@/lib/subagent-format";
 import type {
@@ -111,6 +113,7 @@ interface Props {
   prevTimestamp?: number;
   sessionId?: string;
   toolCallsDefaultCollapsed?: boolean;
+  thinkingDefaultExpanded?: boolean;
 }
 
 function formatTime(ts: number | undefined, locale: Locale): string | null {
@@ -140,12 +143,12 @@ function haveSameRelevantToolResults(
   return true;
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp, sessionId, toolCallsDefaultCollapsed = true }: Props) {
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp, sessionId, toolCallsDefaultCollapsed = true, thinkingDefaultExpanded = false }: Props) {
   if (message.role === "user") {
     return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} onNavigate={onNavigate} prevAssistantEntryId={prevAssistantEntryId} onEditContent={onEditContent} />;
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} thinkingDefaultExpanded={thinkingDefaultExpanded} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -180,7 +183,8 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     && prev.showTimestamp === next.showTimestamp
     && prev.prevTimestamp === next.prevTimestamp
     && prev.sessionId === next.sessionId
-    && prev.toolCallsDefaultCollapsed === next.toolCallsDefaultCollapsed;
+    && prev.toolCallsDefaultCollapsed === next.toolCallsDefaultCollapsed
+    && prev.thinkingDefaultExpanded === next.thinkingDefaultExpanded;
 });
 
 function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent }: {  message: UserMessage;
@@ -388,6 +392,7 @@ function AssistantMessageView({
   sessionId,
   entryId,
   toolCallsDefaultCollapsed,
+  thinkingDefaultExpanded,
 }: {
   message: AssistantMessage;
   isStreaming?: boolean;
@@ -400,6 +405,7 @@ function AssistantMessageView({
   sessionId?: string;
   entryId?: string;
   toolCallsDefaultCollapsed: boolean;
+  thinkingDefaultExpanded: boolean;
 }) {
   const { t, locale } = useI18n();
   const time = showTimestamp ? formatTime(message.timestamp, locale) : null;
@@ -407,6 +413,10 @@ function AssistantMessageView({
     .map((block, originalIndex) => ({ block, originalIndex }))
     .filter(({ block }) => !isEmptyThinkingBlock(block, { isStreaming }));
   const blocks = blockItems.map(({ block }) => block);
+  // Only the last block of the live message is still growing; earlier blocks
+  // became final the moment a successor appeared and must render (and flush)
+  // as settled text, so pacing and word entrances apply to exactly one block.
+  const activeStreamIndex = isStreaming && blockItems.length > 0 ? blockItems[blockItems.length - 1].originalIndex : -1;
   const [hovered, setHovered] = useState(false);
   const [actionsActive, setActionsActive] = useState(false);
   const { copied, copy: copyContent } = useCopyFeedback();
@@ -581,7 +591,7 @@ function AssistantMessageView({
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {blockItems.map(({ block, originalIndex }) => (
-          <BlockView key={`${entryId ?? "stream"}-${originalIndex}`} block={block} toolResults={toolResults} isStreaming={isStreaming} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} />
+          <BlockView key={`${entryId ?? "stream"}-${originalIndex}`} block={block} toolResults={toolResults} isStreaming={isStreaming} isActiveStreamBlock={originalIndex === activeStreamIndex} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} thinkingDefaultExpanded={thinkingDefaultExpanded} />
         ))}
       </div>
 
@@ -630,12 +640,12 @@ function AssistantMessageView({
   );
 }
 
-function BlockView({ block, toolResults, isStreaming, streamingDuration, toolCallDurations, cwd, onOpenFile, sessionId, entryId, blockIndex, toolCallsDefaultCollapsed }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; isStreaming?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; sessionId?: string; entryId?: string; blockIndex: number; toolCallsDefaultCollapsed: boolean }) {
+function BlockView({ block, toolResults, isStreaming, isActiveStreamBlock, streamingDuration, toolCallDurations, cwd, onOpenFile, sessionId, entryId, blockIndex, toolCallsDefaultCollapsed, thinkingDefaultExpanded }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; isStreaming?: boolean; isActiveStreamBlock?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; sessionId?: string; entryId?: string; blockIndex: number; toolCallsDefaultCollapsed: boolean; thinkingDefaultExpanded: boolean }) {
   if (block.type === "text") {
-    return <TextBlock block={block as TextContent} isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile} />;
+    return <TextBlock block={block as TextContent} isStreaming={isStreaming} isActiveStreamBlock={isActiveStreamBlock} cwd={cwd} onOpenFile={onOpenFile} />;
   }
   if (block.type === "thinking") {
-    return <ThinkingBlock block={block as ThinkingContent} duration={streamingDuration} sessionId={sessionId} entryId={entryId} blockIndex={blockIndex} />;
+    return <ThinkingBlock block={block as ThinkingContent} duration={streamingDuration} sessionId={sessionId} entryId={entryId} blockIndex={blockIndex} defaultExpanded={thinkingDefaultExpanded} isStreaming={isStreaming} isActiveStreamBlock={isActiveStreamBlock} />;
   }
   if (block.type === "toolCall") {
     const tc = block as ToolCallContent;
@@ -651,14 +661,89 @@ function BlockView({ block, toolResults, isStreaming, streamingDuration, toolCal
 // instead of object identity: finished blocks of the streaming message then
 // skip their ReactMarkdown re-parse and only the actively growing block
 // re-renders per frame.
-const TextBlock = memo(function TextBlock({ block, isStreaming, cwd, onOpenFile }: { block: TextContent; isStreaming?: boolean; cwd?: string; onOpenFile?: (filePath: string) => void }) {
-  return <SafeMarkdownBody isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile}>{block.text}</SafeMarkdownBody>;
+const TextBlock = memo(function TextBlock({ block, isStreaming, isActiveStreamBlock, cwd, onOpenFile }: { block: TextContent; isStreaming?: boolean; isActiveStreamBlock?: boolean; cwd?: string; onOpenFile?: (filePath: string) => void }) {
+  const prefersReducedMotion = usePrefersReducedMotion();
+  // Oversized messages fall back to SafeMarkdownBody's raw-reveal button;
+  // pacing text that will not render as markdown is pointless churn.
+  const paced = shouldPaceStream({
+    isStreaming: isStreaming === true,
+    isActiveBlock: isActiveStreamBlock === true,
+    prefersReducedMotion,
+  }) && block.text.length <= MAX_MARKDOWN_CHARS;
+  const displayed = useSmoothStreamText(block.text, paced);
+  if (!paced) {
+    return <SafeMarkdownBody isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile}>{block.text}</SafeMarkdownBody>;
+  }
+  return <PacedMarkdownText text={displayed} cwd={cwd} onOpenFile={onOpenFile} />;
 }, (prev, next) => (
   prev.block.text === next.block.text
   && prev.isStreaming === next.isStreaming
+  && prev.isActiveStreamBlock === next.isActiveStreamBlock
   && prev.cwd === next.cwd
   && prev.onOpenFile === next.onOpenFile
 ));
+
+/**
+ * The live block's paced render: a markdown prefix that only changes when a
+ * completed line migrates into it, plus a plain-text tail of just-revealed
+ * words that re-renders every animation frame. Per-frame work is the split
+ * scan and a bounded window of tail spans — the markdown subtree is memoized
+ * on the prefix string and skipped while only the tail grows, and the tail's
+ * older words settle into a single static text node so an unbroken paragraph
+ * cannot inflate the span count.
+ */
+function PacedMarkdownText({ text, cwd, onOpenFile }: { text: string; cwd?: string; onOpenFile?: (filePath: string) => void }) {
+  const split = useMemo(() => splitMarkdownReveal(text), [text]);
+  const tailWindow = useMemo(() => splitPlainReveal(split.tail), [split.tail]);
+  return (
+    <div className="stream-reveal">
+      {split.prefix !== "" && (
+        <StreamRevealPrefix text={split.prefix} sampleParse={split.tail === ""} cwd={cwd} onOpenFile={onOpenFile} />
+      )}
+      {split.tail !== "" && (
+        <div className={`markdown-body stream-reveal-tail${split.paragraphGap ? " stream-reveal-tail--para" : ""}`}>
+          {tailWindow.prefix}
+          {chunkRevealWords(tailWindow.tail, split.tailOffset + tailWindow.tailOffset).map((chunk) => (
+            <span key={chunk.key} className="stream-word">{chunk.text}</span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// While the tail is live the prefix parses unsampled — it advances at line
+// granularity, and the ≤10 Hz sampler's delay would blank each migrating
+// line for up to 100ms (gone from the tail, not yet in the parse). In
+// prefix-only mode (open code fence, oversized tail) the prefix grows per
+// frame again, so the normal streaming sampling takes back over.
+const StreamRevealPrefix = memo(function StreamRevealPrefix({ text, sampleParse, cwd, onOpenFile }: { text: string; sampleParse: boolean; cwd?: string; onOpenFile?: (filePath: string) => void }) {
+  return <SafeMarkdownBody isStreaming sampleParse={sampleParse} className="stream-reveal-prefix" cwd={cwd} onOpenFile={onOpenFile}>{text}</SafeMarkdownBody>;
+});
+
+/**
+ * Streamed reasoning gets the same paced treatment as body text, but it is
+ * plain pre-wrap text — no markdown-safety constraint — so the boundary just
+ * keeps the trailing window animated. Gated on `active` (streaming + last
+ * block + panel expanded): a collapsed panel must not run an invisible rAF
+ * loop, and expanding mid-stream snaps to the current text instead of
+ * replaying it.
+ */
+function PacedPlainText({ text, active }: { text: string; active: boolean }) {
+  const prefersReducedMotion = usePrefersReducedMotion();
+  const paced = shouldPaceStream({ isStreaming: active, isActiveBlock: active, prefersReducedMotion });
+  const displayed = useSmoothStreamText(text, paced);
+  if (!paced) return <>{text}</>;
+  const split = splitPlainReveal(displayed);
+  return (
+    <>
+      {split.prefix}
+      {chunkRevealWords(split.tail, split.tailOffset).map((chunk) => (
+        <span key={chunk.key} className="stream-word">{chunk.text}</span>
+      ))}
+    </>
+  );
+}
 
 /**
  * Motion state for a collapsible box (tool call / thinking): `animating` is
@@ -682,35 +767,50 @@ function useCollapseMotion() {
   return { animating, beginToggle, onPanelTransitionEnd };
 }
 
-const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex }: {
+const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex, defaultExpanded, isStreaming, isActiveStreamBlock }: {
   block: ThinkingContent;
   duration?: number;
   sessionId?: string;
   entryId?: string;
   blockIndex: number;
+  /** The Interface & Behavior preference. Only the initial state: a block the
+   * user has opened or closed keeps that choice, so flipping the preference
+   * moves every untouched block without reopening ones they dismissed. */
+  defaultExpanded: boolean;
+  isStreaming?: boolean;
+  isActiveStreamBlock?: boolean;
 }) {
   const { t } = useI18n();
-  const [expanded, setExpanded] = useState(false);
+  const [userExpanded, setUserExpanded] = useState<boolean | null>(null);
+  const expanded = userExpanded ?? defaultExpanded;
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { animating, beginToggle, onPanelTransitionEnd } = useCollapseMotion();
+  // History loads strip thinking text (session-reader deferThinking) and leave
+  // it behind a route, so the fetch is driven by visibility however it was
+  // reached: opened by hand, expanded by the preference at mount, or revealed
+  // when the preference changes. One request per block, ever.
+  const requestedRef = useRef(false);
 
-  const handleOpenChange = (nextOpen: boolean) => {
-    beginToggle();
-    setExpanded(nextOpen);
-    if (!nextOpen || !block.deferred || content !== null) return;
+  useEffect(() => {
+    if (!expanded || !block.deferred || requestedRef.current) return;
+    requestedRef.current = true;
     if (!sessionId || !entryId) {
       setError(t("messageView.thinkingUnavailable"));
       return;
     }
 
     setLoading(true);
-    setError(null);
     void loadThinkingContent(sessionId, entryId, blockIndex)
       .then((text) => setContent(text))
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setLoading(false));
+  }, [expanded, block.deferred, sessionId, entryId, blockIndex, t]);
+
+  const handleOpenChange = (nextOpen: boolean) => {
+    beginToggle();
+    setUserExpanded(nextOpen);
   };
 
   return (
@@ -776,7 +876,11 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
               borderTop: "1px solid var(--border)",
             }}
           >
-            {loading ? t("messageView.loadingThinking") : error ?? (block.deferred ? content : block.thinking)}
+            {loading
+              ? t("messageView.loadingThinking")
+              : error ?? (block.deferred
+                ? content
+                : <PacedPlainText text={block.thinking ?? ""} active={isStreaming === true && isActiveStreamBlock === true && expanded} />)}
           </div>
         </CollapsiblePanel>
       </Collapsible>
@@ -789,6 +893,9 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
   && prev.sessionId === next.sessionId
   && prev.entryId === next.entryId
   && prev.blockIndex === next.blockIndex
+  && prev.defaultExpanded === next.defaultExpanded
+  && prev.isStreaming === next.isStreaming
+  && prev.isActiveStreamBlock === next.isActiveStreamBlock
 ));
 
 

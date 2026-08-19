@@ -14,6 +14,12 @@ interface MarkdownBodyProps {
   isStreaming?: boolean;
   cwd?: string;
   onOpenFile?: (filePath: string) => void;
+  /** While streaming the parse is normally time-sampled (≤10 Hz). The paced
+   *  reveal in MessageView renders its committed prefix with sampling off:
+   *  the prefix only changes when a whole line migrates out of the animated
+   *  tail, and any sampling delay would leave that line invisible for a beat
+   *  (unmounted from the tail, not yet parsed into the prefix). */
+  sampleParse?: boolean;
 }
 
 /** Slowest cadence at which a growing block re-parses while it streams. The
@@ -28,7 +34,7 @@ const STREAMING_PARSE_INTERVAL_MS = 100;
  * `isStreaming` is false the moment the message settles, so the last update
  * always renders in full.
  */
-function useParseSource(text: string, isStreaming: boolean | undefined): string {
+function useParseSource(text: string, isStreaming: boolean | undefined, sample: boolean): string {
   const [sampled, setSampled] = useState(text);
   const latestRef = useRef(text);
   const lastFlushRef = useRef(0);
@@ -38,7 +44,14 @@ function useParseSource(text: string, isStreaming: boolean | undefined): string 
     // Written after commit, never during render, so a trailing flush can only
     // ever publish text that was actually committed.
     latestRef.current = text;
-    if (!isStreaming) return;
+    if (!isStreaming || !sample) {
+      // Keep the sample in lockstep while sampling is off, so flipping it
+      // back on (the paced tail collapsing into whole-text mode around a code
+      // fence) can never paint a frame of stale text.
+      lastFlushRef.current = 0;
+      setSampled((prev) => (prev === text ? prev : text));
+      return;
+    }
     const flush = () => {
       lastFlushRef.current = Date.now();
       setSampled((prev) => (prev === latestRef.current ? prev : latestRef.current));
@@ -54,17 +67,17 @@ function useParseSource(text: string, isStreaming: boolean | undefined): string 
       timerRef.current = null;
       flush();
     }, STREAMING_PARSE_INTERVAL_MS - elapsed);
-  }, [text, isStreaming]);
+  }, [text, isStreaming, sample]);
 
   useEffect(() => () => {
     if (timerRef.current !== null) clearTimeout(timerRef.current);
   }, []);
 
-  return isStreaming ? sampled : text;
+  return isStreaming && sample ? sampled : text;
 }
 
-export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile }: MarkdownBodyProps) {
-  const parseSource = useParseSource(children, isStreaming);
+export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile, sampleParse = true }: MarkdownBodyProps) {
+  const parseSource = useParseSource(children, isStreaming, sampleParse);
   const normalizedMarkdown = useMemo(() => normalizeDisplayMath(parseSource), [parseSource]);
   const { remarkPlugins, rehypePlugins } = useMarkdownPlugins(normalizedMarkdown);
 

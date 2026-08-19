@@ -7,7 +7,7 @@ import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { SessionSidebar } from "./SessionSidebar";
 import { ToastProvider } from "./ui/toast";
 import { toast } from "./ui/toast";
-import { ChatWindow } from "./ChatWindow";
+import { ChatWindow, type SessionModelUsage } from "./ChatWindow";
 import { TabBar, type Tab } from "./TabBar";
 import { BranchNavigator } from "./BranchNavigator";
 import { ThemePicker } from "./ThemePicker";
@@ -28,6 +28,8 @@ import { showCompletionNotification } from "@/lib/browser-notifications";
 import type { GitStatusResponse } from "@/lib/git-types";
 import type { SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ChatInputHandle } from "./ChatInput";
+import { ProviderIcon } from "./ProviderIcon";
+import { providerBrand } from "@/lib/provider-brand";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import { ALL_CAPABILITIES, normalizeCapabilities, type ActiveEngineInfo, type EngineCapabilities, type SettingsTab } from "./SettingsTabs";
 import type { EnginesPayload } from "./EnginePicker";
@@ -96,6 +98,7 @@ function UpdateNoticeBody({ current, next, onOpen }: { current: string | null; n
 // --sidebar-width CSS variable (globals.css) and persisted between sessions.
 const SIDEBAR_WIDTH_STORAGE_KEY = STORAGE_KEYS.sidebarWidth;
 const TOOL_CALLS_COLLAPSED_STORAGE_KEY = STORAGE_KEYS.toolCallsCollapsed;
+const THINKING_EXPANDED_STORAGE_KEY = STORAGE_KEYS.thinkingExpanded;
 const SIDEBAR_MIN_WIDTH = 200;
 const SIDEBAR_MAX_WIDTH = 520;
 const SIDEBAR_DEFAULT_WIDTH = 260;
@@ -155,7 +158,7 @@ export function AppShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [initialNavigation] = useState(() => getInitialNavigation(searchParams));
-  const { t, locale } = useI18n();
+  const { t, tn, locale } = useI18n();
   const isMobile = useIsMobile();
   const { isDesktop } = useDesktopShell();
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
@@ -175,6 +178,7 @@ export function AppShell() {
   const [mobileSidebarReady, setMobileSidebarReady] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState<number>(SIDEBAR_DEFAULT_WIDTH);
   const [toolCallsDefaultCollapsed, setToolCallsDefaultCollapsed] = useState(true);
+  const [thinkingDefaultExpanded, setThinkingDefaultExpanded] = useState(false);
   const [sidebarResizing, setSidebarResizing] = useState(false);
   // Active drag handlers so an unmount mid-drag can detach them.
   const sidebarResizeHandlersRef = useRef<{ onMove: (ev: PointerEvent) => void; onUp: () => void } | null>(null);
@@ -185,6 +189,7 @@ export function AppShell() {
     setSidebarWidth(loadSidebarWidth());
     try {
       setToolCallsDefaultCollapsed(window.localStorage.getItem(TOOL_CALLS_COLLAPSED_STORAGE_KEY) !== "false");
+      setThinkingDefaultExpanded(window.localStorage.getItem(THINKING_EXPANDED_STORAGE_KEY) === "true");
     } catch {
       // Keep the compact default when storage is unavailable.
     }
@@ -193,6 +198,14 @@ export function AppShell() {
     setToolCallsDefaultCollapsed(collapsed);
     try {
       window.localStorage.setItem(TOOL_CALLS_COLLAPSED_STORAGE_KEY, String(collapsed));
+    } catch {
+      // The preference still applies for this page load.
+    }
+  }, []);
+  const handleThinkingDefaultExpandedChange = useCallback((expanded: boolean) => {
+    setThinkingDefaultExpanded(expanded);
+    try {
+      window.localStorage.setItem(THINKING_EXPANDED_STORAGE_KEY, String(expanded));
     } catch {
       // The preference still applies for this page load.
     }
@@ -403,6 +416,13 @@ export function AppShell() {
   const [contextUsage, setContextUsage] = useState<{ percent: number | null; contextWindow: number; tokens: number | null } | null>(null);
   const handleContextUsageChange = useCallback((usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => {
     setContextUsage(usage);
+  }, []);
+
+  // Per-model token usage — populated by ChatWindow, shown in the session
+  // popover next to the token totals it complements.
+  const [modelUsage, setModelUsage] = useState<SessionModelUsage[] | null>(null);
+  const handleModelUsageChange = useCallback((usage: SessionModelUsage[] | null) => {
+    setModelUsage(usage);
   }, []);
 
   // Single active panel — only one dropdown open at a time
@@ -1628,6 +1648,40 @@ export function AppShell() {
                           {section(t("appShell.sectionMessages"), messageRows)}
                           {section(t("appShell.sectionTokens"), [...tokenRows, ...extraTokenRows], "right", true)}
                         </div>
+                        {/* Per-model breakdown of the totals above — moved
+                            here from the quota popover, which now speaks
+                            only about plan quota. */}
+                        {modelUsage && modelUsage.length > 0 && (
+                          <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+                            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>
+                              {t("appShell.sectionModels")}
+                            </div>
+                            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                              {modelUsage.map((entry) => {
+                                const tokenTotal = entry.input + entry.output + entry.cacheRead + entry.cacheWrite;
+                                return (
+                                  <div key={`${entry.provider}:${entry.modelId}`} style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, fontSize: 12 }}>
+                                    <ProviderIcon provider={entry.provider} size={14} style={{ flexShrink: 0, color: "var(--text-muted)" }} />
+                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                      <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600, color: "var(--text)" }}>
+                                        {entry.name}
+                                      </div>
+                                      <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 10, color: "var(--text-dim)" }}>
+                                        {providerBrand(entry.provider)?.name ?? entry.provider}
+                                      </div>
+                                    </div>
+                                    <div style={{ flexShrink: 0, textAlign: "right", fontSize: 10, lineHeight: 1.4, color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>
+                                      <div>{tn("appShell.modelTurns", entry.turns)}</div>
+                                      <div style={{ color: "var(--text-dim)" }}>
+                                        {t("appShell.modelTokens", { tokens: formatCompactNumber(tokenTotal) })}
+                                      </div>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
                         {/* API-equivalent spend framing: this is what the
                             session would have cost on pay-as-you-go pricing,
                             never money actually charged on a plan. Only
@@ -1718,12 +1772,14 @@ export function AppShell() {
               onSessionStatsChange={handleSessionStatsChange}
               onSessionStatsPanelOpen={openSessionStatsPanel}
               onContextUsageChange={handleContextUsageChange}
+              onModelUsageChange={handleModelUsageChange}
               onOpenFile={handleOpenLinkedFile}
               onOpenPreview={handleAgentOpenPreview}
               onPreviewUrlsSeen={handlePreviewUrlsSeen}
               advisorEnabled={advisorEnabled}
               chatExtras={capabilities.chatExtras}
               toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
+              thinkingDefaultExpanded={thinkingDefaultExpanded}
             />
           ) : initialCwdStatus === "validating" ? (
             <div
@@ -2053,7 +2109,7 @@ export function AppShell() {
         <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />
       </svg>
     </button>
-    {settingsTab && <SettingsConfig activeTab={settingsTab} advisorEnabled={advisorEnabled} onAdvisorChange={handleAdvisorChange} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} onToolCallsDefaultCollapsedChange={handleToolCallsDefaultCollapsedChange} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd} sessionId={selectedSession?.id ?? null} capabilities={capabilities} engine={activeEngine} onModelsSaved={() => setModelsRefreshKey((k) => k + 1)} onPluginsReloaded={() => setSessionKey((k) => k + 1)} onOmpUpdateAvailabilityChange={setOmpUpdateAvailable} onSelectTab={setSettingsTab} onClose={() => setSettingsTab(null)} />}
+    {settingsTab && <SettingsConfig activeTab={settingsTab} advisorEnabled={advisorEnabled} onAdvisorChange={handleAdvisorChange} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} onToolCallsDefaultCollapsedChange={handleToolCallsDefaultCollapsedChange} thinkingDefaultExpanded={thinkingDefaultExpanded} onThinkingDefaultExpandedChange={handleThinkingDefaultExpandedChange} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd} sessionId={selectedSession?.id ?? null} capabilities={capabilities} engine={activeEngine} onModelsSaved={() => setModelsRefreshKey((k) => k + 1)} onPluginsReloaded={() => setSessionKey((k) => k + 1)} onOmpUpdateAvailabilityChange={setOmpUpdateAvailable} onSelectTab={setSettingsTab} onClose={() => setSettingsTab(null)} />}
     {enginePickerOpen && <EnginePicker initial={engineRoster} onDone={handleEnginePickerDone} />}
     {setupWizardOpen && !enginePickerOpen && (
       <SetupWizard

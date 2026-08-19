@@ -22,6 +22,12 @@ export interface UsageWindow {
   resetsAt: string | null;
   state: UsageWindowState;
   /**
+   * Window span in milliseconds (5h → 18 000 000), or null when the engine
+   * never said how long the window lasts. Selection prefers shorter spans —
+   * the window the user is spending against right now — and sorts null last.
+   */
+  windowMs?: number | null;
+  /**
    * Model tier this window is scoped to, lowercased (e.g. "opus"), or null when
    * it covers the whole account. A tiered window constrains only the models of
    * that tier, so it must not be charged against a model of another one.

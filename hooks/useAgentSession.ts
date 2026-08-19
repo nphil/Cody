@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect, useMemo, useReducer } from "react";
+import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useReducer } from "react";
 import type {
   AgentMessage,
   CustomMessage,
@@ -641,6 +641,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [error, setError] = useState<string | null>(null);
   const [activeLeafId, setActiveLeafId] = useState<string | null>(null);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
+  // Latest committed transcript identity, readable from event callbacks that
+  // must not re-create per message (the run-end handlers capture it so the
+  // follow logic can tell the terminal reload's commit apart from the state
+  // churn that precedes it).
+  const messagesRef = useRef<AgentMessage[]>(messages);
+  messagesRef.current = messages;
   const [entryIds, setEntryIds] = useState<string[]>([]);
   const [streamState, dispatch] = useReducer(streamReducer, { isStreaming: false, streamingMessage: null });
   const [agentRunning, setAgentRunning] = useState(false);
@@ -752,6 +758,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const initialScrollDoneRef = useRef(false);
   const pendingScrollToUserRef = useRef(false);
   const completionScrollAllowedRef = useRef(true);
+  // Non-null while a terminal run-end reload is replacing `messages` AND the
+  // user was following at the bottom: holds the pre-reload array identity.
+  // While set, follow scrolls stay instant; the layout effect below consumes
+  // it on the reload's commit to re-pin before that commit paints.
+  const completionRepinFromRef = useRef<AgentMessage[] | null>(null);
   const executeBashRef = useRef<(command: string, excludeFromContext: boolean) => Promise<void> | undefined>(undefined);
   const userScrollIntentUntilRef = useRef(0);
   const ignoreProgrammaticScrollUntilRef = useRef(0);
@@ -1712,6 +1723,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // must not overwrite the messages of the run currently streaming.
     if (runId !== undefined && promptRunIdRef.current !== runId) return;
     try {
+      // The reload below replaces `messages` wholesale; if the user is
+      // following, the follow logic must re-pin instantly through the reflow
+      // (see the terminal re-pin effect) — a smooth scroll would race it.
+      completionRepinFromRef.current = completionScrollAllowedRef.current ? messagesRef.current : null;
       // Pass the fence into loadSession: the pre-check above only guards the
       // start — a next prompt that begins while the reload is in flight must
       // not be overwritten by the finished run's snapshot.
@@ -2034,6 +2049,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         resetSubagentActivityState();
         dispatch({ type: "end" });
         if (endedSid) {
+          // Same contract as finishPromptWithoutStream: arm the terminal
+          // re-pin before the reload so a smooth scroll never races the
+          // content-visibility reflow of the reloaded transcript.
+          completionRepinFromRef.current = completionScrollAllowedRef.current ? messagesRef.current : null;
           void loadSession(endedSid, false, false, endedRunId);
           const endToken = beginAuthoritativeModelSync();
           fetch(`/api/agent/${encodeURIComponent(endedSid)}`)
@@ -3297,11 +3316,52 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         followScrollFrameRef.current = requestAnimationFrame(() => {
           followScrollFrameRef.current = null;
           if (!completionScrollAllowedRef.current) return;
-          scrollToBottom(agentRunningRef.current || streamState.isStreaming ? "instant" : "smooth");
+          scrollToBottom(completionRepinFromRef.current !== null || agentRunningRef.current || streamState.isStreaming ? "instant" : "smooth");
         });
       }
     }
   }, [messages, streamState, agentRunning, agentPhase, extensionWidgets, isCompacting, retryInfo, activeSubagentCount, todoPhases, scrollToBottom, loading]);
+
+  // The follow effect above only runs on React state changes, but the scroll
+  // container also shrinks without one — composer panels mounting/expanding,
+  // the input growing a line, the window resizing — which pushes the live
+  // tail (status line, pending tool headers) below the fold with no scroll
+  // event to correct it: the owner sees it "hidden behind the composer".
+  // Re-pin on any container resize while following; "instant" because an
+  // eased chase during a drag-resize lags the pointer. A user who scrolled
+  // up keeps their position (completionScrollAllowedRef is false).
+  const transcriptMounted = !loading && (messages.length > 0 || streamState.isStreaming);
+  useEffect(() => {
+    if (!transcriptMounted || typeof ResizeObserver === "undefined") return;
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const observer = new ResizeObserver(() => {
+      if (!completionScrollAllowedRef.current) return;
+      scrollToBottom("instant");
+    });
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [transcriptMounted, scrollToBottom]);
+
+  // Terminal re-pin. When a run ends, the transcript is reloaded from disk
+  // and `messages` is replaced: the streamed tail unmounts and every turn
+  // re-enters a `.chat-turn` wrapper whose content-visibility placeholder
+  // only realizes its true height as it paints. A smooth scroll issued
+  // against the pre-reload geometry animates toward a stale offset and lands
+  // mid-conversation. If the user was following when the run ended, pin the
+  // viewport back to the bottom before this commit paints, and once more a
+  // frame later after realized heights settle. A user who scrolled up
+  // (completionScrollAllowedRef === false) is left alone.
+  useLayoutEffect(() => {
+    const from = completionRepinFromRef.current;
+    if (from === null || from === messages) return;
+    completionRepinFromRef.current = null;
+    if (!completionScrollAllowedRef.current) return;
+    scrollToBottom("instant");
+    requestAnimationFrame(() => {
+      if (completionScrollAllowedRef.current) scrollToBottom("instant");
+    });
+  }, [messages, scrollToBottom]);
 
   useEffect(() => () => {
     hookAliveRef.current = false;

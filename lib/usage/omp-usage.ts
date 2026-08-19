@@ -190,6 +190,7 @@ function buildWindow(
     utilization,
     resetsAt: toIsoString(readNumber(windowInfo.resetsAt) ?? readString(windowInfo.resetsAt)),
     state: deriveUsageWindowState(utilization, status),
+    windowMs: windowSpanMs(readString(windowInfo.id) ?? readString(scope.windowId), readNumber(windowInfo.durationMs)),
     // The scope survives past the label so a window can be matched against the
     // selected model later: the label alone cannot say whether "Opus · weekly"
     // constrains the model in the composer right now.
@@ -230,6 +231,33 @@ function isUnlimitedLimit(limit: Record<string, unknown>): boolean {
 
 const WINDOW_ID_RE = /^(\d+)([hdm])$/i;
 const NAMED_WINDOWS = new Set(["hourly", "daily", "weekly", "monthly"]);
+
+const HOUR_MS = 3_600_000;
+const DAY_MS = 86_400_000;
+const NAMED_WINDOW_SPANS: Record<string, number> = {
+  hourly: HOUR_MS,
+  daily: DAY_MS,
+  weekly: 7 * DAY_MS,
+  monthly: 30 * DAY_MS,
+};
+
+/** Window span in milliseconds, preferring the engine's own duration when it
+ * reports one, else read off the same window identities windowPhrase names
+ * ("5h", "7d", "weekly"). Null when neither says: selection sorts an unknown
+ * span last rather than guessing how long it lasts. */
+function windowSpanMs(windowId: string | undefined, durationMs: number | undefined): number | null {
+  if (durationMs !== undefined && durationMs > 0) return durationMs;
+  const id = windowId?.trim().toLowerCase();
+  if (!id) return null;
+  const named = NAMED_WINDOW_SPANS[id];
+  if (named !== undefined) return named;
+  const match = WINDOW_ID_RE.exec(id);
+  if (!match) return null;
+  const count = Number(match[1]);
+  if (!Number.isFinite(count) || count <= 0) return null;
+  const unit = match[2]!.toLowerCase();
+  return count * (unit === "d" ? DAY_MS : unit === "h" ? HOUR_MS : 60_000);
+}
 
 /** Turn omp's window identity into short display copy: "7d" reads as "weekly",
  * "5h" as "5-hour window". Falls back to omp's own labels when the window id is

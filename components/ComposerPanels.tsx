@@ -311,7 +311,9 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
  * subagent roster. Each hugs its content width, is independently collapsible
  * via its header row (`chevron`), and starts collapsed; the headers always
  * show live progress / running-summary over the full roster, even while the
- * chip list is truncated. Rendered pinned above the chat input. */
+ * chip list is truncated. Rendered pinned above the chat input. Panels sit
+ * side by side while they fit, wrapping to a column when space runs out;
+ * each can shrink so one expanded panel never pushes the other off-screen. */
 export function ComposerPanels({ todoPhases, subagents, onSelectSubagent, defaultExpanded = false }: {
   todoPhases: TodoPhase[];
   subagents: SubagentInfo[];
@@ -321,9 +323,13 @@ export function ComposerPanels({ todoPhases, subagents, onSelectSubagent, defaul
 }) {
   if (todoPhases.length === 0 && subagents.length === 0) return null;
   return (
-    <div style={{ display: "grid", gap: 6, marginBottom: 8 }}>
-      <TodoList phases={todoPhases} collapsible defaultExpanded={defaultExpanded} />
-      <SubagentsPanel subagents={subagents} onSelectSubagent={onSelectSubagent} defaultExpanded={defaultExpanded} />
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "flex-start", marginBottom: 8 }}>
+      <div style={{ flex: "0 1 auto", minWidth: 0, maxWidth: "100%" }}>
+        <TodoList phases={todoPhases} collapsible defaultExpanded={defaultExpanded} />
+      </div>
+      <div style={{ flex: "0 1 auto", minWidth: 0, maxWidth: "100%" }}>
+        <SubagentsPanel subagents={subagents} onSelectSubagent={onSelectSubagent} defaultExpanded={defaultExpanded} />
+      </div>
     </div>
   );
 }

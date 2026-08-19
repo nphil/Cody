@@ -1,17 +1,16 @@
-import type { UsageAccount, UsageWindow, UsageWindowState } from "./types";
+import type { UsageAccount, UsageWindow } from "./types";
 
 /**
  * Picking the binding constraint.
  *
  * An account can report half a dozen overlapping windows and the user only
- * cares about the one that will actually stop them next. That is the most
- * severe state first (an exhausted window blocks work even at a lower
- * percentage than a busy one), then the fullest window, then the one that
- * clears soonest — a window with no known reset is the least useful answer, so
- * it loses every tie.
+ * cares about the one that will actually stop them next. Exhaustion first — a
+ * refused window stops the model now, whatever its term — then the shortest
+ * span: the current 5 hours are what this turn spends against, and a fuller
+ * week is context, not the gauge. Only then the fullest window, then the one
+ * that clears soonest — a window with no known reset is the least useful
+ * answer, so it loses every tie.
  */
-
-const STATE_RANK: Record<UsageWindowState, number> = { exhausted: 2, warning: 1, ok: 0 };
 
 export function selectBindingWindow(
   accounts: UsageAccount[],
@@ -130,9 +129,15 @@ function isMoreBinding(candidate: UsageWindow, incumbent: UsageWindow): boolean 
 /** Sort comparator for the ranking above: most binding first, ties left in the
  * order encountered so the ring and the popover always name the same window. */
 function compareBinding(a: UsageWindow, b: UsageWindow): number {
-  const rankA = STATE_RANK[a.state] ?? 0;
-  const rankB = STATE_RANK[b.state] ?? 0;
-  if (rankA !== rankB) return rankB - rankA;
+  // Only exhaustion outranks the term. A warning refuses nothing, so it must
+  // not drag the gauge off the short window the turn is actually spending.
+  const refusedA = a.state === "exhausted" ? 1 : 0;
+  const refusedB = b.state === "exhausted" ? 1 : 0;
+  if (refusedA !== refusedB) return refusedB - refusedA;
+
+  const spanA = toWindowSpan(a.windowMs);
+  const spanB = toWindowSpan(b.windowMs);
+  if (spanA !== spanB) return spanA - spanB;
 
   const usedA = toUtilization(a.utilization);
   const usedB = toUtilization(b.utilization);
@@ -145,6 +150,14 @@ function compareBinding(a: UsageWindow, b: UsageWindow): number {
   // Fully tied: the first window encountered keeps the slot, so repeated calls
   // over the same snapshot always name the same window.
   return 0;
+}
+
+/** Unknown spans sort last: a window that will not say how long it lasts
+ * cannot claim to be the near-term one. */
+function toWindowSpan(value: number | null | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : Number.POSITIVE_INFINITY;
 }
 
 function toUtilization(value: number): number {

@@ -4,15 +4,16 @@ import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type
 import { ChevronDown, TriangleAlert, X } from "lucide-react";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, ImageContent, SessionInfo, SessionTreeNode, TextContent, ToolCallContent, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
-import { countToolCallBlocks, getDisplayableAssistantBlocks, splitFinalAssistantBlocks } from "@/lib/message-display";
+import { countToolCallBlocks, getDisplayableAssistantBlocks, groupHasThinking, splitFinalAssistantBlocks } from "@/lib/message-display";
 import { estimateTurnHeight, type TurnContentSignal } from "@/lib/turn-height-estimate";
 import { imageSource, MessageView } from "./MessageView";
 import { ClickableImage } from "./ImageLightbox";
-import { ChatInput, type ChatInputHandle, type ContextModelUsage } from "./ChatInput";
+import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ExtensionDialog } from "./ExtensionDialog";
 import { SubagentTranscriptDialog } from "./SubagentTranscriptDialog";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ComposerPanels } from "./ComposerPanels";
+import { StatusTextCrossfade } from "./StatusTextCrossfade";
 import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-layout";
 import { useAgentSession, type AgentPhase, type NoticeItem, type StreamAlert, type SubagentInfo } from "@/hooks/useAgentSession";
 import { useAudio } from "@/hooks/useAudio";
@@ -38,6 +39,7 @@ interface Props {
    * affordances instead of letting them fail against the engine. */
   chatExtras?: boolean;
   toolCallsDefaultCollapsed?: boolean;
+  thinkingDefaultExpanded?: boolean;
   onAgentEnd?: () => void;
   onSessionCreated?: (session: SessionInfo) => void;
   onSessionForked?: (newSessionId: string) => void;
@@ -48,9 +50,29 @@ interface Props {
   onSessionStatsChange?: (stats: SessionStatsInfo | null) => void;
   onSessionStatsPanelOpen?: () => void;
   onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
+  /** Per-model token usage of the loaded conversation, for the top bar's
+   * session popover. Null on unmount so a closed chat clears the readout. */
+  onModelUsageChange?: (usage: SessionModelUsage[] | null) => void;
   onOpenFile?: (filePath: string) => void;
   onOpenPreview?: (url: string, sessionId?: string) => void;
   onPreviewUrlsSeen?: (urls: string[], sessionId?: string) => void;
+}
+
+/** Token traffic one model produced in the loaded conversation. */
+export interface ContextModelUsage {
+  provider: string;
+  modelId: string;
+  turns: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
+/** The same rows with their display name resolved, ready to render outside
+ * this component — the model catalog lives here, not in AppShell. */
+export interface SessionModelUsage extends ContextModelUsage {
+  name: string;
 }
 
 function phaseLabel(phase: AgentPhase): string {
@@ -243,9 +265,14 @@ function collectGroupResultImages(
   return images.slice(0, 6);
 }
 
-function ProcessDetailsGroup({ messageCount, toolCallCount, resultImages, children }: { messageCount: number; toolCallCount: number; resultImages?: ImageContent[]; children: ReactNode }) {
+function ProcessDetailsGroup({ messageCount, toolCallCount, resultImages, defaultExpanded = false, children }: { messageCount: number; toolCallCount: number; resultImages?: ImageContent[]; defaultExpanded?: boolean; children: ReactNode }) {
   const { t, tn } = useI18n();
-  const [expanded, setExpanded] = useState(false);
+  // Reasoning on a committed turn lives inside this group, and its children are
+  // not even mounted while it is shut — so "Expand thinking blocks" has to open
+  // the group or it would only ever apply to the streaming turn. A group the
+  // user has toggled keeps their choice.
+  const [userExpanded, setUserExpanded] = useState<boolean | null>(null);
+  const expanded = userExpanded ?? defaultExpanded;
   const parts = [t("chatWindow.processDetails"), tn("chatWindow.messageCount", messageCount)];
   if (toolCallCount > 0) parts.push(tn("chatWindow.toolCallCount", toolCallCount));
 
@@ -254,7 +281,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, resultImages, childr
       <button
         type="button"
         aria-expanded={expanded}
-        onClick={() => setExpanded((v) => !v)}
+        onClick={() => setUserExpanded(!expanded)}
         className="process-details-toggle"
         title={expanded ? t("chatWindow.collapseProcessDetails") : t("chatWindow.expandProcessDetails")}
       >
@@ -317,6 +344,7 @@ interface CommittedTranscriptProps {
   onOpenFile?: (filePath: string) => void;
   sessionId: string | undefined;
   toolCallsDefaultCollapsed: boolean;
+  thinkingDefaultExpanded: boolean;
   visibleCount: number;
   /** True while the viewport is near the bottom of the conversation. When
    *  false (user is reading history), the render window anchors its top so
@@ -438,7 +466,7 @@ function turnClassName(live: boolean, compact: boolean): string {
 const CommittedTranscript = memo(function CommittedTranscript({
   messages, entryIds, conversationMeta, messageRefs, isStreaming, sessionBusy, isNew, forkingEntryId,
   canFork, handleFork, handleNavigate, handleEditContent, modelNames, messageCwd, onOpenFile, sessionId,
-  toolCallsDefaultCollapsed, visibleCount, nearBottom, sentinelRef, handleLoadMoreClick,
+  toolCallsDefaultCollapsed, thinkingDefaultExpanded, visibleCount, nearBottom, sentinelRef, handleLoadMoreClick,
 }: CommittedTranscriptProps) {
   const { t } = useI18n();
   const { toolResultsMap, lastAnchorIdx, visibleRefIndexByMessage } = conversationMeta;
@@ -496,6 +524,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
         prevTimestamp={idx > 0 ? (messages[idx - 1] as AgentMessage & { timestamp?: number }).timestamp : undefined}
         sessionId={sessionId}
         toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
+        thinkingDefaultExpanded={thinkingDefaultExpanded}
       />
     );
   };
@@ -525,6 +554,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
             messageCount={unit.processIndices.length + (unit.finalProcessMessage ? 1 : 0)}
             toolCallCount={countToolCalls(messages, unit.processIndices) + countToolCallBlocks(processBlocks)}
             resultImages={collectGroupResultImages(messages, unit.processIndices, toolResultsMap, processBlocks)}
+            defaultExpanded={thinkingDefaultExpanded && groupHasThinking(messages, unit.processIndices, processBlocks)}
           >
             {unit.processIndices.map((processIdx) => renderMessage(processIdx, { keyPrefix: "process" }))}
             {unit.finalProcessMessage && renderMessage(unit.finalAssistantIdx, { keyPrefix: "process-final", messageOverride: unit.finalProcessMessage, showTimestamp: false })}
@@ -594,7 +624,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
 /** Memoized: AppShell holds ~60 state values (git badge polls, update checks,
  *  the context-usage tick ChatWindow itself pushes up), and each of those
  *  re-renders would otherwise rebuild this whole tree. */
-export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, advisorEnabled, chatExtras = true, toolCallsDefaultCollapsed = true, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onOpenPreview, onPreviewUrlsSeen }: Props) {
+export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, advisorEnabled, chatExtras = true, toolCallsDefaultCollapsed = true, thinkingDefaultExpanded = false, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onModelUsageChange, onOpenFile, onOpenPreview, onPreviewUrlsSeen }: Props) {
   const { t, tn } = useI18n();
   const { playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -892,6 +922,9 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     ? (modelThinkingLevelMaps[`${displayModelValue.provider}:${displayModelValue.modelId}`] ?? null)
     : null;
 
+  // The quota popover used to render this list itself; it now feeds the top
+  // bar's session popover, which is where the rest of the session's token
+  // readouts already live.
   const contextModelUsage = useMemo<ContextModelUsage[]>(() => {
     const byModel = new Map<string, ContextModelUsage>();
     for (const message of messages) {
@@ -917,6 +950,29 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     }
     return [...byModel.values()];
   }, [messages]);
+
+  const modelUsageRows = useMemo<SessionModelUsage[]>(() => (
+    contextModelUsage.map((entry) => ({
+      ...entry,
+      name: modelList.find((option) => option.provider === entry.provider && option.id === entry.modelId)?.name
+        ?? modelNames[`${entry.provider}:${entry.modelId}`]
+        ?? (displayModelValue?.provider === entry.provider && displayModelValue.modelId === entry.modelId
+          ? liveModelMeta?.name ?? null
+          : null)
+        ?? entry.modelId,
+    }))
+  ), [contextModelUsage, modelList, modelNames, displayModelValue, liveModelMeta]);
+  // Push it up the same way as sessionStats: keyed on scalars so a fresh array
+  // identity per render cannot loop the parent.
+  const modelUsageKey = modelUsageRows
+    .map((row) => [row.provider, row.modelId, row.name, row.turns, row.input, row.output, row.cacheRead, row.cacheWrite].join(":"))
+    .join("|");
+  const modelUsageRef = useRef(modelUsageRows);
+  modelUsageRef.current = modelUsageRows;
+  useEffect(() => {
+    onModelUsageChange?.(modelUsageRef.current);
+  }, [modelUsageKey, onModelUsageChange]);
+  useEffect(() => () => { onModelUsageChange?.(null); }, [onModelUsageChange]);
 
   // Steering and the follow-up queue are omp-protocol commands; a turn-based
   // engine answers them "unsupported", so they are not offered at all — the
@@ -957,8 +1013,6 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       advisorEnabled={chatExtras && advisorEnabled}
       queuedMessages={queuedMessages}
       inputHistory={inputHistory}
-      contextUsage={contextUsage}
-      contextModelUsage={contextModelUsage}
       onRemoveQueuedMessage={removeQueuedMessage}
       onPromoteQueuedToSteer={promoteQueuedToSteer}
       slashCommands={slashCommands}
@@ -1127,13 +1181,14 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
               onOpenFile={onOpenFile}
               sessionId={session?.id ?? sessionIdRef.current ?? undefined}
               toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
+              thinkingDefaultExpanded={thinkingDefaultExpanded}
               visibleCount={visibleCount}
               nearBottom={nearBottom}
               sentinelRef={sentinelRef}
               handleLoadMoreClick={handleLoadMoreClick}
             />
             {streamState.isStreaming && streamState.streamingMessage && (
-              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} />
+              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} thinkingDefaultExpanded={thinkingDefaultExpanded} />
             )}
 
             {toolCallsDefaultCollapsed && pendingToolHeaders.map((tool) => (
@@ -1166,42 +1221,50 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
               />
             )}
 
-            {agentRunning && !streamState.streamingMessage && pendingToolHeaders.length === 0 && (
-              <div role="status" aria-live="polite" className="py-2 text-[13px] text-text-muted flex items-center gap-2">
-                <span
-                  aria-hidden
-                  className="live-status-dot live-pulse inline-block h-2 w-2 shrink-0 rounded-full bg-accent"
-                />
-                <span>
-                  {[
-                    // A degraded stream must never read as a healthy wait, and
-                    // once the retries are exhausted it must not claim to be
-                    // reconnecting either — the banner beside it says it is not.
-                    streamAlert?.kind === "stream_lost"
-                      ? t("agentStream.disconnected")
-                      : streamDegraded
-                        ? t("agentStream.reconnecting")
-                        : phaseLabel(agentPhase),
-                    activeSubagentCount > 0 ? tn("chatWindow.subagentCount", activeSubagentCount) : null,
-                    currentTodoPhase
-                      ? t("chatWindow.todoPhaseStatus", {
-                          name: currentTodoPhase.name,
-                          done: currentTodoPhase.done,
-                          total: currentTodoPhase.total,
-                        })
-                      : null,
-                  ].filter(Boolean).join(" · ")}
-                </span>
-              </div>
-            )}
-
-            {bashRunning && !pendingBash && (
-              <div role="status" aria-live="polite" className="py-2 text-[13px] text-text-muted flex items-center gap-2">
-                <span
-                  aria-hidden
-                  className="live-status-dot live-pulse inline-block h-2 w-2 shrink-0 rounded-full bg-accent"
-                />
-                <span>{t("chatWindow.runningCommand")}</span>
+            {/* Status slot: reserved for the whole run so the status line
+                appearing/disappearing (streaming content taking over, tool
+                headers resolving) and text swaps never shift the transcript
+                or the follow-scroll target. min-height matches the old
+                py-2 rows, so nothing moved visually. */}
+            {sessionBusy && (
+              <div className="chat-status-slot">
+                {agentRunning && !streamState.streamingMessage && pendingToolHeaders.length === 0 && (
+                  <div role="status" aria-live="polite" className="text-[13px] text-text-muted flex items-center gap-2">
+                    <span
+                      aria-hidden
+                      className="live-status-dot live-pulse inline-block h-2 w-2 shrink-0 rounded-full bg-accent"
+                    />
+                    <StatusTextCrossfade
+                      text={[
+                        // A degraded stream must never read as a healthy wait, and
+                        // once the retries are exhausted it must not claim to be
+                        // reconnecting either — the banner beside it says it is not.
+                        streamAlert?.kind === "stream_lost"
+                          ? t("agentStream.disconnected")
+                          : streamDegraded
+                            ? t("agentStream.reconnecting")
+                            : phaseLabel(agentPhase),
+                        activeSubagentCount > 0 ? tn("chatWindow.subagentCount", activeSubagentCount) : null,
+                        currentTodoPhase
+                          ? t("chatWindow.todoPhaseStatus", {
+                              name: currentTodoPhase.name,
+                              done: currentTodoPhase.done,
+                              total: currentTodoPhase.total,
+                            })
+                          : null,
+                      ].filter(Boolean).join(" · ")}
+                    />
+                  </div>
+                )}
+                {bashRunning && !pendingBash && (
+                  <div role="status" aria-live="polite" className="text-[13px] text-text-muted flex items-center gap-2">
+                    <span
+                      aria-hidden
+                      className="live-status-dot live-pulse inline-block h-2 w-2 shrink-0 rounded-full bg-accent"
+                    />
+                    <StatusTextCrossfade text={t("chatWindow.runningCommand")} />
+                  </div>
+                )}
               </div>
             )}
 
@@ -1217,7 +1280,11 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
               />
             )}
 
-            <div ref={messagesEndRef} />
+            {/* Real height rather than padding below: `block: "nearest"`
+                stops once this sentinel's whole box is visible, so the
+                follow-scroll always leaves this much clearance between the
+                last row and the composer seam. */}
+            <div ref={messagesEndRef} aria-hidden style={{ height: 16 }} />
             </div>
           </div>
         </div>
