@@ -19,7 +19,13 @@ export type TerminalInfo = {
   createdAt: string;
   exited: boolean;
   exitCode?: number;
+  /** True for a terminal that opened as the read-only live chat view. */
+  attached?: boolean;
 };
+
+/** Request to open the terminal as a read-only follower of a chat session.
+ * Honored only when the workspace has no other live web terminal. */
+export type TerminalAttach = { sessionFile: string; locale: string };
 export type TerminalEvent =
   | { type: "output"; data: string; replay?: boolean }
   | { type: "exit"; exitCode?: number }
@@ -59,16 +65,34 @@ function terminalEnvironment(): Record<string, string> {
   return env;
 }
 
-function interactiveShell(launchEngine: boolean): { command: string; args: string[] } {
+type SpawnCommand = { command: string; args: string[]; env?: Record<string, string> };
+type SpawnMode = { launchEngine: boolean; attach?: TerminalAttach };
+
+/** Resolve what a browser PTY runs. All three shapes are exclusive to a
+ * user-created Cody terminal; server subprocesses, task runners and
+ * non-interactive SSH commands never pass through here. */
+function terminalCommand(mode: SpawnMode): SpawnCommand {
   const shell = process.env.CODY_TERMINAL_SHELL || (process.platform === "win32" ? "powershell.exe" : userInfo().shell || "/bin/sh");
-  if (!launchEngine || process.platform === "win32") return { command: shell, args: [] };
+
+  // Read-only chat follower (bin/cody-session-tail.js): renders the active
+  // conversation, follows appends, and hands the PTY to the login shell on
+  // demand. It never writes to the session file, so the live rpc-ui process
+  // stays the single writer. create() only requests it on POSIX, like the
+  // engine wrapper below.
+  if (mode.attach) {
+    const packageRoot = process.env.CODY_PACKAGE_DIR || process.cwd();
+    return {
+      command: process.execPath,
+      args: [path.join(packageRoot, "bin", "cody-session-tail.js"), mode.attach.sessionFile],
+      env: { CODY_TAIL_SHELL: shell, CODY_TAIL_LOCALE: mode.attach.locale },
+    };
+  }
+  if (!mode.launchEngine || process.platform === "win32") return { command: shell, args: [] };
 
   const harness = getHarness();
   const engine = harness.resolveBinary();
   if (!engine) return { command: shell, args: [] };
 
-  // The wrapper is exclusive to a user-created Cody PTY. Server subprocesses,
-  // task runners and non-interactive SSH commands never pass through it.
   const script = [
     `printf 'Cody: starting %s — exit the engine to drop to a shell.\\n' "$1"`,
     `"$2" || true`,
@@ -89,19 +113,32 @@ export class TerminalManager {
     return [...this.terminals.values()].filter((terminal) => terminal.cwd === normalized).map(publicInfo);
   }
 
-  create(cwd: string, name?: string, cols?: number, rows?: number): TerminalInfo {
+  /** True while any terminal in this workspace still has a live PTY. The
+   * first-terminal attach rule counts here, server-side, so racing clients
+   * cannot create two chat views. */
+  private hasLiveTerminal(cwd: string): boolean {
+    const normalized = path.resolve(cwd);
+    return [...this.terminals.values()].some((terminal) => terminal.cwd === normalized && !terminal.exited);
+  }
+
+  create(cwd: string, name?: string, cols?: number, rows?: number, attach?: TerminalAttach): TerminalInfo {
     const requestedName = name?.trim();
     if (requestedName && !/^[\w .:+-]{1,80}$/.test(requestedName)) throw new Error("Invalid terminal name");
+    // Server-authoritative first-terminal rule: only the FIRST live terminal
+    // of a workspace may attach to the chat; every other one gets the normal
+    // engine wrapper, whatever the client claimed.
+    const attaching = attach !== undefined && process.platform !== "win32" && !this.hasLiveTerminal(cwd);
     const record: TerminalRecord = {
       id: randomUUID(),
       cwd,
       name: requestedName || `Shell ${this.list(cwd).length + 1}`,
       createdAt: new Date().toISOString(),
       exited: false,
+      ...(attaching ? { attached: true } : {}),
       replay: "",
       listeners: new Set(),
     };
-    this.spawn(record, cols, rows, true);
+    this.spawn(record, cols, rows, { launchEngine: true, attach: attaching ? attach : undefined });
     this.terminals.set(record.id, record);
     return publicInfo(record);
   }
@@ -145,7 +182,7 @@ export class TerminalManager {
     const marker = "\r\n[continued in interactive shell]\r\n";
     record.replay = (record.replay + marker).slice(-MAX_REPLAY);
     this.emit(record, { type: "output", data: marker });
-    this.spawn(record, cols, rows, false);
+    this.spawn(record, cols, rows, { launchEngine: false });
     return publicInfo(record);
   }
 
@@ -160,8 +197,8 @@ export class TerminalManager {
     for (const id of [...this.terminals.keys()]) this.close(id);
   }
 
-  private spawn(record: TerminalRecord, cols?: number, rows?: number, launchEngine = false): void {
-    const shell = interactiveShell(launchEngine);
+  private spawn(record: TerminalRecord, cols: number | undefined, rows: number | undefined, mode: SpawnMode): void {
+    const shell = terminalCommand(mode);
     record.exited = false;
     delete record.exitCode;
     const child = pty.spawn(shell.command, shell.args, {
@@ -169,7 +206,7 @@ export class TerminalManager {
       cols: dimension(cols, 80),
       rows: dimension(rows, 24),
       cwd: record.cwd,
-      env: terminalEnvironment(),
+      env: { ...terminalEnvironment(), ...shell.env },
     });
     record.pty = child;
     child.onData((data) => {
@@ -197,8 +234,12 @@ export class TerminalManager {
 }
 
 function publicInfo(record: TerminalRecord): TerminalInfo {
-  const { id, cwd, name, createdAt, exited, exitCode } = record;
-  return { id, cwd, name, createdAt, exited, ...(exited && exitCode !== undefined ? { exitCode } : {}) };
+  const { id, cwd, name, createdAt, exited, exitCode, attached } = record;
+  return {
+    id, cwd, name, createdAt, exited,
+    ...(attached ? { attached } : {}),
+    ...(exited && exitCode !== undefined ? { exitCode } : {}),
+  };
 }
 
 export function getTerminalManager(): TerminalManager {

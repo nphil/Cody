@@ -166,7 +166,6 @@ components/
                       shared by PreviewPanel and the pop-out window route
   DisplayWindow.tsx   /display/<sessionId>: the streamed surface alone, full
                       viewport, no chat chrome
-  UpdatesPanel.tsx    right-panel Updates tool: app/omp/skills update status
   InfoPanel.tsx       right-panel Info tool: versions + workspace diagnostics
   ChatMinimap.tsx     scroll minimap alongside the message list
   MarkdownBody.tsx    markdown renderer
@@ -194,6 +193,11 @@ bin/
                            mints the display capability secret at boot
   cody-display-mcp.js      bundled stdio MCP server exposing open_preview to
                            Claude/Codex engines (posts to /api/internal/display)
+  cody-session-tail.js     read-only live view of a chat session for the FIRST
+                           web terminal of a workspace (spawned by
+                           lib/terminal-manager.ts); renders + follows the
+                           session .jsonl, never writes it, q/Ctrl+C drops to
+                           the login shell
 ```
 
 `desktop/` is a separate top-level tree, not part of the Next.js app above:

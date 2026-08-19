@@ -21,6 +21,10 @@ export type TerminalInfo = {
 
 type Props = {
   cwd: string | null;
+  /** Active chat session in this workspace. The server attaches the FIRST
+   * live terminal of the workspace to it as a read-only live view; any
+   * further terminal gets the normal engine and shell. */
+  sessionId?: string | null;
   onOpen?: () => void;
   /** One-shot focus request (e.g. a task was dispatched into a fresh
    * terminal): reload the list and focus that terminal. Each request carries a
@@ -87,8 +91,8 @@ function TerminalSoftKeys({
   );
 }
 
-export function TerminalPanel({ cwd, onOpen, focusRequest }: Props) {
-  const { t } = useI18n();
+export function TerminalPanel({ cwd, sessionId, onOpen, focusRequest }: Props) {
+  const { t, locale } = useI18n();
   const isMobile = useIsMobile();
   // Soft keys (Esc/Tab/Ctrl/arrows) matter on ANY touch keyboard, not just
   // phones — a tablet terminal without Esc or Ctrl is near unusable.
@@ -184,7 +188,7 @@ export function TerminalPanel({ cwd, onOpen, focusRequest }: Props) {
       const response = await fetch("/api/terminals", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd }),
+        body: JSON.stringify({ cwd, ...(sessionId ? { sessionId, locale } : {}) }),
       });
       if (!response.ok) throw new Error(await responseError(response, t("terminal.createError")));
       const terminal = await response.json() as TerminalInfo;
@@ -197,7 +201,7 @@ export function TerminalPanel({ cwd, onOpen, focusRequest }: Props) {
     } finally {
       setBusy(false);
     }
-  }, [busy, cwd, onOpen, t]);
+  }, [busy, cwd, locale, onOpen, sessionId, t]);
 
   const close = useCallback(async (id: string) => {
     const response = await fetch(`/api/terminals/${encodeURIComponent(id)}`, { method: "DELETE" }).catch(() => null);
