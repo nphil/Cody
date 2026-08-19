@@ -48,7 +48,7 @@ export function TodoList({ phases = [], collapsible = false, defaultExpanded = f
     <section
       aria-label={t("chatWindow.todoList")}
       className={`overflow-hidden border border-border bg-bg-subtle ${collapsible ? "" : "my-2"}`}
-      style={{ borderRadius: "var(--radius-card)" }}
+      style={{ borderRadius: "var(--radius-card)", width: "fit-content", maxWidth: "100%" }}
     >
       {collapsible ? (
         <button

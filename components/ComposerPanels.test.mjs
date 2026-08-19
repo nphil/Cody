@@ -84,7 +84,7 @@ test("live chips show current tool, telemetry, and async marker", () => {
   }));
 
   assert.match(html, /Map the surface/);
-  assert.match(html, /read — Inspect foo\.ts/);
+  assert.match(html, /read: Inspect foo\.ts/);
   assert.match(html, /data-subagent-metric="2\.2k tok"/);
   assert.match(html, /data-subagent-metric="8k\/32k ctx"/);
   assert.match(html, /data-subagent-metric="gpt-x"/);
@@ -193,5 +193,83 @@ test("zero context tokens never print a null gauge", () => {
   }));
   assert.doesNotMatch(html, /null/);
   assert.match(html, /read/);
+});
+
+const roster = (statuses) => statuses.map((status, index) => ({
+  id: `s${index + 1}`,
+  agent: `agent${index + 1}`,
+  status,
+  task: `Task ${index + 1}`,
+  index,
+}));
+
+test("large rosters truncate to seven chips, actives first, behind Show all", () => {
+  // 12 mixed agents: actives at positions 2, 5, 8, 11 (s3, s6, s9, s12).
+  const subagents = roster([
+    "completed", "failed", "started", "completed", "aborted", "started",
+    "completed", "completed", "started", "failed", "completed", "started",
+  ]);
+  const html = renderToStaticMarkup(React.createElement(ComposerPanels, {
+    todoPhases: [],
+    subagents,
+    onSelectSubagent: noop,
+    defaultExpanded: true,
+  }));
+
+  // Header summary reflects the full roster, not the visible chips.
+  assert.match(html, /aria-label="4 running · 12 total"/);
+  // All four actives are visible and precede every terminal chip.
+  for (const active of ["agent3", "agent6", "agent9", "agent12"]) assert.match(html, new RegExp(active));
+  // The three remaining slots go to the most recent terminals (s8, s10, s11).
+  for (const recent of ["agent8", "agent10", "agent11"]) assert.match(html, new RegExp(recent));
+  for (const hidden of ["agent1", "agent2", "agent4", "agent5", "agent7"]) {
+    assert.doesNotMatch(html, new RegExp(`${hidden}\\b`));
+  }
+  assert.ok(html.indexOf("agent12") < html.indexOf("agent8"), "actives render before terminals");
+  assert.match(html, /Show all \(12\)/);
+  assert.doesNotMatch(html, /Show fewer/);
+});
+
+test("rosters at or under the cap render every chip without a toggle", () => {
+  const html = renderToStaticMarkup(React.createElement(ComposerPanels, {
+    todoPhases: [],
+    subagents: roster(["completed", "started", "failed", "started", "completed", "aborted", "started"]),
+    onSelectSubagent: noop,
+    defaultExpanded: true,
+  }));
+  for (let index = 1; index <= 7; index += 1) assert.match(html, new RegExp(`agent${index}\\b`));
+  assert.doesNotMatch(html, /Show all/);
+  // Actives (s2, s4, s7) still sort ahead of terminals.
+  assert.ok(html.indexOf("agent7") < html.indexOf("agent1"), "actives render before terminals");
+});
+
+test("selectVisibleSubagents orders stably and caps all-terminal rosters", async () => {
+  const { selectVisibleSubagents } = await jiti.import("./ComposerPanels.tsx");
+  const mixed = roster([
+    "completed", "failed", "started", "completed", "aborted", "started",
+    "completed", "completed", "started", "failed", "completed", "started",
+  ]);
+  // Expanded: full roster, actives first, both groups keep incoming order.
+  assert.deepEqual(
+    selectVisibleSubagents(mixed, true).map((subagent) => subagent.id),
+    ["s3", "s6", "s9", "s12", "s1", "s2", "s4", "s5", "s7", "s8", "s10", "s11"],
+  );
+  // Collapsed: actives claim slots, most recent terminals fill the rest.
+  assert.deepEqual(
+    selectVisibleSubagents(mixed, false).map((subagent) => subagent.id),
+    ["s3", "s6", "s9", "s12", "s8", "s10", "s11"],
+  );
+  // All-terminal rosters keep the same seven-chip cap: the most recent seven.
+  const settled = roster(Array.from({ length: 10 }, () => "completed"));
+  assert.deepEqual(
+    selectVisibleSubagents(settled, false).map((subagent) => subagent.id),
+    ["s4", "s5", "s6", "s7", "s8", "s9", "s10"],
+  );
+  // More actives than slots: the first seven actives win.
+  const busy = roster(Array.from({ length: 9 }, () => "started"));
+  assert.deepEqual(
+    selectVisibleSubagents(busy, false).map((subagent) => subagent.id),
+    ["s1", "s2", "s3", "s4", "s5", "s6", "s7"],
+  );
 });
 

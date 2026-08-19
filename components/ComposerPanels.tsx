@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   Activity, Bot, ChevronDown,
   CircleDollarSign, Clock3, Cpu, Gauge, GitBranch, Network, RefreshCw,
@@ -63,7 +63,7 @@ function SubagentActivityLine({ subagent }: { subagent: SubagentInfo }) {
     );
   } else if (subagent.status === "started") {
     const activity = progress?.currentTool
-      ? `${progress.currentTool}${progress.lastIntent ? ` — ${progress.lastIntent}` : ""}`
+      ? `${progress.currentTool}${progress.lastIntent ? `: ${progress.lastIntent}` : ""}`
       : progress?.lastIntent;
     if (activity) {
       parts.push(
@@ -121,6 +121,38 @@ function SubagentActivityLine({ subagent }: { subagent: SubagentInfo }) {
   );
 }
 
+/** Default number of roster chips shown before the list truncates behind the
+ * "Show all" toggle. */
+const MAX_VISIBLE_SUBAGENTS = 7;
+
+/** Roster display order: agents still working (`started`) come first, settled
+ * ones (completed / failed / aborted) after, each group keeping its incoming
+ * relative order. When `showAll` is off and the roster exceeds
+ * `MAX_VISIBLE_SUBAGENTS`, actives claim the visible slots first and the
+ * remainder is filled with the most recent terminal agents. */
+export function selectVisibleSubagents(subagents: SubagentInfo[], showAll: boolean): SubagentInfo[] {
+  const active = subagents.filter((subagent) => subagent.status === "started");
+  const terminal = subagents.filter((subagent) => subagent.status !== "started");
+  if (showAll || subagents.length <= MAX_VISIBLE_SUBAGENTS) return [...active, ...terminal];
+  const visibleActive = active.slice(0, MAX_VISIBLE_SUBAGENTS);
+  const terminalSlots = MAX_VISIBLE_SUBAGENTS - visibleActive.length;
+  return terminalSlots > 0 ? [...visibleActive, ...terminal.slice(-terminalSlots)] : visibleActive;
+}
+
+/** Chip entrance motion, component-scoped: globals.css belongs to another
+ * surface, so the class/keyframes names are unique to this panel. Newly
+ * mounted chips fade/rise in; reduced motion disables the animation. */
+const CHIP_MOTION_CSS = `
+@keyframes composer-chip-in {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: none; }
+}
+.composer-roster-chip { animation: composer-chip-in var(--dur-fast) var(--ease-out-warm) both; }
+@media (prefers-reduced-motion: reduce) {
+  .composer-roster-chip { animation: none; }
+}
+`;
+
 function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }: {
   subagents: SubagentInfo[];
   onSelectSubagent: (subagent: SubagentInfo) => void;
@@ -129,16 +161,27 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
 }) {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(!defaultExpanded);
+  const [showAll, setShowAll] = useState(false);
   const runningCount = subagents.filter((subagent) => subagent.source !== "history" && subagent.status === "started").length;
 
+  // An emptied roster means a new run: the next roster starts truncated again.
+  const emptied = subagents.length === 0;
+  useEffect(() => {
+    if (emptied) setShowAll(false);
+  }, [emptied]);
+
   if (subagents.length === 0) return null;
+
+  const visibleSubagents = selectVisibleSubagents(subagents, showAll);
+  const truncatable = subagents.length > MAX_VISIBLE_SUBAGENTS;
 
   return (
     <section
       aria-label={t("chatWindow.subagentsPanel")}
       className="overflow-hidden border border-border bg-bg-subtle"
-      style={{ borderRadius: "var(--radius-card)" }}
+      style={{ borderRadius: "var(--radius-card)", width: "fit-content", maxWidth: "100%" }}
     >
+      <style>{CHIP_MOTION_CSS}</style>
       <button
         type="button"
         aria-expanded={!collapsed}
@@ -172,7 +215,7 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
           className="flex flex-wrap gap-1.5 px-3 py-2.5"
           style={{ maxHeight: "min(30vh, 240px)", overflowY: "auto" }}
         >
-          {subagents.map((subagent) => {
+          {visibleSubagents.map((subagent) => {
             const stateLabel = t(SUBAGENT_STATE_KEYS[subagent.status]);
             const label = `${subagent.agent} · ${stateLabel} · ${subagent.task ?? subagent.description ?? ""}`.replace(/\s+$/, "");
             const live = subagent.source !== "history";
@@ -180,7 +223,7 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
               <button
                 key={subagent.id}
                 type="button"
-                className="ui-focus-ring"
+                className="ui-focus-ring composer-roster-chip"
                 onClick={() => onSelectSubagent(subagent)}
                 aria-label={label}
                 title={`${label}${subagent.detached ? " (async)" : ""}`}
@@ -227,6 +270,37 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
               </button>
             );
           })}
+          {truncatable && (
+            <button
+              type="button"
+              className="ui-focus-ring composer-roster-chip"
+              aria-expanded={showAll}
+              onClick={() => setShowAll((value) => !value)}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                padding: "5px 9px",
+                border: "1px solid color-mix(in srgb, var(--border) 60%, transparent)",
+                borderRadius: "var(--radius-control)",
+                background: "none",
+                fontSize: 11.5,
+                fontFamily: "inherit",
+                cursor: "pointer",
+                color: "var(--text-muted)",
+                transition: "border-color var(--dur-fast) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = "var(--bg-hover)";
+                e.currentTarget.style.color = "var(--text)";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = "none";
+                e.currentTarget.style.color = "var(--text-muted)";
+              }}
+            >
+              {showAll ? t("chatWindow.subagentShowFewer") : t("chatWindow.subagentShowAll", { count: subagents.length })}
+            </button>
+          )}
         </div>
       )}
     </section>
@@ -234,9 +308,10 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
 }
 
 /** Session panels attached to the composer: live todo plan + running
- * subagent roster. Each is independently collapsible via its header row
- * (`chevron`) and starts collapsed; the headers always show live progress /
- * running-summary. Rendered pinned above the chat input. */
+ * subagent roster. Each hugs its content width, is independently collapsible
+ * via its header row (`chevron`), and starts collapsed; the headers always
+ * show live progress / running-summary over the full roster, even while the
+ * chip list is truncated. Rendered pinned above the chat input. */
 export function ComposerPanels({ todoPhases, subagents, onSelectSubagent, defaultExpanded = false }: {
   todoPhases: TodoPhase[];
   subagents: SubagentInfo[];

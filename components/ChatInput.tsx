@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
-import { ChevronDown, ListChecks, Loader2, Sparkles, Target } from "lucide-react";
+import { ChevronDown, ListChecks, Loader2, Paperclip, Sparkles, Target } from "lucide-react";
 import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
@@ -2601,10 +2601,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               {preparingImageCount > 0 ? (
                 <Loader2 size={14} strokeWidth={2} style={{ animation: "spin 0.8s linear infinite" }} aria-hidden="true" />
               ) : (
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                  <polyline points="14 2 14 8 20 8" />
-                </svg>
+                <Paperclip size={14} strokeWidth={1.8} />
               )}
             </button>
 
@@ -2726,6 +2723,35 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                         })}
                       </div>
                     ))}
+                    {/* Fast mode lives with the model it belongs to: the
+                        footer only appears when the active model supports it. */}
+                    {fastModeSupported && onFastModeChange && (
+                      <label
+                        style={{
+                          position: "sticky", bottom: 0,
+                          display: "flex", alignItems: "flex-start", gap: 8,
+                          padding: "8px 12px",
+                          borderTop: "1px solid var(--border)",
+                          background: "var(--bg-panel)",
+                          cursor: "pointer",
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={Boolean(fastModeEnabled)}
+                          onChange={() => onFastModeChange(!fastModeEnabled)}
+                          style={{ margin: "2px 0 0", accentColor: "var(--accent)", cursor: "pointer", flexShrink: 0 }}
+                        />
+                        <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+                          <span style={{ fontSize: 12, fontWeight: 600, color: fastModeActive ? "var(--accent)" : "var(--text)" }}>
+                            {t("chatInput.fastLabel")}
+                          </span>
+                          <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                            {t("chatInput.fastModeHint")}
+                          </span>
+                        </span>
+                      </label>
+                    )}
                   </div>
                   );
                 })()}
@@ -2819,39 +2845,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               </div>
             )}
 
-            {/* Fast toggle — only for models that support fast mode. Stays
-                visible while the agent runs (disabled) so it does not look
-                like fast mode was reset; the toggle affects the family tier
-                for the next prompt. */}
-            {fastModeSupported && onFastModeChange && (
-              <button
-                type="button"
-                onClick={() => { if (isStreaming) return; onFastModeChange(!fastModeEnabled); }}
-                disabled={isStreaming}
-                title={fastModeEnabled && fastModeActive === false ? "Fast mode is enabled but inactive for this model" : `Turn OMP Fast mode ${fastModeEnabled ? "off" : "on"} for this model`}
-                aria-pressed={fastModeEnabled}
-                style={{
-                  display: "flex", alignItems: "center", gap: 5,
-                  height: 28,
-                  padding: "0 8px",
-                  background: fastModeEnabled ? "var(--bg-selected)" : "none",
-                  border: "none",
-                  borderRadius: 7,
-                  color: fastModeEnabled && fastModeActive === false ? "var(--status-warning)" : fastModeEnabled ? "var(--accent)" : "var(--text-muted)",
-                  cursor: isStreaming ? "not-allowed" : "pointer",
-                  opacity: isStreaming ? 0.5 : 1,
-                  fontSize: 12,
-                  fontWeight: 600,
-                  transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
-                }}
-              >
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
-                </svg>
-                {t("chatInput.fastLabel")}
-              </button>
-            )}
-
             <div style={{ flex: 1 }} />
 
             {/* Icon-only plan-quota gauge. The arc tracks the binding quota
@@ -2859,7 +2852,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 below the divider inside this popover. */}
               <div
                 ref={contextPopoverRef}
-                style={{ position: "relative", width: 28, height: 28, flexShrink: 0 }}
+                // marginRight doubles the visual space between the gauge and
+                // the Send/Stop button (owner request); the toolbar's own gap
+                // supplies the other half.
+                style={{ position: "relative", width: 28, height: 28, flexShrink: 0, marginRight: 4 }}
               >
                 <button
                   type="button"

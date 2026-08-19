@@ -1454,8 +1454,8 @@ html.dark .dropdown-surface :is(select, option) {
    animate on mount, so streamed token updates do not restart the entrance
    animation. */
 @keyframes chat-message-in {
-  from { opacity: 0; transform: translateY(7px) scale(0.995); }
-  to   { opacity: 1; transform: translateY(0) scale(1); }
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 .chat-message-card {
   /* `backwards`, not `both`: a finished `both` fill leaves a permanent
@@ -1549,6 +1549,82 @@ html.dark .dropdown-surface :is(select, option) {
 .chat-turn:not(.chat-turn--live) .chat-message,
 .chat-turn:not(.chat-turn--live) .chat-message-card {
   animation: none;
+}
+
+/* Streaming blocks (tool call / thinking boxes, pending tool headers) slide
+   in as they appear. The class only animates OUTSIDE committed turns — the
+   streaming tail message and pending headers render outside .chat-turn — so
+   revealing a lazy-loaded page or expanding a process group stays static and
+   only genuinely new blocks move. Compositor-only: transform + opacity. */
+.chat-block-in {
+  animation: chat-message-in var(--dur-fast) var(--ease-out-warm) backwards;
+}
+.chat-turn .chat-block-in {
+  animation: none;
+}
+
+/* ── Collapsible message boxes (tool call / bash / thinking / extension) ──
+   Collapsed boxes hug their header (width: fit-content); expanded boxes grow
+   to their content, capped at 75% of the message column. The cap uses
+   container-query units resolved against .collapse-scope (the message root),
+   so dragging the panel splitter re-resolves it live — never a px snapshot.
+
+   Grow mechanism: the box keeps `width: fit-content` and follows its panel,
+   whose height transitions 0 ↔ open size and max-width 0 ↔ 75cqi. Chromium
+   (`interpolate-size: allow-keywords`) interpolates height straight to
+   `auto`; other engines transition to Base UI's measured
+   --collapsible-panel-height pixel value, and engines without container
+   queries degrade to an instant width change. Inner content is width-pinned
+   (max-content capped at the same 75cqi) so text wraps once at its final
+   width and never reflows mid-resize; it enters with compositor-only
+   transform + opacity. The global prefers-reduced-motion block collapses
+   all of this to instant states. */
+.collapse-scope {
+  container-type: inline-size;
+}
+.collapse-box {
+  width: fit-content;
+  min-width: 0;
+  max-width: 100%;
+}
+.collapse-box[data-expanded] {
+  max-width: min(100%, 75cqi);
+}
+.collapse-box-panel {
+  overflow: clip;
+  height: var(--collapsible-panel-height, auto);
+  max-width: 75cqi;
+  transition: height var(--dur-med) var(--ease-out-warm),
+              max-width var(--dur-med) var(--ease-out-warm);
+}
+@supports (interpolate-size: allow-keywords) {
+  .collapse-box-panel {
+    interpolate-size: allow-keywords;
+    height: auto;
+  }
+}
+.collapse-box-panel[data-starting-style],
+.collapse-box-panel[data-ending-style] {
+  height: 0;
+  max-width: 0;
+}
+/* Compositor hint only while a toggle is in flight; the component swaps the
+   modifier off on transitionend (useCollapseMotion in MessageView). */
+.collapse-box-panel--motion {
+  will-change: height, max-width;
+}
+/* min-width: 100% keeps section borders/backgrounds spanning the full box
+   even when the header is wider than the content; the percentage is ignored
+   during intrinsic sizing, so it cannot inflate the hug width. */
+.collapse-box-inner {
+  width: max-content;
+  min-width: 100%;
+  max-width: 75cqi;
+  animation: collapse-content-in var(--dur-med) var(--ease-out-warm) backwards;
+}
+@keyframes collapse-content-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes toast-in {

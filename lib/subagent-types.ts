@@ -280,7 +280,7 @@ export function parseSubagentActivityEvent(value: unknown): SubagentActivityEven
   if (type === "tool_execution_start") {
     const toolName = asString(event.toolName) ?? "tool";
     const intent = asString(event.intent)?.trim();
-    if (intent) return { kind: "tool", label: `→ ${toolName} — ${intent}`, ts };
+    if (intent) return { kind: "tool", label: `→ ${toolName}: ${intent}`, ts };
     const args = isRecord(event.args) ? Object.keys(event.args).slice(0, 3).join(", ") : undefined;
     return { kind: "tool", label: args ? `→ ${toolName} (${args})` : `→ ${toolName}`, ts };
   }

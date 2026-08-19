@@ -1139,6 +1139,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
             {toolCallsDefaultCollapsed && pendingToolHeaders.map((tool) => (
               <div
                 key={tool.id}
+                className="chat-block-in"
                 role="status"
                 aria-label={t("chatWindow.runningNamed", { names: tool.name })}
                 style={{

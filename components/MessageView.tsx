@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useState, useRef, useEffect, useMemo, useCallback, type ComponentProps } from "react";
+import { memo, useState, useRef, useEffect, useMemo, useCallback, type ComponentProps, type TransitionEvent } from "react";
 import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, Brain } from "lucide-react";
 import { MarkdownBody } from "./MarkdownBody";
 import { ClickableImage } from "./ImageLightbox";
@@ -523,7 +523,7 @@ function AssistantMessageView({
 
   return (
     <div
-      className={`chat-message${isLiveText ? " chat-message--live" : ""}`}
+      className={`chat-message collapse-scope${isLiveText ? " chat-message--live" : ""}`}
       style={{ marginBottom: 18 }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
@@ -660,6 +660,28 @@ const TextBlock = memo(function TextBlock({ block, isStreaming, cwd, onOpenFile 
   && prev.onOpenFile === next.onOpenFile
 ));
 
+/**
+ * Motion state for a collapsible box (tool call / thinking): `animating` is
+ * true from the moment the user toggles until the panel's height/max-width
+ * transition ends, so `will-change` (the --motion modifier) exists only while
+ * the resize is in flight. The timeout is a safety net for engines whose
+ * panel transition never fires.
+ */
+function useCollapseMotion() {
+  const [animating, setAnimating] = useState(false);
+  useEffect(() => {
+    if (!animating) return;
+    const id = window.setTimeout(() => setAnimating(false), 600);
+    return () => window.clearTimeout(id);
+  }, [animating]);
+  const beginToggle = useCallback(() => setAnimating(true), []);
+  const onPanelTransitionEnd = useCallback((e: TransitionEvent<HTMLDivElement>) => {
+    if (e.target !== e.currentTarget) return;
+    if (e.propertyName === "height" || e.propertyName === "max-width") setAnimating(false);
+  }, []);
+  return { animating, beginToggle, onPanelTransitionEnd };
+}
+
 const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex }: {
   block: ThinkingContent;
   duration?: number;
@@ -672,8 +694,10 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { animating, beginToggle, onPanelTransitionEnd } = useCollapseMotion();
 
   const handleOpenChange = (nextOpen: boolean) => {
+    beginToggle();
     setExpanded(nextOpen);
     if (!nextOpen || !block.deferred || content !== null) return;
     if (!sessionId || !entryId) {
@@ -691,6 +715,8 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
 
   return (
     <div
+      className="collapse-box chat-block-in"
+      data-expanded={expanded ? "" : undefined}
       style={{
         border: "1px solid var(--border)",
         borderRadius: 6,
@@ -735,17 +761,23 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
           />
         </CollapsibleTrigger>
         <CollapsiblePanel
-          style={{
-            padding: "8px 10px",
-            color: error ? "var(--status-error)" : "var(--text-muted)",
-            fontSize: 12,
-            lineHeight: 1.6,
-            whiteSpace: "pre-wrap",
-            background: "var(--bg-panel)",
-            borderTop: "1px solid var(--border)",
-          }}
+          className={`collapse-box-panel${animating ? " collapse-box-panel--motion" : ""}`}
+          onTransitionEnd={onPanelTransitionEnd}
         >
-          {loading ? t("messageView.loadingThinking") : error ?? (block.deferred ? content : block.thinking)}
+          <div
+            className="collapse-box-inner"
+            style={{
+              padding: "8px 10px",
+              color: error ? "var(--status-error)" : "var(--text-muted)",
+              fontSize: 12,
+              lineHeight: 1.6,
+              whiteSpace: "pre-wrap",
+              background: "var(--bg-panel)",
+              borderTop: "1px solid var(--border)",
+            }}
+          >
+            {loading ? t("messageView.loadingThinking") : error ?? (block.deferred ? content : block.thinking)}
+          </div>
         </CollapsiblePanel>
       </Collapsible>
     </div>
@@ -763,8 +795,9 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
 const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isStreaming, defaultCollapsed = true }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number; isStreaming?: boolean; defaultCollapsed?: boolean }) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(Boolean(isStreaming) && !defaultCollapsed);
+  const { animating, beginToggle, onPanelTransitionEnd } = useCollapseMotion();
   const isEditTool = isEditToolName(block.toolName);
-  const resultDiff = expanded && result && !result.isError ? getResultDiff(result) : null;
+  const resultDiff = result && !result.isError ? getResultDiff(result) : null;
 
   // Result display
   const resultText = result
@@ -786,6 +819,8 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
 
   return (
     <div
+      className="collapse-box chat-block-in"
+      data-expanded={expanded ? "" : undefined}
       style={{
         borderRadius: 7,
         overflow: "hidden",
@@ -796,7 +831,7 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
     >
       <Collapsible
         open={expanded}
-        onOpenChange={setExpanded}
+        onOpenChange={(next) => { beginToggle(); setExpanded(next); }}
       >
         {/* ── Tool call header ── */}
         <CollapsibleTrigger
@@ -819,7 +854,7 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
           <span style={{ color: isError ? "var(--status-error)" : "var(--status-success)", fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 11, flexShrink: 0 }}>
             {block.toolName}
           </span>
-          <span style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
+          <span style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0, maxWidth: "64ch", marginRight: "auto" }}>
             {getToolPreview(block)}
           </span>
           {duration !== undefined && (
@@ -836,44 +871,51 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
           />
         </CollapsibleTrigger>
 
-        {/* ── Expanded: input args ── */}
-        {expanded && !isEditTool && (
-          <pre
-            style={{
-              margin: 0,
-              padding: "8px 10px",
-              color: "var(--text-muted)",
-              fontSize: 12,
-              lineHeight: 1.5,
-              overflow: "auto",
-              overscrollBehavior: "contain",
-              backgroundColor: "var(--bg-subtle)",
-              borderTop: isError ? "1px solid color-mix(in srgb, var(--status-error) 25%, transparent)" : "1px solid color-mix(in srgb, var(--status-success) 20%, transparent)",
-              whiteSpace: "pre-wrap",
-              wordBreak: "break-all",
-            }}
-          >
-            {JSON.stringify(block.input, null, 2)}
-          </pre>
-        )}
-
-        {/* ── Paired result — only shown when expanded ── */}
-        {expanded && result && (
-          resultDiff ? (
-            <PairedDiffResult
-              diff={resultDiff}
-            />
-          ) : (
-            <>
-              <TaskResultPanel details={result.details} />
-              <PairedResult
-                text={resultText ?? ""}
-                isEmpty={resultIsEmpty}
-                isError={isError}
-              />
-            </>
-          )
-        )}
+        {/* ── Expanded content (input args + paired result), mounted by the
+            panel and width-pinned by .collapse-box-inner so the grow
+            animation never re-wraps text ── */}
+        <CollapsiblePanel
+          className={`collapse-box-panel${animating ? " collapse-box-panel--motion" : ""}`}
+          onTransitionEnd={onPanelTransitionEnd}
+        >
+          <div className="collapse-box-inner">
+            {!isEditTool && (
+              <pre
+                style={{
+                  margin: 0,
+                  padding: "8px 10px",
+                  color: "var(--text-muted)",
+                  fontSize: 12,
+                  lineHeight: 1.5,
+                  overflow: "auto",
+                  overscrollBehavior: "contain",
+                  backgroundColor: "var(--bg-subtle)",
+                  borderTop: isError ? "1px solid color-mix(in srgb, var(--status-error) 25%, transparent)" : "1px solid color-mix(in srgb, var(--status-success) 20%, transparent)",
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-all",
+                }}
+              >
+                {JSON.stringify(block.input, null, 2)}
+              </pre>
+            )}
+            {result && (
+              resultDiff ? (
+                <PairedDiffResult
+                  diff={resultDiff}
+                />
+              ) : (
+                <>
+                  <TaskResultPanel details={result.details} />
+                  <PairedResult
+                    text={resultText ?? ""}
+                    isEmpty={resultIsEmpty}
+                    isError={isError}
+                  />
+                </>
+              )
+            )}
+          </div>
+        </CollapsiblePanel>
       </Collapsible>
       {resultImages.length > 0 && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8, padding: "8px 10px", borderTop: "1px solid color-mix(in srgb, var(--status-success) 20%, transparent)" }}>
@@ -1425,8 +1467,10 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
 
 
   return (
-    <div style={{ marginBottom: 16 }}>
+    <div className="chat-message collapse-scope" style={{ marginBottom: 16 }}>
       <div
+        className="collapse-box"
+        data-expanded={contentExpanded ? "" : undefined}
         style={{
           border: "1px solid var(--border)",
           borderRadius: 8,
@@ -1729,7 +1773,7 @@ function BashExecutionView({ message, sessionId }: { message: BashExecutionMessa
     : null;
 
   return (
-    <div style={{ margin: "6px 0" }}>
+    <div className="chat-message collapse-scope" style={{ margin: "6px 0" }}>
       <ToolCallBlock block={block} result={result} />
       {downloadUrl && (
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 6 }}>

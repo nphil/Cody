@@ -128,7 +128,7 @@ test("renders the composer ring as an absence before the first usage read lands"
   assert.doesNotMatch(ring, /(?:title|aria-label)="[^"]*\d+%/);
   // First paint is "still checking", never a verdict on the engine: nothing
   // has answered yet, so nothing may be asserted about what it reports.
-  assert.match(ring, /title="(?:Plan usage — Checking plan usage…|usage\.ringUnknown)"/);
+  assert.match(ring, /title="(?:Plan usage: Checking plan usage…|usage\.ringUnknown)"/);
   assert.doesNotMatch(ring, /Not reported by this engine/);
   assert.doesNotMatch(ring, /does not report plan limits/);
 });

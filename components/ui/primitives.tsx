@@ -171,13 +171,4 @@ export function Collapsible({ open, onOpenChange, defaultOpen, children }: {
 
 export const CollapsibleTrigger = BaseCollapsible.Trigger;
 
-export function CollapsiblePanel({ children, style }: {
-  children: React.ReactNode;
-  style?: React.CSSProperties;
-}) {
-  return (
-    <BaseCollapsible.Panel style={style}>
-      {children}
-    </BaseCollapsible.Panel>
-  );
-}
+export const CollapsiblePanel = BaseCollapsible.Panel;
