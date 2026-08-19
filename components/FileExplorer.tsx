@@ -412,7 +412,7 @@ function TreeNode({
 
   // Keyboard activation (Enter/Space) for the row, mirroring the click action so
   // the tree is operable without a mouse. Only reacts when the focus is on the
-  // row itself, never when a nested action button (mention/download) is focused.
+  // row itself, never when a nested action button (mention/menu) is focused.
   const handleKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.target !== event.currentTarget) return;
     if (event.key !== "Enter" && event.key !== " ") return;
@@ -421,8 +421,6 @@ function TreeNode({
   }, [handleClick]);
 
   const mentionLabel = t("fileExplorer.insertPathIntoChat");
-  const downloadLabel = t("fileExplorer.downloadFile");
-
 
   const startRename = useCallback(() => {
     setMenuOpen(false);
@@ -507,7 +505,7 @@ function TreeNode({
           alignItems: "center",
           gap: 4,
           paddingLeft: 8 + depth * 14,
-          paddingRight: hovered || focused || menuOpen ? 8 + 22 * (1 + (onAtMention ? 1 : 0) + (node.isDir ? 0 : 1)) : 8,
+          paddingRight: hovered || focused || menuOpen ? 8 + 22 * (1 + (onAtMention ? 1 : 0)) : 8,
           height: 24,
           cursor: renaming ? "default" : "pointer",
           background: hovered ? "var(--bg-hover)" : "transparent",
@@ -646,25 +644,6 @@ function TreeNode({
                 </button>
               </Tooltip>
             )}
-            {!node.isDir && (
-              <Tooltip content={downloadLabel}>
-                <a
-                  href={`/api/files/${encodeFilePathForApi(node.fullPath)}?type=download`}
-                  download
-                  onClick={(event) => event.stopPropagation()}
-                  aria-label={downloadLabel}
-                  style={{
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                    width: 20, height: 20, padding: 0,
-                    border: "1px solid var(--border)", borderRadius: "var(--radius-control)",
-                    background: "var(--bg-panel)", color: "var(--text-muted)", cursor: "pointer",
-                    textDecoration: "none",
-                  }}
-                >
-                  <Download size={11} strokeWidth={2.2} aria-hidden="true" />
-                </a>
-              </Tooltip>
-            )}
             <Tooltip content={t("fileExplorer.moreActions")}>
               <button
                 type="button"
@@ -685,6 +664,21 @@ function TreeNode({
               </button>
             </Tooltip>
             <FileRowMenu anchor={menuButtonRef} open={menuOpen} onClose={() => setMenuOpen(false)}>
+              <a
+                role="menuitem"
+                className="sidebar-menu-item"
+                href={`/api/files/${encodeFilePathForApi(node.fullPath)}?type=download`}
+                download
+                onClick={(event) => { event.stopPropagation(); setMenuOpen(false); }}
+                style={{
+                  display: "flex", alignItems: "center", gap: 7,
+                  padding: "6px 9px", borderRadius: 6, fontSize: 11,
+                  color: "var(--text-muted)", textDecoration: "none",
+                }}
+              >
+                <Download size={12} strokeWidth={2} aria-hidden="true" />
+                {t("fileExplorer.download")}
+              </a>
               <FileRowMenuItem onClick={(event) => { event.stopPropagation(); startRename(); }}>
                 <Pencil size={12} strokeWidth={2} aria-hidden="true" />
                 {t("fileExplorer.rename")}

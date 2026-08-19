@@ -26,6 +26,7 @@ import {
   parseUploadConflictStrategy,
   validateUploadFileNames,
 } from "@/lib/file-upload";
+import { createZipStream, ZIP_MAX_BYTES, type ZipEntry } from "@/lib/zip";
 import { parseFormDataWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 
 const IGNORED_NAMES = new Set([
@@ -35,6 +36,10 @@ const IGNORED_NAMES = new Set([
 ]);
 
 const IGNORED_SUFFIXES = [".pyc"];
+
+// Folder downloads skip VCS internals and dependency trees, nothing else —
+// unlike the listing filter, build artifacts are part of what users export.
+const DOWNLOAD_SKIP_NAMES = new Set([".git", "node_modules"]);
 
 const FILE_REQUEST_TYPES = ["list", "read", "download", "meta", "preview", "watch"] as const;
 type FileRequestType = typeof FILE_REQUEST_TYPES[number];
@@ -353,6 +358,69 @@ function streamFile(filePath: string, stat: fs.Stats, contentType: string, range
   });
 }
 
+/**
+ * Walk a directory into zip entries (metadata only; file bytes are streamed
+ * later by the zip writer). Skips DOWNLOAD_SKIP_NAMES, anything that is
+ * neither file nor directory, and symlinks whose target resolves outside the
+ * allowed roots; a realpath set breaks symlink directory cycles.
+ */
+function collectDirectoryZipEntries(
+  rootDir: string,
+  allowedRoots: Set<string>,
+): { entries: ZipEntry[]; totalBytes: number } {
+  const readDirectorySync = Reflect.get(fs, "readdirSync") as typeof fs.readdirSync;
+  const entries: ZipEntry[] = [];
+  let totalBytes = 0;
+  const visited = new Set<string>([fs.realpathSync(rootDir)]);
+
+  const walk = (dir: string, prefix: string) => {
+    const dirents = readDirectorySync(dir, { withFileTypes: true })
+      .sort((a, b) => a.name.localeCompare(b.name));
+    for (const dirent of dirents) {
+      if (DOWNLOAD_SKIP_NAMES.has(dirent.name)) continue;
+      const fullPath = path.join(dir, dirent.name);
+      let isDirectory = dirent.isDirectory();
+      let isFile = dirent.isFile();
+      if (dirent.isSymbolicLink()) {
+        let realPath: string;
+        try {
+          realPath = fs.realpathSync(fullPath);
+        } catch {
+          continue; // broken link
+        }
+        if (!isFilePathAllowed(realPath, allowedRoots)) continue;
+        let linkStat: fs.Stats;
+        try {
+          linkStat = fs.statSync(realPath);
+        } catch {
+          continue;
+        }
+        isDirectory = linkStat.isDirectory();
+        isFile = linkStat.isFile();
+        if (isDirectory) {
+          if (visited.has(realPath)) continue;
+          visited.add(realPath);
+        }
+      }
+      if (isDirectory) {
+        entries.push({ name: `${prefix}${dirent.name}/` });
+        walk(fullPath, `${prefix}${dirent.name}/`);
+      } else if (isFile) {
+        let fileStat: fs.Stats;
+        try {
+          fileStat = fs.statSync(fullPath);
+        } catch {
+          continue;
+        }
+        entries.push({ name: prefix + dirent.name, filePath: fullPath, mtime: fileStat.mtime });
+        totalBytes += fileStat.size;
+      }
+    }
+  };
+  walk(rootDir, "");
+  return { entries, totalBytes };
+}
+
 function escapeHtml(text: string): string {
   return text
     .replace(/&/g, "&amp;")
@@ -474,6 +542,22 @@ export async function GET(
     }
 
     if (type === "download") {
+      if (stat.isDirectory()) {
+        const { entries, totalBytes } = collectDirectoryZipEntries(filePath, allowedRoots);
+        if (totalBytes > ZIP_MAX_BYTES) {
+          return NextResponse.json(
+            { error: "Folder is too large to download as a zip archive (limit 2 GiB)", code: "archive_too_large" },
+            { status: 413 }
+          );
+        }
+        return new Response(createZipStream(entries), {
+          headers: {
+            "Content-Type": "application/zip",
+            "Cache-Control": "no-cache",
+            "Content-Disposition": getContentDisposition(`${filePath}.zip`, true),
+          },
+        });
+      }
       if (!stat.isFile()) {
         return NextResponse.json({ error: "Not a file", code: "not_a_file" }, { status: 400 });
       }
