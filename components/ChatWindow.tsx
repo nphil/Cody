@@ -220,8 +220,7 @@ function OmpRuntimeVersion() {
     fetch("/api/omp-version")
       .then((res) => (res.ok ? res.json() : null))
       .then((data: { version: string | null } | null) => {
-        // omp reports "omp/17.1.3"; show just the number next to the label.
-        if (!cancelled && data?.version) setVersion(data.version.replace(/^omp\//, ""));
+        if (!cancelled && data?.version) setVersion(data.version);
       })
       .catch(() => {});
     return () => {

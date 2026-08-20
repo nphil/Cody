@@ -75,7 +75,19 @@ export function resolveOmpBin(): string | null {
   return null;
 }
 
-/** `omp --version` output (e.g. "omp/17.1.3"), or null when unavailable.
+/** Strip a leading binary-name prefix (`omp/17.3.7` → `17.3.7`) from a version
+ * string. `omp --version` is the only probe in the engine set that prefixes its
+ * output, and the shape has to be normalized at the source: everything
+ * downstream compares versions as semver. */
+export function stripVersionPrefix(version: string): string {
+  const trimmed = version.trim();
+  const slash = trimmed.indexOf("/");
+  return slash === -1 ? trimmed : trimmed.slice(slash + 1).trim();
+}
+
+/** Bare semver of the installed omp (e.g. "17.3.7"), or null when unavailable.
+ * `omp --version` prints "omp/17.3.7"; the prefix is stripped here so the
+ * harness layer can compare the value as semver against the npm registry.
  * Cached after the first successful probe; failures are retried after
  * MISS_TTL_MS so a later install is picked up without a server restart. */
 export async function getOmpVersion(): Promise<string | null> {
@@ -93,7 +105,7 @@ export async function getOmpVersion(): Promise<string | null> {
         else resolve(stdout);
       });
     });
-    const version = output.trim();
+    const version = stripVersionPrefix(output);
     if (version) {
       cachedVersion = version;
       versionMissAt = 0;

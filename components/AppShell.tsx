@@ -13,13 +13,14 @@ import { BranchNavigator } from "./BranchNavigator";
 import { ThemePicker } from "./ThemePicker";
 import { TitleBar } from "./TitleBar";
 import { useDesktopShell } from "@/hooks/useDesktopShell";
-import { AppWindow, ExternalLink, Files, GitBranch, History, Info, ListTodo, Menu, PanelLeft, ScrollText, Settings, Terminal, TriangleAlert } from "lucide-react";
+import { AppWindow, Check, Copy, ExternalLink, Files, GitBranch, History, Info, ListTodo, Menu, PanelLeft, ScrollText, Settings, Terminal, TriangleAlert } from "lucide-react";
 import { formatApiCost, formatCompactNumber, formatPercent, usageToneColor } from "@/lib/format";
 import { translate, useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
 import { useDisplayRequests } from "@/hooks/useDisplayRequests";
+import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { copyText } from "@/lib/clipboard";
 import { getFileName } from "@/lib/file-paths";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
@@ -428,6 +429,7 @@ export function AppShell() {
       sessionCopyTimerRef.current = setTimeout(() => setCopiedSessionField(null), 1400);
     });
   }, []);
+  const { copied: systemPromptCopied, copy: copySystemPrompt } = useCopyFeedback();
 
   useEffect(() => {
     return () => {
@@ -1517,7 +1519,24 @@ export function AppShell() {
                 </TopPanelSection>
               )}
               {activeTopPanel === "system" && (
-                <TopPanelSection title={t("appShell.systemPrompt")} help={t("appShell.systemPromptHelp")}>
+                <TopPanelSection
+                  title={t("appShell.systemPrompt")}
+                  help={t("appShell.systemPromptHelp")}
+                  action={systemPrompt ? (
+                    <button
+                      type="button"
+                      onClick={() => copySystemPrompt(systemPrompt)}
+                      title={systemPromptCopied ? t("appShell.copied") : t("appShell.copySystemPrompt")}
+                      aria-label={systemPromptCopied ? t("appShell.copied") : t("appShell.copySystemPrompt")}
+                      className="shell-toolbar-btn ui-focus-ring"
+                      style={{ color: systemPromptCopied ? "var(--accent)" : undefined }}
+                    >
+                      {systemPromptCopied
+                        ? <Check size={13} strokeWidth={1.8} aria-hidden="true" />
+                        : <Copy size={13} strokeWidth={1.8} aria-hidden="true" />}
+                    </button>
+                  ) : undefined}
+                >
                   {systemPrompt ? (
                     <div style={{
                       maxHeight: "min(600px, 70vh)",

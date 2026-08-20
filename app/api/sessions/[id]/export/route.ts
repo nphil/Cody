@@ -74,7 +74,11 @@ export async function GET(
           // policy, plus frame-ancestors 'self' so the top-bar history panel
           // can frame it (per spec this also supersedes X-Frame-Options).
           // Mirrors the docx preview in /api/files.
-          "Content-Security-Policy": "default-src 'none'; img-src 'self' data: blob: https:; style-src 'unsafe-inline'; script-src 'unsafe-inline' 'unsafe-eval'; font-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
+          // cdnjs is allowed in script-src because the exporter renders the
+          // transcript client-side with SRI-pinned marked and highlight.js from
+          // that CDN; blocking it silently yields an empty transcript. This
+          // makes the rendered transcript depend on outbound access to cdnjs.
+          "Content-Security-Policy": "default-src 'none'; img-src 'self' data: blob: https:; style-src 'unsafe-inline'; script-src 'unsafe-inline' 'unsafe-eval' https://cdnjs.cloudflare.com; font-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff",
         },

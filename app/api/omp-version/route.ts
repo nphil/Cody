@@ -3,8 +3,8 @@ import { getOmpVersion } from "@/lib/omp/omp-cli";
 
 export const dynamic = "force-dynamic";
 
-/** Runtime probe of the installed omp binary ("omp/17.1.3"), separate from the
- * build-time Cody version — the two can legitimately drift. */
+/** Runtime probe of the installed omp binary (bare semver, e.g. "17.3.7"),
+ * separate from the build-time Cody version — the two can legitimately drift. */
 export async function GET() {
   const version = await getOmpVersion();
   return NextResponse.json({ version });

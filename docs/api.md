@@ -192,7 +192,7 @@ affected by which credential you used.
 Read-only runtime facts. No workspace, no path checks, cheap.
 
 ```json
-{"codyVersion":"0.7.1","ompVersion":"omp/17.3.5","nodeVersion":"v22.23.2",
+{"codyVersion":"0.7.1","ompVersion":"17.3.5","nodeVersion":"v22.23.2",
  "platform":"linux x64","agentDir":"/data/agent",
  "harness":{"id":"omp","name":"OMP runtime"},
  "capabilities":{"liveSessions":true,"models":true,"skills":true,"plugins":true,
@@ -298,7 +298,7 @@ The engine roster, in one authenticated round trip.
 ```json
 {"engines":[{"id":"omp","name":"OMP runtime","shortName":"OMP",
              "tagline":"…","experimental":false,"installed":true,
-             "installing":false,"version":"omp/17.3.5","installable":true,
+             "installing":false,"version":"17.3.5","installable":true,
              "authHint":null,"binaryName":"omp"}],
  "active":"omp","onboarded":true,"setupDone":true,"canManage":true}
 ```

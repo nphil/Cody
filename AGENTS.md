@@ -589,6 +589,10 @@ appears without a Cody change.
   them (top-bar history panel, file viewer) — a middleware `set()` would
   clobber exactly those headers, and per spec `frame-ancestors` is also what
   overrides the global `X-Frame-Options: DENY`.
+  The session-export policy additionally allows `https://cdnjs.cloudflare.com`
+  in `script-src`: the exporter renders the transcript client-side with
+  SRI-pinned `marked`/`highlight.js` from that CDN, and blocking it renders an
+  empty transcript.
 - The Docker image installs `chromium` and sets `CODY_CHROMIUM_BIN` so both
   `preview_screenshot` captures and the `stream` rung — the fallback that must
   never be missing — work out of the box.
@@ -767,7 +771,7 @@ handled or safely ignored.
 
 ### Update notifications (`/api/omp-update`, `/api/app-update`)
 - Automatic in-app self-updating has been removed in favor of explicit user notifications and manual terminal commands.
-- `GET /api/app-update` queries the npm registry for `@nphil/cody` updates, detects the install manager (`bun` vs `npm` via `detectInstallMethod`), and returns `updateAvailable` plus the exact terminal command (e.g. `npm install -g @nphil/cody` or `bun add -g @nphil/cody`).
+- `GET /api/app-update` returns `updateAvailable`, the exact terminal command, and `managedBy` naming the channel that ships to this deployment. A container install (detected via `/.dockerenv`) is compared against the latest `nphil/Cody` GitHub release and updated with `docker pull ghcr.io/nphil/cody:latest`; anything else queries the npm registry for `@nphil/cody` and uses the detected install manager (`bun` vs `npm` via `detectInstallMethod`), e.g. `npm install -g @nphil/cody` or `bun add -g @nphil/cody`.
 - `POST /api/omp-update` (`action: "check"`) runs `omp update --check` and returns `updateAvailable` plus `updateCommand: "omp update"`.
 - `POST /api/omp-update` (`action: "restart"`) restarts active OMP sessions after a manual CLI update.
 - Notifications in `AppShell` and settings cards in `SettingsConfig` present the update notification alongside copyable terminal update commands.

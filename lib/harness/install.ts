@@ -2,6 +2,7 @@ import { spawn } from "child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { execPath } from "process";
+import { stripVersionPrefix } from "../omp/omp-cli";
 import { getToolsDir, invalidateEngineBinCache } from "./engine-bin";
 
 /**
@@ -169,7 +170,9 @@ export function readInstallHistory(): Record<string, InstallHistoryEntry> {
     for (const [id, value] of Object.entries(parsed as Record<string, Partial<InstallHistoryEntry>>)) {
       if (!value || typeof value !== "object") continue;
       entries[id] = {
-        previousVersion: typeof value.previousVersion === "string" ? value.previousVersion : null,
+        // Records written before the omp probe was normalized hold "omp/17.3.5";
+        // the revert affordance must show the same bare semver as everywhere else.
+        previousVersion: typeof value.previousVersion === "string" ? stripVersionPrefix(value.previousVersion) : null,
         updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : "",
       };
     }

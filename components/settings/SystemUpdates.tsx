@@ -31,6 +31,9 @@ interface AppUpdateStatus {
   availableVersion: string | null;
   updateAvailable: boolean;
   updateCommand: string;
+  /** Which channel ships to this deployment; a container is updated by
+   * pulling its image, so it must never be handed an npm command. */
+  managedBy: "docker" | "npm" | "bun";
 }
 
 interface OmpSelfStatus {
@@ -213,6 +216,7 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
             availableVersion: typeof data.availableVersion === "string" ? data.availableVersion : null,
             updateAvailable: data.updateAvailable === true,
             updateCommand: typeof data.updateCommand === "string" ? data.updateCommand : "",
+            managedBy: data.managedBy === "docker" || data.managedBy === "bun" ? data.managedBy : "npm",
           },
         });
       } catch (error) {
@@ -479,14 +483,23 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
           app.data.updateAvailable && app.data.availableVersion ? (
             <>
               <VersionDelta current={app.data.currentVersion} next={app.data.availableVersion} />
-              <CommandCard command={app.data.updateCommand || "npm install -g @nphil/cody"} />
+              {/* Never fall back to an npm command in a container: it cannot
+                  update an image-based deployment. */}
+              <CommandCard command={app.data.updateCommand || (app.data.managedBy === "docker" ? "docker pull ghcr.io/nphil/cody:latest" : "npm install -g @nphil/cody")} />
             </>
           ) : (
-            <div style={mutedLineStyle}>
-              <span style={{ fontFamily: "var(--font-mono)" }}>v{app.data.currentVersion}</span>
-              {" · "}
-              {app.data.availableVersion ? t("updates.upToDate") : t("updates.checkUnavailable")}
-            </div>
+            <>
+              <div style={mutedLineStyle}>
+                <span style={{ fontFamily: "var(--font-mono)" }}>v{app.data.currentVersion}</span>
+                {" · "}
+                {app.data.availableVersion
+                  ? t("updates.upToDate")
+                  : app.data.managedBy === "docker"
+                    ? t("updates.cody.dockerManaged")
+                    : t("updates.checkUnavailable")}
+              </div>
+              {app.data.managedBy === "docker" && <div style={dimLineStyle}>{t("updates.cody.dockerPullHint")}</div>}
+            </>
           )
         )}
       </section>
