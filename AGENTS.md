@@ -583,6 +583,12 @@ appears without a Cody change.
   label, so ranges are emitted as exact per-interface hosts — Chromium silently
   discards `http://192.168.*.*:*` as an invalid source, which would collapse
   `frame-src` and block every direct preview. Public origins stay unframeable.
+  The page CSP is applied to rendered pages only, NOT `/api/` responses: the
+  two HTML-serving API routes (session export, docx preview) author their own
+  stricter document CSP with `frame-ancestors 'self'` so the app can iframe
+  them (top-bar history panel, file viewer) — a middleware `set()` would
+  clobber exactly those headers, and per spec `frame-ancestors` is also what
+  overrides the global `X-Frame-Options: DENY`.
 - The Docker image installs `chromium` and sets `CODY_CHROMIUM_BIN` so both
   `preview_screenshot` captures and the `stream` rung — the fallback that must
   never be missing — work out of the box.

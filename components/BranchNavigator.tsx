@@ -9,13 +9,11 @@ interface Props {
   tree: SessionTreeNode[];
   activeLeafId: string | null;
   onLeafChange: (leafId: string | null) => void;
-  /** When true, renders as a compact inline button for embedding in a top bar */
-  inline?: boolean;
-  /** When inline, use this ref's bounding rect to size/position the dropdown */
+  /** Use this ref's bounding rect to size/position the dropdown */
   containerRef?: React.RefObject<HTMLElement | null>;
-  /** Controlled open state for inline mode */
+  /** Controlled open state */
   open?: boolean;
-  /** Called when the button is clicked in inline mode */
+  /** Called when the button is clicked */
   onToggle?: () => void;
   /** Whether a session is currently active (used to show appropriate empty reason) */
   hasSession?: boolean;
@@ -242,7 +240,7 @@ const TreeNodeView = memo(function TreeNodeView({ node, activePathIds, depth, is
   return true;
 });
 
-export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, containerRef, open: openProp, onToggle, hasSession }: Props) {
+export function BranchNavigator({ tree, activeLeafId, onLeafChange, containerRef, open: openProp, onToggle, hasSession }: Props) {
   const { t } = useI18n();
   const [openInternal, setOpenInternal] = useState(false);
   const open = openProp !== undefined ? openProp : openInternal;
@@ -250,7 +248,7 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
   const [dropdownPos, setDropdownPos] = useState<{ top: number; left: number; width: number; height: number } | null>(null);
 
   useEffect(() => {
-    if (!open || !inline) return;
+    if (!open) return;
     const anchor = containerRef?.current ?? btnRef.current;
     if (!anchor) return;
     const update = () => {
@@ -269,11 +267,11 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
       window.removeEventListener("scroll", update, true);
       window.removeEventListener("resize", update);
     };
-  }, [open, inline, containerRef]);
+  }, [open, containerRef]);
 
-  // Close the inline dropdown on outside click or Escape.
+  // Close the dropdown on outside click or Escape.
   useEffect(() => {
-    if (!open || !inline) return;
+    if (!open) return;
     const closeDropdown = () => {
       if (onToggle) onToggle();
       else setOpenInternal(false);
@@ -299,7 +297,7 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
       document.removeEventListener("mousedown", close);
       document.removeEventListener("keydown", onKey);
     };
-  }, [open, inline, containerRef, onToggle]);
+  }, [open, containerRef, onToggle]);
 
   const activePathIds = useMemo(
     () => buildActivePath(tree, activeLeafId),
@@ -328,44 +326,44 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
     <GitBranch size={14} strokeWidth={1.8} aria-hidden="true" style={{ color: hasContent ? "var(--accent)" : undefined, flexShrink: 0 }} />
   );
 
-  const chevron = (
-    <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--text-dim)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ marginLeft: 2, transform: open ? "rotate(180deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }}>
-      <polyline points="2 3.5 5 6.5 8 3.5" />
-    </svg>
-  );
 
-
-  if (inline) {
-    return (
-      <div style={{ height: "100%", display: "flex", alignItems: "center" }}>
-        <button
-          ref={btnRef}
-          onClick={() => onToggle ? onToggle() : setOpenInternal((v) => !v)}
-          className="shell-toolbar-btn shell-captioned-btn ui-focus-ring"
-          style={{
-            background: open ? "var(--bg-selected)" : undefined,
-            color: open ? "var(--text)" : undefined,
-          }}
-          title={t("branchNavigator.branches")}
-          aria-label={t("branchNavigator.branches")}
-          aria-haspopup="menu"
-          aria-expanded={open}
-        >
-          {branchIcon}
-          <span className="shell-btn-caption">{t("appShell.captionBranches")}</span>
-        </button>
-        {open && dropdownPos && (
-          <div data-branch-panel className="dropdown-surface" style={{
-            position: "fixed",
-            top: dropdownPos.top,
-            left: dropdownPos.left,
-            width: dropdownPos.width,
-            maxHeight: dropdownPos.height,
-            overflowY: "auto",
-            zIndex: 600,
-          }}>
+  return (
+    <div style={{ height: "100%", display: "flex", alignItems: "center" }}>
+      <button
+        ref={btnRef}
+        onClick={() => onToggle ? onToggle() : setOpenInternal((v) => !v)}
+        className="shell-toolbar-btn ui-focus-ring"
+        style={{
+          background: open ? "var(--bg-selected)" : undefined,
+          color: open ? "var(--text)" : undefined,
+        }}
+        title={t("branchNavigator.branches")}
+        aria-label={t("branchNavigator.branches")}
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        {branchIcon}
+      </button>
+      {open && dropdownPos && (
+        <div data-branch-panel className="dropdown-surface" style={{
+          position: "fixed",
+          top: dropdownPos.top,
+          left: dropdownPos.left,
+          width: dropdownPos.width,
+          maxHeight: dropdownPos.height,
+          display: "flex",
+          flexDirection: "column",
+          overflow: "hidden",
+          zIndex: 600,
+        }}>
+          <div style={{ flexShrink: 0, padding: "8px 16px", borderBottom: "1px solid var(--border)" }}>
+            <span className="display-serif" style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>
+              {t("branchNavigator.branches")}
+            </span>
+          </div>
+          <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
             {hasContent && firstNode ? (
-              <div style={{ padding: "4px 12px 8px 12px", maxHeight: 260, overflowY: "auto" }}>
+              <div style={{ padding: "4px 12px 8px 12px" }}>
                 {firstNode.children.map((child, idx) => (
                   <TreeNodeView
                     key={child.entry.id}
@@ -384,66 +382,9 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
               </div>
             )}
           </div>
-        )}
-      </div>
-    );
-  }
-
-  return (
-    <div style={{ borderBottom: "1px solid var(--border)", background: "var(--bg)", flexShrink: 0, position: "relative" }}>
-      {/* Header toggle */}
-      <button
-        onClick={() => setOpenInternal((v) => !v)}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 6,
-          width: "100%",
-          padding: "5px 12px",
-          background: "none",
-          border: "none",
-          cursor: "pointer",
-          color: "var(--text-muted)",
-          fontSize: 11,
-          textAlign: "left",
-        }}
-      >
-        {branchIcon}
-        <span style={{ color: "var(--text-muted)" }}>{t("branchNavigator.branches")}</span>
-        {chevron}
-      </button>
-
-      {/* Tree panel - overlay */}
-      {open && (
-        <div style={{
-          position: "absolute",
-          top: "100%",
-          left: 0,
-          right: 0,
-          background: "var(--bg)",
-          borderBottom: "1px solid var(--border)",
-          boxShadow: "var(--shadow-pop)",
-          zIndex: 100,
-        }}>
-          {hasContent && firstNode ? (
-            <div style={{ padding: "4px 12px 8px 12px", maxHeight: 260, overflowY: "auto" }}>
-              {firstNode.children.map((child, idx) => (
-                <TreeNodeView
-                  key={child.entry.id}
-                  node={child}
-                  activePathIds={activePathIds}
-                  depth={0}
-                  isLast={idx === firstNode.children.length - 1}
-                  parentLines={[]}
-                  onSelect={handleSelect}
-                />
-              ))}
-            </div>
-          ) : (
-            <div style={{ padding: "10px 16px", fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>
-              {noBranchReason ?? t("branchNavigator.noBranches")}
-            </div>
-          )}
+          <div style={{ flexShrink: 0, padding: "7px 16px", borderTop: "1px solid var(--border)", background: "var(--bg-subtle)", fontSize: 11, lineHeight: 1.5, color: "var(--text-muted)" }}>
+            {t("branchNavigator.help")}
+          </div>
         </div>
       )}
     </div>

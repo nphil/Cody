@@ -47,8 +47,9 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab }: Props) {
       className="tabbar-scroll"
       style={{
         display: "flex",
-        alignItems: "flex-end",
+        alignItems: "flex-start",
         background: "var(--bg-panel)",
+        borderTop: "1px solid var(--border)",
         overflowX: "auto",
         flexShrink: 0,
         height: 25,
@@ -118,11 +119,11 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab }: Props) {
                   position: "absolute",
                   left: 0,
                   right: 0,
-                  bottom: 0,
+                  top: 0,
                   height: 2,
                   background: "var(--accent)",
-                  borderTopLeftRadius: "var(--radius-control)",
-                  borderTopRightRadius: "var(--radius-control)",
+                  borderBottomLeftRadius: "var(--radius-control)",
+                  borderBottomRightRadius: "var(--radius-control)",
                 }}
               />
             )}

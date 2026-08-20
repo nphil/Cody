@@ -2101,11 +2101,15 @@ html.dark .dropdown-surface :is(select, option) {
   min-height: 0;
   background: var(--bg);
 }
+/* Terminal control bar: anchored to the panel's bottom edge, below the host
+   and the soft keys, so tabs and actions stay in one predictable place. It is
+   the panel's last row, so it carries the safe-area bottom inset. */
 .terminal-toolbar {
   display: flex;
   align-items: center;
   min-height: 25px;
-  border-bottom: 1px solid var(--border);
+  border-top: 1px solid var(--border);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
   background: var(--bg-panel);
 }
 .terminal-tabs {
@@ -2141,7 +2145,8 @@ html.dark .dropdown-surface :is(select, option) {
 .terminal-tab-active {
   color: var(--text);
   background: var(--bg-selected);
-  box-shadow: inset 0 -2px var(--accent);
+  /* The bar sits under the terminal, so the active marker faces the content. */
+  box-shadow: inset 0 2px var(--accent);
 }
 .terminal-tab-select {
   display: flex;
@@ -2184,10 +2189,9 @@ html.dark .dropdown-surface :is(select, option) {
 }
 .terminal-connection-connected { background: var(--status-success); }
 .terminal-connection-connecting { background: var(--status-warning); }
-/* Extra bottom padding + safe-area so the TUI's last row is never clipped by
-   tablet browser chrome or rounded corners (xterm fits to whole rows; a
-   too-tight box eats the status line). */
-.terminal-host { flex: 1; min-height: 0; padding: 8px 8px max(10px, env(safe-area-inset-bottom)); overflow: hidden; }
+/* The soft keys and the tab bar sit below the host, so the host itself keeps
+   plain padding; the bottom rows own the safe-area inset. */
+.terminal-host { flex: 1; min-height: 0; padding: 8px; overflow: hidden; }
 .terminal-host .xterm { height: 100%; }
 .terminal-error {
   padding: 7px 10px;
@@ -2202,37 +2206,6 @@ html.dark .dropdown-surface :is(select, option) {
    edge where the line actually is (seam-line-start: left edge, seam-line-end:
    right edge). Hover/focus tint it; press (mouse or touch) enlarges it and
    adds a soft accent glow so grabbing is unmistakable. */
-/* Icon buttons that carry a tiny caption below the glyph — touch devices get
-   no hover tooltips, so the label rides along without full-size buttons. */
-.shell-captioned-btn {
-  flex-direction: column;
-  gap: 1px;
-  width: auto;
-  min-width: 34px;
-  padding: 2px 6px 1px;
-  height: 32px;
-}
-.shell-btn-caption {
-  font-size: 8.5px;
-  font-weight: 600;
-  letter-spacing: 0.03em;
-  line-height: 1;
-  color: var(--text-muted);
-  white-space: nowrap;
-}
-.shell-captioned-btn:disabled .shell-btn-caption {
-  color: var(--text-dim);
-}
-@media (max-width: 640px) {
-  .shell-captioned-btn {
-    height: 40px;
-    min-width: 42px;
-  }
-  .shell-btn-caption {
-    font-size: 9px;
-  }
-}
-
 .panel-resize-seam {
   position: relative;
   touch-action: none;
@@ -2284,7 +2257,7 @@ html.dark .dropdown-surface :is(select, option) {
   display: flex;
   flex-shrink: 0;
   gap: 4px;
-  padding: 5px max(6px, env(safe-area-inset-right)) max(5px, env(safe-area-inset-bottom)) max(6px, env(safe-area-inset-left));
+  padding: 5px max(6px, env(safe-area-inset-right)) 5px max(6px, env(safe-area-inset-left));
   overflow-x: auto;
   border-top: 1px solid var(--border);
   background: var(--bg-panel);
@@ -2824,13 +2797,13 @@ html.dark .dropdown-surface :is(select, option) {
     width: 40px;
     height: 40px;
   }
-  .shell-captioned-btn {
-    height: 40px;
-    min-width: 42px;
-  }
   /* The terminal strip stays deliberately compact even on touch (it is a
-     tab bar, not a toolbar); 28px keeps it tappable without the bulk. */
-  .terminal-toolbar, .terminal-tabs {
+     tab bar, not a toolbar); 28px keeps it tappable without the bulk. The
+     toolbar itself only sets a minimum so the safe-area inset can grow it. */
+  .terminal-toolbar {
+    min-height: 28px;
+  }
+  .terminal-tabs {
     min-height: 28px;
     height: 28px;
   }
@@ -2858,7 +2831,7 @@ html.dark .dropdown-surface :is(select, option) {
     font-size: 16px !important;
   }
   /* Kill the 300ms double-tap-to-zoom delay on every interactive control. */
-  .shell-toolbar-btn, .shell-captioned-btn, .ui-control, .ui-icon-button,
+  .shell-toolbar-btn, .ui-control, .ui-icon-button,
   .terminal-tab-close, .terminal-action, .terminal-soft-keys button,
   .composer-control-shelf > button, .login-primary, .login-ghost,
   .engine-button, .engine-link {

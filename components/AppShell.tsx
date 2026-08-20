@@ -13,11 +13,12 @@ import { BranchNavigator } from "./BranchNavigator";
 import { ThemePicker } from "./ThemePicker";
 import { TitleBar } from "./TitleBar";
 import { useDesktopShell } from "@/hooks/useDesktopShell";
-import { AppWindow, Files, GitBranch, History, Info, ListTodo, Menu, PanelLeft, ScrollText, Terminal, TriangleAlert } from "lucide-react";
+import { AppWindow, ExternalLink, Files, GitBranch, History, Info, ListTodo, Menu, PanelLeft, ScrollText, Settings, Terminal, TriangleAlert } from "lucide-react";
 import { formatApiCost, formatCompactNumber, formatPercent, usageToneColor } from "@/lib/format";
 import { translate, useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
 import { useDisplayRequests } from "@/hooks/useDisplayRequests";
 import { copyText } from "@/lib/clipboard";
 import { getFileName } from "@/lib/file-paths";
@@ -152,6 +153,26 @@ function ModalLoadingFallback() {
   );
 }
 
+/** Shared frame for the top-bar dropdown panels: a clear title row above the
+ *  content and a short plain-language explanation pinned below it, so every
+ *  panel states what it is showing. */
+function TopPanelSection({ title, help, action, children }: { title: string; help: string; action?: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <div style={{ background: "var(--bg-panel)", borderBottom: "1px solid var(--border)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 16px", borderBottom: "1px solid var(--border)" }}>
+        <span className="display-serif" style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {title}
+        </span>
+        {action}
+      </div>
+      {children}
+      <div style={{ padding: "7px 16px", borderTop: "1px solid var(--border)", background: "var(--bg-subtle)", fontSize: 11, lineHeight: 1.5, color: "var(--text-muted)" }}>
+        {help}
+      </div>
+    </div>
+  );
+}
+
 type SessionCopyField = "file" | "id";
 
 export function AppShell() {
@@ -160,6 +181,7 @@ export function AppShell() {
   const [initialNavigation] = useState(() => getInitialNavigation(searchParams));
   const { t, tn, locale } = useI18n();
   const isMobile = useIsMobile();
+  const isCoarsePointer = useIsCoarsePointer();
   const { isDesktop } = useDesktopShell();
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
   // When user clicks +, we only store the cwd — no fake session id
@@ -385,6 +407,7 @@ export function AppShell() {
 
   const [systemPrompt, setSystemPrompt] = useState<string | null>(null);
   const systemBtnRef = useRef<HTMLButtonElement>(null);
+  const historyBtnRef = useRef<HTMLButtonElement>(null);
   const sessionStatsBtnRef = useRef<HTMLButtonElement>(null);
 
   const handleSystemPromptChange = useCallback((prompt: string | null) => {
@@ -426,10 +449,10 @@ export function AppShell() {
   }, []);
 
   // Single active panel — only one dropdown open at a time
-  const [activeTopPanel, setActiveTopPanel] = useState<"branches" | "system" | "session" | null>(null);
+  const [activeTopPanel, setActiveTopPanel] = useState<"history" | "branches" | "system" | "session" | null>(null);
   const [topPanelPos, setTopPanelPos] = useState<{ top: number; left: number; width: number } | null>(null);
 
-  const toggleTopPanel = useCallback((panel: "branches" | "system" | "session") => {
+  const toggleTopPanel = useCallback((panel: "history" | "branches" | "system" | "session") => {
     if (isMobile) setSidebarOpen(false);
     setActiveTopPanel((cur) => cur === panel ? null : panel);
   }, [isMobile]);
@@ -527,7 +550,7 @@ export function AppShell() {
     return () => ro.disconnect();
   }, [activeTopPanel]);
 
-  // Dismiss the system/session dropdowns on outside click or Escape. The
+  // Dismiss the history/system/session dropdowns on outside click or Escape. The
   // Escape handler stops propagation so the global Esc (abort agent) does not
   // fire while a panel is open; clicks on the trigger buttons themselves are
   // ignored here — their onClick toggles the panel.
@@ -537,6 +560,7 @@ export function AppShell() {
     const onPointerDown = (event: MouseEvent) => {
       if (event.target instanceof Element && event.target.closest("[data-top-panel]")) return;
       if (systemBtnRef.current?.contains(event.target as Node)) return;
+      if (historyBtnRef.current?.contains(event.target as Node)) return;
       if (sessionStatsBtnRef.current?.contains(event.target as Node)) return;
       setActiveTopPanel(null);
     };
@@ -1107,8 +1131,6 @@ export function AppShell() {
         explorerRefreshKey={explorerRefreshKey}
         onAtMention={handleAtMention}
         onAtMentions={handleAtMentions}
-        onOpenSettings={() => setSettingsTab("general")}
-        updateAvailable={appUpdateAvailable || ompUpdateAvailable}
       />
     </>
   );
@@ -1239,22 +1261,20 @@ export function AppShell() {
 
       {/* Center: chat */}
       <main style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
-        {/* Top bar: compact icon-led control bar */}
-        <div ref={topBarRef} className="shell-topbar" style={{ display: "flex", alignItems: "center", flexShrink: 0, borderBottom: "1px solid var(--border)", height: isMobile ? 44 : 36, background: "var(--bg-panel)" }}>
+        {/* Top bar: compact icon-led control bar. Touch gets a 44px bar for
+            40px targets; fine pointers get a slim 32px bar for 28px buttons. */}
+        <div ref={topBarRef} className="shell-topbar" style={{ display: "flex", alignItems: "center", flexShrink: 0, borderBottom: "1px solid var(--border)", height: isMobile || isCoarsePointer ? 44 : 32, background: "var(--bg-panel)" }}>
         {/* Utility group: sidebar, theme, language */}
         <div style={{ display: "flex", alignItems: "center", gap: 4, height: "100%", paddingLeft: isMobile ? 4 : 8 }}>
-          {/* Same captioned treatment as the session controls so the whole
-              topbar reads as one system: 14px icon + tiny caption, one box. */}
           <button
             onClick={handleSidebarToggle}
             title={sidebarOpen ? t("appShell.hideSidebar") : t("appShell.showSidebar")}
             aria-label={sidebarOpen ? t("appShell.hideSidebar") : t("appShell.showSidebar")}
-            className="shell-toolbar-btn shell-captioned-btn ui-focus-ring"
+            className="shell-toolbar-btn ui-focus-ring"
           >
             {sidebarOpen ? <PanelLeft size={14} strokeWidth={1.8} aria-hidden="true" /> : <Menu size={14} strokeWidth={1.8} aria-hidden="true" />}
-            <span className="shell-btn-caption">{t("appShell.captionSidebar")}</span>
           </button>
-          <ThemePicker captioned />
+          <ThemePicker />
         </div>
         {showChat && (
           <>
@@ -1264,14 +1284,15 @@ export function AppShell() {
               {/* The HTML export reads an omp transcript over the omp protocol. */}
               {capabilities.chatExtras && (
                 <button
-                  onClick={handleViewFullHistory}
+                  ref={historyBtnRef}
+                  onClick={() => toggleTopPanel("history")}
                   disabled={!selectedSession}
                   title={selectedSession ? t("appShell.fullHistory") : t("appShell.fullHistoryUnavailable")}
                   aria-label={t("appShell.fullHistory")}
-                  className="shell-toolbar-btn shell-captioned-btn ui-focus-ring"
+                  aria-pressed={activeTopPanel === "history"}
+                  className="shell-toolbar-btn ui-focus-ring"
                 >
                   <History size={14} strokeWidth={1.8} aria-hidden="true" />
-                  <span className="shell-btn-caption">{t("appShell.captionHistory")}</span>
                 </button>
               )}
               {/* Branch/fork navigation is an omp-protocol affordance. */}
@@ -1280,7 +1301,6 @@ export function AppShell() {
                   tree={branchTree}
                   activeLeafId={branchActiveLeafId}
                   onLeafChange={handleBranchLeafChange}
-                  inline
                   containerRef={topBarRef}
                   open={activeTopPanel === "branches"}
                   onToggle={() => toggleTopPanel("branches")}
@@ -1293,14 +1313,31 @@ export function AppShell() {
                 title={t("appShell.system")}
                 aria-label={t("appShell.system")}
                 aria-pressed={activeTopPanel === "system"}
-                className="shell-toolbar-btn shell-captioned-btn ui-focus-ring"
+                className="shell-toolbar-btn ui-focus-ring"
               >
                 <ScrollText size={14} strokeWidth={1.8} aria-hidden="true" style={{ color: systemPrompt ? "var(--accent)" : undefined }} />
-                <span className="shell-btn-caption">{t("appShell.captionSystem")}</span>
               </button>
             </div>
           </>
         )}
+        {/* Settings — deliberately the last icon in the top bar. */}
+        <div className="shell-toolbar-divider" aria-hidden="true" />
+        <button
+          onClick={() => setSettingsTab("general")}
+          title={t("appShell.settingsButton")}
+          aria-label={t("appShell.settingsButton")}
+          className="shell-toolbar-btn ui-focus-ring"
+          style={{ position: "relative" }}
+        >
+          <Settings size={14} strokeWidth={1.8} aria-hidden="true" />
+          {(appUpdateAvailable || ompUpdateAvailable) && (
+            <span
+              role="status"
+              aria-label={t("appShell.updateAvailable")}
+              style={{ position: "absolute", top: 4, right: 4, width: 6, height: 6, borderRadius: "50%", background: "var(--accent)", border: "1px solid var(--bg-panel)" }}
+            />
+          )}
+        </button>
           {/* Session stats — right-aligned in top bar */}
           {showChat && (sessionStats || contextUsage) && (() => {
             const tok = sessionStats?.tokens;
@@ -1445,7 +1482,7 @@ export function AppShell() {
               branch panel renders inside BranchNavigator itself; never mount
               an empty fixed layer for it (it would sit over the top-bar
               region and swallow clicks). */}
-          {(activeTopPanel === "system" || activeTopPanel === "session") && topPanelPos && (
+          {(activeTopPanel === "history" || activeTopPanel === "system" || activeTopPanel === "session") && topPanelPos && (
             <div data-top-panel className="dropdown-surface" style={{
               position: "fixed",
               top: topPanelPos.top,
@@ -1457,14 +1494,33 @@ export function AppShell() {
               overflow: "auto",
               zIndex: 500,
             }}>
+              {activeTopPanel === "history" && selectedSession && (
+                <TopPanelSection
+                  title={t("appShell.fullHistory")}
+                  help={t("appShell.fullHistoryHelp")}
+                  action={
+                    <button
+                      onClick={handleViewFullHistory}
+                      title={t("appShell.openInNewTab")}
+                      aria-label={t("appShell.openInNewTab")}
+                      className="shell-toolbar-btn ui-focus-ring"
+                    >
+                      <ExternalLink size={13} strokeWidth={1.8} aria-hidden="true" />
+                    </button>
+                  }
+                >
+                  <iframe
+                    src={`/api/sessions/${encodeURIComponent(selectedSession.id)}/export?inline=1`}
+                    title={t("appShell.fullHistory")}
+                    style={{ display: "block", width: "100%", height: "min(600px, 70vh)", border: 0, background: "var(--bg)" }}
+                  />
+                </TopPanelSection>
+              )}
               {activeTopPanel === "system" && (
-                <div style={{
-                  background: "var(--bg-panel)",
-                  borderBottom: "1px solid var(--border)",
-                }}>
+                <TopPanelSection title={t("appShell.systemPrompt")} help={t("appShell.systemPromptHelp")}>
                   {systemPrompt ? (
                     <div style={{
-                      maxHeight: "min(600px, 75vh)",
+                      maxHeight: "min(600px, 70vh)",
                       overflowY: "auto",
                       padding: "12px 16px",
                       color: "var(--text-muted)",
@@ -1484,7 +1540,7 @@ export function AppShell() {
                       {t("appShell.systemPromptLoadHint")}
                     </div>
                   )}
-                </div>
+                </TopPanelSection>
               )}
               {activeTopPanel === "session" && (
                 <div className="session-info-popover" style={{
@@ -1883,7 +1939,7 @@ export function AppShell() {
             alignItems: "center",
             gap: 4,
             flexShrink: 0,
-            height: isMobile ? 44 : 36,
+            height: isMobile || isCoarsePointer ? 44 : 32,
             padding: "0 4px",
             boxSizing: "border-box",
             borderBottom: "1px solid var(--border)",
@@ -1970,7 +2026,7 @@ export function AppShell() {
           })()}
           {/* Scrollable spacer: the panel toggle is position:fixed above the
               strip, so the last tab needs in-flow room to scroll clear of it. */}
-          <div aria-hidden="true" style={{ flexShrink: 0, width: isMobile ? 44 : 36 }} />
+          <div aria-hidden="true" style={{ flexShrink: 0, width: isMobile || isCoarsePointer ? 44 : 32 }} />
         </div>
 
         <div
@@ -1979,14 +2035,6 @@ export function AppShell() {
           aria-labelledby="workspace-file-tab"
           style={{ flex: 1, minHeight: 0, overflow: "hidden", display: rightPanelMode === "file" ? "flex" : "none", flexDirection: "column" }}
         >
-          {fileTabs.length > 0 && (
-            <TabBar
-              tabs={fileTabs}
-              activeTabId={activeFileTabId ?? ""}
-              onSelectTab={setActiveFileTabId}
-              onCloseTab={handleCloseFileTab}
-            />
-          )}
           <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
             {activeFileTab?.filePath ? (
               <FileViewer
@@ -2003,6 +2051,14 @@ export function AppShell() {
               </div>
             )}
           </div>
+          {fileTabs.length > 0 && (
+            <TabBar
+              tabs={fileTabs}
+              activeTabId={activeFileTabId ?? ""}
+              onSelectTab={setActiveFileTabId}
+              onCloseTab={handleCloseFileTab}
+            />
+          )}
         </div>
         <div
           id="workspace-git-tool"
@@ -2097,7 +2153,7 @@ export function AppShell() {
         // In the desktop shell the viewport starts under the 36px titlebar.
         position: "fixed", top: isDesktop ? "calc(env(safe-area-inset-top, 0px) + 36px)" : "env(safe-area-inset-top, 0px)", right: "env(safe-area-inset-right, 0px)", zIndex: 300,
         display: "flex", alignItems: "center", justifyContent: "center",
-        width: isMobile ? 44 : 36, height: isMobile ? 44 : 36, padding: 0,
+        width: isMobile || isCoarsePointer ? 44 : 32, height: isMobile || isCoarsePointer ? 44 : 32, padding: 0,
         background: "var(--bg-panel)", border: "none", borderLeft: "1px solid var(--border)", borderBottom: "1px solid var(--border)",
         color: rightPanelOpen ? "var(--text)" : "var(--text-muted)",
         cursor: "pointer", transition: "color var(--dur-fast) var(--ease-out-warm)",

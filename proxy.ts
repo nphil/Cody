@@ -65,7 +65,14 @@ export function proxy(request: NextRequest) {
     return NextResponse.json({ error: "Cross-origin API requests are not allowed" }, { status: 403 });
   }
   const response = NextResponse.next();
-  response.headers.set("Content-Security-Policy", buildContentSecurityPolicy());
+  // The page CSP protects rendered app documents. API responses either carry
+  // no document (JSON) or author their own stricter document CSP (session
+  // export, docx preview) — set() here would clobber those, and its
+  // frame-ancestors 'none' would block the same-origin iframes that
+  // deliberately frame them (the top-bar history panel, the file viewer).
+  if (!pathname.startsWith("/api/")) {
+    response.headers.set("Content-Security-Policy", buildContentSecurityPolicy());
+  }
   return response;
 }
 

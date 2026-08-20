@@ -14,7 +14,7 @@ import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { clearLastOpenSession, setLastOpenSession, workspaceKeyOf } from "@/lib/workspace-memory";
 import { groupSessionsByProject, projectActivityCounts, sortManagedProjects } from "@/lib/project-ordering";
 import { comparableProjectPath } from "@/lib/comparable-path";
-import { Check, ChevronDown, ChevronRight, FilePlus, FileUp, Folder, FolderPlus, GitBranch, MoreHorizontal, Plus, RefreshCw, Search, Settings2, SlidersHorizontal, Trash2, Upload } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, FilePlus, FileUp, Folder, FolderPlus, GitBranch, MoreHorizontal, Plus, RefreshCw, Search, SlidersHorizontal, Trash2, Upload } from "lucide-react";
 import { STORAGE_KEYS } from "@/lib/storage-keys";
 
 declare global {
@@ -42,10 +42,6 @@ interface Props {
   explorerRefreshKey?: number;
   onAtMention?: (relativePath: string, isDir: boolean) => void;
   onAtMentions?: (relativePaths: string[]) => void;
-  /** Opens the app settings (pinned sidebar footer row). */
-  onOpenSettings?: () => void;
-  /** True when an omp/Cody update is available — shows a badge on the gear. */
-  updateAvailable?: boolean;
 }
 
 interface WorktreeEntry {
@@ -513,7 +509,7 @@ function CodyTitle() {
     </button>
   );
 }
-export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, onAtMentions, onOpenSettings, updateAvailable }: Props) {
+export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, onAtMentions }: Props) {
   const { t } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1307,8 +1303,9 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
                 label={t("sessionSidebar.refresh")}
                 active={sessionRefreshDone}
                 onClick={() => {
-                  loadSessions(false);
-                  void loadProjects();
+                  void Promise.all([loadSessions(false), loadProjects()]).then(() => {
+                    toast.success(t("sessionSidebar.refreshed"), t("sessionSidebar.refreshedDetail"));
+                  });
                 }}
               >
                 {sessionRefreshDone ? (
@@ -1600,47 +1597,6 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
         </div>
       )}
 
-      {/* Pinned footer: Settings */}
-      <div style={{ borderTop: "1px solid var(--border)", flexShrink: 0 }}>
-        <button
-          className="sidebar-settings-row"
-          onClick={onOpenSettings}
-          title="Settings"
-          aria-label="Settings"
-          style={{
-            width: "100%",
-            height: 36,
-            boxSizing: "border-box",
-            display: "flex",
-            alignItems: "center",
-            gap: 9,
-            padding: "0 12px",
-            background: "none",
-            border: "none",
-            color: "var(--text-muted)",
-            cursor: "pointer",
-            textAlign: "left",
-            transition: SIDEBAR_BUTTON_TRANSITION,
-          }}
-          onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = "none"; e.currentTarget.style.color = "var(--text-muted)"; }}
-        >
-          <span style={{ position: "relative", display: "inline-flex", flexShrink: 0, color: "var(--accent)" }}>
-            <Settings2 size={14} strokeWidth={2} aria-hidden="true" />
-            {updateAvailable && (
-              <span
-                aria-label="Update available"
-                role="status"
-                style={{ position: "absolute", top: -3, right: -4, width: 6, height: 6, borderRadius: "50%", background: "var(--accent)", border: "1px solid var(--bg-panel)" }}
-              />
-            )}
-          </span>
-          <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12, fontWeight: 500 }}>
-            Settings
-          </span>
-          <ChevronRight size={13} strokeWidth={2} style={{ flexShrink: 0, color: "var(--text-dim)" }} aria-hidden="true" />
-        </button>
-      </div>
     </div>
   );
 }

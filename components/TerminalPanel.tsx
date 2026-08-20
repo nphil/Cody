@@ -443,6 +443,18 @@ export function TerminalPanel({ cwd, sessionId, onOpen, focusRequest }: Props) {
 
   return (
     <section className="terminal-panel" aria-label={t("terminal.title")}>
+      {error && <div className="terminal-error" role="alert">{error}</div>}
+      {activeId ? (
+        <>
+          <div ref={hostRef} className="terminal-host" role="tabpanel" aria-labelledby={`terminal-tab-${activeId}`} onClick={() => terminalRef.current?.focus()} />
+          {softKeysVisible && softKeyIds.length > 0 && <TerminalSoftKeys onSend={send} label={t("terminal.keys")} selectedIds={softKeyIds} />}
+        </>
+      ) : (
+        <div className="terminal-empty">
+          <div>{cwd ? t("terminal.empty") : t("terminal.noWorkspace")}</div>
+          <button type="button" className="ui-focus-ring terminal-new-button" onClick={() => void create()} disabled={!cwd || busy}><Plus size={14} />{t("terminal.new")}</button>
+        </div>
+      )}
       <div className="terminal-toolbar">
         <div className="terminal-tabs" role="tablist" aria-label={t("terminal.tabs")}>
           {terminals.map((item, index) => (
@@ -520,18 +532,6 @@ export function TerminalPanel({ cwd, sessionId, onOpen, focusRequest }: Props) {
           </button>
         )}
       </div>
-      {error && <div className="terminal-error" role="alert">{error}</div>}
-      {activeId ? (
-        <>
-          <div ref={hostRef} className="terminal-host" role="tabpanel" aria-labelledby={`terminal-tab-${activeId}`} onClick={() => terminalRef.current?.focus()} />
-          {softKeysVisible && softKeyIds.length > 0 && <TerminalSoftKeys onSend={send} label={t("terminal.keys")} selectedIds={softKeyIds} />}
-        </>
-      ) : (
-        <div className="terminal-empty">
-          <div>{cwd ? t("terminal.empty") : t("terminal.noWorkspace")}</div>
-          <button type="button" className="ui-focus-ring terminal-new-button" onClick={() => void create()} disabled={!cwd || busy}><Plus size={14} />{t("terminal.new")}</button>
-        </div>
-      )}
     </section>
   );
 }

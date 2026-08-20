@@ -50,11 +50,28 @@ export const toast = {
   close: (id?: string) => manager.close(id),
 };
 
+/** Kind icon inside a softly tinted chip so the toast reads at a glance. */
 function KindIcon({ kind }: { kind?: ToastKind }) {
-  const common = { size: 13, strokeWidth: 2, style: { flexShrink: 0, marginTop: 2 } } as const;
-  if (kind === "success") return <Check {...common} style={{ ...common.style, color: "var(--accent)" }} aria-hidden />;
-  if (kind === "error") return <AlertCircle {...common} style={{ ...common.style, color: "var(--accent-strong)" }} aria-hidden />;
-  return <Info {...common} style={{ ...common.style, color: "var(--text-muted)" }} aria-hidden />;
+  const tone = kind === "success" ? "var(--status-success)" : kind === "error" ? "var(--status-error)" : "var(--accent)";
+  const Icon = kind === "success" ? Check : kind === "error" ? AlertCircle : Info;
+  return (
+    <span
+      aria-hidden
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        flexShrink: 0,
+        width: 22,
+        height: 22,
+        borderRadius: 7,
+        color: tone,
+        background: `color-mix(in srgb, ${tone} 12%, transparent)`,
+      }}
+    >
+      <Icon size={13} strokeWidth={2.2} />
+    </span>
+  );
 }
 
 const descriptionBaseStyle = {
@@ -104,21 +121,25 @@ export function ClampedDescription({ children }: { children: React.ReactNode }) 
 function Toaster() {
   const { toasts } = Toast.useToastManager<ToastData>();
   const isMobile = useIsMobile();
-  // Clear the app chrome (topbar 36/44px + tab bar 36px) with a safe gap so
+  // Clear the app chrome (topbar + workspace tab strip) with a safe gap so
   // toasts never cover the header, tabs, or chat content.
-  const topOffset = isMobile ? 88 : 80;
+  const topOffset = isMobile ? 88 : 76;
   return (
     <Toast.Portal>
       <Toast.Viewport
         style={{
           position: "fixed",
           top: topOffset,
-          right: 16,
+          right: "max(16px, env(safe-area-inset-right, 0px))",
           zIndex: 2100,
           display: "flex",
           flexDirection: "column",
           gap: 8,
           width: "min(92vw, 360px)",
+          // Toasts must never be clipped: when they outgrow the viewport they
+          // scroll instead of running off screen.
+          maxHeight: `calc(100dvh - ${topOffset}px - 16px)`,
+          overflowY: "auto",
           pointerEvents: "none",
         }}
       >
@@ -132,7 +153,7 @@ function Toaster() {
               display: "flex",
               alignItems: "flex-start",
               gap: 8,
-              background: "var(--bg)",
+              background: "var(--bg-panel)",
               color: "var(--text)",
               border: "1px solid var(--border)",
               borderRadius: "var(--radius-card)",

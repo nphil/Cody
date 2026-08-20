@@ -70,6 +70,13 @@ export async function GET(
           "Content-Type": "text/html; charset=utf-8",
           "Content-Disposition": getContentDisposition(fileName, inline),
           "Cache-Control": "no-cache",
+          // Same rendering allowances the document had under the global
+          // policy, plus frame-ancestors 'self' so the top-bar history panel
+          // can frame it (per spec this also supersedes X-Frame-Options).
+          // Mirrors the docx preview in /api/files.
+          "Content-Security-Policy": "default-src 'none'; img-src 'self' data: blob: https:; style-src 'unsafe-inline'; script-src 'unsafe-inline' 'unsafe-eval'; font-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
         },
       });
     } finally {
