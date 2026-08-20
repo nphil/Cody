@@ -7,7 +7,7 @@ import { sendAgentCommand } from "@/lib/agent-client";
 import { useI18n } from "@/lib/i18n";
 import { formatCost, formatDuration, formatTokens } from "@/lib/subagent-format";
 import { MarkdownBody } from "./MarkdownBody";
-import { Dialog, DialogContent, DialogTitle, DialogClose } from "./ui/primitives";
+import { Dialog, DialogContent, DialogTitle } from "./ui/primitives";
 import type { SubagentInfo } from "@/hooks/useAgentSession";
 import type { SubagentActivityEvent, SubagentSnapshotLike } from "@/lib/subagent-types";
 import type { AgentMessage, ToolResultMessage } from "@/lib/types";
@@ -516,10 +516,22 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
         <DialogContent
           key={subagent.id}
           ariaLabel={t("subagentTranscript.title")}
-          style={{ width: "min(94vw, 920px)", maxWidth: "min(94vw, 920px)" }}
+          onClose={onClose}
+          closeLabel={t("subagentTranscript.close")}
+          // The popup must not be the scroller, or the pinned close button
+          // rides away with the transcript (see DialogContent's contract):
+          // the header below is fixed and the body owns the scroll region.
+          style={{
+            width: "min(94vw, 920px)",
+            maxWidth: "min(94vw, 920px)",
+            padding: 0,
+            display: "flex",
+            flexDirection: "column",
+            overflow: "hidden",
+          }}
         >
           <>
-            <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 12 }}>
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 10, flexShrink: 0, padding: "16px 18px 12px", paddingRight: 44 }}>
               <div style={{ minWidth: 0, flex: 1 }}>
                 <DialogTitle style={{ marginBottom: 2, fontSize: 16, lineHeight: 1.3 }}>
                   <span style={{ fontFamily: "var(--font-mono)", color: "var(--accent)", fontSize: 14 }}>{agent}</span>
@@ -543,15 +555,8 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
                   </div>
                 )}
               </div>
-              <DialogClose
-                className="ui-focus-ring"
-                style={{ flexShrink: 0, background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 18, lineHeight: 1, width: 32, height: 32, minWidth: 32, minHeight: 32, display: "flex", alignItems: "center", justifyContent: "center", touchAction: "manipulation" }}
-                aria-label={t("subagentTranscript.close")}
-              >
-                ×
-              </DialogClose>
             </div>
-
+            <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 18px 18px" }}>
             {recentEvents && (
               <div
                 aria-live="polite"
@@ -632,6 +637,7 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
                   onLoadMore={handleLoadMore}
                 />
               )}
+            </div>
             </div>
           </>
         </DialogContent>

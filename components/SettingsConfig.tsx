@@ -111,7 +111,7 @@ const SETTING_INDEX: SettingIndexEntry[] = [
 
 function SearchResultsList({ results, query, onSelect }: { results: SearchResult[]; query: string; onSelect: (result: SearchResult) => void }) {
   return (
-    <div style={{ flex: 1, minHeight: 0, overflowY: "auto", background: "var(--bg)", padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
+    <div className="settings-scroll-column" style={{ flex: 1, minHeight: 0, overflowY: "auto", background: "var(--bg)", padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
       <div style={{ fontSize: 12.5, color: "var(--text-muted)" }}>
         {results.length === 0 ? `No settings match “${query}”.` : `${results.length} result${results.length === 1 ? "" : "s"} for “${query}”.`}
       </div>
@@ -416,7 +416,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                 <SettingsTabs active={currentTab} onSelect={onSelectTab} workspaceReady={workspaceReady} layout="vertical" harnessLabel={harnessLabel} capabilities={capabilities} />
               )}
 
-              <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflowY: "auto", background: "var(--bg)" }}>
+              <div className="settings-scroll-column" style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflowY: "auto", background: "var(--bg)" }}>
             {nativeSettingsError && (
               <div role="alert" style={{ margin: 16, padding: "10px 14px", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", border: "1px solid var(--status-error)", color: "var(--status-error)", fontSize: 12, display: "flex", alignItems: "center", gap: 8 }}>
                 <AlertCircle size={14} aria-hidden="true" /> {nativeSettingsError}
@@ -805,7 +805,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
 
             {/* EXTENSIONS & TOOLS TAB (MCP, SKILLS, PLUGINS) */}
             {(visitedTabs.has("mcp") || visitedTabs.has("skills") || visitedTabs.has("plugins")) && (
-              <div role="tabpanel" id="settings-panel-mcp" aria-labelledby="settings-tab-mcp" style={{ display: currentTab === "mcp" ? "flex" : "none", height: "100%", minHeight: 0, flexDirection: "column", overflowY: "auto", padding: 20, gap: 16 }}>
+              <div role="tabpanel" id="settings-panel-mcp" aria-labelledby="settings-tab-mcp" className="settings-scroll-column" style={{ display: currentTab === "mcp" ? "flex" : "none", height: "100%", minHeight: 0, flexDirection: "column", overflowY: "auto", padding: 20, gap: 16 }}>
                 <div>
                   <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>Extensions & Tools</h3>
                   <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)" }}>Model Context Protocol servers, managed skills, and OMP plugins.</p>

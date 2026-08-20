@@ -85,6 +85,10 @@ const dimLineStyle: React.CSSProperties = {
   overflowWrap: "anywhere",
 };
 
+/** A version-probe failure is raw tool output: enough of it to recognise the
+ * fault, capped so one long message cannot push the card off the screen. */
+const PROBE_ERROR_MAX_CHARS = 160;
+
 function actionButtonStyle(disabled: boolean): React.CSSProperties {
   return { ...smallButtonStyle, opacity: disabled ? 0.6 : 1, cursor: disabled ? "default" : "pointer" };
 }
@@ -337,12 +341,14 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
     const name = rosterRef.current?.engines.find((engine) => engine.id === id)?.name ?? id;
     if (ok) {
       toast.success(translate("updates.engines.updated", { name }));
-      // Re-check so the row flips to "Up to date" against fresh versions.
-      void runCheckRef.current(false);
     } else {
       // The row keeps the detailed npm failure inline; the toast is the alert.
       toast.error(translate("updates.engines.updateFailed", { name }));
     }
+    // Re-checked after a failure too: an install that ran but left an unusable
+    // binary still recorded the version it replaced, and offering that revert
+    // target is what gets the row out of a dead end.
+    void runCheckRef.current(false);
   }, []);
 
   const {
@@ -364,6 +370,15 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
   const updateEngine = useCallback((engine: EngineSummary) => {
     const active = rosterRef.current?.active === engine.id;
     if (active && !window.confirm(translate("updates.engines.updateConfirm", { name: engine.name }))) return;
+    startInstall(engine.id);
+  }, [startInstall]);
+
+  // Repair, not upgrade: re-runs the installer at the adapter's own spec. The
+  // one action that stays available when the version probe fails, because that
+  // is precisely when no update can be computed.
+  const reinstallEngine = useCallback((engine: EngineSummary) => {
+    const active = rosterRef.current?.active === engine.id;
+    if (active && !window.confirm(translate("updates.engines.reinstallConfirm", { name: engine.name }))) return;
     startInstall(engine.id);
   }, [startInstall]);
 
@@ -533,6 +548,9 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
           const installedVersion = status?.installedVersion ?? engine.version;
           const updateAvailable = canManage ? status?.updateAvailable ?? null : self ? self.updateAvailable : null;
           const latestVersion = canManage ? status?.latestVersion ?? null : self?.availableVersion ?? null;
+          // Why the version is unknown. Only the registry route reports it, and
+          // only for a row whose probe actually failed.
+          const probeError = canManage ? status?.probeError ?? null : null;
           // A status is expected for this row (a check can answer it): admins
           // for every engine, members only for the active omp runtime.
           const statusExpected = canManage || self !== null || (engine.id === "omp" && !canManage && capabilities.updates);
@@ -577,24 +595,44 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
                 </span>
               )}
 
-              {!npmBusy && updateAvailable === true && canManage && (
+              {!npmBusy && !checking && !installedVersion && probeError && (
+                // The chip alone just says "Version unavailable". This says what
+                // that means and what to do, ahead of the raw tool output.
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <div style={mutedLineStyle}>{t("updates.engines.probeFailed")}</div>
+                  <div style={{ ...dimLineStyle, fontFamily: "var(--font-mono)" }} title={probeError}>
+                    {probeError.length > PROBE_ERROR_MAX_CHARS ? `${probeError.slice(0, PROBE_ERROR_MAX_CHARS)}…` : probeError}
+                  </div>
+                </div>
+              )}
+
+              {!npmBusy && canManage && (
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  {updateAvailable === true && latestVersion && (
+                    <button
+                      type="button"
+                      onClick={() => (selfUpdate ? void updateOmpNow() : updateEngine(engine))}
+                      disabled={busy}
+                      style={actionButtonStyle(busy)}
+                    >
+                      {busy ? <Spinner /> : <Download size={13} aria-hidden="true" />}
+                      {busy ? t("updates.omp.updating") : t("updates.engines.updateTo", { version: latestVersion })}
+                    </button>
+                  )}
                   <button
                     type="button"
-                    onClick={() => (selfUpdate ? void updateOmpNow() : updateEngine(engine))}
+                    onClick={() => reinstallEngine(engine)}
                     disabled={busy}
+                    title={t("updates.engines.reinstallTitle")}
                     style={actionButtonStyle(busy)}
                   >
-                    {busy ? <Spinner /> : <Download size={13} aria-hidden="true" />}
-                    {busy
-                      ? t("updates.omp.updating")
-                      : latestVersion
-                        ? t("updates.engines.updateTo", { version: latestVersion })
-                        : t("updates.omp.update")}
+                    <RefreshCw size={13} aria-hidden="true" />
+                    {t("updates.engines.reinstall")}
                   </button>
                   {status?.previousVersion && (
                     // The escape hatch after an update breaks the engine:
-                    // reinstall exactly the version the update replaced.
+                    // reinstall exactly the version the update replaced. Shown
+                    // whenever history has one, not just when an update exists.
                     <button
                       type="button"
                       onClick={() => revertEngine(engine, status.previousVersion as string)}

@@ -25,26 +25,30 @@ export function Dialog({ open, onOpenChange, children }: {
   );
 }
 
-export function DialogContent({ children, className, style, ariaLabel, onClose }: {
+export function DialogContent({ children, className, style, ariaLabel, onClose, closeLabel }: {
   children: React.ReactNode;
   className?: string;
   style?: React.CSSProperties;
   ariaLabel?: string;
   /**
-   * When provided, renders a visible close button (lucide X) pinned to the
-   * dialog surface's top-right corner — a touch-friendly close affordance
-   * for callers that have no device-independent Esc key and no close/cancel
-   * control of their own. Skip this prop when the dialog already renders
-   * its own close/cancel control; the button is absolutely positioned
-   * inside BaseDialog.Popup (already a `position: fixed` containing block)
-   * so it never scrolls away, but callers whose content can grow past
-   * `maxHeight` should keep managing their own internal scroll region (as
-   * the existing dialogs already do) rather than relying on this popup's
-   * own overflow, so the button doesn't get carried off with scrolled
-   * content. Callers should give their title element a little right
-   * padding/margin (~36px) so long titles don't run under the button.
+   * When provided, renders a quiet close button (lucide X) at the dialog
+   * surface's top-right corner — a touch-friendly close affordance for
+   * callers with no device-independent Esc key. Skip it when the dialog
+   * renders its own close/cancel control.
+   *
+   * PINNING CONTRACT: the button is absolutely positioned against the popup,
+   * so it only stays put while the POPUP ITSELF does not scroll. A caller
+   * that lets content grow past `maxHeight` under this component's default
+   * `overflow: auto` will watch the button scroll away with the content. Any
+   * caller whose content can overflow must therefore take the popup out of
+   * the scrolling role — `overflow: "hidden"` plus a flex column — and give
+   * its own body the scroll region, which is what every caller here does.
+   * Callers should also leave their title ~36px of right padding so long
+   * titles do not run under the button.
    */
   onClose?: () => void;
+  /** Accessible name for the close button; defaults to "Close". */
+  closeLabel?: string;
 }) {
   return (
     <BaseDialog.Portal>
@@ -83,7 +87,7 @@ export function DialogContent({ children, className, style, ariaLabel, onClose }
           <button
             type="button"
             onClick={onClose}
-            aria-label="Close"
+            aria-label={closeLabel ?? "Close"}
             className="ui-focus-ring"
             style={{
               position: "absolute", top: 8, right: 8, zIndex: 1,

@@ -1,5 +1,6 @@
 import { listHarnesses } from ".";
 import { isNewerVersion } from "../npm-update";
+import { probeEngineVersion } from "./engine-bin";
 import { readInstallHistory } from "./install";
 
 /**
@@ -7,6 +8,11 @@ import { readInstallHistory } from "./install";
  * vs the installed binary's. The Settings engine card shows an Update button
  * only when this reports one — an ever-present "Update" reads as "an update
  * exists", which is a lie most of the time.
+ *
+ * When the installed version cannot be read at all the card has nothing to
+ * compare and no story to tell, so the status also carries probeError: the
+ * binary's own explanation of why it will not run. That is what turns
+ * "Version unavailable" into a diagnosis the user can act on.
  */
 
 const CHECK_TTL_MS = 10 * 60_000;
@@ -21,6 +27,10 @@ export interface EngineUpdateStatus {
   /** Version the last successful install replaced — the revert target when
    * an update breaks the engine. Null when no history exists. */
   previousVersion: string | null;
+  /** Why the version probe failed, when installedVersion is null: usually a
+   * binary that resolves but cannot run. Null whenever the version is known,
+   * so a healthy engine never pays for the extra probe. */
+  probeError: string | null;
 }
 
 /** "@oh-my-pi/pi-coding-agent@latest" → "@oh-my-pi/pi-coding-agent". */
@@ -64,6 +74,10 @@ export async function checkEngineUpdates(force = false): Promise<EngineUpdateSta
         fetchLatestVersion(packageNameFromSpec(adapter.installSpec as string), force),
       ]);
       const previous = history[adapter.id]?.previousVersion ?? null;
+      // Only the broken case pays for a second spawn, and it is the only case
+      // with something to explain: a version in hand already says the binary
+      // runs.
+      const binary = installedVersion === null ? adapter.resolveBinary() : null;
       return {
         id: adapter.id,
         installedVersion,
@@ -72,6 +86,7 @@ export async function checkEngineUpdates(force = false): Promise<EngineUpdateSta
           installedVersion && latestVersion ? isNewerVersion(latestVersion, installedVersion) : null,
         // Offering a "revert" to the version already running is noise.
         previousVersion: previous && previous !== installedVersion ? previous : null,
+        probeError: binary ? (await probeEngineVersion(binary)).error : null,
       };
     }),
   );

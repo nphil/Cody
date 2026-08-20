@@ -2280,6 +2280,23 @@ html.dark .dropdown-surface :is(select, option) {
 .terminal-empty { display: flex; flex: 1; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--text-dim); font-size: 12px; }
 .terminal-new-button { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 0 12px; border: 1px solid var(--border); border-radius: var(--radius-control); color: var(--text); background: var(--bg-panel); cursor: pointer; }
 
+/* Scrolling flex column (the Settings tab panels).
+
+   TRAP this exists to prevent: a `flex-direction: column` box with
+   `overflow-y: auto` does NOT scroll to its content by default. Flex items
+   default to `flex-shrink: 1`, so instead of overflowing the box and growing
+   its scrollHeight, they get COMPRESSED to fit it — and any inner box with
+   `overflow: hidden` (the MCP server cards, for instance) then clips its own
+   content. The result is content that is invisible AND unreachable, because
+   scrollHeight never exceeds clientHeight so no scrollbar appears.
+
+   Pinning the children at their content height restores the overflow the
+   scroll container needs. Apply this to any settings panel that scrolls its
+   own content. */
+.settings-scroll-column > * {
+  flex-shrink: 0;
+}
+
 /* ============================== Login screen ============================== */
 /* The sign-in surface renders before the app shell exists, so its styling
    lives here as classes rather than inline objects: focus rings and hover

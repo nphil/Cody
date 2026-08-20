@@ -95,7 +95,11 @@ export function useEngineInstalls(onSettled: (id: string, ok: boolean) => void) 
         // In "start" mode a non-running snapshot is just the stream opening
         // before the POST landed; the POST response settles the install.
       } else if (event.type === "done") {
-        settle(id, event.ok, outcomeMessage(event.error));
+        // Only a reattached watcher settles here. npm exiting 0 is not the same
+        // as a working engine: the POST verifies the fresh binary afterwards
+        // and is the only signal that reports a failed verification, so in
+        // "start" mode its response — not this frame — decides the outcome.
+        if (activeRef.current.get(id) === "watch") settle(id, event.ok, outcomeMessage(event.error));
       }
     };
     // EventSource reconnects on its own; a transient error frame needs no
