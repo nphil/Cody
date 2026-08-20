@@ -25,6 +25,7 @@ on:
         description: "Release version (X.Y.Z, no leading v). Empty = rebuild only."
         required: false
         type: string
+      # From the CLI, pass file CONTENT with an `@`: `-F notes=@notes.md`; without it the literal path becomes the release body.
       notes:
         description: "Release notes / changelog (markdown), shown by ShipLog"
         required: false
