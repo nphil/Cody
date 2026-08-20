@@ -3,6 +3,10 @@ import { isToolPreset, type ToolPreset } from "./tool-presets";
 
 const STORAGE_KEY = STORAGE_KEYS.toolPreset;
 
+// New sessions default to the full toolset so a fresh Cody session exposes the
+// same builtin tools as a vanilla `omp` terminal (which passes no --tools).
+const DEFAULT_TOOL_PRESET: ToolPreset = "full";
+
 interface StorageLike {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
@@ -18,12 +22,12 @@ function browserStorage(): StorageLike | null {
 }
 
 export function getPreferredToolPreset(storage: StorageLike | null = browserStorage()): ToolPreset {
-  if (!storage) return "default";
+  if (!storage) return DEFAULT_TOOL_PRESET;
   try {
     const value = storage.getItem(STORAGE_KEY);
-    return isToolPreset(value) ? value : "default";
+    return isToolPreset(value) ? value : DEFAULT_TOOL_PRESET;
   } catch {
-    return "default";
+    return DEFAULT_TOOL_PRESET;
   }
 }
 
