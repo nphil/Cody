@@ -381,6 +381,13 @@ export interface UseAgentSessionOptions {
   session: SessionInfo | null;
   newSessionCwd: string | null;
   advisorEnabled?: boolean;
+  /** The Interface & Behavior preference. When thinking is shown by default,
+   *  session loads must NOT defer thinking text: a deferred block renders
+   *  expanded-but-empty, the load's pin-to-bottom lands, and then hundreds of
+   *  per-block fetches grow the transcript above the viewport — the
+   *  stream-end "bounce". Deferral is purely a payload optimization for
+   *  blocks that would start collapsed. */
+  thinkingDefaultExpanded?: boolean;
   onAgentEnd?: () => void;
   onSessionCreated?: (session: SessionInfo) => void;
   onSessionForked?: (newSessionId: string) => void;
@@ -628,7 +635,7 @@ function toSlashCommandInfo(command: RpcAvailableSlashCommand): SlashCommandInfo
 
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
-    session, newSessionCwd, advisorEnabled, onAgentEnd, onSessionCreated, onSessionForked,
+    session, newSessionCwd, advisorEnabled, thinkingDefaultExpanded, onAgentEnd, onSessionCreated, onSessionForked,
     modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
     onOpenFile, onOpenPreview, onPreviewUrlsSeen,
   } = opts;
@@ -1087,12 +1094,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [applyAuthoritativeModel, beginAuthoritativeModelSync]);
 
+  // Ref, not a dependency: loadSession must stay identity-stable across a
+  // preference toggle (a new identity would re-run the mount effect and
+  // reload the open session mid-run).
+  const thinkingDefaultExpandedRef = useRef(thinkingDefaultExpanded === true);
+  thinkingDefaultExpandedRef.current = thinkingDefaultExpanded === true;
+
   const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false, fenceRunId?: number) => {
     let messagesLoaded = false;
     if (sessionIdRef.current === sid) setLiveContextUsage(null);
     try {
       if (showLoading) setLoading(true);
-      const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
+      const params = new URLSearchParams({ deferMedia: "1" });
+      // Thinking text is deferred only when blocks start collapsed. With the
+      // show-thinking preference on, a deferred block mounts expanded but
+      // EMPTY: the load's pin-to-bottom lands first and per-block fetches
+      // then regrow the transcript above the viewport — the visible bounce
+      // when a run ends (the terminal reload takes this exact path), plus one
+      // HTTP request per thinking block. Ship the text inline instead.
+      if (!thinkingDefaultExpandedRef.current) params.set("deferThinking", "1");
       const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}?${params}`);
       if (res.status === 404) {
         if (showLoading) {
@@ -3323,13 +3343,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [messages, streamState, agentRunning, agentPhase, extensionWidgets, isCompacting, retryInfo, activeSubagentCount, todoPhases, scrollToBottom, loading]);
 
   // The follow effect above only runs on React state changes, but the scroll
-  // container also shrinks without one — composer panels mounting/expanding,
-  // the input growing a line, the window resizing — which pushes the live
-  // tail (status line, pending tool headers) below the fold with no scroll
-  // event to correct it: the owner sees it "hidden behind the composer".
-  // Re-pin on any container resize while following; "instant" because an
-  // eased chase during a drag-resize lags the pointer. A user who scrolled
-  // up keeps their position (completionScrollAllowedRef is false).
+  // geometry also moves without one, in two directions:
+  //  - the CONTAINER shrinks — composer panels mounting/expanding, the input
+  //    growing a line, the window resizing — pushing the live tail (status
+  //    line, pending tool headers) below the fold: the owner sees it "hidden
+  //    behind the composer";
+  //  - the CONTENT grows after commit — deferred tool-result images arriving,
+  //    fonts swapping, collapse animations settling — leaving a followed
+  //    viewport stranded above the true bottom (the stream-end "bounce"
+  //    residue).
+  // Re-pin on either while following; "instant" because an eased chase during
+  // a drag-resize lags the pointer. A user who scrolled up keeps their
+  // position (completionScrollAllowedRef is false).
   const transcriptMounted = !loading && (messages.length > 0 || streamState.isStreaming);
   useEffect(() => {
     if (!transcriptMounted || typeof ResizeObserver === "undefined") return;
@@ -3340,6 +3365,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       scrollToBottom("instant");
     });
     observer.observe(container);
+    // The content wrapper is the scroller's only child; its border-box height
+    // IS the scrollHeight, so observing it catches late content growth.
+    if (container.firstElementChild) observer.observe(container.firstElementChild);
     return () => observer.disconnect();
   }, [transcriptMounted, scrollToBottom]);
 
