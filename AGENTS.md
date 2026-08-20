@@ -288,6 +288,15 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
 - The onboarding picker (`components/EnginePicker.tsx`) mounts post-auth for
   admins while `cody-engine.json` is absent/un-onboarded; `/api/engines` is
   deliberately unreachable before the first account exists.
+- **The seam is CI-enforced** (`lib/architecture.test.mjs`): outside
+  `lib/omp/` and `lib/harness/`, importing `lib/omp/*` fails the test unless
+  the file is on the in-test allowlist with a written reason, stale allowlist
+  entries fail too (the list only ratchets down), and the adapter/translator
+  modules (`harness/omp|claude|codex|*-stream`) are private to the seam —
+  everything else goes through `@/lib/harness` or its engine-neutral
+  submodules. New engine-neutral code must NOT import `lib/omp` directly;
+  route it through the harness (capabilities, adapter methods, or the engine
+  dispatch pattern in `app/api/sessions/route.ts`).
 
 ## Settings: schema-driven, not hand-listed
 
