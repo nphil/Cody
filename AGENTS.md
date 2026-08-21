@@ -842,6 +842,49 @@ handled or safely ignored.
 - The Models panel reads and writes `models.yml` in the omp agent directory (`~/.omp/agent/models.yml`, `.yaml` fallback).
 - API-key status endpoints must never return the raw key.
 
+### RPC transport limit — the utility process MUST negotiate v2
+- omp's NDJSON transport caps one logical frame at 1 MiB. At protocol **v1** it
+  cannot chunk, so it replaces any oversized reply with a failed response
+  carrying `"RPC response exceeded the transport limit"`. Protocol **v2**
+  chunks (`lib/omp/rpc-frame.ts`, reassembled by `RpcProcess`).
+- `get_available_models` grows with the provider catalog: measured 502 models /
+  1,058,841 bytes on a real install (466 from a single OpenRouter key) — just
+  over the limit. The session path always negotiated; `lib/omp/rpc-utility.ts`
+  did not, so `/api/models` failed and the composer showed a bare "Model error"
+  banner with an empty list. **Both** `startProcess` and
+  `runIsolatedUtilityCommand` now negotiate; `rpc-utility.test.mjs` guards it.
+  Engines that do not advertise v2 are never sent the command, so a restricted
+  dialect (pi) still starts.
+
+### Model curation (`enabledModels`) — omp filters, Cody does not
+- omp owns the allow-list: `get_available_models` is already filtered by
+  `enabledModels` (omp `session/model-controls.ts`), and entries are **glob
+  patterns** matched against `provider/modelId` and bare ids. Cody MUST NOT
+  re-filter — a second dialect of the same setting would disagree with omp on
+  any hand-written pattern. What `/api/models` returns IS the effective set, so
+  the Composer picker, the ten role selects, and fallback chains all shrink for
+  free (measured: 502 models → 18, and 5,020 role `<option>` elements → 200).
+- **Trap**: because omp filters, a restricted read cannot see what it excluded,
+  so curation would be a dead end — no way to find the other 464 OpenRouter
+  models to re-add one. `/api/models?catalog=full` therefore runs a throwaway
+  utility process with `PI_CONFIG_FILES` pointing at an overlay containing
+  `enabledModels: []` (omp's own `--config` layering). The user's `config.yml`
+  is never written. `--models` does NOT work for this: it only scopes Ctrl+P
+  cycling, while `getAvailableModels()` reads the setting directly.
+- Only the curation panel requests the full catalog, and only on mount. The
+  main UI never carries it.
+- UI shape (`components/ModelsConfig.tsx`): one summary row per provider
+  (`openrouter — None of 466 enabled`) plus a per-provider dialog with search,
+  bulk enable/disable of the current matches, a rendered-row cap
+  (`CURATION_VISIBLE_LIMIT`, so DOM size is constant), and a single PUT on
+  confirm. Turning the restriction ON seeds only in-use models
+  (`seedAllowList`) — seeding the whole catalog is what wrote hundreds of
+  entries into `config.yml` and then demanded hundreds of un-checks.
+- A provider whose every model is de-selected keeps its row and stays openable
+  (`summarizeProviderCuration` counts totals from the full catalog, enabled
+  from the effective list), so switching a provider off is always reversible.
+  Pure helpers + tests: `lib/model-allow-list.ts`.
+
 ### Completion sound
 - `hooks/useAudio.ts` stores the toggle in `localStorage` and reuses one `AudioContext`.
 - Browser autoplay policy means sound must be unlocked from a user gesture; `ChatInput` calls the unlock hook from interactive controls, and `ChatWindow` plays the tone from `onAgentEnd`.

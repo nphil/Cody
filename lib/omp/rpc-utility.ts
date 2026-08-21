@@ -120,7 +120,16 @@ async function startProcess(state: UtilityRpcState, launch?: RpcProcessLaunch): 
     },
   });
   try {
-    await proc.waitReady(READY_TIMEOUT_MS);
+    const ready = await proc.waitReady(READY_TIMEOUT_MS);
+    // Protocol v2 or the big responses never arrive. get_available_models
+    // grows with the provider catalog — an OpenRouter key alone contributes
+    // hundreds of entries — and at v1 omp cannot chunk, so it replaces any
+    // response over MAX_RPC_FRAME_BYTES with "RPC response exceeded the
+    // transport limit". That surfaced as a bare "Model error" banner with an
+    // empty model list. The session path (lib/rpc-manager) has always
+    // negotiated; this path must too. Engines that do not advertise v2 are
+    // never sent the command, so a restricted dialect (pi) still starts.
+    await proc.negotiateProtocol(ready);
   } catch (error) {
     void proc.dispose();
     throw error;
@@ -181,7 +190,10 @@ export async function runIsolatedUtilityCommand<T = unknown>(
     env: options.env,
   });
   try {
-    await proc.waitReady(READY_TIMEOUT_MS);
+    const ready = await proc.waitReady(READY_TIMEOUT_MS);
+    // Same reason as startProcess: without v2 a large response is replaced by
+    // a transport-limit error instead of being chunked.
+    await proc.negotiateProtocol(ready);
     return await proc.sendCommand<T>(command, options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS);
   } finally {
     // Await the child's exit (not fire-and-forget): callers like the

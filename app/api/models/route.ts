@@ -1,7 +1,10 @@
+import { writeFile } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
 import { loadModelsWithCache, withModelRuntimeError, type ModelsData } from "@/lib/models-cache";
 import { supportsPriorityFastMode } from "@/lib/fast-mode";
 import { getHarness, type HarnessAdapter } from "@/lib/harness";
-import { type OmpModel, runUtilityCommand } from "@/lib/omp/rpc-utility";
+import { type OmpModel, runIsolatedUtilityCommand, runUtilityCommand } from "@/lib/omp/rpc-utility";
 import { readDisabledProviders } from "@/lib/omp/model-roles";
 import { utilityRpcLaunchFor } from "@/lib/rpc-manager";
 
@@ -114,9 +117,43 @@ const EMPTY_MODELS: ModelsData = {
   thinkingLevels: {},
 };
 
-export async function GET() {
+/**
+ * The UNRESTRICTED catalog, for the settings panel that edits
+ * `enabledModels`. OMP filters `get_available_models` by that setting, so once
+ * a restriction is in place the normal read can no longer see the models it
+ * excluded — and curation would be a dead end: no way to find the other 464
+ * OpenRouter models to add one back.
+ *
+ * A config overlay (`PI_CONFIG_FILES`, OMP's own `--config` mechanism) layers
+ * `enabledModels: []` over the real config for this one read-only query. The
+ * user's config.yml is never written, and the overlay applies only to this
+ * throwaway process.
+ */
+async function loadFullCatalog(): Promise<{ id: string; name: string; provider: string }[]> {
+  const overlay = join(tmpdir(), "cody-unrestricted-models.yml");
+  await writeFile(overlay, "enabledModels: []\n", "utf8");
+  const { models } = await runIsolatedUtilityCommand<{ models: OmpModel[] }>(
+    { type: "get_available_models" },
+    { env: { PI_CONFIG_FILES: overlay }, timeoutMs: 120_000 },
+  );
+  return models
+    .map((model) => ({ id: model.id, name: model.name || model.id, provider: model.provider }))
+    .sort(compareModelEntries);
+}
+
+export async function GET(req: Request) {
   try {
+    // Curation asks for the full catalog explicitly. Nothing else does: the
+    // main UI only ever needs the models a session can actually use.
+    if (new URL(req.url).searchParams.get("catalog") === "full") {
+      return Response.json({ modelList: await loadFullCatalog() });
+    }
     const harness = getHarness();
+    // No allow-list filtering here on purpose: OMP already applied
+    // `enabledModels` to this response, using glob semantics Cody must not
+    // reimplement (see lib/model-allow-list.ts). What arrives IS the effective
+    // set, so the Composer picker, model roles, and fallback chains all shrink
+    // to the user's selection with no client-side work.
     return Response.json(await loadModelsWithCache(`global:${harness.id}`, () => loadModels(harness)));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

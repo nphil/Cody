@@ -6,6 +6,7 @@ import { useI18n } from "@/lib/i18n";
 import { isSafeExternalUrl } from "@/lib/safe-url";
 import { omitUntouchedModelDrafts } from "@/lib/models-config-drafts";
 import { formatApiError } from "@/lib/i18n/api-error";
+import { allowListActive, replaceProviderSelection, seedAllowList, summarizeProviderCuration } from "@/lib/model-allow-list";
 import {
   Dialog,
   DialogContent,
@@ -319,16 +320,157 @@ function RetryFallbackDetail({ models }: { models: RuntimeModelEntry[] }) {
   </div>;
 }
 
-function NativeRegistryDetail({ models, connectedProviders, onChanged }: { models: RuntimeModelEntry[]; connectedProviders: ConnectedProvider[]; onChanged: () => Promise<void> }) {
+// A single provider can carry hundreds of models (an OpenRouter key measured
+// 466 of 502 on a real install). Curating that inline would mean one checkbox
+// per model in the settings panel, so the panel keeps one summary row per
+// provider and the models themselves live behind this dialog:
+//   - the catalog is fetched once by the panel and sliced per provider here,
+//     so opening a provider costs no request and the main UI never carries it;
+//   - rendered rows are capped, so the DOM stays a constant size no matter how
+//     many models match;
+//   - edits accumulate in a local draft and save ONCE on confirm, instead of a
+//     PUT per checkbox.
+const CURATION_VISIBLE_LIMIT = 60;
+
+function ProviderModelsDialog({ provider, catalog, enabled, saving, onCancel, onConfirm }: {
+  provider: string;
+  catalog: RuntimeModelEntry[];
+  enabled: Set<string>;
+  saving: boolean;
+  onCancel: () => void;
+  onConfirm: (nextEnabled: Set<string>) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [enabledOnly, setEnabledOnly] = useState(false);
+  const [draft, setDraft] = useState<Set<string>>(() => new Set(enabled));
+  const total = catalog.length;
+
+  const needle = query.trim().toLowerCase();
+  const matches = catalog.filter((model) => {
+    if (enabledOnly && !draft.has(`${model.provider}/${model.id}`)) return false;
+    if (!needle) return true;
+    return model.id.toLowerCase().includes(needle) || (model.name ?? "").toLowerCase().includes(needle);
+  });
+  const visible = matches.slice(0, CURATION_VISIBLE_LIMIT);
+  const hiddenCount = matches.length - visible.length;
+  const dirty = draft.size !== enabled.size || [...draft].some((key) => !enabled.has(key));
+
+  const bulk = (keys: string[], on: boolean) => {
+    setDraft((previous) => {
+      const next = new Set(previous);
+      for (const key of keys) if (on) next.add(key); else next.delete(key);
+      return next;
+    });
+  };
+
+  return <Dialog open onOpenChange={(next) => { if (!next) onCancel(); }}>
+    <DialogContent ariaLabel={`Choose ${provider} models`} onClose={onCancel} style={{ width: "min(680px, 94vw)", display: "flex", flexDirection: "column", maxHeight: "85vh" }}>
+      <DialogTitle style={{ margin: "0 0 4px" }}>{provider} models</DialogTitle>
+      <p style={{ margin: "0 0 12px", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>
+        {draft.size} of {total} enabled. Only enabled models reach the Composer picker, model roles, and fallback chains.
+      </p>
+
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+        <input
+          type="search"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder={`Search ${total} models...`}
+          aria-label={`Search ${provider} models`}
+          style={{ flex: "1 1 200px", minWidth: 0, padding: "7px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12 }}
+        />
+        <label style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--text-muted)", fontSize: 12 }}>
+          <input type="checkbox" checked={enabledOnly} onChange={(event) => setEnabledOnly(event.target.checked)} /> Enabled only
+        </label>
+      </div>
+
+      <>
+        <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+          <button type="button" disabled={matches.length === 0} onClick={() => bulk(matches.map((model) => `${model.provider}/${model.id}`), true)} style={{ padding: "5px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 11, cursor: matches.length === 0 ? "default" : "pointer" }}>
+            Enable {needle || enabledOnly ? `these ${matches.length}` : "all"}
+          </button>
+          <button type="button" disabled={matches.length === 0} onClick={() => bulk(matches.map((model) => `${model.provider}/${model.id}`), false)} style={{ padding: "5px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 11, cursor: matches.length === 0 ? "default" : "pointer" }}>
+            Disable {needle || enabledOnly ? `these ${matches.length}` : "all"}
+          </button>
+        </div>
+
+        <div style={{ flex: 1, overflowY: "auto", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", minHeight: 120 }}>
+          {matches.length === 0
+            ? <div style={{ padding: "16px 12px", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>
+                {catalog.length === 0
+                  ? <>This provider currently offers no models. Check its credentials, or that it is not disabled below.</>
+                  : enabledOnly && !needle
+                    ? <>No {provider} models are enabled yet. Search above and enable the ones you want.</>
+                    : <>Nothing matches &ldquo;{query.trim()}&rdquo;.</>}
+              </div>
+            : visible.map((model) => {
+              const key = `${model.provider}/${model.id}`;
+              return <label key={key} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", color: "var(--text-muted)", fontSize: 12, borderBottom: "1px solid var(--border)" }}>
+                <input type="checkbox" checked={draft.has(key)} onChange={(event) => bulk([key], event.target.checked)} />
+                <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {model.name && model.name !== model.id ? <>{model.name} <code style={{ color: "var(--text-dim)" }}>{model.id}</code></> : <code>{model.id}</code>}
+                </span>
+              </label>;
+            })}
+          {hiddenCount > 0 && <div style={{ padding: "8px 10px", color: "var(--text-dim)", fontSize: 11 }}>
+            {hiddenCount} more match — refine the search to see them, or use the bulk buttons above (they apply to all {matches.length}).
+          </div>}
+        </div>
+      </>
+
+      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 12 }}>
+        <button type="button" onClick={onCancel} style={{ padding: "7px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12, cursor: "pointer" }}>Cancel</button>
+        <button type="button" disabled={!dirty || saving} onClick={() => onConfirm(draft)} style={{ padding: "7px 12px", border: "none", borderRadius: "var(--radius-control)", background: dirty ? "var(--accent)" : "var(--bg-hover)", color: dirty ? "var(--on-accent)" : "var(--text-dim)", fontSize: 12, fontWeight: 600, cursor: dirty && !saving ? "pointer" : "default" }}>
+          {saving ? "Saving..." : "Save selection"}
+        </button>
+      </div>
+    </DialogContent>
+  </Dialog>;
+}
+
+function NativeRegistryDetail({ models, connectedProviders, defaultModelKey, onChanged }: {
+  models: RuntimeModelEntry[];
+  connectedProviders: ConnectedProvider[];
+  defaultModelKey: string | null;
+  onChanged: () => Promise<void>;
+}) {
   const [settings, setSettings] = useState<NativeRegistrySettings | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [curating, setCurating] = useState<string | null>(null);
+  // Role assignments are seeded into the allow-list when the restriction is
+  // switched on, so turning it on never takes away a model a role is using.
+  const [assignedRoleKeys, setAssignedRoleKeys] = useState<string[]>([]);
+  // The UNRESTRICTED catalog. `models` carries only what OMP currently allows,
+  // so it cannot describe what is available to turn back ON — without this the
+  // panel would show "0 of 0" for a provider the user just switched off, with
+  // no way to recover it. Fetched once here, sliced per provider for the
+  // dialog, and never requested by the main UI.
+  const [catalog, setCatalog] = useState<RuntimeModelEntry[] | null>(null);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
 
   useEffect(() => {
     fetch("/api/omp-settings")
       .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
       .then((data: { settings?: NativeRegistrySettings }) => setSettings(data.settings ?? {}))
       .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+  }, []);
+
+  useEffect(() => {
+    fetch("/api/model-roles")
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
+      .then((data: { roles?: Record<string, string> }) => setAssignedRoleKeys(
+        Object.values(data.roles ?? {}).map((value) => value.replace(/:([^,:]+)$/, "")).filter(Boolean),
+      ))
+      // Seeding is a convenience; a failure here must not block the panel.
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    fetch("/api/models?catalog=full")
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
+      .then((data: { modelList?: RuntimeModelEntry[] }) => setCatalog(data.modelList ?? []))
+      .catch((reason) => setCatalogError(reason instanceof Error ? reason.message : String(reason)));
   }, []);
 
   // Serialize full-snapshot saves: each call PUTs the whole settings object and
@@ -369,13 +511,27 @@ function NativeRegistryDetail({ models, connectedProviders, onChanged }: { model
 
   if (!settings) return <div style={{ color: "var(--text-muted)", fontSize: 12 }}>Loading native OMP registry settings...</div>;
   const isReadOnly = settings.registryHasScopedEntries === true;
-  const allModelKeys = models.map((model) => `${model.provider}/${model.id}`);
-  const allowListEnabled = (settings.enabledModels?.length ?? 0) > 0;
-  const enabledModels = new Set(settings.enabledModels ?? allModelKeys);
-  const providers = [...new Set([...models.map((model) => model.provider), ...connectedProviders.map((provider) => provider.id), ...(settings.disabledProviders ?? [])])].sort();
+  const allowListEnabled = allowListActive(settings.enabledModels);
+  const enabledModels = settings.enabledModels ?? [];
   const disabledProviders = new Set(settings.disabledProviders ?? []);
   const providerOrder = settings.modelProviderOrder ?? [];
-  const orderedProviders = [...providerOrder, ...providers.filter((provider) => !providerOrder.includes(provider))];
+  // Totals come from the unrestricted catalog and enabled counts from the
+  // effective list, so a provider reads correctly even when every one of its
+  // models is de-selected — and glob entries count right without Cody matching
+  // a single pattern itself.
+  const curation = summarizeProviderCuration(catalog ?? [], models);
+  const curationByProvider = new Map(curation.map((entry) => [entry.provider, entry]));
+  const providers = [...new Set([
+    ...curation.map((entry) => entry.provider),
+    ...connectedProviders.map((provider) => provider.id),
+    ...disabledProviders,
+  ])].sort();
+  const orderedProviders = [...providerOrder.filter((provider) => providers.includes(provider)), ...providers.filter((provider) => !providerOrder.includes(provider))];
+
+  const applySelection = (provider: string, nextForProvider: Set<string>) => {
+    save({ ...settings, enabledModels: replaceProviderSelection(enabledModels, provider, nextForProvider) });
+    setCurating(null);
+  };
 
   return <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
     <div>
@@ -383,13 +539,71 @@ function NativeRegistryDetail({ models, connectedProviders, onChanged }: { model
       <p style={{ margin: "4px 0 0", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>These settings affect the models OMP itself can resolve. They are saved in <code>~/.omp/agent/config.yml</code>, unlike the Composer picker.</p>
     </div>
     <section style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden" }}>
-      <label style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12, fontWeight: 600 }}><input type="checkbox" checked={allowListEnabled} disabled={saving || isReadOnly} onChange={(event) => void save({ ...settings, enabledModels: event.target.checked ? allModelKeys : [] })} /> Restrict OMP to selected models</label>
-      <p style={{ margin: 0, padding: "8px 12px", color: "var(--text-muted)", fontSize: 11, lineHeight: 1.45 }}>{allowListEnabled ? "Unchecked models are unavailable to every OMP session." : "All currently available OMP models are allowed."}</p>
-      {allowListEnabled && <div style={{ maxHeight: 260, overflowY: "auto", borderTop: "1px solid var(--border)" }}>{models.map((model) => {
-        const key = `${model.provider}/${model.id}`;
-        return <label key={key} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", color: "var(--text-muted)", fontSize: 12 }}><input type="checkbox" checked={enabledModels.has(key)} disabled={saving || isReadOnly} onChange={(event) => { const next = new Set(enabledModels); if (event.target.checked) next.add(key); else next.delete(key); void save({ ...settings, enabledModels: [...next] }); }} /><code>{key}</code></label>;
-      })}</div>}
+      <label style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12, fontWeight: 600 }}>
+        <input
+          type="checkbox"
+          checked={allowListEnabled}
+          disabled={saving || isReadOnly}
+          // Seeds only what is already in use, never the whole catalog: with a
+          // large provider connected, seeding everything wrote hundreds of
+          // entries into config.yml and then required hundreds of un-checks.
+          onChange={(event) => void save({
+            ...settings,
+            enabledModels: event.target.checked
+              ? seedAllowList([defaultModelKey, ...assignedRoleKeys], models)
+              : [],
+          })}
+        /> Restrict OMP to selected models
+      </label>
+      <p style={{ margin: 0, padding: "8px 12px", color: "var(--text-muted)", fontSize: 11, lineHeight: 1.45 }}>
+        {allowListEnabled
+          ? "Only the models you enable per provider are offered to OMP sessions, roles, and fallback chains. The model a role or the Composer already uses stays available."
+          : "Every available model is allowed. Turn this on to choose per provider — useful when one provider (OpenRouter) contributes hundreds of models."}
+      </p>
+      {allowListEnabled && <div style={{ borderTop: "1px solid var(--border)" }}>
+        {catalog === null && !catalogError && <div style={{ padding: "10px 12px", color: "var(--text-muted)", fontSize: 12 }}>Reading the full model catalog...</div>}
+        {catalogError && <div role="alert" style={{ padding: "10px 12px", color: "var(--status-error)", fontSize: 12, lineHeight: 1.45 }}>
+          Could not read the full catalog ({catalogError}). Counts below show only the models currently enabled.
+        </div>}
+        {orderedProviders.map((provider) => {
+          const summary = curationByProvider.get(provider);
+          const total = summary?.total ?? 0;
+          const enabledHere = summary?.enabled ?? 0;
+          const providerDisabled = disabledProviders.has(provider);
+          // A provider is openable as long as the catalog says it has models.
+          // Never gated on the enabled count, or switching a provider fully
+          // off would remove the only way to switch it back on.
+          const openable = !providerDisabled && total > 0 && catalog !== null;
+          return <div key={provider} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", fontSize: 12, borderTop: "1px solid var(--border)" }}>
+            <ProviderIcon id={provider} size={14} />
+            <code style={{ color: "var(--text)" }}>{provider}</code>
+            <span style={{ flex: 1, color: "var(--text-muted)" }}>
+              {providerDisabled
+                ? "Provider disabled below — none of its models are offered"
+                : total === 0
+                  ? "No models available (check this provider's credentials)"
+                  : enabledHere === 0
+                    ? `None of ${total} enabled`
+                    : `${enabledHere} of ${total} enabled`}
+            </span>
+            <button
+              type="button"
+              disabled={saving || isReadOnly || !openable}
+              onClick={() => setCurating(provider)}
+              style={{ padding: "4px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: openable ? "var(--text)" : "var(--text-dim)", fontSize: 11, cursor: saving || isReadOnly || !openable ? "default" : "pointer" }}
+            >{enabledHere === 0 ? "Choose models..." : "Change..."}</button>
+          </div>;
+        })}
+      </div>}
     </section>
+    {curating && <ProviderModelsDialog
+      provider={curating}
+      catalog={(catalog ?? []).filter((model) => model.provider === curating)}
+      enabled={new Set(enabledModels.filter((key) => key.startsWith(`${curating}/`)))}
+      saving={saving}
+      onCancel={() => setCurating(null)}
+      onConfirm={(next) => applySelection(curating, next)}
+    />}
     <section style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden" }}>
       <div style={{ padding: "10px 12px", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12, fontWeight: 600 }}>Disabled Providers</div>
       <p style={{ margin: 0, padding: "8px 12px", color: "var(--text-muted)", fontSize: 11, lineHeight: 1.45 }}>Disabling a provider removes it from OMP&apos;s model registry, even if it has credentials.</p>
@@ -1800,6 +2014,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
   const [apiKeyProviders, setApiKeyProviders] = useState<ApiKeyProvider[]>([]);
   const [runtimeModels, setRuntimeModels] = useState<RuntimeModelEntry[]>([]);
   const [connectedProviders, setConnectedProviders] = useState<ConnectedProvider[]>([]);
+  const [defaultModelKey, setDefaultModelKey] = useState<string | null>(null);
   const [runtimeModelsLoading, setRuntimeModelsLoading] = useState(true);
   const [visibleModelKeys, setVisibleModelKeys] = useState<Set<string> | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -1828,12 +2043,20 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
     setRuntimeModelsLoading(true);
     try {
       const response = await fetch("/api/models");
-      const data = response.ok ? await response.json() as { modelList?: RuntimeModelEntry[]; connectedProviders?: ConnectedProvider[] } : null;
+      const data = response.ok ? await response.json() as {
+        modelList?: RuntimeModelEntry[];
+        connectedProviders?: ConnectedProvider[];
+        defaultModel?: { provider: string; modelId: string } | null;
+      } : null;
       setRuntimeModels(data?.modelList ?? []);
       setConnectedProviders(data?.connectedProviders ?? []);
+      // Seeds the allow-list when the restriction is switched on, so turning it
+      // on never takes away the model the Composer is already using.
+      setDefaultModelKey(data?.defaultModel ? `${data.defaultModel.provider}/${data.defaultModel.modelId}` : null);
     } catch {
       setRuntimeModels([]);
       setConnectedProviders([]);
+      setDefaultModelKey(null);
     } finally {
       setRuntimeModelsLoading(false);
     }
@@ -2058,7 +2281,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
       return <ApiKeyDetail key={p.id} provider={p} />;
     }
     if (selection.type === "roles") return <ModelRolesDetail models={runtimeModels} />;
-    if (selection.type === "registry") return <NativeRegistryDetail models={runtimeModels} connectedProviders={connectedProviders} onChanged={loadRuntimeModels} />;
+    if (selection.type === "registry") return <NativeRegistryDetail models={runtimeModels} connectedProviders={connectedProviders} defaultModelKey={defaultModelKey} onChanged={loadRuntimeModels} />;
     if (selection.type === "fallbacks") return <RetryFallbackDetail models={runtimeModels} />;
     if (selection.type === "modelPlan") return <ModelPlanPanel />;
     if (selection.type === "picker") return (
