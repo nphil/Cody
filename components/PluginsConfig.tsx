@@ -11,7 +11,8 @@ import {
 } from "@/components/ui/primitives";
 import { ConfirmDialog } from "@/components/ui/field";
 import { toast } from "@/components/ui/toast";
-import { Plus } from "lucide-react";
+import { Plus, Store } from "lucide-react";
+import { PluginMarketplace } from "@/components/PluginMarketplace";
 import { SettingsTabs, type SettingsTab } from "./SettingsTabs";
 import type { PluginPackageInfo, PluginsResponse } from "@/lib/api-types";
 
@@ -634,6 +635,7 @@ export function PluginsConfig({
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [marketplaceOpen, setMarketplaceOpen] = useState(false);
 
   const packages = useMemo(() => data?.packages ?? [], [data?.packages]);
   const selectedPackage = packages.find((pkg) => packageKey(pkg) === selected) ?? null;
@@ -938,7 +940,7 @@ export function PluginsConfig({
                 ))
               )}
             </div>
-            <div style={{ padding: "8px 6px", borderTop: "1px solid var(--border)", flexShrink: 0 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4, padding: "8px 6px", borderTop: "1px solid var(--border)", flexShrink: 0 }}>
               <button
                 type="button"
                 onClick={() => {
@@ -968,6 +970,28 @@ export function PluginsConfig({
               >
                 <Plus size={13} aria-hidden="true" />
                 {t("pluginsConfig.addPlugin")}
+              </button>
+              <button
+                type="button"
+                onClick={() => setMarketplaceOpen(true)}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  padding: "7px 8px",
+                  borderRadius: 5,
+                  border: "none",
+                  width: "100%",
+                  cursor: "pointer",
+                  background: "none",
+                  color: "var(--text-dim)",
+                  fontSize: 12,
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
+              >
+                <Store size={13} aria-hidden="true" />
+                {t("pluginMarket.openButton")}
               </button>
             </div>
           </div>
@@ -1059,6 +1083,13 @@ export function PluginsConfig({
             {t("pluginsConfig.close")}
           </button>
         </div>
+        {marketplaceOpen && (
+          <PluginMarketplace
+            cwd={cwd}
+            onChanged={() => void loadPlugins()}
+            onClose={() => setMarketplaceOpen(false)}
+          />
+        )}
     </PluginsConfigSurface>
   );
 }

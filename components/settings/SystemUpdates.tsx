@@ -1,9 +1,10 @@
 "use client";
 
-import { ArrowRight, Check, Copy, Cpu, Download, Loader2, RefreshCw, RotateCcw, ScrollText, Settings2, Sparkles, Store, TriangleAlert } from "lucide-react";
+import { ArrowRight, Check, Copy, Cpu, Download, Loader2, PlugZap, RefreshCw, RotateCcw, ScrollText, Settings2, Sparkles, Store, TriangleAlert } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "@/components/ui/toast";
 import { SkillsStore } from "@/components/SkillsStore";
+import { PluginMarketplace } from "@/components/PluginMarketplace";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { useEngineInstalls } from "@/hooks/useEngineInstalls";
 import type { SkillInfo, SkillInstallScope, SkillUpdateResult } from "@/lib/api-types";
@@ -161,6 +162,7 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
   const [statusesChecked, setStatusesChecked] = useState(false);
   const [skills, setSkills] = useState<{ state: RowState | "no-workspace"; updates: SkillUpdateResult[] }>({ state: "loading", updates: [] });
   const [storeOpen, setStoreOpen] = useState(false);
+  const [marketplaceOpen, setMarketplaceOpen] = useState(false);
   const [installedPackages, setInstalledPackages] = useState<Record<SkillInstallScope, ReadonlySet<string>>>({ global: new Set(), project: new Set() });
 
   /** Installed-package sets for the store's "Installed" states — cheap local
@@ -782,6 +784,25 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
           onInstalled={() => void refreshInstalled(cwd)}
           onClose={() => setStoreOpen(false)}
         />
+      )}
+
+      {/* ── Plugins ──────────────────────────────────────────────────── */}
+      {capabilities.plugins && cwd && (
+        <section style={cardStyle} aria-label={t("pluginMarket.title")}>
+          <div style={cardTitleStyle}>
+            <PlugZap size={13} aria-hidden="true" />
+            {t("pluginMarket.title")}
+          </div>
+          <div>
+            <button type="button" onClick={() => setMarketplaceOpen(true)} style={actionButtonStyle(false)}>
+              <Store size={13} aria-hidden="true" />
+              {t("pluginMarket.openButton")}
+            </button>
+          </div>
+        </section>
+      )}
+      {marketplaceOpen && cwd && (
+        <PluginMarketplace cwd={cwd} onClose={() => setMarketplaceOpen(false)} />
       )}
     </div>
   );
