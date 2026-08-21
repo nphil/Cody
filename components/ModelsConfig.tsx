@@ -63,6 +63,16 @@ import { STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
 
 type IconComponent = React.ComponentType<{ size?: number | string; style?: React.CSSProperties }>;
 
+// Settings draws provider brands in COLOUR, at tile size, from @lobehub/icons —
+// a roomy list where the colour is the fastest way to find a provider, and this
+// modal is dynamic()-imported so the icon set stays out of the main bundle.
+//
+// The composer's picker deliberately does NOT share this. It needs monochrome
+// marks that inherit row tone at 12px, and it is always mounted, so it draws
+// from the vendored set in components/ProviderIcon.tsx instead. Two briefs, two
+// renderers — keep them that way; see AGENTS.md "Brand marks". What they SHOULD
+// agree on is which ids exist: a provider added here usually wants an entry in
+// lib/provider-brand.ts too.
 // hasColor=true → Color icon (self-colored SVG, no wrapper)
 // hasColor=false → Mono icon (rendered with currentColor, inherits theme text color)
 const PROVIDER_ICONS: Record<string, { Icon: IconComponent; hasColor: boolean }> = {
@@ -575,7 +585,7 @@ function NativeRegistryDetail({ models, connectedProviders, defaultModelKey, onC
           // off would remove the only way to switch it back on.
           const openable = !providerDisabled && total > 0 && catalog !== null;
           return <div key={provider} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", fontSize: 12, borderTop: "1px solid var(--border)" }}>
-            <ProviderIcon id={provider} size={14} />
+            <ProviderBrandTile id={provider} size={14} />
             <code style={{ color: "var(--text)" }}>{provider}</code>
             <span style={{ flex: 1, color: "var(--text-muted)" }}>
               {providerDisabled
@@ -607,12 +617,12 @@ function NativeRegistryDetail({ models, connectedProviders, defaultModelKey, onC
     <section style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden" }}>
       <div style={{ padding: "10px 12px", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12, fontWeight: 600 }}>Disabled Providers</div>
       <p style={{ margin: 0, padding: "8px 12px", color: "var(--text-muted)", fontSize: 11, lineHeight: 1.45 }}>Disabling a provider removes it from OMP&apos;s model registry, even if it has credentials.</p>
-      <div style={{ borderTop: "1px solid var(--border)" }}>{providers.map((provider) => <label key={provider} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", color: "var(--text-muted)", fontSize: 12 }}><input type="checkbox" checked={disabledProviders.has(provider)} disabled={saving || isReadOnly} onChange={(event) => { const next = new Set(disabledProviders); if (event.target.checked) next.add(provider); else next.delete(provider); void save({ ...settings, disabledProviders: [...next] }); }} /><ProviderIcon id={provider} size={14} /><code>{provider}</code></label>)}</div>
+      <div style={{ borderTop: "1px solid var(--border)" }}>{providers.map((provider) => <label key={provider} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", color: "var(--text-muted)", fontSize: 12 }}><input type="checkbox" checked={disabledProviders.has(provider)} disabled={saving || isReadOnly} onChange={(event) => { const next = new Set(disabledProviders); if (event.target.checked) next.add(provider); else next.delete(provider); void save({ ...settings, disabledProviders: [...next] }); }} /><ProviderBrandTile id={provider} size={14} /><code>{provider}</code></label>)}</div>
     </section>
     <section style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden" }}>
       <div style={{ padding: "10px 12px", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12, fontWeight: 600 }}>Provider Preference</div>
       <p style={{ margin: 0, padding: "8px 12px", color: "var(--text-muted)", fontSize: 11, lineHeight: 1.45 }}>Sets OMP&apos;s provider order when a model id is ambiguous.</p>
-      <div style={{ borderTop: "1px solid var(--border)" }}>{orderedProviders.map((provider, index) => <div key={provider} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", color: "var(--text-muted)", fontSize: 12 }}><ProviderIcon id={provider} size={14} /><code style={{ flex: 1 }}>{provider}</code><button type="button" disabled={saving || isReadOnly || index === 0} onClick={() => { const next = [...orderedProviders]; [next[index - 1], next[index]] = [next[index], next[index - 1]]; void save({ ...settings, modelProviderOrder: next }); }} title="Move provider up" style={{ padding: 3, border: "none", background: "transparent", color: "var(--text-muted)", cursor: "pointer" }}><ArrowUp size={14} /></button><button type="button" disabled={saving || isReadOnly || index === orderedProviders.length - 1} onClick={() => { const next = [...orderedProviders]; [next[index + 1], next[index]] = [next[index], next[index + 1]]; void save({ ...settings, modelProviderOrder: next }); }} title="Move provider down" style={{ padding: 3, border: "none", background: "transparent", color: "var(--text-muted)", cursor: "pointer" }}><ArrowDown size={14} /></button></div>)}</div>
+      <div style={{ borderTop: "1px solid var(--border)" }}>{orderedProviders.map((provider, index) => <div key={provider} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", color: "var(--text-muted)", fontSize: 12 }}><ProviderBrandTile id={provider} size={14} /><code style={{ flex: 1 }}>{provider}</code><button type="button" disabled={saving || isReadOnly || index === 0} onClick={() => { const next = [...orderedProviders]; [next[index - 1], next[index]] = [next[index], next[index - 1]]; void save({ ...settings, modelProviderOrder: next }); }} title="Move provider up" style={{ padding: 3, border: "none", background: "transparent", color: "var(--text-muted)", cursor: "pointer" }}><ArrowUp size={14} /></button><button type="button" disabled={saving || isReadOnly || index === orderedProviders.length - 1} onClick={() => { const next = [...orderedProviders]; [next[index + 1], next[index]] = [next[index], next[index + 1]]; void save({ ...settings, modelProviderOrder: next }); }} title="Move provider down" style={{ padding: 3, border: "none", background: "transparent", color: "var(--text-muted)", cursor: "pointer" }}><ArrowDown size={14} /></button></div>)}</div>
     </section>
     {isReadOnly && <div role="status" style={{ padding: "9px 11px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.45 }}>OMP path-scoped registry entries are configured. Edit <code>config.yml</code> directly to preserve their path rules.</div>}
     {error && <div role="alert" style={{ color: "var(--status-error)", fontSize: 12 }}>{error}</div>}
@@ -844,7 +854,7 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete }: {
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <div style={{ width: 36, height: 36, borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", border: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-              <ProviderIcon id={name} size={20} />
+              <ProviderBrandTile id={name} size={20} />
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
               <div style={{ fontSize: 15, fontWeight: 700, fontFamily: "var(--font-mono)", color: "var(--text)" }}>{name}</div>
@@ -1810,9 +1820,9 @@ export function ApiKeyDetail({ provider }: { provider: ApiKeyProvider }) {
   );
 }
 
-// ── Provider icon ─────────────────────────────────────────────────────────────
+// ── Provider brand tile ─────────────────────────────────────────────────────────────
 
-function ProviderIcon({ id, size }: { id: string; size: number }) {
+function ProviderBrandTile({ id, size }: { id: string; size: number }) {
   const pi = PROVIDER_ICONS[id];
   if (!pi) {
     const label = id
@@ -1970,7 +1980,7 @@ export function AddProviderPicker({
                     <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", lineHeight: 1.3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
                     <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 2 }}>OAuth</div>
                   </div>
-                  <ProviderIcon id={p.id} size={28} />
+                  <ProviderBrandTile id={p.id} size={28} />
                 </button>
               ))}
 
@@ -1987,7 +1997,7 @@ export function AddProviderPicker({
                     <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", lineHeight: 1.3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.displayName}</div>
                     <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 2 }}>{tn("modelsConfig.modelCount", p.modelCount)}</div>
                   </div>
-                  <ProviderIcon id={p.id} size={28} />
+                  <ProviderBrandTile id={p.id} size={28} />
                 </button>
               ))}
 
@@ -2299,7 +2309,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
           return <section key={provider} style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden" }}>
             <label style={{ display: "flex", alignItems: "center", gap: 8, padding: "9px 11px", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12, fontWeight: 600 }}>
               <input type="checkbox" checked={providerVisible} ref={(input) => { if (input) input.indeterminate = providerSomeVisible && !providerVisible; }} onChange={(event) => setComposerProviderVisible(provider, event.target.checked)} aria-label={`Show all ${provider} models in composer`} />
-              <ProviderIcon id={provider} size={15} />
+              <ProviderBrandTile id={provider} size={15} />
               <span>{provider}</span>
               <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 11, fontWeight: 400 }}>{models.length} model{models.length === 1 ? "" : "s"}</span>
             </label>
@@ -2317,7 +2327,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
         {!runtimeModelsLoading && runtimeModels.length === 0 && <div style={{ color: "var(--text-muted)", fontSize: 12 }}>OMP did not report any configured models.</div>}
         {connectedProviders.filter((provider) => !runtimeModelsByProvider[provider.id]).map((provider) => (
           <section key={provider.id} style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", padding: 12 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--text)", fontSize: 12, fontWeight: 600 }}><ProviderIcon id={provider.id} size={15} />{provider.name}</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--text)", fontSize: 12, fontWeight: 600 }}><ProviderBrandTile id={provider.id} size={15} />{provider.name}</div>
             <p style={{ margin: "6px 0 0", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>{provider.disabled ? "Connected, but disabled in OMP. Enable it to discover its models." : "Connected, but OMP has not reported models for this provider yet."}</p>
             {provider.disabled && <button type="button" onClick={() => void enableConnectedProvider(provider.id).catch((error) => toast.error("Could not enable provider", error instanceof Error ? error.message : String(error)))} style={{ marginTop: 8, padding: "6px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text)", cursor: "pointer", fontSize: 12 }}>Enable in OMP</button>}
           </section>
@@ -2421,7 +2431,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                     style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", borderRadius: "var(--radius-control)", cursor: "pointer", width: "100%", border: "none", textAlign: "left", fontFamily: "inherit", background: isSelected ? "var(--bg-selected)" : "none", fontWeight: isSelected ? 600 : 400 }}
                     {...hoverRow(isSelected)}
                   >
-                    <ProviderIcon id={p.id} size={16} />
+                    <ProviderBrandTile id={p.id} size={16} />
                     <span style={{ fontSize: 12, color: "var(--text)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
                     <span title={`OMP OAuth provider: ${p.id}`} style={{ padding: "2px 5px", borderRadius: 4, background: "var(--bg-subtle)", color: "var(--text-muted)", fontSize: 9, fontWeight: 500, flexShrink: 0 }}>OAuth</span>
                   </button>
@@ -2439,7 +2449,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                     style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", borderRadius: "var(--radius-control)", cursor: "pointer", width: "100%", border: "none", textAlign: "left", fontFamily: "inherit", background: isSelected ? "var(--bg-selected)" : "none", fontWeight: isSelected ? 600 : 400 }}
                     {...hoverRow(isSelected)}
                   >
-                    <ProviderIcon id={p.id} size={16} />
+                    <ProviderBrandTile id={p.id} size={16} />
                     <span style={{ fontSize: 12, color: "var(--text)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.displayName}</span>
                     <span title={`OMP API-key provider: ${p.id}`} style={{ padding: "2px 5px", borderRadius: 4, background: "var(--bg-subtle)", color: "var(--text-muted)", fontSize: 9, fontWeight: 500, flexShrink: 0 }}>API key</span>
                   </button>
@@ -2473,7 +2483,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                       style={{ display: "flex", alignItems: "center", gap: 7, padding: "6px 8px", borderRadius: "var(--radius-control)", cursor: "pointer", width: "100%", border: "none", textAlign: "left", fontFamily: "inherit", background: isProviderSelected ? "var(--bg-selected)" : "none" }}
                       {...hoverRow(isProviderSelected)}
                     >
-                      <ProviderIcon id={pName} size={15} />
+                      <ProviderBrandTile id={pName} size={15} />
                       <span style={{ fontSize: 12, fontWeight: isProviderSelected ? 600 : 500, color: "var(--text)", fontFamily: "var(--font-mono)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {pName}
                       </span>

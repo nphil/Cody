@@ -78,6 +78,16 @@ const BRANDS: Record<string, ProviderBrand> = {
   ollama: { name: "Ollama", icon: "ollama" },
   qwen: { name: "Qwen", icon: "qwen" },
   dashscope: { name: "Qwen", icon: "qwen" },
+  // Regional and plan-scoped ids the engines also report. Kept in step with
+  // the id list in components/ModelsConfig.tsx, which draws the same providers
+  // in colour for Settings.
+  "azure-openai-responses": { name: "Azure OpenAI", icon: "azure" },
+  "google-vertex-anthropic": { name: "Claude", icon: "claude" },
+  "moonshotai-cn": { name: "Moonshot", icon: "moonshot" },
+  "kimi-coding": { name: "Kimi", icon: "moonshot" },
+  zai: { name: "Z.ai", icon: "zhipu" },
+  "zai-coding-cn": { name: "Z.ai", icon: "zhipu" },
+  "qwen-code": { name: "Qwen", icon: "qwen" },
 };
 
 export function providerBrand(provider: string | null | undefined): ProviderBrand | null {
