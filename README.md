@@ -2,7 +2,7 @@
 
 [English](./README.md) | [简体中文](./README.zh-CN.md) | [日本語](./README.ja.md)
 
-Cody is a self-hosted web workspace for coding agents — an IDE you keep, with an **engine you can swap**. The interface stays constant (session browsing, real-time chat, files, git, persistent terminals, tasks, settings) while the coding agent underneath is chosen at onboarding and can be replaced any time: [oh-my-pi (omp)](https://github.com/can1357/oh-my-pi) is the founding, fully-featured engine; **Claude Code** and **Codex** are available as experimental engines. Agents evolve fast — Cody lets you switch the internals without giving up your workspace.
+Cody is a self-hosted web workspace for coding agents — an IDE you keep, with an **engine you can swap**. The interface stays constant (session browsing, real-time chat, files, git, persistent terminals, tasks, settings) while the coding agent underneath is chosen at onboarding and can be replaced any time: [oh-my-pi (omp)](https://github.com/can1357/oh-my-pi) is the founding, fully-featured engine; **Pi** ([pi.dev](https://pi.dev), omp's ancestor), **Claude Code** and **Codex** are available as experimental engines. Agents evolve fast — Cody lets you switch the internals without giving up your workspace.
 
 Cody is a fork of [kahme247/ompweb](https://github.com/kahme247/ompweb) — see [Credits](#credits).
 
@@ -42,8 +42,8 @@ Then open the WebUI:
 1. **First-run setup** — the instance is locked from its very first request;
    the only reachable page walks you through creating your account, which
    becomes the administrator. No password variables needed.
-2. **Choose your coding engine** — pick omp (recommended), Claude Code, or
-   Codex. Cody installs it into the persistent `/data` tools prefix, where it
+2. **Choose your coding engine** — pick omp (recommended), Pi, Claude Code,
+   or Codex. Cody installs it into the persistent `/data` tools prefix, where it
    survives image updates and updates independently.
 3. Add `/workspace/<your-project>` as a workspace and start working.
 
@@ -89,6 +89,7 @@ NVIDIA GPU is optional, for local models running inside the distro.
 | Engine | Status | What you get |
 | --- | --- | --- |
 | **omp** (oh-my-pi) | Founding engine — every surface enabled | Full chat (thinking levels, forking, compaction, steering, subagents), models & providers, skills, plugins, MCP, native settings, updates |
+| **Pi** (pi.dev) | Experimental | Live chat over Pi's native RPC — streamed replies, tool activity, steering, aborts; settings surfaces fit to what Pi actually serves |
 | **Claude Code** | Experimental | Plain chat: prompt, streamed reply, tool activity, abort. Non-relevant settings hide automatically |
 | **Codex** | Experimental | Same plain-chat surface as Claude Code |
 
@@ -110,7 +111,7 @@ NVIDIA GPU is optional, for local models running inside the distro.
   broken — with Claude/Codex active, settings collapse to Cody's own tabs
   and omp-only composer controls disappear.
 - **Adding engines**: one adapter per engine. The contract and checklist
-  (Pi, Cline, Cursor, …) live in [docs/harnesses.md](docs/harnesses.md).
+  (Cline, Cursor, …) live in [docs/harnesses.md](docs/harnesses.md).
 - Experimental engines run non-interactively with file edits auto-accepted
   inside the workspace, and their transcript history is session-local (no
   replay across server restarts yet).
@@ -154,8 +155,10 @@ updates.
 - **See what the agent builds, live**: when the assistant starts a local dev server, the embedded preview opens automatically once its URL answers — and on omp the agent can open it deliberately with the `open_preview` tool.
 - **The agent sees its own work**: a `preview_screenshot` tool renders the app in a bundled headless Chromium on the server, so the model can screenshot what it built, look at the image, and iterate — the screenshot shows up right in the chat, and a camera button on the Preview panel attaches one to your next message.
 - **The agent reads its app's console**: the preview Chromium's uncaught exceptions, `console.error` output, failed fetches and 4xx/5xx responses are captured into a bounded per-session ring, and a `read_app_logs` tool hands the model a deduped digest — a render loop logging thousands of identical lines arrives as one entry with a count. When something new breaks, a single line is appended to the next preview tool result rather than streaming logs into the conversation.
+- **Streaming that reads like typing, not teleporting**: replies render through a buffered reveal that absorbs token bursts and stalls into a steady cadence — tool-call boxes and their streaming input included — with shipped defaults and a `/dev/stream-tuner` playground for retuning the feel.
 - **See session state clearly**: context usage, cost, compaction state, and system prompt details in the top bar (engine-dependent), plus an icon-only context ring in the composer that shifts color as usage crosses thresholds and clicks open to a compact summary of used/available/limit, token traffic, and models used.
 - **Configure less from the terminal**: models, provider auth, native omp controls (advisor, approvals, thinking, compaction, memory, retry/fallback), skills, plugins, and project MCP servers — all from Settings when the engine supports them.
+- **Discover skills in-app**: search the public [skills.sh](https://skills.sh) registry from Settings and install skills into your project or user scope without leaving the workspace.
 - **Stay current in-app**: version checks and one-click updates for the engine; Cody itself updates with the container image.
 - **Stay informed**: browser notifications when an agent finishes; skill update checks.
 - **Jump anywhere with ⌘K**: a command palette for switching sessions, starting new ones, and toggling the theme.
