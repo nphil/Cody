@@ -31,6 +31,11 @@ export interface StreamPacerOptions {
   /** Frame-delta clamp: a background-tab gap must not smear into one giant
    *  reveal step when the tab returns. */
   maxTickMs?: number;
+  /** Tolerate non-append rewrites by retracting only past the common prefix.
+   *  For targets that are *mostly* append-only but re-close a suffix each
+   *  frame (streaming tool-call JSON: the closing braces shift while the
+   *  interior grows). Off, any rewrite snaps — prose must never replay. */
+  lenientPrefix?: boolean;
 }
 
 const DEFAULTS: Required<StreamPacerOptions> = {
@@ -39,6 +44,7 @@ const DEFAULTS: Required<StreamPacerOptions> = {
   maxBacklogChars: 2000,
   wordLookaheadChars: 24,
   maxTickMs: 250,
+  lenientPrefix: false,
 };
 
 /** Assumed frame length for the first tick after the loop (re)starts, when
@@ -56,6 +62,8 @@ export interface StreamPacer {
   caughtUp(): boolean;
   /** Snap to the full target (stream settled, block no longer active). */
   flush(): void;
+  /** Re-tune mid-flight (live knob changes); reveal position is preserved. */
+  configure(next: StreamPacerOptions): void;
 }
 
 function isWhitespaceCode(code: number): boolean {
@@ -63,7 +71,7 @@ function isWhitespaceCode(code: number): boolean {
 }
 
 export function createStreamPacer(options: StreamPacerOptions = {}): StreamPacer {
-  const opts = { ...DEFAULTS, ...options };
+  let opts = { ...DEFAULTS, ...options };
   let target = "";
   let shown = 0;
   let armed = false;
@@ -75,13 +83,27 @@ export function createStreamPacer(options: StreamPacerOptions = {}): StreamPacer
       // The first push after construction snaps: a block mounting mid-stream
       // (tab reopen, thinking panel expanded late) must show what is already
       // there, not replay history.
-      const paceable = armed && next.startsWith(target);
+      const prev = target;
+      const wasArmed = armed;
       target = next;
       armed = true;
-      if (!paceable) {
+      if (!wasArmed) {
         shown = target.length;
         lastTick = null;
         return;
+      }
+      if (!next.startsWith(prev)) {
+        if (!opts.lenientPrefix) {
+          shown = target.length;
+          lastTick = null;
+          return;
+        }
+        // Retract only the already-shown chars that actually changed (the
+        // re-closed JSON suffix — a handful of chars), then pace forward.
+        const bound = Math.min(prev.length, next.length, shown);
+        let cp = 0;
+        while (cp < bound && prev.charCodeAt(cp) === next.charCodeAt(cp)) cp++;
+        if (cp < shown) shown = cp;
       }
       if (target.length - shown > opts.maxBacklogChars) {
         shown = target.length - opts.maxBacklogChars;
@@ -121,6 +143,9 @@ export function createStreamPacer(options: StreamPacerOptions = {}): StreamPacer
       shown = target.length;
       lastTick = null;
     },
+    configure(next: StreamPacerOptions) {
+      opts = { ...opts, ...next };
+    },
   };
 }
 
@@ -139,22 +164,36 @@ export function shouldPaceStream(args: {
 }
 
 /**
+ * The three ways a block consumes the pacer:
+ * - "pace"  — actively streaming tail: buffer and reveal per animation frame.
+ * - "drain" — the block was superseded mid-stream (a tool call started below
+ *   it) but still owes backlog: keep revealing until caught up, then drop the
+ *   pacer. A block with no pacer (or no debt) reads instantly. The caller
+ *   passes drain-rate options (a faster catchUpMs) alongside the mode.
+ * - "snap"  — settled/off: return the target verbatim, drop any pacer.
+ * Booleans are accepted as shorthand (true = "pace", false = "snap").
+ */
+export type StreamPaceMode = "pace" | "drain" | "snap";
+
+/**
  * Paces `target` (which grows monotonically per SSE batch) into a displayed
- * string that advances a few words per animation frame. When `paced` is false
- * the target is returned verbatim — that is the completion flush: the moment
- * a block settles or stops being the active tail, any animation debt is paid
- * instantly and the pacer is dropped.
+ * string that advances a few words per animation frame. In "snap" mode the
+ * target is returned verbatim — that is the completion flush: the moment a
+ * block settles, any animation debt is paid instantly and the pacer dropped.
  *
  * The rAF loop only runs while there is backlog; a caught-up stream burns no
- * idle frames.
+ * idle frames. Option changes apply live via pacer.configure().
  */
-export function useSmoothStreamText(target: string, paced: boolean): string {
+export function useSmoothStreamText(target: string, mode: StreamPaceMode | boolean, options?: StreamPacerOptions): string {
+  const resolved: StreamPaceMode = mode === true ? "pace" : mode === false ? "snap" : mode;
   const pacerRef = useRef<StreamPacer | null>(null);
   const frameRef = useRef<number | null>(null);
   const [displayed, setDisplayed] = useState(target);
 
   useEffect(() => {
-    if (!paced) {
+    // "drain" without an existing pacer has no debt to animate — instant.
+    const engaged = resolved === "pace" || (resolved === "drain" && pacerRef.current !== null && !pacerRef.current.caughtUp());
+    if (!engaged) {
       // Drop the pacer so re-enabling starts caught-up (the first push
       // snaps): stale text from a previous paced run must never replay.
       pacerRef.current = null;
@@ -164,7 +203,8 @@ export function useSmoothStreamText(target: string, paced: boolean): string {
       }
       return;
     }
-    const pacer = (pacerRef.current ??= createStreamPacer());
+    const pacer = (pacerRef.current ??= createStreamPacer(options));
+    if (options) pacer.configure(options);
     pacer.push(target);
     const pushed = pacer.text();
     setDisplayed((prev) => (prev === pushed ? prev : pushed));
@@ -179,7 +219,9 @@ export function useSmoothStreamText(target: string, paced: boolean): string {
       if (!live.caughtUp()) frameRef.current = requestAnimationFrame(step);
     };
     frameRef.current = requestAnimationFrame(step);
-  }, [target, paced]);
+    // `options` must be referentially stable per tuning state (callers memoize
+    // via usePacerOptions); a per-render literal would re-run this every frame.
+  }, [target, resolved, options]);
 
   useEffect(() => () => {
     if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
@@ -188,7 +230,7 @@ export function useSmoothStreamText(target: string, paced: boolean): string {
   // Until the arming effect has run, `displayed` may hold text from a
   // previous paced run — returning it would flash stale content for a frame.
   // An unarmed pacer means "show the live target".
-  return paced && pacerRef.current !== null ? displayed : target;
+  return resolved !== "snap" && pacerRef.current !== null ? displayed : target;
 }
 
 export interface RevealSplit {
@@ -275,9 +317,9 @@ export function splitMarkdownReveal(text: string): RevealSplit {
  *  text node was already visible and never re-animates. */
 const PLAIN_TAIL_WINDOW_CHARS = 160;
 
-export function splitPlainReveal(text: string): RevealSplit {
+export function splitPlainReveal(text: string, windowChars: number = PLAIN_TAIL_WINDOW_CHARS): RevealSplit {
   const n = text.length;
-  let idx = n - PLAIN_TAIL_WINDOW_CHARS;
+  let idx = n - windowChars;
   if (idx < 0) idx = 0;
   while (idx > 0 && idx < n) {
     const atWordStart = isWhitespaceCode(text.charCodeAt(idx - 1)) && !isWhitespaceCode(text.charCodeAt(idx));

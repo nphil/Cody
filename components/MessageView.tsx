@@ -11,7 +11,8 @@ import { parseUnifiedPatch, type SplitDiffCell } from "@/lib/patch";
 import { Tooltip, Collapsible, CollapsibleTrigger, CollapsiblePanel } from "./ui/primitives";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
-import { useSmoothStreamText, shouldPaceStream, splitMarkdownReveal, splitPlainReveal, chunkRevealWords } from "@/hooks/useSmoothStreamText";
+import { useSmoothStreamText, shouldPaceStream, splitMarkdownReveal, splitPlainReveal, chunkRevealWords, type StreamPaceMode, type StreamPacerOptions } from "@/hooks/useSmoothStreamText";
+import { useStreamTuning } from "@/hooks/useStreamTuning";
 import { SubagentStatusIcon } from "./SubagentStatusIcon";
 import { formatCost, formatDuration, formatTokens, shortModel } from "@/lib/subagent-format";
 import type {
@@ -651,9 +652,22 @@ function BlockView({ block, toolResults, isStreaming, isActiveStreamBlock, strea
     const tc = block as ToolCallContent;
     const result = toolResults?.get(tc.toolCallId);
     const duration = toolCallDurations?.get(tc.toolCallId);
-    return <ToolCallBlock block={tc} result={result} duration={duration} isStreaming={isStreaming} defaultCollapsed={toolCallsDefaultCollapsed} />;
+    return <ToolCallBlock block={tc} result={result} duration={duration} isStreaming={isStreaming} isActiveStreamBlock={isActiveStreamBlock} defaultCollapsed={toolCallsDefaultCollapsed} />;
   }
   return null;
+}
+
+/** Pacer options for one block, derived from the live tuning. In "drain"
+ *  mode the faster drain rate replaces the streaming catch-up rate. */
+function usePacerOptions(mode: StreamPaceMode, lenient = false): StreamPacerOptions | undefined {
+  const tuning = useStreamTuning();
+  return useMemo(() => (mode === "snap" ? undefined : {
+    catchUpMs: mode === "drain" ? tuning.drainCatchUpMs : tuning.catchUpMs,
+    minRevealChars: tuning.minRevealChars,
+    maxBacklogChars: tuning.maxBacklogChars,
+    wordLookaheadChars: tuning.wordLookaheadChars,
+    lenientPrefix: lenient,
+  }), [mode, lenient, tuning]);
 }
 
 // Every message_update frame delivers freshly parsed block objects, so the
@@ -663,15 +677,27 @@ function BlockView({ block, toolResults, isStreaming, isActiveStreamBlock, strea
 // re-renders per frame.
 const TextBlock = memo(function TextBlock({ block, isStreaming, isActiveStreamBlock, cwd, onOpenFile }: { block: TextContent; isStreaming?: boolean; isActiveStreamBlock?: boolean; cwd?: string; onOpenFile?: (filePath: string) => void }) {
   const prefersReducedMotion = usePrefersReducedMotion();
+  const tuning = useStreamTuning();
   // Oversized messages fall back to SafeMarkdownBody's raw-reveal button;
   // pacing text that will not render as markdown is pointless churn.
+  const sizeOk = block.text.length <= MAX_MARKDOWN_CHARS;
   const paced = shouldPaceStream({
     isStreaming: isStreaming === true,
     isActiveBlock: isActiveStreamBlock === true,
     prefersReducedMotion,
-  }) && block.text.length <= MAX_MARKDOWN_CHARS;
-  const displayed = useSmoothStreamText(block.text, paced);
-  if (!paced) {
+  }) && sizeOk;
+  // A superseded block (a tool call started below it) drains its remaining
+  // backlog at the drain rate instead of snapping — when the knob is off
+  // (drainCatchUpMs = 0, the default) it snaps exactly as it always has.
+  const mode: StreamPaceMode = paced
+    ? "pace"
+    : isStreaming === true && sizeOk && !prefersReducedMotion && tuning.drainCatchUpMs > 0
+      ? "drain"
+      : "snap";
+  const options = usePacerOptions(mode);
+  const displayed = useSmoothStreamText(block.text, mode, options);
+  const showPaced = mode === "pace" || (mode === "drain" && displayed !== block.text);
+  if (!showPaced) {
     return <SafeMarkdownBody isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile}>{block.text}</SafeMarkdownBody>;
   }
   return <PacedMarkdownText text={displayed} cwd={cwd} onOpenFile={onOpenFile} />;
@@ -693,8 +719,9 @@ const TextBlock = memo(function TextBlock({ block, isStreaming, isActiveStreamBl
  * cannot inflate the span count.
  */
 function PacedMarkdownText({ text, cwd, onOpenFile }: { text: string; cwd?: string; onOpenFile?: (filePath: string) => void }) {
+  const tuning = useStreamTuning();
   const split = useMemo(() => splitMarkdownReveal(text), [text]);
-  const tailWindow = useMemo(() => splitPlainReveal(split.tail), [split.tail]);
+  const tailWindow = useMemo(() => splitPlainReveal(split.tail, tuning.plainTailWindowChars), [split.tail, tuning.plainTailWindowChars]);
   return (
     <div className="stream-reveal">
       {split.prefix !== "" && (
@@ -729,12 +756,20 @@ const StreamRevealPrefix = memo(function StreamRevealPrefix({ text, sampleParse,
  * loop, and expanding mid-stream snaps to the current text instead of
  * replaying it.
  */
-function PacedPlainText({ text, active }: { text: string; active: boolean }) {
+function PacedPlainText({ text, streaming, activeBlock }: { text: string; streaming: boolean; activeBlock: boolean }) {
   const prefersReducedMotion = usePrefersReducedMotion();
-  const paced = shouldPaceStream({ isStreaming: active, isActiveBlock: active, prefersReducedMotion });
-  const displayed = useSmoothStreamText(text, paced);
-  if (!paced) return <>{text}</>;
-  const split = splitPlainReveal(displayed);
+  const tuning = useStreamTuning();
+  const paced = shouldPaceStream({ isStreaming: streaming, isActiveBlock: activeBlock, prefersReducedMotion });
+  const mode: StreamPaceMode = paced
+    ? "pace"
+    : streaming && !prefersReducedMotion && tuning.drainCatchUpMs > 0
+      ? "drain"
+      : "snap";
+  const options = usePacerOptions(mode);
+  const displayed = useSmoothStreamText(text, mode, options);
+  const showPaced = mode === "pace" || (mode === "drain" && displayed !== text);
+  if (!showPaced) return <>{text}</>;
+  const split = splitPlainReveal(displayed, tuning.plainTailWindowChars);
   return (
     <>
       {split.prefix}
@@ -880,7 +915,7 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
               ? t("messageView.loadingThinking")
               : error ?? (block.deferred
                 ? content
-                : <PacedPlainText text={block.thinking ?? ""} active={isStreaming === true && isActiveStreamBlock === true && expanded} />)}
+                : <PacedPlainText text={block.thinking ?? ""} streaming={isStreaming === true && expanded} activeBlock={isActiveStreamBlock === true} />)}
           </div>
         </CollapsiblePanel>
       </Collapsible>
@@ -899,10 +934,21 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
 ));
 
 
-const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isStreaming, defaultCollapsed = true }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number; isStreaming?: boolean; defaultCollapsed?: boolean }) {
+const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isStreaming, isActiveStreamBlock, defaultCollapsed = true }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number; isStreaming?: boolean; isActiveStreamBlock?: boolean; defaultCollapsed?: boolean }) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(Boolean(isStreaming) && !defaultCollapsed);
   const { animating, beginToggle, onPanelTransitionEnd } = useCollapseMotion();
+  const prefersReducedMotion = usePrefersReducedMotion();
+  const tuning = useStreamTuning();
+  // Streaming tool input arrives as raw network bursts (the input JSON and
+  // the header preview repaint per frame). When the knob is on, both run
+  // through the pacer in lenient-prefix mode — the stringified JSON re-closes
+  // its braces on every growth, which must retract a few chars, not snap.
+  const inputLive = isStreaming === true && isActiveStreamBlock === true && result === undefined && !prefersReducedMotion && tuning.paceToolInput;
+  const inputJson = useMemo(() => JSON.stringify(block.input, null, 2) ?? "", [block.input]);
+  const toolPaceOptions = usePacerOptions(inputLive ? "pace" : "snap", true);
+  const displayedJson = useSmoothStreamText(inputJson, inputLive && expanded ? "pace" : "snap", toolPaceOptions);
+  const displayedPreview = useSmoothStreamText(getToolPreview(block), inputLive ? "pace" : "snap", toolPaceOptions);
   const isEditTool = isEditToolName(block.toolName);
   const resultDiff = result && !result.isError ? getResultDiff(result) : null;
 
@@ -962,7 +1008,7 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
             {block.toolName}
           </span>
           <span style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0, maxWidth: "64ch", marginRight: "auto" }}>
-            {getToolPreview(block)}
+            {displayedPreview}
           </span>
           {duration !== undefined && (
             <span style={{ fontSize: 11, color: "var(--text-dim)", flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{t("messageView.durationSeconds", { seconds: duration })}</span>
@@ -1002,7 +1048,7 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
                   wordBreak: "break-all",
                 }}
               >
-                {JSON.stringify(block.input, null, 2)}
+                {displayedJson}
               </pre>
             )}
             {result && (
@@ -1050,6 +1096,8 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
   && prev.block.input === next.block.input
   && prev.result === next.result
   && prev.duration === next.duration
+  && prev.isStreaming === next.isStreaming
+  && prev.isActiveStreamBlock === next.isActiveStreamBlock
   && prev.defaultCollapsed === next.defaultCollapsed
 ));
 

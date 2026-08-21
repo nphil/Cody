@@ -17,6 +17,8 @@ import { StatusTextCrossfade } from "./StatusTextCrossfade";
 import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-layout";
 import { useAgentSession, type AgentPhase, type NoticeItem, type StreamAlert, type SubagentInfo } from "@/hooks/useAgentSession";
 import { useAudio } from "@/hooks/useAudio";
+import { useStreamTuning } from "@/hooks/useStreamTuning";
+import { streamTuningCssVars } from "@/lib/stream-tuning";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import type { SessionStatsInfo } from "@/lib/pi-types";
@@ -631,6 +633,8 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
   const { t, tn } = useI18n();
   const { playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
+  const tuning = useStreamTuning();
+  const tuningCssVars = useMemo(() => streamTuningCssVars(tuning), [tuning]);
 
   // Wrap onAgentEnd to play the completion sound. This is more reliable than
   // wrapping handleAgentEventRef because useAgentSession overwrites that ref
@@ -1160,7 +1164,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
         {/* Hide the Firefox scrollbar on desktop only: ChatMinimap provides the
             position indicator there, but on mobile there is no minimap and
             users need the scrollbar (Chrome's overlay scrollbar still shows). */}
-        <div ref={scrollContainerRef} className={`chat-scroll-region flex-1 overflow-y-auto pt-6` + (isMobile ? "" : " [scrollbar-width:none]")}>
+        <div ref={scrollContainerRef} className={`chat-scroll-region flex-1 overflow-y-auto pt-6` + (isMobile ? "" : " [scrollbar-width:none]")} style={tuningCssVars}>
           <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
             <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
               <ExtensionStatusBar statuses={extensionStatuses} />

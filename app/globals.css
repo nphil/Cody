@@ -216,6 +216,15 @@ html[data-theme="dracula-dark"] {
   --dur-med: 220ms;
   --dur-slow: 320ms;
   --dur-theme: 450ms;
+  /* Stream pacing animation tuning (lib/stream-tuning.ts). Defaults fall back to
+     the base timing variables above — override these to adjust reveal/block/collapse
+     feel without touching code. */
+  --stream-word-dur: var(--dur-med);
+  --stream-word-blur: 0px;
+  --chat-block-enter-dur: var(--dur-med);
+  --chat-block-rise: 7px;
+  --collapse-dur: var(--dur-med);
+  --stream-anim-ease: var(--ease-out-warm);
 }
 html.dark {
   --shadow-card: 0 1px 2px rgba(0,0,0,0.35), 0 0 0 1px rgba(235,225,210,0.03);
@@ -1560,11 +1569,11 @@ html.dark .dropdown-surface :is(select, option) {
    shared 6px rise read as a jump, so these blocks take the medium duration
    with a hint of scale settle instead. */
 @keyframes chat-block-rise {
-  from { opacity: 0; transform: translateY(7px) scale(0.99); }
+  from { opacity: 0; transform: translateY(var(--chat-block-rise)) scale(0.99); }
   to   { opacity: 1; transform: translateY(0) scale(1); }
 }
 .chat-block-in {
-  animation: chat-block-rise var(--dur-med) var(--ease-out-warm) backwards;
+  animation: chat-block-rise var(--chat-block-enter-dur) var(--stream-anim-ease) backwards;
 }
 .chat-turn .chat-block-in {
   animation: none;
@@ -1594,11 +1603,14 @@ html.dark .dropdown-surface :is(select, option) {
   margin-top: 10px;
 }
 .stream-word {
-  animation: stream-word-in var(--dur-med) var(--ease-out-warm) both;
+  animation: stream-word-in var(--stream-word-dur) var(--stream-anim-ease) both;
 }
+/* Blur lives in the from-state only: `to` resolves to filter: none, so a
+   settled word carries no filter (no per-span layer/stacking context). At the
+   default --stream-word-blur: 0px this is a pure opacity fade, as shipped. */
 @keyframes stream-word-in {
-  from { opacity: 0; }
-  to   { opacity: 1; }
+  from { opacity: 0; filter: blur(var(--stream-word-blur)); }
+  to   { opacity: 1; filter: none; }
 }
 
 /* ── Collapsible message boxes (tool call / bash / thinking / extension) ──
@@ -1633,8 +1645,8 @@ html.dark .dropdown-surface :is(select, option) {
   overflow: clip;
   height: var(--collapsible-panel-height, auto);
   max-width: 100cqi;
-  transition: height var(--dur-med) var(--ease-out-warm),
-              max-width var(--dur-med) var(--ease-out-warm);
+  transition: height var(--collapse-dur) var(--stream-anim-ease),
+              max-width var(--collapse-dur) var(--stream-anim-ease);
 }
 @supports (interpolate-size: allow-keywords) {
   .collapse-box-panel {
@@ -1659,7 +1671,7 @@ html.dark .dropdown-surface :is(select, option) {
   width: max-content;
   min-width: 100%;
   max-width: 100cqi;
-  animation: collapse-content-in var(--dur-med) var(--ease-out-warm) backwards;
+  animation: collapse-content-in var(--collapse-dur) var(--stream-anim-ease) backwards;
 }
 @keyframes collapse-content-in {
   from { opacity: 0; transform: translateY(6px); }

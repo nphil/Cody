@@ -233,3 +233,91 @@ test("per-frame split scan cost stays micro even on long documents", () => {
   console.log(`splitMarkdownReveal over ${(target.length / 1024).toFixed(1)}KB: ${usPerCall.toFixed(1)}µs/call`);
   assert.ok(usPerCall < 2000, "the split scan must stay far under a frame budget");
 });
+
+test("lenient prefix retracts only the rewritten suffix instead of snapping", () => {
+  const pacer = createStreamPacer({ lenientPrefix: true, wordLookaheadChars: 0, minRevealChars: 2 });
+  pacer.push('{\n  "command": "ls"\n}');
+  assert.equal(pacer.caughtUp(), true, "first push snaps");
+  // The stringified input grows in the middle: the closing `"\n}` moves.
+  const next = '{\n  "command": "ls -la /tmp && echo done"\n}';
+  pacer.push(next);
+  assert.equal(pacer.caughtUp(), false, "growth must pace, not snap");
+  const shownNow = pacer.text();
+  assert.ok(next.startsWith(shownNow), "display is a prefix of the new target");
+  assert.ok(shownNow.length < next.length, "the rewrite is not painted all at once");
+  drain(pacer);
+  assert.equal(pacer.text(), next);
+});
+
+test("without lenientPrefix a suffix rewrite snaps (prose must never replay)", () => {
+  const pacer = createStreamPacer();
+  pacer.push("abc}");
+  pacer.push("abcdef}");
+  assert.equal(pacer.caughtUp(), true);
+  assert.equal(pacer.text(), "abcdef}");
+});
+
+test("configure retunes the reveal rate mid-flight without losing position", () => {
+  const pacer = createStreamPacer({ catchUpMs: 100000, minRevealChars: 1, wordLookaheadChars: 0 });
+  pacer.push("x");
+  pacer.push(`x${"y".repeat(2000 - 1)}`.slice(0, 1500));
+  pacer.tick(0);
+  pacer.tick(100);
+  const slowShown = pacer.text().length;
+  assert.ok(slowShown < 100, `glacial catch-up must reveal little, got ${slowShown}`);
+  pacer.configure({ catchUpMs: 50 });
+  pacer.tick(200);
+  assert.ok(pacer.text().length > slowShown, "faster rate applies immediately");
+  assert.ok(pacer.text().length > 500, "the backlog drains at the new rate");
+});
+
+test("the shipped steady profile flattens bursty arrivals into near-uniform reveal", async () => {
+  const { DEFAULT_STREAM_TUNING } = await jiti.import("../lib/stream-tuning.ts");
+  const pacer = createStreamPacer({
+    catchUpMs: DEFAULT_STREAM_TUNING.catchUpMs,
+    minRevealChars: DEFAULT_STREAM_TUNING.minRevealChars,
+    maxBacklogChars: DEFAULT_STREAM_TUNING.maxBacklogChars,
+    wordLookaheadChars: 0,
+  });
+  pacer.push("");
+  // Feast-famine arrivals: a 240-char flush, 800ms of silence, a trickle —
+  // repeated. Raw painting would jump 240 then freeze; the deep buffer must
+  // spread it out so no 100ms window is empty while debt exists and no
+  // window reveals a whole flush at once.
+  let text = "";
+  const word = "steady words keep arriving here ";
+  const arrivals = [];
+  for (let t = 0; t < 6000; t += 1000) {
+    arrivals.push({ at: t, chars: 240 });
+    for (let s = 800; s < 1000; s += 50) arrivals.push({ at: t + s, chars: 12 });
+  }
+  const windows = new Map();
+  let next = 0;
+  for (let now = 0; now <= 7000; now += 16.7) {
+    while (next < arrivals.length && arrivals[next].at <= now) {
+      const targetLen = text.length + arrivals[next].chars;
+      while (text.length < targetLen) text += word;
+      text = text.slice(0, targetLen);
+      next += 1;
+    }
+    pacer.push(text);
+    const before = pacer.text().length;
+    pacer.tick(now);
+    const bucket = Math.floor(now / 100);
+    windows.set(bucket, (windows.get(bucket) ?? 0) + (pacer.text().length - before));
+  }
+  const active = [...windows.values()].filter((d) => d > 0);
+  const mean = active.reduce((a, b) => a + b, 0) / active.length;
+  const max = Math.max(...active);
+  // The anti-snap property: a flush must never land whole (or near-whole) in
+  // one visual instant — it spreads across many windows at a decaying rate.
+  // The proportional controller deliberately swells right after a flush
+  // (that IS the catch-up), so the bound is against the flush size, not the
+  // mean: no 100ms window may paint more than half a flush.
+  assert.ok(max <= 120, `a 240ch flush must spread across windows: max window ${max}ch (mean ${mean.toFixed(1)}ch)`);
+  // While the pacer owes text, every 100ms window makes visible progress —
+  // zero-progress windows may only be the genuinely-starved silence gaps.
+  let starved = 0;
+  for (const [, d] of windows) if (d === 0) starved += 1;
+  assert.ok(starved <= 12, `stalled windows only where the buffer is truly empty, got ${starved}`);
+});

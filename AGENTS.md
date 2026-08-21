@@ -23,6 +23,18 @@ Lint: `npm run lint`
 The dev server needs the `omp` binary installed (on `PATH`, or set `CODY_OMP_BIN`).
 All live-agent features go through it; session browsing works without it.
 
+## Improving Cody with Cody (self-development)
+
+Cody is developed through Cody: the agent reading this may be running inside
+the app it is editing, with Cody's host tools available (`open_preview`,
+`preview_screenshot`, `read_app_logs`) to see and verify its own work. This is
+intended — use it. The playbook, including the do-not-kill-your-own-session
+rule and how to verify on an isolated second instance, is the committed skill
+`.claude/skills/improving-cody/SKILL.md` (discovered by Claude Code natively
+and by omp via its `.claude` compat provider). Priorities when changing this
+codebase: stability first (every push to `main` is a release), then
+robustness, then flexibility — never bind engine-neutral code to one engine.
+
 ---
 
 ## Architecture
@@ -100,7 +112,7 @@ app/api/
   projects/route.ts               GET registered+discovered projects | POST add | DELETE hide
   skills/route.ts                 GET/PATCH loaded skills and disable-model-invocation
   skills/install/route.ts         POST install skills through npx skills add
-  skills/search/route.ts          GET/POST skills.sh search
+  skills/store/route.ts           GET browse/search/detail | POST card descriptions (skills.sh registry)
   worktrees/route.ts              GET/POST/DELETE git worktrees
 
 lib/
@@ -137,7 +149,12 @@ lib/
   rpc-manager.ts       session registry + startRpcSession over RpcProcess
   session-reader.ts    session .jsonl parsing + path cache + buildSessionContext
   skills-service.ts    pure-Node skill discovery mirroring omp's providers
+  skills-registry.ts   client for the public skills.sh registry endpoints (the
+                       same ones `npx skills` uses): category browse, fuzzy/
+                       semantic search, cached SKILL.md detail extraction
   storage-keys.ts      the cody: browser-storage namespace + legacy migration
+  stream-tuning.ts     tunable streaming pacing/motion params: defaults, clamping,
+                       CSS-var diffing, localStorage store (playground: /dev/stream-tuner)
   workspace-tasks.ts   .cody/tasks.json schema validation + grouping
   tool-presets.ts      PRESET_NONE/DEFAULT/FULL + getPresetFromTools()
   types.ts             shared TypeScript types
@@ -172,7 +189,9 @@ components/
   ModelsConfig.tsx    modal for models/auth configuration
   McpConfig.tsx       project MCP server editor (Settings → MCP tab)
   PluginsConfig.tsx   modal for installed plugins
-  SkillsConfig.tsx    modal for loaded/search/installable skills
+  SkillsConfig.tsx    modal for loaded/installable skills; opens SkillsStore
+  SkillsStore.tsx     skill store dialog: skills.sh browse/search/detail/install
+                      (opened from SkillsConfig and the System & Updates card)
   FileExplorer.tsx    file tree inside sidebar
   FileViewer.tsx      file content in a tab
   TabBar.tsx          tab bar (Chat + open file tabs)
@@ -185,6 +204,7 @@ hooks/
   useDisplayRequests.ts    display-request SSE → snapshot/live request state
   useIsMobile.ts           responsive breakpoint hook
   usePrefersReducedMotion.ts OS reduce-motion preference (SMIL-safe)
+  useStreamTuning.tsx      live StreamTuning: playground context override, else the stored value
   useTheme.ts              theme state (localStorage key "omp-theme")
 
 bin/
@@ -234,6 +254,13 @@ is a reserved seam if per-uid isolation is ever wanted.
   native dialog over the login screen). Public paths: `/login`,
   `/api/accounts/{state,login,signup}`, hashed `_next` assets. The WS upgrade
   gate in `bin/cody-server.js` accepts the same two credentials.
+  The cross-site guard (`lib/request-security.ts`, applied to every route)
+  rejects cross-site `fetch()`/XHR and non-GET navigations (form-post CSRF)
+  but ALLOWS cross-site GET/HEAD navigations — links into Cody, the preview
+  gateway's iframe, detach-to-tab. Navigating is how browsers arrive
+  anywhere, mutating GETs are bugs by contract, and the SameSite=Lax session
+  cookie stays off cross-site iframe loads regardless. Before this exemption,
+  ANY cross-site link into Cody answered a bare 403 JSON.
 - Session privacy: `lib/auth/session-owners.ts` sidecar maps omp session id →
   account id (omp owns the JSONL files, so ownership cannot live inside them).
   Owned sessions are visible only to their owner (admins included); unowned
@@ -448,8 +475,21 @@ appears without a Cody change.
      `127.0.0.1` may get an opaque success from an unrelated local app and
      frame the wrong thing.
   2. `native` — the `CODY_PREVIEW_BASE_URL` wildcard-subdomain HTTP+WS reverse
-     proxy, which strips cookies/auth headers so the iframe never carries Cody
-     credentials into the dev server. Only present when configured.
+     proxy. It strips credentials in BOTH directions (cookie/authorization on
+     the way in, set-cookie on the way out) so the iframe never carries Cody
+     credentials into the dev server and the dev server can never plant
+     cookies on the preview domain — and it strips `X-Frame-Options` + the
+     `frame-ancestors` directive from responses it re-serves under its token
+     origin, so ANY target (a frame-guarded Cody dev server included) is
+     frameable through it, like any port-forwarding preview proxy. Only
+     present when configured, and only minted when a server-side cookie-less
+     probe gets a 2xx (`gatewayRenderable`): an auth-gated target could at
+     most render a login form whose session cookie the gateway discards — a
+     dead end, so it rides the streamed rung instead. **Do NOT "fix"
+     auth-gated gateway targets by passing set-cookie through** (cookie
+     tossing / session fixation against Cody itself); run the dev server
+     without auth instead — a bare `npm run dev` with no accounts is already
+     open. Covered by `lib/native-gateway.test.mjs`.
   3. `stream` — always last, always present: a server-side Chromium
      (`CODY_CHROMIUM_BIN`, puppeteer-core, CDP screencast) renders the URL and
      ships JPEG frames + pointer/keyboard input over the
@@ -777,6 +817,7 @@ handled or safely ignored.
 - `/api/skills` uses `lib/skills-service.ts`, a pure-Node scanner mirroring omp's discovery order: project `.omp/skills` (walk-up), `~/.omp/agent/skills`, then the `.claude` / `.agent(s)` / `.codex` / `.github` compat dirs and managed skills.
 - Skill toggling edits only the `disable-model-invocation` frontmatter key on the target `SKILL.md`; keep that surgical so user formatting survives.
 - `/api/skills/install` shells through `npx skills add ... --agent universal`, which installs into the ecosystem-standard `.agents/skills` dirs omp reads; project installs run with the selected cwd.
+- The skill store (`components/SkillsStore.tsx`, `/api/skills/store`, `lib/skills-registry.ts`) talks to skills.sh's public endpoints — `/api/search` (fuzzy for one word, semantic over descriptions for phrases) and `/api/download/{owner}/{repo}/{slug}` for SKILL.md details. The documented `/api/v1/*` surface needs a Vercel OIDC token, so browse views are category-seeded searches, never a scraped ranking. Well-known (non-GitHub) sources install as whole-provider bundles (`https://<domain>`) because the CLI has no per-skill selector for them; the UI says so.
 
 ### Update notifications (`/api/omp-update`, `/api/app-update`)
 - Automatic in-app self-updating has been removed in favor of explicit user notifications and manual terminal commands.

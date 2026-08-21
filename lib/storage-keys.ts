@@ -42,6 +42,8 @@ export const STORAGE_KEYS = {
   terminalSoftKeysVisible: "cody:terminal-soft-keys",
   /** Individual buttons shown in the terminal soft-key toolbar. */
   terminalSoftKeyIds: "cody:terminal-soft-key-ids",
+  /** Stream pacing parameters (JSON-serialized StreamTuning). */
+  streamTuning: "cody:stream-tuning",
 } as const;
 
 /** localStorage prefixes completed with a workspace path. */
@@ -64,6 +66,7 @@ export const STORAGE_EVENTS = {
   composerModelsChange: "cody:composer-models-change",
   soundPrefChange: "cody:sound-pref-change",
   terminalSoftKeysChange: "cody:terminal-soft-keys-change",
+  streamTuningChange: "cody:stream-tuning-change",
 } as const;
 
 /**
