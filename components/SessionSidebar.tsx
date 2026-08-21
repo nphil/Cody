@@ -12,7 +12,7 @@ import { Tooltip } from "./ui/primitives";
 import { toast } from "./ui/toast";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { clearLastOpenSession, setLastOpenSession, workspaceKeyOf } from "@/lib/workspace-memory";
-import { groupSessionsByProject, projectActivityCounts, sortManagedProjects } from "@/lib/project-ordering";
+import { groupSessionsByProject, projectActivityCounts, retainPendingSessions, sortManagedProjects } from "@/lib/project-ordering";
 import { comparableProjectPath } from "@/lib/comparable-path";
 import { Check, ChevronDown, ChevronRight, FilePlus, FileUp, Folder, FolderPlus, GitBranch, MoreHorizontal, Plus, RefreshCw, Search, SlidersHorizontal, Trash2, Upload } from "lucide-react";
 import { STORAGE_KEYS } from "@/lib/storage-keys";
@@ -111,6 +111,10 @@ const EXPANDED_PROJECTS_STORAGE_KEY = STORAGE_KEYS.expandedProjects;
 
 /** Shared empty set for the no-stored-expansion default (never mutated). */
 const EMPTY_PROJECT_SET: ReadonlySet<string> = new Set();
+
+/** Shared empty list so the "no pending sessions" case keeps a stable
+ *  identity and never busts the memos derived from it (never mutated). */
+const NO_SESSIONS: readonly SessionInfo[] = [];
 
 /** Persisted expanded-project paths. Returns null when nothing was stored —
  *  the sidebar then defaults to expanding only the active project. */
@@ -840,24 +844,39 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
     return () => { cancelled = true; };
   }, [selectedCwd, wtRefreshKey, refreshKey]);
 
-  // Keep a just-created session and its project visible while omp is still
-  // flushing the JSONL file. The server list remains authoritative once it
-  // contains the same id.
-  const optimisticProjectRoot = optimisticSession
-    ? optimisticSession.projectRoot ?? projectRootFor(optimisticSession.cwd) ?? optimisticSession.cwd
-    : null;
-  const visibleSessions = useMemo(() => {
-    if (!optimisticSession || allSessions.some((session) => session.id === optimisticSession.id)) {
-      return allSessions;
-    }
-    return [...allSessions, { ...optimisticSession, projectRoot: optimisticProjectRoot ?? optimisticSession.cwd }];
-  }, [allSessions, optimisticProjectRoot, optimisticSession]);
+  // Keep every just-created session and its project visible while the engine
+  // is still flushing its JSONL file. The server list stays authoritative:
+  // an entry is dropped as soon as the list reports the same id. See
+  // retainPendingSessions for why these accumulate instead of tracking only
+  // the selected session.
+  const [pendingSessions, setPendingSessions] = useState<readonly SessionInfo[]>(NO_SESSIONS);
+  useEffect(() => {
+    setPendingSessions((prev) => retainPendingSessions(prev, optimisticSession, allSessions));
+  }, [allSessions, optimisticSession]);
+
+  // Filtered against allSessions at render time, not just in the effect above:
+  // state settles one render later, and a duplicate id would collide keys.
+  const extraSessions = useMemo(() => {
+    if (pendingSessions.length === 0) return NO_SESSIONS;
+    const known = new Set(allSessions.map((session) => session.id));
+    const extra = pendingSessions
+      .filter((session) => !known.has(session.id))
+      .map((session) => ({
+        ...session,
+        projectRoot: session.projectRoot ?? projectRootFor(session.cwd) ?? session.cwd,
+      }));
+    return extra.length === 0 ? NO_SESSIONS : extra;
+  }, [allSessions, pendingSessions, projectRootFor]);
+  const visibleSessions = useMemo(
+    () => (extraSessions.length === 0 ? allSessions : [...allSessions, ...extraSessions]),
+    [allSessions, extraSessions],
+  );
   const visibleProjects = useMemo(() => {
-    if (!optimisticProjectRoot || projects.some((project) => project.path === optimisticProjectRoot)) {
-      return projects;
-    }
-    return [...projects, { path: optimisticProjectRoot }];
-  }, [optimisticProjectRoot, projects]);
+    if (extraSessions.length === 0) return projects;
+    const roots = [...new Set(extraSessions.map((session) => session.projectRoot).filter((root): root is string => !!root))]
+      .filter((root) => !projects.some((project) => project.path === root));
+    return roots.length === 0 ? projects : [...projects, ...roots.map((path) => ({ path }))];
+  }, [extraSessions, projects]);
 
   // ---- Derived project list ---------------------------------------------------
   const selectedProject = useMemo(() => projectRootFor(selectedCwd), [projectRootFor, selectedCwd]);

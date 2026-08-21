@@ -82,3 +82,32 @@ export function groupSessionsByProject(
   }
   return grouped;
 }
+
+/** The just-created sessions that must stay listed even though the server
+ *  cannot report them yet. A new session has no transcript file until its
+ *  first message is persisted (seconds after the run starts, and unbounded in
+ *  principle), so until then it exists only in the client's hands.
+ *
+ *  `incoming` is the session the shell currently knows about — only ever the
+ *  selected one. Retaining it here is what makes the row survive switching to
+ *  another session mid-run: without accumulation the row vanished the moment
+ *  it stopped being selected, and came back only when the run ended and the
+ *  session-list invalidation finally saw the file.
+ *
+ *  The server list is authoritative: an id it reports is dropped from the
+ *  pending set. Returns `pending` unchanged (same identity) when nothing
+ *  moved, so callers can store this in state without looping — the session
+ *  list is replaced on every refresh. */
+export function retainPendingSessions(
+  pending: readonly SessionInfo[],
+  incoming: SessionInfo | null | undefined,
+  sessions: readonly SessionInfo[],
+): readonly SessionInfo[] {
+  const known = new Set<string>();
+  for (const session of sessions) known.add(session.id);
+  const next = pending.filter((session) => !known.has(session.id));
+  if (incoming && !known.has(incoming.id) && !next.some((session) => session.id === incoming.id)) {
+    next.push(incoming);
+  }
+  return next.length === pending.length && next.every((session, i) => session === pending[i]) ? pending : next;
+}

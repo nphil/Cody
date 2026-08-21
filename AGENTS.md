@@ -786,6 +786,17 @@ handled or safely ignored.
   compaction, renames) must therefore ALSO clear the walk cache via
   `invalidateSessionFileListCache()` — never add a session-mutation path that
   forgets this. Regression test: `session-reader.test.mjs`.
+- **No cache fixes a file that does not exist yet.** A brand-new session has
+  no `.jsonl` until its first message is *persisted* — measured at ~5s after
+  `agent_start` against omp, and unbounded in principle. Until then the
+  session cannot be listed from disk at all, so the sidebar's row exists only
+  client-side. `retainPendingSessions()` (`lib/project-ordering.ts`) keeps
+  those rows until the server list reports the same id; the sidebar
+  accumulates them rather than rendering only the selected one, which is what
+  makes a new session survive the user switching away mid-run. The server
+  side still self-heals separately: `signalWhenSessionFileAppears()` in
+  `lib/rpc-manager.ts` polls for the file after `agent_start` and re-signals
+  the sidebar once it lands.
 
 ### Chat scroll-follow
 - `useAgentSession` follows the conversation: the effect depends on both
