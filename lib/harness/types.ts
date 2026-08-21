@@ -108,6 +108,46 @@ export interface EngineSession {
   destroyPromise: Promise<void> | null;
 }
 
+/**
+ * How to spawn and drive an engine that speaks the pi/omp NDJSON RPC dialect
+ * (one JSON object per line over stdio). omp and its ancestor pi share the
+ * protocol but differ in CLI surface and in which commands exist; this
+ * descriptor states those differences as data so rpc-manager stays one
+ * pipeline. Engines with `createSession` (turn-based CLIs) never use it.
+ */
+export interface RpcUiSpawn {
+  /** Value passed to `--mode` ("rpc-ui" for omp, "rpc" for pi). */
+  readonly mode: string;
+  /** Flag that opens a session file deterministically ("--resume" for omp,
+   * "--session" for pi — pi's own --resume is a boolean picker). */
+  readonly resumeFlag: string;
+  /** Whether the CLI accepts `--cwd <dir>`. pi has no such flag (unknown
+   * flags are silently swallowed); it inherits the spawn cwd instead. */
+  readonly supportsCwdFlag: boolean;
+  /** Whether `--advisor` exists (omp-only). */
+  readonly supportsAdvisor: boolean;
+  /** Whether `set_host_tools` / `host_tool_call` exist in the protocol. */
+  readonly hostTools: boolean;
+  /** Whether `set_subagent_subscription` / subagent frames exist. */
+  readonly subagentEvents: boolean;
+  /**
+   * How the child signals readiness. omp prints `{type:"ready"}` before
+   * accepting commands; pi prints nothing and simply starts reading stdin —
+   * its readiness signal is the response to the first command, which sits
+   * safely in the pipe buffer until pi attaches its reader.
+   */
+  readonly readiness: "ready-frame" | "first-response";
+  /**
+   * Engine RPC command vocabulary, when it is a strict subset of omp's.
+   * Commands outside the set are rejected Cody-side with code "unsupported"
+   * (which the UI tolerates by design) instead of being written to the
+   * child — pi answers unknown commands with an id-less error response that
+   * can never settle the pending request, i.e. a silent hang. Absent means
+   * unrestricted (omp).
+   */
+  readonly commands?: ReadonlySet<string>;
+}
+
 export interface HarnessAdapter {
   /** Stable id, also the CODY_HARNESS value that selects this adapter. */
   readonly id: string;
@@ -140,9 +180,12 @@ export interface HarnessAdapter {
   /** Root directory that holds per-project session transcripts. */
   getSessionsDir(): string;
   /**
-   * Live-chat factory for engines that do not speak omp's rpc-ui protocol.
-   * omp itself has no createSession — rpc-manager owns its bespoke path and
-   * treats the absence of this field as "use the omp pipeline".
+   * Live-chat factory for engines that do not speak the pi/omp RPC dialect.
+   * Exactly one of `createSession` / `rpcUi` must be present: turn-based
+   * engines implement createSession; rpc-dialect engines describe their CLI
+   * with rpcUi and ride rpc-manager's pipeline.
    */
   createSession?(options: EngineSessionOptions): EngineSession;
+  /** RPC-dialect spawn descriptor (omp, pi). See RpcUiSpawn. */
+  readonly rpcUi?: RpcUiSpawn;
 }

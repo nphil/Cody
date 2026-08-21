@@ -26,4 +26,13 @@ export const ompHarness: HarnessAdapter = {
   getVersion: () => getOmpVersion(),
   getAgentDir: () => getAgentDir(),
   getSessionsDir: () => path.join(getAgentDir(), "sessions"),
+  rpcUi: {
+    mode: "rpc-ui",
+    resumeFlag: "--resume",
+    supportsCwdFlag: true,
+    supportsAdvisor: true,
+    hostTools: true,
+    subagentEvents: true,
+    readiness: "ready-frame",
+  },
 };

@@ -1,5 +1,6 @@
 import { existsSync, statSync } from "fs";
 import { normalize as normalizePath } from "path";
+import { getHarness } from "./harness";
 import { getAgentDir } from "./omp/paths";
 import {
   invalidateSessionFileListCache,
@@ -44,7 +45,14 @@ function matchParentSessionId(
 }
 
 async function loadAllSessions(): Promise<SessionInfo[]> {
-  const ompSessions: OmpSessionInfo[] = await listAllSessionInfos();
+  // The active engine decides where session transcripts live: omp and pi
+  // write the same .jsonl format into different roots (~/.omp/agent/sessions
+  // vs ~/.pi/agent/sessions). Turn-based engines (createSession) never reach
+  // this walk through the sessions route, but other callers (file-access
+  // roots) still get omp's root as the default.
+  const harness = getHarness();
+  const sessionsRoot = harness.rpcUi ? harness.getSessionsDir() : undefined;
+  const ompSessions: OmpSessionInfo[] = await listAllSessionInfos(sessionsRoot);
   const pathToId = new Map<string, string>();
   const knownIds = new Set<string>();
   for (const s of ompSessions) {

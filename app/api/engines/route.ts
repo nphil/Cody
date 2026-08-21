@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
+import { isAbsolute, relative } from "path";
 import { requireUser } from "@/lib/auth/http";
 import { getHarness, listHarnesses } from "@/lib/harness";
+import { getToolsDir } from "@/lib/harness/engine-bin";
 import { isEngineInstalling } from "@/lib/harness/install";
 import { isEngineOnboarded, isSetupWizardDone } from "@/lib/harness/state";
 
@@ -18,27 +20,39 @@ export async function GET(request: Request) {
   if ("response" in resolved) return resolved.response;
 
   const adapters = listHarnesses();
+  const toolsDir = getToolsDir();
   // Version probes shell out to each binary; run them together so the picker
   // is not serialized behind three CLI startups.
   const versions = await Promise.all(adapters.map((adapter) => adapter.getVersion()));
 
   return NextResponse.json(
     {
-      engines: adapters.map((adapter, index) => ({
-        id: adapter.id,
-        name: adapter.displayName,
-        shortName: adapter.shortName,
-        tagline: adapter.tagline,
-        experimental: adapter.experimental === true,
-        installed: adapter.resolveBinary() !== null,
-        // A truthful "still running" so a reloaded page can reattach to the
-        // install (via the events route) instead of showing a dead button.
-        installing: isEngineInstalling(adapter.id),
-        version: versions[index],
-        installable: Boolean(adapter.installSpec),
-        authHint: adapter.authHint ?? null,
-        binaryName: adapter.binaryName,
-      })),
+      engines: adapters.map((adapter, index) => {
+        const binPath = adapter.resolveBinary();
+        const insideTools = binPath !== null && (() => {
+          const rel = relative(toolsDir, binPath);
+          return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+        })();
+        return {
+          id: adapter.id,
+          name: adapter.displayName,
+          shortName: adapter.shortName,
+          tagline: adapter.tagline,
+          experimental: adapter.experimental === true,
+          installed: binPath !== null,
+          // A truthful "still running" so a reloaded page can reattach to the
+          // install (via the events route) instead of showing a dead button.
+          installing: isEngineInstalling(adapter.id),
+          version: versions[index],
+          installable: Boolean(adapter.installSpec),
+          // Cody npm-installed this binary into its own tools prefix, so Cody
+          // can also uninstall it. A PATH or env-override install is the
+          // operator's, not ours.
+          managed: insideTools && Boolean(adapter.installSpec),
+          authHint: adapter.authHint ?? null,
+          binaryName: adapter.binaryName,
+        };
+      }),
       active: getHarness().id,
       onboarded: isEngineOnboarded(),
       setupDone: isSetupWizardDone(),

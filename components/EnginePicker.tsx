@@ -32,6 +32,9 @@ export interface EngineSummary {
   version: string | null;
   /** Cody can npm-install this engine itself. */
   installable: boolean;
+  /** Cody itself installed the resolved binary into its tools prefix, so
+   * Cody can also uninstall it. False for PATH/env-override installs. */
+  managed: boolean;
   /** English sentence from the adapter; not a translation key. */
   authHint: string | null;
   binaryName: string;

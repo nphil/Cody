@@ -71,13 +71,15 @@ export function getEngineVersion(binaryName: string, envSuffix: string): Promise
   const bin = resolveEngineBin(binaryName, envSuffix);
   if (!bin) return Promise.resolve(null);
   const { promise, resolve } = Promise.withResolvers<string | null>();
-  execFile(bin, ["--version"], { timeout: VERSION_TIMEOUT_MS }, (error, stdout) => {
+  execFile(bin, ["--version"], { timeout: VERSION_TIMEOUT_MS }, (error, stdout, stderr) => {
     if (error) {
       versionCache.set(binaryName, { version: null, missAt: Date.now() });
       resolve(null);
       return;
     }
-    const version = matchVersion(String(stdout)) ?? (String(stdout).trim() || null);
+    // pi prints its version to stderr; the clean exit above is what proves
+    // the binary ran, so on success either stream may carry the number.
+    const version = matchVersion(String(stdout)) ?? matchVersion(String(stderr)) ?? (String(stdout).trim() || null);
     versionCache.set(binaryName, { version, missAt: version ? 0 : Date.now() });
     resolve(version);
   });
@@ -111,12 +113,12 @@ export function probeEngineVersion(
   execFile(binaryPath, ["--version"], { timeout: VERSION_TIMEOUT_MS }, (error, stdout, stderr) => {
     const out = String(stdout ?? "");
     const err = String(stderr ?? "");
-    // Exit status decides whether the binary ran, stdout only supplies the
-    // number: a version printed alongside warnings on stderr still counts,
-    // while a failing CLI that names a package version in its diagnostic
-    // must not have that number read back as the installed version.
+    // Exit status decides whether the binary ran: a failing CLI that names a
+    // package version in its diagnostic must not have that number read back
+    // as the installed version. On a clean exit either stream may carry it —
+    // pi versions to stderr, omp/claude/codex to stdout.
     if (!error) {
-      const version = matchVersion(out) ?? (out.trim() || null);
+      const version = matchVersion(out) ?? matchVersion(err) ?? (out.trim() || null);
       if (version) {
         resolve({ version, error: null });
         return;

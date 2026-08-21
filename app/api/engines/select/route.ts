@@ -2,6 +2,7 @@ import { jsonError, requireAdmin } from "@/lib/auth/http";
 import { parseJsonWithinLimit } from "@/lib/bounded-form-data";
 import { getHarness, getHarnessById, selectHarness } from "@/lib/harness";
 import { restartAllRpcSessions } from "@/lib/rpc-manager";
+import { invalidateSessionListCache } from "@/lib/session-reader";
 import { GET as getEngines } from "../route";
 
 /**
@@ -48,6 +49,10 @@ export async function POST(request: Request) {
   }
 
   selectHarness(adapter.id);
+  // The sidebar's session list is sourced from the ACTIVE engine's sessions
+  // root (or its engine-session index); a cached list from the old engine
+  // must not survive the switch.
+  invalidateSessionListCache();
   if (!reaffirming) {
     try {
       await restartAllRpcSessions();

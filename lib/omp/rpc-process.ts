@@ -50,11 +50,32 @@ interface PendingCommand {
   timer?: NodeJS.Timeout;
 }
 
+export interface RpcProcessLaunch {
+  /** Absolute binary path. */
+  bin: string;
+  /** Engine name for error messages ("pi"). Defaults to "omp". */
+  label?: string;
+  /** Complete argv (mode flag included) — replaces the omp default. */
+  args: string[];
+  /**
+   * "ready-frame": the child prints `{type:"ready"}` before accepting
+   * commands (omp). "first-response": the child prints nothing at startup
+   * and readiness is the response to an immediately-sent `get_state` — the
+   * command waits in the pipe buffer until the child attaches its stdin
+   * reader (pi).
+   */
+  readiness: "ready-frame" | "first-response";
+}
+
 export interface RpcProcessOptions {
   /** Working directory for the agent (also passed as --cwd). */
   cwd: string;
-  /** Extra CLI args appended after the base `--mode rpc-ui --cwd <cwd>`. */
+  /** Extra CLI args appended after the base `--mode rpc-ui --cwd <cwd>`.
+   * Ignored when `launch` is present (its args are complete). */
   extraArgs?: string[];
+  /** Engine launch override (binary + argv + readiness). Absent means the
+   * default: the installed omp in rpc-ui mode. */
+  launch?: RpcProcessLaunch;
   /** Environment overrides merged over process.env. */
   env?: Record<string, string>;
   /** Called for every non-response frame (events, extension UI, subagent frames). */
@@ -82,22 +103,33 @@ export class RpcProcess {
   private exitInfo: { code: number | null; signal: NodeJS.Signals | null } | null = null;
   private protocolVersion: RpcProtocolVersion = 1;
   private readonly spawnProcess: typeof spawn;
+  /** Engine name for error messages ("omp" unless the launch overrides it). */
+  private readonly label: string;
   // Serializes physical stdin writes so commands reach omp in the order their
   // callers issued them, and so a write error is reported to the frame that
   // caused it. Each logical frame is enqueued whole.
   private writeQueue: Promise<void> = Promise.resolve();
 
   constructor(options: RpcProcessOptions) {
-    const resolveBin = options.dependencies?.resolveOmpBin ?? resolveOmpBin;
     this.spawnProcess = options.dependencies?.spawn ?? spawn;
-    const bin = resolveBin();
-    if (!bin) {
-      throw new Error("omp binary not found. Install oh-my-pi or set CODY_OMP_BIN.");
+    this.label = options.launch?.label ?? "omp";
+    let bin: string;
+    let args: string[];
+    if (options.launch) {
+      bin = options.launch.bin;
+      args = options.launch.args;
+    } else {
+      const resolveBin = options.dependencies?.resolveOmpBin ?? resolveOmpBin;
+      const resolved = resolveBin();
+      if (!resolved) {
+        throw new Error("omp binary not found. Install oh-my-pi or set CODY_OMP_BIN.");
+      }
+      bin = resolved;
+      args = ["--mode", "rpc-ui", "--cwd", options.cwd, ...(options.extraArgs ?? [])];
     }
     this.cwd = options.cwd;
     if (options.onFrame) this.frameListeners.add(options.onFrame);
 
-    const args = ["--mode", "rpc-ui", "--cwd", options.cwd, ...(options.extraArgs ?? [])];
     this.child = this.spawnProcess(bin, args, {
       cwd: options.cwd,
       env: { ...process.env, ...options.env },
@@ -119,6 +151,16 @@ export class RpcProcess {
     // waitReady() is optional for callers; avoid unhandled-rejection noise when
     // the process dies before anyone awaited readiness.
     this.readyPromise.catch(() => {});
+    if (options.launch?.readiness === "first-response") {
+      // The child prints no ready frame (pi). Probe it: this command sits in
+      // the pipe buffer until the child attaches its stdin reader, so there
+      // is no startup race, and its response is the readiness signal. A dead
+      // child rejects readyPromise through finalize() as usual.
+      void this.sendCommand({ type: "get_state" }).then(
+        () => resolveReady({ type: "ready" }),
+        () => {},
+      );
+    }
 
     const decoder = new RpcFrameDecoder();
     const rl = createInterface({ input: this.child.stdout });
@@ -171,7 +213,7 @@ export class RpcProcess {
       this.exited = true;
       this.exitInfo = { code, signal };
       const exitError = new Error(
-        `omp exited (code ${code ?? "null"}, signal ${signal ?? "none"})${this.stderrTail ? `: ${this.stderrTail.slice(-500)}` : ""}`,
+        `${this.label} exited (code ${code ?? "null"}, signal ${signal ?? "none"})${this.stderrTail ? `: ${this.stderrTail.slice(-500)}` : ""}`,
       );
       rejectReady(exitError);
       for (const [, entry] of this.pending) {
@@ -200,7 +242,7 @@ export class RpcProcess {
    * timeout elapses. omp startup can take a few seconds (extensions, LSP). */
   waitReady(timeoutMs = 60_000): Promise<RpcFrame> {
     const timeout = new Promise<never>((_, reject) => {
-      const timer = setTimeout(() => reject(new Error(`omp RPC ready timeout after ${timeoutMs}ms`)), timeoutMs);
+      const timer = setTimeout(() => reject(new Error(`${this.label} RPC ready timeout after ${timeoutMs}ms`)), timeoutMs);
       timer.unref?.();
       this.readyPromise.finally(() => clearTimeout(timer)).catch(() => {});
     });
@@ -239,7 +281,7 @@ export class RpcProcess {
    * keeps the event loop alive on its own. */
   sendCommand<T = unknown>(command: { type: string; [key: string]: unknown }, timeoutMs?: number): Promise<T> {
     if (this.exited) {
-      return Promise.reject(new Error("omp RPC process has exited"));
+      return Promise.reject(new Error(`${this.label} RPC process has exited`));
     }
     const id = `w${this.nextId++}`;
     return new Promise<T>((resolve, reject) => {

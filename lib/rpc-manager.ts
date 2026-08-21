@@ -4,13 +4,13 @@ import { renameSessionOwner } from "./auth/session-owners";
 import { aliasDisplaySession, publishDisplayRequest } from "./display/bus";
 import { isLoopbackHost } from "./display/ladder";
 import { getHarness } from "./harness";
-import type { EngineSession, EngineSessionOptions } from "./harness/types";
+import type { EngineSession, EngineSessionOptions, HarnessAdapter, RpcUiSpawn } from "./harness/types";
 import { validateAgentImages } from "./image-attachments";
 import { APP_LOG_SHADOW_NOTE, DEFAULT_LIMIT, MAX_LIMIT, appLogNotice, formatAppLogDigest, markAppLogsRead, parseSince, readAppLogs } from "./logs/ring";
 import { APP_LOG_LEVELS, type AppLogQuery } from "./logs/types";
 import { invalidateModelsCache } from "./models-cache";
 import { MAX_RPC_FRAME_BYTES } from "./omp/rpc-frame";
-import { RpcCommandError, RpcProcess, type RpcFrame } from "./omp/rpc-process";
+import { RpcCommandError, RpcProcess, type RpcFrame, type RpcProcessLaunch } from "./omp/rpc-process";
 import { readNativeSettings } from "./omp/settings-config";
 import { captureLoopbackScreenshot, ScreenshotError } from "./preview-screenshot";
 import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
@@ -149,6 +149,17 @@ const PASSTHROUGH_COMMANDS = new Set([
   "login",
 ]);
 
+// Commands the wrapper settles locally (or forwards conditionally) — exempt
+// from the engine RPC-vocabulary gate below, because rejecting them would
+// break wrapper-level features that need no engine support.
+const LOCAL_WRAPPER_COMMANDS = new Set([
+  "reload",
+  "set_host_tools",
+  "set_host_uri_schemes",
+  "host_tool_result",
+  "host_uri_result",
+]);
+
 // pi-web commands with no omp RPC equivalent. The UI tolerates these failing.
 const UNSUPPORTED_COMMANDS: Record<string, string> = {
   navigate_tree: "Branch navigation is not supported over the omp RPC protocol",
@@ -213,28 +224,62 @@ export function mapPresetToolNames(toolNames: string[]): string[] {
 
 const FULL_PRESET_KEY = [...PRESET_FULL].map((n) => n.toLowerCase()).sort().join(",");
 
-/** Extra CLI args for spawning `omp --mode rpc-ui` for a session. */
-export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[], advisor = false): string[] {
+/** The CLI-surface facts arg building needs; omp's defaults keep the historic
+ * three-argument call sites (and their tests) intact. */
+type RpcSpawnFlags = Pick<RpcUiSpawn, "resumeFlag" | "supportsAdvisor">;
+const OMP_SPAWN_FLAGS: RpcSpawnFlags = { resumeFlag: "--resume", supportsAdvisor: true };
+
+/** Session CLI args for spawning an rpc-dialect engine (after the mode/cwd base). */
+export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[], advisor = false, flags: RpcSpawnFlags = OMP_SPAWN_FLAGS): string[] {
   const args: string[] = [];
   if (sessionFile) {
     // An absolute path (or anything containing "/") resolves deterministically:
     // omp's createSessionManager opens it directly via SessionManager.open
     // without any interactive resume/fork prompts (main.ts resume handling).
-    args.push("--resume", sessionFile);
+    // pi's --session flag has the same SessionManager.open semantics.
+    args.push(flags.resumeFlag, sessionFile);
   } else if (toolNames !== undefined) {
     const presetKey = toolNames.map((n) => n.toLowerCase()).sort().join(",");
     if (toolNames.length === 0) {
       args.push("--no-tools");
     } else if (presetKey === FULL_PRESET_KEY) {
-      // "Full" means everything: leave omp's complete default toolset intact
-      // rather than restricting it to the (much smaller) pi preset list.
+      // "Full" means everything: leave the engine's complete default toolset
+      // intact rather than restricting it to the (much smaller) preset list.
     } else {
       const mapped = mapPresetToolNames(toolNames);
       if (mapped.length > 0) args.push("--tools", mapped.join(","));
     }
   }
-  if (advisor && !sessionFile) args.push("--advisor");
+  if (flags.supportsAdvisor && advisor && !sessionFile) args.push("--advisor");
   return args;
+}
+
+/**
+ * Complete launch (binary + argv + readiness) for an rpc-dialect engine
+ * session — the harness's RpcUiSpawn descriptor decides the CLI surface.
+ * `sessionFile: ""` means a brand-new session.
+ */
+export function buildEngineRpcLaunch(
+  harness: HarnessAdapter,
+  opts: { cwd: string; sessionFile: string; toolNames?: string[]; advisor?: boolean },
+): RpcProcessLaunch {
+  const spec = harness.rpcUi;
+  if (!spec) {
+    throw new WebRpcError(`${harness.displayName} does not speak the RPC session protocol`, "engine_mismatch");
+  }
+  const bin = harness.resolveBinary();
+  if (!bin) {
+    throw new WebRpcError(
+      `${harness.binaryName} binary not found. Install ${harness.displayName} from Settings → User Accounts → Agent engine, or set CODY_${harness.binaryName.toUpperCase()}_BIN.`,
+      "engine_not_installed",
+    );
+  }
+  const args = ["--mode", spec.mode];
+  // Engines without a --cwd flag (pi) inherit the spawn cwd, which RpcProcess
+  // always sets; passing the flag anyway would be silently swallowed.
+  if (spec.supportsCwdFlag) args.push("--cwd", opts.cwd);
+  args.push(...buildSessionSpawnArgs(opts.sessionFile, opts.toolNames, opts.advisor === true, spec));
+  return { bin, label: harness.binaryName, args, readiness: spec.readiness };
 }
 
 function toImageContents(value: unknown): Array<{ type: "image"; data: string; mimeType: string }> | undefined {
@@ -272,9 +317,21 @@ function patchEstimatedTokensAfter(result: unknown): void {
 
 // ============================================================================
 // AgentSessionWrapper
-// Wraps one spawned `omp --mode rpc-ui` process with the interface the rest of
-// the app expects (same command surface pi-web's in-process wrapper offered).
+// Wraps one spawned rpc-dialect engine process (`omp --mode rpc-ui`,
+// `pi --mode rpc`) with the interface the rest of the app expects (same
+// command surface pi-web's in-process wrapper offered).
 // ============================================================================
+
+/** Engine facts a wrapper needs beyond the live process: the CLI descriptor
+ * (command gating, host-tool/subagent availability) and how to rebuild the
+ * launch for an in-place restart (`reload`). */
+export interface WrapperEngineContext {
+  rpcUi: RpcUiSpawn;
+  /** Engine name for user-facing messages ("omp", "pi"). */
+  label: string;
+  /** Rebuilds the launch for a restart; "" means start a fresh session. */
+  relaunch: (sessionFile: string) => RpcProcessLaunch;
+}
 
 export class AgentSessionWrapper {
   private listeners: EventListener[] = [];
@@ -312,11 +369,14 @@ export class AgentSessionWrapper {
   private proc: RpcProcess;
   readonly cwd: string;
 
+  private readonly engine: WrapperEngineContext;
+
   // Plain field assignments (not TS parameter properties) keep this module
   // runnable under Node's strip-only TypeScript mode for probes/tests.
-  constructor(proc: RpcProcess, cwd: string) {
+  constructor(proc: RpcProcess, cwd: string, engine: WrapperEngineContext) {
     this.proc = proc;
     this.cwd = cwd;
+    this.engine = engine;
   }
 
   get sessionId(): string {
@@ -352,12 +412,19 @@ export class AgentSessionWrapper {
     await this.proc.negotiateProtocol(ready);
     // Subscribe to subagent lifecycle/progress/event frames so the UI can show
     // a live subagent roster. Older omp builds may not know the command —
-    // degrade silently (the UI falls back to no subagent info).
-    await this.proc.sendCommand({ type: "set_subagent_subscription", level: "events" }).catch(() => {});
+    // degrade silently (the UI falls back to no subagent info). Engines whose
+    // protocol has no subagent surface (pi) are never asked: their id-less
+    // unknown-command responses can never settle the request.
+    if (this.engine.rpcUi.subagentEvents) {
+      await this.proc.sendCommand({ type: "set_subagent_subscription", level: "events" }).catch(() => {});
+    }
     // Server-implemented host tools are available from the first turn, no
     // browser needed; a later UI set_host_tools re-sends them merged. Older
-    // omp builds without host tools degrade silently.
-    await this.proc.sendCommand({ type: "set_host_tools", tools: [...SERVER_HOST_TOOLS] }).catch(() => {});
+    // omp builds without host tools degrade silently; engines without the
+    // host-tool surface (pi) are never asked.
+    if (this.engine.rpcUi.hostTools) {
+      await this.proc.sendCommand({ type: "set_host_tools", tools: [...SERVER_HOST_TOOLS] }).catch(() => {});
+    }
     const state = await this.proc.sendCommand<RpcSessionState>({ type: "get_state" });
     this.applyIdentity(state);
   }
@@ -379,7 +446,7 @@ export class AgentSessionWrapper {
     this.emit({
       type: "notice",
       level: "error",
-      message: `The omp process for this session exited unexpectedly${detail ? `: ${detail}` : "."}`,
+      message: `The ${this.engine.label} process for this session exited unexpectedly${detail ? `: ${detail}` : "."}`,
     });
     // Terminal agent_end so a client mid-stream stops spinning immediately
     // instead of waiting for the reconcile poll.
@@ -1016,7 +1083,7 @@ export class AgentSessionWrapper {
 
       const proc = new RpcProcess({
         cwd: this.cwd,
-        extraArgs: buildSessionSpawnArgs(resumable ? sessionFile : ""),
+        launch: this.engine.relaunch(resumable ? sessionFile : ""),
         onExit: ({ stderrTail }) => {
           if (this.proc === proc) this.handleProcessExit(stderrTail);
         },
@@ -1028,7 +1095,10 @@ export class AgentSessionWrapper {
         await proc.negotiateProtocol(ready);
         // The replacement process starts with subscriptions disabled; restore
         // the live roster/transcript event stream before reading its state.
-        await proc.sendCommand({ type: "set_subagent_subscription", level: "events" }).catch(() => {});
+        // Engines without the subagent surface (pi) are never asked.
+        if (this.engine.rpcUi.subagentEvents) {
+          await proc.sendCommand({ type: "set_subagent_subscription", level: "events" }).catch(() => {});
+        }
         const state = await proc.sendCommand<RpcSessionState>({ type: "get_state" });
         this.applyIdentity(state);
       } catch (error) {
@@ -1060,6 +1130,16 @@ export class AgentSessionWrapper {
 
     const unsupported = UNSUPPORTED_COMMANDS[type];
     if (unsupported) throw new RpcCommandError(type, unsupported, "unsupported");
+
+    // Engines with a restricted RPC vocabulary (pi) must never be sent a
+    // command outside it: they answer unknown commands with an ID-LESS error
+    // response, which can never settle the pending request — a silent hang.
+    // Rejecting here surfaces the honest "unsupported" the UI already
+    // tolerates. Commands the wrapper settles locally are exempt.
+    const engineCommands = this.engine.rpcUi.commands;
+    if (engineCommands && !engineCommands.has(type) && !LOCAL_WRAPPER_COMMANDS.has(type)) {
+      throw new RpcCommandError(type, `${type} is not supported by this engine's RPC protocol`, "unsupported");
+    }
 
     switch (type) {
       case "prompt": {
@@ -1256,8 +1336,12 @@ export class AgentSessionWrapper {
         this.hostToolNames = new Set(valid.map((t) => t.name as string));
         // Server-implemented tools ride every registration: omp replaces the
         // whole roster per set_host_tools, so a UI re-register (SSE
-        // reconnect) must never drop them.
-        await this.proc.sendCommand({ type: "set_host_tools", tools: [...valid, ...SERVER_HOST_TOOLS] });
+        // reconnect) must never drop them. Engines without the host-tool
+        // surface (pi) accept the registration locally but are never told —
+        // they could not call the tools anyway.
+        if (this.engine.rpcUi.hostTools) {
+          await this.proc.sendCommand({ type: "set_host_tools", tools: [...valid, ...SERVER_HOST_TOOLS] });
+        }
         return null;
       }
 
@@ -1278,7 +1362,9 @@ export class AgentSessionWrapper {
             this.hostUriSchemes.set(entry.scheme, { writable: entry.writable === true });
           }
         }
-        await this.proc.sendCommand({ type: "set_host_uri_schemes", schemes });
+        if (this.engine.rpcUi.hostTools) {
+          await this.proc.sendCommand({ type: "set_host_uri_schemes", schemes });
+        }
         return null;
       }
 
@@ -1522,10 +1608,19 @@ export async function startRpcSession(
     const holder: { wrapper?: AgentSessionWrapper } = {};
     const proc = new RpcProcess({
       cwd,
-      extraArgs: buildSessionSpawnArgs(sessionFile, toolNames, advisor),
+      launch: buildEngineRpcLaunch(harness, { cwd, sessionFile, toolNames, advisor }),
       onExit: ({ stderrTail }) => holder.wrapper?.handleProcessExit(stderrTail),
     });
-    const created = new AgentSessionWrapper(proc, cwd);
+    const created = new AgentSessionWrapper(proc, cwd, {
+      // Non-null: buildEngineRpcLaunch above already threw for descriptor-less
+      // engines, so this wrapper only exists for rpc-dialect harnesses.
+      rpcUi: harness.rpcUi!,
+      label: harness.binaryName,
+      // Restart (`reload`) re-resolves the binary so an engine updated
+      // mid-session restarts onto the new install; presets/advisor are
+      // resume-only concerns and never apply to a restart.
+      relaunch: (file) => buildEngineRpcLaunch(harness, { cwd, sessionFile: file }),
+    });
     holder.wrapper = created;
     created.start();
     try {

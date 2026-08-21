@@ -2,13 +2,15 @@ import { readEnv } from "../env";
 import { claudeHarness } from "./claude";
 import { codexHarness } from "./codex";
 import { ompHarness } from "./omp";
+import { piHarness } from "./pi";
 import { readEngineState, writeEngineState } from "./state";
 import type { HarnessAdapter } from "./types";
 
-export type { EngineEvent, EngineSession, EngineSessionOptions, HarnessAdapter, HarnessCapabilities } from "./types";
+export type { EngineEvent, EngineSession, EngineSessionOptions, HarnessAdapter, HarnessCapabilities, RpcUiSpawn } from "./types";
 
 const ADAPTERS: Record<string, HarnessAdapter> = {
   [ompHarness.id]: ompHarness,
+  [piHarness.id]: piHarness,
   [claudeHarness.id]: claudeHarness,
   [codexHarness.id]: codexHarness,
 };

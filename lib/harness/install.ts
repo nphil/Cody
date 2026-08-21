@@ -318,6 +318,64 @@ export function installEngine(request: EngineInstallRequest): Promise<EngineInst
   return pending;
 }
 
+/** Ceiling on an `npm uninstall` run — removal is file deletion, not a
+ * network operation, so a minute is generous. */
+const UNINSTALL_TIMEOUT_MS = 60_000;
+
+/**
+ * Remove an engine that Cody npm-installed into the persistent tools prefix.
+ * Policy lives in the DELETE route (admin, not the active engine, binary
+ * actually managed by Cody); this only runs npm and drops the binary caches
+ * so the next probe sees the removal.
+ */
+export function uninstallEngine(request: { id: string; packageName: string; binaryName: string }): Promise<void> {
+  if (inFlight.has(request.id)) {
+    return Promise.reject(new EngineInstallError(`An install of ${request.id} is still running; wait for it to finish.`, ""));
+  }
+  const prefix = getToolsDir();
+  const args = ["uninstall", "-g", "--prefix", prefix, request.packageName];
+  const npmCli = findNpmCli();
+  const command = npmCli ? execPath : "npm";
+  const commandArgs = npmCli ? [npmCli, ...args] : args;
+
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn(command, commandArgs, { env: process.env, stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    let timedOut = false;
+    let killTimer: NodeJS.Timeout | undefined;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      killTimer = setTimeout(() => child.kill("SIGKILL"), KILL_GRACE_MS);
+    }, UNINSTALL_TIMEOUT_MS);
+
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr = tail(stderr + chunk.toString("utf8"), STDERR_TAIL_LIMIT * 2);
+    });
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      reject(new EngineInstallError(`Could not run npm to uninstall ${request.packageName}`, String(error)));
+    });
+    child.on("close", (code, signal) => {
+      clearTimeout(timeout);
+      clearTimeout(killTimer);
+      // Dropped on failure too: a partial removal can leave a broken bin that
+      // a stale "installed" probe would outlive.
+      invalidateEngineBinCache(request.binaryName);
+      if (timedOut) {
+        reject(new EngineInstallError(`Uninstalling ${request.packageName} timed out after 1 minute`, tail(stderr)));
+        return;
+      }
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      const how = signal ? `was killed with ${signal}` : `exited with code ${code}`;
+      reject(new EngineInstallError(`npm uninstall ${request.packageName} ${how}`, tail(stderr)));
+    });
+  });
+}
+
 /** Whether an install for this engine is already running (UI/status probes). */
 export function isEngineInstalling(id: string): boolean {
   return inFlight.has(id);

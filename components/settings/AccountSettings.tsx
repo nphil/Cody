@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { chipStyle, nativeInputStyle, nativeOptionStyle, nativeSelectStyle, NativeSetting } from "./primitives";
 import { dangerButtonStyle, ErrorNote, primaryButtonStyle, requestJson, smallButtonStyle, useAsyncAction } from "./account-controls";
 import { AccessTokensSection } from "./AccessTokensSection";
+import { ConfirmDialog } from "@/components/ui/field";
 import { useEngineInstalls } from "@/hooks/useEngineInstalls";
 import { useI18n } from "@/lib/i18n";
 import type { EngineSummary, EnginesPayload } from "../EnginePicker";
@@ -92,6 +93,10 @@ function AgentEngineSection({ isMobile }: { isMobile: boolean }) {
   const [data, setData] = useState<EnginesPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selecting, setSelecting] = useState<string | null>(null);
+  const [pendingUninstall, setPendingUninstall] = useState<EngineSummary | null>(null);
+  const [uninstalling, setUninstalling] = useState<string | null>(null);
+  /** Post-uninstall honesty line ("a system copy on PATH remains"). */
+  const [note, setNote] = useState<string | null>(null);
 
   const load = useCallback(async (signal?: AbortSignal) => {
     const response = await fetch("/api/engines", { cache: "no-store", signal });
@@ -150,6 +155,37 @@ function AgentEngineSection({ isMobile }: { isMobile: boolean }) {
         setError(failure instanceof Error ? failure.message : String(failure));
         setSelecting(null);
       });
+  };
+
+  const uninstall = (engine: EngineSummary) => {
+    setError(null);
+    setNote(null);
+    setUninstalling(engine.id);
+    void (async () => {
+      const response = await fetch("/api/engines/install", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: engine.id }),
+      });
+      const body = (await response.json().catch(() => null)) as { error?: string; detail?: string; remainingBinary?: string | null } | null;
+      if (!response.ok) {
+        throw new Error([body?.error, body?.detail].filter(Boolean).join(" — ") || `HTTP ${response.status}`);
+      }
+      return body;
+    })()
+      .then((body) => {
+        setPendingUninstall(null);
+        // Removal from Cody's prefix cannot touch a system install; say so
+        // rather than letting the still-"Installed" row look like a failure.
+        if (body?.remainingBinary) {
+          setNote(`${engine.name} was removed from Cody's tools directory, but a system copy remains at ${body.remainingBinary}.`);
+        }
+        return load();
+      })
+      .catch((failure: unknown) => {
+        setError(failure instanceof Error ? failure.message : String(failure));
+      })
+      .finally(() => setUninstalling(null));
   };
 
   if (!data && !error) {
@@ -248,6 +284,19 @@ function AgentEngineSection({ isMobile }: { isMobile: boolean }) {
                     {selecting === engine.id ? "Switching…" : `Use ${engine.shortName}`}
                   </button>
                 )}
+                {engine.installed && engine.managed && !isActive && (
+                  <button
+                    type="button"
+                    onClick={() => setPendingUninstall(engine)}
+                    disabled={busy || installBusy || uninstalling !== null}
+                    style={{ ...dangerButtonStyle, opacity: busy || installBusy || uninstalling !== null ? 0.6 : 1 }}
+                  >
+                    {uninstalling === engine.id
+                      ? <Loader2 size={13} aria-hidden style={{ animation: "spin 0.9s linear infinite" }} />
+                      : <Trash2 size={13} aria-hidden />}
+                    {uninstalling === engine.id ? "Uninstalling…" : "Uninstall"}
+                  </button>
+                )}
                 {isActive && (
                   <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "var(--accent)", fontSize: 11.5, fontWeight: 600 }}>
                     <Check size={13} aria-hidden /> In use
@@ -259,9 +308,26 @@ function AgentEngineSection({ isMobile }: { isMobile: boolean }) {
         })}
       </section>
 
+      {note && (
+        <p role="status" style={{ margin: 0, fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.5 }}>
+          {note}
+        </p>
+      )}
+
       <p style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.5 }}>
         {t("updates.engines.settingsPointer")}
       </p>
+
+      <ConfirmDialog
+        open={pendingUninstall !== null}
+        onOpenChange={(open) => { if (!open) setPendingUninstall(null); }}
+        title={pendingUninstall ? `Uninstall ${pendingUninstall.name}?` : "Uninstall engine"}
+        description="Removes the engine from Cody's tools directory. Sessions already recorded stay on disk and the engine can be reinstalled from this card at any time. Its own sign-in state and configuration are not touched."
+        confirmLabel={uninstalling ? "Uninstalling…" : "Uninstall engine"}
+        danger
+        busy={uninstalling !== null}
+        onConfirm={() => { if (pendingUninstall) uninstall(pendingUninstall); }}
+      />
     </>
   );
 }
