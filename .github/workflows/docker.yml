@@ -216,10 +216,13 @@ jobs:
           push: true
           # :latest tracks main only — tagging an older commit must never move
           # it backwards. The version tag is immutable-by-convention: it is
-          # published from tag builds, where the version is pinned to the ref.
+          # published only from tag builds and versioned dispatches, where the
+          # version is pinned — an ordinary main push must not re-point the
+          # released X.Y.Z at newer content just because package.json still
+          # carries that version.
           tags: |
             ${{ github.ref == 'refs/heads/main' && format('ghcr.io/{0}/cody:latest', github.repository_owner) || '' }}
-            ghcr.io/${{ github.repository_owner }}/cody:${{ steps.meta.outputs.version }}
+            ${{ (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.version != '')) && format('ghcr.io/{0}/cody:{1}', github.repository_owner, steps.meta.outputs.version) || '' }}
             ghcr.io/${{ github.repository_owner }}/cody:sha-${{ github.sha }}
           # Update-tracking tools (and Unraid itself) read the version label.
           labels: |
