@@ -110,6 +110,33 @@ function agentDataSubdir(subdir: string): string {
   return path.join(xdg ?? getAgentDir(), subdir);
 }
 
+/** Config-root data root: ~/.omp (or its profile subdir), or the XDG data
+ * dir when opted in. Distinct from getAgentDir()/agentDataSubdir(): plugins
+ * and marketplaces are config-root-scoped in omp (DirResolver's `rootDirs`),
+ * not agent-scoped (`agentDirs`) — they live at ~/.omp/plugins, never under
+ * ~/.omp/agent. omp's DirResolver still gates XDG activation on the SAME
+ * override check as the agent-scoped paths (a PI_CODING_AGENT_DIR override
+ * disables XDG resolution instance-wide, not just for agent-scoped data), so
+ * this reuses xdgDataAgentRoot()'s value rather than re-deriving it — only
+ * the non-XDG fallback differs (config root vs agent dir). */
+export function getOmpDataRoot(): string {
+  return xdgDataAgentRoot() ?? getConfigRoot();
+}
+
+/** Plugins directory (~/.omp/plugins, or its XDG equivalent). Marketplace
+ * plugin installs, the installed-plugins registry, and the marketplace
+ * catalog cache all live here. */
+export function getPluginsDir(): string {
+  return path.join(getOmpDataRoot(), "plugins");
+}
+
+/** Registry of configured marketplace catalogs (~/.omp/marketplaces.json, or
+ * its XDG equivalent). Written by `omp plugin marketplace add/remove/update`;
+ * read (never written) by lib/omp/marketplace.ts. */
+export function getMarketplacesRegistryPath(): string {
+  return path.join(getOmpDataRoot(), "marketplaces.json");
+}
+
 /** ~/.omp/agent/sessions (or $XDG_DATA_HOME/omp/sessions). */
 export function getSessionsDir(): string {
   return agentDataSubdir("sessions");

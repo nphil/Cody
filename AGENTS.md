@@ -109,6 +109,8 @@ app/api/
   omp-settings/schema/route.ts    GET omp's own settings schema + values; PUT a dotted-path patch
   mcp/route.ts                    GET/POST/PUT/DELETE project MCP servers
   plugins/route.ts                GET/POST plugin management (shells out to `omp plugin`)
+  plugins/marketplace/route.ts    GET browse configured marketplaces + catalogs | POST
+                                   add/remove/update marketplace, install/uninstall/upgrade
   projects/route.ts               GET registered+discovered projects | POST add | DELETE hide
   skills/route.ts                 GET/PATCH loaded skills and disable-model-invocation
   skills/install/route.ts         POST install skills through npx skills add
@@ -116,7 +118,9 @@ app/api/
   worktrees/route.ts              GET/POST/DELETE git worktrees
 
 lib/
-  omp/                 shared omp foundations (paths, CLI probe, RpcProcess)
+  omp/                 shared omp foundations (paths, CLI probe, RpcProcess,
+                        marketplace.ts pure-Node catalog reader, plugin-cli.ts
+                        shared `omp plugin` execFile/JSON helpers)
   agent-client.ts      typed fetch helper for /api/agent commands
   draft-store.ts       local draft persistence helpers
   context-usage.ts     derives idle/reconnect gauge usage from persisted messages
@@ -194,7 +198,10 @@ components/
                       model's vendor. Never hotlinked — see the note below
   ModelsConfig.tsx    modal for models/auth configuration
   McpConfig.tsx       project MCP server editor (Settings → MCP tab)
-  PluginsConfig.tsx   modal for installed plugins
+  PluginsConfig.tsx   modal for installed plugins; opens PluginMarketplace
+  PluginMarketplace.tsx marketplace dialog: browse/search/install across
+                      configured `omp` marketplaces, manage marketplaces
+                      (opened from PluginsConfig and the System & Updates card)
   SkillsConfig.tsx    modal for loaded/installable skills; opens SkillsStore
   SkillsStore.tsx     skill store dialog: skills.sh browse/search/detail/install
                       (opened from SkillsConfig and the System & Updates card)
@@ -830,7 +837,8 @@ handled or safely ignored.
 - The endpoint is guarded by the same allowed-root rules as `/api/files`.
 
 ### Plugins and skills
-- `/api/plugins` shells out to the user's `omp plugin` CLI (`list/install/uninstall/enable/disable/upgrade`, `--json` where available) — never the Bun-only SDK.
+- `/api/plugins` shells out to the user's `omp plugin` CLI (`list/install/uninstall/enable/disable/upgrade`, `--json` where available) — never the Bun-only SDK. `lib/omp/plugin-cli.ts` holds the shared `execFile`/loose-JSON-parse helpers (`runOmpCli`, `parseJsonLoose`), used by both `/api/plugins` and `/api/plugins/marketplace`.
+- **Plugin marketplace** (`/api/plugins/marketplace`, `lib/omp/marketplace.ts`, `components/PluginMarketplace.tsx`): browse data is a pure-Node read of `marketplaces.json` (the registry of `omp plugin marketplace add`ed catalogs, at `getMarketplacesRegistryPath()`) plus each marketplace's cached `marketplace.json` catalog (`getPluginsDir()`'s cache dir, `~` expanded) — no child process. `lib/omp/paths.ts`'s `getOmpDataRoot()` is the shared root for both (`~/.omp`, or its XDG equivalent): omp's own `DirResolver` gates XDG activation on the SAME `PI_CODING_AGENT_DIR`-override check for config-root-scoped paths (plugins, marketplaces) as for agent-scoped ones, so `getOmpDataRoot()` reuses the existing `xdgDataAgentRoot()` value rather than re-deriving a separate check — the override disables XDG resolution instance-wide, not per-category. Installed-state (which catalog plugins are already installed, at what version/scope) comes from `omp plugin list --json`, same as `/api/plugins`. Every mutation (add/remove/update marketplace, install/uninstall/upgrade a plugin) shells out to the CLI; name/id segments are validated against omp's own `^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$` rule before reaching argv.
 - `/api/skills` uses `lib/skills-service.ts`, a pure-Node scanner mirroring omp's discovery order: project `.omp/skills` (walk-up), `~/.omp/agent/skills`, then the `.claude` / `.agent(s)` / `.codex` / `.github` compat dirs and managed skills.
 - Skill toggling edits only the `disable-model-invocation` frontmatter key on the target `SKILL.md`; keep that surgical so user formatting survives.
 - `/api/skills/install` shells through `npx skills add ... --agent universal`, which installs into the ecosystem-standard `.agents/skills` dirs omp reads; project installs run with the selected cwd.
@@ -842,6 +850,47 @@ handled or safely ignored.
 - `POST /api/omp-update` (`action: "check"`) runs `omp update --check` and returns `updateAvailable` plus `updateCommand: "omp update"`.
 - `POST /api/omp-update` (`action: "restart"`) restarts active OMP sessions after a manual CLI update.
 - Notifications in `AppShell` and settings cards in `SettingsConfig` present the update notification alongside copyable terminal update commands.
+
+### Model orchestration: roles, plans, chains, resets
+- **omp's out-of-the-box behavior is the baseline.** With no `modelRoles` in
+  config.yml, omp resolves each role from built-in priority lists
+  (src/priority.json: `smol`/`slow`/`designer` chains; `tiny` reuses smol,
+  `advisor` reuses slow; everything else follows the default model). "Reset to
+  OMP defaults" therefore DELETES overrides rather than writing anything:
+  `DELETE /api/model-roles` (drops `modelRoles`), `DELETE /api/omp-settings`
+  `{sections:["retry"]}` (whole retry block), `DELETE /api/model-plan` (only
+  what a plan writes: roles + `retry.fallbackChains` + `usageAwareFallback`,
+  keeping unrelated retry tuning). Deletion allow-lists live in
+  `lib/omp/settings-config.ts` (`RESETTABLE_SECTIONS`/`RESETTABLE_PATHS`).
+- **Config reaches live sessions via restart, not osmosis.** An omp child
+  reads config.yml once at spawn (only subagent preflight reloads it), so
+  plan-apply and every reset call `restartIdleRpcSessions()` (rpc-manager):
+  idle children are destroyed and reconnect on demand with the new config;
+  running turns are never killed and finish on the old one. Responses carry
+  `{restarted, active}` and the UI toasts say so.
+- **Ladder tiering** (`lib/model-plan/derive.ts`): the heuristic plan ranks
+  providers direct → gateway → local. A gateway (OpenRouter-style aggregator)
+  is detected from evidence, not a brand list — most of its model ids are
+  themselves vendor-prefixed (`openrouter/anthropic/claude-…`), so
+  `gatewayProviders()` flags providers where >half the ids contain a slash.
+  `bestAvailableModel` shares the tiering so a gateway's rebadged frontier
+  model never drives main turns while a direct subscription exists; the
+  provider already assigned to the `default` role leads its tier
+  (`preferredProvider`, passed by the model-plan route). Enabled-model
+  curation applies automatically: the roster comes from
+  `get_available_models`, which omp already filters by `enabledModels`.
+- **Fallback switches announce themselves**: omp's `retry_fallback_applied`
+  ({from, to, role}) and `retry_fallback_succeeded` ({model, role}) frames
+  surface as toasts in `useAgentSession` (i18n `agentSession.fallback*`).
+- **Trap — `patchSection` in SettingsConfig.tsx** must spread the SECTION
+  (`base?.[key]`), never the whole settings object; the whole-object spread
+  filled config.yml sections with junk top-level keys after the first save.
+- **omp 17.4 compaction**: `compaction.strategy`/`remoteEnabled` no longer
+  exist upstream — `compaction.methodOrder` (ordered preference list)
+  replaced them. `settings-config.ts` reads legacy keys through omp's own
+  migration mapping and deletes them when writing `methodOrder`.
+- Retry/fallback UI lives in `components/settings/RetryFallbackPanel.tsx`
+  (see its module comment for the never-persist-an-empty-chain rule).
 
 ### Auth and model config
 - Auth flows go through RPC commands (`get_login_providers`, `login`) against the omp child process; credentials live in omp's `agent.db` (SQLite) which Cody never touches directly.

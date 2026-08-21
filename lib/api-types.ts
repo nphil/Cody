@@ -83,3 +83,40 @@ export interface PluginsResponse {
   totals: PluginResourceCounts;
   diagnostics: PluginDiagnostic[];
 }
+
+export type MarketplaceSourceType = "github" | "git" | "url" | "local";
+
+export interface MarketplaceListEntry {
+  name: string;
+  sourceUri: string;
+  sourceType: MarketplaceSourceType;
+  updatedAt: string;
+  /** The catalog file at this marketplace's catalogPath is missing/unreadable
+   * — offer "update marketplace" rather than showing zero plugins as final. */
+  catalogMissing?: boolean;
+}
+
+export interface MarketplacePluginListing {
+  name: string;
+  marketplace: string;
+  description?: string;
+  version?: string;
+  author?: string;
+  homepage?: string;
+  repository?: string;
+  license?: string;
+  category?: string;
+  keywords?: string[];
+  tags?: string[];
+  installed: boolean;
+  installedScope?: PluginScope;
+  enabled?: boolean;
+  installedVersion?: string;
+  /** Installed version differs from the catalog's current version. */
+  updateAvailable?: boolean;
+}
+
+export interface MarketplaceBrowseResponse {
+  marketplaces: MarketplaceListEntry[];
+  plugins: MarketplacePluginListing[];
+}
