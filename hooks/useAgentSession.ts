@@ -2270,6 +2270,27 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "auto_retry_end":
         setRetryInfo(null);
         break;
+      // A silent model swap is the confusing half of retry fallback: the run
+      // continues, the composer badge changes, and nothing says why. Surface
+      // omp's own fallback events so the switch always announces its reason.
+      case "retry_fallback_applied": {
+        const from = typeof event.from === "string" ? event.from : "?";
+        const to = typeof event.to === "string" ? event.to : "?";
+        const role = typeof event.role === "string" ? event.role : "default";
+        toast.info(
+          translate("agentSession.fallbackApplied", { from, to }),
+          translate("agentSession.fallbackAppliedDetail", { role }),
+        );
+        break;
+      }
+      case "retry_fallback_succeeded": {
+        const model = typeof event.model === "string" ? event.model : "?";
+        toast.success(
+          translate("agentSession.fallbackSucceeded", { model }),
+          translate("agentSession.fallbackSucceededDetail"),
+        );
+        break;
+      }
       case "usage_event": {
         // Claude Code and codex account for themselves instead of recording
         // usage on the messages they emit, so their figures arrive as frames.

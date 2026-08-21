@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getSubmitDuringRunBehavior, setSubmitDuringRunBehavior, type SubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import dynamic from "next/dynamic";
-import { RefreshCw, Sparkles, Search, AlertCircle } from "lucide-react";
+import { AlertCircle, ArrowDown, ArrowUp, RefreshCw, Search, Sparkles, X } from "lucide-react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/primitives";
 import { SettingsTabs, type SettingsTab, type ActiveEngineInfo, type EngineCapabilities, ALL_CAPABILITIES, DEFAULT_HARNESS_LABEL, getSettingsCategories, getNormalizedActive } from "./SettingsTabs";
@@ -22,6 +22,18 @@ const AccountSettings = dynamic(() => import("./settings/AccountSettings").then(
 const LocalAiConfig = dynamic(() => import("./settings/LocalAiConfig").then((module) => module.LocalAiConfig), { loading: SettingsTabLoading });
 const SystemUpdates = dynamic(() => import("./settings/SystemUpdates").then((module) => module.SystemUpdates), { loading: SettingsTabLoading });
 
+// Mirrors omp 17.4's compaction.methodOrder (session/compaction-methods.ts):
+// an ordered preference list replaced the old single `strategy`.
+type CompactionMethod = "remote" | "snapcompact" | "handoff" | "shake" | "soft";
+const COMPACTION_METHOD_LABELS: Record<CompactionMethod, string> = {
+  remote: "Server compaction",
+  snapcompact: "Snapcompact",
+  handoff: "Handoff",
+  shake: "Shake",
+  soft: "Soft summary",
+};
+const DEFAULT_COMPACTION_METHOD_ORDER: CompactionMethod[] = ["remote", "snapcompact", "handoff", "shake", "soft"];
+
 type NativeSettings = {
   defaultThinkingLevel?: "auto" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   hideThinkingBlock?: boolean;
@@ -30,7 +42,7 @@ type NativeSettings = {
   personality?: "default" | "friendly" | "pragmatic" | "none";
   advisor?: { enabled?: boolean; subagents?: boolean; syncBacklog?: "off" | "1" | "3" | "5"; immuneTurns?: number };
   tools?: { approvalMode?: "always-ask" | "write" | "yolo"; approval?: { bash?: "allow" | "prompt" | "deny"; extension?: "allow" | "prompt" } };
-  compaction?: { enabled?: boolean; midTurnEnabled?: boolean; strategy?: "snapcompact" | "handoff" | "context-full" | "shake" | "off"; autoContinue?: boolean; remoteEnabled?: boolean; keepRecentTokens?: number };
+  compaction?: { enabled?: boolean; midTurnEnabled?: boolean; methodOrder?: CompactionMethod[]; autoContinue?: boolean; keepRecentTokens?: number };
   memory?: { backend?: "off" | "local" | "mnemopi" | "hindsight" };
   autolearn?: { enabled?: boolean; autoContinue?: boolean; minToolCalls?: number };
   mnemopi?: { scoping?: "global" | "per-project" | "per-project-tagged"; autoRecall?: boolean; autoRetain?: boolean; noEmbeddings?: boolean };
@@ -90,7 +102,7 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   // Context Compaction
   { tab: "intelligence", section: "Context Compaction", label: "Automatic Compaction", description: "Compact context before model context limit is hit." },
   { tab: "intelligence", section: "Context Compaction", label: "Continue After Compaction", description: "Resume task execution after compaction completes." },
-  { tab: "intelligence", section: "Context Compaction", label: "Maintenance Strategy", description: "Select algorithm used to reduce context pressure." },
+  { tab: "intelligence", section: "Context Compaction", label: "Method Order", description: "Preferred order of context-maintenance methods; unavailable methods fall through to the next." },
   { tab: "intelligence", section: "Context Compaction", label: "Compact Mid-Turn", description: "Check context limits between tool execution steps." },
   // Memory & Auto-Learn
   { tab: "intelligence", section: "Memory & Auto-Learn", label: "Memory Backend", description: "Where durable knowledge is stored across sessions." },
@@ -108,6 +120,69 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   { tab: "mcp", section: "Extensions & Tools", label: "Render MCP Markdown", description: "Render non-JSON MCP results as Markdown in transcript." },
   { tab: "mcp", section: "Extensions & Tools", label: "MCP Resource Updates", description: "Inject server resource updates into conversation." },
 ];
+
+/** Ordered editor for compaction.methodOrder: enabled methods in preference
+ * order with move/remove, remaining methods addable, and a one-click return to
+ * omp's default order. An empty list is valid — it turns automatic context
+ * maintenance off, which is what the legacy "Off" strategy mapped to. */
+function CompactionMethodOrderEditor({ value, onChange }: {
+  value: CompactionMethod[] | undefined;
+  onChange: (methodOrder: CompactionMethod[]) => void;
+}) {
+  const order = value ?? DEFAULT_COMPACTION_METHOD_ORDER;
+  const remaining = DEFAULT_COMPACTION_METHOD_ORDER.filter((method) => !order.includes(method));
+  const isDefault = order.length === DEFAULT_COMPACTION_METHOD_ORDER.length
+    && order.every((method, index) => method === DEFAULT_COMPACTION_METHOD_ORDER[index]);
+  const move = (index: number, delta: number) => {
+    const target = index + delta;
+    if (target < 0 || target >= order.length) return;
+    const next = [...order];
+    [next[index], next[target]] = [next[target], next[index]];
+    onChange(next);
+  };
+  const rowButton: React.CSSProperties = {
+    padding: 2, border: "none", background: "transparent", color: "var(--text-muted)", cursor: "pointer",
+    display: "inline-flex", alignItems: "center",
+  };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0 }}>
+      {order.length === 0 && (
+        <div style={{ fontSize: 11.5, color: "var(--text-dim)" }}>No methods — automatic context maintenance is off.</div>
+      )}
+      {order.map((method, index) => (
+        <div key={method} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text)" }}>
+          <span style={{ width: 14, color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11 }}>{index + 1}</span>
+          <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{COMPACTION_METHOD_LABELS[method]}</span>
+          <button type="button" aria-label={`Move ${COMPACTION_METHOD_LABELS[method]} up`} disabled={index === 0} onClick={() => move(index, -1)} style={{ ...rowButton, opacity: index === 0 ? 0.4 : 1, cursor: index === 0 ? "default" : "pointer" }}><ArrowUp size={13} /></button>
+          <button type="button" aria-label={`Move ${COMPACTION_METHOD_LABELS[method]} down`} disabled={index === order.length - 1} onClick={() => move(index, 1)} style={{ ...rowButton, opacity: index === order.length - 1 ? 0.4 : 1, cursor: index === order.length - 1 ? "default" : "pointer" }}><ArrowDown size={13} /></button>
+          <button type="button" aria-label={`Remove ${COMPACTION_METHOD_LABELS[method]}`} onClick={() => onChange(order.filter((entry) => entry !== method))} style={rowButton}><X size={13} /></button>
+        </div>
+      ))}
+      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+        {remaining.length > 0 && (
+          <select
+            style={{ ...nativeSelectStyle, minHeight: 26, fontSize: 11.5 }}
+            value=""
+            aria-label="Add compaction method"
+            onChange={(e) => { if (e.target.value) onChange([...order, e.target.value as CompactionMethod]); }}
+          >
+            <option value="" style={nativeOptionStyle}>Add method…</option>
+            {remaining.map((method) => <option key={method} value={method} style={nativeOptionStyle}>{COMPACTION_METHOD_LABELS[method]}</option>)}
+          </select>
+        )}
+        {!isDefault && (
+          <button
+            type="button"
+            onClick={() => onChange([...DEFAULT_COMPACTION_METHOD_ORDER])}
+            style={{ padding: "3px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text-muted)", fontSize: 11, cursor: "pointer" }}
+          >
+            Default order
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function SearchResultsList({ results, query, onSelect }: { results: SearchResult[]; query: string; onSelect: (result: SearchResult) => void }) {
   return (
@@ -288,7 +363,10 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
   // so the section spread is safe; the cast keeps the generic index type-checkable.
   const patchSection = <K extends keyof NativeSettings>(key: K, patch: Partial<NonNullable<NativeSettings[K]>>) => {
     const base = latestNativeSettingsRef.current;
-    const section = (base ?? nativeSettings?.[key] ?? {}) as object;
+    // The SECTION under `key`, never the whole settings object: spreading the
+    // full object here wrote every top-level key into the section being
+    // patched, filling config.yml sections with junk after the first save.
+    const section = (base?.[key] ?? nativeSettings?.[key] ?? {}) as object;
     void saveNativeSettings({
       ...currentSettings(),
       [key]: { ...section, ...patch },
@@ -704,18 +782,11 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                         onChange={(checked) => patchSection("compaction", { autoContinue: checked })}
                       />
                     </NativeSetting>
-                    <NativeSetting label="Maintenance Strategy" description="Select algorithm used to reduce context pressure.">
-                      <select
-                        style={nativeSelectStyle}
-                        value={nativeSettings?.compaction?.strategy ?? "snapcompact"}
-                        onChange={(e) => patchSection("compaction", { strategy: e.target.value as NonNullable<NativeSettings["compaction"]>["strategy"] })}
-                      >
-                        <option value="snapcompact" style={nativeOptionStyle}>Snapcompact</option>
-                        <option value="handoff" style={nativeOptionStyle}>Handoff</option>
-                        <option value="context-full" style={nativeOptionStyle}>Context full</option>
-                        <option value="shake" style={nativeOptionStyle}>Shake</option>
-                        <option value="off" style={nativeOptionStyle}>Off</option>
-                      </select>
+                    <NativeSetting label="Method Order" description="Preferred order of context-maintenance methods; unavailable methods fall through to the next.">
+                      <CompactionMethodOrderEditor
+                        value={nativeSettings?.compaction?.methodOrder}
+                        onChange={(methodOrder) => patchSection("compaction", { methodOrder })}
+                      />
                     </NativeSetting>
                     <NativeSetting label="Compact Mid-Turn" description="Check context limits between tool execution steps.">
                       <ToggleSwitch

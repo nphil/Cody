@@ -76,7 +76,7 @@ function buildUserPrompt(roster: Roster): string {
     "",
     `Rules. Role names must come from this list: ${ROLE_NAMES.join(", ")}. Omit any role you have no opinion on rather than guessing.`,
     "Every selector must be one of the `selector` values above, copied exactly.",
-    "`ladder` is provider ids ordered best first: how quality should degrade when a provider is exhausted. Put local providers last.",
+    "`ladder` is provider ids ordered best first: how quality should degrade when a provider is exhausted. Direct providers the user pays for or is signed in to come first, gateway aggregators that resell other vendors' models (OpenRouter and its kind) after them as the backup route, and local providers last.",
     "`rationale` explains the assignments, one short sentence per entry.",
   ].join("\n");
 }

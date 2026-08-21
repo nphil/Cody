@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
 import { invalidateModelsCache } from "@/lib/models-cache";
-import { bestAvailableModel, deriveChains, heuristicPlan, resolveRosterModel, ROLE_NAMES, validatePlan } from "@/lib/model-plan/derive";
+import { bestAvailableModel, deriveChains, heuristicPlan, providerOf, resolveRosterModel, ROLE_NAMES, validatePlan } from "@/lib/model-plan/derive";
 import { planWithModel } from "@/lib/model-plan/planner";
 import { loadRoster, type RosterModel } from "@/lib/model-plan/roster";
-import { readModelRoles, writeModelRoles } from "@/lib/omp/model-roles";
-import { readNativeSettings, writeNativeSettings } from "@/lib/omp/settings-config";
+import { clearModelRoles, readModelRoles, writeModelRoles } from "@/lib/omp/model-roles";
+import { deleteNativeSettingsPaths, readNativeSettings, writeNativeSettings } from "@/lib/omp/settings-config";
+import { restartIdleRpcSessions } from "@/lib/rpc-manager";
 import { isRecord } from "@/lib/type-guards";
 
 export const dynamic = "force-dynamic";
@@ -54,7 +55,12 @@ export async function POST(request: Request) {
     }
 
     const warnings: string[] = [];
-    const heuristic = heuristicPlan(roster.models);
+    // The provider already driving main turns leads the heuristic ladder: it
+    // is the provider the user trusted, so quality degrades away from it.
+    const currentDefault = readModelRoles().roles.default;
+    const heuristic = heuristicPlan(roster.models, {
+      preferredProvider: currentDefault ? providerOf(currentDefault) : undefined,
+    });
     let draft = heuristic;
     let source: "llm" | "heuristic" = "heuristic";
 
@@ -138,7 +144,25 @@ export async function PUT(request: Request) {
       },
     });
     invalidateModelsCache();
-    return NextResponse.json({ success: true, roles, chains });
+    // A live omp child reads config.yml once at spawn, so without this the
+    // saved plan would sit unused until sessions happened to recycle. Idle
+    // children restart now; running turns finish on the old plan.
+    const { restarted, active } = await restartIdleRpcSessions();
+    return NextResponse.json({ success: true, roles, chains, restarted, active });
+  } catch (error) {
+    return NextResponse.json({ error: String(error) }, { status: 400 });
+  }
+}
+
+/** Reset to OMP defaults: drop everything a plan writes — role assignments and
+ * the derived fallback chains — leaving unrelated retry tuning untouched. */
+export async function DELETE() {
+  try {
+    const clearedRoles = clearModelRoles();
+    const clearedPaths = deleteNativeSettingsPaths(["retry.fallbackChains", "retry.usageAwareFallback"]);
+    invalidateModelsCache();
+    const { restarted, active } = await restartIdleRpcSessions();
+    return NextResponse.json({ success: true, cleared: clearedRoles || clearedPaths.length > 0, restarted, active });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 400 });
   }

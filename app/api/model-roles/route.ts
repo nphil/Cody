@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { invalidateModelsCache } from "@/lib/models-cache";
-import { readModelRoles, writeModelRoles } from "@/lib/omp/model-roles";
+import { clearModelRoles, readModelRoles, writeModelRoles } from "@/lib/omp/model-roles";
+import { restartIdleRpcSessions } from "@/lib/rpc-manager";
 
 export const dynamic = "force-dynamic";
 
@@ -23,7 +24,21 @@ export async function PUT(request: Request) {
     ));
     writeModelRoles(roles);
     invalidateModelsCache();
-    return NextResponse.json({ success: true, roles });
+    const { restarted, active } = await restartIdleRpcSessions();
+    return NextResponse.json({ success: true, roles, restarted, active });
+  } catch (error) {
+    return NextResponse.json({ error: String(error) }, { status: 400 });
+  }
+}
+
+/** Reset to OMP defaults: drop the modelRoles section so omp's built-in
+ * per-role priorities apply, exactly as on a fresh install. */
+export async function DELETE() {
+  try {
+    const cleared = clearModelRoles();
+    invalidateModelsCache();
+    const { restarted, active } = await restartIdleRpcSessions();
+    return NextResponse.json({ success: true, cleared, restarted, active });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 400 });
   }

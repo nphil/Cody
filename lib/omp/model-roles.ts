@@ -42,6 +42,22 @@ export function writeModelRoles(roles: ModelRoles): void {
   renameSync(temp, path);
 }
 
+/** Remove the modelRoles section entirely, restoring omp's out-of-the-box role
+ * resolution (built-in per-role priority lists; unset roles follow the default
+ * model). Returns whether anything was removed. */
+export function clearModelRoles(): boolean {
+  const path = configPath();
+  if (!existsSync(path)) return false;
+  const doc = parseDocument(readFileSync(path, "utf8"));
+  if (doc.errors.length > 0) throw new Error(`${path} is not valid YAML: ${doc.errors[0].message}`);
+  if (!isMap(doc.contents)) return false;
+  if (!doc.delete("modelRoles")) return false;
+  const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(temp, doc.toString(), "utf8");
+  renameSync(temp, path);
+  return true;
+}
+
 export function readDisabledProviders(): Set<string> {
   const path = configPath();
   if (!existsSync(path)) return new Set();

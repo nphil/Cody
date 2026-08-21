@@ -23,10 +23,13 @@ export type NativeSettings = {
     /** Skip a provider whose coding-plan quota is already depleted instead of
      * spending a doomed request on it first (omp default: off). */
     usageAwareFallback?: boolean;
+    /** Treat a coding-plan model as near its limit below this remaining %. */
+    usageReservePct?: number;
+    usageReservePolicy?: "confirm" | "auto" | "fail-closed";
     fallbackRevertPolicy?: "cooldown-expiry" | "never";
     fallbackChains?: Record<string, string[]>;
   };
-  compaction?: { enabled?: boolean; midTurnEnabled?: boolean; strategy?: "snapcompact" | "handoff" | "context-full" | "shake" | "off"; autoContinue?: boolean; remoteEnabled?: boolean; keepRecentTokens?: number };
+  compaction?: { enabled?: boolean; midTurnEnabled?: boolean; methodOrder?: CompactionMethod[]; autoContinue?: boolean; keepRecentTokens?: number };
   memory?: { backend?: "off" | "local" | "mnemopi" | "hindsight" };
   autolearn?: { enabled?: boolean; autoContinue?: boolean; minToolCalls?: number };
   mnemopi?: { scoping?: "global" | "per-project" | "per-project-tagged"; autoRecall?: boolean; autoRetain?: boolean; noEmbeddings?: boolean };
@@ -43,7 +46,17 @@ const BACKLOGS = new Set(["off", "1", "3", "5"]);
 const APPROVAL_MODES = new Set(["always-ask", "write", "yolo"]);
 const APPROVAL_POLICIES = new Set(["allow", "prompt", "deny"]);
 const FALLBACK_REVERT_POLICIES = new Set(["cooldown-expiry", "never"]);
-const COMPACTION_STRATEGIES = new Set(["snapcompact", "handoff", "context-full", "shake", "off"]);
+const USAGE_RESERVE_POLICIES = new Set(["confirm", "auto", "fail-closed"]);
+
+/** omp's automatic context-maintenance methods (session/compaction-methods.ts).
+ * 17.4.0 replaced `compaction.strategy`/`compaction.remoteEnabled` with this
+ * ordered preference list; omp migrates legacy keys itself, and
+ * `legacyMethodOrder` mirrors that mapping so Cody shows the effective order
+ * for configs omp has not rewritten yet. */
+export type CompactionMethod = "remote" | "snapcompact" | "handoff" | "shake" | "soft";
+export const COMPACTION_METHODS: readonly CompactionMethod[] = ["remote", "snapcompact", "handoff", "shake", "soft"];
+export const DEFAULT_COMPACTION_METHOD_ORDER: readonly CompactionMethod[] = ["remote", "snapcompact", "handoff", "shake", "soft"];
+const COMPACTION_METHOD_SET: ReadonlySet<string> = new Set(COMPACTION_METHODS);
 const MEMORY_BACKENDS = new Set(["off", "local", "mnemopi", "hindsight"]);
 const MEMORY_SCOPES = new Set(["global", "per-project", "per-project-tagged"]);
 
@@ -61,6 +74,35 @@ function assertOptionalRecord(value: unknown, name: string): asserts value is Re
 
 function assertOptionalBoolean(value: unknown, name: string): void {
   if (value !== undefined && typeof value !== "boolean") throw new Error(`${name} must be a boolean`);
+}
+
+/** Effective compaction method order: the 17.4+ key when present, else omp's
+ * own migration mapping applied to the pre-17.4 `strategy`/`remoteEnabled`
+ * keys (mirrors oh-my-pi src/config/settings.ts), else unset = omp default. */
+function readCompactionMethodOrder(compaction: Record<string, unknown>): CompactionMethod[] | undefined {
+  const raw = compaction.methodOrder;
+  if (Array.isArray(raw)) {
+    const cleaned: CompactionMethod[] = [];
+    for (const value of raw) {
+      if (typeof value === "string" && COMPACTION_METHOD_SET.has(value) && !cleaned.includes(value as CompactionMethod)) {
+        cleaned.push(value as CompactionMethod);
+      }
+    }
+    return cleaned;
+  }
+  const remoteEnabled = compaction.remoteEnabled !== false;
+  const strategy = compaction.strategy === "shake-summary" ? "shake" : compaction.strategy;
+  switch (strategy) {
+    case "context-full": return remoteEnabled ? ["remote", "soft"] : ["soft"];
+    case "handoff": return remoteEnabled ? ["handoff", "remote", "soft"] : ["handoff", "soft"];
+    case "shake": return remoteEnabled ? ["shake", "remote", "soft"] : ["shake", "soft"];
+    case "snapcompact": return remoteEnabled ? ["snapcompact", "remote", "soft"] : ["snapcompact", "soft"];
+    case "off": return [];
+    default:
+      return compaction.remoteEnabled === false
+        ? DEFAULT_COMPACTION_METHOD_ORDER.filter((method) => method !== "remote")
+        : undefined;
+  }
 }
 
 function readDocument() {
@@ -122,15 +164,16 @@ export function readNativeSettings(): { path: string; settings: NativeSettings }
         ...(typeof retry.maxRetries === "number" && Number.isInteger(retry.maxRetries) ? { maxRetries: retry.maxRetries } : {}),
         ...(typeof retry.modelFallback === "boolean" ? { modelFallback: retry.modelFallback } : {}),
         ...(typeof retry.usageAwareFallback === "boolean" ? { usageAwareFallback: retry.usageAwareFallback } : {}),
+        ...(typeof retry.usageReservePct === "number" && Number.isInteger(retry.usageReservePct) ? { usageReservePct: retry.usageReservePct } : {}),
+        ...(USAGE_RESERVE_POLICIES.has(retry.usageReservePolicy as string) ? { usageReservePolicy: retry.usageReservePolicy as "confirm" | "auto" | "fail-closed" } : {}),
         ...(FALLBACK_REVERT_POLICIES.has(retry.fallbackRevertPolicy as string) ? { fallbackRevertPolicy: retry.fallbackRevertPolicy as "cooldown-expiry" | "never" } : {}),
         ...(Object.keys(fallbackChains).length ? { fallbackChains } : {}),
       } } : {}),
       ...(Object.keys(compaction).length ? { compaction: {
         ...(typeof compaction.enabled === "boolean" ? { enabled: compaction.enabled } : {}),
         ...(typeof compaction.midTurnEnabled === "boolean" ? { midTurnEnabled: compaction.midTurnEnabled } : {}),
-        ...(COMPACTION_STRATEGIES.has(compaction.strategy as string) ? { strategy: compaction.strategy as "snapcompact" | "handoff" | "context-full" | "shake" | "off" } : {}),
+        ...((() => { const methodOrder = readCompactionMethodOrder(compaction); return methodOrder !== undefined ? { methodOrder } : {}; })()),
         ...(typeof compaction.autoContinue === "boolean" ? { autoContinue: compaction.autoContinue } : {}),
-        ...(typeof compaction.remoteEnabled === "boolean" ? { remoteEnabled: compaction.remoteEnabled } : {}),
         ...(typeof compaction.keepRecentTokens === "number" && Number.isInteger(compaction.keepRecentTokens) ? { keepRecentTokens: compaction.keepRecentTokens } : {}),
       } } : {}),
       ...(Object.keys(memory).length ? { memory: { ...(MEMORY_BACKENDS.has(memory.backend as string) ? { backend: memory.backend as "off" | "local" | "mnemopi" | "hindsight" } : {}) } } : {}),
@@ -185,7 +228,6 @@ export function writeNativeSettings(settings: NativeSettings): void {
     "compaction.enabled": settings.compaction?.enabled,
     "compaction.midTurnEnabled": settings.compaction?.midTurnEnabled,
     "compaction.autoContinue": settings.compaction?.autoContinue,
-    "compaction.remoteEnabled": settings.compaction?.remoteEnabled,
     "autolearn.enabled": settings.autolearn?.enabled,
     "autolearn.autoContinue": settings.autolearn?.autoContinue,
     "mnemopi.autoRecall": settings.mnemopi?.autoRecall,
@@ -204,13 +246,15 @@ export function writeNativeSettings(settings: NativeSettings): void {
   if (settings.tools?.approval?.bash !== undefined && !APPROVAL_POLICIES.has(settings.tools.approval.bash)) throw new Error("Invalid Bash approval policy");
   if (settings.tools?.approval?.extension !== undefined && settings.tools.approval.extension !== "allow" && settings.tools.approval.extension !== "prompt") throw new Error("Invalid extension tool approval policy");
   if (settings.retry?.maxRetries !== undefined && (!Number.isInteger(settings.retry.maxRetries) || settings.retry.maxRetries < 0 || settings.retry.maxRetries > 20)) throw new Error("Retry attempts must be an integer between 0 and 20");
+  if (settings.retry?.usageReservePct !== undefined && (!Number.isInteger(settings.retry.usageReservePct) || settings.retry.usageReservePct < 0 || settings.retry.usageReservePct > 100)) throw new Error("Reserve margin must be an integer between 0 and 100");
+  if (settings.retry?.usageReservePolicy !== undefined && !USAGE_RESERVE_POLICIES.has(settings.retry.usageReservePolicy)) throw new Error("Invalid usage reserve policy");
   if (settings.retry?.fallbackRevertPolicy !== undefined && !FALLBACK_REVERT_POLICIES.has(settings.retry.fallbackRevertPolicy)) throw new Error("Invalid fallback revert policy");
   if (settings.retry?.fallbackChains !== undefined) {
     for (const [role, chain] of Object.entries(settings.retry.fallbackChains)) {
       if (!role.trim() || !Array.isArray(chain) || chain.some((selector) => typeof selector !== "string" || !selector.trim())) throw new Error("Fallback chains require non-empty role and model selectors");
     }
   }
-  if (settings.compaction?.strategy !== undefined && !COMPACTION_STRATEGIES.has(settings.compaction.strategy)) throw new Error("Invalid compaction strategy");
+  if (settings.compaction?.methodOrder !== undefined && (!Array.isArray(settings.compaction.methodOrder) || settings.compaction.methodOrder.some((method) => !COMPACTION_METHOD_SET.has(method)))) throw new Error("Invalid compaction method order");
   if (settings.compaction?.keepRecentTokens !== undefined && (!Number.isInteger(settings.compaction.keepRecentTokens) || settings.compaction.keepRecentTokens < 1_000 || settings.compaction.keepRecentTokens > 1_000_000)) throw new Error("Compaction retained tokens must be an integer between 1,000 and 1,000,000");
   if (settings.memory?.backend !== undefined && !MEMORY_BACKENDS.has(settings.memory.backend)) throw new Error("Invalid memory backend");
   if (settings.autolearn?.minToolCalls !== undefined && (!Number.isInteger(settings.autolearn.minToolCalls) || settings.autolearn.minToolCalls < 0 || settings.autolearn.minToolCalls > 100)) throw new Error("Auto-learn minimum tool calls must be an integer between 0 and 100");
@@ -243,6 +287,12 @@ export function writeNativeSettings(settings: NativeSettings): void {
   if (settings.modelProviderOrder !== undefined) doc.set("modelProviderOrder", settings.modelProviderOrder);
   for (const [key, value] of Object.entries(settings.retry ?? {})) doc.setIn(["retry", key], value);
   for (const [key, value] of Object.entries(settings.compaction ?? {})) doc.setIn(["compaction", key], value);
+  if (settings.compaction?.methodOrder !== undefined) {
+    // Clean cutover to the 17.4+ key: leaving the pre-17.4 keys behind would
+    // re-trigger omp's legacy migration and shadow the order just written.
+    doc.deleteIn(["compaction", "strategy"]);
+    doc.deleteIn(["compaction", "remoteEnabled"]);
+  }
   for (const [key, value] of Object.entries(settings.memory ?? {})) doc.setIn(["memory", key], value);
   for (const [key, value] of Object.entries(settings.autolearn ?? {})) doc.setIn(["autolearn", key], value);
   for (const [key, value] of Object.entries(settings.mnemopi ?? {})) doc.setIn(["mnemopi", key], value);
@@ -251,4 +301,40 @@ export function writeNativeSettings(settings: NativeSettings): void {
   const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
   writeFileSync(temp, doc.toString(), "utf8");
   renameSync(temp, path);
+}
+
+/** Top-level config.yml sections Cody may reset wholesale. Deleting a section
+ * is how "back to OMP defaults" works: omitted keys fall through to omp's own
+ * schema defaults, so there is nothing to write, only stale overrides to drop. */
+const RESETTABLE_SECTIONS = new Set(["retry", "compaction"]);
+
+/** Remove whole sections from config.yml so omp's built-in defaults apply.
+ * Returns the sections that actually existed and were removed. */
+export function deleteNativeSettingsSections(sections: string[]): string[] {
+  const unknown = sections.filter((section) => !RESETTABLE_SECTIONS.has(section));
+  if (unknown.length > 0) throw new Error(`Not a resettable settings section: ${unknown.join(", ")}`);
+  return deleteDocumentPaths(sections.map((section) => [section]));
+}
+
+/** Dotted config.yml paths Cody may reset individually — the keys the model
+ * plan writes, so undoing a plan does not clobber unrelated retry tuning. */
+const RESETTABLE_PATHS = new Set(["retry.fallbackChains", "retry.usageAwareFallback"]);
+
+/** Remove individual nested keys (dotted paths) from config.yml. */
+export function deleteNativeSettingsPaths(paths: string[]): string[] {
+  const unknown = paths.filter((dotted) => !RESETTABLE_PATHS.has(dotted));
+  if (unknown.length > 0) throw new Error(`Not a resettable settings path: ${unknown.join(", ")}`);
+  return deleteDocumentPaths(paths.map((dotted) => dotted.split(".")));
+}
+
+function deleteDocumentPaths(paths: string[][]): string[] {
+  const { path, doc } = readDocument();
+  if (doc.contents === null) return [];
+  if (!isMap(doc.contents)) throw new Error(`${path} must contain a YAML mapping`);
+  const removed = paths.filter((parts) => (parts.length === 1 ? doc.delete(parts[0]) : doc.deleteIn(parts)));
+  if (removed.length === 0) return [];
+  const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(temp, doc.toString(), "utf8");
+  renameSync(temp, path);
+  return removed.map((parts) => parts.join("."));
 }
