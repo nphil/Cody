@@ -2,17 +2,23 @@ import { existsSync, promises as fs } from "fs";
 import { homedir } from "os";
 import * as path from "path";
 import { parse as parseYaml } from "yaml";
+import { getHarness } from "@/lib/harness";
 import { getAgentDir } from "@/lib/omp/paths";
 import type { SkillInfo } from "@/lib/api-types";
 import { annotateSkillsWithInstallInfo } from "@/lib/skill-lock";
 
 /**
- * Pure-Node skill discovery mirroring omp's providers
- * (oh-my-pi/packages/coding-agent/src/discovery/{builtin,claude,agents,codex,github}.ts).
- * Cody cannot import the Bun-only SDK, so the scan rules are replicated:
+ * Pure-Node skill discovery mirroring the active engine's providers.
+ * omp (oh-my-pi/packages/coding-agent/src/discovery/{builtin,claude,agents,codex,github}.ts):
  * each provider contributes <root>/<name>/SKILL.md skills, higher-priority
  * providers win name collisions, and `enabled: false` frontmatter hides a
- * skill entirely.
+ * skill entirely. pi (pi-mono coding-agent package-manager.js
+ * addAutoDiscoveredResources) reads a narrower set: <cwd>/.pi/skills,
+ * .agents/skills walked up to the git root, <agent dir>/skills and
+ * ~/.agents/skills — no .claude/.codex/.github compat dirs and no
+ * managed-skills dir, so scanning those under pi would list skills the
+ * engine never loads. Cody cannot import either Bun-only SDK, so the scan
+ * rules are replicated per engine.
  */
 
 export interface SkillDiagnostic {
@@ -78,9 +84,34 @@ function getAncestorDirs(cwd: string): string[] {
   return dirs;
 }
 
+/** pi's discovery (see module doc): project .pi/skills + .agents/skills
+ * walk-up, then user <agent dir>/skills + ~/.agents/skills. */
+function buildPiScanRoots(cwd: string): SkillScanRoot[] {
+  const home = homedir();
+  const agentDir = getHarness().getAgentDir();
+  const projectAncestors = getAncestorDirs(cwd).filter((dir) => dir !== home);
+  const roots: SkillScanRoot[] = [];
+
+  // Project scope: .pi/skills at the cwd only (pi does not walk .pi up), and
+  // .agents/skills from the cwd up to the git root.
+  roots.push({ dir: path.join(cwd, ".pi", "skills"), source: ".pi", scope: "project" });
+  for (const dir of projectAncestors) {
+    roots.push({ dir: path.join(dir, ".agents", "skills"), source: ".agents", scope: "project" });
+  }
+
+  // User scope: pi's own agent dir, then the ecosystem ~/.agents/skills —
+  // also where Cody's global skill installs land, so installs stay loadable.
+  roots.push({ dir: path.join(agentDir, "skills"), source: ".pi", scope: "user" });
+  roots.push({ dir: path.join(home, ".agents", "skills"), source: ".agents", scope: "user" });
+
+  return roots;
+}
+
 /** Scan roots in omp's provider priority order (highest first): .omp (100),
- * .claude (80), .agent/.agents + .codex + .github (70), managed skills (5). */
+ * .claude (80), .agent/.agents + .codex + .github (70), managed skills (5).
+ * The pi engine gets its own narrower walk (buildPiScanRoots above). */
 function buildScanRoots(cwd: string): SkillScanRoot[] {
+  if (getHarness().id === "pi") return buildPiScanRoots(cwd);
   const home = homedir();
   const agentDir = getAgentDir();
   const ancestors = getAncestorDirs(cwd);

@@ -1,6 +1,8 @@
 import { jsonError, requireAdmin } from "@/lib/auth/http";
 import { parseJsonWithinLimit } from "@/lib/bounded-form-data";
 import { getHarness, getHarnessById, selectHarness } from "@/lib/harness";
+import { invalidateModelsCache } from "@/lib/models-cache";
+import { disposeUtilityRpc } from "@/lib/omp/rpc-utility";
 import { restartAllRpcSessions } from "@/lib/rpc-manager";
 import { invalidateSessionListCache } from "@/lib/session-reader";
 import { GET as getEngines } from "../route";
@@ -53,6 +55,10 @@ export async function POST(request: Request) {
   // root (or its engine-session index); a cached list from the old engine
   // must not survive the switch.
   invalidateSessionListCache();
+  // Same reasoning for the model catalog and the shared utility process that
+  // serves it: both belong to the engine that was just replaced.
+  invalidateModelsCache();
+  disposeUtilityRpc();
   if (!reaffirming) {
     try {
       await restartAllRpcSessions();

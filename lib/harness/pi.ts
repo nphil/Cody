@@ -73,13 +73,26 @@ export const piHarness: HarnessAdapter = {
     "Run `pi` once in a Cody terminal to configure a provider, or set provider API keys (ANTHROPIC_API_KEY, OPENAI_API_KEY, …) on the container.",
   capabilities: {
     liveSessions: true,
+    // The models.yml/providers editor and native-settings schema are omp's
+    // own config pipelines; pi has no MCP, no plugin CLI Cody can drive, and
+    // updates ride the engine card's npm reinstall instead of a self-updater.
     models: false,
-    skills: false,
+    // pi discovers skills from .pi/skills, .agents/skills (walk-up + home)
+    // and <agent dir>/skills, and honors disable-model-invocation — the
+    // skills tab (list/toggle/install-to-.agents) is fully honest for it.
+    skills: true,
     plugins: false,
     mcp: false,
     nativeSettings: false,
     updates: false,
-    chatExtras: false,
+    // The full RPC-dialect chat surface: steer/follow-up, set_model,
+    // thinking levels, fork, compact — plus the file-level history/branch
+    // surfaces, which work because pi writes real v3 transcripts.
+    chatExtras: true,
+    // omp-only protocol extras pi's dialect lacks.
+    fastMode: false,
+    advisor: false,
+    subagents: false,
   },
   resolveBinary: () => resolveEngineBin("pi", "PI"),
   getVersion: () => getEngineVersion("pi", "PI"),

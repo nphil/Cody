@@ -1,5 +1,5 @@
 import { homedir } from "os";
-import { RpcProcess } from "./rpc-process";
+import { RpcProcess, type RpcProcessLaunch } from "./rpc-process";
 
 /**
  * Shared short-lived `omp` utility process for global registry/auth queries
@@ -55,6 +55,9 @@ export interface OmpLoginProvider {
 
 interface UtilityRpcState {
   proc: RpcProcess | null;
+  /** Which engine the live proc belongs to ("omp" default, or launch.label).
+   * A launch for a different engine disposes the old child first. */
+  procKey: string;
   idleTimer: NodeJS.Timeout | null;
   queue: Promise<void>;
 }
@@ -65,7 +68,7 @@ declare global {
 
 function getState(): UtilityRpcState {
   if (!globalThis.__ompUtilityRpcState) {
-    globalThis.__ompUtilityRpcState = { proc: null, idleTimer: null, queue: Promise.resolve() };
+    globalThis.__ompUtilityRpcState = { proc: null, procKey: "omp", idleTimer: null, queue: Promise.resolve() };
     // Mirror the session registry in lib/rpc-manager.ts: dispose the shared
     // utility omp process on server shutdown so it does not outlive the server.
     // Idempotent and safe to call any time (clears the idle timer + disposes).
@@ -107,10 +110,11 @@ function scheduleIdleKill(state: UtilityRpcState): void {
   state.idleTimer.unref?.();
 }
 
-async function startProcess(state: UtilityRpcState): Promise<RpcProcess> {
+async function startProcess(state: UtilityRpcState, launch?: RpcProcessLaunch): Promise<RpcProcess> {
   const proc = new RpcProcess({
     cwd: homedir(),
     extraArgs: UTILITY_EXTRA_ARGS,
+    launch,
     onExit: () => {
       if (state.proc === proc) state.proc = null;
     },
@@ -125,20 +129,32 @@ async function startProcess(state: UtilityRpcState): Promise<RpcProcess> {
 }
 
 /** Run one RPC command on the shared utility process (lazy start, serialized,
- * idle-killed). Rejections from earlier commands never poison the queue. */
+ * idle-killed). Rejections from earlier commands never poison the queue.
+ * `launch` selects a non-omp rpc-dialect engine (see utilityRpcLaunchFor in
+ * lib/rpc-manager); absent means the installed omp. The shared child is keyed
+ * by engine — a command for a different engine disposes the old child first,
+ * so an engine switch can never be answered by the previous engine's process. */
 export function runUtilityCommand<T = unknown>(
   command: { type: string; [key: string]: unknown },
   timeoutMs: number = DEFAULT_COMMAND_TIMEOUT_MS,
+  launch?: RpcProcessLaunch,
 ): Promise<T> {
   const state = getState();
+  const key = launch ? `${launch.label ?? "engine"}:${launch.bin}` : "omp";
   const run = state.queue.then(async () => {
     if (state.idleTimer) {
       clearTimeout(state.idleTimer);
       state.idleTimer = null;
     }
     try {
+      if (state.proc && state.proc.isAlive && state.procKey !== key) {
+        const old = state.proc;
+        state.proc = null;
+        void old.dispose();
+      }
       if (!state.proc || !state.proc.isAlive) {
-        state.proc = await startProcess(state);
+        state.proc = await startProcess(state, launch);
+        state.procKey = key;
       }
       return await state.proc.sendCommand<T>(command, timeoutMs);
     } finally {

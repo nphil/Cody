@@ -92,8 +92,37 @@ Session listing follows the ACTIVE engine's `getSessionsDir()`
 (`~/.pi/agent/sessions` vs `~/.omp/agent/sessions`; both honor
 `PI_CODING_AGENT_DIR`, an env name omp kept from its pi ancestry), and
 Cody's session reader parses pi transcripts as the "old pi files" it always
-tolerated. Everything else (models registry, skills, plugins, MCP, native
-settings, updates) is capability-gated off.
+tolerated.
+
+What pi serves is flagged per surface, not as one bundle:
+
+- **`chatExtras: true`** — steer/follow-up, composer model switching,
+  thinking levels, fork, compaction, branch navigation and the history/HTML
+  export all work: the RPC commands exist in pi's dialect and the
+  file-level surfaces work because pi writes real v3 transcripts (which is
+  exactly what the turn engines lack).
+- **`fastMode` / `advisor` / `subagents`: false** — omp protocol extras
+  (`set_fast_mode`, `--advisor`, `get_subagents` + subagent frames) split out
+  of chatExtras so pi's true surface can be stated. The fast-mode tier match
+  would otherwise light up for pi's Anthropic models and the toggle would
+  fail against the vocabulary gate.
+- **`skills: true`** — `lib/skills-service.ts` scans pi's OWN discovery
+  roots (`<cwd>/.pi/skills`, `.agents/skills` walked up to the git root,
+  `<agent dir>/skills`, `~/.agents/skills` — no .claude/.codex/.github
+  compat dirs, no managed-skills), pi honors `disable-model-invocation`, and
+  Cody's installer writes `.agents/skills`, which pi loads. The Extensions &
+  Tools group shows with just the sub-panels the engine serves.
+- **`models: false`** but the composer model list works: `/api/models` runs
+  `get_available_models` on a sessionless utility child of the ACTIVE engine
+  (`utilityRpcLaunchFor`), keyed per engine in cache and in the shared
+  process. pi's catalog is auth-gated by design — it lists models for
+  providers with configured keys (env or its auth.json), the same set its
+  own `/model` picker offers — and reasoning models get the dialect's global
+  thinking levels, since pi's catalog carries no per-model efforts. Provider
+  login state (`get_login_providers`) is omp-only and skipped.
+- **`mcp` / `plugins` / `nativeSettings` / `updates`: false** — pi has no
+  MCP, no plugin CLI Cody can drive, no schema-readable settings pipeline,
+  and updates ride the engine card's npm reinstall.
 
 ## The seam: `lib/harness/`
 

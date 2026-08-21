@@ -282,6 +282,32 @@ export function buildEngineRpcLaunch(
   return { bin, label: harness.binaryName, args, readiness: spec.readiness };
 }
 
+/**
+ * Launch for the shared UTILITY process (global registry queries: available
+ * models, default model — see lib/omp/rpc-utility). `undefined` for omp:
+ * rpc-utility's default path already spawns the installed omp, and the
+ * omp-only auth routes share that process. Other rpc-dialect engines (pi)
+ * get a sessionless launch; `--no-session --no-skills` exist in pi's parser
+ * with omp's semantics.
+ */
+export function utilityRpcLaunchFor(harness: HarnessAdapter): RpcProcessLaunch | undefined {
+  const spec = harness.rpcUi;
+  if (!spec || harness.id === "omp") return undefined;
+  const bin = harness.resolveBinary();
+  if (!bin) {
+    throw new WebRpcError(
+      `${harness.binaryName} binary not found. Install ${harness.displayName} from Settings → User Accounts → Agent engine.`,
+      "engine_not_installed",
+    );
+  }
+  return {
+    bin,
+    label: harness.binaryName,
+    args: ["--mode", spec.mode, "--no-session", "--no-skills"],
+    readiness: spec.readiness,
+  };
+}
+
 function toImageContents(value: unknown): Array<{ type: "image"; data: string; mimeType: string }> | undefined {
   const images = value as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
   return images?.length ? images : undefined;
@@ -1015,7 +1041,7 @@ export class AgentSessionWrapper {
       isCompacting: state.isCompacting,
       autoCompactionEnabled: state.autoCompactionEnabled,
       autoRetryEnabled: state.autoRetryEnabled,
-      interruptMode: state.interruptMode,
+      interruptMode: state.interruptMode ?? "immediate",
       steeringMode: state.steeringMode,
       followUpMode: state.followUpMode,
       model: state.model
@@ -1028,7 +1054,8 @@ export class AgentSessionWrapper {
           }
         : undefined,
       messageCount: state.messageCount,
-      queuedMessageCount: state.queuedMessageCount,
+      // pi reports the same number as pendingMessageCount (omp renamed it).
+      queuedMessageCount: state.queuedMessageCount ?? state.pendingMessageCount ?? 0,
       contextUsage: state.contextUsage ?? null,
       systemPrompt: state.systemPrompt?.join("\n\n") ?? "",
       thinkingLevel: state.thinkingLevel ?? "off",

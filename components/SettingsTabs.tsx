@@ -33,6 +33,9 @@ export interface EngineCapabilities {
   nativeSettings: boolean;
   updates: boolean;
   chatExtras: boolean;
+  fastMode: boolean;
+  advisor: boolean;
+  subagents: boolean;
 }
 
 /** The active engine's identity, also from GET /api/info. */
@@ -54,6 +57,9 @@ export const ALL_CAPABILITIES: EngineCapabilities = {
   nativeSettings: true,
   updates: true,
   chatExtras: true,
+  fastMode: true,
+  advisor: true,
+  subagents: true,
 };
 
 /** Coerce whatever /api/info returned into a full flag set, defaulting every
@@ -95,8 +101,10 @@ export interface TabItem {
   Icon: ComponentType<{ size?: number; className?: string; "aria-hidden"?: boolean | "true" | "false"; style?: CSSProperties }>;
   needsWorkspace?: boolean;
   /** Hidden entirely when the active engine lacks this capability — an engine
-   * that cannot serve the surface should not advertise it as disabled. */
-  needsCapability?: keyof EngineCapabilities;
+   * that cannot serve the surface should not advertise it as disabled. An
+   * array means ANY of the listed capabilities keeps the tab (a group tab
+   * whose sub-surfaces gate individually, like Extensions & Tools). */
+  needsCapability?: keyof EngineCapabilities | readonly (keyof EngineCapabilities)[];
   /** Sits apart at the foot of the sidebar. The full harness settings dump is
    * a reference surface, not part of the curated walk through the tabs above. */
   pinBottom?: boolean;
@@ -107,17 +115,38 @@ export interface TabItem {
  * only what renders before that lands. */
 export const DEFAULT_HARNESS_LABEL = "OMP";
 
+/** The Extensions & Tools group description, composed from what the active
+ * engine actually serves so a skills-only engine (pi) is not promised MCP. */
+function extensionsGroupDescription(capabilities: EngineCapabilities): string {
+  const parts = [
+    ...(capabilities.mcp ? ["MCP servers"] : []),
+    ...(capabilities.skills ? ["skills"] : []),
+    ...(capabilities.plugins ? ["plugins"] : []),
+  ];
+  return parts.length > 0
+    ? `${parts.join(", ").replace(/^./, (c) => c.toUpperCase())} for the active engine`
+    : "Extensions for the active engine";
+}
+
 export function getSettingsCategories(
   harnessLabel: string = DEFAULT_HARNESS_LABEL,
   capabilities: EngineCapabilities = ALL_CAPABILITIES,
 ): TabItem[] {
   return SETTINGS_CATEGORIES
-    .filter((tab) => !tab.needsCapability || capabilities[tab.needsCapability])
-    .map((tab) =>
-      tab.id === "omp"
-        ? { ...tab, label: `All ${harnessLabel} Settings`, description: `Every setting ${harnessLabel} declares, read from its own schema` }
-        : tab,
-    );
+    .filter((tab) => {
+      if (!tab.needsCapability) return true;
+      const needs = typeof tab.needsCapability === "string" ? [tab.needsCapability] : tab.needsCapability;
+      return needs.some((key) => capabilities[key]);
+    })
+    .map((tab) => {
+      if (tab.id === "omp") {
+        return { ...tab, label: `All ${harnessLabel} Settings`, description: `Every setting ${harnessLabel} declares, read from its own schema` };
+      }
+      if (tab.id === "mcp") {
+        return { ...tab, description: extensionsGroupDescription(capabilities) };
+      }
+      return tab;
+    });
 }
 
 export const SETTINGS_CATEGORIES: TabItem[] = [
@@ -131,7 +160,7 @@ export const SETTINGS_CATEGORIES: TabItem[] = [
   // and is just as useful on a headless Docker install as on desktop.
   { id: "localai", label: "Local AI", description: "Detect Ollama, LM Studio, and llama.cpp running near this instance", Icon: Server },
   { id: "intelligence", label: "Agent & Intelligence", description: "Advisor, memory, autolearn, compaction and retry", Icon: Sparkles, needsCapability: "nativeSettings" },
-  { id: "mcp", label: "Extensions & Tools", description: "MCP servers, managed skills, and OMP plugins", Icon: Cable, needsCapability: "mcp" },
+  { id: "mcp", label: "Extensions & Tools", description: "MCP servers, managed skills, and plugins", Icon: Cable, needsCapability: ["mcp", "skills", "plugins"] },
   { id: "system", label: "System & Updates", description: "Updates for the app, agent engines, and skills, plus session restart", Icon: RefreshCw },
   { id: "omp", label: `All ${DEFAULT_HARNESS_LABEL} Settings`, description: `Every setting ${DEFAULT_HARNESS_LABEL} declares, read from its own schema`, Icon: SlidersHorizontal, pinBottom: true, needsCapability: "nativeSettings" },
 ];

@@ -1851,8 +1851,10 @@ export function AppShell() {
               onOpenFile={handleOpenLinkedFile}
               onOpenPreview={handleAgentOpenPreview}
               onPreviewUrlsSeen={handlePreviewUrlsSeen}
-              advisorEnabled={advisorEnabled}
+              advisorEnabled={capabilities.advisor && advisorEnabled}
               chatExtras={capabilities.chatExtras}
+              fastModeCapable={capabilities.fastMode}
+              subagentsCapable={capabilities.subagents}
               toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
               thinkingDefaultExpanded={thinkingDefaultExpanded}
             />

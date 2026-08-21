@@ -58,15 +58,20 @@ export interface RpcSessionState {
   isCompacting: boolean;
   steeringMode: "all" | "one-at-a-time";
   followUpMode: "all" | "one-at-a-time";
-  interruptMode: "immediate" | "wait";
+  /** omp addition; absent on pi. */
+  interruptMode?: "immediate" | "wait";
   sessionFile?: string;
   sessionId: string;
   sessionName?: string;
   autoCompactionEnabled: boolean;
   autoRetryEnabled?: boolean;
   messageCount: number;
-  queuedMessageCount: number;
-  todoPhases: TodoPhase[];
+  /** omp's name for the queued-message count. Absent on pi. */
+  queuedMessageCount?: number;
+  /** pi's name for the same count (omp renamed it queuedMessageCount). */
+  pendingMessageCount?: number;
+  /** omp addition; absent on pi. */
+  todoPhases?: TodoPhase[];
   systemPrompt?: string[];
   contextUsage?: { tokens: number; contextWindow: number; percent: number };
   fastMode?: boolean;

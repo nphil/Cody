@@ -305,13 +305,15 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
   const currentTab = getNormalizedActive(activeTab);
 
   // Tabs the active engine can serve. Sub-tabs (skills/plugins/extensions)
-  // live under "mcp", so they ride on that entry's visibility.
+  // live under the "mcp" group entry but gate on their OWN capabilities: a
+  // skills-only engine (pi) shows the group with just the skills panel.
   const visibleTabs = useMemo(() => {
     const ids = new Set<SettingsTab>(getSettingsCategories(harnessLabel, capabilities).map((tab) => tab.id));
     if (ids.has("mcp")) {
       if (capabilities.skills) ids.add("skills");
       if (capabilities.plugins) ids.add("plugins");
-      ids.add("extensions");
+      // "extensions" deep-links to the MCP panel itself.
+      if (capabilities.mcp) ids.add("extensions");
     }
     return ids;
   }, [harnessLabel, capabilities]);
@@ -322,6 +324,15 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
   useEffect(() => {
     if (!visibleTabs.has(currentTab)) onSelectTab("general");
   }, [visibleTabs, currentTab, onSelectTab]);
+
+  // The Extensions & Tools group can be visible while its MCP panel is not
+  // (pi: skills without MCP). Landing on the group then means the first
+  // sub-surface this engine actually serves.
+  useEffect(() => {
+    if ((activeTab === "mcp" || activeTab === "extensions") && !capabilities.mcp) {
+      onSelectTab(capabilities.skills ? "skills" : "plugins");
+    }
+  }, [activeTab, capabilities.mcp, capabilities.skills, onSelectTab]);
 
   const trimmedQuery = searchQuery.trim().toLowerCase();
   const searchActive = trimmedQuery.length > 0;
@@ -803,8 +814,10 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
               </div>
             )}
 
-            {/* EXTENSIONS & TOOLS TAB (MCP, SKILLS, PLUGINS) */}
-            {(visitedTabs.has("mcp") || visitedTabs.has("skills") || visitedTabs.has("plugins")) && (
+            {/* EXTENSIONS & TOOLS TAB (MCP, SKILLS, PLUGINS). The MCP panel
+                itself is capability-gated: a skills-only engine (pi) shows the
+                group with just the sub-panels it serves. */}
+            {capabilities.mcp && (visitedTabs.has("mcp") || visitedTabs.has("skills") || visitedTabs.has("plugins")) && (
               <div role="tabpanel" id="settings-panel-mcp" aria-labelledby="settings-tab-mcp" className="settings-scroll-column" style={{ display: currentTab === "mcp" ? "flex" : "none", height: "100%", minHeight: 0, flexDirection: "column", overflowY: "auto", padding: 20, gap: 16 }}>
                 <div>
                   <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>Extensions & Tools</h3>

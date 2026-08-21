@@ -34,10 +34,14 @@ interface Props {
   session: SessionInfo | null;
   newSessionCwd: string | null;
   advisorEnabled?: boolean;
-  /** The active engine serves omp's advanced chat protocol (thinking levels,
-   * model switching, forking, compaction, subagents). False hides those
+  /** The active engine serves the rpc-dialect chat extras (thinking levels,
+   * model switching, forking, compaction, steering). False hides those
    * affordances instead of letting them fail against the engine. */
   chatExtras?: boolean;
+  /** Engine supports priority fast mode (omp set_fast_mode). */
+  fastModeCapable?: boolean;
+  /** Engine emits subagent rosters/progress (omp get_subagents + frames). */
+  subagentsCapable?: boolean;
   toolCallsDefaultCollapsed?: boolean;
   thinkingDefaultExpanded?: boolean;
   onAgentEnd?: () => void;
@@ -623,7 +627,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
 /** Memoized: AppShell holds ~60 state values (git badge polls, update checks,
  *  the context-usage tick ChatWindow itself pushes up), and each of those
  *  re-renders would otherwise rebuild this whole tree. */
-export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, advisorEnabled, chatExtras = true, toolCallsDefaultCollapsed = true, thinkingDefaultExpanded = false, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onModelUsageChange, onOpenFile, onOpenPreview, onPreviewUrlsSeen }: Props) {
+export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, advisorEnabled, chatExtras = true, fastModeCapable = true, subagentsCapable = true, toolCallsDefaultCollapsed = true, thinkingDefaultExpanded = false, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onModelUsageChange, onOpenFile, onOpenPreview, onPreviewUrlsSeen }: Props) {
   const { t, tn } = useI18n();
   const { playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -1000,7 +1004,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       onThinkingLevelChange={chatExtras && (session || isNew) ? handleThinkingLevelChange : undefined}
       fastModeEnabled={fastModeEnabled}
       fastModeActive={fastModeActive}
-      fastModeSupported={chatExtras && Boolean(displayModelValue && modelList.some((entry) => entry.provider === displayModelValue.provider && entry.id === displayModelValue.modelId && entry.supportsFastMode))}
+      fastModeSupported={fastModeCapable && chatExtras && Boolean(displayModelValue && modelList.some((entry) => entry.provider === displayModelValue.provider && entry.id === displayModelValue.modelId && entry.supportsFastMode))}
       onFastModeChange={session || isNew ? handleFastModeChange : undefined}
       onAbortRetry={session ? handleAbortRetry : undefined}
       availableThinkingLevels={availableThinkingLevels}
@@ -1306,7 +1310,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
           <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
             <ComposerPanels
               todoPhases={todoPhases}
-              subagents={chatExtras ? subagents : []}
+              subagents={subagentsCapable && chatExtras ? subagents : []}
               onSelectSubagent={setSelectedSubagent}
             />
             <ExtensionWidgets widgets={belowEditorWidgets} />

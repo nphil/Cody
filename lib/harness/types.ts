@@ -26,12 +26,18 @@ export interface HarnessCapabilities {
   /** Harness self-update checks and restarts. */
   updates: boolean;
   /**
-   * The advanced chat affordances built against omp's protocol: thinking
-   * levels, in-session model switching, forking, compaction, steering modes,
-   * advisor sessions, tool presets, subagent rosters. Engines without this
+   * The advanced chat affordances shared by the pi/omp RPC dialect: thinking
+   * levels, in-session model switching, forking, branch navigation, history
+   * export, compaction, steering modes, tool presets. Engines without this
    * get a plain prompt/stream/abort chat surface.
    */
   chatExtras: boolean;
+  /** Priority fast mode (`set_fast_mode`) — omp-only; pi's dialect lacks it. */
+  fastMode: boolean;
+  /** Advisor sessions (`--advisor` spawn flag) — omp-only. */
+  advisor: boolean;
+  /** Subagent rosters/progress (`get_subagents`, subagent frames) — omp-only. */
+  subagents: boolean;
 }
 
 /**
