@@ -1,91 +1,63 @@
 # Release Checklist
 
-> **Status: not published yet — deliberately.** Cody is self-hosted for
-> personal use right now (run from a checkout, or the Docker bundle in
-> `docker/` — see `docs/unraid.md`). Publishing to npm is on the long-term
-> roadmap for when the product is ready to share. Nothing depends on it
-> except the version check in Settings › System & Updates, which degrades to
-> "Update check unavailable" until then. The steps below are ready to run
-> whenever that day comes.
+Cody ships **one way: the container image**. `ghcr.io/nphil/cody:latest` is
+what installs pull, a versioned GitHub Release is the changelog Unraid's
+ShipLog plugin shows, and the in-app update check compares against the latest
+release of this repo. **npm is not a release channel** — Cody is not
+published there, nothing may reintroduce an npm publish step, and outside
+Docker the app runs from a checkout (the Settings update check degrades to
+"Update check unavailable" by design.)
 
-Each release publishes two artifacts:
+Everything is driven by `.github/workflows/docker.yml`:
 
-- npm package: `@nphil/cody`
-- GitHub Release: [nphil/Cody](https://github.com/nphil/Cody)
+- **Every push to `main`** rebuilds the image, runs the smoke gate (locked
+  first boot, first-run admin signup, in-container engine install, SSH
+  bring-up), and republishes `:latest`. A red run means the release did not
+  happen — the gate blocks publishing.
+- **A version release** additionally publishes `ghcr.io/nphil/cody:X.Y.Z`,
+  creates/updates the `vX.Y.Z` tag, and publishes a GitHub Release.
 
-After the initial bootstrap release, publishing is performed by GitHub Actions
-with npm trusted publishing. No npm access token is stored in this repository
-or in GitHub secrets.
+## Cutting a release
 
-## Bootstrap the first release
-
-`@nphil/cody` is not registered on npm yet. npm exposes trusted-publisher settings
-only for an existing package, so the first version must be published once from a
-reviewed local checkout using the authenticated npm account:
-
-```bash
-npm ci
-npm test
-npm run build
-npm pack --dry-run
-npm publish --access public
-```
-
-`--access public` is required: a scoped package defaults to restricted.
-
-Do not create a tag or GitHub Release for this bootstrap version: npm will
-reject a duplicate version.
-After this succeeds, configure trusted publishing before publishing any later
-version.
-
-## One-time trusted-publisher setup
-
-1. In npm, open the `@nphil/cody` package settings and add a **GitHub Actions**
-   trusted publisher with:
-   - Owner: `nphil`
-   - Repository: `Cody`
-   - Workflow filename: `publish.yml`
-   - Environment: `npm`
-2. In GitHub, create the `npm` environment for this repository. Add required
-   reviewers if releases need approval.
-3. Confirm Actions are enabled for the repository.
-
-The workflow at `.github/workflows/publish.yml` requests `contents: write` to
-create the GitHub Release and `id-token: write` for trusted publishing. It
-installs npm 11.5.1 or newer, as required for trusted publishing. The OIDC
-permission lets npm verify the GitHub Actions identity and generate provenance
-for the published package.
-
-## Release later versions
-
-Run these from a clean `main` checkout after the release changes are merged.
+From a clean, gated `main` checkout (`npm run typecheck && npm run lint &&
+npm test && npm run build` — inside the container, prefix the build with
+`env -u TURBOPACK`):
 
 ```bash
-npm ci
-npm test
-npm run build
-npm version <major|minor|patch>
-git push origin main --follow-tags
+npm version minor --no-git-tag-version       # or major/patch; updates package.json + lock
+git add package.json package-lock.json
+git commit                                   # subject: "Release X.Y.Z", body: the changelog narrative
+git tag vX.Y.Z                               # annotated (-m) or lightweight — both work
+git push origin main vX.Y.Z
 ```
 
-`npm version` updates `package.json` and `package-lock.json`, creates a commit,
-and creates a `v<version>` tag. Review the generated commit before pushing.
+The tag push runs the workflow's `release` job, which resolves the notes
+without a checkout (annotated tag → tag message; lightweight tag → the
+release commit's message body) and publishes "Cody vX.Y.Z" with generated
+commit notes appended.
 
-Pushing the tag starts the `Publish npm package` workflow. It checks out that
-immutable tag, verifies the tag matches `package.json`, installs from the
-lockfile, runs tests and the production build, then creates a draft GitHub
-Release with generated notes. It publishes `@nphil/cody` through the configured
-trusted publisher and makes that release public only after npm accepts the
-package. A rerun can safely finish a release if npm has already accepted its
-version.
+Alternatively, dispatch the whole thing without touching tags locally:
+
+```bash
+gh workflow run docker.yml -f version=X.Y.Z -F notes=@notes.md
+```
+
+The `@` matters: without it the literal path becomes the release body.
+Dispatch with an empty version is a plain `:latest` rebuild, no release.
 
 ## Verify
 
 ```bash
-gh run list --repo nphil/Cody --workflow publish.yml --limit 1
-npm view @nphil/cody@<version> version --registry https://registry.npmjs.org/
-npm view @nphil/cody@<version> --json --registry https://registry.npmjs.org/
+gh run list --workflow docker.yml --limit 2          # publish + release green
+gh release view vX.Y.Z                               # public, correct notes
+T=$(curl -s "https://ghcr.io/token?scope=repository:nphil/cody:pull" | jq -r .token)
+curl -s -o /dev/null -w '%{http_code} %header{docker-content-digest}\n' \
+  -H "Authorization: Bearer $T" \
+  -H "Accept: application/vnd.oci.image.index.v1+json" \
+  https://ghcr.io/v2/nphil/cody/manifests/X.Y.Z      # 200; same digest as :latest
 ```
 
-Confirm the workflow succeeded, the exact package version resolves, and npm
-shows the expected provenance link.
+Then update the running server (Unraid's update button, or
+`docker pull ghcr.io/nphil/cody:latest` + recreate). Note for agents: if you
+are running inside that container, recreating it ends your session — finish
+everything else first.

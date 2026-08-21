@@ -27,6 +27,10 @@ model is doing the work.
   first boot, first-run admin signup, in-app omp install, Basic-Auth
   compatibility, and SSH bring-up. When behavior changes deliberately,
   update the contract in the same commit.
+- **Versioned releases are container-only** — follow `docs/release.md`
+  (version commit + v-tag, or a `docker.yml` dispatch with notes). **npm is
+  not a release channel**: Cody is never published there and no workflow may
+  reintroduce an npm publish step.
 - Never put model identifiers in commits, PR text, or code comments.
   Commit messages: imperative subject that names the user-visible outcome,
   body explaining why (see `git log` for the house style).

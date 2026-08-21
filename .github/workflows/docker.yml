@@ -15,10 +15,11 @@ on:
   # Dispatching with a version cuts a RELEASE: image tagged X.Y.Z + latest,
   # a v-tag created on the dispatched ref, and a GitHub Release whose body is
   # `notes` — the changelog the ShipLog plugin shows in Unraid's Docker tab.
-  # Dispatch without a version = plain rebuild, no release. (The dispatch
-  # path is primary because Claude sessions cannot push tags through the git
-  # proxy; a human pushing an annotated v-tag works identically, with the tag
-  # message as the notes.)
+  # Dispatch without a version = plain rebuild, no release. Pushing a v-tag
+  # works identically with either tag shape: an annotated tag's message
+  # becomes the notes, a lightweight tag falls back to its commit's message
+  # body. This is the ONLY release pipeline — npm is not a channel
+  # (docs/release.md).
   workflow_dispatch:
     inputs:
       version:
@@ -241,30 +242,38 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-tags: true
-
+      # NO checkout: actions/checkout dies on lightweight tags ("Cannot fetch
+      # both <sha> and refs/tags/<tag>"), which killed release jobs and
+      # stranded releases. The API needs no git state and handles every tag
+      # shape: an annotated tag's message is the changelog; a lightweight tag
+      # falls back to its commit's message body (the "Release X.Y.Z"
+      # narrative). Dispatches carry notes explicitly.
       - name: Resolve tag + notes
         id: rel
         env:
+          GH_TOKEN: ${{ github.token }}
           NOTES_INPUT: ${{ inputs.notes }}
         run: |
+          set -euo pipefail
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            echo "tag=v${{ inputs.version }}" >> "$GITHUB_OUTPUT"
-            {
-              echo 'body<<SHIPLOG_EOF'
-              printf '%s\n' "$NOTES_INPUT"
-              echo SHIPLOG_EOF
-            } >> "$GITHUB_OUTPUT"
+            tag="v${{ inputs.version }}"
+            notes="$NOTES_INPUT"
           else
-            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
-            {
-              echo 'body<<SHIPLOG_EOF'
-              git tag -l --format='%(contents)' "$GITHUB_REF_NAME"
-              echo SHIPLOG_EOF
-            } >> "$GITHUB_OUTPUT"
+            tag="$GITHUB_REF_NAME"
+            type=$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.type)
+            sha=$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha)
+            if [ "$type" = "tag" ]; then
+              notes=$(gh api "/repos/$GITHUB_REPOSITORY/git/tags/$sha" --jq .message)
+            else
+              notes=$(gh api "/repos/$GITHUB_REPOSITORY/commits/$sha" --jq .commit.message | sed '1,2d')
+            fi
           fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          {
+            echo 'body<<SHIPLOG_EOF'
+            printf '%s\n' "$notes"
+            echo SHIPLOG_EOF
+          } >> "$GITHUB_OUTPUT"
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
