@@ -99,6 +99,32 @@ async function directCandidates(target: URL): Promise<DisplayCandidate[]> {
   return probed.filter((candidate): candidate is DisplayCandidate => candidate !== null);
 }
 
+/**
+ * Whether the gateway could usefully render this target: it must answer a
+ * cookie-less request with a 2xx. The gateway strips credentials in BOTH
+ * directions (see getProxy below), so an auth-gated target could at most
+ * render a login form whose session cookie is discarded — a dead end — and a
+ * Cody dev server's cross-site guard answers plain 403 JSON. Such targets are
+ * simply not offered this rung; the streamed rung is their fidelity floor and
+ * always present. Framing headers are deliberately NOT probed: getProxy
+ * removes x-frame-options and the frame-ancestors directive when it re-serves
+ * the response under the gateway's own origin, like any port-forwarding
+ * preview proxy.
+ *
+ * Do NOT "fix" auth-gated targets by forwarding cookies through the gateway:
+ * set-cookie pass-through would let a previewed dev server toss cookies onto
+ * the parent preview domain — session fixation against Cody itself.
+ */
+async function gatewayRenderable(target: URL): Promise<boolean> {
+  try {
+    const response = await fetch(target, { redirect: "manual", cache: "no-store", signal: AbortSignal.timeout(DIRECT_PROBE_TIMEOUT_MS) });
+    void response.body?.cancel().catch(() => {});
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 /** Mints a single-use wildcard-subdomain route through Cody's own origin. */
 function nativeCandidate(target: URL): DisplayCandidate | null {
   const base = configuredBase();
@@ -122,8 +148,11 @@ function nativeCandidate(target: URL): DisplayCandidate | null {
 export async function resolveDisplayCandidates(sourceUrl: string, mode: DisplayRequestMode): Promise<DisplayCandidate[]> {
   if (mode === "stream") return [{ kind: "stream" }];
   const target = new URL(normalizeLoopbackUrl(sourceUrl));
-  const direct = mode === "native" ? [] : await directCandidates(target);
-  const native = nativeCandidate(target);
+  const [direct, frameable] = await Promise.all([
+    mode === "native" ? Promise.resolve<DisplayCandidate[]>([]) : directCandidates(target),
+    configuredBase() === null ? Promise.resolve(false) : gatewayRenderable(target),
+  ]);
+  const native = frameable ? nativeCandidate(target) : null;
   return [...direct, ...(native ? [native] : []), { kind: "stream" }];
 }
 
@@ -147,21 +176,26 @@ function getProxy(): HttpProxyServer {
   const current = state();
   if (current.proxy) return current.proxy;
   const proxy = HttpProxyServer.createProxyServer({ ws: true, xfwd: true, changeOrigin: true, secure: false, autoRewrite: true });
-  proxy.on("proxyReq", (proxyReq, request) => {
+  // Re-origination: the upstream must see a self-consistent local request.
+  // Browser-sent origin/referer are TRANSLATED into the target's own origin —
+  // never fabricated onto requests that carried none — and the outer edge's
+  // forwarding metadata is overwritten with the target's reality: a
+  // TLS-terminating proxy in front of Cody stamps x-forwarded-proto: https,
+  // and an upstream that derives its self-origin from that while reading a
+  // rewritten http Origin header sees a phantom cross-origin request.
+  const toUpstreamHeaders = (proxyReq: import("node:http").ClientRequest, request: IncomingMessage) => {
     proxyReq.removeHeader("cookie");
     proxyReq.removeHeader("authorization");
     const route = routeForHost(request.headers.host);
-    if (route) {
-      proxyReq.setHeader("origin", route.targetOrigin);
-      proxyReq.setHeader("referer", `${route.targetOrigin}/`);
-    }
-  });
-  proxy.on("proxyReqWs", (proxyReq, request) => {
-    proxyReq.removeHeader("cookie");
-    proxyReq.removeHeader("authorization");
-    const route = routeForHost(request.headers.host);
-    if (route) proxyReq.setHeader("origin", route.targetOrigin);
-  });
+    if (!route) return;
+    const target = new URL(route.targetOrigin);
+    proxyReq.setHeader("x-forwarded-proto", target.protocol.replace(":", ""));
+    proxyReq.setHeader("x-forwarded-host", target.host);
+    if (request.headers.origin) proxyReq.setHeader("origin", route.targetOrigin);
+    if (request.headers.referer) proxyReq.setHeader("referer", `${route.targetOrigin}/`);
+  };
+  proxy.on("proxyReq", toUpstreamHeaders);
+  proxy.on("proxyReqWs", toUpstreamHeaders);
   proxy.on("proxyRes", (proxyRes) => {
     delete proxyRes.headers["set-cookie"];
     delete proxyRes.headers["x-frame-options"];
