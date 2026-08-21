@@ -452,6 +452,7 @@ it is the engine's. For reference, what the web client currently handles:
 `tool_execution_end`, `thinking_level_changed`, `model_changed`,
 `config_update`, `available_commands_update`, `todo_reminder`,
 `todo_auto_clear`, `auto_retry_start`, `auto_retry_end`,
+`retry_fallback_applied`, `retry_fallback_succeeded`,
 `auto_compaction_start`, `auto_compaction_end`, `subagent_lifecycle`,
 `subagent_progress`, `subagent_event`, `host_tool_call`, `host_uri_request`,
 `extension_ui_request`.

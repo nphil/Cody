@@ -265,7 +265,15 @@ export function ModelPlanPanel({ onApplied, onSkip, compact }: {
         body: JSON.stringify({ roles: payloadRoles, chains: payloadChains, usageAwareFallback: usageAware }),
       });
       if (!response.ok) throw new Error(await errorText(response));
-      toast.success(t("modelPlan.applied"));
+      const result = (await response.json().catch(() => null)) as { restarted?: number; active?: number } | null;
+      // Say how the plan reaches live sessions: idle ones were restarted onto
+      // it; running ones keep the old plan until their current run ends.
+      toast.success(
+        t("modelPlan.applied"),
+        result && result.active
+          ? t("modelPlan.appliedActiveNote", { count: String(result.active) })
+          : t("modelPlan.appliedNote"),
+      );
       onApplied?.();
     } catch (failure) {
       // The edits stay on screen: a failed write must not cost the user the

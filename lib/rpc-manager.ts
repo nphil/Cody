@@ -1506,6 +1506,18 @@ export async function restartAllRpcSessions(): Promise<number> {
   return sessions.length;
 }
 
+/** Stop live omp children that are NOT mid-run, so they come back with freshly
+ * saved config (model roles, fallback chains) on the next command. Running
+ * sessions are left alone — killing an active turn to apply settings would be
+ * worse than one turn on the previous config — and they pick the change up
+ * when their run ends and the child is next restarted. */
+export async function restartIdleRpcSessions(): Promise<{ restarted: number; active: number }> {
+  const sessions = [...new Set(getRegistry().values())];
+  const idle = sessions.filter((session) => !session.isRunning());
+  await Promise.all(idle.map((session) => session.destroyAndWait()));
+  return { restarted: idle.length, active: sessions.length - idle.length };
+}
+
 // ----------------------------------------------------------------------------
 // Running-status broadcaster
 //

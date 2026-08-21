@@ -47,9 +47,33 @@ export interface ModelPlan {
 
 // The provider is the FIRST path segment, not everything before the last "/":
 // gateway model ids can themselves contain slashes.
-function providerOf(selector: string): string {
+export function providerOf(selector: string): string {
   const slash = selector.indexOf("/");
   return slash === -1 ? selector : selector.slice(0, slash);
+}
+
+/**
+ * Providers that are gateways: aggregators (OpenRouter and its kind) that
+ * resell many vendors' models under one key. Judged from evidence, not a brand
+ * list — a gateway's model ids are themselves vendor-prefixed
+ * (`openrouter/anthropic/claude-…`), so a provider where most ids carry a
+ * slash is an aggregator. A gateway is a backup route, never the first choice:
+ * the same models exist on their home providers with the quota the user
+ * actually pays for, so gateways rank after direct providers and before local
+ * runtimes wherever this module orders providers.
+ */
+export function gatewayProviders(roster: RosterModel[]): Set<string> {
+  const slashed = new Map<string, number>();
+  const totals = new Map<string, number>();
+  for (const model of roster) {
+    totals.set(model.provider, (totals.get(model.provider) ?? 0) + 1);
+    if (model.id.includes("/")) slashed.set(model.provider, (slashed.get(model.provider) ?? 0) + 1);
+  }
+  const gateways = new Set<string>();
+  for (const [provider, total] of totals) {
+    if ((slashed.get(provider) ?? 0) * 2 > total) gateways.add(provider);
+  }
+  return gateways;
 }
 
 /**
@@ -82,13 +106,16 @@ function compareCapability(a: RosterModel, b: RosterModel): number {
 
 /**
  * The model to reach for whenever a plan needs "the good one": the strongest
- * model on a provider the user pays for or is signed in to, and a local model
- * only when the roster offers nothing else. Shared by the planner suggestion,
- * the heuristic assignment and the repair path so all three agree.
+ * model on a DIRECT provider the user pays for or is signed in to, then a
+ * gateway model, and a local model only when the roster offers nothing else.
+ * Shared by the planner suggestion, the heuristic assignment and the repair
+ * path so all three agree.
  */
 export function bestAvailableModel(roster: RosterModel[]): RosterModel | null {
-  const byCapability = [...roster].sort(compareCapability);
-  return byCapability.find((model) => !model.local) ?? byCapability[0] ?? null;
+  const gateways = gatewayProviders(roster);
+  const tier = (model: RosterModel): number => (model.local ? 2 : gateways.has(model.provider) ? 1 : 0);
+  const ranked = [...roster].sort((a, b) => tier(a) - tier(b) || compareCapability(a, b));
+  return ranked[0] ?? null;
 }
 
 /**
@@ -254,8 +281,11 @@ export function validatePlan(
  * ordering is all it has — the catalog carries no per-role quality signal — so
  * it sorts the roster and places the tiers.
  */
-export function heuristicPlan(roster: RosterModel[]): PlanDraft {
-  const byCapability = [...roster].sort(compareCapability);
+export function heuristicPlan(roster: RosterModel[], options: { preferredProvider?: string } = {}): PlanDraft {
+  const gateways = gatewayProviders(roster);
+  const providerTier = (provider: string, isLocal: boolean): number => (isLocal ? 2 : gateways.has(provider) ? 1 : 0);
+  const modelTier = (model: RosterModel): number => providerTier(model.provider, model.local);
+  const byCapability = [...roster].sort((a, b) => modelTier(a) - modelTier(b) || compareCapability(a, b));
   const roles: Record<string, string> = {};
   const rationale: PlanRationale[] = [];
   const capable = bestAvailableModel(roster);
@@ -263,7 +293,10 @@ export function heuristicPlan(roster: RosterModel[]): PlanDraft {
 
   // Local models are free but share the machine with the session, so the tiers
   // above `tiny` are drawn from models on a provider the user pays for or is
-  // signed in to — unless that is all the roster has.
+  // signed in to — unless that is all the roster has. Within that pool the
+  // tier sort above keeps direct providers ahead of gateways, so an
+  // aggregator's rebadged frontier model never outranks the same vendor's
+  // model on the account the user actually pays for.
   const local = byCapability.filter((model) => model.local);
   const reachable = byCapability.filter((model) => !model.local);
   const pool = reachable.length > 0 ? reachable : byCapability;
@@ -299,9 +332,12 @@ export function heuristicPlan(roster: RosterModel[]): PlanDraft {
   );
   if (vision) assign("vision", vision, `${vision.name} is the strongest model here that accepts images.`);
 
-  // One rung per provider, its best model standing in for it, with paid or
-  // signed-in providers first and local runtimes last so quality degrades in
-  // the order the user would choose themselves.
+  // One rung per provider, its best model standing in for it. Quality degrades
+  // in the order the user would choose themselves: direct paid or signed-in
+  // providers first, gateway aggregators (OpenRouter and its kind) as the
+  // backup route behind them, local runtimes last. The provider driving the
+  // user's current default model leads its tier — it is the provider they
+  // already trusted with main turns, so the ladder starts from it.
   //
   // Localness is judged per PROVIDER here, not from the rung's own model: a
   // self-hosted runtime serves whatever names its operator loaded, and the
@@ -312,13 +348,19 @@ export function heuristicPlan(roster: RosterModel[]): PlanDraft {
   const localProviders = new Set(local.map((model) => model.provider));
   const bestPerProvider = new Map<string, RosterModel>();
   for (const model of byCapability) if (!bestPerProvider.has(model.provider)) bestPerProvider.set(model.provider, model);
+  const preferred = options.preferredProvider && bestPerProvider.has(options.preferredProvider)
+    ? options.preferredProvider
+    : undefined;
   const ladder = [...bestPerProvider.values()]
-    .sort((a, b) => Number(localProviders.has(a.provider)) - Number(localProviders.has(b.provider)) || compareCapability(a, b))
+    .sort((a, b) =>
+      providerTier(a.provider, localProviders.has(a.provider)) - providerTier(b.provider, localProviders.has(b.provider))
+      || Number(b.provider === preferred) - Number(a.provider === preferred)
+      || compareCapability(a, b))
     .map((model) => model.provider);
   if (ladder.length > 1) {
     rationale.push({
       subject: "ladder",
-      text: `When a provider runs out, work moves down ${ladder.join(" → ")} to that provider's nearest equivalent model.`,
+      text: `When a provider runs out, work moves down ${ladder.join(" → ")} to that provider's nearest equivalent model — direct providers first, gateways as backup, local models last.`,
     });
   }
 
