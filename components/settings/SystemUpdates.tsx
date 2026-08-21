@@ -1,11 +1,12 @@
 "use client";
 
-import { ArrowRight, Check, Copy, Cpu, Download, Loader2, RefreshCw, RotateCcw, ScrollText, Settings2, Sparkles, TriangleAlert } from "lucide-react";
+import { ArrowRight, Check, Copy, Cpu, Download, Loader2, RefreshCw, RotateCcw, ScrollText, Settings2, Sparkles, Store, TriangleAlert } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "@/components/ui/toast";
+import { SkillsStore } from "@/components/SkillsStore";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { useEngineInstalls } from "@/hooks/useEngineInstalls";
-import type { SkillUpdateResult } from "@/lib/api-types";
+import type { SkillInfo, SkillInstallScope, SkillUpdateResult } from "@/lib/api-types";
 import type { EngineUpdateStatus } from "@/lib/harness/updates";
 import { translate, translatePlural, useI18n } from "@/lib/i18n";
 import type { EngineSummary, EnginesPayload } from "../EnginePicker";
@@ -159,6 +160,27 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
   // "check unavailable" instead of implying a check is still running.
   const [statusesChecked, setStatusesChecked] = useState(false);
   const [skills, setSkills] = useState<{ state: RowState | "no-workspace"; updates: SkillUpdateResult[] }>({ state: "loading", updates: [] });
+  const [storeOpen, setStoreOpen] = useState(false);
+  const [installedPackages, setInstalledPackages] = useState<Record<SkillInstallScope, ReadonlySet<string>>>({ global: new Set(), project: new Set() });
+
+  /** Installed-package sets for the store's "Installed" states — cheap local
+   * disk read, refreshed on open and after each install. */
+  const refreshInstalled = useCallback(async (targetCwd: string) => {
+    try {
+      const res = await fetch(`/api/skills?cwd=${encodeURIComponent(targetCwd)}`);
+      if (!res.ok) return;
+      const data = (await res.json()) as { skills?: SkillInfo[] };
+      const globalSet = new Set<string>();
+      const projectSet = new Set<string>();
+      for (const skill of data.skills ?? []) {
+        if (!skill.install) continue;
+        (skill.install.scope === "project" ? projectSet : globalSet).add(skill.install.package);
+      }
+      setInstalledPackages({ global: globalSet, project: projectSet });
+    } catch {
+      // Store falls back to session-local installed marks.
+    }
+  }, []);
   const [checking, setChecking] = useState(true);
   const [restarting, setRestarting] = useState(false);
   const [ompUpdating, setOmpUpdating] = useState(false);
@@ -736,7 +758,30 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
               <div style={mutedLineStyle}>{t("updates.skills.upToDate")}</div>
             )
           )}
+          {cwd && (
+            <div>
+              <button
+                type="button"
+                onClick={() => {
+                  setStoreOpen(true);
+                  void refreshInstalled(cwd);
+                }}
+                style={actionButtonStyle(false)}
+              >
+                <Store size={13} aria-hidden="true" />
+                {t("skillsConfig.store.open")}
+              </button>
+            </div>
+          )}
         </section>
+      )}
+      {storeOpen && cwd && (
+        <SkillsStore
+          cwd={cwd}
+          installedPackages={installedPackages}
+          onInstalled={() => void refreshInstalled(cwd)}
+          onClose={() => setStoreOpen(false)}
+        />
       )}
     </div>
   );

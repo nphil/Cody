@@ -1,9 +1,3 @@
-export interface SkillSearchResult {
-  package: string;
-  installs: string;
-  url: string;
-}
-
 export type SkillInstallScope = "global" | "project";
 
 export interface SkillInstallInfo {

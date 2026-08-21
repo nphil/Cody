@@ -50,10 +50,11 @@ yarn-error.log*
 next-env.d.ts
 .factory.claude/worktrees/
 
-# editor/agent tooling (session hook and settings are checked in)
+# editor/agent tooling (session hook, settings, and committed skills are checked in)
 .claude/*
 !.claude/settings.json
 !.claude/hooks/
+!.claude/skills/
 /.vscode/
 .vscode/settings.json
 /.pi/

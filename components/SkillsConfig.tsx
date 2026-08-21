@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useState, useEffect, useCallback, useRef } from "react";
+import { Fragment, useState, useEffect, useCallback } from "react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { translate, useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
@@ -9,12 +9,11 @@ import {
   DialogContent,
 } from "@/components/ui/primitives";
 import { toast } from "@/components/ui/toast";
-import { Plus } from "lucide-react";
+import { Store } from "lucide-react";
 import { SettingsTabs, type SettingsTab } from "./SettingsTabs";
+import { SkillsStore } from "./SkillsStore";
 import type {
   SkillInfo as Skill,
-  SkillInstallScope,
-  SkillSearchResult,
   SkillUpdateResult,
 } from "@/lib/api-types";
 
@@ -364,352 +363,6 @@ function SkillDetail({
   );
 }
 
-function AddSkillPanel({
-  cwd,
-  installedPackages,
-  onInstalled,
-}: {
-  cwd: string;
-  installedPackages: Record<SkillInstallScope, ReadonlySet<string>>;
-  onInstalled: () => void;
-}) {
-  const { t } = useI18n();
-  const [query, setQuery] = useState("");
-  const [results, setResults] = useState<SkillSearchResult[]>([]);
-  const [searching, setSearching] = useState(false);
-  const [searchError, setSearchError] = useState<string | null>(null);
-  const [installing, setInstalling] = useState<string | null>(null);
-  const [installError, setInstallError] = useState<string | null>(null);
-  const [newlyInstalledPkgs, setNewlyInstalledPkgs] = useState<Set<string>>(
-    new Set(),
-  );
-  const [scope, setScope] = useState<"global" | "project">("global");
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
-
-  const search = useCallback(async (q: string) => {
-    if (!q.trim()) return;
-    setSearching(true);
-    setSearchError(null);
-    setResults([]);
-    try {
-      const res = await fetch("/api/skills/search", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: q.trim() }),
-      });
-      const d = (await res.json()) as {
-        results?: SkillSearchResult[];
-        error?: string;
-        code?: string;
-      };
-      if (d.error) {
-        setSearchError(formatApiError(d));
-        return;
-      }
-      setResults(d.results ?? []);
-      if ((d.results ?? []).length === 0) setSearchError(translate("skillsConfig.noSkillsFound"));
-    } catch (e) {
-      setSearchError(String(e));
-    } finally {
-      setSearching(false);
-    }
-  }, []);
-
-  const install = useCallback(
-    async (pkg: string) => {
-      setInstalling(pkg);
-      setInstallError(null);
-      try {
-        const res = await fetch("/api/skills/install", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ package: pkg, scope, cwd }),
-        });
-        const d = (await res.json()) as { success?: boolean; error?: string; code?: string };
-        if (!res.ok || d.error) {
-          setInstallError(formatApiError(d.error ? d : `HTTP ${res.status}`));
-          return;
-        }
-        setNewlyInstalledPkgs((prev) =>
-          new Set(prev).add(`${scope}:${pkg}`),
-        );
-        onInstalled();
-      } catch (e) {
-        setInstallError(String(e));
-      } finally {
-        setInstalling(null);
-      }
-    },
-    [onInstalled, scope, cwd],
-  );
-
-  const installPath =
-    scope === "global"
-      ? "~/.agents/skills/"
-      : `${shortenPath(cwd)}/.agents/skills/`;
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-      {/* ── Header area ── */}
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          gap: 12,
-          marginBottom: 20,
-        }}
-      >
-        <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text)" }}>
-          {t("skillsConfig.addSkillTitle")}
-        </div>
-
-        {/* Search row */}
-        <div style={{ display: "flex", gap: 8 }}>
-          <input
-            ref={inputRef}
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") search(query);
-            }}
-            placeholder={t("skillsConfig.searchPlaceholder")}
-            style={{
-              flex: 1,
-              padding: "7px 10px",
-              fontSize: 13,
-              background: "var(--bg-panel)",
-              border: "1px solid var(--border)",
-              borderRadius: 6,
-              color: "var(--text)",
-              outline: "none",
-            }}
-          />
-          <button
-            onClick={() => search(query)}
-            disabled={searching || !query.trim()}
-            style={{
-              padding: "7px 16px",
-              fontSize: 13,
-              borderRadius: 6,
-              border: "none",
-              background: "var(--accent)",
-              color: "var(--on-accent)",
-              cursor: searching || !query.trim() ? "not-allowed" : "pointer",
-              opacity: searching || !query.trim() ? 0.5 : 1,
-              flexShrink: 0,
-            }}
-          >
-            {searching ? t("skillsConfig.searching") : t("skillsConfig.search")}
-          </button>
-        </div>
-
-        {/* Scope + install path row */}
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div
-            style={{
-              display: "flex",
-              borderRadius: 5,
-              border: "1px solid var(--border)",
-              overflow: "hidden",
-              fontSize: 12,
-              flexShrink: 0,
-            }}
-          >
-            {(["global", "project"] as const).map((s) => (
-              <button
-                key={s}
-                onClick={() => setScope(s)}
-                style={{
-                  padding: "3px 10px",
-                  border: "none",
-                  cursor: "pointer",
-                  background: scope === s ? "var(--bg-selected)" : "none",
-                  color: scope === s ? "var(--text)" : "var(--text-dim)",
-                  fontWeight: scope === s ? 600 : 400,
-                  borderRight:
-                    s === "global" ? "1px solid var(--border)" : "none",
-                }}
-              >
-                {t(SOURCE_LABEL_KEYS[s])}
-              </button>
-            ))}
-          </div>
-          <span
-            style={{
-              fontSize: 12,
-              color: "var(--text-dim)",
-              fontFamily: "var(--font-mono)",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            → {installPath}
-          </span>
-        </div>
-
-        {/* Errors */}
-        {searchError && (
-          <div style={{ fontSize: 12, color: "var(--status-error)" }}>{searchError}</div>
-        )}
-        {installError && (
-          <div
-            style={{ fontSize: 12, color: "var(--status-error)", wordBreak: "break-word" }}
-          >
-            {installError}
-          </div>
-        )}
-      </div>
-
-      {/* ── Results list ── */}
-      {results.length > 0 ? (
-        <div style={{ flex: 1, overflowY: "auto" }}>
-          {results.map((r) => {
-            const isInstalled =
-              installedPackages[scope].has(r.package) ||
-              newlyInstalledPkgs.has(`${scope}:${r.package}`);
-            const isInstalling = installing === r.package;
-            // split "owner/repo@skill" for cleaner display
-            const atIdx = r.package.indexOf("@");
-            const repopart = atIdx > -1 ? r.package.slice(0, atIdx) : r.package;
-            const skillpart = atIdx > -1 ? r.package.slice(atIdx + 1) : null;
-            return (
-              <div
-                key={r.package}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 14,
-                  padding: "12px 0",
-                  borderBottom: "1px solid var(--border)",
-                }}
-              >
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  {/* skill name prominent */}
-                  <div
-                    style={{
-                      fontSize: 13,
-                      fontWeight: 600,
-                      color: "var(--text)",
-                      marginBottom: 3,
-                    }}
-                  >
-                    {skillpart ?? repopart}
-                  </div>
-                  {/* repo + installs + link row */}
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 10,
-                      flexWrap: "wrap",
-                    }}
-                  >
-                    <span
-                      style={{
-                        fontFamily: "var(--font-mono)",
-                        fontSize: 11,
-                        color: "var(--text-dim)",
-                      }}
-                    >
-                      {repopart}
-                    </span>
-                    <span
-                      style={{
-                        fontSize: 12,
-                        color: "var(--text-muted)",
-                        fontWeight: 500,
-                      }}
-                    >
-                      {r.installs}
-                    </span>
-                    {r.url && (
-                      <a
-                        href={r.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        style={{
-                          fontSize: 12,
-                          color: "var(--accent)",
-                          textDecoration: "none",
-                        }}
-                      >
-                        skills.sh ↗
-                      </a>
-                    )}
-                  </div>
-                </div>
-                <button
-                  onClick={() =>
-                    !isInstalled && !isInstalling && install(r.package)
-                  }
-                  disabled={isInstalled || isInstalling || installing !== null}
-                  style={{
-                    flexShrink: 0,
-                    padding: "5px 14px",
-                    fontSize: 12,
-                    fontWeight: 500,
-                    borderRadius: 5,
-                    border: "1px solid var(--border)",
-                    cursor:
-                      isInstalled || isInstalling || installing !== null
-                        ? "not-allowed"
-                        : "pointer",
-                    background: isInstalled ? "color-mix(in srgb, var(--status-success) 10%, transparent)" : "none",
-                    color: isInstalled
-                      ? "var(--status-success)"
-                      : isInstalling
-                        ? "var(--accent)"
-                        : "var(--text-muted)",
-                    transition: "color var(--dur-fast) var(--ease-out-warm)",
-                  }}
-                >
-                  {isInstalled
-                    ? t("skillsConfig.installed")
-                    : isInstalling
-                      ? t("skillsConfig.installing")
-                      : t("skillsConfig.install")}
-                </button>
-              </div>
-            );
-          })}
-        </div>
-      ) : (
-        !searchError &&
-        !searching && (
-          <div
-            style={{ fontSize: 13, color: "var(--text-dim)", lineHeight: 1.8 }}
-          >
-            {(() => {
-              // "{site}" marks where the skills.sh link goes; kept out of the
-              // dictionary value's translation so word order can differ.
-              const [before, after] = t("skillsConfig.searchHint").split("{site}");
-              return (
-                <>
-                  {before}
-                  <a
-                    href="https://skills.sh"
-                    target="_blank"
-                    rel="noreferrer"
-                    style={{ color: "var(--accent)", textDecoration: "none" }}
-                  >
-                    skills.sh
-                  </a>
-                  {after}
-                </>
-              );
-            })()}
-          </div>
-        )
-      )}
-    </div>
-  );
-}
-
 export function SkillsConfig({
   cwd,
   onClose,
@@ -729,7 +382,7 @@ export function SkillsConfig({
   const [selected, setSelected] = useState<string | null>(null);
   const [toggling, setToggling] = useState<Set<string>>(new Set());
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [addMode, setAddMode] = useState(false);
+  const [storeOpen, setStoreOpen] = useState(false);
   const [updateStatuses, setUpdateStatuses] = useState<Record<string, SkillUpdateResult>>({});
   const [checkingUpdates, setCheckingUpdates] = useState<Set<string>>(new Set());
   const [checkingAll, setCheckingAll] = useState(false);
@@ -1053,8 +706,7 @@ export function SkillsConfig({
                           {t(grpLabel)}
                         </div>
                         {[...grpSkills.filter((skill) => !skill.disableModelInvocation), ...grpSkills.filter((skill) => skill.disableModelInvocation)].map((skill, index, orderedSkills) => {
-                          const isSelected =
-                            !addMode && selected === skill.filePath;
+                          const isSelected = selected === skill.filePath;
                           const disabled = skill.disableModelInvocation;
                           const firstDormant = disabled && (index === 0 || !orderedSkills[index - 1].disableModelInvocation);
                           const dormantCount = firstDormant ? orderedSkills.filter((candidate) => candidate.disableModelInvocation).length : 0;
@@ -1067,10 +719,7 @@ export function SkillsConfig({
                             )}
                             <button
                               type="button"
-                              onClick={() => {
-                                setSelected(skill.filePath);
-                                setAddMode(false);
-                              }}
+                              onClick={() => setSelected(skill.filePath)}
                               style={{
                                 display: "flex",
                                 alignItems: "center",
@@ -1156,7 +805,7 @@ export function SkillsConfig({
                 })()
               )}
             </div>
-            {/* Add skill button */}
+            {/* Skill store button */}
             <div
               style={{
                 padding: "8px 6px",
@@ -1165,13 +814,13 @@ export function SkillsConfig({
               }}
             >
               <div
-                onClick={() => setAddMode(true)}
+                onClick={() => setStoreOpen(true)}
                 role="button"
                 tabIndex={0}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();
-                    setAddMode(true);
+                    setStoreOpen(true);
                   }
                 }}
                 style={{
@@ -1181,46 +830,21 @@ export function SkillsConfig({
                   padding: "7px 8px",
                   borderRadius: 5,
                   cursor: "pointer",
-                  background: addMode ? "var(--bg-selected)" : "none",
-                  color: addMode ? "var(--accent)" : "var(--text-dim)",
+                  color: "var(--text-dim)",
                   fontSize: 12,
                 }}
-                onMouseEnter={(e) => {
-                  if (!addMode)
-                    e.currentTarget.style.background = "var(--bg-hover)";
-                }}
-                onMouseLeave={(e) => {
-                  if (!addMode) e.currentTarget.style.background = "none";
-                }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
               >
-                <Plus size={13} aria-hidden="true" />
-                {t("skillsConfig.addSkill")}
+                <Store size={13} aria-hidden="true" />
+                {t("skillsConfig.store.open")}
               </div>
             </div>
           </div>
 
-          {/* Right: detail or add panel */}
+          {/* Right: skill detail */}
           <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
-            {addMode ? (
-              <AddSkillPanel
-                cwd={cwd}
-                installedPackages={{
-                  global: new Set(
-                    skills
-                      .filter((skill) => skill.install?.scope === "global")
-                      .map((skill) => skill.install!.package),
-                  ),
-                  project: new Set(
-                    skills
-                      .filter((skill) => skill.install?.scope === "project")
-                      .map((skill) => skill.install!.package),
-                  ),
-                }}
-                onInstalled={() => {
-                  void loadSkills();
-                }}
-              />
-            ) : loading ? (
+            {loading ? (
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 <div className="skeleton" style={{ height: 18, width: "40%" }} />
                 <div className="skeleton" style={{ height: 12, width: "70%" }} />
@@ -1327,6 +951,27 @@ export function SkillsConfig({
             {t("skillsConfig.close")}
           </button>
         </div>
+        {storeOpen && (
+          <SkillsStore
+            cwd={cwd}
+            installedPackages={{
+              global: new Set(
+                skills
+                  .filter((skill) => skill.install?.scope === "global")
+                  .map((skill) => skill.install!.package),
+              ),
+              project: new Set(
+                skills
+                  .filter((skill) => skill.install?.scope === "project")
+                  .map((skill) => skill.install!.package),
+              ),
+            }}
+            onInstalled={() => {
+              void loadSkills();
+            }}
+            onClose={() => setStoreOpen(false)}
+          />
+        )}
     </SkillsConfigSurface>
   );
 }
