@@ -61,8 +61,15 @@ const RESERVE_POLICIES: { value: UsageReservePolicy; label: string; description:
   { value: "fail-closed", label: "Fail closed", description: "OMP stops the turn instead of switching providers once the reserve margin is reached." },
 ];
 
-const cardStyle: CSSProperties = { padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", fontSize: 12, color: "var(--text)" };
-const selectStyle: CSSProperties = { marginLeft: 8, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12 };
+// minWidth 0: a grid item's default min-width is its content, so without this
+// a card with wide content escapes its minmax(0,1fr) track instead of shrinking.
+const cardStyle: CSSProperties = { minWidth: 0, padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", fontSize: 12, color: "var(--text)" };
+// Full-width and shrinkable on purpose: a native <select> keeps the
+// min-content width of its LONGEST option, so an inline select beside label
+// text overflows a `minmax(0,1fr)` grid cell (seen with "Confirm
+// interactively (OMP default)"). Constrained to the card, the popup list can
+// still be as wide as it likes.
+const selectStyle: CSSProperties = { display: "block", width: "100%", minWidth: 0, marginTop: 6, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12 };
 const helpTextStyle: CSSProperties = { margin: "6px 0 0", color: "var(--text-dim)", fontSize: 11, lineHeight: 1.45 };
 const sectionCardStyle: CSSProperties = { border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden" };
 const sectionHeaderStyle: CSSProperties = { padding: "10px 12px", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12, fontWeight: 600 };
