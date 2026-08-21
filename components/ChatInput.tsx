@@ -39,7 +39,7 @@ import { useUsage } from "@/hooks/useUsage";
 import { selectBindingWindow, selectWindowsForModel, type ModelRef } from "@/lib/usage/select";
 import type { UsageAccount, UsageSnapshot, UsageWindow, UsageWindowState } from "@/lib/usage/types";
 import { brandAccountLabel } from "@/lib/provider-brand";
-import { ProviderIcon } from "./ProviderIcon";
+import { ModelIcon, ProviderIcon } from "./ProviderIcon";
 import { useI18n } from "@/lib/i18n";
 import { selectableThinkingLevels } from "@/lib/thinking-levels";
 import { STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
@@ -2839,14 +2839,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     ? t("chatInput.changeModel")
                     : showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noAvailableModels")}
                 >
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                    <rect x="4" y="4" width="16" height="16" rx="2" />
-                    <rect x="9" y="9" width="6" height="6" />
-                    <line x1="9" y1="1" x2="9" y2="4" /><line x1="15" y1="1" x2="15" y2="4" />
-                    <line x1="9" y1="20" x2="9" y2="23" /><line x1="15" y1="20" x2="15" y2="23" />
-                    <line x1="20" y1="9" x2="23" y2="9" /><line x1="20" y1="14" x2="23" y2="14" />
-                    <line x1="1" y1="9" x2="4" y2="9" /><line x1="1" y1="14" x2="4" y2="14" />
-                  </svg>
+                  {model ? (
+                    <ModelIcon provider={model.provider} modelId={model.modelId} size={13} style={{ flexShrink: 0 }} />
+                  ) : (
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                      <rect x="4" y="4" width="16" height="16" rx="2" />
+                      <rect x="9" y="9" width="6" height="6" />
+                      <line x1="9" y1="1" x2="9" y2="4" /><line x1="15" y1="1" x2="15" y2="4" />
+                      <line x1="9" y1="20" x2="9" y2="23" /><line x1="15" y1="20" x2="15" y2="23" />
+                      <line x1="20" y1="9" x2="23" y2="9" /><line x1="20" y1="14" x2="23" y2="14" />
+                      <line x1="1" y1="9" x2="4" y2="9" /><line x1="1" y1="14" x2="4" y2="14" />
+                    </svg>
+                  )}
                   {advisorEnabled && (
                     <span title={t("chatInput.advisorEnabled")} aria-label={t("chatInput.advisorEnabled")} style={{ display: "flex", flexShrink: 0, color: "var(--accent)" }}>
                       <Sparkles size={13} strokeWidth={2} aria-hidden="true" />
@@ -2882,11 +2886,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                       <div key={group.provider}>
                         {(modelsByProvider.length > 1) && (
                           <div style={{
+                            display: "flex", alignItems: "center", gap: 6,
                             padding: "6px 12px 4px",
                             fontSize: 10, fontWeight: 600, color: "var(--text-dim)",
                             textTransform: "uppercase", letterSpacing: "0.07em",
                             borderTop: gi > 0 ? "1px solid var(--border)" : "none",
                           }}>
+                            <ProviderIcon provider={group.provider} size={10} style={{ flexShrink: 0, color: "var(--text-dim)" }} />
                             {group.provider}
                           </div>
                         )}
@@ -2913,6 +2919,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                               {isActive
                                 ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
                                 : <span style={{ width: 10, flexShrink: 0 }} />}
+                              <ModelIcon provider={opt.provider} modelId={opt.modelId} size={13} style={{ flexShrink: 0, color: isActive ? "var(--accent)" : "var(--text-dim)" }} />
                               {opt.name}
                             </button>
                           );

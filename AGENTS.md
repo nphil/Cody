@@ -146,6 +146,9 @@ lib/
   preview-screenshot.ts server-side headless-Chromium capture of loopback apps
   project-ordering.ts  pure project sort/group/activity helpers (client + tests)
   project-registry.ts  on-disk managed-project registry (~/.omp/agent/projects.json)
+  provider-brand.ts    provider id → product brand + which vendored mark to draw;
+                       modelBrand() reads the VENDOR off a model id so gateway rows
+                       (one OpenRouter key, many vendors) don't all wear one mark
   rpc-manager.ts       session registry + startRpcSession over RpcProcess
   session-reader.ts    session .jsonl parsing + path cache + buildSessionContext
   skills-service.ts    pure-Node skill discovery mirroring omp's providers
@@ -186,6 +189,9 @@ components/
   InfoPanel.tsx       right-panel Info tool: versions + workspace diagnostics
   ChatMinimap.tsx     scroll minimap alongside the message list
   MarkdownBody.tsx    markdown renderer
+  ProviderIcon.tsx    vendored brand marks (models.dev logo set + simple-icons for
+                      the few it stubs); ProviderIcon = a provider, ModelIcon = a
+                      model's vendor. Never hotlinked — see the note below
   ModelsConfig.tsx    modal for models/auth configuration
   McpConfig.tsx       project MCP server editor (Settings → MCP tab)
   PluginsConfig.tsx   modal for installed plugins
@@ -884,6 +890,36 @@ handled or safely ignored.
   (`summarizeProviderCuration` counts totals from the full catalog, enabled
   from the effective list), so switching a provider off is always reversible.
   Pure helpers + tests: `lib/model-allow-list.ts`.
+
+### Brand marks (`components/ProviderIcon.tsx`, `lib/provider-brand.ts`)
+- Marks are **vendored path data, never hotlinked**. The composer's model picker
+  has to draw identically on a home LAN with no route to the internet, and a
+  remote logo that fails to load is exactly the "the icons disappeared" bug this
+  replaced. Source is models.dev's own logo set
+  (`https://models.dev/logos/<provider>.svg`) — the catalog Cody already reads
+  model metadata from. **Trap**: models.dev answers 200 with a generic sparkle
+  placeholder for providers it has no mark for (Claude, Ollama, Qwen, Together,
+  Fireworks...), so a new mark must be eyeballed, not just fetched; the three
+  Cody needs come from simple-icons (CC0) instead.
+- Every mark keeps its **source viewBox** (the set mixes 24- and 40-unit grids)
+  rather than being rescaled by hand — the browser scales a viewBox for free and
+  rewriting Bézier coordinates risks silent distortion. simple-icons draws
+  edge-to-edge on a 24 grid while models.dev sits padded inside a 40 grid, so the
+  simple-icons marks carry a widened viewBox (`-3 -3 30 30`) to match the optical
+  weight of the rest. Detail that turns to mush at 13px is a bug, not a mark:
+  prefer a simpler source over a faithful-but-illegible one.
+- **`ProviderIcon` is a provider; `ModelIcon` is a model's VENDOR.** A gateway is
+  not a vendor — every model behind one OpenRouter key reports
+  `provider: "openrouter"`, so keying rows off the provider paints one identical
+  mark down hundreds of rows. `modelBrand()` reads the vendor off the model id,
+  by explicit prefix (`anthropic/claude-sonnet-4`) then by family name
+  (`gpt-…`, `qwen…`), and only then falls back to the provider. That fallback
+  order is also what gives a local runtime's models real marks: `llama-swap`
+  is an unknown provider, but its `gemma4-*` / `qwen3.5-*` models still draw
+  Gemini and Qwen.
+- An unmapped provider draws a neutral `Bot`, never a broken image. Adding a
+  provider is two edits: an id → brand entry in `lib/provider-brand.ts` and the
+  mark in `BRAND_MARKS`. Tests: `lib/provider-brand.test.mjs`.
 
 ### Completion sound
 - `hooks/useAudio.ts` stores the toggle in `localStorage` and reuses one `AudioContext`.
