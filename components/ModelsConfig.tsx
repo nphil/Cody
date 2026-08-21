@@ -28,6 +28,7 @@ import { toast } from "@/components/ui/toast";
 import { SettingsTabs, type SettingsTab } from "./SettingsTabs";
 import { ModelCatalogPicker } from "./ModelCatalogPicker";
 import { ModelPlanPanel } from "./settings/ModelPlanPanel";
+import { RetryFallbackPanel, NATIVE_MODEL_ROLES } from "./settings/RetryFallbackPanel";
 // Color icons (have their own fill colors — no background needed)
 import AnthropicIcon from "@lobehub/icons/es/Anthropic/components/Mono";
 import OpenAIIcon from "@lobehub/icons/es/OpenAI/components/Mono";
@@ -242,93 +243,6 @@ type NativeRegistrySettings = {
   modelProviderOrder?: string[];
   registryHasScopedEntries?: boolean;
 };
-
-type RetrySettings = {
-  retry?: { enabled?: boolean; maxRetries?: number; modelFallback?: boolean; fallbackRevertPolicy?: "cooldown-expiry" | "never"; fallbackChains?: Record<string, string[]> };
-};
-
-function RetryFallbackDetail({ models }: { models: RuntimeModelEntry[] }) {
-  const [settings, setSettings] = useState<RetrySettings | null>(null);
-  const [role, setRole] = useState("default");
-  const [candidate, setCandidate] = useState("");
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    fetch("/api/omp-settings")
-      .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
-      .then((data: { settings?: RetrySettings }) => setSettings(data.settings ?? {}))
-      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
-  }, []);
-
-  // Serialize full-snapshot saves: each call writes the whole settings object,
-  // so overlapping PUTs can land out of order and clobber newer changes. Keep
-  // the latest snapshot and drain a single serialized save always writing the
-  // most recent state (fixes rapid fallback-chain edits scheduling stale writes).
-  const latestRef = useRef<RetrySettings | null>(null);
-  const drainingRef = useRef(false);
-  const save = (next: RetrySettings) => {
-    setSettings(next);
-    setError(null);
-    latestRef.current = next;
-    if (drainingRef.current) return;
-    drainingRef.current = true;
-    void (async () => {
-      try {
-        while (latestRef.current !== null) {
-          const snapshot = latestRef.current;
-          latestRef.current = null;
-          try {
-            const response = await fetch("/api/omp-settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ settings: snapshot }) });
-            const data = await response.json() as { settings?: RetrySettings; error?: string };
-            if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
-            if (latestRef.current === null) setSettings(data.settings ?? snapshot);
-          } catch (reason) {
-            setError(reason instanceof Error ? reason.message : String(reason));
-            break;
-          }
-        }
-      } finally {
-        drainingRef.current = false;
-      }
-    })();
-  };
-
-  if (!settings) return <div style={{ color: "var(--text-muted)", fontSize: 12 }}>Loading native OMP retry settings...</div>;
-  const retry = settings.retry ?? {};
-  const chain = retry.fallbackChains?.[role] ?? [];
-  const modelOptions = models.map((model) => `${model.provider}/${model.id}`);
-  const updateChain = (next: string[]) => void save({ ...settings, retry: { ...retry, fallbackChains: { ...(retry.fallbackChains ?? {}), [role]: next } } });
-
-  return <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-    <div><SectionTitle>Native OMP Retry & Fallback</SectionTitle><p style={{ margin: "4px 0 0", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>OMP switches through these ordered model chains when a provider is rate-limited or unavailable.</p></div>
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 9 }}>
-      <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", fontSize: 12, color: "var(--text)" }}><input type="checkbox" checked={retry.enabled ?? true} onChange={(event) => void save({ ...settings, retry: { ...retry, enabled: event.target.checked } })} /> Retry transient provider errors</label>
-      <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", fontSize: 12, color: "var(--text)" }}><input type="checkbox" checked={retry.modelFallback ?? true} onChange={(event) => void save({ ...settings, retry: { ...retry, modelFallback: event.target.checked } })} /> Allow model fallback</label>
-      <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12 }}>Retry attempts <select value={retry.maxRetries ?? 10} onChange={(event) => void save({ ...settings, retry: { ...retry, maxRetries: Number(event.target.value) } })} style={{ marginLeft: 8, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}>{[0, 1, 2, 3, 5, 10, 15, 20].map((count) => <option key={count} value={count}>{count}</option>)}</select></label>
-      <label style={{ padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", color: "var(--text)", fontSize: 12 }}>Return to primary <select value={retry.fallbackRevertPolicy ?? "cooldown-expiry"} onChange={(event) => void save({ ...settings, retry: { ...retry, fallbackRevertPolicy: event.target.value as "cooldown-expiry" | "never" } })} style={{ marginLeft: 8, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}><option value="cooldown-expiry">After cooldown</option><option value="never">Never</option></select></label>
-    </div>
-    <section style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden" }}>
-      <div style={{ padding: "10px 12px", background: "var(--bg-panel)", display: "flex", alignItems: "center", gap: 8 }}><span style={{ color: "var(--text)", fontSize: 12, fontWeight: 600 }}>Fallback chain for</span><select value={role} onChange={(event) => setRole(event.target.value)} style={{ padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}>{NATIVE_MODEL_ROLES.map((value) => <option key={value} value={value}>{value}</option>)}</select></div>
-      <div style={{ padding: 12, display: "flex", gap: 8 }}><select value={candidate} onChange={(event) => setCandidate(event.target.value)} style={{ flex: 1, minWidth: 0, padding: "6px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)" }}><option value="">Select a fallback model</option>{modelOptions.filter((value) => !chain.includes(value)).map((value) => <option key={value} value={value}>{value}</option>)}</select><button type="button" disabled={!candidate} onClick={() => { updateChain([...chain, candidate]); setCandidate(""); }} style={{ padding: "6px 10px", border: "none", borderRadius: "var(--radius-control)", background: "var(--accent)", color: "var(--on-accent)", cursor: candidate ? "pointer" : "default" }}>Add</button></div>
-      {chain.length === 0 ? (
-        <div style={{ padding: "0 12px 12px", color: "var(--text-dim)", fontSize: 12 }}>No explicit chain. OMP uses the <code>default</code> chain when available.</div>
-      ) : (
-        <div style={{ borderTop: "1px solid var(--border)" }}>
-          {chain.map((selector, index) => (
-            <div key={selector} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", color: "var(--text-muted)", fontSize: 12 }}>
-              <span style={{ width: 18, color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>{index + 1}</span>
-              <code style={{ flex: 1 }}>{selector}</code>
-              <button type="button" disabled={index === 0} onClick={() => { const next = [...chain]; const previous = next[index - 1]; next[index - 1] = next[index]; next[index] = previous; updateChain(next); }} style={{ padding: 2, border: "none", background: "transparent", color: "var(--text-muted)", cursor: index === 0 ? "default" : "pointer" }}><ArrowUp size={14} /></button>
-              <button type="button" disabled={index === chain.length - 1} onClick={() => { const next = [...chain]; const following = next[index + 1]; next[index + 1] = next[index]; next[index] = following; updateChain(next); }} style={{ padding: 2, border: "none", background: "transparent", color: "var(--text-muted)", cursor: index === chain.length - 1 ? "default" : "pointer" }}><ArrowDown size={14} /></button>
-              <button type="button" onClick={() => updateChain(chain.filter((value) => value !== selector))} style={{ padding: 2, border: "none", background: "transparent", color: "var(--text-muted)", cursor: "pointer" }}><Trash2 size={14} /></button>
-            </div>
-          ))}
-        </div>
-      )}
-    </section>
-    {error && <div role="alert" style={{ color: "var(--status-error)", fontSize: 12 }}>{error}</div>}
-  </div>;
-}
 
 // A single provider can carry hundreds of models (an OpenRouter key measured
 // 466 of 502 on a real install). Curating that inline would mean one checkbox
@@ -630,13 +544,14 @@ function NativeRegistryDetail({ models, connectedProviders, defaultModelKey, onC
 }
 
 const COMPOSER_MODELS_STORAGE_KEY = STORAGE_KEYS.composerModels;
-const NATIVE_MODEL_ROLES = ["default", "smol", "slow", "vision", "plan", "designer", "commit", "tiny", "task", "advisor"];
 
 function ModelRolesDetail({ models }: { models: RuntimeModelEntry[] }) {
   const [roles, setRoles] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [resetOpen, setResetOpen] = useState(false);
+  const [resetting, setResetting] = useState(false);
 
   useEffect(() => {
     fetch("/api/model-roles")
@@ -651,13 +566,42 @@ function ModelRolesDetail({ models }: { models: RuntimeModelEntry[] }) {
     setError(null);
     try {
       const response = await fetch("/api/model-roles", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ roles }) });
-      const data = await response.json() as { error?: string };
+      const data = await response.json() as { error?: string; restarted?: number; active?: number };
       if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
-      toast.success("OMP model roles saved");
+      const restarted = data.restarted ?? 0;
+      const active = data.active ?? 0;
+      toast.success(
+        "OMP model roles saved",
+        `Applied to ${restarted} idle session${restarted === 1 ? "" : "s"}.${active > 0 ? ` ${active} running session${active === 1 ? "" : "s"} will pick it up when it finishes.` : ""}`,
+      );
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setSaving(false);
+    }
+  };
+
+  const runReset = async () => {
+    setResetting(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/model-roles", { method: "DELETE" });
+      const data = await response.json() as { error?: string; restarted?: number; active?: number };
+      if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+      setRoles({});
+      setResetOpen(false);
+      const restarted = data.restarted ?? 0;
+      const active = data.active ?? 0;
+      toast.success(
+        "OMP model roles reset",
+        `Every role goes back to OMP's built-in choice. Applied to ${restarted} idle session${restarted === 1 ? "" : "s"}.${active > 0 ? ` ${active} running session${active === 1 ? "" : "s"} will keep the previous roles until it finishes.` : ""}`,
+      );
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setError(message);
+      toast.error("Could not reset OMP model roles", message);
+    } finally {
+      setResetting(false);
     }
   };
 
@@ -702,7 +646,21 @@ function ModelRolesDetail({ models }: { models: RuntimeModelEntry[] }) {
       </div>
     ))}
     {error && <div role="alert" style={{ color: "var(--status-error)", fontSize: 12 }}>{error}</div>}
-    <button type="button" onClick={() => void save()} disabled={loading || saving} style={{ alignSelf: "flex-start", padding: "7px 12px", border: "none", borderRadius: "var(--radius-control)", background: "var(--accent)", color: "var(--on-accent)", cursor: saving ? "wait" : "pointer", fontSize: 12, fontWeight: 600 }}>{saving ? "Saving..." : "Save OMP roles"}</button>
+    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <button type="button" onClick={() => void save()} disabled={loading || saving} style={{ padding: "7px 12px", border: "none", borderRadius: "var(--radius-control)", background: "var(--accent)", color: "var(--on-accent)", cursor: saving ? "wait" : "pointer", fontSize: 12, fontWeight: 600 }}>{saving ? "Saving..." : "Save OMP roles"}</button>
+      <button type="button" onClick={() => setResetOpen(true)} disabled={loading} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 12px", border: "1px solid var(--status-error)", borderRadius: "var(--radius-control)", background: "none", color: "var(--status-error)", cursor: loading ? "default" : "pointer", fontSize: 12, fontWeight: 500 }}><RotateCcw size={13} /> Reset to OMP defaults</button>
+    </div>
+    <ConfirmDialog
+      open={resetOpen}
+      onOpenChange={setResetOpen}
+      title="Reset OMP model roles?"
+      description="This clears every role override — default, smol, slow, vision, plan, designer, commit, tiny, task, advisor — and lets OMP choose each one using its own built-in priorities, as on a fresh install."
+      confirmLabel="Reset to defaults"
+      cancelLabel="Cancel"
+      danger
+      busy={resetting}
+      onConfirm={() => void runReset()}
+    />
   </div>;
 }
 
@@ -2292,7 +2250,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
     }
     if (selection.type === "roles") return <ModelRolesDetail models={runtimeModels} />;
     if (selection.type === "registry") return <NativeRegistryDetail models={runtimeModels} connectedProviders={connectedProviders} defaultModelKey={defaultModelKey} onChanged={loadRuntimeModels} />;
-    if (selection.type === "fallbacks") return <RetryFallbackDetail models={runtimeModels} />;
+    if (selection.type === "fallbacks") return <RetryFallbackPanel models={runtimeModels} onOpenModelPlan={() => setSelection({ type: "modelPlan" })} />;
     if (selection.type === "modelPlan") return <ModelPlanPanel />;
     if (selection.type === "picker") return (
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
