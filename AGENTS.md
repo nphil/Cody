@@ -692,6 +692,25 @@ appears without a Cody change.
   Unreadable free space NEVER blocks an install: unknown is not empty.
 - `/api/info` serves `storage` for the agent dir and the Info panel turns the
   row warning-colored under 2 GB, so the condition is visible before it bites.
+- **The preflight threshold is measured, not fixed.** npm updates a package by
+  renaming the old tree aside and unpacking the new one, so an update needs
+  room for BOTH. omp is ~1.4 GB installed (two ~160 MB native addons among the
+  rest), which a flat 512 MB floor waved straight through into the failure it
+  existed to prevent. `requiredFreeBytes()` measures the installed tree and
+  demands `size + 256 MB`, falling back to the floor only for a first install
+  or an unmeasurable tree.
+- **An interrupted install poisons every later one.** npm leaves its
+  rename-aside tree (`@scope/.name-XXXXXX`) behind, then tries to rename onto
+  that exact path next time and fails `ENOTEMPTY` forever — one out-of-disk
+  install permanently blocked updates on a real instance until the directory
+  was deleted by hand. `cleanStaleInstallDirs()` sweeps them before every
+  install, matching npm's pattern for that package only.
+- **npm exiting 0 is not proof the engine runs.** A disk-full install left a
+  TRUNCATED native addon that loaded fine as a file and then killed the
+  process with a Bus error on every invocation — Cody had reported the engine
+  as installed. Installs now probe `<binary> --version` before reporting
+  success and fail with the probe's own error otherwise, which also surfaces
+  the revert affordance.
 - **Trap — `formatBytes` lives in `lib/format-bytes.ts`, not `disk-space.ts`.**
   The latter imports `node:fs`; a CLIENT component importing from it pulls
   `fs` into the browser bundle and fails the build with "Can't resolve 'fs'".

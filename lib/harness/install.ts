@@ -1,10 +1,10 @@
 import { spawn } from "child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { execPath } from "process";
 import { describeDiskError, formatBytes, getDiskSpace, getNpmCacheDir } from "../disk-space";
 import { stripVersionPrefix } from "../omp/omp-cli";
-import { getToolsDir, invalidateEngineBinCache } from "./engine-bin";
+import { getToolsDir, invalidateEngineBinCache, probeEngineVersion, resolveEngineBin } from "./engine-bin";
 
 /**
  * On-demand engine installs. An engine the user picks in onboarding (or in
@@ -28,14 +28,22 @@ const LOG_TAIL_LIMIT = 32_000;
 /** Grace period between SIGTERM and SIGKILL for a timed-out npm. */
 const KILL_GRACE_MS = 5_000;
 /**
- * Below this, an engine install is refused before npm runs. An engine unpacks
- * far larger than its tarball (omp: ~12 MB compressed, ~50 MB on disk, plus
- * its dependency tree and the cached tarball), so a filesystem this close to
- * full will fail partway through — the expensive, confusing way. Deliberately
- * conservative: the point is to catch "no room at all", not to second-guess a
- * small-but-workable disk.
+ * Floor for a first-time install, used when the engine is not installed yet so
+ * there is no existing tree to measure. Engines unpack far larger than their
+ * tarballs — omp ships two ~160 MB native addons alone.
  */
 const MIN_FREE_BYTES = 512 * 1024 * 1024;
+/** Slack added on top of a measured tree, for the cache copy and metadata. */
+const HEADROOM_BYTES = 256 * 1024 * 1024;
+/** Stop measuring a tree after this many entries: the answer only needs to be
+ * good enough to size a threshold, and an unbounded walk would stall a UI. */
+const SIZE_WALK_ENTRY_CAP = 60_000;
+
+/** "@oh-my-pi/pi-coding-agent@latest" → "@oh-my-pi/pi-coding-agent". */
+export function packageNameFromSpec(spec: string): string {
+  const at = spec.lastIndexOf("@");
+  return at > 0 ? spec.slice(0, at) : spec;
+}
 
 export interface EngineInstallRequest {
   /** Engine id — the serialization key ("claude", "codex"). */
@@ -230,6 +238,82 @@ function tail(value: string, limit = STDERR_TAIL_LIMIT): string {
   return trimmed.length <= limit ? trimmed : `…${trimmed.slice(-limit)}`;
 }
 
+/** Where npm unpacks a global package under `--prefix`. */
+function packageInstallDir(prefix: string, packageName: string): string {
+  return join(prefix, "lib", "node_modules", ...packageName.split("/"));
+}
+
+/** Bytes on disk under `dir`, bounded so a pathological tree cannot stall the
+ * request. Returns null when the walk is impossible or hits the cap — callers
+ * fall back to the flat floor rather than trusting a partial number. */
+export function measureTreeBytes(dir: string, entryCap = SIZE_WALK_ENTRY_CAP): number | null {
+  let total = 0;
+  let seen = 0;
+  const stack = [dir];
+  try {
+    while (stack.length > 0) {
+      const current = stack.pop() as string;
+      for (const entry of readdirSync(current, { withFileTypes: true })) {
+        if (++seen > entryCap) return null;
+        const full = join(current, entry.name);
+        if (entry.isDirectory()) stack.push(full);
+        else if (entry.isFile()) total += statSync(full).size;
+      }
+    }
+  } catch {
+    return null;
+  }
+  return total;
+}
+
+/**
+ * npm updates a package by renaming the old tree aside (`@scope/.name-XXXXXX`)
+ * and unpacking the new one, so an UPDATE transiently needs room for BOTH.
+ * omp is ~1.1 GB installed (two ~160 MB native addons among the rest), which a
+ * flat 512 MB floor would wave straight through into the failure it exists to
+ * prevent. Measuring the installed tree sizes the requirement to the engine
+ * actually being updated.
+ */
+export function requiredFreeBytes(prefix: string, packageName: string): number {
+  const installed = measureTreeBytes(packageInstallDir(prefix, packageName));
+  if (installed === null || installed === 0) return MIN_FREE_BYTES;
+  return Math.max(MIN_FREE_BYTES, installed + HEADROOM_BYTES);
+}
+
+/**
+ * Remove the trees npm renamed aside and then failed to delete. A run killed
+ * mid-flight (out of disk, timeout) leaves `@scope/.name-XXXXXX` behind, and
+ * npm's next attempt tries to rename onto that exact path — which fails with
+ * ENOTEMPTY forever, so a single interrupted install permanently blocks every
+ * later update until someone deletes it by hand. Only paths matching npm's own
+ * pattern for THIS package are touched.
+ *
+ * Returns the paths removed, for the install log.
+ */
+export function cleanStaleInstallDirs(prefix: string, packageName: string): string[] {
+  const target = packageInstallDir(prefix, packageName);
+  const parent = dirname(target);
+  const base = packageName.split("/").pop() as string;
+  const removed: string[] = [];
+  let entries: string[];
+  try {
+    entries = readdirSync(parent);
+  } catch {
+    return removed;
+  }
+  for (const entry of entries) {
+    // npm's rename-aside form: a dot, the package basename, a dash, a suffix.
+    if (!entry.startsWith(`.${base}-`)) continue;
+    try {
+      rmSync(join(parent, entry), { recursive: true, force: true });
+      removed.push(join(parent, entry));
+    } catch {
+      // Reported by the ENOTEMPTY message if it still blocks the install.
+    }
+  }
+  return removed;
+}
+
 /**
  * The paths npm will write to, and whether either is too full to try. Both
  * matter and they are often on different filesystems: the prefix receives the
@@ -244,11 +328,12 @@ export function checkInstallDiskSpace(
   prefix: string,
   cacheDir: string,
   probe: (dir: string) => { availableBytes: number } | null = getDiskSpace,
+  required: number = MIN_FREE_BYTES,
 ): string | null {
   for (const [label, dir] of [["install directory", prefix], ["npm cache", cacheDir]] as const) {
     const space = probe(dir);
-    if (!space || space.availableBytes >= MIN_FREE_BYTES) continue;
-    return `Not enough free disk space for the ${label} ${dir}: ${formatBytes(space.availableBytes)} available, at least ${formatBytes(MIN_FREE_BYTES)} needed. Free up space on that filesystem (or raise its quota) and try again.`;
+    if (!space || space.availableBytes >= required) continue;
+    return `Not enough free disk space for the ${label} ${dir}: ${formatBytes(space.availableBytes)} available, about ${formatBytes(required)} needed. Free up space on that filesystem (or raise its quota) and try again.`;
   }
   return null;
 }
@@ -270,6 +355,7 @@ function diskFailureMessage(stderr: string, prefix: string, cacheDir: string): s
 function runInstall(request: EngineInstallRequest): Promise<EngineInstallResult> {
   const prefix = getToolsDir();
   const cacheDir = getNpmCacheDir();
+  const packageName = packageNameFromSpec(request.installSpec);
   const args = ["install", "-g", "--prefix", prefix, request.installSpec];
   const npmCli = findNpmCli();
   const command = npmCli ? execPath : "npm";
@@ -294,9 +380,21 @@ function runInstall(request: EngineInstallRequest): Promise<EngineInstallResult>
       return;
     }
 
+    // Sweep any tree a previous interrupted run renamed aside: npm would try
+    // to rename onto that exact path and fail with ENOTEMPTY every time.
+    const swept = cleanStaleInstallDirs(prefix, packageName);
+    for (const path of swept) {
+      appendJobLog(job, `Removed leftover directory from an interrupted install: ${path}\n`);
+    }
+
     // Preflight: a five-minute download that dies on a full disk teaches the
     // admin nothing. Refuse up front, naming the path and the space left.
-    const spaceProblem = checkInstallDiskSpace(prefix, cacheDir);
+    const spaceProblem = checkInstallDiskSpace(
+      prefix,
+      cacheDir,
+      getDiskSpace,
+      requiredFreeBytes(prefix, packageName),
+    );
     if (spaceProblem) {
       appendJobLog(job, `${spaceProblem}\n`);
       const failure = new EngineInstallError(spaceProblem);
@@ -349,7 +447,37 @@ function runInstall(request: EngineInstallRequest): Promise<EngineInstallResult>
         return;
       }
       if (code === 0) {
-        finish(null, { id: request.id, installSpec: request.installSpec, prefix, durationMs: Date.now() - startedAt });
+        // npm exiting 0 is not proof the engine RUNS. An install interrupted
+        // by a full disk can leave a truncated native addon behind that only
+        // faults at load time, so the binary is probed before this is called a
+        // success — otherwise Cody reports a healthy engine that crashes on
+        // every invocation.
+        invalidateEngineBinCache(request.binaryName);
+        const binary = resolveEngineBin(request.binaryName, request.id.toUpperCase());
+        if (!binary) {
+          finish(new EngineInstallError(
+            `npm installed ${request.installSpec} but no ${request.binaryName} binary appeared in ${prefix}.`,
+            tail(stderr),
+          ));
+          return;
+        }
+        void probeEngineVersion(binary).then((probe) => {
+          if (probe.error) {
+            finish(new EngineInstallError(
+              `${request.installSpec} installed but ${request.binaryName} does not run — the install is damaged. Reinstall it, or revert to the previous version.`,
+              probe.error,
+            ));
+            return;
+          }
+          finish(null, { id: request.id, installSpec: request.installSpec, prefix, durationMs: Date.now() - startedAt });
+        });
+        return;
+      }
+      if (/ENOTEMPTY/.test(stderr)) {
+        finish(new EngineInstallError(
+          `npm could not replace the existing ${packageName} install (ENOTEMPTY) — a previous interrupted install left a directory behind. Cody removed what it found; run the update again, and if it still fails delete the leftover \`.\`-prefixed directory under ${dirname(packageInstallDir(prefix, packageName))}.`,
+          tail(stderr),
+        ));
         return;
       }
       // A disk failure gets named rather than passed through as npm's
