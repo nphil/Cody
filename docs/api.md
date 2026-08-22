@@ -305,9 +305,34 @@ The engine roster, in one authenticated round trip.
 
 `canManage` mirrors `role === "admin"`; the install/select routes
 (`/api/engines/install`, `/api/engines/install/events`, `/api/engines/select`,
-`/api/engines/setup-complete`, `/api/engines/updates`,
-`/api/engines/changelog`) are admin-only. The roster itself — the set of engine
-ids — is **Incidental**: engines come and go.
+`/api/engines/setup-complete`, `/api/engines/updates`) are admin-only. The
+roster itself — the set of engine ids — is **Incidental**: engines come and go.
+
+`/api/engines/updates` rows also carry `latestBeyondVerified` /
+`installedBeyondVerified`: whether that version's MAJOR is past the newest one
+this Cody build was audited against, so clients can warn that a brand-new
+engine major may hold features Cody does not surface yet.
+
+### `GET /api/engines/changelog?id=omp` — Incidental
+
+Any signed-in user. Release notes for an engine: while the npm registry knows a
+newer version than the installed binary the entries come from the **latest
+published package** (fetched from the registry tarball, cached per version) —
+that is what an update would install — otherwise from the installed package's
+own `CHANGELOG.md`.
+
+```json
+{"entries":[{"heading":"[18.0.0] - 2026-08-22","body":"…","isNew":true}],
+ "reason":null,"source":"latest","updatePending":true,
+ "installedVersion":"17.4.2","latestVersion":"18.0.0"}
+```
+
+`isNew` marks sections strictly newer than the installed version. `source` is
+`"installed"` when up to date — or when the registry fetch failed and the
+installed file is the honest fallback; `source:"installed"` together with
+`updatePending:true` is the payload's own admission that the pending release's
+notes are missing, and is what clients should key any "stale" caveat off.
+`entries` is `null` with a `reason` when no changelog is available at all.
 
 ## Sessions
 

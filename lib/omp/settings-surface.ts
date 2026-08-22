@@ -68,6 +68,10 @@ const TERMINAL_ONLY_PREFIXES = [
   "tui.",
   "display.",
   "startup.",
+  // The macOS prompt-editor spelling features (omp 18: typo detection, word
+  // autocomplete, autocorrect) act on the TUI composer; Cody's composer has
+  // the browser's own spellcheck.
+  "spelling.",
 ];
 
 /** Whether a setting configures the harness's terminal UI and therefore has no

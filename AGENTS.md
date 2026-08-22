@@ -328,6 +328,23 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
 - The onboarding picker (`components/EnginePicker.tsx`) mounts post-auth for
   admins while `cody-engine.json` is absent/un-onboarded; `/api/engines` is
   deliberately unreachable before the first account exists.
+- **Engine release notes come from the version an update would install**
+  (`lib/harness/package-changelog.ts`, `/api/engines/changelog`): while the
+  registry knows a newer version than the installed binary, the changelog is
+  pulled from the LATEST published npm tarball (fetched once per exact
+  version, minimal ustar walk, registry-host-pinned) and every section newer
+  than the installed version is flagged `isNew` — the installed package's own
+  CHANGELOG.md can only describe the past, which is precisely the version the
+  user is about to leave. A failed fetch falls back to the installed file and
+  the UI says so (`source: "installed"` while an update is pending).
+- **`HarnessAdapter.verifiedMajor`** is the newest engine MAJOR this Cody
+  build was audited against (omp: 18). `checkEngineUpdates` compares it to
+  the latest/installed versions (`latestBeyondVerified` /
+  `installedBeyondVerified`) and System & Updates warns before — and marks
+  after — a jump past it: core surfaces keep working (settings are
+  schema-driven, unknown RPC frames are tolerated), but brand-new engine
+  features may not appear in Cody until Cody updates. Bump the marker in the
+  same commit as each major's compatibility audit.
 - **The seam is CI-enforced** (`lib/architecture.test.mjs`): outside
   `lib/omp/` and `lib/harness/`, importing `lib/omp/*` fails the test unless
   the file is on the in-test allowlist with a written reason, stale allowlist

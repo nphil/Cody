@@ -171,6 +171,13 @@ export interface HarnessAdapter {
   /** npm spec for on-demand install ("@openai/codex@latest"); absent when
    * Cody cannot install this engine itself. */
   readonly installSpec?: string;
+  /** Newest engine MAJOR version this Cody build has been audited against.
+   * When the registry offers — or the user has installed — a later major,
+   * the System & Updates card warns that new engine features may not surface
+   * in Cody yet (schema-driven surfaces keep working; bespoke ones lag).
+   * Bump it in the same commit as the compatibility audit for that major.
+   * Absent = never warn. */
+  readonly verifiedMajor?: number;
   /** How to authenticate this engine, shown in the picker and engine card
    * (e.g. "Run `claude` in a Cody terminal to sign in, or set
    * ANTHROPIC_API_KEY on the container"). */

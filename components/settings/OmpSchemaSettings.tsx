@@ -2,7 +2,7 @@
 
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, RefreshCw, RotateCcw } from "lucide-react";
-import { SETTING_CONDITIONS, isConditionSatisfied } from "@/lib/omp/settings-conditions";
+import { HOST_CONDITIONS, SETTING_CONDITIONS, isConditionSatisfied, type HostFacts } from "@/lib/omp/settings-conditions";
 import type { OmpSetting, OmpSettingOption, OmpSettingsSchema } from "@/lib/omp/settings-schema";
 import { NativeSetting, SettingsHighlightContext, TERMINAL_ONLY_BADGE, ToggleSwitch, nativeInputStyle, nativeOptionStyle, nativeSelectStyle } from "./primitives";
 
@@ -22,6 +22,7 @@ export type OmpSettingValue = boolean | number | string | string[];
 interface SchemaResponse {
   path?: string;
   harness?: { id?: string; shortName?: string };
+  host?: { platform?: string };
   schema?: OmpSettingsSchema | null;
   values?: Record<string, OmpSettingValue>;
   reason?: string;
@@ -46,10 +47,17 @@ function isInlineControl(setting: OmpSetting): boolean {
 
 /** A condition Cody can evaluate is honoured by hiding the row, so saying so
  * again would be noise. One it cannot evaluate is worth naming, because the
- * row is shown unconditionally and may have no effect. */
+ * row is shown unconditionally and may have no effect. Camel-case splits at
+ * lowercase→uppercase boundaries only, so an acronym run ("macOS",
+ * "hasSIXELSupport") survives instead of shattering into letters. */
 function describeCondition(condition: string): string | null {
-  if (SETTING_CONDITIONS[condition]) return null;
-  return `Only takes effect when OMP reports ${condition.replace(/([A-Z])/g, " $1").toLowerCase().trim()}.`;
+  if (SETTING_CONDITIONS[condition] || HOST_CONDITIONS[condition]) return null;
+  const words = condition
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .split(" ")
+    .map((word) => (word.length > 1 && word === word.toUpperCase() ? word : word.toLowerCase()))
+    .join(" ");
+  return `Only takes effect when OMP reports ${words}.`;
 }
 
 /** A setting's current value, falling back to the schema default so a control
@@ -73,6 +81,7 @@ export function OmpSchemaSettings({ isMobile, harnessLabel = "OMP", onSaved, rel
   reloadToken?: number;
 }) {
   const [schema, setSchema] = useState<OmpSettingsSchema | null>(null);
+  const [host, setHost] = useState<HostFacts | undefined>(undefined);
   const [values, setValues] = useState<Record<string, OmpSettingValue>>({});
   const [status, setStatus] = useState<"loading" | "ready" | "unavailable">("loading");
   const [reason, setReason] = useState<string | null>(null);
@@ -93,6 +102,7 @@ export function OmpSchemaSettings({ isMobile, harnessLabel = "OMP", onSaved, rel
         return;
       }
       setSchema(data.schema);
+      setHost(typeof data.host?.platform === "string" ? { platform: data.host.platform } : undefined);
       setValues(data.values ?? {});
       setStatus("ready");
     } catch (cause) {
@@ -182,12 +192,12 @@ export function OmpSchemaSettings({ isMobile, harnessLabel = "OMP", onSaved, rel
       return setting ? effectiveValue(setting, values) : undefined;
     };
     return schema.settings.filter((setting) => {
-      if (!isConditionSatisfied(setting.condition, resolve)) return false;
+      if (!isConditionSatisfied(setting.condition, resolve, host)) return false;
       if (!query) return setting.tab === currentTab;
       // A search spans every tab; the tab strip stops applying while it runs.
       return `${setting.label} ${setting.description ?? ""} ${setting.key} ${setting.group ?? ""}`.toLowerCase().includes(query);
     });
-  }, [schema, values, currentTab, query]);
+  }, [schema, values, currentTab, query, host]);
 
   const sections = useMemo(() => {
     if (!schema) return [];

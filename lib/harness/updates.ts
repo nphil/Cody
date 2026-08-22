@@ -31,6 +31,13 @@ export interface EngineUpdateStatus {
    * binary that resolves but cannot run. Null whenever the version is known,
    * so a healthy engine never pays for the extra probe. */
   probeError: string | null;
+  /** The registry's latest is a bigger major than this Cody build has been
+   * exercised against (adapter.verifiedMajor) — the update card warns before
+   * the jump instead of after it. */
+  latestBeyondVerified: boolean;
+  /** The installed binary is already past the verified major — the row keeps
+   * a visible marker that Cody may not surface everything this engine can do. */
+  installedBeyondVerified: boolean;
 }
 
 /** "@oh-my-pi/pi-coding-agent@latest" → "@oh-my-pi/pi-coding-agent". */
@@ -39,9 +46,27 @@ export function packageNameFromSpec(spec: string): string {
   return at > 0 ? spec.slice(0, at) : spec;
 }
 
+/** Leading major out of "18.0.0" / "v18.0.0"; null when unparseable. */
+export function majorVersionOf(version: string | null): number | null {
+  const match = version?.match(/^v?(\d+)[.\-+]/) ?? version?.match(/^v?(\d+)$/);
+  return match ? Number(match[1]) : null;
+}
+
+/** Whether a version has crossed past the newest major this Cody build was
+ * verified against. Unknown versions and unmarked adapters never warn — the
+ * notice exists for a provable jump, not as ambient anxiety. */
+export function isBeyondVerifiedMajor(
+  version: string | null,
+  verifiedMajor: number | undefined,
+): boolean {
+  if (verifiedMajor === undefined) return false;
+  const major = majorVersionOf(version);
+  return major !== null && major > verifiedMajor;
+}
+
 const latestCache = new Map<string, { checkedAt: number; version: string | null }>();
 
-async function fetchLatestVersion(packageName: string, force: boolean): Promise<string | null> {
+export async function fetchLatestPackageVersion(packageName: string, force = false): Promise<string | null> {
   const cached = latestCache.get(packageName);
   if (!force && cached && Date.now() - cached.checkedAt < CHECK_TTL_MS) return cached.version;
   let version: string | null = null;
@@ -71,7 +96,7 @@ export async function checkEngineUpdates(force = false): Promise<EngineUpdateSta
     adapters.map(async (adapter) => {
       const [installedVersion, latestVersion] = await Promise.all([
         adapter.getVersion(),
-        fetchLatestVersion(packageNameFromSpec(adapter.installSpec as string), force),
+        fetchLatestPackageVersion(packageNameFromSpec(adapter.installSpec as string), force),
       ]);
       const previous = history[adapter.id]?.previousVersion ?? null;
       // Only the broken case pays for a second spawn, and it is the only case
@@ -87,6 +112,8 @@ export async function checkEngineUpdates(force = false): Promise<EngineUpdateSta
         // Offering a "revert" to the version already running is noise.
         previousVersion: previous && previous !== installedVersion ? previous : null,
         probeError: binary ? (await probeEngineVersion(binary)).error : null,
+        latestBeyondVerified: isBeyondVerifiedMajor(latestVersion, adapter.verifiedMajor),
+        installedBeyondVerified: isBeyondVerifiedMajor(installedVersion, adapter.verifiedMajor),
       };
     }),
   );
