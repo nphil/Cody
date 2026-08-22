@@ -129,7 +129,7 @@ drafts. Follows the system light/dark setting, or either one pinned in Settings 
 Appearance (stored in a plain preferences DataStore, separate from the credential
 one so a `401` cannot take the palette with it). The palette is a data class of
 semantic tokens (`ui/theme/CodyPalette.kt`) mirroring the CSS custom properties,
-so adding the other nine families is adding entries, not rewriting screens.
+so adding the other nineteen families is adding entries, not rewriting screens.
 
 ---
 

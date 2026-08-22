@@ -9,7 +9,7 @@ interface Props {
   messageRefs: RefObject<(HTMLDivElement | null)[]>;
 }
 
-const MINIMAP_WIDTH = 36;
+export const MINIMAP_WIDTH = 36;
 
 function getMessagePreview(msg: AgentMessage | Partial<AgentMessage>): string {
   if (msg.role === "user") {
@@ -82,7 +82,7 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
   const [mouseYRatio, setMouseYRatio] = useState<number | null>(null);
   const [minimapHeightPx, setMinimapHeightPx] = useState(600);
   const draggingRef = useRef(false);
-  const dragListenersRef = useRef<{ onMove: (ev: MouseEvent) => void; onUp: () => void } | null>(null);
+  const dragListenersRef = useRef<{ onMove: (ev: PointerEvent) => void; onUp: () => void } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   // Scroll geometry is deliberately NOT React state: it changes on every scroll
   // frame, and re-rendering the minimap would reconcile one absolutely
@@ -274,8 +274,13 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
     }
   }, [flushMouseMove]);
 
-  const handleMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+  // Pointer events instead of mouse events so the same drag works from a
+  // touch (tablet) as from a mouse: the container declares touch-action:none,
+  // and pointercancel is treated like release so an OS gesture interrupting
+  // the drag never leaves the listeners attached.
+  const handlePointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     if (!visible) return;
+    if (e.pointerType === "mouse" && e.button !== 0) return;
 
     draggingRef.current = true;
     const viewportRatio = viewportRatioRef.current;
@@ -287,7 +292,7 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
 
     scrollToMinimapRatio(clickRatio - offset);
 
-    const onMove = (ev: MouseEvent) => {
+    const onMove = (ev: PointerEvent) => {
       if (!draggingRef.current) return;
       const r = (ev.clientY - rect.top) / rect.height;
       scrollToMinimapRatio(r - offset);
@@ -295,21 +300,24 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
     const onUp = () => {
       draggingRef.current = false;
       dragListenersRef.current = null;
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
     };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
     dragListenersRef.current = { onMove, onUp };
   }, [visible, scrollToMinimapRatio]);
 
-  // An interrupted drag (unmount before mouseup) must not leak the window
+  // An interrupted drag (unmount before pointerup) must not leak the window
   // listeners.
   useEffect(() => () => {
     const listeners = dragListenersRef.current;
     if (listeners) {
-      window.removeEventListener("mousemove", listeners.onMove);
-      window.removeEventListener("mouseup", listeners.onUp);
+      window.removeEventListener("pointermove", listeners.onMove);
+      window.removeEventListener("pointerup", listeners.onUp);
+      window.removeEventListener("pointercancel", listeners.onUp);
       dragListenersRef.current = null;
     }
     draggingRef.current = false;
@@ -387,7 +395,7 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
   return (
     <div
       ref={containerRef}
-      onMouseDown={handleMouseDown}
+      onPointerDown={handlePointerDown}
       onMouseEnter={() => setMinimapHovered(true)}
       onMouseLeave={() => { setMinimapHovered(false); setMouseYRatio(null); }}
       onMouseMove={handleMinimapMouseMove}
@@ -397,6 +405,7 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
         position: "relative",
         cursor: "default",
         userSelect: "none",
+        touchAction: "none",
         borderLeft: "1px solid var(--border)",
         background: "var(--bg-panel)",
         overflow: "visible",

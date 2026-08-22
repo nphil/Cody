@@ -8,6 +8,7 @@ import { SessionSidebar } from "./SessionSidebar";
 import { ToastProvider } from "./ui/toast";
 import { toast } from "./ui/toast";
 import { ChatWindow, type SessionModelUsage } from "./ChatWindow";
+import { MINIMAP_WIDTH } from "./ChatMinimap";
 import { TabBar, type Tab } from "./TabBar";
 import { BranchNavigator } from "./BranchNavigator";
 import { ThemePicker } from "./ThemePicker";
@@ -2174,7 +2175,11 @@ export function AppShell() {
         // In the desktop shell the viewport starts under the 36px titlebar.
         position: "fixed", top: isDesktop ? "calc(env(safe-area-inset-top, 0px) + 36px)" : "env(safe-area-inset-top, 0px)", right: "env(safe-area-inset-right, 0px)", zIndex: 300,
         display: "flex", alignItems: "center", justifyContent: "center",
-        width: isMobile || isCoarsePointer ? 44 : 32, height: isMobile || isCoarsePointer ? 44 : 32, padding: 0,
+        // Closed, with a minimap below (non-mobile): match the minimap's 36px
+        // width so this button's left border continues the minimap's own
+        // separator line instead of sitting a few pixels off it.
+        width: rightPanelOpen || isMobile ? (isMobile || isCoarsePointer ? 44 : 32) : MINIMAP_WIDTH,
+        height: isMobile || isCoarsePointer ? 44 : 32, padding: 0,
         background: "var(--bg-panel)", border: "none", borderLeft: "1px solid var(--border)", borderBottom: "1px solid var(--border)",
         color: rightPanelOpen ? "var(--text)" : "var(--text-muted)",
         cursor: "pointer", transition: "color var(--dur-fast) var(--ease-out-warm)",

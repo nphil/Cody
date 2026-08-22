@@ -162,7 +162,7 @@ updates.
 - **Stay current in-app**: version checks and one-click updates for the engine; Cody itself updates with the container image.
 - **Stay informed**: browser notifications when an agent finishes; skill update checks.
 - **Jump anywhere with ⌘K**: a command palette for switching sessions, starting new ones, and toggling the theme.
-- **Pick a look that suits you**: ten theme families, each with paired light/dark variants, on a token-driven UI kit with WCAG AA-verified contrast; English, 简体中文 and 日本語 UI.
+- **Pick a look that suits you**: twenty theme families inspired by popular editor colorways, each with paired light/dark variants, on a token-driven UI kit with WCAG AA-verified contrast; English, 简体中文 and 日本語 UI.
 
 ## Configuration
 

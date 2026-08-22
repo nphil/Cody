@@ -11,10 +11,10 @@ const {
   isThemeId,
 } = await jiti.import("../lib/theme-catalog.ts");
 
-test("ships twenty balanced light and dark themes", () => {
-  assert.equal(THEMES.length, 20);
-  assert.equal(THEMES.filter((theme) => theme.mode === "light").length, 10);
-  assert.equal(THEMES.filter((theme) => theme.mode === "dark").length, 10);
+test("ships forty balanced light and dark themes", () => {
+  assert.equal(THEMES.length, 40);
+  assert.equal(THEMES.filter((theme) => theme.mode === "light").length, 20);
+  assert.equal(THEMES.filter((theme) => theme.mode === "dark").length, 20);
   assert.equal(new Set(THEMES.map((theme) => theme.id)).size, THEMES.length);
 });
 
@@ -44,7 +44,7 @@ test("degrades pre-catalog ids to the default instead of throwing", () => {
 
 test("every id carries a light/dark family pair the mode toggle can reach", () => {
   const families = new Set(THEMES.map((theme) => theme.family));
-  assert.equal(families.size, 10);
+  assert.equal(families.size, 20);
   for (const family of families) {
     const pair = THEMES.filter((theme) => theme.family === family);
     assert.equal(pair.length, 2);
