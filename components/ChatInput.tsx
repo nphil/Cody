@@ -1,8 +1,9 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
-import { ChevronDown, ListChecks, Loader2, Paperclip, Sparkles, Target } from "lucide-react";
+import { ChevronDown, ListChecks, Loader2, Paperclip, Sparkles, Target, Wrench } from "lucide-react";
 import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
+import type { ToolPreset } from "@/lib/tool-presets";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
 import { formatGoalElapsed } from "@/lib/web-mode-state";
@@ -77,10 +78,18 @@ interface Props {
   modelError?: string | null;
   modelsLoading?: boolean;
   onModelChange?: (provider: string, modelId: string) => void;
+  /** Return a NEW session to auto ("Smart") model resolution. Present only
+   * for a new, not-yet-spawned session — on a live session the Smart row
+   * resolves the OMP roles default itself and calls onModelChange instead. */
+  onSelectSmartModel?: () => void;
   fastModeEnabled?: boolean;
   fastModeActive?: boolean;
   fastModeSupported?: boolean;
   onFastModeChange?: (enabled: boolean) => void;
+  /** Applied at spawn time only (--tools/--no-tools flags) — omp's RPC
+   * protocol cannot change an already-running session's toolset. */
+  toolPreset?: ToolPreset;
+  onToolPresetChange?: (preset: ToolPreset) => void;
   onAbortCompaction?: () => void;
   isCompacting?: boolean;
   compactResult?: CompactResultInfo | null;
@@ -117,6 +126,22 @@ export interface ChatInputHandle {
   prependText: (text: string) => void;
   addFiles: (files: File[]) => void;
 }
+
+// Most-to-least permissive, matching how a user thinks about "what am I
+// giving up": Full keeps omp's whole builtin toolset (subagents, task lists,
+// GitHub, web search, …); Core restricts to read/bash/edit/write only;
+// None disables tools entirely.
+const TOOL_PRESET_ORDER: ToolPreset[] = ["full", "default", "none"];
+const TOOL_PRESET_LABEL_KEY: Record<ToolPreset, string> = {
+  full: "chatInput.toolsFull",
+  default: "chatInput.toolsDefault",
+  none: "chatInput.toolsOff",
+};
+// Only the restrictive presets warn — Full loses nothing, so it gets no line.
+const TOOL_PRESET_WARNING_KEY: Partial<Record<ToolPreset, string>> = {
+  default: "chatInput.toolPresetCoreWarning",
+  none: "chatInput.toolPresetNoneWarning",
+};
 
 const COMPOSITION_END_ENTER_GRACE_MS = 100;
 /** Circumference of the composer ring (r = 9.5). */
@@ -979,7 +1004,7 @@ function ComposerModeStatus({ goal, plan }: { goal?: ActiveGoal | null; plan?: A
 }
 
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSteer, onFollowUp, isStreaming, chatExtras = true, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, onModelChange, fastModeEnabled, fastModeActive, fastModeSupported, onFastModeChange,
+  onSend, onAbort, onSteer, onFollowUp, isStreaming, chatExtras = true, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, onModelChange, onSelectSmartModel, fastModeEnabled, fastModeActive, fastModeSupported, onFastModeChange, toolPreset, onToolPresetChange,
   onAbortCompaction, isCompacting, compactResult,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap, modelNameOverride,
   retryInfo, queuedMessages, inputHistory = [], onAbortRetry,
@@ -1011,6 +1036,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [modelDropdownRect, setModelDropdownRect] = useState<{ top: number; left: number; width: number } | null>(null);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
+  const [toolsDropdownOpen, setToolsDropdownOpen] = useState(false);
   const [contextPopoverOpen, setContextPopoverOpen] = useState(false);
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
     draftKey ? draftImagesToAttachedImages(getDraft(draftKey)?.images) : []
@@ -1040,6 +1066,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const dropdownRef = useRef<HTMLDivElement>(null);
   const modelDropdownPanelRef = useRef<HTMLDivElement>(null);
   const thinkingDropdownRef = useRef<HTMLDivElement>(null);
+  const toolsDropdownRef = useRef<HTMLDivElement>(null);
   const historyMenuRef = useRef<HTMLDivElement>(null);
   const contextPopoverRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -2001,6 +2028,46 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   // loading chip, so "no models" can only appear after the fetch settled.
   const showModelsLoading = Boolean(modelsLoading) && !modelError;
   const modelSelectorDisabled = isStreaming || (showModelsLoading && modelOptions.length === 0);
+
+  // Smart row on a LIVE session: there is no "auto" runtime state to fall
+  // back into (the session already has a resolved model), so this reaches
+  // for the same answer omp would give a brand-new session — the configured
+  // OMP roles' `default` — and pins the picker to it. Unset or unmatched
+  // roles surface a toast rather than silently doing nothing.
+  const handleSmartModelForLiveSession = useCallback(async () => {
+    if (!onModelChange) return;
+    try {
+      const res = await fetch("/api/model-roles");
+      if (!res.ok) throw new Error(`model-roles fetch failed: ${res.status}`);
+      const data = await res.json() as { roles?: Record<string, string> };
+      const defaultRole = data.roles?.default;
+      const slash = defaultRole ? defaultRole.indexOf("/") : -1;
+      if (!defaultRole || slash === -1) {
+        toast.info(t("chatInput.smartModelUnavailable"));
+        return;
+      }
+      const provider = defaultRole.slice(0, slash);
+      const rest = defaultRole.slice(slash + 1);
+      // Exact match first — a model id can itself contain a colon (self-hosted
+      // tags such as `qwen3:8b`) — before stripping an optional :thinking suffix.
+      const match = modelList?.find((m) => m.provider === provider && m.id === rest)
+        ?? (() => {
+          const colon = rest.lastIndexOf(":");
+          if (colon === -1) return undefined;
+          const base = rest.slice(0, colon);
+          return modelList?.find((m) => m.provider === provider && m.id === base);
+        })();
+      if (!match) {
+        toast.info(t("chatInput.smartModelUnavailable"));
+        return;
+      }
+      onModelChange(match.provider, match.id);
+    } catch (e) {
+      console.error("Failed to resolve smart model:", e);
+      toast.info(t("chatInput.smartModelUnavailable"));
+    }
+  }, [modelList, onModelChange, t]);
+
   // Turn-based engines take one prompt at a time: no steering, no follow-up
   // queue. Rather than leave Enter silently inert, the composer says it is
   // waiting. Typing stays allowed so the next message can be drafted.
@@ -2093,6 +2160,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   useEffect(() => {
     if (isStreaming) setThinkingDropdownOpen(false);
   }, [isStreaming]);
+  useEffect(() => {
+    if (isStreaming) setToolsDropdownOpen(false);
+  }, [isStreaming]);
 
   // Close dropdowns on outside click
   useEffect(() => {
@@ -2105,6 +2175,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       }
       if (thinkingDropdownRef.current && !thinkingDropdownRef.current.contains(e.target as Node)) {
         setThinkingDropdownOpen(false);
+      }
+      if (toolsDropdownRef.current && !toolsDropdownRef.current.contains(e.target as Node)) {
+        setToolsDropdownOpen(false);
       }
       if (historyMenuRef.current && !historyMenuRef.current.contains(e.target as Node) && !textareaRef.current?.contains(e.target as Node)) {
         setHistoryMenuOpen(false);
@@ -2857,9 +2930,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     </span>
                   )}
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
-                    {currentName ?? (modelOptions.length > 0
-                      ? t("chatInput.selectModel")
-                      : showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noModels"))}
+                    {isAutoModelSelection && currentName
+                      ? `${t("chatInput.smartModel")} · ${currentName}`
+                      : currentName ?? (modelOptions.length > 0
+                        ? t("chatInput.selectModel")
+                        : showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noModels"))}
                   </span>
                   <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7 }} aria-hidden="true" />
                 </button>
@@ -2878,6 +2953,36 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     zIndex: 500,
                     overflow: "hidden", maxHeight: maxH, overflowY: "auto",
                     }}>
+                    <button
+                      className="dropdown-item"
+                      key="smart-model-role"
+                      onClick={() => {
+                        setModelDropdownOpen(false);
+                        if (onSelectSmartModel) onSelectSmartModel();
+                        else void handleSmartModelForLiveSession();
+                      }}
+                      style={{
+                        display: "flex", alignItems: "flex-start", gap: 8,
+                        width: "100%", padding: "7px 12px",
+                        background: isAutoModelSelection ? "var(--bg-selected)" : "transparent",
+                        border: "none",
+                        borderBottom: "1px solid var(--border)",
+                        color: isAutoModelSelection ? "var(--text)" : "var(--text-muted)",
+                        cursor: "pointer", fontSize: 12, textAlign: "left",
+                        fontWeight: isAutoModelSelection ? 600 : 400,
+                      }}
+                      onMouseEnter={(e) => { if (!isAutoModelSelection) e.currentTarget.style.background = "var(--bg-hover)"; }}
+                      onMouseLeave={(e) => { if (!isAutoModelSelection) e.currentTarget.style.background = "transparent"; }}
+                    >
+                      {isAutoModelSelection
+                        ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 3 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
+                        : <span style={{ width: 10, flexShrink: 0 }} />}
+                      <Sparkles size={13} strokeWidth={1.8} style={{ flexShrink: 0, marginTop: 2, color: isAutoModelSelection ? "var(--accent)" : "var(--text-dim)" }} />
+                      <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+                        <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t("chatInput.smartModel")}</span>
+                        <span style={{ fontSize: 11, color: "var(--text-dim)", fontWeight: 400, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t("chatInput.smartModelHint")}</span>
+                      </span>
+                    </button>
                     {modelsByProvider.length === 0 ? (
                       <div style={{ padding: "8px 12px", color: "var(--text-dim)", fontSize: 12, whiteSpace: "nowrap" }}>
                         {showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noAvailableModels")}
@@ -2958,6 +3063,78 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   </div>
                   );
                 })()}
+              </div>
+            )}
+
+            {/* Tool preset selector — applies at spawn time only, so it stays
+                available even mid-run (the picked preset takes effect on the
+                next new session, not the live one). */}
+            {onToolPresetChange && (
+              <div ref={toolsDropdownRef} style={{ position: "relative" }}>
+                <button
+                  onClick={() => setToolsDropdownOpen((v) => !v)}
+                  title={t("chatInput.changeToolPresetTitle", { preset: t(TOOL_PRESET_LABEL_KEY[toolPreset ?? "full"]) })}
+                  aria-label={t("chatInput.changeToolPreset")}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 5,
+                    height: 28,
+                    padding: "0 8px",
+                    background: toolsDropdownOpen ? "var(--bg-hover)" : "none",
+                    border: "none",
+                    borderRadius: 7,
+                    color: toolPreset && toolPreset !== "full" ? "var(--status-warning)" : "var(--text-muted)",
+                    cursor: "pointer",
+                    fontSize: 12,
+                    transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = toolsDropdownOpen ? "var(--bg-hover)" : "none"; }}
+                >
+                  <Wrench size={12} strokeWidth={1.8} style={{ flexShrink: 0 }} aria-hidden="true" />
+                  <span style={{ whiteSpace: "nowrap" }}>{t(TOOL_PRESET_LABEL_KEY[toolPreset ?? "full"])}</span>
+                  <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7 }} aria-hidden="true" />
+                </button>
+                {toolsDropdownOpen && (
+                  <div className="dropdown-surface" style={{
+                    position: "absolute", bottom: "calc(100% + 6px)", left: 0,
+                    zIndex: 100, minWidth: 260, maxWidth: "calc(100vw - 32px)",
+                  }}>
+                    {TOOL_PRESET_ORDER.map((preset) => {
+                      const isActive = (toolPreset ?? "full") === preset;
+                      const warningKey = TOOL_PRESET_WARNING_KEY[preset];
+                      return (
+                        <button
+                          className="dropdown-item"
+                          key={preset}
+                          onClick={() => { setToolsDropdownOpen(false); if (!isActive) onToolPresetChange(preset); }}
+                          style={{
+                            display: "flex", alignItems: "flex-start", gap: 8,
+                            width: "100%", padding: "7px 12px",
+                            background: isActive ? "var(--bg-selected)" : "transparent",
+                            border: "none",
+                            color: isActive ? "var(--text)" : "var(--text-muted)",
+                            cursor: "pointer", fontSize: 12, textAlign: "left",
+                            fontWeight: isActive ? 600 : 400,
+                          }}
+                          onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = "var(--bg-hover)"; }}
+                          onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = "transparent"; }}
+                        >
+                          {isActive
+                            ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, marginTop: 3 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
+                            : <span style={{ width: 10, flexShrink: 0 }} />}
+                          <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+                            <span style={{ whiteSpace: "nowrap" }}>{t(TOOL_PRESET_LABEL_KEY[preset])}</span>
+                            {warningKey && (
+                              <span style={{ fontSize: 11, fontWeight: 400, color: "var(--status-warning)", whiteSpace: "normal" }}>
+                                {t(warningKey)}
+                              </span>
+                            )}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             )}
 

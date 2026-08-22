@@ -441,6 +441,9 @@ const PROMPT_SETTLE_INITIAL_DELAY_MS = 800;
 const PROMPT_SETTLE_POLL_MS = 600;
 const PROMPT_SETTLE_MAX_MS = 20_000;
 const AGENT_STATE_RECONCILE_MS = 15_000;
+/** Model-switch toasts explain a mid-run change of engine behavior — worth a
+ * slow read, so they stay up far longer than the 4s default. */
+const MODEL_SWITCH_TOAST_MS = 10_000;
 const BASH_STATE_RECONCILE_MS = 1_000;
 // A cold `omp --mode rpc-ui` spawn (extension + skill + LSP discovery) can take
 // far longer than a few seconds, and the SSE route may only answer once the
@@ -709,6 +712,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [steeringMode, setSteeringMode] = useState<"all" | "one-at-a-time">("all");
   const [followUpMode, setFollowUpMode] = useState<"all" | "one-at-a-time">("all");
   const [retryInfo, setRetryInfo] = useState<{ attempt: number; maxAttempts: number; errorMessage?: string } | null>(null);
+  // The last provider error auto-retry reported, kept past auto_retry_end so a
+  // retry_fallback_applied toast can name the reason for the model switch.
+  const lastRetryErrorRef = useRef<string | null>(null);
   const [liveContextUsage, setLiveContextUsage] = useState<ContextUsageValue | null>(null);
   // Usage recorded outside the parent transcript, kept apart so the headline
   // adds each source exactly once. `subagentUsage` is summed from the
@@ -1784,6 +1790,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setAgentRunning(false);
       setAgentPhase(null);
       setRetryInfo(null);
+      lastRetryErrorRef.current = null;
       setSubagents([]);
       subagentRosterGenerationRef.current += 1;
       // Bound per-run activity state: without this, subagentEvents and the
@@ -2309,31 +2316,52 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       case "auto_retry_start":
         setRetryInfo({ attempt: event.attempt as number, maxAttempts: event.maxAttempts as number, errorMessage: event.errorMessage as string | undefined });
+        // Remembered past auto_retry_end: a fallback that follows exhausted
+        // retries names this error as its reason.
+        if (typeof event.errorMessage === "string" && event.errorMessage.trim()) {
+          lastRetryErrorRef.current = event.errorMessage.trim();
+        }
         break;
       case "auto_retry_end":
         setRetryInfo(null);
         break;
       // A silent model swap is the confusing half of retry fallback: the run
       // continues, the composer badge changes, and nothing says why. Surface
-      // omp's own fallback events so the switch always announces its reason.
+      // omp's own fallback events so the switch always announces its reason —
+      // including the provider error that caused it — and give the toast time
+      // to actually be read (10s, dismissible).
       case "retry_fallback_applied": {
         const from = typeof event.from === "string" ? event.from : "?";
         const to = typeof event.to === "string" ? event.to : "?";
         const role = typeof event.role === "string" ? event.role : "default";
+        const reason = lastRetryErrorRef.current;
+        const detail = translate("agentSession.fallbackAppliedDetail", { role })
+          + (reason ? `\n${translate("agentSession.fallbackReason", { reason })}` : "");
         toast.info(
           translate("agentSession.fallbackApplied", { from, to }),
-          translate("agentSession.fallbackAppliedDetail", { role }),
+          detail,
+          { durationMs: MODEL_SWITCH_TOAST_MS, clamp: true },
         );
         break;
       }
       case "retry_fallback_succeeded": {
         const model = typeof event.model === "string" ? event.model : "?";
+        lastRetryErrorRef.current = null;
         toast.success(
           translate("agentSession.fallbackSucceeded", { model }),
           translate("agentSession.fallbackSucceededDetail"),
+          { durationMs: MODEL_SWITCH_TOAST_MS },
         );
         break;
       }
+      // Turn boundaries are where todo items flip (the model checks phases
+      // off between turns, and subagent-driven updates land without any
+      // parent-session tool frame). Refresh there instead of waiting for the
+      // 15s reconcile poll, so items check off as they complete instead of
+      // arriving in poll-sized batches.
+      case "turn_end":
+        if (sessionIdRef.current) void reconcileAgentState(sessionIdRef.current);
+        break;
       case "usage_event": {
         // Claude Code and codex account for themselves instead of recording
         // usage on the messages they emit, so their figures arrive as frames.
@@ -2795,6 +2823,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       console.error("Failed to set model:", e);
     }
   }, [isNew, setNewSessionModel, refreshLiveModelState]);
+
+  // Returns a brand-new session to auto ("Smart") model resolution: omp picks
+  // the model from the user's configured OMP roles plan instead of a pinned
+  // provider/modelId. Only meaningful before the session has spawned — the
+  // model picker's Smart row is a no-op (beyond a toast) on a live session.
+  const selectSmartModel = useCallback(() => {
+    setNewSessionModel(null);
+  }, [setNewSessionModel]);
 
   const handleFastModeChange = useCallback(async (enabled: boolean) => {
     // A brand-new session has no runtime yet: the model picker updates local
@@ -3525,7 +3561,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     sessionIdRef, messagesEndRef, scrollContainerRef,
     pendingScrollToUserRef, initialScrollDoneRef,
     // Actions
-    handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, handleFastModeChange, handleAutoRetryChange, handleInterruptModeChange, handleAutoCompactionChange, handleSteeringModeChange, handleFollowUpModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, handleInterruptAndReply,
+    handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, selectSmartModel, handleFastModeChange, handleAutoRetryChange, handleInterruptModeChange, handleAutoCompactionChange, handleSteeringModeChange, handleFollowUpModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, handleInterruptAndReply,
     handleCompact, handleHandoff, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     removeQueuedMessage, promoteQueuedToSteer,
     handleBuiltinSlashCommand,

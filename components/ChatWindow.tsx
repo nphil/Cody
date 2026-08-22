@@ -98,7 +98,7 @@ function oldestRunningTool(phase: AgentPhase): RunningToolInfo | null {
   return phase.tools.reduce((oldest, tool) => (tool.startedAt < oldest.startedAt ? tool : oldest));
 }
 
-function phaseLabel(phase: AgentPhase, now: number): string {
+function phaseLabel(phase: AgentPhase): string {
   if (phase?.kind === "running_tools") {
     const names = phase.tools.map((tool) => tool.name);
     let label: string;
@@ -106,21 +106,29 @@ function phaseLabel(phase: AgentPhase, now: number): string {
     else if (names.length <= 3) label = translate("chatWindow.runningNamed", { names: names.join(", ") });
     else label = translate("chatWindow.runningNamedMore", { names: names.slice(0, 2).join(", "), more: names.length - 2 });
     // The oldest tool is the one worth narrating: append the newest line it
-    // streamed about itself and, once it has run a while, for how long. A
-    // long silent call (omp's gh run_watch behind `write xd://github`,
-    // polling a GitHub Actions run to completion) must read as a live watch
-    // with a clock on it, never as a hang.
+    // streamed about itself. A long silent call (omp's gh run_watch behind
+    // `write xd://github`, polling a GitHub Actions run to completion) must
+    // read as a live watch, never as a hang. The ELAPSED clock deliberately
+    // lives outside this string: the status line renders through a
+    // crossfade, and folding a per-second tick into the crossfaded text made
+    // the whole line re-animate every second.
     const oldest = oldestRunningTool(phase);
-    if (oldest) {
-      if (oldest.statusText) label += ` — ${oldest.statusText}`;
-      const elapsed = now - oldest.startedAt;
-      if (elapsed >= LONG_TOOL_THRESHOLD_MS) label += ` · ${formatToolElapsed(elapsed)}`;
-    }
+    if (oldest?.statusText) label += ` — ${oldest.statusText}`;
     return label;
   }
   if (phase?.kind === "waiting_model") return translate("chatWindow.waitingModel");
   if (phase?.kind === "running_command") return translate("chatWindow.runningCommand");
   return translate("chatWindow.thinking");
+}
+
+/** Elapsed readout for the oldest running tool, or null below the threshold.
+ * Rendered as a plain sibling span (tabular digits, no animation) so only the
+ * digits change each second. */
+function phaseElapsed(phase: AgentPhase, now: number): string | null {
+  const oldest = oldestRunningTool(phase);
+  if (!oldest) return null;
+  const elapsed = now - oldest.startedAt;
+  return elapsed >= LONG_TOOL_THRESHOLD_MS ? formatToolElapsed(elapsed) : null;
 }
 
 const CHAT_MINIMAP_WIDTH = 36;
@@ -685,7 +693,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
 
   const {
     loading, error, messages, entryIds, streamState,
-    agentRunning, bashRunning, pendingBash, modelNames, modelList, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, thinkingLevel, fastModeEnabled, fastModeActive,
+    agentRunning, bashRunning, pendingBash, modelNames, modelList, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, thinkingLevel, fastModeEnabled, fastModeActive, toolPreset,
     liveModelMeta,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactResult, displayModel: displayModelValue, sessionStats,
@@ -696,11 +704,11 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases,
     isNew,
     sessionIdRef, messagesEndRef, scrollContainerRef,
-    handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,
+    handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, selectSmartModel,
     handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     removeQueuedMessage, promoteQueuedToSteer,
     handleBuiltinSlashCommand,
-    handleThinkingLevelChange, handleFastModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, loadSlashCommands,
+    handleThinkingLevelChange, handleFastModeChange, handleToolPresetChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, loadSlashCommands,
   } = useAgentSession({
     session, newSessionCwd, advisorEnabled, thinkingDefaultExpanded, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
@@ -1046,6 +1054,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       modelsLoading={modelsLoading}
       modelError={modelError}
       onModelChange={chatExtras ? handleModelChange : undefined}
+      onSelectSmartModel={chatExtras && isNew ? selectSmartModel : undefined}
       onAbortCompaction={handleAbortCompaction}
       isCompacting={isCompacting}
       compactResult={compactResult}
@@ -1055,6 +1064,8 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       fastModeActive={fastModeActive}
       fastModeSupported={fastModeCapable && chatExtras && Boolean(displayModelValue && modelList.some((entry) => entry.provider === displayModelValue.provider && entry.id === displayModelValue.modelId && entry.supportsFastMode))}
       onFastModeChange={session || isNew ? handleFastModeChange : undefined}
+      toolPreset={toolPreset}
+      onToolPresetChange={chatExtras ? handleToolPresetChange : undefined}
       onAbortRetry={session ? handleAbortRetry : undefined}
       availableThinkingLevels={availableThinkingLevels}
       thinkingLevelMap={currentThinkingLevelMap}
@@ -1301,7 +1312,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
                           ? t("agentStream.disconnected")
                           : streamDegraded
                             ? t("agentStream.reconnecting")
-                            : phaseLabel(agentPhase, toolClockNow),
+                            : phaseLabel(agentPhase),
                         activeSubagentCount > 0 ? tn("chatWindow.subagentCount", activeSubagentCount) : null,
                         currentTodoPhase
                           ? t("chatWindow.todoPhaseStatus", {
@@ -1312,6 +1323,15 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
                           : null,
                       ].filter(Boolean).join(" · ")}
                     />
+                    {/* The ticking clock stays OUTSIDE the crossfade: routed
+                        through it, the per-second change re-animated the whole
+                        status line. Here only the digits repaint. */}
+                    {!streamAlert && !streamDegraded && (() => {
+                      const elapsed = phaseElapsed(agentPhase, toolClockNow);
+                      return elapsed
+                        ? <span style={{ flexShrink: 0, color: "var(--text-dim)", fontVariantNumeric: "tabular-nums" }}>· {elapsed}</span>
+                        : null;
+                    })()}
                   </div>
                 )}
                 {bashRunning && !pendingBash && (

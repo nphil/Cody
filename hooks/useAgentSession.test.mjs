@@ -101,7 +101,7 @@ test("the degraded and lost states reach the UI with a retry affordance", () => 
 
   // The plain "Waiting for model…" label must not survive a degraded stream,
   // and an exhausted retry loop must not keep claiming to be reconnecting.
-  assert.match(chatWindow, /streamAlert\?\.kind === "stream_lost"\s*\n\s*\? t\("agentStream\.disconnected"\)\s*\n\s*: streamDegraded\s*\n\s*\? t\("agentStream\.reconnecting"\)\s*\n\s*: phaseLabel\(agentPhase, toolClockNow\)/);
+  assert.match(chatWindow, /streamAlert\?\.kind === "stream_lost"\s*\n\s*\? t\("agentStream\.disconnected"\)\s*\n\s*: streamDegraded\s*\n\s*\? t\("agentStream\.reconnecting"\)\s*\n\s*: phaseLabel\(agentPhase\)/);
   assert.match(chatWindow, /<StreamAlertBanner/);
   assert.match(chatWindow, /onRetry=\{retryEventStream\}/);
   assert.match(chatWindow, /onDismiss=\{dismissStreamAlert\}/);
@@ -194,7 +194,10 @@ test("long tool calls surface streamed progress and an elapsed clock", () => {
   assert.match(hook, /case "tool_execution_update":/, "the update frame must be handled, not ignored");
   assert.match(hook, /toolUpdateStatusText\(event\.partialResult\)/, "status text comes from the frame's partialResult");
   assert.match(hook, /startedAt: Date\.now\(\)/, "tool_execution_start must stamp a start time");
-  assert.match(chatWindow, /phaseLabel\(agentPhase, toolClockNow\)/, "the status line renders against the ticking clock");
+  assert.match(chatWindow, /phaseElapsed\(agentPhase, toolClockNow\)/, "the elapsed clock renders against the ticking clock");
   assert.match(chatWindow, /LONG_TOOL_THRESHOLD_MS/, "elapsed shows only past the long-call threshold");
   assert.match(chatWindow, /formatToolElapsed/, "elapsed is rendered, not just tracked");
+  // The tick must NOT ride through the crossfade: a per-second text change
+  // there re-animates the entire status line (user-visible flicker).
+  assert.doesNotMatch(chatWindow, /phaseLabel\(agentPhase, toolClockNow\)/, "the crossfaded label must not contain the ticking clock");
 });

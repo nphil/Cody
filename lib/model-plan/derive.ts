@@ -123,12 +123,22 @@ export function bestAvailableModel(roster: RosterModel[]): RosterModel | null {
  * match — substituting a chat model for a thinking model changes what the role
  * can do — and among the models that match, the largest context window is the
  * nearest equivalent the catalog can express.
+ *
+ * The mismatch rule is asymmetric on purpose. A provider with no reasoning
+ * model contributes NOTHING to a reasoning reference's chain: falling back
+ * from a thinking model to a small chat model (a Haiku-class rung under a
+ * planning role) trades a rate-limit pause for a model that loops on problems
+ * it cannot think through — strictly worse than skipping the rung. A
+ * non-reasoning reference may still step up to a reasoning model, which is
+ * merely overqualified.
  */
 function equivalentOn(provider: string, reference: RosterModel | null, roster: RosterModel[]): RosterModel | null {
   const candidates = roster.filter((model) => model.provider === provider);
   if (candidates.length === 0) return null;
   const sameKind = reference ? candidates.filter((model) => model.reasoning === reference.reasoning) : [];
-  return (sameKind.length > 0 ? sameKind : candidates).sort(compareCapability)[0];
+  if (sameKind.length > 0) return sameKind.sort(compareCapability)[0];
+  if (reference?.reasoning) return null;
+  return candidates.sort(compareCapability)[0];
 }
 
 /**
