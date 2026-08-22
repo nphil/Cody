@@ -690,6 +690,33 @@ handled or safely ignored.
   GitHub Actions Run #N" snapshot per poll. Without the update wiring that
   call renders as a frozen "write xd://github" for many minutes and reads as
   a hang. Contract-tested in `hooks/useAgentSession.test.mjs`.
+- **Trap — the ticking clock must not ride the crossfade.** The status line
+  renders through `StatusTextCrossfade`, which re-animates on ANY text
+  change; folding the per-second elapsed tick into that string made the
+  whole line flicker every second. The clock renders as a plain sibling span
+  (`phaseElapsed`, tabular digits); only real status changes crossfade.
+
+### Composer model + tools controls
+- **Smart model row**: the model dropdown's pinned first row ("Smart — OMP
+  roles") is the labeled face of auto model selection. A NEW session with no
+  explicit pick sends no `set_model`, so omp resolves `modelRoles.default`
+  (the saved plan); Smart re-selects that state (`selectSmartModel()` clears
+  `newSessionModel`). On a live session it resolves the configured default
+  role to a concrete model client-side and pins it (omp's `set_model` RPC
+  takes exact provider/model — no role aliases). Picking any named model
+  pins it and OMP roles stop applying to that session's main turns.
+- **Tools preset control** (composer, Wrench icon): "full" leaves omp's
+  toolset alone; "default"/Core spawns omp with `--tools read,bash,edit,write`,
+  which also kills the `task`, `todo`, `github` and `web_search` builtins —
+  no subagents, no task lists — so the menu says so in warning color and the
+  trigger tints warning when restricted. The control had been removed from
+  the UI while the stored preference (`cody:tool-preset`) kept applying to
+  every spawn; `lib/tool-preset-preference.ts` therefore migrates a
+  restricted value back to "full" unless it was chosen through the current
+  labeled control (ack marker). Never reintroduce an invisible restriction.
+- Todo phases refresh on every `turn_end` (plus todo tool end and
+  `todo_reminder`) — the 15s reconcile poll alone made checkoffs land in
+  batches, especially when subagents did the checking.
 
 ### Running state SSE + reconciliation
 - The sidebar listens to `/api/agent/running/events`, backed by `subscribeRunningSessions()` in `lib/rpc-manager.ts`, so running badges update without polling.

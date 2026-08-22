@@ -27,6 +27,9 @@ interface ToastData {
 interface ToastOptions {
   /** Clamp the description to 2 lines; click the description to expand it. */
   clamp?: boolean;
+  /** Auto-dismiss after this long instead of the provider default (4s).
+   * Use for toasts worth reading slowly (model switches: 10s). */
+  durationMs?: number;
 }
 
 const manager = Toast.createToastManager<ToastData>();
@@ -36,6 +39,7 @@ function add(kind: ToastKind, title: React.ReactNode, description?: React.ReactN
     title,
     description,
     type: kind,
+    ...(options?.durationMs !== undefined ? { timeout: options.durationMs } : {}),
     data: { kind, clamp: options?.clamp },
   });
 }
