@@ -15,7 +15,7 @@ import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ComposerPanels } from "./ComposerPanels";
 import { StatusTextCrossfade } from "./StatusTextCrossfade";
 import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-layout";
-import { useAgentSession, type AgentPhase, type NoticeItem, type StreamAlert, type SubagentInfo } from "@/hooks/useAgentSession";
+import { useAgentSession, type AgentPhase, type NoticeItem, type RunningToolInfo, type StreamAlert, type SubagentInfo } from "@/hooks/useAgentSession";
 import { useAudio } from "@/hooks/useAudio";
 import { useStreamTuning } from "@/hooks/useStreamTuning";
 import { streamTuningCssVars } from "@/lib/stream-tuning";
@@ -81,12 +81,42 @@ export interface SessionModelUsage extends ContextModelUsage {
   name: string;
 }
 
-function phaseLabel(phase: AgentPhase): string {
+/** A tool call must announce an elapsed time once it has run this long —
+ * below it, the churn would be noise; above it, silence reads as a hang. */
+const LONG_TOOL_THRESHOLD_MS = 8_000;
+
+function formatToolElapsed(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  if (minutes >= 60) return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+  if (minutes > 0) return `${minutes}m ${String(totalSeconds % 60).padStart(2, "0")}s`;
+  return `${totalSeconds}s`;
+}
+
+function oldestRunningTool(phase: AgentPhase): RunningToolInfo | null {
+  if (phase?.kind !== "running_tools" || phase.tools.length === 0) return null;
+  return phase.tools.reduce((oldest, tool) => (tool.startedAt < oldest.startedAt ? tool : oldest));
+}
+
+function phaseLabel(phase: AgentPhase, now: number): string {
   if (phase?.kind === "running_tools") {
     const names = phase.tools.map((tool) => tool.name);
-    if (names.length === 0) return translate("chatWindow.runningTool");
-    if (names.length <= 3) return translate("chatWindow.runningNamed", { names: names.join(", ") });
-    return translate("chatWindow.runningNamedMore", { names: names.slice(0, 2).join(", "), more: names.length - 2 });
+    let label: string;
+    if (names.length === 0) label = translate("chatWindow.runningTool");
+    else if (names.length <= 3) label = translate("chatWindow.runningNamed", { names: names.join(", ") });
+    else label = translate("chatWindow.runningNamedMore", { names: names.slice(0, 2).join(", "), more: names.length - 2 });
+    // The oldest tool is the one worth narrating: append the newest line it
+    // streamed about itself and, once it has run a while, for how long. A
+    // long silent call (omp's gh run_watch behind `write xd://github`,
+    // polling a GitHub Actions run to completion) must read as a live watch
+    // with a clock on it, never as a hang.
+    const oldest = oldestRunningTool(phase);
+    if (oldest) {
+      if (oldest.statusText) label += ` — ${oldest.statusText}`;
+      const elapsed = now - oldest.startedAt;
+      if (elapsed >= LONG_TOOL_THRESHOLD_MS) label += ` · ${formatToolElapsed(elapsed)}`;
+    }
+    return label;
   }
   if (phase?.kind === "waiting_model") return translate("chatWindow.waitingModel");
   if (phase?.kind === "running_command") return translate("chatWindow.runningCommand");
@@ -912,6 +942,21 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
   const messageCwd = session?.cwd ?? newSessionCwd ?? undefined;
 
+  // One-second clock behind the elapsed readout on long tool calls. It runs
+  // only while a tool is executing, keyed on the oldest start time so a new
+  // tool in the same batch does not reset the interval; message rows are
+  // memoized, so the per-second re-render stays in the status surfaces.
+  const [toolClockNow, setToolClockNow] = useState(() => Date.now());
+  const oldestToolStartedAt = agentPhase?.kind === "running_tools" && agentPhase.tools.length > 0
+    ? Math.min(...agentPhase.tools.map((tool) => tool.startedAt))
+    : null;
+  useEffect(() => {
+    if (oldestToolStartedAt === null) return;
+    setToolClockNow(Date.now());
+    const timer = setInterval(() => setToolClockNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [oldestToolStartedAt]);
+
   // Memoized because the live-metadata fallback allocates a fresh array: a new
   // identity here defeats ChatInput's memo, re-rendering the whole composer on
   // every streaming frame.
@@ -1214,7 +1259,13 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
                 }}
               >
                 <span aria-hidden className="live-status-dot live-pulse inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-accent" />
-                <span style={{ color: "var(--status-success)", fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 11 }}>{tool.name}</span>
+                <span style={{ color: "var(--status-success)", fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 11, flexShrink: 0 }}>{tool.name}</span>
+                {tool.statusText && (
+                  <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{tool.statusText}</span>
+                )}
+                {toolClockNow - tool.startedAt >= LONG_TOOL_THRESHOLD_MS && (
+                  <span style={{ marginLeft: "auto", flexShrink: 0, color: "var(--text-dim)", fontVariantNumeric: "tabular-nums" }}>{formatToolElapsed(toolClockNow - tool.startedAt)}</span>
+                )}
               </div>
             ))}
 
@@ -1250,7 +1301,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
                           ? t("agentStream.disconnected")
                           : streamDegraded
                             ? t("agentStream.reconnecting")
-                            : phaseLabel(agentPhase),
+                            : phaseLabel(agentPhase, toolClockNow),
                         activeSubagentCount > 0 ? tn("chatWindow.subagentCount", activeSubagentCount) : null,
                         currentTodoPhase
                           ? t("chatWindow.todoPhaseStatus", {
