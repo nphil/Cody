@@ -336,6 +336,18 @@ export interface RunningToolInfo {
   statusText?: string;
 }
 
+/** An engine-initiated model switch (retry fallback, usage-aware routing,
+ * engine-side /model), kept until the model moves again so the composer can
+ * wear a persistent marker — the 10s toast alone is easy to miss and the
+ * downgraded model outlives it. `role`/`reason` are known only for switches
+ * omp attributed via its retry_fallback_applied event. */
+export interface AutoModelSwitchInfo {
+  from: string;
+  to: string;
+  role?: string;
+  reason?: string;
+}
+
 export type AgentPhase =
   | { kind: "waiting_model" }
   | { kind: "running_command" }
@@ -727,6 +739,29 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [forkingEntryId, setForkingEntryId] = useState<string | null>(null);
   const [currentModelOverride, setCurrentModelOverride] = useState<{ provider: string; modelId: string } | null>(null);
   const [pendingModel, setPendingModel] = useState<{ provider: string; modelId: string } | null>(null);
+  // The model Smart resolved — a live-session Smart pick, or the engine's own
+  // resolution of a Smart new session. Smart-ness must survive the pin: while
+  // the running model still IS this model, the composer keeps saying
+  // "Smart · <name>" instead of silently reading like a manual pick. Scoped
+  // to the session it was made for (loads and reconciles reuse loadSession,
+  // so a reset there would wipe the pin mid-conversation); an engine switch
+  // simply stops matching, which hands the label to the marker below.
+  const [smartPinnedModel, setSmartPinnedModel] = useState<{ provider: string; modelId: string; forSession: string } | null>(null);
+  // The engine's last unprompted model switch (retry fallback, usage-aware
+  // routing, an engine-side /model). The 10s toast announces it once; this
+  // keeps a composer marker naming the switch until the model moves again —
+  // a downgrade that outlives its toast must stay explicable.
+  const [autoModelSwitch, setAutoModelSwitch] = useState<(AutoModelSwitchInfo & { forSession: string }) | null>(null);
+  // Session id of a spawning Smart new session: its first authoritative model
+  // is Smart's own resolution and becomes smartPinnedModel. Id-keyed so a
+  // sync for a different session (switched away mid-spawn) can never claim it.
+  const pendingSmartSpawnRef = useRef<string | null>(null);
+  // The user's last explicit pick, so the model_changed echo of our own
+  // set_model is never dressed up as an engine-initiated switch.
+  const lastUserModelPickRef = useRef<{ provider: string; modelId: string; at: number } | null>(null);
+  // Previous authoritative model, for naming the "from" side of a bare
+  // model_changed that arrives without any fallback attribution.
+  const lastAuthoritativeModelRef = useRef<{ provider: string; modelId: string } | null>(null);
   const [isCompacting, setIsCompacting] = useState(false);
   const [compactError, setCompactError] = useState<string | null>(null);
   const [compactResult, setCompactResult] = useState<CompactResultInfo | null>(null);
@@ -1086,6 +1121,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     authoritativeModelSeqRef.current += 1;
     setLiveModelMeta(model);
     if (!model) return true;
+    lastAuthoritativeModelRef.current = { provider: model.provider, modelId: model.modelId };
+    // A Smart new session's first resolved model IS Smart's answer.
+    if (pendingSmartSpawnRef.current !== null && pendingSmartSpawnRef.current === sessionIdRef.current) {
+      const forSession = pendingSmartSpawnRef.current;
+      pendingSmartSpawnRef.current = null;
+      setSmartPinnedModel({ provider: model.provider, modelId: model.modelId, forSession });
+    }
     setCurrentModelOverride((prev) =>
       prev && (prev.provider !== model.provider || prev.modelId !== model.modelId) ? null : prev
     );
@@ -1277,6 +1319,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
     const promise = (async () => {
       const selectedModel = newSessionModel ?? newSessionDefaultModel;
+      // No explicit pick = Smart: whatever model the spawned session first
+      // reports is Smart's resolution, and the composer should keep saying so.
+      const smartSpawn = newSessionModel === null;
       if (selectedModel) setPendingModel(selectedModel);
       const toolNames = getToolNamesForPreset(toolPreset);
       const res = await fetch("/api/agent/new", {
@@ -1295,6 +1340,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const result = await res.json() as { sessionId: string };
       const realId = result.sessionId;
       sessionIdRef.current = realId;
+      if (smartSpawn) pendingSmartSpawnRef.current = realId;
       return realId;
     })();
 
@@ -2184,8 +2230,30 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           .then((d) => {
             if (!d?.state?.model) return;
             if (sessionIdRef.current !== sid) return;
+            const previous = lastAuthoritativeModelRef.current;
             const applied = applyAuthoritativeModel(toThinkingModelMeta(d.state.model), token);
             if (!applied) return; // stale snapshot — drop its thinking level too
+            // A switch with no fallback attribution and no matching recent
+            // user pick is still the engine acting on its own — mark it, so
+            // even paths that emit only this bare event stay explicable. A
+            // marker whose `to` already matches (the fallback event landed
+            // first, with role + reason) is kept, not overwritten.
+            const next = { provider: String(d.state.model.provider ?? ""), modelId: String(d.state.model.id ?? "") };
+            const pick = lastUserModelPickRef.current;
+            const isOwnEcho = pick !== null && Date.now() - pick.at < 15_000
+              && pick.provider === next.provider && pick.modelId === next.modelId;
+            if (!isOwnEcho && previous && (previous.provider !== next.provider || previous.modelId !== next.modelId)) {
+              const from = `${previous.provider}/${previous.modelId}`;
+              const to = `${next.provider}/${next.modelId}`;
+              setAutoModelSwitch((current) => (
+                current && current.forSession === sid && current.to.endsWith(next.modelId)
+                  ? current
+                  : { from, to, forSession: sid }
+              ));
+              setSmartPinnedModel((current) => (
+                current && current.provider === next.provider && current.modelId === next.modelId ? current : null
+              ));
+            }
             if (d.state.thinkingLevel !== undefined) setThinkingLevel(normalizeThinkingLevel(d.state.thinkingLevel));
             if (d.state.fastModeEnabled !== undefined) setFastModeEnabled(d.state.fastModeEnabled);
             setFastModeActive(d.state.fastModeActive);
@@ -2337,6 +2405,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const reason = lastRetryErrorRef.current;
         const detail = translate("agentSession.fallbackAppliedDetail", { role })
           + (reason ? `\n${translate("agentSession.fallbackReason", { reason })}` : "");
+        // The toast announces the switch once; the marker outlives it on the
+        // composer until the model moves again, so a downgraded session never
+        // reads as if the downgrade were the user's own pick.
+        if (sessionIdRef.current) {
+          setAutoModelSwitch({ from, to, role, reason: reason ?? undefined, forSession: sessionIdRef.current });
+        }
+        setSmartPinnedModel(null);
         toast.info(
           translate("agentSession.fallbackApplied", { from, to }),
           detail,
@@ -2801,6 +2876,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [loadContext]);
 
   const handleModelChange = useCallback(async (provider: string, modelId: string) => {
+    // An explicit pick: not Smart any more, and any auto-switch marker is
+    // answered. The echo of our own set_model (omp emits model_changed for
+    // it) must not be re-labelled as an engine-initiated switch.
+    lastUserModelPickRef.current = { provider, modelId, at: Date.now() };
+    setSmartPinnedModel(null);
+    setAutoModelSwitch(null);
+    pendingSmartSpawnRef.current = null;
     if (isNew) {
       setNewSessionModel({ provider, modelId });
       setPendingModel({ provider, modelId });
@@ -2826,11 +2908,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   // Returns a brand-new session to auto ("Smart") model resolution: omp picks
   // the model from the user's configured OMP roles plan instead of a pinned
-  // provider/modelId. Only meaningful before the session has spawned — the
-  // model picker's Smart row is a no-op (beyond a toast) on a live session.
+  // provider/modelId. Only meaningful before the session has spawned — on a
+  // live session the picker resolves the role itself and reports the pin
+  // through markSmartPinnedModel below.
   const selectSmartModel = useCallback(() => {
     setNewSessionModel(null);
+    setSmartPinnedModel(null);
+    pendingSmartSpawnRef.current = null;
   }, [setNewSessionModel]);
+
+  // A live-session Smart pick: the composer resolved the configured default
+  // role to a concrete model and pinned it via handleModelChange — record
+  // that the pin was Smart's answer so the label keeps saying "Smart · …"
+  // instead of reading like a manual pick.
+  const markSmartPinnedModel = useCallback((provider: string, modelId: string) => {
+    const forSession = sessionIdRef.current;
+    if (!forSession) return;
+    setSmartPinnedModel({ provider, modelId, forSession });
+    setAutoModelSwitch(null);
+  }, []);
 
   const handleFastModeChange = useCallback(async (enabled: boolean) => {
     // A brand-new session has no runtime yet: the model picker updates local
@@ -3548,7 +3644,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
     notices: noticeState.visible, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
-    isAutoModelSelection: isNew && newSessionModel === null,
+    // Smart is on for an unpinned new session, and stays on after the pin —
+    // whether Smart resolved it (live pick) or the engine did (Smart spawn) —
+    // for as long as the running model is still the one Smart chose in THIS
+    // session (both facts are id-scoped, so a switch to another conversation
+    // can never inherit them).
+    isAutoModelSelection: (isNew && newSessionModel === null)
+      || (smartPinnedModel !== null
+        && smartPinnedModel.forSession === (session?.id ?? sessionIdRef.current)
+        && displayModelProvider === smartPinnedModel.provider
+        && displayModelId === smartPinnedModel.modelId),
+    autoModelSwitch: autoModelSwitch && autoModelSwitch.forSession === (session?.id ?? sessionIdRef.current)
+      ? { from: autoModelSwitch.from, to: autoModelSwitch.to, role: autoModelSwitch.role, reason: autoModelSwitch.reason }
+      : null,
     agentPhase,
     // Event-stream health: `streamDegraded` replaces the "Waiting for model…"
     // label while the stream is not delivering; `streamAlert` is the banner for
@@ -3561,7 +3669,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     sessionIdRef, messagesEndRef, scrollContainerRef,
     pendingScrollToUserRef, initialScrollDoneRef,
     // Actions
-    handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, selectSmartModel, handleFastModeChange, handleAutoRetryChange, handleInterruptModeChange, handleAutoCompactionChange, handleSteeringModeChange, handleFollowUpModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, handleInterruptAndReply,
+    handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, selectSmartModel, markSmartPinnedModel, handleFastModeChange, handleAutoRetryChange, handleInterruptModeChange, handleAutoCompactionChange, handleSteeringModeChange, handleFollowUpModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, handleInterruptAndReply,
     handleCompact, handleHandoff, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     removeQueuedMessage, promoteQueuedToSteer,
     handleBuiltinSlashCommand,

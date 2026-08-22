@@ -699,7 +699,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     isCompacting, compactResult, displayModel: displayModelValue, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
     notices, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
-    isAutoModelSelection,
+    isAutoModelSelection, autoModelSwitch, markSmartPinnedModel,
     agentPhase, streamDegraded, streamAlert, dismissStreamAlert, retryEventStream, activeGoal, activePlan,
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases,
     isNew,
@@ -1055,6 +1055,8 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       modelError={modelError}
       onModelChange={chatExtras ? handleModelChange : undefined}
       onSelectSmartModel={chatExtras && isNew ? selectSmartModel : undefined}
+      onSmartModelPinned={chatExtras ? markSmartPinnedModel : undefined}
+      autoModelSwitch={autoModelSwitch}
       onAbortCompaction={handleAbortCompaction}
       isCompacting={isCompacting}
       compactResult={compactResult}
