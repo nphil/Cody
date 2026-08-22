@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, Clipboard, RotateCw, TriangleAlert } from "lucide-react";
 import { translate, useI18n } from "@/lib/i18n";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
+import { formatBytes } from "@/lib/format-bytes";
 
 export interface InfoPanelProps {
   cwd: string | null;
@@ -18,9 +19,14 @@ interface RuntimeInfo {
   nodeVersion: string;
   platform: string;
   agentDir: string;
+  storage: { availableBytes: number; totalBytes: number } | null;
 }
 
 const PACKAGE_NAME = "@nphil/cody";
+
+/** Below this the data dir is close enough to full that an engine install is
+ * likely to fail partway through; the row turns warning-colored. */
+const LOW_DISK_BYTES = 2 * 1024 * 1024 * 1024;
 
 /** pi-web formatVersion semantics: undefined/empty reads as "unknown" rather
  * than a blank row, so a missing probe is visibly missing. */
@@ -73,7 +79,7 @@ const sectionHeadingStyle: React.CSSProperties = {
   color: "var(--text-dim)",
 };
 
-function Row({ label, value, mono = false }: { label: string; value: string; mono?: boolean }): React.ReactElement {
+function Row({ label, value, mono = false, tone }: { label: string; value: string; mono?: boolean; tone?: "warning" }): React.ReactElement {
   return (
     <div
       style={{
@@ -90,7 +96,7 @@ function Row({ label, value, mono = false }: { label: string; value: string; mon
           minWidth: 0,
           fontSize: 12,
           lineHeight: 1.45,
-          color: "var(--text)",
+          color: tone === "warning" ? "var(--status-warning)" : "var(--text)",
           fontFamily: mono ? "var(--font-mono)" : undefined,
           overflowWrap: "anywhere",
         }}
@@ -155,6 +161,9 @@ export function InfoPanel({ cwd, active, gitBranch, gitRepoRoot }: InfoPanelProp
         nodeVersion: typeof data.nodeVersion === "string" ? data.nodeVersion : "",
         platform: typeof data.platform === "string" ? data.platform : "",
         agentDir: typeof data.agentDir === "string" ? data.agentDir : "",
+        storage: data.storage && typeof data.storage.availableBytes === "number" && typeof data.storage.totalBytes === "number"
+          ? { availableBytes: data.storage.availableBytes, totalBytes: data.storage.totalBytes }
+          : null,
       });
     } catch (err) {
       if (controller.signal.aborted || stale()) return;
@@ -273,6 +282,18 @@ export function InfoPanel({ cwd, active, gitBranch, gitRepoRoot }: InfoPanelProp
           <div style={sectionHeadingStyle}>{t("info.section.omp")}</div>
           <Row label={t("info.label.version")} value={formatVersion(info?.ompVersion)} mono />
           <Row label={t("info.label.agentDir")} value={formatVersion(info?.agentDir)} mono />
+          {info?.storage ? (
+            <Row
+              label={t("info.label.diskFree")}
+              value={t("info.diskFreeValue", {
+                free: formatBytes(info.storage.availableBytes),
+                total: formatBytes(info.storage.totalBytes),
+              })}
+              // A nearly-full data dir is the reason engine installs fail with
+              // an unreadable errno, so it is called out before it bites.
+              tone={info.storage.availableBytes < LOW_DISK_BYTES ? "warning" : undefined}
+            />
+          ) : null}
         </div>
 
         <div>

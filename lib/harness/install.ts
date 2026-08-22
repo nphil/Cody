@@ -2,6 +2,7 @@ import { spawn } from "child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { execPath } from "process";
+import { describeDiskError, formatBytes, getDiskSpace, getNpmCacheDir } from "../disk-space";
 import { stripVersionPrefix } from "../omp/omp-cli";
 import { getToolsDir, invalidateEngineBinCache } from "./engine-bin";
 
@@ -26,6 +27,15 @@ const STDERR_TAIL_LIMIT = 4_000;
 const LOG_TAIL_LIMIT = 32_000;
 /** Grace period between SIGTERM and SIGKILL for a timed-out npm. */
 const KILL_GRACE_MS = 5_000;
+/**
+ * Below this, an engine install is refused before npm runs. An engine unpacks
+ * far larger than its tarball (omp: ~12 MB compressed, ~50 MB on disk, plus
+ * its dependency tree and the cached tarball), so a filesystem this close to
+ * full will fail partway through — the expensive, confusing way. Deliberately
+ * conservative: the point is to catch "no room at all", not to second-guess a
+ * small-but-workable disk.
+ */
+const MIN_FREE_BYTES = 512 * 1024 * 1024;
 
 export interface EngineInstallRequest {
   /** Engine id — the serialization key ("claude", "codex"). */
@@ -220,8 +230,46 @@ function tail(value: string, limit = STDERR_TAIL_LIMIT): string {
   return trimmed.length <= limit ? trimmed : `…${trimmed.slice(-limit)}`;
 }
 
+/**
+ * The paths npm will write to, and whether either is too full to try. Both
+ * matter and they are often on different filesystems: the prefix receives the
+ * unpacked engine, while the cache receives the downloaded tarball — and the
+ * cache is what filled first in the field.
+ *
+ * Returns a ready-to-show message, or null when there is room (or when free
+ * space cannot be read at all — an unknown filesystem must never block an
+ * install that would have worked).
+ */
+export function checkInstallDiskSpace(
+  prefix: string,
+  cacheDir: string,
+  probe: (dir: string) => { availableBytes: number } | null = getDiskSpace,
+): string | null {
+  for (const [label, dir] of [["install directory", prefix], ["npm cache", cacheDir]] as const) {
+    const space = probe(dir);
+    if (!space || space.availableBytes >= MIN_FREE_BYTES) continue;
+    return `Not enough free disk space for the ${label} ${dir}: ${formatBytes(space.availableBytes)} available, at least ${formatBytes(MIN_FREE_BYTES)} needed. Free up space on that filesystem (or raise its quota) and try again.`;
+  }
+  return null;
+}
+
+/** Turn npm's disk failures into the one sentence that explains them. npm
+ * reports EDQUOT as "Unknown system error -122", which reads like a bug in
+ * Cody rather than a full disk. */
+function diskFailureMessage(stderr: string, prefix: string, cacheDir: string): string | null {
+  const kind = describeDiskError(stderr);
+  if (!kind) return null;
+  const culprit = /_cacache|npm[\\/]_logs/.test(stderr) ? cacheDir : prefix;
+  const space = getDiskSpace(culprit);
+  const free = space ? ` (${formatBytes(space.availableBytes)} available)` : "";
+  return kind === "quota"
+    ? `Ran out of disk quota while writing to ${culprit}${free}. The filesystem holding it is at its quota — raise the quota or delete data there, then try again.`
+    : `Ran out of disk space while writing to ${culprit}${free}. Free up space on that filesystem and try again.`;
+}
+
 function runInstall(request: EngineInstallRequest): Promise<EngineInstallResult> {
   const prefix = getToolsDir();
+  const cacheDir = getNpmCacheDir();
   const args = ["install", "-g", "--prefix", prefix, request.installSpec];
   const npmCli = findNpmCli();
   const command = npmCli ? execPath : "npm";
@@ -234,7 +282,24 @@ function runInstall(request: EngineInstallRequest): Promise<EngineInstallResult>
     try {
       mkdirSync(prefix, { recursive: true });
     } catch (error) {
-      const failure = new EngineInstallError(`Could not create the engine install directory ${prefix}`, String(error));
+      const diskNote = describeDiskError(String(error));
+      const failure = new EngineInstallError(
+        diskNote
+          ? `Could not create the engine install directory ${prefix}: the filesystem is ${diskNote === "quota" ? "at its quota" : "full"}.`
+          : `Could not create the engine install directory ${prefix}`,
+        String(error),
+      );
+      finishJob(job, failure);
+      reject(failure);
+      return;
+    }
+
+    // Preflight: a five-minute download that dies on a full disk teaches the
+    // admin nothing. Refuse up front, naming the path and the space left.
+    const spaceProblem = checkInstallDiskSpace(prefix, cacheDir);
+    if (spaceProblem) {
+      appendJobLog(job, `${spaceProblem}\n`);
+      const failure = new EngineInstallError(spaceProblem);
       finishJob(job, failure);
       reject(failure);
       return;
@@ -285,6 +350,13 @@ function runInstall(request: EngineInstallRequest): Promise<EngineInstallResult>
       }
       if (code === 0) {
         finish(null, { id: request.id, installSpec: request.installSpec, prefix, durationMs: Date.now() - startedAt });
+        return;
+      }
+      // A disk failure gets named rather than passed through as npm's
+      // "Unknown system error -122", which reads like a Cody bug.
+      const diskMessage = diskFailureMessage(stderr, prefix, cacheDir);
+      if (diskMessage) {
+        finish(new EngineInstallError(diskMessage, tail(stderr)));
         return;
       }
       const how = signal ? `was killed with ${signal}` : `exited with code ${code}`;

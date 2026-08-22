@@ -3,6 +3,7 @@ import packageJson from "../../../package.json";
 import { getHarness } from "@/lib/harness";
 import type { HarnessCapabilities } from "@/lib/harness/types";
 import { readEnv } from "@/lib/env";
+import { getDiskSpace } from "@/lib/disk-space";
 
 
 export const dynamic = "force-dynamic";
@@ -34,6 +35,13 @@ export interface InfoResponse {
    * byte-identical to today.
    */
   platformInfo: { desktop: boolean };
+  /**
+   * Free space on the filesystem holding the instance data dir — everything
+   * Cody persists (sessions, checkpoints, installed engines) lands there, and
+   * when it fills, engine installs die with errors that name a libuv errno
+   * rather than a full disk. Null when the platform cannot report it.
+   */
+  storage: { availableBytes: number; totalBytes: number } | null;
 }
 
 /** Read-only runtime facts for the Info panel. Deliberately minimal: no env
@@ -57,6 +65,7 @@ export async function GET() {
         experimental: harness.experimental === true,
       },
       platformInfo: { desktop: readEnv("DESKTOP") === "1" },
+      storage: getDiskSpace(harness.getAgentDir()),
     };
     return NextResponse.json(body, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
