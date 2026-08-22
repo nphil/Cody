@@ -29,9 +29,31 @@ export const SETTING_CONDITIONS: Record<string, ConditionRule> = {
   // it is deliberately absent and its settings always render.
 };
 
-/** Whether a setting gated by `condition` should be shown, given current values. */
-export function isConditionSatisfied(condition: string | undefined, resolved: (key: string) => unknown): boolean {
+/** Facts about the machine the harness binary runs on — the same machine as
+ * the Cody server, so the schema route reports them and the browser applies
+ * them. */
+export interface HostFacts {
+  platform: string;
+}
+
+/** Predicates OMP evaluates from its own process rather than from settings
+ * values (omp 18: the macOS prompt-editor spelling settings are gated on
+ * `condition: "macOS"` = `process.platform === "darwin"`). Cody hides the
+ * same rows OMP hides; without host facts in hand they fail open. */
+export const HOST_CONDITIONS: Record<string, (host: HostFacts) => boolean> = {
+  macOS: (host) => host.platform === "darwin",
+};
+
+/** Whether a setting gated by `condition` should be shown, given current
+ * values and (when known) the server host's facts. */
+export function isConditionSatisfied(
+  condition: string | undefined,
+  resolved: (key: string) => unknown,
+  host?: HostFacts,
+): boolean {
   if (!condition) return true;
+  const hostRule = HOST_CONDITIONS[condition];
+  if (hostRule) return host ? hostRule(host) : true;
   const rule = SETTING_CONDITIONS[condition];
   if (!rule) return true;
   return resolved(rule.key) === rule.equals;

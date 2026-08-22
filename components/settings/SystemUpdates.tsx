@@ -50,9 +50,25 @@ type RowState = "loading" | "ready" | "error";
 interface ChangelogState {
   open: boolean;
   loading: boolean;
-  entries: Array<{ heading: string; body: string }> | null;
+  entries: Array<{ heading: string; body: string; isNew?: boolean }> | null;
   reason: string | null;
+  /** Whose changelog these entries are: the latest published package (what an
+   * update would install) or the installed one (up to date, or the registry
+   * fetch failed — the panel says so when the payload admits an update was
+   * pending). */
+  source: "latest" | "installed" | null;
+  /** The payload's own update-pending admission — never inferred from the
+   * row's separately-refreshed update state, which can be newer than these
+   * entries. */
+  updatePending: boolean;
+  /** The versions the entries were computed against. Reopening compares them
+   * to the row's current knowledge and refetches on any drift, so a check
+   * that just discovered an update (or an out-of-band engine update) can
+   * never leave cached entries wearing yesterday's "New" marks. */
+  forVersions: { installed: string | null; latest: string | null } | null;
 }
+
+const CLOSED_CHANGELOG: ChangelogState = { open: false, loading: false, entries: null, reason: null, source: null, updatePending: false, forVersions: null };
 
 const cardStyle: React.CSSProperties = {
   display: "flex",
@@ -186,7 +202,7 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
   const [checking, setChecking] = useState(true);
   const [restarting, setRestarting] = useState(false);
   const [ompUpdating, setOmpUpdating] = useState(false);
-  const [changelog, setChangelog] = useState<ChangelogState>({ open: false, loading: false, entries: null, reason: null });
+  const [changelog, setChangelog] = useState<ChangelogState>(CLOSED_CHANGELOG);
 
   // A monotonic request id plus an AbortController keeps a slow response for
   // a previous check (or a previous workspace) from landing on newer state.
@@ -372,6 +388,10 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
     // Re-checked after a failure too: an install that ran but left an unusable
     // binary still recorded the version it replaced, and offering that revert
     // target is what gets the row out of a dead end.
+    // An omp install also invalidates the cached changelog (its "new" marks
+    // compared against the version just replaced). Only omp's — another
+    // engine's install must not collapse a changelog someone is reading.
+    if (id === "omp") setChangelog(CLOSED_CHANGELOG);
     void runCheckRef.current(false);
   }, []);
 
@@ -391,9 +411,11 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
     }
   }, [roster, watchInstall]);
 
-  const updateEngine = useCallback((engine: EngineSummary) => {
+  const updateEngine = useCallback((engine: EngineSummary, compatWarning?: string | null) => {
     const active = rosterRef.current?.active === engine.id;
-    if (active && !window.confirm(translate("updates.engines.updateConfirm", { name: engine.name }))) return;
+    const message = translate("updates.engines.updateConfirm", { name: engine.name })
+      + (compatWarning ? `\n\n${compatWarning}` : "");
+    if (active && !window.confirm(message)) return;
     startInstall(engine.id);
   }, [startInstall]);
 
@@ -415,9 +437,10 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
   // The active omp runtime updates through its dedicated route rather than
   // the generic install route: the server restarts live sessions, runs a
   // post-update health check, and reports both in one message.
-  const updateOmpNow = useCallback(async () => {
+  const updateOmpNow = useCallback(async (compatWarning?: string | null) => {
     if (ompUpdating) return;
-    if (!window.confirm(translate("updates.omp.updateConfirm"))) return;
+    const message = translate("updates.omp.updateConfirm") + (compatWarning ? `\n\n${compatWarning}` : "");
+    if (!window.confirm(message)) return;
     setOmpUpdating(true);
     try {
       const response = await fetch("/api/omp-update", {
@@ -432,6 +455,7 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
       }
       const count = typeof data.sessionsRestarted === "number" ? data.sessionsRestarted : 0;
       toast.success(translatePlural("updates.omp.updated", count, { count, version: data.version ?? "?" }));
+      setChangelog(CLOSED_CHANGELOG);
       void runCheckRef.current(false);
     } catch (error) {
       toast.error(translate("updates.omp.updateFailed"), error instanceof Error ? error.message : String(error));
@@ -461,12 +485,15 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
     }
   }, [restarting]);
 
-  const toggleChangelog = useCallback(async () => {
+  const toggleChangelog = useCallback(async (installedNow: string | null, latestNow: string | null) => {
     if (changelog.open) {
       setChangelog((current) => ({ ...current, open: false }));
       return;
     }
-    if (changelog.entries) {
+    const fresh = changelog.forVersions !== null
+      && changelog.forVersions.installed === installedNow
+      && changelog.forVersions.latest === latestNow;
+    if (changelog.entries && fresh) {
       setChangelog((current) => ({ ...current, open: true }));
       return;
     }
@@ -474,18 +501,31 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
     try {
       const response = await fetch("/api/engines/changelog?id=omp", { cache: "no-store" });
       const data = (await response.json().catch(() => null)) as
-        | { entries?: Array<{ heading: string; body: string }> | null; reason?: string }
+        | {
+            entries?: Array<{ heading: string; body: string; isNew?: boolean }> | null;
+            reason?: string;
+            source?: "latest" | "installed" | null;
+            updatePending?: boolean;
+            installedVersion?: string | null;
+            latestVersion?: string | null;
+          }
         | null;
       setChangelog({
         open: true,
         loading: false,
-        entries: Array.isArray(data?.entries) ? data.entries : null,
+        entries: Array.isArray(data?.entries) && data.entries.length > 0 ? data.entries : null,
         reason: data?.reason ?? null,
+        source: data?.source === "latest" || data?.source === "installed" ? data.source : null,
+        updatePending: data?.updatePending === true,
+        forVersions: {
+          installed: typeof data?.installedVersion === "string" ? data.installedVersion : null,
+          latest: typeof data?.latestVersion === "string" ? data.latestVersion : null,
+        },
       });
     } catch (error) {
-      setChangelog({ open: true, loading: false, entries: null, reason: String(error) });
+      setChangelog({ ...CLOSED_CHANGELOG, open: true, reason: String(error) });
     }
-  }, [changelog.entries, changelog.open]);
+  }, [changelog.entries, changelog.forVersions, changelog.open]);
 
   const canManage = roster?.canManage === true;
   const installedEngines = (roster?.engines ?? []).filter((engine) => engine.installed);
@@ -584,6 +624,14 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
           const npmBusy = installingIds.has(engine.id);
           const busy = npmBusy || (selfUpdate && ompUpdating);
           const installError = installErrors[engine.id];
+          // The engine has moved (or would move) past the newest major this
+          // Cody build was verified against: warn before the jump, mark after
+          // it. Core surfaces keep working — the point is that brand-new
+          // engine features may not show up in Cody until Cody updates.
+          const compatWarning = canManage && status?.latestBeyondVerified && updateAvailable === true && latestVersion
+            ? t("updates.engines.aheadNote", { name: engine.name, version: latestVersion })
+            : null;
+          const installedAhead = canManage && status?.installedBeyondVerified === true;
           return (
             <div key={engine.id} style={{ display: "flex", flexDirection: "column", gap: 8, padding: "12px 14px", borderTop: "1px solid var(--border)" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -592,6 +640,16 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
                 <span style={{ ...chipStyle, fontFamily: "var(--font-mono)" }}>
                   {installedVersion ? `v${installedVersion}` : t("updates.versionUnavailable")}
                 </span>
+                {installedAhead && (
+                  <span
+                    style={{ ...chipStyle, color: "var(--status-warning)" }}
+                    title={t("updates.engines.aheadInstalledTitle")}
+                    aria-label={t("updates.engines.aheadInstalledTitle")}
+                  >
+                    <TriangleAlert size={10} aria-hidden="true" style={{ flexShrink: 0, marginRight: 3, verticalAlign: "-1px" }} />
+                    {t("updates.engines.aheadChip")}
+                  </span>
+                )}
                 <span style={{ flex: 1 }} />
                 {checking && !busy && <LoadingLine label={t("updates.checking")} />}
                 {!checking && !busy && updateAvailable === false && (
@@ -635,7 +693,7 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
                   {updateAvailable === true && latestVersion && (
                     <button
                       type="button"
-                      onClick={() => (selfUpdate ? void updateOmpNow() : updateEngine(engine))}
+                      onClick={() => (selfUpdate ? void updateOmpNow(compatWarning) : updateEngine(engine, compatWarning))}
                       disabled={busy}
                       style={actionButtonStyle(busy)}
                     >
@@ -671,6 +729,17 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
                 </div>
               )}
 
+              {/* Before the jump the note names the offered version; after it
+                  (installed ahead, nothing newer offered) the chip's full
+                  explanation renders inline — a tooltip alone is unreachable
+                  for keyboard and touch. */}
+              {!npmBusy && (compatWarning || installedAhead) && (
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 6, fontSize: 11, lineHeight: 1.5, color: "var(--status-warning)", overflowWrap: "anywhere" }}>
+                  <TriangleAlert size={12} aria-hidden="true" style={{ flexShrink: 0, marginTop: 1 }} />
+                  <span style={{ minWidth: 0 }}>{compatWarning ?? t("updates.engines.aheadInstalledTitle")}</span>
+                </div>
+              )}
+
               {!npmBusy && updateAvailable === true && !canManage && self && (
                 <CommandCard command={self.updateCommand} />
               )}
@@ -687,7 +756,7 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
                   <div>
                     <button
                       type="button"
-                      onClick={() => void toggleChangelog()}
+                      onClick={() => void toggleChangelog(installedVersion ?? null, latestVersion)}
                       aria-expanded={changelog.open}
                       style={actionButtonStyle(changelog.loading)}
                     >
@@ -695,9 +764,20 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
                       {changelog.open ? t("updates.omp.changelogHide") : t("updates.omp.changelog")}
                     </button>
                   </div>
+                  {changelog.open && changelog.entries && changelog.source === "installed" && changelog.updatePending && (
+                    // The payload itself admits an update was pending and the
+                    // published notes could not be fetched, so these entries
+                    // stop at the installed version — say so instead of
+                    // letting old notes read as the update's. Keyed off the
+                    // payload, never the row's separately-refreshed state.
+                    <div style={{ ...dimLineStyle, color: "var(--status-warning)" }}>{t("updates.omp.changelogStale")}</div>
+                  )}
                   {changelog.open && changelog.entries && changelog.entries.map((entry) => (
                     <div key={entry.heading} style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-control)", padding: "8px 10px" }}>
-                      <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-mono)" }}>{entry.heading}</div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                        <span style={{ fontSize: 11.5, fontWeight: 600, color: "var(--text)", fontFamily: "var(--font-mono)" }}>{entry.heading}</span>
+                        {entry.isNew && <span style={{ ...chipStyle, color: "var(--accent)" }}>{t("updates.omp.changelogNew")}</span>}
+                      </div>
                       <pre style={{ margin: "6px 0 0", whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontSize: 11, lineHeight: 1.55, color: "var(--text-muted)", fontFamily: "inherit" }}>{entry.body}</pre>
                     </div>
                   ))}

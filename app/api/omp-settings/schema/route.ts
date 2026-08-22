@@ -19,10 +19,13 @@ export function GET() {
     // follows CODY_HARNESS instead of being baked into the UI.
     const { id, shortName } = getHarness();
     const harness = { id, shortName };
+    // The harness binary runs on this machine, so its platform-gated settings
+    // (ui.condition "macOS") resolve from the server's own platform.
+    const host = { platform: process.platform };
     if (!schema) {
-      return NextResponse.json({ path, harness, schema: null, values: {}, reason: `${shortName}'s settings schema could not be read from the installed package` });
+      return NextResponse.json({ path, harness, host, schema: null, values: {}, reason: `${shortName}'s settings schema could not be read from the installed package` });
     }
-    return NextResponse.json({ path, harness, schema, values });
+    return NextResponse.json({ path, harness, host, schema, values });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 });
   }
