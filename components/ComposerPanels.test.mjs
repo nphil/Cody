@@ -41,17 +41,20 @@ test("attaches todo plan and subagent roster with live states", () => {
   assert.doesNotMatch(html, />1 running · 2 total</);
 });
 
-test("panels sit in a wrapping flex row so they share horizontal space", () => {
+test("panels stack as full-width rows so every expansion state stays aligned", () => {
   const html = renderToStaticMarkup(React.createElement(ComposerPanels, {
     todoPhases: [{ name: "Implementation", tasks: [{ content: "Wire panels", status: "in_progress" }] }],
     subagents: [{ id: "s1", agent: "scout", status: "started", task: "Map the surface", index: 0 }],
     onSelectSubagent: noop,
   }));
 
-  assert.match(html, /^<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:flex-start;margin-bottom:8px">/);
-  // Each panel must be allowed to shrink so an expanded sibling cannot push it off-screen.
-  const shrinkable = html.match(/flex:0 1 auto;min-width:0;max-width:100%/g) ?? [];
-  assert.equal(shrinkable.length, 2);
+  // A stacked column, not the old fit-content wrap: mixed states (one panel
+  // expanded, the other collapsed) previously left a chip floating mid-air
+  // beside a tall card at a different width.
+  assert.match(html, /^<div style="display:flex;flex-direction:column;gap:6px;margin-bottom:8px">/);
+  const fullWidth = html.match(/width:100%(?:;|")/g) ?? [];
+  assert.ok(fullWidth.length >= 2, `both panels fill their row (saw ${fullWidth.length} width:100%)`);
+  assert.doesNotMatch(html, /width:fit-content/);
 });
 
 test("panels start collapsed with live summary in their headers", () => {

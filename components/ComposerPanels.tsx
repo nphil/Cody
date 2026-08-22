@@ -179,7 +179,7 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
     <section
       aria-label={t("chatWindow.subagentsPanel")}
       className="overflow-hidden border border-border bg-bg-subtle"
-      style={{ borderRadius: "var(--radius-card)", width: "fit-content", maxWidth: "100%" }}
+      style={{ borderRadius: "var(--radius-card)", width: "100%" }}
     >
       <style>{CHIP_MOTION_CSS}</style>
       <button
@@ -212,8 +212,11 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
       </button>
       {!collapsed && (
         <div
-          className="flex flex-wrap gap-1.5 px-3 py-2.5"
-          style={{ maxHeight: "min(30vh, 240px)", overflowY: "auto" }}
+          className="grid gap-1.5 px-3 py-2.5"
+          // Equal-width columns instead of a content-hugging flex wrap: chips
+          // whose labels truncate to near-identical text otherwise render at
+          // ragged widths, and each wrap row ends mid-air.
+          style={{ gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", maxHeight: "min(30vh, 240px)", overflowY: "auto" }}
         >
           {visibleSubagents.map((subagent) => {
             const stateLabel = t(SUBAGENT_STATE_KEYS[subagent.status]);
@@ -228,8 +231,8 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
                 aria-label={label}
                 title={`${label}${subagent.detached ? " (async)" : ""}`}
                 style={{
-                  display: "inline-flex", flexDirection: "column", alignItems: "flex-start", gap: 1,
-                  maxWidth: 320, padding: "5px 9px",
+                  display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 1,
+                  minWidth: 0, padding: "5px 9px",
                   border: "1px solid color-mix(in srgb, var(--border) 86%, transparent)",
                   borderRadius: "var(--radius-control)",
                   background: "var(--bg)",
@@ -249,12 +252,12 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
                   e.currentTarget.style.background = "var(--bg)";
                 }}
               >
-                <span style={{ display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0, maxWidth: "100%" }}>
+                <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, width: "100%" }}>
                   <SubagentStatusBadge subagent={subagent} />
                   <span style={{ fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 10.5, color: "var(--accent)", flexShrink: 0 }}>
                     {subagent.agent}
                   </span>
-                  <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 220 }}>
+                  <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textAlign: "left" }}>
                     {subagent.task ?? subagent.description ?? stateLabel}
                   </span>
                   {subagent.detached && (
@@ -270,50 +273,34 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
               </button>
             );
           })}
-          {truncatable && (
-            <button
-              type="button"
-              className="ui-focus-ring composer-roster-chip"
-              aria-expanded={showAll}
-              onClick={() => setShowAll((value) => !value)}
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                padding: "5px 9px",
-                border: "1px solid color-mix(in srgb, var(--border) 60%, transparent)",
-                borderRadius: "var(--radius-control)",
-                background: "none",
-                fontSize: 11.5,
-                fontFamily: "inherit",
-                cursor: "pointer",
-                color: "var(--text-muted)",
-                transition: "border-color var(--dur-fast) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = "var(--bg-hover)";
-                e.currentTarget.style.color = "var(--text)";
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = "none";
-                e.currentTarget.style.color = "var(--text-muted)";
-              }}
-            >
-              {showAll ? t("chatWindow.subagentShowFewer") : t("chatWindow.subagentShowAll", { count: subagents.length })}
-            </button>
-          )}
         </div>
+      )}
+      {!collapsed && truncatable && (
+        // Footer link, not a chip in the grid: mirrors TodoList's own
+        // "Show all tasks" footer so the two panels read as one family.
+        <button
+          type="button"
+          className="ui-focus-ring w-full cursor-pointer border-t border-border bg-transparent px-3 py-2 text-left text-xs text-accent hover:text-accent-hover"
+          aria-expanded={showAll}
+          onClick={() => setShowAll((value) => !value)}
+        >
+          {showAll ? t("chatWindow.subagentShowFewer") : t("chatWindow.subagentShowAll", { count: subagents.length })}
+        </button>
       )}
     </section>
   );
 }
 
 /** Session panels attached to the composer: live todo plan + running
- * subagent roster. Each hugs its content width, is independently collapsible
- * via its header row (`chevron`), and starts collapsed; the headers always
- * show live progress / running-summary over the full roster, even while the
- * chip list is truncated. Rendered pinned above the chat input. Panels sit
- * side by side while they fit, wrapping to a column when space runs out;
- * each can shrink so one expanded panel never pushes the other off-screen. */
+ * subagent roster. Both render as FULL-WIDTH stacked rows aligned to the
+ * composer, whatever their expansion state — a collapsed panel is a slim
+ * full-width header bar, an expanded one the same bar plus its body. The
+ * earlier fit-content/side-by-side layout produced every combination of
+ * floating chip beside tall card at a different width; rows keep the two
+ * headers (icon · title · count · chevron) vertically aligned in all four
+ * states. Each panel is independently collapsible via its header and starts
+ * collapsed; the headers always show live progress / running-summary over
+ * the full roster, even while the chip list is truncated. */
 export function ComposerPanels({ todoPhases, subagents, onSelectSubagent, defaultExpanded = false }: {
   todoPhases: TodoPhase[];
   subagents: SubagentInfo[];
@@ -323,13 +310,9 @@ export function ComposerPanels({ todoPhases, subagents, onSelectSubagent, defaul
 }) {
   if (todoPhases.length === 0 && subagents.length === 0) return null;
   return (
-    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "flex-start", marginBottom: 8 }}>
-      <div style={{ flex: "0 1 auto", minWidth: 0, maxWidth: "100%" }}>
-        <TodoList phases={todoPhases} collapsible defaultExpanded={defaultExpanded} />
-      </div>
-      <div style={{ flex: "0 1 auto", minWidth: 0, maxWidth: "100%" }}>
-        <SubagentsPanel subagents={subagents} onSelectSubagent={onSelectSubagent} defaultExpanded={defaultExpanded} />
-      </div>
+    <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 8 }}>
+      <TodoList phases={todoPhases} collapsible defaultExpanded={defaultExpanded} />
+      <SubagentsPanel subagents={subagents} onSelectSubagent={onSelectSubagent} defaultExpanded={defaultExpanded} />
     </div>
   );
 }

@@ -48,7 +48,9 @@ export function TodoList({ phases = [], collapsible = false, defaultExpanded = f
     <section
       aria-label={t("chatWindow.todoList")}
       className={`overflow-hidden border border-border bg-bg-subtle ${collapsible ? "" : "my-2"}`}
-      style={{ borderRadius: "var(--radius-card)", width: "fit-content", maxWidth: "100%" }}
+      // Composer variant fills its row so the stacked panels stay aligned in
+      // every expansion state; the standalone variant keeps hugging content.
+      style={{ borderRadius: "var(--radius-card)", width: collapsible ? "100%" : "fit-content", maxWidth: "100%" }}
     >
       {collapsible ? (
         <button

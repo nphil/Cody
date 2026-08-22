@@ -732,6 +732,14 @@ handled or safely ignored.
   for terminal states) fed by the same `subagent_lifecycle`/`subagent_progress`
   SSE frames; clicking a chip opens the transcript dialog. `TodoList` keeps a
   non-collapsible default (`collapsible` prop) for SSR tests.
+- **Layout is full-width stacked rows, never fit-content side-by-side**: a
+  collapsed panel is a slim full-width header bar, an expanded one the same
+  bar plus body, so the two headers stay aligned in all four expansion
+  states (the old wrap layout floated a collapsed chip mid-air beside a tall
+  card at a different width). Subagent chips fill an equal-column grid
+  (`auto-fill minmax(240px,1fr)`) instead of a ragged content-hugging wrap,
+  and the show-all toggle is a footer link mirroring TodoList's "Show all
+  tasks" footer. Pinned by `ComposerPanels.test.mjs`.
 
 ### Composer context gauge
 - An icon-only context ring sits beside Send. It uses the accent color below
