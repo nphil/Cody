@@ -679,6 +679,40 @@ appears without a Cody change.
   multi-process deployment (multiple Next.js workers or replicas) would need a
   shared store for both before display requests survive crossing processes.
 
+### Disk exhaustion is a first-class failure (`lib/disk-space.ts`)
+- The instance data dir is finite and often quota-capped (a ZFS dataset on
+  Unraid appdata). When it fills, npm dies with `errno -122` — EDQUOT, which
+  libuv has no name for, so npm prints "Unknown system error -122" and the
+  admin sees what looks like a Cody bug. `describeDiskError()` matches the
+  NUMERIC errno (-122 linux, -69 macOS) as well as EDQUOT/ENOSPC text,
+  because the unnamed form is the one that actually shows up.
+- Engine installs preflight both filesystems they touch — the tools prefix AND
+  the npm cache (`$npm_config_cache` else `$HOME/.npm`), which are frequently
+  different mounts and where the cache is the one that filled in the field.
+  Unreadable free space NEVER blocks an install: unknown is not empty.
+- `/api/info` serves `storage` for the agent dir and the Info panel turns the
+  row warning-colored under 2 GB, so the condition is visible before it bites.
+- **Trap — `formatBytes` lives in `lib/format-bytes.ts`, not `disk-space.ts`.**
+  The latter imports `node:fs`; a CLIENT component importing from it pulls
+  `fs` into the browser bundle and fails the build with "Can't resolve 'fs'".
+  Typecheck and unit tests both pass — only `next build` (or loading the page)
+  catches it.
+
+### Checkpoints must never snapshot a home directory or Cody's own state
+- Shadow repos live under the AGENT dir, keyed by a hash of the workspace
+  path. Two consequences bit a production instance hard:
+  - A session that opened `/data/home` as its workspace grew a **3.5 GB**
+    shadow repo out of `.npm`, `.gradle` and a node_modules tree — those roots
+    carry no `.gitignore`, so nothing was excluded. `isUncheckpointableRoot()`
+    now refuses home, filesystem roots, and the agent/data dir (which would
+    otherwise feed on its own output). Refusal returns null, the established
+    "no checkpoint here" answer every caller already tolerates.
+  - `checkpoints.test.mjs` created workspaces in `/tmp` but the shadow repos
+    followed `getAgentDir()`, so every test run inside the container leaked
+    into live appdata — **465** stale `cody-ckpt-*` repos. The test now sets
+    `PI_CODING_AGENT_DIR` to a temp dir BEFORE importing the module. Any test
+    touching agent-dir state must do the same.
+
 ### Two kinds of branching — don't confuse them
 - **Fork** (Fork button on user message): creates a new independent `.jsonl` file. Shown as a child in the sidebar tree via `parentSession` header field.
 - **In-session branch** (Continue button / BranchNavigator): navigates the entry tree within the same file. Multiple entries share the same `parentId`. Switching between them calls `/api/sessions/[id]/context?leafId=`.

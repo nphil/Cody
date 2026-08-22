@@ -72,6 +72,30 @@ function serialize<T>(cwd: string, operation: () => Promise<T>): Promise<T> {
   return next;
 }
 
+/**
+ * Directories that must never be snapshotted wholesale. Checkpointing is
+ * scoped to a project; pointed at a home directory or a filesystem root it
+ * captures caches instead of source — a session that opened `/data/home` as
+ * its workspace grew a 3.5 GB shadow repo out of `.npm`, `.gradle` and a
+ * node_modules tree, because those roots carry no `.gitignore` to exclude
+ * anything. The instance data dir is excluded for a second reason: it holds
+ * the shadow repos themselves, so snapshotting it feeds on its own output.
+ *
+ * Exported for the test; callers go through the checkpoint API.
+ */
+export function isUncheckpointableRoot(cwd: string): boolean {
+  const resolved = path.resolve(cwd);
+  if (resolved === path.parse(resolved).root) return true;
+  const home = process.env.HOME?.trim() || homedir();
+  if (home && resolved === path.resolve(home)) return true;
+  const agentDir = path.resolve(getAgentDir());
+  // The agent dir itself, its parent (the instance data dir), or anything
+  // inside it — all of which are Cody's own state, never a workspace.
+  if (resolved === agentDir || resolved === path.dirname(agentDir)) return true;
+  const relative = path.relative(agentDir, resolved);
+  return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
 async function ensureShadowRepo(cwd: string): Promise<void> {
   const gitDir = checkpointGitDir(cwd);
   const worktree = path.resolve(cwd);
@@ -138,6 +162,10 @@ export function createCheckpoint(cwd: string, label: string): Promise<string | n
 
 async function createCheckpointLocked(cwd: string, label: string): Promise<string | null> {
   try {
+    // Null is the established "no checkpoint here" answer — every caller
+    // already treats it as a non-error, so a home-directory workspace simply
+    // goes unsnapshotted instead of filling the disk.
+    if (isUncheckpointableRoot(cwd)) return null;
     const stat = await fs.promises.stat(cwd);
     if (!stat.isDirectory()) return null;
     await ensureShadowRepo(cwd);
