@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
-import { ChevronDown, ListChecks, Loader2, Paperclip, Sparkles, Target, Wrench } from "lucide-react";
+import { ChevronDown, ListChecks, Loader2, Paperclip, ShieldCheck, Sparkles, Target, TriangleAlert, Wrench } from "lucide-react";
 import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import type { ToolPreset } from "@/lib/tool-presets";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
@@ -82,6 +82,14 @@ interface Props {
    * for a new, not-yet-spawned session — on a live session the Smart row
    * resolves the OMP roles default itself and calls onModelChange instead. */
   onSelectSmartModel?: () => void;
+  /** Reports a live-session Smart pick after it resolved and pinned, so the
+   * session state remembers the pin was Smart's answer (keeps the label on
+   * "Smart · <model>" instead of reading like a manual pick). */
+  onSmartModelPinned?: (provider: string, modelId: string) => void;
+  /** The engine's last unprompted model switch for this session (retry
+   * fallback, usage-aware routing). Renders a persistent marker beside the
+   * model control naming what moved and why — the switch outlives its toast. */
+  autoModelSwitch?: { from: string; to: string; role?: string; reason?: string } | null;
   fastModeEnabled?: boolean;
   fastModeActive?: boolean;
   fastModeSupported?: boolean;
@@ -1004,7 +1012,7 @@ function ComposerModeStatus({ goal, plan }: { goal?: ActiveGoal | null; plan?: A
 }
 
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSteer, onFollowUp, isStreaming, chatExtras = true, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, onModelChange, onSelectSmartModel, fastModeEnabled, fastModeActive, fastModeSupported, onFastModeChange, toolPreset, onToolPresetChange,
+  onSend, onAbort, onSteer, onFollowUp, isStreaming, chatExtras = true, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, onModelChange, onSelectSmartModel, onSmartModelPinned, autoModelSwitch, fastModeEnabled, fastModeActive, fastModeSupported, onFastModeChange, toolPreset, onToolPresetChange,
   onAbortCompaction, isCompacting, compactResult,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap, modelNameOverride,
   retryInfo, queuedMessages, inputHistory = [], onAbortRetry,
@@ -2062,11 +2070,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         return;
       }
       onModelChange(match.provider, match.id);
+      onSmartModelPinned?.(match.provider, match.id);
     } catch (e) {
       console.error("Failed to resolve smart model:", e);
       toast.info(t("chatInput.smartModelUnavailable"));
     }
-  }, [modelList, onModelChange, t]);
+  }, [modelList, onModelChange, onSmartModelPinned, t]);
 
   // Turn-based engines take one prompt at a time: no steering, no follow-up
   // queue. Rather than leave Enter silently inert, the composer says it is
@@ -2925,8 +2934,19 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     </svg>
                   )}
                   {advisorEnabled && (
+                    // ShieldCheck, deliberately NOT Sparkles: Sparkles is the
+                    // Smart-model glyph in the dropdown one click away, and an
+                    // accent sparkle beside the model name read as "this model
+                    // was auto-picked" — a meaning it never had.
                     <span title={t("chatInput.advisorEnabled")} aria-label={t("chatInput.advisorEnabled")} style={{ display: "flex", flexShrink: 0, color: "var(--accent)" }}>
-                      <Sparkles size={13} strokeWidth={2} aria-hidden="true" />
+                      <ShieldCheck size={13} strokeWidth={2} aria-hidden="true" />
+                    </span>
+                  )}
+                  {isAutoModelSelection && currentName && (
+                    // The same glyph as the dropdown's Smart row, so "Smart"
+                    // in the label and the row read as one feature.
+                    <span style={{ display: "flex", flexShrink: 0, color: "var(--accent)" }} aria-hidden="true">
+                      <Sparkles size={12} strokeWidth={2} />
                     </span>
                   )}
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
@@ -3064,6 +3084,37 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   );
                 })()}
               </div>
+            )}
+
+            {/* The engine moved this session onto a different model by itself
+                (retry fallback / usage-aware routing). The 10s toast is easy
+                to miss and the switched model outlives it, so the marker
+                stays until the model moves again — click re-shows the full
+                from → to and reason. */}
+            {autoModelSwitch && (
+              <button
+                type="button"
+                onClick={() => {
+                  const detail = [
+                    t("chatInput.autoSwitchDetail", { from: autoModelSwitch.from, to: autoModelSwitch.to }),
+                    autoModelSwitch.role ? t("agentSession.fallbackAppliedDetail", { role: autoModelSwitch.role }) : null,
+                    autoModelSwitch.reason ? t("agentSession.fallbackReason", { reason: autoModelSwitch.reason }) : null,
+                  ].filter(Boolean).join("\n");
+                  toast.info(t("chatInput.autoSwitchChip"), detail, { durationMs: 12_000, clamp: true });
+                }}
+                title={t("chatInput.autoSwitchTitle")}
+                aria-label={t("chatInput.autoSwitchTitle")}
+                style={{
+                  display: "inline-flex", alignItems: "center", gap: 4,
+                  height: 28, padding: "0 7px",
+                  background: "none", border: "none", borderRadius: 7,
+                  color: "var(--status-warning)", cursor: "pointer",
+                  fontSize: 11, flexShrink: 0, whiteSpace: "nowrap",
+                }}
+              >
+                <TriangleAlert size={12} aria-hidden="true" style={{ flexShrink: 0 }} />
+                {t("chatInput.autoSwitchChip")}
+              </button>
             )}
 
             {/* Tool preset selector — applies at spawn time only, so it stays

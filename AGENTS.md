@@ -722,6 +722,24 @@ handled or safely ignored.
   role to a concrete model client-side and pins it (omp's `set_model` RPC
   takes exact provider/model — no role aliases). Picking any named model
   pins it and OMP roles stop applying to that session's main turns.
+- **Smart-ness survives the pin** (`smartPinnedModel` in useAgentSession):
+  both a live Smart pick (`markSmartPinnedModel`) and the engine's own
+  resolution of a Smart spawn (`pendingSmartSpawnRef`, claimed by the first
+  authoritative model) record the pin as Smart's answer, id-scoped to their
+  session — loads and reconciles reuse `loadSession`, so a reset there would
+  wipe it mid-conversation. The composer keeps "✦ Smart · <model>" while the
+  running model still matches. The Advisor indicator is ShieldCheck, never
+  Sparkles: Sparkles is the Smart glyph, and an accent sparkle beside the
+  model name read as "auto-picked".
+- **Engine-initiated model switches wear a persistent marker**
+  (`autoModelSwitch`): `retry_fallback_applied` (error and usage-aware
+  routing both emit it) and any bare `model_changed` whose model differs
+  from the last authoritative one set a warning chip beside the model
+  control — from → to, role, and the last provider error; click re-shows the
+  detail as a toast. The echo of Cody's own `set_model`
+  (`lastUserModelPickRef`, 15s window) is never dressed up as an engine
+  switch. The 10s fallback toast stays; the marker is what outlives it,
+  clearing on the next user pick or model move.
 - **Tools preset control** (composer, Wrench icon): "full" leaves omp's
   toolset alone; "default"/Core spawns omp with `--tools read,bash,edit,write`,
   which also kills the `task`, `todo`, `github` and `web_search` builtins —
