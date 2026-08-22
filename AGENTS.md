@@ -677,6 +677,20 @@ events, and the queue length comes from `get_state.queuedMessageCount`.
 New frame types (`turn_start/end`, `notice`, `todo_reminder`, ...) must be
 handled or safely ignored.
 
+### Long tool calls narrate themselves
+- `tool_execution_update` frames are handled, not dropped: the newest text
+  line a tool streams about itself lands on the running-tool state
+  (`RunningToolInfo.statusText`), and `tool_execution_start` stamps
+  `startedAt`. The chat status line and the pending-tool headers append that
+  line plus an elapsed clock once a call runs past ~8s
+  (`LONG_TOOL_THRESHOLD_MS`, ChatWindow).
+- The motivating case: omp's `gh` tool `run_watch` — usually invoked as a
+  `write` to the `xd://github` tool device — blocks for an entire GitHub
+  Actions run while polling (3s then 15s intervals), streaming a "Watching
+  GitHub Actions Run #N" snapshot per poll. Without the update wiring that
+  call renders as a frozen "write xd://github" for many minutes and reads as
+  a hang. Contract-tested in `hooks/useAgentSession.test.mjs`.
+
 ### Running state SSE + reconciliation
 - The sidebar listens to `/api/agent/running/events`, backed by `subscribeRunningSessions()` in `lib/rpc-manager.ts`, so running badges update without polling.
 - `useAgentSession` still treats per-session SSE as primary for chat events, but while a run is active it periodically calls `GET /api/agent/[id]` and also reconciles on `visibilitychange`/`online`. This fixes missed `agent_end` events from background tabs or half-open connections.

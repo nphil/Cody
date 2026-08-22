@@ -449,7 +449,7 @@ it is the engine's. For reference, what the web client currently handles:
 
 `agent_start`, `agent_end`, `prompt_result`, `prompt_error`, `command_output`,
 `message_start`, `message_update`, `message_end`, `tool_execution_start`,
-`tool_execution_end`, `thinking_level_changed`, `model_changed`,
+`tool_execution_update`, `tool_execution_end`, `thinking_level_changed`, `model_changed`,
 `config_update`, `available_commands_update`, `todo_reminder`,
 `todo_auto_clear`, `auto_retry_start`, `auto_retry_end`,
 `retry_fallback_applied`, `retry_fallback_succeeded`,

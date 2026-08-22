@@ -324,11 +324,36 @@ type NoticeAction =
   | { type: "mark_oldest_exiting" }
   | { type: "remove"; id: string };
 
+/** A tool call the engine is executing right now. `startedAt` feeds the
+ * elapsed indicator once a tool runs long; `statusText` is the newest line the
+ * tool streamed about itself (tool_execution_update) — for a long watch like
+ * `write xd://github` (omp's gh run_watch polling a GitHub Actions run) it is
+ * the only signal separating "watching CI" from "hung". */
+export interface RunningToolInfo {
+  id: string;
+  name: string;
+  startedAt: number;
+  statusText?: string;
+}
+
 export type AgentPhase =
   | { kind: "waiting_model" }
   | { kind: "running_command" }
-  | { kind: "running_tools"; tools: { id: string; name: string }[] }
+  | { kind: "running_tools"; tools: RunningToolInfo[] }
   | null;
+
+/** First informative line of a streamed partial tool result, compacted for the
+ * one-line status surfaces (markdown heading markers stripped, clamped). */
+export function toolUpdateStatusText(partialResult: unknown): string | undefined {
+  if (!isRecord(partialResult) || !Array.isArray(partialResult.content)) return undefined;
+  for (const block of partialResult.content) {
+    if (!isRecord(block) || block.type !== "text" || typeof block.text !== "string") continue;
+    const line = block.text.split("\n").map((entry) => entry.replace(/^#+\s*/, "").trim()).find((entry) => entry.length > 0);
+    if (!line) continue;
+    return line.length > 160 ? `${line.slice(0, 159)}…` : line;
+  }
+  return undefined;
+}
 
 /**
  * A stream problem the user must be told about, rather than left to infer from
@@ -2242,7 +2267,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const name = event.toolName as string;
         setAgentPhase((prev) => {
           const tools = prev?.kind === "running_tools" ? [...prev.tools] : [];
-          if (!tools.some((t) => t.id === id)) tools.push({ id, name });
+          if (!tools.some((t) => t.id === id)) tools.push({ id, name, startedAt: Date.now() });
+          return { kind: "running_tools", tools };
+        });
+        break;
+      }
+      case "tool_execution_update": {
+        // Long-running tools stream progress about themselves (omp's gh
+        // run_watch reports every CI poll this way). Keep only the newest
+        // line per tool — without it a long `write xd://github` watch is
+        // indistinguishable from a hang.
+        const id = event.toolCallId as string;
+        const statusText = toolUpdateStatusText(event.partialResult);
+        if (!statusText) break;
+        setAgentPhase((prev) => {
+          if (prev?.kind !== "running_tools") return prev;
+          const index = prev.tools.findIndex((t) => t.id === id);
+          if (index === -1 || prev.tools[index].statusText === statusText) return prev;
+          const tools = [...prev.tools];
+          tools[index] = { ...tools[index], statusText };
           return { kind: "running_tools", tools };
         });
         break;
