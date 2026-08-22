@@ -1,7 +1,7 @@
 import { listHarnesses } from ".";
 import { isNewerVersion } from "../npm-update";
 import { probeEngineVersion } from "./engine-bin";
-import { readInstallHistory } from "./install";
+import { packageNameFromSpec, readInstallHistory } from "./install";
 
 /**
  * Update checks for installable engines: the npm registry's latest version
@@ -40,11 +40,9 @@ export interface EngineUpdateStatus {
   installedBeyondVerified: boolean;
 }
 
-/** "@oh-my-pi/pi-coding-agent@latest" → "@oh-my-pi/pi-coding-agent". */
-export function packageNameFromSpec(spec: string): string {
-  const at = spec.lastIndexOf("@");
-  return at > 0 ? spec.slice(0, at) : spec;
-}
+// Lives in ./install (which owns the spec) and is re-exported here because
+// this module's importers have always taken it from `harness/updates`.
+export { packageNameFromSpec };
 
 /** Leading major out of "18.0.0" / "v18.0.0"; null when unparseable. */
 export function majorVersionOf(version: string | null): number | null {
