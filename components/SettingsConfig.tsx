@@ -6,7 +6,7 @@ import dynamic from "next/dynamic";
 import { AlertCircle, ArrowDown, ArrowUp, RefreshCw, Search, Sparkles, X } from "lucide-react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/primitives";
-import { SettingsTabs, type SettingsTab, type ActiveEngineInfo, type EngineCapabilities, ALL_CAPABILITIES, DEFAULT_HARNESS_LABEL, getSettingsCategories, getNormalizedActive } from "./SettingsTabs";
+import { SettingsTabs, type SettingsTab, type ActiveEngineInfo, type EngineCapabilities, ALL_CAPABILITIES, DEFAULT_HARNESS_LABEL, SCHEMA_TAB_CAPABILITY, getSettingsCategories, getNormalizedActive } from "./SettingsTabs";
 import { STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
 import { LOCALES, useI18n, type Locale } from "@/lib/i18n";
 import { readTerminalSoftKeyIds, TERMINAL_SOFT_KEYS, writeTerminalSoftKeyIds, type TerminalSoftKeyId } from "@/lib/terminal-preferences";
@@ -302,10 +302,13 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
       .catch((error) => setNativeSettingsError(error instanceof Error ? error.message : String(error)));
   }, [nativeReloadToken, capabilities.configEditor]);
 
-  // OMP's schema also backs the dialog-wide search, so a setting Cody never
-  // hand-listed is still findable by name from the search box.
+  // The schema behind the "All <engine> Settings" tab also backs the
+  // dialog-wide search, so a setting Cody never hand-listed is still findable
+  // by name from the search box.
   useEffect(() => {
-    if (!capabilities.configEditor) {
+    // The SAME flag that decides whether the tab exists (SettingsTabs.tsx) —
+    // never configEditor, which means "omp, whose editors Cody hand-built".
+    if (!capabilities[SCHEMA_TAB_CAPABILITY]) {
       setSchemaSearchIndex([]);
       return;
     }
@@ -326,7 +329,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
       })
       .catch(() => setSchemaSearchIndex([]));
     return () => controller.abort();
-  }, [capabilities.nativeSettings]);
+  }, [capabilities]);
 
   const latestNativeSettingsRef = useRef<NativeSettings | null>(null);
   const nativeSaveDrainingRef = useRef(false);
