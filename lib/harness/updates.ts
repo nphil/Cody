@@ -64,23 +64,42 @@ export function isBeyondVerifiedMajor(
 
 const latestCache = new Map<string, { checkedAt: number; version: string | null }>();
 
-export async function fetchLatestPackageVersion(packageName: string, force = false): Promise<string | null> {
-  const cached = latestCache.get(packageName);
+/** "hermes-agent[acp]" → "hermes-agent". A PyPI spec may carry extras (and a
+ * pin), neither of which belongs in a registry lookup. */
+export function pypiNameFromSpec(spec: string): string {
+  return spec.split(/[[=<>!~ ]/)[0].trim();
+}
+
+/**
+ * Latest published version of an engine's package. The registry follows the
+ * ecosystem: npm engines are on registry.npmjs.org, uv engines are Python
+ * packages on PyPI. Asking npm for a PyPI package simply 404s, which would
+ * quietly report "no update available" forever.
+ */
+export async function fetchLatestPackageVersion(
+  packageName: string,
+  force = false,
+  via: "npm" | "uv" = "npm",
+): Promise<string | null> {
+  const key = `${via}:${packageName}`;
+  const cached = latestCache.get(key);
   if (!force && cached && Date.now() - cached.checkedAt < CHECK_TTL_MS) return cached.version;
   let version: string | null = null;
   try {
-    const response = await fetch(`https://registry.npmjs.org/${encodeURIComponent(packageName)}/latest`, {
-      cache: "no-store",
-      signal: AbortSignal.timeout(5_000),
-    });
-    const data = response.ok ? ((await response.json()) as { version?: unknown }) : null;
-    version = typeof data?.version === "string" ? data.version : null;
+    const url = via === "uv"
+      ? `https://pypi.org/pypi/${encodeURIComponent(pypiNameFromSpec(packageName))}/json`
+      : `https://registry.npmjs.org/${encodeURIComponent(packageName)}/latest`;
+    const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(5_000) });
+    const data = response.ok ? ((await response.json()) as { version?: unknown; info?: { version?: unknown } }) : null;
+    // npm answers with the manifest directly; PyPI nests it under `info`.
+    const raw = via === "uv" ? data?.info?.version : data?.version;
+    version = typeof raw === "string" ? raw : null;
   } catch {
     version = null;
   }
   // A failed probe is cached too: settings opening repeatedly while offline
   // should not hammer the registry timeout on every render.
-  latestCache.set(packageName, { checkedAt: Date.now(), version });
+  latestCache.set(key, { checkedAt: Date.now(), version });
   return version;
 }
 
@@ -94,7 +113,13 @@ export async function checkEngineUpdates(force = false): Promise<EngineUpdateSta
     adapters.map(async (adapter) => {
       const [installedVersion, latestVersion] = await Promise.all([
         adapter.getVersion(),
-        fetchLatestPackageVersion(packageNameFromSpec(adapter.installSpec as string), force),
+        fetchLatestPackageVersion(
+          adapter.installVia === "uv"
+            ? (adapter.installSpec as string)
+            : packageNameFromSpec(adapter.installSpec as string),
+          force,
+          adapter.installVia ?? "npm",
+        ),
       ]);
       const previous = history[adapter.id]?.previousVersion ?? null;
       // Only the broken case pays for a second spawn, and it is the only case
@@ -109,7 +134,7 @@ export async function checkEngineUpdates(force = false): Promise<EngineUpdateSta
           installedVersion && latestVersion ? isNewerVersion(latestVersion, installedVersion) : null,
         // Offering a "revert" to the version already running is noise.
         previousVersion: previous && previous !== installedVersion ? previous : null,
-        probeError: binary ? (await probeEngineVersion(binary)).error : null,
+        probeError: binary ? (await probeEngineVersion(binary, adapter.versionArgs)).error : null,
         latestBeyondVerified: isBeyondVerifiedMajor(latestVersion, adapter.verifiedMajor),
         installedBeyondVerified: isBeyondVerifiedMajor(installedVersion, adapter.verifiedMajor),
       };

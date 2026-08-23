@@ -47,6 +47,15 @@ export const hermesHarness: HarnessAdapter = {
   binaryName: "hermes",
   tagline: "Nous Research's self-hosted agent, with persistent memory and its own skills.",
   experimental: true,
+  // PyPI, not npm — and the `[acp]` extra is REQUIRED: without it the binary
+  // installs fine and then `hermes acp` exits reporting "ACP dependencies not
+  // installed", i.e. an engine that looks healthy and cannot start.
+  installSpec: "hermes-agent[acp]",
+  installVia: "uv",
+  // `hermes --version` prints a report whose lines include "Python: 3.11.15";
+  // a first-match version scan would report the PYTHON version as the
+  // engine's. The acp subcommand prints the bare number.
+  versionArgs: ["acp", "--version"],
   authHint:
     "Hermes brings its own model configuration: run `hermes setup` once in a Cody terminal to pick a provider and add keys.",
   capabilities: {
@@ -63,7 +72,9 @@ export const hermesHarness: HarnessAdapter = {
     // file; Hermes keeps its own. Not wired yet.
     mcp: false,
     nativeSettings: false,
-    // Cody cannot update Hermes through npm — it is not an npm package.
+    // This flag gates the engine's OWN self-update route and the session
+    // restart control, both of which are omp-specific. Cody installing
+    // Hermes through uv is a different thing entirely, driven by installSpec.
     updates: false,
     // omp-only composer affordances: steering, follow-up queue, compaction,
     // thinking levels, forking. None are wired over ACP yet.
@@ -74,7 +85,7 @@ export const hermesHarness: HarnessAdapter = {
     subagents: false,
   },
   resolveBinary: () => resolveEngineBin("hermes", "HERMES"),
-  getVersion: () => getEngineVersion("hermes", "HERMES"),
+  getVersion: () => getEngineVersion("hermes", "HERMES", ["acp", "--version"]),
   getAgentDir: () => hermesHome(),
   // Hermes stores conversations in SQLite rather than a directory of
   // transcripts; this path exists so the adapter contract is satisfied, and
