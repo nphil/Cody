@@ -710,7 +710,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     handleBuiltinSlashCommand,
     handleThinkingLevelChange, handleFastModeChange, handleToolPresetChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, loadSlashCommands,
   } = useAgentSession({
-    session, newSessionCwd, advisorEnabled, thinkingDefaultExpanded, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked,
+    session, newSessionCwd, advisorEnabled, subagentsCapable, thinkingDefaultExpanded, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
     onOpenFile, onOpenPreview, onPreviewUrlsSeen,
   });

@@ -35,7 +35,13 @@ export function createHermesSession(options: EngineSessionOptions): EngineSessio
     throw new Error("hermes binary not found. Install Hermes from the engine picker, or set CODY_HERMES_BIN.");
   }
   return new AcpEngineSession(
-    { id: "hermes", name: "Hermes", binaryPath, args: ["acp"] },
+    {
+      id: "hermes",
+      name: "Hermes",
+      binaryPath,
+      args: ["acp"],
+      setupHint: "Run `hermes setup` in a Cody terminal to pick a provider and add an API key.",
+    },
     options,
   );
 }

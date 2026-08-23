@@ -43,6 +43,11 @@ export interface AcpEngineSpec {
   readonly args: readonly string[];
   /** Extra environment for the child, merged over process.env. */
   readonly env?: Readonly<Record<string, string>>;
+  /** One sentence telling the user how to configure this engine, appended
+   * when a turn ends with no reply — overwhelmingly the shape of an engine
+   * with no model or credentials yet. Engine-specific wording belongs here,
+   * not in this module. */
+  readonly setupHint?: string;
 }
 
 /** Commands this transport can honestly serve. Everything else throws
@@ -136,6 +141,26 @@ export function translateSessionUpdate(update: unknown, state: AcpStreamState): 
     }
     default:
       return [];
+  }
+}
+
+/** Why a turn produced no assistant content, in the user's terms. Exported
+ * for the test: the wording is the whole point of the function. */
+export function emptyTurnMessage(engineName: string, stopReason: string, setupHint?: string): string {
+  switch (stopReason) {
+    case "refusal":
+      return `${engineName} declined to answer this prompt.`;
+    case "max_tokens":
+      return `${engineName} hit its output limit before writing a reply.`;
+    case "max_turn_requests":
+      return `${engineName} reached its tool-call limit for this turn without replying.`;
+    case "cancelled":
+      return `${engineName} stopped before replying.`;
+    default:
+      // The overwhelmingly common cause of a clean, empty end_turn: no model
+      // or credentials configured, so there was nothing to answer with.
+      return `${engineName} ended the turn without a reply.`
+        + (setupHint ? ` ${setupHint}` : " If this is a fresh install, it may have no model configured yet.");
   }
 }
 
@@ -385,10 +410,18 @@ export class AcpEngineSession implements EngineSession {
         sessionId: this.acpSessionId,
         prompt: [{ type: "text", text }],
       });
+      const answered = this.stream.open;
       this.finishTurn();
       const stopReason = (result as { stopReason?: unknown }).stopReason;
+      const reason = typeof stopReason === "string" ? stopReason : "end_turn";
+      // A turn that ends having said NOTHING leaves the user staring at their
+      // own message wondering if anything happened. It is the normal shape of
+      // an agent that has no model configured yet — the ACP layer sees a clean
+      // end_turn with no content — so the silence gets explained rather than
+      // rendered as a void.
+      if (!answered) this.emit({ type: "notice", level: "warning", message: emptyTurnMessage(this.spec.name, reason, this.spec.setupHint) });
       this.emit({ type: "turn_end" });
-      this.emit({ type: "agent_end", stopReason: typeof stopReason === "string" ? stopReason : "end_turn" });
+      this.emit({ type: "agent_end", stopReason: reason });
       return { stopReason };
     } catch (error) {
       this.finishTurn();
