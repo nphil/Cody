@@ -5,7 +5,7 @@ import { Readable, Writable } from "stream";
 import { ClientApp, ndJsonStream, PROTOCOL_VERSION, type ClientConnection } from "@agentclientprotocol/sdk";
 import type { EngineEvent, EngineSession, EngineSessionOptions, EngineUsage } from "./types";
 import { getEngineSession, upsertEngineSession } from "./engine-sessions";
-import { EngineCommandError } from "./turn-session";
+import { EngineCommandError } from "./errors";
 
 /**
  * A live chat session driven over the Agent Client Protocol.
@@ -16,7 +16,7 @@ import { EngineCommandError } from "./turn-session";
  * ACP server becomes a Cody engine by describing its CLI in an `AcpEngineSpec`
  * (see docs/specs/2026-08-22-acp-engines.md).
  *
- * Unlike the per-turn engines in turn-session.ts, an ACP session is a single
+ * Unlike the process-per-turn transport this replaced, an ACP session is one
  * long-lived process: one `session/new` up front, then a `session/prompt` per
  * turn. That is closer to how omp's rpc-ui already behaves, which is why this
  * satisfies `EngineSession` without any change to the seam.
