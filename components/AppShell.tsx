@@ -947,6 +947,13 @@ export function AppShell() {
     }
   }, [handleSelectSession, selectedSession]);
 
+  // The auto-namer gave a nameless session a real name: only the sidebar's
+  // session list has to re-read it, so this is deliberately not handleAgentEnd
+  // (which also fires the completion sound and notification).
+  const handleSessionNamed = useCallback(() => {
+    setRefreshKey((k) => k + 1);
+  }, []);
+
   const handleSessionForked = useCallback((newSessionId: string) => {
     setRefreshKey((k) => k + 1);
     setSessionKey((k) => k + 1);
@@ -1839,6 +1846,7 @@ export function AppShell() {
               session={selectedSession}
               newSessionCwd={effectiveNewSessionCwd}
               onAgentEnd={handleAgentEnd}
+              onSessionNamed={handleSessionNamed}
               onSessionCreated={handleSessionCreated}
               onSessionForked={handleSessionForked}
               modelsRefreshKey={modelsRefreshKey}
