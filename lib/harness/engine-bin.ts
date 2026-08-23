@@ -64,14 +64,14 @@ function matchVersion(output: string): string | null {
   return match ? match[0] : null;
 }
 
-export function getEngineVersion(binaryName: string, envSuffix: string): Promise<string | null> {
+export function getEngineVersion(binaryName: string, envSuffix: string, versionArgs: readonly string[] = ["--version"]): Promise<string | null> {
   const cached = versionCache.get(binaryName);
   if (cached?.version) return Promise.resolve(cached.version);
   if (cached && Date.now() - cached.missAt < MISS_TTL_MS) return Promise.resolve(null);
   const bin = resolveEngineBin(binaryName, envSuffix);
   if (!bin) return Promise.resolve(null);
   const { promise, resolve } = Promise.withResolvers<string | null>();
-  execFile(bin, ["--version"], { timeout: VERSION_TIMEOUT_MS }, (error, stdout, stderr) => {
+  execFile(bin, [...versionArgs], { timeout: VERSION_TIMEOUT_MS }, (error, stdout, stderr) => {
     if (error) {
       versionCache.set(binaryName, { version: null, missAt: Date.now() });
       resolve(null);
@@ -108,9 +108,10 @@ function probeFailureText(stderr: string, stdout: string, error: Error | null): 
  */
 export function probeEngineVersion(
   binaryPath: string,
+  versionArgs: readonly string[] = ["--version"],
 ): Promise<{ version: string | null; error: string | null }> {
   const { promise, resolve } = Promise.withResolvers<{ version: string | null; error: string | null }>();
-  execFile(binaryPath, ["--version"], { timeout: VERSION_TIMEOUT_MS }, (error, stdout, stderr) => {
+  execFile(binaryPath, [...versionArgs], { timeout: VERSION_TIMEOUT_MS }, (error, stdout, stderr) => {
     const out = String(stdout ?? "");
     const err = String(stderr ?? "");
     // Exit status decides whether the binary ran: a failing CLI that names a

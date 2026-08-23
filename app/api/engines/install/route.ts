@@ -52,7 +52,13 @@ export async function POST(request: Request) {
     if (!/^\d+\.\d+\.\d+(-[\w.]+)?$/.test(version)) {
       return jsonError("version must be a plain semver string", 400);
     }
-    installSpec = `${packageNameFromSpec(adapter.installSpec)}@${version}`;
+    // Pin syntax differs by ecosystem: npm takes `name@1.2.3`, PyPI takes
+    // `name==1.2.3` — and the PyPI name may carry an extra (`pkg[acp]`) that
+    // must be preserved, since dropping it installs a package whose optional
+    // features are missing.
+    installSpec = adapter.installVia === "uv"
+      ? `${adapter.installSpec}==${version}`
+      : `${packageNameFromSpec(adapter.installSpec)}@${version}`;
   }
 
   try {
@@ -61,7 +67,14 @@ export async function POST(request: Request) {
     // against an already-broken engine would otherwise overwrite the recorded
     // revert target with "nothing", losing the last known-good version.
     const currentVersion = (await adapter.getVersion()) ?? undefined;
-    await installEngine({ id: adapter.id, installSpec, binaryName: adapter.binaryName, currentVersion });
+    await installEngine({
+      id: adapter.id,
+      installSpec,
+      binaryName: adapter.binaryName,
+      currentVersion,
+      installVia: adapter.installVia,
+      versionArgs: adapter.versionArgs,
+    });
   } catch (error) {
     const detail = error instanceof EngineInstallError ? error.detail : "";
     return NextResponse.json(
@@ -86,7 +99,7 @@ export async function POST(request: Request) {
   const binary = adapter.resolveBinary();
   const probe = binary
     ? await probeEngineVersion(binary)
-    : { version: null, error: `npm finished but no ${adapter.binaryName} binary is installed.` };
+    : { version: null, error: `The installer finished but no ${adapter.binaryName} binary is installed.` };
 
   if (!probe.version) {
     const previousVersion = readInstallHistory()[adapter.id]?.previousVersion ?? null;

@@ -51,6 +51,8 @@ const SUPPORTED_COMMANDS = new Set(["prompt", "abort", "get_state", "get_message
 
 /** Grace period between SIGTERM and SIGKILL when tearing a session down. */
 const KILL_GRACE_MS = 3_000;
+/** How much agent stderr is kept to explain a failed start. */
+const STDERR_TAIL_LIMIT = 4_000;
 
 interface AcpMessage {
   role: "user" | "assistant";
@@ -157,6 +159,8 @@ export class AcpEngineSession implements EngineSession {
   /** Assistant text of the turn in flight, accumulated for get_messages. */
   private stream: AcpStreamState = { open: false, text: "" };
   private currentModel: string | null = null;
+  /** Recent agent stderr, reported only if the connection fails. */
+  private stderrTail = "";
   destroyPromise: Promise<void> | null = null;
 
   constructor(spec: AcpEngineSpec, options: EngineSessionOptions) {
@@ -265,7 +269,14 @@ export class AcpEngineSession implements EngineSession {
         // re-runs it, and the session reports itself dead meanwhile.
         this.readyPromise = null;
         this._alive = false;
-        throw error;
+        // The agent's own stderr is usually the only thing that says WHY —
+        // e.g. an ACP extra that was never installed — so it rides along.
+        const detail = this.stderrTail.trim();
+        const message = detail
+          ? `${this.spec.name} could not start its ACP server: ${String(error)}\n${detail}`
+          : `${this.spec.name} could not start its ACP server: ${String(error)}`;
+        this.emit({ type: "notice", level: "error", message });
+        throw new Error(message);
       });
     }
     return this.readyPromise;
@@ -287,12 +298,14 @@ export class AcpEngineSession implements EngineSession {
         resolve();
       });
     });
-    // stderr is the agent's own diagnostics channel; surface it as notices
-    // rather than swallowing it, since a misconfigured agent explains itself
-    // there and nowhere else.
+    // stderr is the agent's diagnostics channel, and agents are CHATTY on it:
+    // Hermes alone logs dozens of INFO lines per start. Surfacing each as a
+    // notice buries the conversation, so it is buffered instead and reported
+    // only when it explains a failure — which is precisely where it earns its
+    // keep (a missing optional dependency announces itself here and nowhere
+    // else).
     child.stderr?.on("data", (chunk: Buffer) => {
-      const text = chunk.toString("utf8").trim();
-      if (text) this.emit({ type: "notice", level: "info", message: `${this.spec.name}: ${text}` });
+      this.stderrTail = (this.stderrTail + chunk.toString("utf8")).slice(-STDERR_TAIL_LIMIT);
     });
 
     const app = new ClientApp();

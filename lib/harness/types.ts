@@ -168,9 +168,17 @@ export interface HarnessAdapter {
   readonly tagline: string;
   /** Experimental engines carry a visible chip and reduced expectations. */
   readonly experimental?: boolean;
-  /** npm spec for on-demand install ("@openai/codex@latest"); absent when
-   * Cody cannot install this engine itself. */
+  /** Package spec for on-demand install ("@openai/codex@latest",
+   * "hermes-agent[acp]"); absent when Cody cannot install this engine. */
   readonly installSpec?: string;
+  /** Which package manager installs `installSpec`. Defaults to npm, which is
+   * what every engine used before Hermes — a Python program on PyPI. */
+  readonly installVia?: "npm" | "uv";
+  /** Args that make the binary print its version. Defaults to ["--version"].
+   * Hermes needs ["acp", "--version"]: its plain --version prints a report
+   * whose lines include the PYTHON version, which a first-match scan would
+   * happily report as the engine's. */
+  readonly versionArgs?: readonly string[];
   /** Newest engine MAJOR version this Cody build has been audited against.
    * When the registry offers — or the user has installed — a later major,
    * the System & Updates card warns that new engine features may not surface

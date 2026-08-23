@@ -50,8 +50,14 @@ export interface EngineInstallRequest {
   id: string;
   /** npm spec from the adapter ("@openai/codex@latest"). */
   installSpec: string;
-  /** Binary whose resolution cache must be dropped once npm finishes. */
+  /** Binary whose resolution cache must be dropped once the install finishes. */
   binaryName: string;
+  /** Which package manager installs the spec. Defaults to npm — every engine
+   * before Hermes was an npm package; Hermes is Python, on PyPI. */
+  installVia?: "npm" | "uv";
+  /** Args that make the installed binary print its version, for the
+   * post-install health probe. Defaults to ["--version"]. */
+  versionArgs?: readonly string[];
   /** Version installed BEFORE this run (probed by the route); recorded on
    * success so a broken update can be reverted. Omit to leave the record
    * untouched. */
@@ -354,15 +360,21 @@ function diskFailureMessage(stderr: string, prefix: string, cacheDir: string): s
 
 function runInstall(request: EngineInstallRequest): Promise<EngineInstallResult> {
   const prefix = getToolsDir();
-  const cacheDir = getNpmCacheDir();
+  const viaUv = request.installVia === "uv";
+  const cacheDir = viaUv ? join(prefix, "uv-cache") : getNpmCacheDir();
   const packageName = packageNameFromSpec(request.installSpec);
-  const args = ["install", "-g", "--prefix", prefix, request.installSpec];
-  const npmCli = findNpmCli();
-  const command = npmCli ? execPath : "npm";
+  // uv installs a Python tool into the same prefix npm uses, so both engines
+  // land in one `bin` that engine-bin already searches. --force makes a repeat
+  // install an UPDATE rather than a no-op, matching npm's `@latest` behavior.
+  const args = viaUv
+    ? ["tool", "install", "--force", request.installSpec]
+    : ["install", "-g", "--prefix", prefix, request.installSpec];
+  const npmCli = viaUv ? null : findNpmCli();
+  const command = viaUv ? "uv" : (npmCli ? execPath : "npm");
   const commandArgs = npmCli ? [npmCli, ...args] : args;
   const startedAt = Date.now();
   const job = beginJob(request.id);
-  appendJobLog(job, `$ npm install -g --prefix ${prefix} ${request.installSpec}\n`);
+  appendJobLog(job, `$ ${command} ${commandArgs.join(" ")}\n`);
 
   return new Promise<EngineInstallResult>((resolve, reject) => {
     try {
@@ -381,8 +393,9 @@ function runInstall(request: EngineInstallRequest): Promise<EngineInstallResult>
     }
 
     // Sweep any tree a previous interrupted run renamed aside: npm would try
-    // to rename onto that exact path and fail with ENOTEMPTY every time.
-    const swept = cleanStaleInstallDirs(prefix, packageName);
+    // to rename onto that exact path and fail with ENOTEMPTY every time. uv
+    // replaces a tool directory outright, so it has no equivalent leftover.
+    const swept = viaUv ? [] : cleanStaleInstallDirs(prefix, packageName);
     for (const path of swept) {
       appendJobLog(job, `Removed leftover directory from an interrupted install: ${path}\n`);
     }
@@ -403,9 +416,20 @@ function runInstall(request: EngineInstallRequest): Promise<EngineInstallResult>
       return;
     }
 
-    // Env is inherited: npm needs HOME, PATH, proxy and registry settings from
-    // the container exactly as the operator configured them.
-    const child = spawn(command, commandArgs, { env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+    // Env is inherited: the package manager needs HOME, PATH, proxy and
+    // registry settings from the container exactly as the operator configured
+    // them. uv additionally gets its tool/bin/cache dirs pointed inside Cody's
+    // persistent prefix, so a Python engine survives an image update the same
+    // way an npm one does.
+    const env = viaUv
+      ? {
+        ...process.env,
+        UV_TOOL_DIR: join(prefix, "uv-tools"),
+        UV_TOOL_BIN_DIR: join(prefix, "bin"),
+        UV_CACHE_DIR: cacheDir,
+      }
+      : process.env;
+    const child = spawn(command, commandArgs, { env, stdio: ["ignore", "pipe", "pipe"] });
 
     let stderr = "";
     let settled = false;
@@ -438,7 +462,7 @@ function runInstall(request: EngineInstallRequest): Promise<EngineInstallResult>
     });
 
     child.on("error", (error) => {
-      finish(new EngineInstallError(`Could not run npm to install ${request.installSpec}`, String(error)));
+      finish(new EngineInstallError(`Could not run ${command} to install ${request.installSpec}${viaUv ? " — is uv installed on this host?" : ""}`, String(error)));
     });
 
     child.on("close", (code, signal) => {
@@ -461,7 +485,7 @@ function runInstall(request: EngineInstallRequest): Promise<EngineInstallResult>
           ));
           return;
         }
-        void probeEngineVersion(binary).then((probe) => {
+        void probeEngineVersion(binary, request.versionArgs ?? ["--version"]).then((probe) => {
           if (probe.error) {
             finish(new EngineInstallError(
               `${request.installSpec} installed but ${request.binaryName} does not run — the install is damaged. Reinstall it, or revert to the previous version.`,
@@ -488,7 +512,7 @@ function runInstall(request: EngineInstallRequest): Promise<EngineInstallResult>
         return;
       }
       const how = signal ? `was killed with ${signal}` : `exited with code ${code}`;
-      finish(new EngineInstallError(`npm install ${request.installSpec} ${how}`, tail(stderr)));
+      finish(new EngineInstallError(`Installing ${request.installSpec} ${how}`, tail(stderr)));
     });
   });
 }
