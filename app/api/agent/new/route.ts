@@ -11,7 +11,7 @@ import { getRequestUser } from "@/lib/auth/guard";
 import { setSessionOwner } from "@/lib/auth/session-owners";
 import { getHarness } from "@/lib/harness";
 import { engineSessionTitle, getEngineSession, upsertEngineSession } from "@/lib/harness/engine-sessions";
-import { EngineCommandError } from "@/lib/harness/turn-session";
+import { EngineCommandError } from "@/lib/harness/errors";
 
 function newSessionErrorResponse(error: unknown) {
   if (error instanceof SyntaxError) {

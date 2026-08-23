@@ -15,7 +15,7 @@ import type { EngineSession, EngineSessionOptions, HarnessAdapter } from "./type
  * no subcommand — and `--cli <args>` forwards to the wrapped CLI.
  *
  * What that buys over the `claude -p --output-format stream-json`
- * process-per-turn path it replaces (lib/harness/turn-session.ts):
+ * process-per-turn path it replaces (since deleted):
  *
  * - One long-lived session instead of a process per turn, and `session/load`
  *   to resume it.

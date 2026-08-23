@@ -16,7 +16,7 @@ import type { EngineSession, EngineSessionOptions, HarnessAdapter } from "./type
  * `codex exec`. Bare invocation IS ACP stdio mode; there is no subcommand.
  *
  * What that buys, versus the `codex exec --json` process-per-turn path it
- * replaces (`codex-stream.ts`, deleted with this change):
+ * replaces (the process-per-turn transport, since deleted):
  *
  * - One long-lived session instead of a process per turn, so the thread stays
  *   warm and `session/load` resumes it.

@@ -57,8 +57,8 @@ export interface HarnessCapabilities {
  * spend counted, a reconnect cannot resurrect a stale total, and no frame can
  * be counted twice. Translators must therefore never forward an engine's
  * cumulative turn total alongside the per-message figures that already sum to
- * it — see lib/harness/claude-stream.ts, where the result frame contributes
- * only the cost that has no per-message counterpart.
+ * it: the ACP translator contributes one additive frame per turn from
+ * `PromptResponse.usage`, never a running total alongside it.
  */
 export interface EngineEvent {
   type: string;

@@ -5,7 +5,7 @@ import { apiErrorResponse, resolveEngineSessionOr404, resolveSessionPathOr404 } 
 import { startRpcSession, getRpcSession, resolveSpawnCwd, WebRpcError } from "@/lib/rpc-manager";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { getHarness } from "@/lib/harness";
-import { EngineCommandError } from "@/lib/harness/turn-session";
+import { EngineCommandError } from "@/lib/harness/errors";
 
 /** Cody's own failures carry a stable code the client can localize; omp's
  * errors stay opaque English text. */
