@@ -302,7 +302,11 @@ export function AppShell() {
     // the fresh load re-derives setupDone from the roster and opens the setup
     // wizard itself. Same engine: chain straight into the wizard.
     if (engineChanged) {
-      window.location.reload();
+      // assign("/") rather than reload(): a reload preserves `?session=<id>`
+      // from the previous engine, which the new engine's session list will
+      // never contain — the restore retries for eight seconds behind a blank
+      // pane and the dead id persists in the address bar.
+      window.location.assign("/");
       return;
     }
     setSetupWizardOpen(true);

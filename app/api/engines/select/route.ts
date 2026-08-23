@@ -5,6 +5,7 @@ import { clearEngineSessionsCache } from "@/lib/harness/engine-sessions";
 import { invalidateModelsCache } from "@/lib/models-cache";
 import { disposeUtilityRpc } from "@/lib/omp/rpc-utility";
 import { restartAllRpcSessions } from "@/lib/rpc-manager";
+import { getTerminalManager } from "@/lib/terminal-manager";
 import { invalidateSessionListCache } from "@/lib/session-reader";
 import { resetUsageCache } from "@/lib/usage/cache";
 import { GET as getEngines } from "../route";
@@ -72,6 +73,18 @@ export async function POST(request: Request) {
   // whole listing is about to be re-derived, and re-reading from disk here
   // costs one file read.
   clearEngineSessionsCache();
+  // A terminal launched into an engine's CLI keeps that engine's binary — the
+  // wrapper resolved it once at spawn time and the PTY outlives the reload.
+  // Everything else belonging to the old engine is stopped below; a live REPL
+  // of it sitting in the terminal panel, still named in the replay buffer, is
+  // the one survivor, and anything typed there (a login, a config edit) goes
+  // to the engine the user just switched away from. Plain shells are untouched.
+  try {
+    getTerminalManager().closeTerminalsForOtherEngines(adapter.id);
+  } catch {
+    // node-pty is optional at runtime; an instance with no terminal support
+    // has nothing to close and must not fail the switch over it.
+  }
   if (!reaffirming) {
     try {
       await restartAllRpcSessions();

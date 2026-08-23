@@ -1,5 +1,5 @@
 import { existsSync, statSync } from "fs";
-import { normalize as normalizePath } from "path";
+import { normalize as normalizePath, sep } from "path";
 import { getHarness } from "./harness";
 import { getAgentDir } from "./omp/paths";
 import {
@@ -94,16 +94,31 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
 
 export async function listAllSessions(): Promise<SessionInfo[]> {
   const generation = globalThis.__piSessionListGeneration ?? 0;
+  // Part of the key, not just a filter. The engine-switch route does call
+  // invalidateSessionListCache(), but a snapshot that silently answers for
+  // whichever engine asks next is one missed invalidation away from showing a
+  // user another engine's conversations — so the cache refuses to answer
+  // across roots on its own.
+  const root = activeSessionsRootKey();
 
   // Return cached result if still fresh (avoids re-scanning session files
   // and re-spawning git processes on every page load).
-  if (globalThis.__piSessionListCache && Date.now() - globalThis.__piSessionListCache.ts < SESSION_LIST_CACHE_TTL_MS) {
+  if (
+    globalThis.__piSessionListCache
+    && globalThis.__piSessionListCache.root === root
+    && Date.now() - globalThis.__piSessionListCache.ts < SESSION_LIST_CACHE_TTL_MS
+  ) {
     return globalThis.__piSessionListCache.data;
   }
 
   // Coalescing dedup: concurrent callers share the same in-flight promise
-  // only while it belongs to the current cache generation.
-  if (globalThis.__piSessionListPromise && globalThis.__piSessionListPromiseGeneration === generation) {
+  // only while it belongs to the current cache generation AND is scanning the
+  // same root.
+  if (
+    globalThis.__piSessionListPromise
+    && globalThis.__piSessionListPromiseGeneration === generation
+    && globalThis.__piSessionListPromiseRoot === root
+  ) {
     return globalThis.__piSessionListPromise;
   }
 
@@ -111,7 +126,7 @@ export async function listAllSessions(): Promise<SessionInfo[]> {
     // An invalidation may happen while the scan is in flight. Do not let that
     // older result repopulate the cache after a session mutation.
     if ((globalThis.__piSessionListGeneration ?? 0) === generation) {
-      globalThis.__piSessionListCache = { data, ts: Date.now() };
+      globalThis.__piSessionListCache = { data, ts: Date.now(), root };
     }
     return data;
   });
@@ -119,11 +134,13 @@ export async function listAllSessions(): Promise<SessionInfo[]> {
     if (globalThis.__piSessionListPromise === trackedPromise) {
       globalThis.__piSessionListPromise = undefined;
       globalThis.__piSessionListPromiseGeneration = undefined;
+      globalThis.__piSessionListPromiseRoot = undefined;
     }
   });
 
   globalThis.__piSessionListPromise = trackedPromise;
   globalThis.__piSessionListPromiseGeneration = generation;
+  globalThis.__piSessionListPromiseRoot = root;
   return trackedPromise;
 }
 
@@ -136,7 +153,8 @@ declare global {
   var __piSessionListPromise: Promise<SessionInfo[]> | undefined;
   var __piSessionListPromiseGeneration: number | undefined;
   var __piSessionListGeneration: number | undefined;
-  var __piSessionListCache: { data: SessionInfo[]; ts: number } | undefined;
+  var __piSessionListCache: { data: SessionInfo[]; ts: number; root: string } | undefined;
+  var __piSessionListPromiseRoot: string | undefined;
 }
 
 const SESSION_LIST_CACHE_TTL_MS = 30_000;
@@ -154,6 +172,25 @@ export function invalidateSessionListCache(): void {
   globalThis.__ompSessionEntriesCache?.clear();
 }
 
+/**
+ * Which transcript root the ACTIVE engine reads, as a cache key.
+ *
+ * omp and pi write the same .jsonl format into DIFFERENT roots, so a snapshot
+ * scanned under one is not an answer for the other. Keying on the root rather
+ * than the engine id is deliberate: it also separates two omp profiles, and it
+ * correctly SHARES a cache between engines genuinely reading the same
+ * directory — which is what the shipped container does, where
+ * PI_CODING_AGENT_DIR points omp and pi at one place.
+ *
+ * The engines with no root of their own (the ACP three) collapse to one key,
+ * matching loadAllSessions, which lets them fall back to omp's root for
+ * file-access callers.
+ */
+function activeSessionsRootKey(): string {
+  const harness = getHarness();
+  return harness.rpcUi ? sessionPathKey(harness.getSessionsDir()) : "\u0000no-own-sessions-root";
+}
+
 function getPathCache(): Map<string, string> {
   if (!globalThis.__piSessionPathCache) globalThis.__piSessionPathCache = new Map();
   return globalThis.__piSessionPathCache;
@@ -164,10 +201,36 @@ function getPathToIdCache(): Map<string, string> {
   return globalThis.__piPathToSessionIdCache;
 }
 
+/**
+ * Is this transcript one the ACTIVE engine owns?
+ *
+ * The path cache is keyed by session id alone and outlives an engine switch,
+ * so an id minted while omp was active still resolved to `~/.omp/agent/...`
+ * after switching to pi. Nothing downstream re-checked: the file-based send
+ * path hands the resolved path straight to `--session`, so pi would open and
+ * APPEND to omp's transcript — a turn written into a file pi's own sidebar
+ * never lists. `resolveEngineSessionOr404` already applies this check to
+ * index rows for the ACP engines; the file-based path had no equivalent.
+ *
+ * Scoped to the rpc-dialect engines because they are the ones with a sessions
+ * root of their own. For the others `loadAllSessions` deliberately falls back
+ * to omp's root for file-access callers, and narrowing that here would take
+ * away something that works.
+ */
+function isActiveEngineTranscript(filePath: string): boolean {
+  const harness = getHarness();
+  if (!harness.rpcUi) return true;
+  const root = activeSessionsRootKey();
+  const candidate = sessionPathKey(filePath);
+  // The separator matters: without it a sibling root sharing a prefix
+  // (`/data/agent/sessions-old`) would read as inside `/data/agent/sessions`.
+  return candidate === root || candidate.startsWith(root.endsWith(sep) ? root : root + sep);
+}
+
 export async function resolveSessionPath(sessionId: string): Promise<string | null> {
   const cached = getPathCache().get(sessionId);
   if (cached) {
-    if (existsSync(cached)) return cached;
+    if (existsSync(cached) && isActiveEngineTranscript(cached)) return cached;
     // A deleted session must never resolve: callers spawn omp with --resume
     // against the path, and omp silently creates a NEW session when the file
     // is gone. Drop the stale entry (and the list snapshot that produced it).

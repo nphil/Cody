@@ -31,7 +31,15 @@ export type TerminalEvent =
   | { type: "exit"; exitCode?: number }
   | { type: "error"; message: string };
 
-type TerminalRecord = TerminalInfo & { pty?: IPty; replay: string; listeners: Set<(event: TerminalEvent) => void> };
+type TerminalRecord = TerminalInfo & {
+  pty?: IPty;
+  replay: string;
+  listeners: Set<(event: TerminalEvent) => void>;
+  /** The engine whose CLI this terminal was launched into, when it was one.
+   * Internal: it stays off TerminalInfo so it never reaches an API response.
+   * A plain shell leaves it undefined and is never touched by a switch. */
+  engineId?: string;
+};
 const MAX_REPLAY = 200_000;
 const MIN_DIM = 2;
 const MAX_DIM = 500;
@@ -65,7 +73,15 @@ function terminalEnvironment(): Record<string, string> {
   return env;
 }
 
-type SpawnCommand = { command: string; args: string[]; env?: Record<string, string> };
+type SpawnCommand = {
+  command: string;
+  args: string[];
+  env?: Record<string, string>;
+  /** Set only on the branch that actually launches an engine CLI, so the
+   * record can be torn down when that engine is no longer active. A plain
+   * shell leaves it unset. */
+  engineId?: string;
+};
 type SpawnMode = { launchEngine: boolean; attach?: TerminalAttach };
 
 /** Resolve what a browser PTY runs. All three shapes are exclusive to a
@@ -107,6 +123,11 @@ function terminalCommand(mode: SpawnMode): SpawnCommand {
   return {
     command: "/bin/sh",
     args: ["-c", script, "cody-terminal", harness.binaryName, engine, shell, ...(harness.cliArgs ?? [])],
+    // Named so the record can be torn down when this engine stops being the
+    // active one. Reported from HERE rather than re-derived at the call site
+    // because this is the branch that decides an engine was launched at all —
+    // an unresolved binary falls through to a plain shell above.
+    engineId: harness.id,
     // Whatever the engine needs to find its own parts, the same values the
     // live session and the post-install probe get. Without it, an engine Cody
     // points at a CLI it manages separately would fail in a terminal only —
@@ -207,10 +228,40 @@ export class TerminalManager {
     for (const id of [...this.terminals.keys()]) this.close(id);
   }
 
+  /**
+   * Close terminals running an engine that is no longer the active one.
+   *
+   * The PTY lives on globalThis, so it outlives the page reload an engine
+   * switch triggers — and `terminalCommand` resolved the engine ONCE, at spawn
+   * time, baking that binary into the `/bin/sh -c` wrapper. Everything else
+   * belonging to the old engine is torn down by the switch; without this the
+   * terminal panel reattaches to a live REPL of the PREVIOUS engine, still
+   * announcing it in the replay buffer, inside a Cody that reports a different
+   * engine everywhere else. Anything typed there — a login, a config edit —
+   * goes to the wrong engine.
+   *
+   * Plain shells are left alone: they carry no engineId, and a user's shell is
+   * not the switch's to close.
+   */
+  closeTerminalsForOtherEngines(activeEngineId: string): number {
+    let closed = 0;
+    for (const [id, record] of [...this.terminals.entries()]) {
+      if (!record.engineId || record.engineId === activeEngineId) continue;
+      this.close(id);
+      closed += 1;
+    }
+    return closed;
+  }
+
   private spawn(record: TerminalRecord, cols: number | undefined, rows: number | undefined, mode: SpawnMode): void {
     const shell = terminalCommand(mode);
     record.exited = false;
     delete record.exitCode;
+    // Re-stamped on every spawn: a record that respawns into a plain shell
+    // must stop claiming an engine, or a later switch would kill a shell the
+    // user is working in.
+    if (shell.engineId) record.engineId = shell.engineId;
+    else delete record.engineId;
     const child = pty.spawn(shell.command, shell.args, {
       name: "xterm-256color",
       cols: dimension(cols, 80),

@@ -693,9 +693,29 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
       try {
         const data = JSON.parse(e.data) as {
           type?: string;
+          engine?: string | null;
           runningSessionIds?: string[];
           refreshSessionList?: boolean;
         };
+        // An engine switch is instance-wide, but only the browser that clicked
+        // Switch reloads. Every other surface — a tablet, a phone over
+        // Tailscale, a second tab — keeps rendering the PREVIOUS engine's
+        // model roles, settings tabs and chat affordances, because
+        // capabilities are read once per page load and never re-read. Its
+        // sidebar meanwhile swaps to the new engine's sessions, so the two
+        // halves of the page disagree.
+        //
+        // Both ids must be present before acting: a frame with no engine (the
+        // server could not read the selection) or a page that booted without
+        // one says nothing, and treating either as a mismatch would reload in
+        // a loop.
+        if (data.engine && engineId && data.engine !== engineId) {
+          // assign("/") rather than reload(): `?session=<id>` names a session
+          // of the engine this page was showing, which the new one will not
+          // have.
+          window.location.assign("/");
+          return;
+        }
         if (data.type === "running") {
           sseAuthoritativeRef.current = true;
           setRunningSessionIds(new Set(data.runningSessionIds ?? []));
@@ -708,7 +728,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
 
     // On error EventSource auto-reconnects; keep the last known state meanwhile.
     return () => source.close();
-  }, [loadSessions]);
+  }, [loadSessions, engineId]);
 
   useEffect(() => {
     const previous = previousRunningSessionIdsRef.current;
