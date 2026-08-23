@@ -77,7 +77,10 @@ export const hermesHarness: HarnessAdapter = {
     // ACP carries MCP capabilities, but Cody's MCP editor writes omp's config
     // file; Hermes keeps its own. Not wired yet.
     mcp: false,
-    nativeSettings: false,
+    // Hermes declares ~550 settings in its own DEFAULT_CONFIG; Cody derives
+    // the schema from it, so the panel is real and stays current with
+    // upstream (lib/harness/hermes-settings.ts).
+    nativeSettings: true,
     // This flag gates the engine's OWN self-update route and the session
     // restart control, both of which are omp-specific. Cody installing
     // Hermes through uv is a different thing entirely, driven by installSpec.

@@ -328,7 +328,11 @@ function SchemaSettingRow({ setting, value, overridden, onChange }: {
   return (
     <NativeSetting
       label={setting.label}
-      description={description || setting.key}
+      // No fallback to the key: the row already prints it in mono below the
+      // control, so falling back duplicates it. Harmless while every setting
+      // carried a description (omp's do); Hermes declares none, which made it
+      // every row.
+      description={description || undefined}
       badge={setting.terminalOnly ? TERMINAL_ONLY_BADGE : undefined}
       searchId={`omp-${setting.key}`}
       control={
@@ -340,7 +344,7 @@ function SchemaSettingRow({ setting, value, overridden, onChange }: {
               <button
                 type="button"
                 onClick={() => onChange(null)}
-                title="Reset to OMP's default"
+                title="Reset to the engine's default"
                 style={{ display: "inline-flex", alignItems: "center", gap: 4, background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 10, padding: 0, flexShrink: 0 }}
               >
                 <RotateCcw size={11} aria-hidden="true" /> Reset

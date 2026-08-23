@@ -1,8 +1,9 @@
 # ACP engines: Hermes first, and what comes after
 
-Status: **plan** — phase 1 in progress. Owner-approved scope (2026-08-22):
-chat + settings for Hermes first, the rest planned here so it does not get
-dropped half-built.
+Status: **phase 1 done** (2026-08-23) — Hermes is a working Cody engine for
+chat and settings. Phases 2 and 3 are still plan. Owner-approved scope
+(2026-08-22): chat + settings for Hermes first, the rest planned here so it
+does not get dropped half-built.
 
 ## Why ACP at all
 
@@ -73,22 +74,55 @@ negotiates capabilities, and translates `session/update` into Cody's
 `fs/read_text_file` and `fs/write_text_file` against the workspace, permission
 requests, and cancellation.
 
-**1b. Hermes adapter** (`lib/harness/hermes.ts`). Capability flags set to what
-is actually true, so unsupported surfaces hide rather than break. Binary
-resolution follows the established ladder: `CODY_HERMES_BIN` → tools prefix →
-`PATH`.
+**1b. Hermes adapter** (`lib/harness/hermes.ts`) — DONE. Capability flags set
+to what is actually true, so unsupported surfaces hide rather than break.
+Binary resolution follows the established ladder: `CODY_HERMES_BIN` → tools
+prefix → `PATH`.
 
-**1c. Non-npm install.** Hermes is not on npm — it installs via a curl script
-or `uvx`. `lib/harness/install.ts` assumes `npm install -g --prefix`, so it
-gains a second mechanism. Non-negotiable: the new path carries the same guards
-the npm path just earned — measured disk preflight, stale-directory sweep, and
-a post-install binary probe before reporting success.
+Two things only a real install could have taught us, both now pinned by tests:
+the ACP server lives behind an extras marker, so the spec is
+`hermes-agent[acp]` and a plain `hermes-agent` installs fine and then exits
+"ACP dependencies not installed"; and `hermes --version` reports the *Python*
+version, so the adapter probes `hermes acp --version`.
 
-**1d. Settings.** Cody's "All OMP Settings" tab is generated from omp's own
-TypeScript schema. Hermes has no equivalent, but exposes
-`hermes config get <key> --json` (and `--json` on many other subcommands), so
-its settings surface is driven by the CLI instead. Includes models/providers
-configuration.
+**1c. Non-npm install** — DONE. Hermes is not on npm. `lib/harness/install.ts`
+gained a second mechanism, `installVia: "uv"`, running `uv tool install
+--force` with `UV_TOOL_DIR`/`UV_TOOL_BIN_DIR`/`UV_CACHE_DIR` pointed inside
+the same persistent tools prefix npm installs into — so a PyPI engine
+survives a container replacement exactly as an npm one does, and lands its
+binary on the same `PATH`. `uv` is now in the image (`docker/Dockerfile`).
+The new path carries every guard the npm path earned: measured disk
+preflight, stale-directory sweep, and a post-install binary probe before
+reporting success. The update check is ecosystem-aware too — PyPI's
+`info.version` rather than npm's `dist-tags.latest`.
+
+**1d. Settings** (`lib/harness/hermes-settings.ts`) — DONE, but **not** the
+way this plan first said. `hermes config get --json` returns *values*, and a
+panel built from values can only ever show settings the user already set —
+the opposite of the property that makes Cody's omp panel worth having.
+
+What it does instead: Hermes declares every setting and its default in
+`hermes_cli.config.DEFAULT_CONFIG`, a nested Python dict. Cody reads THAT, by
+invoking the venv interpreter `uv tool install` places beside the binary —
+the same trick as reading omp's TypeScript schema through jiti: ask the
+engine's own runtime. 553 settings in 53 groups, including models and
+providers. Hermes adds a setting upstream, Cody shows it, with no Cody
+release.
+
+`DEFAULT_CONFIG` carries no UI metadata, so the module derives only what it
+honestly can (a label from the key, a control from the default's type) and
+invents nothing. Writes go through `hermes config set`, never by editing the
+YAML: the CLI owns validation, coercion and config migration, and a file Cody
+wrote behind its back is one Hermes can then refuse to load. The schema is
+memoized against the venv's mtime, so a `--force` reinstall at the same path
+re-reads rather than serving the old version's settings.
+
+Panel reuse was total — `app/api/omp-settings/schema/route.ts` dispatches on
+the active harness and returns the same shape, so `OmpSchemaSettings.tsx`
+renders Hermes with no engine-specific code. It did expose one latent bug:
+the row fell back to printing the setting key as its description, harmless
+while every setting had one (omp's do) and duplicated on every row for
+Hermes, which declares none.
 
 ## Phase 2 — the Hermes-specific features worth having
 
