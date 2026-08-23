@@ -2,6 +2,7 @@ import { homedir } from "os";
 import path from "path";
 import { AcpEngineSession } from "./acp-session";
 import { getEngineVersion, resolveEngineBin } from "./engine-bin";
+import { readHermesMemory } from "./hermes-memory";
 import type { EngineSession, EngineSessionOptions, HarnessAdapter } from "./types";
 
 /**
@@ -92,10 +93,15 @@ export const hermesHarness: HarnessAdapter = {
     advisor: false,
     // ACP has no subagent vocabulary at all, so the roster would stay empty.
     subagents: false,
+    // Hermes' built-in memory is two markdown files it maintains itself
+    // (MEMORY.md, USER.md) — the thing that makes it Hermes, and the one
+    // question users have about it: what does it think it knows about me?
+    memory: true,
   },
   resolveBinary: () => resolveEngineBin("hermes", "HERMES"),
   getVersion: () => getEngineVersion("hermes", "HERMES", ["acp", "--version"]),
   getAgentDir: () => hermesHome(),
+  readMemory: () => readHermesMemory(hermesHome()),
   // Hermes stores conversations in SQLite rather than a directory of
   // transcripts; this path exists so the adapter contract is satisfied, and
   // the session list comes from the engine-sessions sidecar instead.

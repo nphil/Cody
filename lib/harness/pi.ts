@@ -93,6 +93,7 @@ export const piHarness: HarnessAdapter = {
     fastMode: false,
     advisor: false,
     subagents: false,
+    memory: false,
   },
   resolveBinary: () => resolveEngineBin("pi", "PI"),
   getVersion: () => getEngineVersion("pi", "PI"),
