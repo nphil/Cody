@@ -1103,7 +1103,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
    *  the composer will not send until they have landed. */
   const [preparingImageCount, setPreparingImageCount] = useState(0);
   const trimmedValue = value.trimStart();
-  const bashMode = attachedImages.length === 0 && attachedTextFiles.length === 0 && trimmedValue.startsWith("!");
+  // Shell mode is an rpc-dialect affordance: an ACP session's vocabulary has no
+  // `bash` command, so tinting the composer and promising "output sent to model"
+  // on one of those engines advertises something it will reject. There a leading
+  // `!` is just the first character of the prompt.
+  const bashMode = chatExtras && attachedImages.length === 0 && attachedTextFiles.length === 0 && trimmedValue.startsWith("!");
   const bashExcluded = bashMode && trimmedValue.startsWith("!!");
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);

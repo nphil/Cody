@@ -20,6 +20,7 @@ import { extractLoopbackUrls, normalizePreviewUrl } from "@/lib/preview-url";
 import { derivePersistedContextUsage, type ContextUsageValue } from "@/lib/context-usage";
 import type { ThinkingModelMeta } from "@/lib/thinking-levels";
 import { sendAgentCommand } from "@/lib/agent-client";
+import { engineSupports } from "@/lib/engine-capabilities";
 import { translate } from "@/lib/i18n";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { createMessageUpdateCoalescer, type MessageUpdateCoalescer } from "@/lib/message-update-coalescer";
@@ -2839,7 +2840,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (agentRunningRef.current || bashRunningRef.current) return false;
     const isSlashCommandPrompt = !images?.length && trimmedMessage.startsWith("/");
 
-    const isBashCommand = !images?.length && trimmedMessage.startsWith("!");
+    // Shell mode belongs to the rpc-dialect engines. An ACP session accepts no
+    // `bash` command, so intercepting the `!` there would turn the user's line
+    // into a request the engine rejects as unsupported and nothing would be
+    // sent at all; the flag keeps it an ordinary first character so the line
+    // falls through to the prompt path verbatim. The hook has no props path to
+    // the capability set, so it reads the same memoized `/api/info` snapshot.
+    const isBashCommand = !images?.length && trimmedMessage.startsWith("!")
+      && await engineSupports("chatExtras");
     if (isBashCommand) {
       const isExcluded = trimmedMessage.startsWith("!!");
       const bashCmd = (isExcluded ? trimmedMessage.slice(2) : trimmedMessage.slice(1)).trim();

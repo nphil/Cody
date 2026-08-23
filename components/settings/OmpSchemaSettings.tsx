@@ -50,14 +50,14 @@ function isInlineControl(setting: OmpSetting): boolean {
  * row is shown unconditionally and may have no effect. Camel-case splits at
  * lowercase→uppercase boundaries only, so an acronym run ("macOS",
  * "hasSIXELSupport") survives instead of shattering into letters. */
-function describeCondition(condition: string): string | null {
+function describeCondition(condition: string, harnessLabel: string): string | null {
   if (SETTING_CONDITIONS[condition] || HOST_CONDITIONS[condition]) return null;
   const words = condition
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
     .split(" ")
     .map((word) => (word.length > 1 && word === word.toUpperCase() ? word : word.toLowerCase()))
     .join(" ");
-  return `Only takes effect when OMP reports ${words}.`;
+  return `Only takes effect when ${harnessLabel} reports ${words}.`;
 }
 
 /** A setting's current value, falling back to the schema default so a control
@@ -98,7 +98,7 @@ export function OmpSchemaSettings({ isMobile, harnessLabel = "OMP", onSaved, rel
       if (data.error) throw new Error(data.error);
       if (!data.schema) {
         setStatus("unavailable");
-        setReason(data.reason ?? "OMP's settings schema is unavailable");
+        setReason(data.reason ?? `${harnessLabel}'s settings schema is unavailable`);
         return;
       }
       setSchema(data.schema);
@@ -110,7 +110,7 @@ export function OmpSchemaSettings({ isMobile, harnessLabel = "OMP", onSaved, rel
       setStatus("unavailable");
       setReason(cause instanceof Error ? cause.message : String(cause));
     }
-  }, []);
+  }, [harnessLabel]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -208,7 +208,7 @@ export function OmpSchemaSettings({ isMobile, harnessLabel = "OMP", onSaved, rel
   }, [schema, visible, currentTab, query]);
 
   if (status === "loading") {
-    return <div role="status" style={{ padding: 20, fontSize: 12, color: "var(--text-muted)" }}>Reading OMP&apos;s settings schema…</div>;
+    return <div role="status" style={{ padding: 20, fontSize: 12, color: "var(--text-muted)" }}>Reading {harnessLabel}&apos;s settings schema…</div>;
   }
 
   if (status === "unavailable") {
@@ -261,7 +261,7 @@ export function OmpSchemaSettings({ isMobile, harnessLabel = "OMP", onSaved, rel
       )}
 
       {!query && (
-        <nav aria-label="OMP settings sections" role="tablist" style={{ display: "flex", gap: 3, flexWrap: "wrap" }}>
+        <nav aria-label={`${harnessLabel} settings sections`} role="tablist" style={{ display: "flex", gap: 3, flexWrap: "wrap" }}>
           {tabs.map((tab) => {
             const selected = tab.id === currentTab;
             return (
@@ -301,6 +301,7 @@ export function OmpSchemaSettings({ isMobile, harnessLabel = "OMP", onSaved, rel
               <SchemaSettingRow
                 key={setting.key}
                 setting={setting}
+                harnessLabel={harnessLabel}
                 value={effectiveValue(setting, values)}
                 overridden={values[setting.key] !== undefined}
                 onChange={(next) => update(setting.key, next)}
@@ -313,15 +314,16 @@ export function OmpSchemaSettings({ isMobile, harnessLabel = "OMP", onSaved, rel
   );
 }
 
-function SchemaSettingRow({ setting, value, overridden, onChange }: {
+function SchemaSettingRow({ setting, harnessLabel, value, overridden, onChange }: {
   setting: OmpSetting;
+  harnessLabel: string;
   value: OmpSettingValue | undefined;
   overridden: boolean;
   onChange: (value: OmpSettingValue | null) => void;
 }) {
   const description = [
     setting.description,
-    setting.condition ? describeCondition(setting.condition) : null,
+    setting.condition ? describeCondition(setting.condition, harnessLabel) : null,
     setting.readOnly ? setting.readOnlyReason : null,
   ]
     .filter(Boolean)

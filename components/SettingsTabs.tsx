@@ -140,7 +140,11 @@ export const OMP_ENGINE_ID = "omp";
 
 /** The Extensions & Tools group description, composed from what the active
  * engine actually serves so a skills-only engine (pi) is not promised MCP. */
-function extensionsGroupDescription(capabilities: EngineCapabilities): string {
+/** What this group actually offers on the ACTIVE engine. Shared by the tab
+ * entry and the panel heading: the panel is no longer hidden on an engine
+ * without MCP, so a hardcoded "MCP servers, skills and OMP plugins" there
+ * would name three things a pi or Hermes user does not have. */
+export function extensionsGroupDescription(capabilities: EngineCapabilities): string {
   const parts = [
     ...(capabilities.mcp ? ["MCP servers"] : []),
     ...(capabilities.skills ? ["skills"] : []),
