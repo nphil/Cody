@@ -418,6 +418,9 @@ export interface UseAgentSessionOptions {
   session: SessionInfo | null;
   newSessionCwd: string | null;
   advisorEnabled?: boolean;
+  /** False when the active engine has no subagents: skip the roster call
+   * entirely rather than provoking an "unsupported" rejection per send. */
+  subagentsCapable?: boolean;
   /** The Interface & Behavior preference. When thinking is shown by default,
    *  session loads must NOT defer thinking text: a deferred block renders
    *  expanded-but-empty, the load's pin-to-bottom lands, and then hundreds of
@@ -1049,6 +1052,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // currently-running subagents, so this fills gaps after an SSE reconnect or
   // a missed lifecycle frame; it never reports finished runs.
   const refreshSubagentRoster = useCallback(async (sid: string) => {
+    // Engines without subagents answer get_subagents with an "unsupported"
+    // 400 — tolerated by design, but asking anyway means a console error on
+    // every send for Claude, Codex and any ACP engine. The capability is
+    // already known; respect it.
+    if (opts.subagentsCapable === false) return;
     const requestedAt = Date.now();
     const runId = promptRunIdRef.current;
     const generation = subagentRosterGenerationRef.current;
@@ -1083,7 +1091,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch {
       // Best effort: subagent_lifecycle/progress frames are the primary source.
     }
-  }, [mergeSubagents, refreshSubagentHistory]);
+  }, [mergeSubagents, refreshSubagentHistory, opts.subagentsCapable]);
 
   // Clear per-run activity state at run end. MUST also cancel the pending
   // version-flush rAF: a queued subagent_event flush would otherwise repopulate
