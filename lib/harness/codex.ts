@@ -233,6 +233,7 @@ export const codexHarness: HarnessAdapter = {
     // file. Not wired.
     mcp: false,
     nativeSettings: false,
+    configEditor: false,
     // The engine's OWN self-update route and session restart, both omp-shaped.
     // Cody installing Codex is a different thing, driven by installSpec.
     updates: false,

@@ -20,6 +20,7 @@ export const ompHarness: HarnessAdapter = {
     plugins: true,
     mcp: true,
     nativeSettings: true,
+    configEditor: true,
     updates: true,
     chatExtras: true,
     fastMode: true,

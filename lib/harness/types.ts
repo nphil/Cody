@@ -38,6 +38,17 @@ export interface HarnessCapabilities {
   mcp: boolean;
   /** Native harness settings editing (config.yml-style allow-listed keys). */
   nativeSettings: boolean;
+  /**
+   * Cody has HAND-BUILT editors for this engine's own config file — the
+   * Safety, AI Model Defaults and Agent & Intelligence tabs, which read and
+   * write omp's config.yml through /api/omp-settings.
+   *
+   * Distinct from `nativeSettings`, which is the schema-DRIVEN panel any
+   * engine can have by declaring its settings. Hermes has the latter and not
+   * the former: conflating them put three tabs of omp's controls on a Hermes
+   * install, where every Save wrote a file Hermes never reads.
+   */
+  configEditor: boolean;
   /** Harness self-update checks and restarts. */
   updates: boolean;
   /**

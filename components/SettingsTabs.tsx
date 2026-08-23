@@ -32,6 +32,7 @@ export interface EngineCapabilities {
   plugins: boolean;
   mcp: boolean;
   nativeSettings: boolean;
+  configEditor: boolean;
   updates: boolean;
   chatExtras: boolean;
   fastMode: boolean;
@@ -63,6 +64,7 @@ export const ALL_CAPABILITIES: EngineCapabilities = {
   plugins: true,
   mcp: true,
   nativeSettings: true,
+  configEditor: true,
   updates: true,
   chatExtras: true,
   fastMode: true,
@@ -173,14 +175,14 @@ export function getSettingsCategories(
 export const SETTINGS_CATEGORIES: TabItem[] = [
   { id: "accounts", label: "User Accounts", description: "Your profile, password, and who can sign in", Icon: UserRound },
   { id: "general", label: "Interface & Behavior", description: "UI preferences, completion sound, submission mode", Icon: Settings2 },
-  { id: "safety", label: "Safety & Approvals", description: "Tool safety rules, YOLO mode, terminal permissions", Icon: ShieldCheck, needsCapability: "nativeSettings" },
-  { id: "models", label: "AI Model Defaults", description: "Reasoning budget, verbosity, personality, scratchpad", Icon: Cpu, needsCapability: "nativeSettings" },
+  { id: "safety", label: "Safety & Approvals", description: "Tool safety rules, YOLO mode, terminal permissions", Icon: ShieldCheck, needsCapability: "configEditor" },
+  { id: "models", label: "AI Model Defaults", description: "Reasoning budget, verbosity, personality, scratchpad", Icon: Cpu, needsCapability: "configEditor" },
   { id: "providers", label: "API Keys & Providers", description: "Connected OAuth accounts, API keys, and model registry", Icon: KeyRound, needsCapability: "models" },
   // No needsCapability: this scans the network Cody itself runs on, not
   // anything the active engine serves, so it stays visible on every engine —
   // and is just as useful on a headless Docker install as on desktop.
   { id: "localai", label: "Local AI", description: "Detect Ollama, LM Studio, and llama.cpp running near this instance", Icon: Server },
-  { id: "intelligence", label: "Agent & Intelligence", description: "Advisor, memory, autolearn, compaction and retry", Icon: Sparkles, needsCapability: "nativeSettings" },
+  { id: "intelligence", label: "Agent & Intelligence", description: "Advisor, memory, autolearn, compaction and retry", Icon: Sparkles, needsCapability: "configEditor" },
   // Sits next to Agent & Intelligence — that tab CONFIGURES memory, this one
   // shows what the engine actually wrote. Hidden unless the engine can hand
   // its memory back (Hermes today; omp keeps memory but cannot read it out).
