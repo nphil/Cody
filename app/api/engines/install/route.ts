@@ -47,6 +47,9 @@ export async function POST(request: Request) {
   // Optional version pin — the revert path after a broken update. Anything
   // else keeps the adapter's own spec (@latest).
   let installSpec = adapter.installSpec;
+  // Companion packages default to the adapter's own `@latest` pins, i.e. an
+  // update moves every half of the engine forward together.
+  let installAlso = adapter.installAlso;
   if (body.version !== undefined) {
     const version = typeof body.version === "string" ? body.version.trim() : "";
     if (!/^\d+\.\d+\.\d+(-[\w.]+)?$/.test(version)) {
@@ -59,6 +62,19 @@ export async function POST(request: Request) {
     installSpec = adapter.installVia === "uv"
       ? `${adapter.installSpec}==${version}`
       : `${packageNameFromSpec(adapter.installSpec)}@${version}`;
+    // A two-package engine has to go back as a PAIR. Pinning the adapter to
+    // the version an update replaced while letting the CLI install `@latest`
+    // is not a revert: if the CLI is what broke, the "revert" reinstalls the
+    // break, and the combination the user lands on is one that never ran on
+    // this instance. The CLI pin comes from the history record for exactly
+    // this adapter version — reverting to some other version has no recorded
+    // partner, so the companion stays at `@latest`.
+    const record = readInstallHistory()[adapter.id];
+    const cliPackage = adapter.engineCli?.packageName;
+    if (cliPackage && record?.previousVersion === version && record.previousEngineVersion) {
+      installAlso = adapter.installAlso?.map((spec) =>
+        packageNameFromSpec(spec) === cliPackage ? `${cliPackage}@${record.previousEngineVersion}` : spec);
+    }
   }
 
   try {
@@ -67,13 +83,19 @@ export async function POST(request: Request) {
     // against an already-broken engine would otherwise overwrite the recorded
     // revert target with "nothing", losing the last known-good version.
     const currentVersion = (await adapter.getVersion()) ?? undefined;
+    // The other half of the pair, for the same reason. Null (not undefined)
+    // when this engine has no CLI half or it cannot be read: the record is
+    // written as a unit, and a missing partner must read as "none recorded"
+    // rather than resurrecting the one from the install before last.
+    const currentEngineVersion = adapter.engineCli ? await adapter.engineCli.getVersion() : null;
     await installEngine({
       id: adapter.id,
       installSpec,
       binaryName: adapter.binaryName,
       currentVersion,
+      currentEngineVersion,
       installVia: adapter.installVia,
-      installAlso: adapter.installAlso,
+      installAlso,
       skipNativeOptional: adapter.skipNativeOptional,
       engineEnv: adapter.engineEnv?.bind(adapter),
       versionArgs: adapter.versionArgs,
@@ -115,9 +137,15 @@ export async function POST(request: Request) {
     : { version: null, error: `The installer finished but no ${adapter.binaryName} binary is installed.` };
 
   if (!probe.version) {
-    const previousVersion = readInstallHistory()[adapter.id]?.previousVersion ?? null;
+    const record = readInstallHistory()[adapter.id];
+    const previousVersion = record?.previousVersion ?? null;
+    // The number the revert button offers is the one a user recognizes: for a
+    // two-package engine that is the CLI's, not the adapter's. Both are
+    // restored either way — this sentence just has to name the same version
+    // the button does, or the two read as different offers.
+    const revertTarget = record?.previousEngineVersion ?? previousVersion;
     const recovery = previousVersion
-      ? ` Reverting to ${previousVersion}, the version this install replaced, should restore a working engine.`
+      ? ` Reverting to ${revertTarget}, the version this install replaced, should restore a working engine.`
       : "";
     // Live sessions are deliberately left alone here: restarting them onto an
     // engine that just failed its own version probe would take working chats

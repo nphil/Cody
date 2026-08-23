@@ -70,6 +70,10 @@ type SettingIndexEntry = {
   /** Overrides the label-derived anchor; schema settings key theirs by path so
    * two panels sharing a label do not fight over the highlight. */
   searchId?: string;
+  /** Flag the card itself is gated on. Search must not offer a jump to a
+   * control the active engine does not render — the tab can be visible while
+   * one card inside it is not. */
+  needsCapability?: keyof EngineCapabilities;
 };
 
 // NOTE: This index mirrors the <NativeSetting label=...> cards rendered in the
@@ -84,7 +88,7 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   { tab: "general", section: "Interface & Behavior", label: "Keep tool calls collapsed", description: "Show only compact headers while tools execute.", scope: "Cody only" },
   { tab: "general", section: "Interface & Behavior", label: "Expand thinking blocks", description: "Show the model's reasoning open by default instead of behind a collapsed header.", scope: "Cody only" },
   { tab: "general", section: "Interface & Behavior", label: "Completion sound", description: "Play a tone when the agent completes a run.", scope: "Cody only" },
-  { tab: "general", section: "Interface & Behavior", label: "Message during active run", description: "What composer does on submit while agent runs. Steer interrupts; Queue follow-up delivers after finish.", scope: "Cody only" },
+  { tab: "general", section: "Interface & Behavior", label: "Message during active run", description: "What composer does on submit while agent runs. Steer interrupts; Queue follow-up delivers after finish.", scope: "Cody only", needsCapability: "chatExtras" },
   { tab: "general", section: "Interface & Behavior", label: "Terminal soft keys", description: "Choose the buttons shown below the terminal on touch devices.", scope: "Cody only" },
   // Tool Safety & Approvals
   { tab: "safety", section: "Tool Safety & Approvals", label: "Approval Mode", description: "Choose when OMP asks before tool calls." },
@@ -426,8 +430,9 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
       }
     }
     for (const setting of [...SETTING_INDEX, ...schemaSearchIndex]) {
-      // Never hand out a jump to a panel this engine does not render.
+      // Never hand out a jump to a panel — or a card — this engine does not render.
       if (!visibleTabs.has(setting.tab)) continue;
+      if (setting.needsCapability && !capabilities[setting.needsCapability]) continue;
       const haystack = `${setting.label} ${setting.description} ${setting.section}`.toLowerCase();
       if (haystack.includes(trimmedQuery)) {
         results.push({ id: setting.searchId ?? slugify(setting.label), kind: "setting", tab: setting.tab, label: setting.label, description: setting.description, scope: setting.scope, section: setting.section });
@@ -552,20 +557,26 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                     ))}
                   </select>
                 </NativeSetting>
-                <NativeSetting label="Message during active run" description="What composer does on submit while agent runs. Steer interrupts; Queue follow-up delivers after finish." scope="Cody only">
-                  <select
-                    style={nativeSelectStyle}
-                    value={submitBehavior}
-                    onChange={(event) => {
-                      const next = event.target.value as SubmitDuringRunBehavior;
-                      setSubmitDuringRunBehavior(next);
-                      setSubmitBehavior(next);
-                    }}
-                  >
-                    <option value="steer" style={nativeOptionStyle}>Steer current run</option>
-                    <option value="queue" style={nativeOptionStyle}>Queue follow-up</option>
-                  </select>
-                </NativeSetting>
+                {/* Steering and the follow-up queue are rpc-dialect commands.
+                    On an engine without chatExtras nothing can be submitted
+                    mid-turn at all, so this choice governs nothing — it is
+                    hidden rather than left as a setting that does nothing. */}
+                {capabilities.chatExtras && (
+                  <NativeSetting label="Message during active run" description="What composer does on submit while agent runs. Steer interrupts; Queue follow-up delivers after finish." scope="Cody only">
+                    <select
+                      style={nativeSelectStyle}
+                      value={submitBehavior}
+                      onChange={(event) => {
+                        const next = event.target.value as SubmitDuringRunBehavior;
+                        setSubmitDuringRunBehavior(next);
+                        setSubmitBehavior(next);
+                      }}
+                    >
+                      <option value="steer" style={nativeOptionStyle}>Steer current run</option>
+                      <option value="queue" style={nativeOptionStyle}>Queue follow-up</option>
+                    </select>
+                  </NativeSetting>
+                )}
                 <NativeSetting
                   label="Terminal soft keys"
                   description="Choose the buttons shown below the terminal on touch devices. Shift Tab moves backward through terminal UI modes."
@@ -711,7 +722,7 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
             {/* API KEYS & PROVIDERS TAB */}
             {(visitedTabs.has("providers") || visitedTabs.has("models")) && (
               <div role="tabpanel" id="settings-panel-providers" aria-labelledby="settings-tab-providers" style={{ display: (currentTab === "providers" || activeTab === "providers") ? "flex" : "none", height: "100%", minHeight: 0, flexDirection: "column" }}>
-                <ModelsConfig embedded onClose={onClose} onSaved={onModelsSaved} />
+                <ModelsConfig embedded engineId={engine?.id ?? null} onClose={onClose} onSaved={onModelsSaved} />
               </div>
             )}
 

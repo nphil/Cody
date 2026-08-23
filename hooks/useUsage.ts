@@ -43,8 +43,15 @@ export interface UseUsageResult {
  * useDesktopShell's mount-only-then-sync shape. A failed fetch never throws
  * into render — it just leaves the previous snapshot in place and raises
  * `failed`, so the UI can say "not read" instead of speaking for the engine.
+ *
+ * `enabled: false` makes the hook inert — no fetch, no timer, no snapshot.
+ * The route answers `{available: false, reason}` for an engine that reports no
+ * plan quota, which is a value rather than an error; the meter hides on it, so
+ * polling every 90 seconds for a widget nobody will ever see is pure noise.
+ * Passing `false` before the active engine is known and `true` after is the
+ * normal case: the effect re-runs on the flip.
  */
-export function useUsage(): UseUsageResult {
+export function useUsage(enabled = true): UseUsageResult {
   const [snapshot, setSnapshot] = useState<UsageSnapshot | null>(null);
   // Starts true: before the first response there is nothing to report, and
   // `loading: false` there would read as a settled "no quota" answer.
@@ -129,6 +136,7 @@ export function useUsage(): UseUsageResult {
 
   useEffect(() => {
     mountedRef.current = true;
+    if (!enabled) return;
     loadRef.current();
 
     // Coming back into view/focus reschedules the pending timer at whatever
@@ -154,10 +162,13 @@ export function useUsage(): UseUsageResult {
       // leaving dev with no usage data until the next poll.
       inFlightRef.current = false;
     };
-    // Mount-only: load/scheduleNext are read through refs/stable callbacks so
-    // this effect never needs to re-run.
+    // load/scheduleNext are read through refs/stable callbacks, so `enabled`
+    // is the only reason this effect ever re-runs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [enabled]);
 
-  return { snapshot, loading, failed, refresh };
+  // Disabled reports a settled "nothing to say", never "still checking": a
+  // caller that renders on `loading` must not spin forever on a hook that
+  // will never fetch.
+  return enabled ? { snapshot, loading, failed, refresh } : { snapshot: null, loading: false, failed: false, refresh };
 }

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requireEngine } from "@/lib/engine-guard";
 import { apiErrorResponse } from "@/lib/api-utils";
 import { invalidateModelsCache } from "@/lib/models-cache";
 import { disposeUtilityRpc } from "@/lib/omp/rpc-utility";
@@ -12,7 +13,12 @@ import {
 
 export const dynamic = "force-dynamic";
 
+/** omp's `models.yml` — its provider/model registry file, in its own schema. */
+const SURFACE = "OMP's models.yml";
+
 export async function GET() {
+  const gate = requireEngine("omp", SURFACE);
+  if ("response" in gate) return gate.response;
   const file = readModelsConfigFile();
   if (file.parseError) {
     // The editor must show the failure instead of an empty form — an empty
@@ -31,6 +37,8 @@ export async function GET() {
 // Refuses to write while models.yml is unparseable unless ?overwrite=true.
 export async function PUT(req: Request) {
   try {
+    const gate = requireEngine("omp", SURFACE);
+    if ("response" in gate) return gate.response;
     const overwriteUnparseable = new URL(req.url).searchParams.get("overwrite") === "true";
     const body = await req.json() as ModelsFileConfig;
     try {

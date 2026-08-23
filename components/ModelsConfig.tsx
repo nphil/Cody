@@ -60,7 +60,7 @@ import NvidiaColorIcon from "@lobehub/icons/es/Nvidia/components/Color";
 import OpenCodeIcon from "@lobehub/icons/es/OpenCode/components/Mono";
 import XiaomiMiMoIcon from "@lobehub/icons/es/XiaomiMiMo/components/Mono";
 import ZAIIcon from "@lobehub/icons/es/ZAI/components/Mono";
-import { STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
+import { engineScopedKey, STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
 
 type IconComponent = React.ComponentType<{ size?: number | string; style?: React.CSSProperties }>;
 
@@ -543,7 +543,6 @@ function NativeRegistryDetail({ models, connectedProviders, defaultModelKey, onC
   </div>;
 }
 
-const COMPOSER_MODELS_STORAGE_KEY = STORAGE_KEYS.composerModels;
 
 function ModelRolesDetail({ models }: { models: RuntimeModelEntry[] }) {
   const [roles, setRoles] = useState<Record<string, string>>({});
@@ -1969,7 +1968,17 @@ export function AddProviderPicker({
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }: { onClose: () => void; onSelectTab?: (tab: SettingsTab) => void; onSaved?: () => void; embedded?: boolean }) {
+export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false, engineId = null }: {
+  onClose: () => void;
+  onSelectTab?: (tab: SettingsTab) => void;
+  onSaved?: () => void;
+  embedded?: boolean;
+  /** Active engine id. The composer's pinned-model list is an allowlist over
+   * ONE engine's catalog, so it is stored per engine; null (identity not
+   * known yet) means the list cannot be addressed and the toggles stay
+   * inert rather than writing into another engine's slot. */
+  engineId?: string | null;
+}) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
   const [config, setConfig] = useState<ModelsFileData>({ providers: {} });
@@ -2058,25 +2067,28 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
     loadRuntimeModels();
   }, [loadConfig, loadOAuthProviders, loadApiKeyProviders, loadRuntimeModels]);
 
+  const composerModelsKey = engineScopedKey(STORAGE_KEYS.composerModels, engineId);
   useEffect(() => {
+    if (!composerModelsKey) return;
     try {
-      const stored = JSON.parse(localStorage.getItem(COMPOSER_MODELS_STORAGE_KEY) ?? "null");
+      const stored = JSON.parse(localStorage.getItem(composerModelsKey) ?? "null");
       if (Array.isArray(stored)) setVisibleModelKeys(new Set(stored.filter((item): item is string => typeof item === "string")));
     } catch {
       // Invalid UI-only preferences fall back to showing all native runtime models.
     }
-  }, []);
+  }, [composerModelsKey]);
 
   const setComposerModelVisible = useCallback((model: RuntimeModelEntry, visible: boolean) => {
     setVisibleModelKeys((current) => {
       const next = new Set(current ?? runtimeModels.map((entry) => `${entry.provider}:${entry.id}`));
       const key = `${model.provider}:${model.id}`;
       if (visible) next.add(key); else next.delete(key);
-      localStorage.setItem(COMPOSER_MODELS_STORAGE_KEY, JSON.stringify([...next]));
+      if (!composerModelsKey) return current;
+      localStorage.setItem(composerModelsKey, JSON.stringify([...next]));
       window.dispatchEvent(new Event(STORAGE_EVENTS.composerModelsChange));
       return next;
     });
-  }, [runtimeModels]);
+  }, [runtimeModels, composerModelsKey]);
 
   const setComposerProviderVisible = useCallback((provider: string, visible: boolean) => {
     setVisibleModelKeys((current) => {
@@ -2086,11 +2098,12 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
         const key = `${model.provider}:${model.id}`;
         if (visible) next.add(key); else next.delete(key);
       }
-      localStorage.setItem(COMPOSER_MODELS_STORAGE_KEY, JSON.stringify([...next]));
+      if (!composerModelsKey) return current;
+      localStorage.setItem(composerModelsKey, JSON.stringify([...next]));
       window.dispatchEvent(new Event(STORAGE_EVENTS.composerModelsChange));
       return next;
     });
-  }, [runtimeModels]);
+  }, [runtimeModels, composerModelsKey]);
 
   const enableConnectedProvider = useCallback(async (provider: string) => {
     const response = await fetch("/api/providers/enable", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider }) });

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireUser } from "@/lib/auth/http";
+import { getHarness } from "@/lib/harness";
 import { getUsageSnapshot } from "@/lib/usage/cache";
 import type { UsageSnapshot } from "@/lib/usage/types";
 
@@ -18,6 +19,23 @@ function emptySnapshot(reason: string): UsageSnapshot {
 export async function GET(request: Request) {
   const resolved = requireUser(request);
   if ("response" in resolved) return resolved.response;
+
+  // `omp usage --json` is the ONLY reader lib/usage has, so this route can
+  // only answer for omp. It used to answer for every engine: on Hermes the
+  // composer's quota ring reported an OMP account's exhaustion, polled every
+  // 90 seconds, for a subscription the running agent was not spending.
+  //
+  // The refusal is a VALUE, not an error — an unavailable snapshot is a
+  // well-formed answer this endpoint already returns for a missing binary,
+  // and the meter is built to hide on it. A 4xx here would paint an error
+  // over a widget whose honest state is simply "nothing to show".
+  const harness = getHarness();
+  if (harness.id !== "omp") {
+    return NextResponse.json(
+      emptySnapshot(`${harness.displayName} does not report plan quota to Cody.`),
+      { headers: { "Cache-Control": "no-store" } },
+    );
+  }
 
   try {
     // The client poll is itself the refresh trigger, so wait for the fresh

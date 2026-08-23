@@ -1,6 +1,6 @@
+import { getHarness } from "./harness";
 import { runOneShotModel } from "./model-plan/one-shot";
 import { readModelRoles } from "./omp/model-roles";
-import { resolveOmpBin } from "./omp/omp-cli";
 import { sanitizeSessionTitle } from "./session-title";
 
 /**
@@ -170,13 +170,21 @@ export function normalizeSessionName(raw: string): string | null {
 }
 
 /**
- * The model that names sessions. `tiny` is the role omp reserves for exactly
- * this ("titles and classifiers run constantly"), so an operator who has tuned
- * their roles has already answered this question. Unset, no model is passed at
- * all and omp resolves its own — better than Cody guessing a selector that may
- * not be signed in.
+ * The model that names sessions, when the ACTIVE engine is omp. `tiny` is the
+ * role omp reserves for exactly this ("titles and classifiers run
+ * constantly"), so an operator who has tuned their roles has already answered
+ * this question.
+ *
+ * `modelRoles` is a key of omp's OWN config.yml, so it is read only when omp
+ * is the engine being run. It used to be read unconditionally: pi writes the
+ * same .jsonl format, so a pi session reached this path and was named by a
+ * model selector out of omp's config — resolved by pi, billed to whichever
+ * provider that selector happened to name. Under any other engine no model is
+ * passed at all and the engine resolves its own default, which is better than
+ * Cody handing it a selector from a file it has never read.
  */
-function namerModel(): string | undefined {
+function namerModel(harnessId: string): string | undefined {
+  if (harnessId !== "omp") return undefined;
   try {
     return readModelRoles().roles.tiny?.trim() || undefined;
   } catch {
@@ -191,12 +199,18 @@ export async function generateSessionName(firstMessage: string | undefined): Pro
   const message = firstMessage?.trim();
   if (!message || message === "(no messages)") return null;
 
-  const bin = resolveOmpBin();
+  const harness = getHarness();
+  // Print mode (`-p --mode=json`) is the rpc dialect's CLI, not a universal
+  // one. An ACP engine has no equivalent Cody can drive, and guessing an argv
+  // for one would spawn it with flags it never declared — so those sessions
+  // keep the truncated first message, which is what they had before.
+  if (!harness.rpcUi) return null;
+  const bin = harness.resolveBinary();
   if (!bin) return null;
 
   const answer = await runOneShotModel({
     bin,
-    model: namerModel(),
+    model: namerModel(harness.id),
     systemPrompt: SYSTEM_PROMPT,
     prompt: [
       "Name this coding session.",

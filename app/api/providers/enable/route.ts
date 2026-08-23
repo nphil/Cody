@@ -1,10 +1,14 @@
 import { NextResponse } from "next/server";
+import { requireEngine } from "@/lib/engine-guard";
 import { invalidateModelsCache } from "@/lib/models-cache";
 import { enableProvider } from "@/lib/omp/model-roles";
 import { disposeUtilityRpc } from "@/lib/omp/rpc-utility";
 
 export async function POST(request: Request) {
   try {
+    // Writes omp's `disabledProviders` in its own config.yml.
+    const gate = requireEngine("omp", "Provider enablement");
+    if ("response" in gate) return gate.response;
     const body = await request.json() as { provider?: unknown };
     if (typeof body.provider !== "string" || !body.provider.trim()) {
       return NextResponse.json({ error: "provider is required" }, { status: 400 });

@@ -1,3 +1,4 @@
+import { requireEngine } from "@/lib/engine-guard";
 import { readModelsConfig } from "@/lib/omp/models-config";
 import { type OmpLoginProvider, type OmpModel, runUtilityCommand } from "@/lib/omp/rpc-utility";
 
@@ -11,6 +12,9 @@ export const dynamic = "force-dynamic";
 // api-key route), so they are intentionally absent.
 export async function GET() {
   try {
+    // Same omp child, same credential store, same rule as /api/auth/providers.
+    const gate = requireEngine("omp", "The configured-provider list");
+    if ("response" in gate) return gate.response;
     const { models } = await runUtilityCommand<{ models: OmpModel[] }>(
       { type: "get_available_models" },
       120_000,

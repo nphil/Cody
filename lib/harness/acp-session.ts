@@ -86,8 +86,14 @@ export interface AcpMcpServer {
 }
 
 /** Commands this transport can honestly serve. Everything else throws
- * "unsupported", which the UI is built to tolerate by hiding the surface. */
-const SUPPORTED_COMMANDS = new Set(["prompt", "abort", "get_state", "get_messages", "respond_permission"]);
+ * "unsupported", which the UI is built to tolerate by hiding the surface.
+ *
+ * `set_model` is here because the transport implements it — but implementing
+ * it is not the same as the AGENT offering models, so it still answers
+ * "unsupported" per session when the agent published no model selector (see
+ * setModel). A command in this set is a promise about Cody, not about the
+ * engine on the other end of the pipe. */
+const SUPPORTED_COMMANDS = new Set(["prompt", "abort", "get_state", "get_messages", "respond_permission", "set_model"]);
 
 /** One choice the AGENT offered for a permission request. Cody renders the
  * agent's own options rather than inventing Allow/Deny buttons: only the agent
@@ -123,6 +129,141 @@ function readPermissionOptions(raw: unknown): AcpPermissionOption[] {
     if (typeof kind !== "string" || !kinds.has(kind)) return [];
     return [{ optionId, name, kind: kind as AcpPermissionOption["kind"] }];
   });
+}
+
+/**
+ * The model selector one ACP agent published for one session, normalized.
+ *
+ * ACP carries model selection as SESSION state, not as a global catalog: it
+ * only exists once `session/new` (or `session/load`) has answered, and its
+ * contents are whatever that agent, signed in to that account, can reach. So
+ * there is nothing for a sessionless route to read, and `/api/models` answers
+ * `catalogSource: "session"` for these engines rather than handing back the
+ * catalog of some other engine that happens to be installed.
+ *
+ * TWO wire shapes are live in the ecosystem at once, and both are handled
+ * because both were measured against a real agent:
+ *
+ *  - CONFIG OPTIONS (current spec, @agentclientprotocol/sdk 1.4.0). The
+ *    `session/new` response carries `configOptions: SessionConfigOption[]`;
+ *    the model one is the entry whose `category` is `"model"`, a
+ *    `type: "select"` with `currentValue` and `options`. Changes arrive as a
+ *    `session/update` of `sessionUpdate: "config_option_update"` carrying the
+ *    full set again, and switching is
+ *    `session/set_config_option {sessionId, configId, value}`, whose response
+ *    is once more the full set. Both installed adapters use this shape.
+ *
+ *  - SESSION MODEL STATE (the older field, still shipped). `session/new`
+ *    carries `models: {availableModels: [{modelId, name, description}],
+ *    currentModelId}`; changes arrive as `current_model_update`; switching is
+ *    `session/set_model {sessionId, modelId}`. Measured live against an agent
+ *    running the Python ACP SDK, which publishes exactly this and no
+ *    `configOptions` at all.
+ *
+ * `configId` is what tells the two apart at switch time: a string means the
+ * config-option call, `null` means the `session/set_model` call. Nothing here
+ * names an engine — the shape decides, and an agent that publishes neither
+ * yields `null` and gets an honest "unsupported" when asked to switch.
+ */
+export interface AcpModelSurface {
+  /** Config-option id for `session/set_config_option`, or null when the agent
+   * published the older `models` field and switching goes through
+   * `session/set_model`. */
+  configId: string | null;
+  /** The value id currently selected. */
+  current: string;
+  /** Everything selectable, flattened out of ACP's optionally-grouped list. */
+  options: Array<{ value: string; name: string; description?: string }>;
+}
+
+function optionEntry(raw: unknown): { value: string; name: string; description?: string } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const { value, name, description } = raw as Record<string, unknown>;
+  if (typeof value !== "string" || !value) return null;
+  return {
+    value,
+    // `name` is required by the schema, but an agent that omits it leaves the
+    // id, which reads fine — better than dropping a model the user has.
+    name: typeof name === "string" && name ? name : value,
+    ...(typeof description === "string" && description ? { description } : {}),
+  };
+}
+
+/** ACP's `SessionConfigSelectOptions` is either a flat list of options or a
+ * list of `{group, name, options}`. Cody renders one list, so a grouped
+ * payload is flattened rather than dropped. */
+function readSelectOptions(raw: unknown): Array<{ value: string; name: string; description?: string }> {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((entry) => {
+    const flat = optionEntry(entry);
+    if (flat) return [flat];
+    const group = entry as { options?: unknown } | null;
+    if (!group || typeof group !== "object" || !Array.isArray(group.options)) return [];
+    return group.options.flatMap((option) => {
+      const parsed = optionEntry(option);
+      return parsed ? [parsed] : [];
+    });
+  });
+}
+
+/**
+ * Pick the MODEL selector out of an agent's `configOptions`.
+ *
+ * `category` is the schema's own hint for exactly this ("help Clients
+ * distinguish broadly common selectors … model selector vs session mode
+ * selector"), and clients "MUST handle missing or unknown categories
+ * gracefully" — so a bare `id` of "model" is accepted as the fallback, and an
+ * agent that publishes neither yields nothing rather than a guess. A mode,
+ * effort or fast-mode selector must never be mistaken for the model one: the
+ * user would be switching their permission mode from the model picker.
+ */
+export function readConfigOptionModels(raw: unknown): AcpModelSurface | null {
+  if (!Array.isArray(raw)) return null;
+  const selects = raw.filter((entry): entry is Record<string, unknown> =>
+    Boolean(entry) && typeof entry === "object" && (entry as Record<string, unknown>).type === "select");
+  const option = selects.find((entry) => entry.category === "model")
+    ?? selects.find((entry) => entry.id === "model");
+  if (!option || typeof option.id !== "string" || typeof option.currentValue !== "string") return null;
+  const options = readSelectOptions(option.options);
+  if (options.length === 0) return null;
+  return { configId: option.id, current: option.currentValue, options };
+}
+
+/** The older `models` field of a `session/new` / `session/load` response
+ * (`SessionModelState`), whose entries key on `modelId` rather than `value`. */
+export function readSessionModelState(raw: unknown): AcpModelSurface | null {
+  if (!raw || typeof raw !== "object") return null;
+  const state = raw as { availableModels?: unknown; currentModelId?: unknown };
+  if (!Array.isArray(state.availableModels)) return null;
+  const options = state.availableModels.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const { modelId, name, description } = entry as Record<string, unknown>;
+    if (typeof modelId !== "string" || !modelId) return [];
+    return [{
+      value: modelId,
+      name: typeof name === "string" && name ? name : modelId,
+      ...(typeof description === "string" && description ? { description } : {}),
+    }];
+  });
+  if (options.length === 0) return null;
+  const current = typeof state.currentModelId === "string" && state.currentModelId
+    ? state.currentModelId
+    : options[0].value;
+  return { configId: null, current, options };
+}
+
+/**
+ * The model selector out of a `session/new`, `session/load` or
+ * `session/set_config_option` response — whichever shape the agent speaks.
+ *
+ * Config options win when both are present: that is the shape the current
+ * spec defines, and an agent shipping both is mid-migration, with the older
+ * field the one more likely to be stale.
+ */
+export function readModelSurface(response: unknown): AcpModelSurface | null {
+  if (!response || typeof response !== "object") return null;
+  const body = response as { configOptions?: unknown; models?: unknown };
+  return readConfigOptionModels(body.configOptions) ?? readSessionModelState(body.models);
 }
 
 /** Grace period between SIGTERM and SIGKILL when tearing a session down. */
@@ -344,7 +485,10 @@ export class AcpEngineSession implements EngineSession {
   private nextPermissionId = 1;
   /** Assistant text of the turn in flight, accumulated for get_messages. */
   private stream: AcpStreamState = { open: false, text: "" };
-  private currentModel: string | null = null;
+  /** The agent's own model selector for THIS session, or null when it
+   * published none. Captured at session open and kept current from the
+   * agent's update notifications — see AcpModelSurface. */
+  private models: AcpModelSurface | null = null;
   /** Recent agent stderr, reported only if the connection fails. */
   private stderrTail = "";
   destroyPromise: Promise<void> | null = null;
@@ -419,6 +563,8 @@ export class AcpEngineSession implements EngineSession {
         return this.abort();
       case "respond_permission":
         return this.respondPermission(command);
+      case "set_model":
+        return this.setModel(command);
       case "get_state":
         return this.buildState();
       default:
@@ -559,7 +705,8 @@ export class AcpEngineSession implements EngineSession {
       // A known session resumes; an agent without loadSession says so and the
       // catch falls through to a fresh session rather than failing the chat.
       try {
-        await connection.agent.request("session/load", { sessionId: this.acpSessionId, cwd: this.cwd, mcpServers });
+        const loaded = await connection.agent.request("session/load", { sessionId: this.acpSessionId, cwd: this.cwd, mcpServers });
+        this.applyModelSurface(readModelSurface(loaded), { announce: false });
         return;
       } catch {
         this.acpSessionId = null;
@@ -567,6 +714,11 @@ export class AcpEngineSession implements EngineSession {
     }
 
     const created = await connection.agent.request("session/new", { cwd: this.cwd, mcpServers });
+    // Model selection is session state in ACP, so THIS is the only moment it
+    // becomes knowable. Captured before anything can ask for it: get_state is
+    // what the composer reads, and a picker that renders one turn late looks
+    // like an engine with no models.
+    this.applyModelSurface(readModelSurface(created), { announce: false });
     const newId = (created as { sessionId?: unknown }).sessionId;
     if (typeof newId === "string" && newId) {
       this.acpSessionId = newId;
@@ -666,11 +818,133 @@ export class AcpEngineSession implements EngineSession {
    * keeps working; unwrapping is decided by which object actually carries
    * `update`, never by shape-guessing.
    */
+  /**
+   * Keep the model selector current from the agent's own notifications, so a
+   * switch made outside Cody — the user typing `/model` at the agent, or the
+   * agent falling back after a rate limit — reaches the composer.
+   *
+   * Two notifications, one per wire shape: `config_option_update` republishes
+   * the whole `configOptions` set, and `current_model_update` carries just the
+   * new id for the older `models` shape. Anything else is left to
+   * translateSessionUpdate.
+   */
+  private handleModelUpdate(update: unknown): void {
+    if (!update || typeof update !== "object") return;
+    const frame = update as { sessionUpdate?: unknown; configOptions?: unknown; modelId?: unknown };
+    if (frame.sessionUpdate === "config_option_update") {
+      // A republished set with no model selector in it means the agent
+      // dropped one it used to offer; keeping the old list would leave a
+      // picker whose entries no longer exist.
+      this.applyModelSurface(readConfigOptionModels(frame.configOptions), { announce: true });
+      return;
+    }
+    if (frame.sessionUpdate === "current_model_update" && typeof frame.modelId === "string" && this.models) {
+      this.applyModelSurface({ ...this.models, current: frame.modelId }, { announce: true });
+    }
+  }
+
+  /**
+   * Adopt a model selector and, when asked, tell the UI the resolved model
+   * changed. `config_update` is the event Cody's session hook already treats
+   * as authoritative for the running model, so an ACP switch lands through
+   * the same path as omp's — no new client vocabulary for the same fact.
+   *
+   * Silent at session open (`announce: false`): the state is fetched right
+   * after, and an event before any listener is attached is one nobody hears.
+   */
+  private applyModelSurface(surface: AcpModelSurface | null, options: { announce: boolean }): void {
+    const previous = this.models?.current;
+    this.models = surface;
+    if (!options.announce) return;
+    const resolved = this.resolvedModel();
+    if (!resolved || resolved.id === previous) return;
+    this.emit({ type: "config_update", model: resolved });
+  }
+
+  /** The running model as the rest of Cody names one: `{provider, id, name}`.
+   * ACP has no provider dimension — one opaque value id is the whole
+   * selection — so the ENGINE stands in as the provider, which is what it
+   * actually is here. `spec.id` is data on the engine's own descriptor, so
+   * this module still names no engine. */
+  private resolvedModel(): { provider: string; id: string; name: string } | null {
+    if (!this.models) return null;
+    const current = this.models.current;
+    const match = this.models.options.find((option) => option.value === current);
+    return { provider: this.spec.id, id: current, name: match?.name ?? current };
+  }
+
+  /**
+   * Switch the session's model.
+   *
+   * The composer's command is omp-shaped (`{provider, modelId}`); only the id
+   * carries meaning here, and it is passed through verbatim because it is the
+   * agent's own value id, not something Cody may reinterpret.
+   *
+   * An agent that published no selector answers "unsupported" — the same code
+   * a command outside the vocabulary gets, and the one the UI hides on. That
+   * is per SESSION, deliberately: whether models can be switched is a fact
+   * about the agent and the account behind it, discovered at session/new, and
+   * no static capability flag on the adapter could tell the truth about it.
+   */
+  private async setModel(command: Record<string, unknown>): Promise<{ provider: string; id: string; name: string }> {
+    // The selector only exists once a session is open, and the composer can
+    // pick a model on a session it has not prompted yet — so this waits for
+    // the handshake rather than reporting "no models" on a session that
+    // simply has not started.
+    await this.ensureReady();
+    const surface = this.models;
+    if (!surface) {
+      throw new EngineCommandError(
+        "set_model",
+        `${this.spec.name} did not offer a model selection for this session`,
+        "unsupported",
+      );
+    }
+    const requested = typeof command.modelId === "string" && command.modelId
+      ? command.modelId
+      : typeof command.model === "string" ? command.model : "";
+    const chosen = surface.options.find((option) => option.value === requested);
+    if (!chosen) {
+      throw new EngineCommandError(
+        "set_model",
+        `${this.spec.name} does not offer a model called "${requested}" in this session`,
+        "invalid_model",
+      );
+    }
+    const connection = this.connection;
+    if (!connection || !this.acpSessionId) {
+      throw new EngineCommandError("set_model", `${this.spec.name} session is not ready`, "session_dead");
+    }
+    if (surface.configId !== null) {
+      // The response republishes the whole set, so the agent's own view of
+      // what is now selected wins over the value Cody asked for — an agent
+      // may clamp or normalize it.
+      const result = await connection.agent.request("session/set_config_option", {
+        sessionId: this.acpSessionId,
+        configId: surface.configId,
+        value: chosen.value,
+      });
+      this.applyModelSurface(readConfigOptionModels((result as { configOptions?: unknown }).configOptions) ?? { ...surface, current: chosen.value }, { announce: true });
+    } else {
+      // `session/set_model` answers with an empty object; the agent confirms
+      // by accepting, and a `current_model_update` may follow.
+      await connection.agent.request("session/set_model", {
+        sessionId: this.acpSessionId,
+        modelId: chosen.value,
+      });
+      this.applyModelSurface({ ...surface, current: chosen.value }, { announce: true });
+    }
+    const resolved = this.resolvedModel();
+    if (!resolved) throw new EngineCommandError("set_model", `${this.spec.name} reported no model after the switch`, "unsupported");
+    return resolved;
+  }
+
   private handleUpdate(payload: unknown): void {
     if (!payload || typeof payload !== "object") return;
     const direct = payload as { update?: unknown; params?: { update?: unknown } };
     const update = direct.update ?? direct.params?.update;
     if (update === undefined) return;
+    this.handleModelUpdate(update);
     for (const event of translateSessionUpdate(update, this.stream, { toolNameMetaPath: this.spec.toolNameMetaPath })) {
       this.emit(event);
     }
@@ -790,7 +1064,24 @@ export class AcpEngineSession implements EngineSession {
     const running = this.turn !== null;
     return {
       sessionId: this._sessionId,
-      model: this.currentModel,
+      model: this.resolvedModel(),
+      // The engine's OWN models, for the composer's picker. They live here
+      // rather than in /api/models because in ACP they ARE session state:
+      // there is no sessionless catalog to fetch, and the list an agent
+      // publishes depends on the account it opened the session with. An
+      // agent that offered no selector reports an empty list and
+      // `modelSelectable: false`, which is the honest way to hide the picker
+      // — as opposed to what this used to do, which was report no model at
+      // all and let /api/models answer with omp's catalog instead.
+      availableModels: this.models
+        ? this.models.options.map((option) => ({
+          provider: this.spec.id,
+          id: option.value,
+          name: option.name,
+          ...(option.description ? { description: option.description } : {}),
+        }))
+        : [],
+      modelSelectable: this.models !== null,
       isStreaming: running,
       isPromptRunning: running,
       isCompacting: false,

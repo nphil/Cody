@@ -78,6 +78,10 @@ export interface EngineInstallRequest {
    * success so a broken update can be reverted. Omit to leave the record
    * untouched. */
   currentVersion?: string | null;
+  /** The engine CLI's version before this run, for a two-package engine.
+   * Recorded alongside `currentVersion` so a revert can restore the PAIR that
+   * was running, not just the half Cody happens to probe. */
+  currentEngineVersion?: string | null;
 }
 
 export interface EngineInstallResult {
@@ -195,6 +199,17 @@ export function subscribeInstall(id: string, listener: InstallListener): () => v
  * update breaks something. */
 export interface InstallHistoryEntry {
   previousVersion: string | null;
+  /**
+   * The engine CLI's version at that same moment, for a two-package engine.
+   * Recorded because a revert that pins only the adapter and lets the CLI
+   * install `@latest` is not a revert: if the CLI is what broke, the "revert"
+   * reinstalls the break, and the pair the user is put back on is one that
+   * never ran here before.
+   *
+   * Null for single-package engines and for records written before this
+   * existed — a revert then does what it always did.
+   */
+  previousEngineVersion: string | null;
   updatedAt: string;
 }
 
@@ -213,6 +228,8 @@ export function readInstallHistory(): Record<string, InstallHistoryEntry> {
         // Records written before the omp probe was normalized hold "omp/17.3.5";
         // the revert affordance must show the same bare semver as everywhere else.
         previousVersion: typeof value.previousVersion === "string" ? stripVersionPrefix(value.previousVersion) : null,
+        previousEngineVersion:
+          typeof value.previousEngineVersion === "string" ? stripVersionPrefix(value.previousEngineVersion) : null,
         updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : "",
       };
     }
@@ -222,10 +239,14 @@ export function readInstallHistory(): Record<string, InstallHistoryEntry> {
   }
 }
 
-function recordInstallHistory(id: string, previousVersion: string | null): void {
+function recordInstallHistory(
+  id: string,
+  previousVersion: string | null,
+  previousEngineVersion: string | null,
+): void {
   try {
     const history = readInstallHistory();
-    history[id] = { previousVersion, updatedAt: new Date().toISOString() };
+    history[id] = { previousVersion, previousEngineVersion, updatedAt: new Date().toISOString() };
     const file = installHistoryPath();
     mkdirSync(dirname(file), { recursive: true });
     const temp = `${file}.${process.pid}.tmp`;
@@ -393,7 +414,7 @@ function diskFailureMessage(stderr: string, prefix: string, cacheDir: string): s
 const SKIP_NATIVE_OPTIONAL_ARGS = ["--os=none", "--cpu=none"];
 
 /** One package-manager invocation of an install job. */
-interface InstallStep {
+export interface InstallStep {
   spec: string;
   skipNativeOptional?: boolean;
 }
@@ -404,7 +425,7 @@ interface InstallStep {
  * bundled CLI, while the CLI beside it needs precisely the platform binary
  * that flag suppresses.
  */
-function installSteps(request: EngineInstallRequest): InstallStep[] {
+export function installSteps(request: EngineInstallRequest): InstallStep[] {
   const primary: InstallStep = { spec: request.installSpec, skipNativeOptional: request.skipNativeOptional };
   // uv has no equivalent, and no engine on it needs one.
   if (request.installVia === "uv") return [primary];
@@ -511,7 +532,13 @@ function runInstall(request: EngineInstallRequest): Promise<EngineInstallResult>
      * verify a different installation than the one a chat turn will run.
      */
     const verify = (stderrTail: string): void => {
-      invalidateEngineBinCache(request.binaryName);
+      // Everything, not just this engine's own binary. A job installs
+      // `installAlso` packages whose bin names Cody does not model here, and a
+      // cache HIT never expires — so a companion CLI updated by this very run
+      // would keep reporting the version it replaced until the server
+      // restarted, and the health probe below would verify a path that no
+      // longer exists.
+      invalidateEngineBinCache();
       const binary = resolveEngineBin(request.binaryName, request.id.toUpperCase());
       if (!binary) {
         finish(new EngineInstallError(
@@ -532,6 +559,18 @@ function runInstall(request: EngineInstallRequest): Promise<EngineInstallResult>
         finish(null, { id: request.id, installSpec: request.installSpec, prefix, durationMs: Date.now() - startedAt });
       });
     };
+
+    /**
+     * A job that fails on anything but its FIRST package has already replaced
+     * the ones before it, so the engine is left running halves from two
+     * different installs. npm's own output names only the package that failed,
+     * which reads as "nothing happened" — and for a split engine (an ACP
+     * adapter plus the CLI it drives) the two are very different states.
+     */
+    const halfInstalledNote = (index: number): string =>
+      index === 0
+        ? ""
+        : ` ${packageNames.slice(0, index).join(", ")} was already replaced, so this engine is now part-updated: fix the cause and run the update again, or revert it.`;
 
     /** One package-manager run. Steps are sequential: two npm processes against
      * the same prefix corrupt each other's bin symlinks, which is the very
@@ -568,14 +607,14 @@ function runInstall(request: EngineInstallRequest): Promise<EngineInstallResult>
 
       child.on("error", (error) => {
         clearTimers();
-        finish(new EngineInstallError(`Could not run ${command} to install ${step.spec}${viaUv ? " — is uv installed on this host?" : ""}`, String(error)));
+        finish(new EngineInstallError(`Could not run ${command} to install ${step.spec}${viaUv ? " — is uv installed on this host?" : ""}.${halfInstalledNote(index)}`, String(error)));
       });
 
       child.on("close", (code, signal) => {
         clearTimers();
         if (settled) return;
         if (timedOut) {
-          finish(new EngineInstallError(`Installing ${step.spec} timed out after 5 minutes`, tail(stderr)));
+          finish(new EngineInstallError(`Installing ${step.spec} timed out after 5 minutes.${halfInstalledNote(index)}`, tail(stderr)));
           return;
         }
         if (code === 0) {
@@ -587,7 +626,7 @@ function runInstall(request: EngineInstallRequest): Promise<EngineInstallResult>
         }
         if (/ENOTEMPTY/.test(stderr)) {
           finish(new EngineInstallError(
-            `npm could not replace the existing ${stepPackage} install (ENOTEMPTY) — a previous interrupted install left a directory behind. Cody removed what it found; run the update again, and if it still fails delete the leftover \`.\`-prefixed directory under ${dirname(packageInstallDir(prefix, stepPackage))}.`,
+            `npm could not replace the existing ${stepPackage} install (ENOTEMPTY) — a previous interrupted install left a directory behind. Cody removed what it found; run the update again, and if it still fails delete the leftover \`.\`-prefixed directory under ${dirname(packageInstallDir(prefix, stepPackage))}.${halfInstalledNote(index)}`,
             tail(stderr),
           ));
           return;
@@ -596,11 +635,11 @@ function runInstall(request: EngineInstallRequest): Promise<EngineInstallResult>
         // "Unknown system error -122", which reads like a Cody bug.
         const diskMessage = diskFailureMessage(stderr, prefix, cacheDir);
         if (diskMessage) {
-          finish(new EngineInstallError(diskMessage, tail(stderr)));
+          finish(new EngineInstallError(`${diskMessage}${halfInstalledNote(index)}`, tail(stderr)));
           return;
         }
         const how = signal ? `was killed with ${signal}` : `exited with code ${code}`;
-        finish(new EngineInstallError(`Installing ${step.spec} ${how}`, tail(stderr)));
+        finish(new EngineInstallError(`Installing ${step.spec} ${how}.${halfInstalledNote(index)}`, tail(stderr)));
       });
     };
 
@@ -621,13 +660,15 @@ export function installEngine(request: EngineInstallRequest): Promise<EngineInst
   const pending = runInstall(request)
     .then((result) => {
       if (request.currentVersion !== undefined) {
-        recordInstallHistory(request.id, request.currentVersion);
+        recordInstallHistory(request.id, request.currentVersion, request.currentEngineVersion ?? null);
       }
       return result;
     })
     .finally(() => {
       inFlight.delete(request.id);
-      invalidateEngineBinCache(request.binaryName);
+      // Same reasoning as verify(), and it runs on the FAILURE path too: a
+      // half-finished job can have replaced the companion and not the primary.
+      invalidateEngineBinCache();
     });
   inFlight.set(request.id, pending);
   return pending;

@@ -3,6 +3,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { loadModelsWithCache, withModelRuntimeError, type ModelsData } from "@/lib/models-cache";
 import { supportsPriorityFastMode } from "@/lib/fast-mode";
+import { requireEngine } from "@/lib/engine-guard";
 import { getHarness, type HarnessAdapter } from "@/lib/harness";
 import { type OmpModel, runIsolatedUtilityCommand, runUtilityCommand } from "@/lib/omp/rpc-utility";
 import { readDisabledProviders } from "@/lib/omp/model-roles";
@@ -37,6 +38,17 @@ function thinkingLevelsFor(model: OmpModel, fallbackEfforts: boolean): string[] 
   return ["off", ...efforts];
 }
 
+/**
+ * The sessionless catalog of an rpc-dialect engine (omp, pi).
+ *
+ * `utilityRpcLaunchFor` is the whole dispatch: it answers `undefined` for omp
+ * and ONLY for omp (rpc-utility's default path spawns the installed omp), a
+ * real launch for another rpc-dialect engine, and throws `unsupported` for an
+ * engine that speaks neither. It used to answer `undefined` for that last
+ * case as well, which is how this route served omp's 150-model catalog as
+ * Claude Code's. GET() never calls this for such an engine now, and the throw
+ * is the backstop if a future caller forgets.
+ */
 async function loadModels(harness: HarnessAdapter): Promise<ModelsData> {
   const launch = utilityRpcLaunchFor(harness);
   // Engines with a restricted RPC vocabulary (pi) must only be sent commands
@@ -75,7 +87,11 @@ async function loadModels(harness: HarnessAdapter): Promise<ModelsData> {
       30_000,
       launch,
     );
-    const disabledProviders = readDisabledProviders();
+    // `disabledProviders` is a key of omp's own config.yml. Applying it to
+    // another engine's provider list would grey out providers on the strength
+    // of a file that engine never reads, so it is read only for omp — the
+    // engine whose file it is.
+    const disabledProviders = harness.id === "omp" ? readDisabledProviders() : new Set<string>();
     connectedProviders = loginProviders
       .filter((provider) => provider.authenticated)
       .map((provider) => ({ id: provider.id, name: provider.name, disabled: disabledProviders.has(provider.id) }));
@@ -105,7 +121,7 @@ async function loadModels(harness: HarnessAdapter): Promise<ModelsData> {
   }
 
   return withModelRuntimeError(
-    { models: Object.fromEntries(nameMap), modelList, defaultModel, thinkingLevels, connectedProviders },
+    { models: Object.fromEntries(nameMap), modelList, defaultModel, thinkingLevels, connectedProviders, catalogSource: "global" },
     undefined,
   );
 }
@@ -115,7 +131,24 @@ const EMPTY_MODELS: ModelsData = {
   modelList: [],
   defaultModel: null,
   thinkingLevels: {},
+  catalogSource: "global",
 };
+
+/**
+ * What an engine with no sessionless catalog answers.
+ *
+ * ACP engines (claude, codex, hermes) carry model selection as a per-SESSION
+ * config option that only exists once `session/new` has run — see
+ * lib/harness/acp-session.ts, which captures it and reports it through
+ * `get_state`. There is nothing for this route to read, and the ONE thing it
+ * must never do is hand back the catalog of whatever engine happens to be
+ * installed beside the active one.
+ *
+ * Empty, and NOT an error: `modelError` is a promise that something broke,
+ * and nothing has. `catalogSource: "session"` tells the client where the
+ * models actually live.
+ */
+const SESSION_SCOPED_MODELS: ModelsData = { ...EMPTY_MODELS, catalogSource: "session" };
 
 /**
  * The UNRESTRICTED catalog, for the settings panel that edits
@@ -146,9 +179,18 @@ export async function GET(req: Request) {
     // Curation asks for the full catalog explicitly. Nothing else does: the
     // main UI only ever needs the models a session can actually use.
     if (new URL(req.url).searchParams.get("catalog") === "full") {
+      // Curation edits omp's `enabledModels`; the overlay trick below is omp's
+      // own --config mechanism. Nothing about it means anything on another
+      // engine, so it refuses rather than spawning omp behind one.
+      const gate = requireEngine("omp", "The unrestricted model catalog");
+      if ("response" in gate) return gate.response;
       return Response.json({ modelList: await loadFullCatalog() });
     }
     const harness = getHarness();
+    // Dispatch on the ACTIVE engine, before anything can spawn a child. An
+    // engine that does not speak the rpc dialect has no global catalog: it
+    // gets an honest empty one, never a neighbour's.
+    if (!harness.rpcUi) return Response.json(SESSION_SCOPED_MODELS);
     // No allow-list filtering here on purpose: OMP already applied
     // `enabledModels` to this response, using glob semantics Cody must not
     // reimplement (see lib/model-allow-list.ts). What arrives IS the effective

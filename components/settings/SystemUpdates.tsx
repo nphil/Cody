@@ -8,7 +8,7 @@ import { PluginMarketplace } from "@/components/PluginMarketplace";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { useEngineInstalls } from "@/hooks/useEngineInstalls";
 import type { SkillInfo, SkillInstallScope, SkillUpdateResult } from "@/lib/api-types";
-import type { EngineUpdateStatus } from "@/lib/harness/updates";
+import type { EngineComponentStatus, EngineUpdateStatus } from "@/lib/harness/updates";
 import { translate, translatePlural, useI18n } from "@/lib/i18n";
 import type { EngineSummary, EnginesPayload } from "../EnginePicker";
 import type { EngineCapabilities } from "../SettingsTabs";
@@ -135,6 +135,36 @@ function VersionDelta({ current, next }: { current: string | null; next: string 
   );
 }
 
+/**
+ * The packages a two-package engine is installed from, each with its own
+ * number. Cody installs an ACP adapter plus the CLI it drives, and those move
+ * on unrelated release schedules — so a single unlabelled version under the
+ * engine's name is either the wrong one or an unanswerable question. Labels
+ * come from the adapter (English package names, like `tagline` and
+ * `authHint`), never from a translation key.
+ *
+ * Only rendered when there is more than one package; a single-package engine
+ * has nothing to break out.
+ */
+function EngineParts({ components }: { components: EngineComponentStatus[] }): React.ReactElement {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+      {components.map((part) => (
+        <div key={part.packageName} style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <span style={{ ...dimLineStyle, minWidth: 0 }}>{part.label}</span>
+          {part.updateAvailable === true && part.latestVersion
+            ? <VersionDelta current={part.installedVersion} next={part.latestVersion} />
+            : (
+              <span style={{ ...dimLineStyle, fontFamily: "var(--font-mono)" }}>
+                {part.installedVersion ? `v${part.installedVersion}` : translate("updates.versionUnavailable")}
+              </span>
+            )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** The copyable terminal-command card, matching the pattern used elsewhere
  * for commands Cody cannot run itself. */
 function CommandCard({ command }: { command: string }): React.ReactElement {
@@ -180,6 +210,9 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
   const [storeOpen, setStoreOpen] = useState(false);
   const [marketplaceOpen, setMarketplaceOpen] = useState(false);
   const [installedPackages, setInstalledPackages] = useState<Record<SkillInstallScope, ReadonlySet<string>>>({ global: new Set(), project: new Set() });
+  // Scopes the active engine can install into, reported by the skills scan.
+  // Defaults to omp's pair so a server that does not answer keeps both.
+  const [installScopes, setInstallScopes] = useState<SkillInstallScope[]>(["global", "project"]);
 
   /** Installed-package sets for the store's "Installed" states — cheap local
    * disk read, refreshed on open and after each install. */
@@ -187,7 +220,7 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
     try {
       const res = await fetch(`/api/skills?cwd=${encodeURIComponent(targetCwd)}`);
       if (!res.ok) return;
-      const data = (await res.json()) as { skills?: SkillInfo[] };
+      const data = (await res.json()) as { skills?: SkillInfo[]; installScopes?: SkillInstallScope[] };
       const globalSet = new Set<string>();
       const projectSet = new Set<string>();
       for (const skill of data.skills ?? []) {
@@ -195,6 +228,7 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
         (skill.install.scope === "project" ? projectSet : globalSet).add(skill.install.package);
       }
       setInstalledPackages({ global: globalSet, project: projectSet });
+      if (data.installScopes?.length) setInstallScopes(data.installScopes);
     } catch {
       // Store falls back to session-local installed marks.
     }
@@ -609,9 +643,21 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
           const isActive = engine.id === roster?.active;
           const status = engineStatuses[engine.id];
           const self = engine.id === "omp" && !canManage && capabilities.updates ? ompSelf : null;
-          const installedVersion = status?.installedVersion ?? engine.version;
+          // The number shown under the engine's name is the ENGINE's own —
+          // for Claude Code and Codex the CLI's, not the ACP adapter Cody
+          // installs to drive it. Both roster and status agree on that.
+          const installedVersion = status?.engineVersion ?? engine.version;
           const updateAvailable = canManage ? status?.updateAvailable ?? null : self ? self.updateAvailable : null;
-          const latestVersion = canManage ? status?.latestVersion ?? null : self?.availableVersion ?? null;
+          // A two-package engine breaks its versions out below instead of
+          // showing one bare delta that could belong to either package.
+          const components = canManage ? status?.components ?? [] : [];
+          // Which package the update button names. The LAST stale one wins,
+          // i.e. the CLI over the adapter: it is the number a user recognizes,
+          // and the parts line right above says the adapter moves too.
+          const stale = components.filter((part) => part.updateAvailable === true);
+          const latestVersion = canManage
+            ? (stale.length > 0 ? stale[stale.length - 1].latestVersion : status?.latestVersion ?? null)
+            : self?.availableVersion ?? null;
           // Why the version is unknown. Only the registry route reports it, and
           // only for a row whose probe actually failed.
           const probeError = canManage ? status?.probeError ?? null : null;
@@ -628,8 +674,14 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
           // Cody build was verified against: warn before the jump, mark after
           // it. Core surfaces keep working — the point is that brand-new
           // engine features may not show up in Cody until Cody updates.
-          const compatWarning = canManage && status?.latestBeyondVerified && updateAvailable === true && latestVersion
-            ? t("updates.engines.aheadNote", { name: engine.name, version: latestVersion })
+          // `verifiedMajor` is a major of the package Cody installs, which for
+          // a two-package engine is the ADAPTER — a different number line from
+          // the CLI's. Naming the adapter keeps the sentence from reading as a
+          // claim about "Claude Code v1.0.0" when Claude Code is on 2.1.x.
+          const compatSubject = status?.adapterLabel ?? engine.name;
+          const compatVersion = status?.latestVersion ?? null;
+          const compatWarning = canManage && status?.latestBeyondVerified && updateAvailable === true && compatVersion
+            ? t("updates.engines.aheadNote", { name: compatSubject, version: compatVersion })
             : null;
           const installedAhead = canManage && status?.installedBeyondVerified === true;
           return (
@@ -661,10 +713,12 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
                 {!checking && !busy && updateAvailable === null && statusExpected && statusesChecked && (
                   <span style={dimLineStyle}>{t("updates.checkUnavailable")}</span>
                 )}
-                {!checking && !busy && updateAvailable === true && latestVersion && (
+                {!checking && !busy && updateAvailable === true && latestVersion && components.length === 0 && (
                   <VersionDelta current={installedVersion} next={latestVersion} />
                 )}
               </div>
+
+              {components.length > 0 && !npmBusy && <EngineParts components={components} />}
 
               {npmBusy && (
                 <span role="status" aria-live="polite" style={{ display: "flex", flexDirection: "column", gap: 5 }}>
@@ -677,9 +731,14 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
                 </span>
               )}
 
-              {!npmBusy && !checking && !installedVersion && probeError && (
-                // The chip alone just says "Version unavailable". This says what
-                // that means and what to do, ahead of the raw tool output.
+              {!npmBusy && !checking && probeError && (
+                // Gated on the probe failure itself, not on a missing version:
+                // the registry route only reports probeError when the INSTALLED
+                // PACKAGE would not run, and for a two-package engine the CLI
+                // beside it can still answer — which would leave the row
+                // wearing a healthy-looking version over a broken adapter with
+                // nothing on screen to say so. The parts line above names which
+                // half is unreadable.
                 <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                   <div style={mutedLineStyle}>{t("updates.engines.probeFailed")}</div>
                   <div style={{ ...dimLineStyle, fontFamily: "var(--font-mono)" }} title={probeError}>
@@ -723,7 +782,11 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
                       style={actionButtonStyle(busy)}
                     >
                       <RotateCcw size={13} aria-hidden="true" />
-                      {t("updates.engines.revertTo", { version: status.previousVersion })}
+                      {/* The version the user recognizes: the engine CLI's for
+                          a two-package engine. The POST still carries the
+                          adapter's — that is the pin the server records — and
+                          the server restores the recorded PAIR from it. */}
+                      {t("updates.engines.revertTo", { version: status.previousEngineVersion ?? status.previousVersion })}
                     </button>
                   )}
                 </div>
@@ -836,6 +899,12 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
                   </button>
                 </div>
               </>
+            ) : skills.updates.every((update) => update.state === "unsupported") ? (
+              // Nothing came back "up to date" — every entry said it CANNOT be
+              // checked (a local source, or Hermes, which tracks its own
+              // hashes and checks them with `hermes skills check`). Reporting
+              // that as up to date would claim a check that never ran.
+              <div style={dimLineStyle}>{t("updates.checkUnavailable")}</div>
             ) : (
               <div style={mutedLineStyle}>{t("updates.skills.upToDate")}</div>
             )
@@ -860,6 +929,7 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
       {storeOpen && cwd && (
         <SkillsStore
           cwd={cwd}
+          scopes={installScopes}
           installedPackages={installedPackages}
           onInstalled={() => void refreshInstalled(cwd)}
           onClose={() => setStoreOpen(false)}

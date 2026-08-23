@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo, type CSSProperties, type Dispatch, type ReactNode, type RefObject, type SetStateAction } from "react";
+import { createContext, memo, useContext, useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo, type CSSProperties, type Dispatch, type ReactNode, type RefObject, type SetStateAction } from "react";
 import { createPortal } from "react-dom";
 import type { ManagedProject, SessionInfo } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
@@ -15,7 +15,8 @@ import { clearLastOpenSession, setLastOpenSession, workspaceKeyOf } from "@/lib/
 import { groupSessionsByProject, projectActivityCounts, retainPendingSessions, sortManagedProjects } from "@/lib/project-ordering";
 import { comparableProjectPath } from "@/lib/comparable-path";
 import { Check, ChevronDown, ChevronRight, FilePlus, FileUp, Folder, FolderPlus, GitBranch, MoreHorizontal, Plus, RefreshCw, Search, SlidersHorizontal, Trash2, Upload } from "lucide-react";
-import { STORAGE_KEYS } from "@/lib/storage-keys";
+import { engineScopedKey, STORAGE_KEYS } from "@/lib/storage-keys";
+import { OMP_ENGINE_ID, type ActiveEngineInfo } from "./SettingsTabs";
 
 declare global {
   interface Window {
@@ -24,6 +25,17 @@ declare global {
     };
   }
 }
+
+/**
+ * The active engine, for the rows deep inside the tree.
+ *
+ * Context rather than props: a session row sits under two memoized layers
+ * with hand-written comparators, and a value that is constant for the whole
+ * page load has no business being threaded through either of them. Null until
+ * `/api/info` answers, which reads as "not omp" — the safe side, since the
+ * only thing gated on it is a control whose route omp alone can serve.
+ */
+const ActiveEngineContext = createContext<ActiveEngineInfo | null>(null);
 
 interface Props {
   selectedSessionId: string | null;
@@ -42,6 +54,12 @@ interface Props {
   explorerRefreshKey?: number;
   onAtMention?: (relativePath: string, isDir: boolean) => void;
   onAtMentions?: (relativePaths: string[]) => void;
+  /** The active engine, from AppShell's one /api/info read. Session ids are
+   * the engine's own, so the sidebar's per-session browser state is scoped by
+   * it; and Import/Archive are omp-only routes, so their controls follow the
+   * engine's identity rather than being offered everywhere. Null until
+   * /api/info answers. */
+  engine?: ActiveEngineInfo | null;
 }
 
 interface WorktreeEntry {
@@ -82,12 +100,16 @@ function normalizeProjectKey(value: string): string {
 const INITIAL_RESTORE_RETRY_MS = 1000;
 const INITIAL_RESTORE_MAX_ATTEMPTS = 8;
 
-const UNREAD_SESSIONS_STORAGE_KEY = STORAGE_KEYS.unreadSessions;
-
-function loadUnreadSessionIds(): Set<string> {
+/** Unread badges are keyed by SESSION id, and session ids belong to the
+ * engine that minted them — after a switch the stored set is a list of ids
+ * that no longer exist. Scoped per engine (lib/storage-keys); an unknown
+ * engine reads as "nothing unread" rather than as another engine's ids. */
+function loadUnreadSessionIds(engineId: string | null): Set<string> {
   if (typeof window === "undefined") return new Set();
+  const storageKey = engineScopedKey(STORAGE_KEYS.unreadSessions, engineId);
+  if (!storageKey) return new Set();
   try {
-    const raw = window.localStorage.getItem(UNREAD_SESSIONS_STORAGE_KEY);
+    const raw = window.localStorage.getItem(storageKey);
     if (!raw) return new Set();
     const parsed = JSON.parse(raw) as unknown;
     if (Array.isArray(parsed)) return new Set(parsed.filter((id): id is string => typeof id === "string"));
@@ -97,11 +119,13 @@ function loadUnreadSessionIds(): Set<string> {
   }
 }
 
-function saveUnreadSessionIds(ids: Set<string>): void {
+function saveUnreadSessionIds(engineId: string | null, ids: Set<string>): void {
   if (typeof window === "undefined") return;
+  const storageKey = engineScopedKey(STORAGE_KEYS.unreadSessions, engineId);
+  if (!storageKey) return;
   try {
-    if (ids.size === 0) window.localStorage.removeItem(UNREAD_SESSIONS_STORAGE_KEY);
-    else window.localStorage.setItem(UNREAD_SESSIONS_STORAGE_KEY, JSON.stringify([...ids]));
+    if (ids.size === 0) window.localStorage.removeItem(storageKey);
+    else window.localStorage.setItem(storageKey, JSON.stringify([...ids]));
   } catch {
     // ignore storage quota / privacy-mode errors
   }
@@ -513,7 +537,13 @@ function CodyTitle() {
     </button>
   );
 }
-export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, onAtMentions }: Props) {
+export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, onAtMentions, engine = null }: Props) {
+  const engineId = engine?.id ?? null;
+  // Import writes an omp .jsonl into omp's sessions layout and Archive moves
+  // one with omp's gc layout; both routes answer 400 "unsupported" under any
+  // other engine (lib/engine-guard requireEngine). A capability flag hides a
+  // surface, it never renders a broken one, so the controls follow the route.
+  const ompSessionFiles = engineId === OMP_ENGINE_ID;
   const { t } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -550,7 +580,11 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   const [explorerUploadBusy, setExplorerUploadBusy] = useState(false);
   const [sessionRefreshDone, setSessionRefreshDone] = useState(false);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
-  const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => loadUnreadSessionIds());
+  // Starts empty and hydrates once the engine identity arrives: the stored set
+  // is addressed per engine, so before /api/info answers there is no honest
+  // key to read. Hydration MERGES rather than replaces — a session that
+  // finished during those few milliseconds must keep its badge.
+  const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => new Set());
   const previousRunningSessionIdsRef = useRef<Set<string>>(new Set());
   // Relative session times must age while the sidebar stays open; one shared
   // minute clock avoids a timer per session row.
@@ -634,11 +668,21 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
     saveExpandedProjects(expandedProjects);
   }, [expandedProjects]);
 
+  useEffect(() => {
+    if (!engineId) return;
+    const stored = loadUnreadSessionIds(engineId);
+    if (stored.size === 0) return;
+    setUnreadSessionIds((current) => {
+      if ([...stored].every((id) => current.has(id))) return current;
+      return new Set([...current, ...stored]);
+    });
+  }, [engineId]);
+
   // Persist unread markers so they survive a browser refresh before the user
   // has actually opened the completed session.
   useEffect(() => {
-    saveUnreadSessionIds(unreadSessionIds);
-  }, [unreadSessionIds]);
+    saveUnreadSessionIds(engineId, unreadSessionIds);
+  }, [engineId, unreadSessionIds]);
 
   useEffect(() => {
     // Live running status and session-list invalidations arrive via SSE; the
@@ -1241,15 +1285,15 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   // on every parent state change.
   const handleSessionDeleted = useCallback((id: string) => {
     const deleted = allSessions.find((session) => session.id === id);
-    if (deleted) clearLastOpenSession(workspaceKeyOf(deleted));
+    if (deleted) clearLastOpenSession(engineId, workspaceKeyOf(deleted));
     onSessionDeleted?.(id);
     loadSessions();
-  }, [allSessions, onSessionDeleted, loadSessions]);
+  }, [allSessions, onSessionDeleted, loadSessions, engineId]);
 
   useEffect(() => {
     const selected = allSessions.find((session) => session.id === selectedSessionId);
-    if (selected) setLastOpenSession(workspaceKeyOf(selected), selected.id);
-  }, [allSessions, selectedSessionId]);
+    if (selected) setLastOpenSession(engineId, workspaceKeyOf(selected), selected.id);
+  }, [allSessions, selectedSessionId, engineId]);
 
   // row. Non-Git projects intentionally render no Git affordance at all. The
   // switcher shows the ACTIVE repo's own worktrees/branches only.
@@ -1282,6 +1326,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   ) : null;
 
   return (
+    <ActiveEngineContext.Provider value={engine}>
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
       {addProjectOpen && (
         <DirectoryPicker
@@ -1308,15 +1353,20 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <CodyTitle />
           <div style={{ display: "flex", gap: 2 }}>
-            <Tooltip content={t("sessionSidebar.importTitle")} side="bottom">
-              <SidebarIconButton
-                label={t("sessionSidebar.import")}
-                onClick={() => importInputRef.current?.click()}
-                disabled={importing}
-              >
-                <FileUp size={14} strokeWidth={1.9} aria-hidden="true" />
-              </SidebarIconButton>
-            </Tooltip>
+            {/* Import writes an omp .jsonl into omp's sessions layout; the
+                route refuses under any other engine. Offered only where it
+                lands somewhere the sidebar will read back. */}
+            {ompSessionFiles && (
+              <Tooltip content={t("sessionSidebar.importTitle")} side="bottom">
+                <SidebarIconButton
+                  label={t("sessionSidebar.import")}
+                  onClick={() => importInputRef.current?.click()}
+                  disabled={importing}
+                >
+                  <FileUp size={14} strokeWidth={1.9} aria-hidden="true" />
+                </SidebarIconButton>
+              </Tooltip>
+            )}
             <Tooltip content={t("sessionSidebar.refresh")} side="bottom">
               <SidebarIconButton
                 label={t("sessionSidebar.refresh")}
@@ -1336,17 +1386,19 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
             </Tooltip>
           </div>
         </div>
-        <input
-          ref={importInputRef}
-          type="file"
-          accept=".jsonl,.json,application/json,application/jsonl"
-          style={{ display: "none" }}
-          onChange={(e) => {
-            const file = e.target.files?.[0] ?? null;
-            e.target.value = "";
-            void handleImportSession(file);
-          }}
-        />
+        {ompSessionFiles && (
+          <input
+            ref={importInputRef}
+            type="file"
+            accept=".jsonl,.json,application/json,application/jsonl"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const file = e.target.files?.[0] ?? null;
+              e.target.value = "";
+              void handleImportSession(file);
+            }}
+          />
+        )}
         <button
           onClick={handleNewSession}
           disabled={!selectedCwd}
@@ -1617,6 +1669,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
       )}
 
     </div>
+    </ActiveEngineContext.Provider>
   );
 }
 
@@ -2400,6 +2453,10 @@ const SessionItem = memo(function SessionItem({
   onToggleCollapse?: () => void;
 }) {
   const { t, locale } = useI18n();
+  // Archive moves an omp .jsonl and its sibling artifacts with omp's own gc
+  // layout; the route refuses under any other engine while Delete, one item
+  // below it in the same menu, dispatches per engine and keeps working.
+  const canArchive = useContext(ActiveEngineContext)?.id === OMP_ENGINE_ID;
   const [hovered, setHovered] = useState(false);
   const [focusWithin, setFocusWithin] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -2588,7 +2645,7 @@ const SessionItem = memo(function SessionItem({
               placement="above"
               minWidth={128}
             >
-              <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); setConfirmArchive(true); }} disabled={hasChildren} title={hasChildren ? t("sessionSidebar.archiveLeafOnly") : t("sessionSidebar.archive")} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: hasChildren ? "var(--text-dim)" : "var(--text-muted)", cursor: hasChildren ? "not-allowed" : "pointer", textAlign: "left", fontSize: 11, opacity: hasChildren ? 0.55 : 1 }}>{t("sessionSidebar.archive")}</button>
+              {canArchive && <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); setConfirmArchive(true); }} disabled={hasChildren} title={hasChildren ? t("sessionSidebar.archiveLeafOnly") : t("sessionSidebar.archive")} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: hasChildren ? "var(--text-dim)" : "var(--text-muted)", cursor: hasChildren ? "not-allowed" : "pointer", textAlign: "left", fontSize: 11, opacity: hasChildren ? 0.55 : 1 }}>{t("sessionSidebar.archive")}</button>}
               <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { startRename(event); setActionMenuOpen(false); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>{t("sessionSidebar.rename")}</button>
               <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); setConfirmDelete(true); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--status-error)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>{t("sessionSidebar.delete")}</button>
             </SidebarPortalMenu>

@@ -92,7 +92,8 @@ app/api/
   agent/[id]/display/route.ts     POST publish a display request | GET latest (auth-gated)
   agent/[id]/display/events/route.ts GET SSE stream of display requests (snapshot + live)
   internal/display/route.ts       POST publish from engine MCP servers (capability-token auth)
-  auth/**                         provider list, login/logout, API keys (via RPC)
+  auth/**                         omp's provider list + login flow (via RPC); every
+                                   route refuses `unsupported` unless omp is active
   cwd/validate/route.ts           POST validate/select a cwd
   default-cwd/route.ts            POST create ~/omp-cwd-YYYYMMDD
   files/[...path]/route.ts        GET file contents for viewer
@@ -102,10 +103,15 @@ app/api/
   tasks/route.ts                  GET .cody/tasks.json (validated)
   tasks/run/route.ts              POST run a task by id into a new terminal
   home/route.ts                   GET user home directory
-  models/route.ts                 GET { models, modelList, defaultModel }
-  models-config/route.ts          GET/PUT — read/write ~/.omp/agent/models.yml
-  models-config/test/route.ts     POST test a configured model/provider
-  omp-settings/route.ts           GET/PUT native config.yml settings (allow-listed)
+  models/route.ts                 GET { models, modelList, defaultModel, catalogSource }
+                                   dispatches on the active engine: an rpc-dialect
+                                   engine's own sessionless catalog, or an empty
+                                   `catalogSource:"session"` answer for ACP engines,
+                                   whose models live in the session's get_state
+  models-config/route.ts          GET/PUT — read/write ~/.omp/agent/models.yml (omp only)
+  models-config/test/route.ts     POST test a configured model/provider (omp only)
+  omp-settings/route.ts           GET/PUT omp's OWN config.yml (omp only — Hermes
+                                   declares nativeSettings and must not land here)
   omp-settings/schema/route.ts    GET omp's own settings schema + values; PUT a dotted-path patch
   mcp/route.ts                    GET/POST/PUT/DELETE project MCP servers
   memory/route.ts                 GET the active engine's persistent memory, read-only
@@ -114,8 +120,10 @@ app/api/
   plugins/marketplace/route.ts    GET browse configured marketplaces + catalogs | POST
                                    add/remove/update marketplace, install/uninstall/upgrade
   projects/route.ts               GET registered+discovered projects | POST add | DELETE hide
-  skills/route.ts                 GET/PATCH loaded skills and disable-model-invocation
-  skills/install/route.ts         POST install skills through npx skills add
+  skills/route.ts                 GET loaded skills + surface flags | PATCH enable/disable
+                                  (frontmatter for omp/pi, config.yaml for Hermes)
+  skills/install/route.ts         POST install through the active engine's own
+                                  installer (npx skills add / hermes skills install)
   skills/store/route.ts           GET browse/search/detail | POST card descriptions (skills.sh registry)
   worktrees/route.ts              GET/POST/DELETE git worktrees
 
@@ -140,6 +148,11 @@ lib/
     access.ts          authorizeDisplaySession(): request auth for display routes
     csp.ts             buildContentSecurityPolicy(): loopback + this host's
                        private LAN/CGNAT frame-src/connect-src for proxy.ts
+  engine-guard.ts      requireEngine()/requireCapability(): the SERVER half of the
+                       capability rule. An omp-only route (models.yml, model roles,
+                       config.yml, `omp usage`, agent.db credentials, session
+                       import/archive/export) refuses 400 `unsupported` under any
+                       other engine instead of answering with omp's data
   file-access.ts       allowed file roots for /api/files and worktrees
   harness/             pluggable engine seam: adapters (omp/pi/claude/codex/hermes),
                        runtime selection state, three transports (rpc-ui, ACP,
@@ -161,10 +174,16 @@ lib/
                        modelBrand() reads the VENDOR off a model id so gateway rows
                        (one OpenRouter key, many vendors) don't all wear one mark
   rpc-manager.ts       session registry + startRpcSession over RpcProcess
-  session-namer.ts     3-4 word model-written session names: a one-shot omp run
-                       plus the pure normalizer that turns its answer into a name
+  session-namer.ts     3-4 word model-written session names: a one-shot run of the
+                       ACTIVE rpc-dialect engine (omp's `tiny` role only when omp
+                       is that engine; null for ACP engines), plus the pure
+                       normalizer that turns its answer into a name
   session-reader.ts    session .jsonl parsing + path cache + buildSessionContext
-  skills-service.ts    pure-Node skill discovery mirroring omp's providers
+  skills-service.ts    pure-Node skill discovery mirroring the ACTIVE engine's
+                       providers (omp's list, pi's narrower one, Hermes' nested
+                       tree) + getSkillsSurface(): what the surface can do here
+  engine-capabilities.ts  memoized client read of /api/info's capability flags,
+                       for components with no props path from AppShell
   skills-registry.ts   client for the public skills.sh registry endpoints (the
                        same ones `npx skills` uses): category browse, fuzzy/
                        semantic search, cached SKILL.md detail extraction
@@ -380,6 +399,46 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   surfaces: a `false` **hides** the settings tab / panel card / composer
   control, it never renders a broken one. `/api/info` serves the active
   engine's capabilities to the client.
+- **A capability flag is a UI convenience; the ROUTE is the boundary**
+  (`lib/engine-guard.ts`). Every omp-shaped endpoint used to answer 200
+  whichever engine was selected — probed directly under Hermes they served
+  omp's model catalog, model roles, models.yml, config.yml, login providers,
+  plan quota and version, each presented as Hermes'. Some were reachable
+  through the UI too, because the flag that hid them is not the flag they
+  needed: Hermes declares `nativeSettings` (it has its own config) and so
+  rendered omp's `config.yml` panels with a Save that wrote to a file it
+  never reads; pi has `chatExtras` and so offered omp's "Smart — OMP roles"
+  row and an Export that shells `omp --export`. Every such route now either
+  DISPATCHES on `getHarness()` (`/api/models`, `/api/omp-version`,
+  `/api/omp-settings/schema`) or REFUSES with 400 `{code:"unsupported"}`,
+  which is the same answer `/api/memory` gives and the one the client hides
+  on. Pinned by `lib/engine-route-guards.test.mjs`.
+- **A launch that means "another engine" must never be spelled the same way
+  as one that means "this engine".** `runUtilityCommand(cmd, ms, launch)`
+  treats an absent `launch` as "spawn the installed omp", and
+  `utilityRpcLaunchFor` used to return `undefined` — that same value — for
+  every engine with no `rpcUi`. So `/api/models` faithfully asked omp for its
+  catalog and served it as Claude Code's: 150 omp models in the composer of
+  an engine that had never heard of them, which is what the owner reported.
+  `utilityRpcLaunchFor` now THROWS `unsupported` for a non-rpc engine, and
+  `undefined` means omp and only omp.
+- **ACP models are SESSION state, not a catalog** (`AcpModelSurface` in
+  `lib/harness/acp-session.ts`). There is nothing sessionless for
+  `/api/models` to read, so it answers `catalogSource: "session"` with an
+  empty list — empty, and deliberately NOT a `modelError`, because nothing
+  broke. The models themselves are captured at `session/new`/`session/load`
+  and reported through `get_state` as `{model, availableModels,
+  modelSelectable}`; `set_model` switches them and emits `config_update`, the
+  event Cody already treats as authoritative for the running model. TWO wire
+  shapes are live at once and both are handled: `configOptions` with
+  `category: "model"` + `session/set_config_option` (current spec; the Claude
+  Code and Codex adapters), and the older `models: {availableModels,
+  currentModelId}` + `session/set_model` + `current_model_update` (measured
+  live against Hermes 0.19, which publishes no `configOptions` at all). The
+  shape decides which call is made, so `acp-session.ts` still names no
+  engine. Whether an agent offers models is per SESSION — it depends on the
+  account the session opened with — so it is reported as data, never as a
+  static capability flag that could not tell the truth about it.
 - **Agent memory is read-only, on purpose** (`capabilities.memory`,
   `HarnessAdapter.readMemory`, `/api/memory`, `components/MemoryPanel.tsx`).
   Memory is the agent's own account of what it learned, so Cody shows it and
@@ -412,14 +471,65 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   CHANGELOG.md can only describe the past, which is precisely the version the
   user is about to leave. A failed fetch falls back to the installed file and
   the UI says so (`source: "installed"` while an update is pending).
+- **The update check follows the ECOSYSTEM, not npm** (`lib/harness/updates.ts`
+  `fetchLatestPackageVersion`). npm engines are looked up on
+  registry.npmjs.org (scoped names fully URL-encoded, which that registry
+  accepts), Hermes on pypi.org, whose manifest nests the number under `info`
+  — and whose project name is the spec WITHOUT its extras marker
+  (`hermes-agent[acp]` → `hermes-agent`, since the bracketed form is install
+  syntax and 404s). A wrong-registry lookup is not a loud failure: it reports
+  "no update available" for the rest of the instance's life. All five specs
+  were checked against the live registries.
+- **An engine installed as TWO packages has TWO versions, and Cody says which
+  is which** (`HarnessAdapter.engineCli`, `EngineUpdateStatus.components`).
+  For Claude Code and Codex, `installSpec` names the ACP ADAPTER
+  (claude-agent-acp 0.70.x, codex-acp 1.x) while `installAlso` names the CLI a
+  user actually means by the engine's name (claude 2.1.x, codex 0.14x.x) —
+  different number lines on different release schedules. Three rules fall out
+  of that, and each one was a live bug before it was a rule:
+  - **The displayed version is the ENGINE's.** Anything that labels a number
+    with the engine's NAME goes through `engineOwnVersion()`
+    (`lib/harness/index.ts`): the picker card and the User Accounts engine
+    list (`/api/engines` `version`, with the adapter's alongside as
+    `adapterVersion`), the Info panel (`/api/info` `ompVersion`), and the
+    update card's headline (`EngineUpdateStatus.engineVersion`). A card
+    reading "Claude Code v0.70.0" beside a `claude --version` of 2.1.241 is
+    not a rounding error. `installedVersion`/`latestVersion` stay the PACKAGE
+    `installSpec` names, because that is what a revert pins and what
+    `verifiedMajor` measures.
+  - **The update check asks BOTH registries.** `engineCli.packageName` is the
+    second lookup. The adapter goes months between releases while the CLI
+    ships most days, so an adapter-only comparison reports a CLI many releases
+    behind as "up to date" and never offers the update that would fix it —
+    measured, not hypothetical.
+  - **Revert restores the PAIR.** `install-history.json` records
+    `previousEngineVersion` beside `previousVersion`, and the install route
+    pins both halves when the requested version matches the record. Pinning
+    only the adapter while the CLI installs `@latest` reinstalls the very
+    thing being reverted if the CLI was the cause. It is also why the revert
+    offer survives an update that left the adapter version untouched.
+  `engineCli.getVersion()` is the adapter's own `healthArgs` with `engineEnv`
+  applied — the CLI that will actually run, not whatever npm last unpacked —
+  so the version that gets VERIFIED is the version that gets SHOWN. Version
+  probes are therefore cached per binary AND per argv
+  (`lib/harness/engine-bin.ts`), and an install drops every argv's answer for
+  every binary, because a cache HIT never expires and the companion CLI's bin
+  name is not something the installer models.
 - **`HarnessAdapter.verifiedMajor`** is the newest engine MAJOR this Cody
-  build was audited against (omp: 18). `checkEngineUpdates` compares it to
+  build was audited against (omp: 18, claude-agent-acp: 0, codex-acp: 1).
+  `checkEngineUpdates` compares it to
   the latest/installed versions (`latestBeyondVerified` /
   `installedBeyondVerified`) and System & Updates warns before — and marks
   after — a jump past it: core surfaces keep working (settings are
   schema-driven, unknown RPC frames are tolerated), but brand-new engine
   features may not appear in Cody until Cody updates. Bump the marker in the
-  same commit as each major's compatibility audit.
+  same commit as each major's compatibility audit. It is always a major of
+  the package `installSpec` names, so for a two-package engine it is the
+  ADAPTER's — which is why the notice names `engineCli.adapterLabel` rather
+  than the engine's brand ("Claude Code ACP adapter v1.0.0", never "Claude
+  Code v1.0.0" while Claude Code is on 2.1.x). The CLI half crossing a major
+  raises no notice today: Cody speaks to the adapter, and an ACP engine's
+  Cody surfaces are capability-gated almost entirely off.
 - **The seam is CI-enforced** (`lib/architecture.test.mjs`): outside
   `lib/omp/` and `lib/harness/`, importing `lib/omp/*` fails the test unless
   the file is on the in-test allowlist with a written reason, stale allowlist
@@ -1095,9 +1205,14 @@ handled or safely ignored.
 ### Plugins and skills
 - `/api/plugins` shells out to the user's `omp plugin` CLI (`list/install/uninstall/enable/disable/upgrade`, `--json` where available) — never the Bun-only SDK. `lib/omp/plugin-cli.ts` holds the shared `execFile`/loose-JSON-parse helpers (`runOmpCli`, `parseJsonLoose`), used by both `/api/plugins` and `/api/plugins/marketplace`.
 - **Plugin marketplace** (`/api/plugins/marketplace`, `lib/omp/marketplace.ts`, `components/PluginMarketplace.tsx`): browse data is a pure-Node read of `marketplaces.json` (the registry of `omp plugin marketplace add`ed catalogs, at `getMarketplacesRegistryPath()`) plus each marketplace's cached `marketplace.json` catalog (`getPluginsDir()`'s cache dir, `~` expanded) — no child process. `lib/omp/paths.ts`'s `getOmpDataRoot()` is the shared root for both (`~/.omp`, or its XDG equivalent): omp's own `DirResolver` gates XDG activation on the SAME `PI_CODING_AGENT_DIR`-override check for config-root-scoped paths (plugins, marketplaces) as for agent-scoped ones, so `getOmpDataRoot()` reuses the existing `xdgDataAgentRoot()` value rather than re-deriving a separate check — the override disables XDG resolution instance-wide, not per-category. Installed-state (which catalog plugins are already installed, at what version/scope) comes from `omp plugin list --json`, same as `/api/plugins`. Every mutation (add/remove/update marketplace, install/uninstall/upgrade a plugin) shells out to the CLI; name/id segments are validated against omp's own `^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$` rule before reaching argv.
-- `/api/skills` uses `lib/skills-service.ts`, a pure-Node scanner mirroring omp's discovery order: project `.omp/skills` (walk-up), `~/.omp/agent/skills`, then the `.claude` / `.agent(s)` / `.codex` / `.github` compat dirs and managed skills.
-- Skill toggling edits only the `disable-model-invocation` frontmatter key on the target `SKILL.md`; keep that surgical so user formatting survives.
-- `/api/skills/install` shells through `npx skills add ... --agent universal`, which installs into the ecosystem-standard `.agents/skills` dirs omp reads; project installs run with the selected cwd.
+- `/api/skills` uses `lib/skills-service.ts`, a pure-Node scanner mirroring the ACTIVE engine's discovery. omp: project `.omp/skills` (walk-up), `~/.omp/agent/skills`, then the `.claude` / `.agent(s)` / `.codex` / `.github` compat dirs and managed skills. pi: a narrower set (`buildPiScanRoots`). Hermes: `buildHermesScanRoots` — see below.
+- **The scan is one level deep for every engine but Hermes.** omp's and pi's roots sit inside repos and user config dirs, so a recursive walk there would list every vendored, checked-out or archived `SKILL.md` as a loaded skill. `SkillScanRoot.recursive` is set only by the Hermes branch, whose engine really does `rglob("SKILL.md")`.
+- Skill toggling edits only the `disable-model-invocation` frontmatter key on the target `SKILL.md`; keep that surgical so user formatting survives. Hermes is the exception (below) and never has its `SKILL.md` rewritten.
+- `/api/skills/install` shells through `npx skills add ... --agent universal`, which installs into the ecosystem-standard `.agents/skills` dirs omp reads; project installs run with the selected cwd. Hermes installs through its own CLI instead (below).
+- **Hermes' skills, on Hermes' terms** (`lib/harness/hermes-skills.ts`, verified against 0.19.0). Its roots are `$HERMES_HOME/skills` plus `skills.external_dirs` from its `config.yaml`, each walked recursively — `hermes skills install --category security 1password` writes `skills/security/1password/SKILL.md`, and categories nest further. The walk prunes what Hermes prunes (`.hub`, `node_modules`, VCS/cache dirs, and a skill package's `references/templates/assets/scripts`, the last only when the containing dir is itself a skill). Enable/disable is `skills.disabled` in `config.yaml`, a list of skill NAMES — Hermes never reads the frontmatter key omp honours — and Cody writes it by running Hermes' OWN `skills_config.save_disabled_skills` through the venv interpreter beside the binary, the same "ask the engine's runtime" trick `hermes-settings.ts` uses (`hermes config set` stores scalars only and cannot write a list; `hermes skills config` is a curses checklist). A `platforms:` mismatch hides a skill, as it does in Hermes; `environments:` (kanban/docker/s6) is deliberately NOT replicated, because mis-detecting it would hide a skill that IS loaded. Provenance comes from `<skills root>/.hub/lock.json`, matched on `install_path` first because Hermes keys that ledger by the name it resolved at install time, which is not always the frontmatter `name`.
+- **`hermes skills install` exits 0 whether or not it installed.** Verified: a security-scan block prints "Installation blocked: …" and an unresolvable identifier prints "Error: Could not fetch …", both with status 0. `installHermesSkill` therefore reads success from a literal `Installed: <path>` line, and never passes `--force` (that overrides a blocked verdict, which is the user's call in a terminal). Cody's store spec `owner/repo@slug` becomes Hermes' `skills-sh/owner/repo/slug`; a `https://<domain>` whole-provider bundle has no Hermes equivalent and is refused with a reason.
+- **The surface reports what it can do.** `GET /api/skills` returns `installScopes` and `canToggle` beside the skills. Hermes has one skills root per home and no project scope, so its store hides the scope selector and `/api/skills/install` refuses `scope: "project"`; Cody's update check diffs a GitHub tree hash from the skills.sh lock, which Hermes' own hashes cannot answer, so every Hermes install reports `canCheckForUpdates: false`, the per-skill Check button and the footer check-all both hide, and the System card says checks are unavailable rather than "up to date".
+- **The composer's skill lookup is capability-gated.** `ChatInput` fetches `/api/skills` to dim dormant skills in the `/` palette and has no capability prop (its props come through `ChatWindow`), so it asks `lib/engine-capabilities.ts` — one memoized `/api/info` read per page load, permissive on anything but an explicit `false`. Without it, Claude Code and Codex (`skills: false`) ran a full filesystem scan on every `/` keystroke.
 - The skill store (`components/SkillsStore.tsx`, `/api/skills/store`, `lib/skills-registry.ts`) talks to skills.sh's public endpoints — `/api/search` (fuzzy for one word, semantic over descriptions for phrases) and `/api/download/{owner}/{repo}/{slug}` for SKILL.md details. The documented `/api/v1/*` surface needs a Vercel OIDC token, so browse views are category-seeded searches, never a scraped ranking. Well-known (non-GitHub) sources install as whole-provider bundles (`https://<domain>`) because the CLI has no per-skill selector for them; the UI says so.
 
 ### Update notifications (`/api/omp-update`, `/api/app-update`)

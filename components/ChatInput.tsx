@@ -3,6 +3,7 @@
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
 import { ChevronDown, ListChecks, Loader2, Paperclip, ShieldCheck, Sparkles, Target, TriangleAlert, Wrench } from "lucide-react";
 import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
+import { ALL_CAPABILITIES, OMP_ENGINE_ID, type ActiveEngineInfo, type EngineCapabilities } from "./SettingsTabs";
 import type { ToolPreset } from "@/lib/tool-presets";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
@@ -43,7 +44,7 @@ import { brandAccountLabel } from "@/lib/provider-brand";
 import { ModelIcon, ProviderIcon } from "./ProviderIcon";
 import { useI18n } from "@/lib/i18n";
 import { selectableThinkingLevels } from "@/lib/thinking-levels";
-import { STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
+import { engineScopedKey, STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
 
 export interface AttachedImage {
   data: string;   // base64, no prefix (already compressed if it needed to be)
@@ -68,9 +69,15 @@ interface Props {
   onFollowUp?: (message: string, images?: AttachedImage[]) => void;
   onPromptWithStreamingBehavior?: (message: string, behavior: "steer" | "followUp", images?: AttachedImage[]) => void;
   isStreaming: boolean;
-  /** Active engine serves omp's advanced chat affordances. False means no
-   * steering and no follow-up queue: nothing can be submitted mid-turn. */
-  chatExtras?: boolean;
+  /** Everything the ACTIVE engine can serve. The composer gates on several
+   * of these (chatExtras for the rpc-dialect affordances, models for omp's
+   * role resolution, skills for the "/" palette lookup), so the whole set
+   * travels as one prop rather than as a hand-picked handful — the missing
+   * flags are exactly how omp-only controls leaked onto pi and Hermes. */
+  capabilities?: EngineCapabilities;
+  /** Who the active engine is, for labels that used to say "omp" whatever
+   * was running, and to scope per-engine browser storage. */
+  engine?: ActiveEngineInfo | null;
   model?: { provider: string; modelId: string } | null;
   isAutoModelSelection?: boolean;
   modelNames?: Record<string, string>;
@@ -158,11 +165,17 @@ const RING_CIRCUMFERENCE = 2 * Math.PI * 9.5;
 const RING_ABSENT_DASH = "2.5 3.5";
 /** How often the popover re-renders so "updated 2 min ago" stays true. */
 const USAGE_FRESHNESS_TICK_MS = 30_000;
-const COMPOSER_MODELS_STORAGE_KEY = STORAGE_KEYS.composerModels;
-
-function readVisibleModelKeys(): Set<string> | null {
+/** The pinned-model list is a `provider:modelId` allowlist built against ONE
+ * engine's catalog, so it is stored per engine (lib/storage-keys). Null means
+ * "nothing pinned here" — which is also what an unknown engine reports, and
+ * what shows the full catalog. Reading the unscoped key instead is how an
+ * omp→pi switch produced a composer that said "No models" while /api/models
+ * had returned pi's whole catalog. */
+function readVisibleModelKeys(engineId: string | null): Set<string> | null {
+  const storageKey = engineScopedKey(STORAGE_KEYS.composerModels, engineId);
+  if (!storageKey) return null;
   try {
-    const value = JSON.parse(localStorage.getItem(COMPOSER_MODELS_STORAGE_KEY) ?? "null");
+    const value = JSON.parse(localStorage.getItem(storageKey) ?? "null");
     return Array.isArray(value) ? new Set(value.filter((item): item is string => typeof item === "string")) : null;
   } catch {
     return null;
@@ -774,7 +787,7 @@ function formatTokenCount(tokens: number, locale: string): string {
   return formatCompactNumber(tokens, locale);
 }
 
-type SlashCommandSource = "builtin" | "extension" | "prompt" | "skill" | "ompBuiltin";
+type SlashCommandSource = "builtin" | "extension" | "prompt" | "skill" | "engineBuiltin";
 
 type SlashCommandPaletteItem = {
   name: string;
@@ -788,14 +801,28 @@ function isDormantSkillCommand(command: SlashCommandPaletteItem, dormantNames: S
   return command.source === "skill" && dormantNames.has(command.name);
 }
 
-const BUILTIN_SLASH_COMMAND_DEFS: { name: string; descriptionKey: string; argumentHintKey?: string }[] = [
-  // Web-native prompt-composing commands (goal/plan/... are TUI-only in omp and
-  // never execute over the RPC prompt path — see lib/web-slash-commands.ts).
-  ...WEB_SLASH_COMMANDS.map((command) => ({
-    name: command.name,
-    descriptionKey: command.descriptionKey,
-    argumentHintKey: command.argumentHintKey,
-  })),
+interface BuiltinSlashCommandDef {
+  name: string;
+  descriptionKey: string;
+  argumentHintKey?: string;
+}
+
+/** Prompt-composing commands the WEB UI expands itself before anything is
+ * sent (goal/plan/... are TUI-only in omp and never execute over the RPC
+ * prompt path — see lib/web-slash-commands.ts). They need nothing from the
+ * engine, so every engine gets them. */
+const WEB_SLASH_COMMAND_DEFS: BuiltinSlashCommandDef[] = WEB_SLASH_COMMANDS.map((command) => ({
+  name: command.name,
+  descriptionKey: command.descriptionKey,
+  argumentHintKey: command.argumentHintKey,
+}));
+
+/** Commands that are really rpc-dialect RPC calls wearing a slash: `compact`,
+ * `set_session_name`, `get_session_stats`, `get_last_assistant_text`, and the
+ * wrapper's own session restart. An ACP engine answers all of them
+ * `unsupported` (lib/harness/acp-session.ts SUPPORTED_COMMANDS), so offering
+ * them there is offering five guaranteed red notices. */
+const RPC_SLASH_COMMAND_DEFS: BuiltinSlashCommandDef[] = [
   { name: "compact", descriptionKey: "chatInput.cmdCompact" },
   { name: "reload", descriptionKey: "chatInput.cmdReload" },
   { name: "name", descriptionKey: "chatInput.cmdName" },
@@ -803,16 +830,22 @@ const BUILTIN_SLASH_COMMAND_DEFS: { name: string; descriptionKey: string; argume
   { name: "copy", descriptionKey: "chatInput.cmdCopy" },
 ];
 
-const CLIENT_BUILTIN_COMMAND_NAMES = new Set(BUILTIN_SLASH_COMMAND_DEFS.map((def) => def.name));
+/** Every name the client intercepts itself, whatever the engine — the dedupe
+ * key against engine-reported commands, and the reason a hand-typed `/compact`
+ * still reaches the dispatcher (which answers with the engine's own honest
+ * "unsupported" message) instead of being sent to the model as prose. */
+const CLIENT_BUILTIN_COMMAND_NAMES = new Set(
+  [...WEB_SLASH_COMMAND_DEFS, ...RPC_SLASH_COMMAND_DEFS].map((def) => def.name),
+);
 
-const SLASH_SOURCES: SlashCommandSource[] = ["builtin", "extension", "prompt", "skill", "ompBuiltin"];
+const SLASH_SOURCES: SlashCommandSource[] = ["builtin", "extension", "prompt", "skill", "engineBuiltin"];
 
 const SLASH_SOURCE_GROUP_LABEL_KEYS: Record<SlashCommandSource, string> = {
   builtin: "chatInput.groupBuiltin",
   extension: "chatInput.groupExtensions",
   prompt: "chatInput.groupPrompts",
   skill: "chatInput.groupSkills",
-  ompBuiltin: "chatInput.groupOmpBuiltin",
+  engineBuiltin: "chatInput.groupEngineBuiltin",
 };
 
 const SLASH_SOURCE_ORDER: Record<SlashCommandSource, number> = {
@@ -820,7 +853,7 @@ const SLASH_SOURCE_ORDER: Record<SlashCommandSource, number> = {
   extension: 1,
   prompt: 2,
   skill: 3,
-  ompBuiltin: 4,
+  engineBuiltin: 4,
 };
 
 function slashMatchRank(command: SlashCommandPaletteItem, query: string): number {
@@ -1012,7 +1045,7 @@ function ComposerModeStatus({ goal, plan }: { goal?: ActiveGoal | null; plan?: A
 }
 
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSteer, onFollowUp, isStreaming, chatExtras = true, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, onModelChange, onSelectSmartModel, onSmartModelPinned, autoModelSwitch, fastModeEnabled, fastModeActive, fastModeSupported, onFastModeChange, toolPreset, onToolPresetChange,
+  onSend, onAbort, onSteer, onFollowUp, isStreaming, capabilities = ALL_CAPABILITIES, engine = null, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, onModelChange, onSelectSmartModel, onSmartModelPinned, autoModelSwitch, fastModeEnabled, fastModeActive, fastModeSupported, onFastModeChange, toolPreset, onToolPresetChange,
   onAbortCompaction, isCompacting, compactResult,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap, modelNameOverride,
   retryInfo, queuedMessages, inputHistory = [], onAbortRetry,
@@ -1030,12 +1063,25 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 }: Props, ref) {
   const isMobile = useIsMobile();
   const { t, tn, locale } = useI18n();
+  // Unpacked once from the flag set rather than plumbed in one flag at a
+  // time: the composer needs several, and the ones it was never given are
+  // what let omp-only controls render on other engines.
+  const chatExtras = capabilities.chatExtras;
+  // What to call the engine in copy that used to hardcode "omp". Falls back
+  // to the product name while /api/info is still in flight, so no string ever
+  // renders with an empty hole in it.
+  const engineName = engine?.shortName ?? "Cody";
+  // Plan quota is read with `omp usage --json` and exists nowhere else:
+  // /api/usage answers `{available:false, reason}` for any other engine — a
+  // value, not an error. A ring that can only ever be an empty dashed circle
+  // is dead chrome, so it hides and the poll behind it never starts.
+  const quotaReported = engine?.id === OMP_ENGINE_ID;
   const {
     snapshot: usageSnapshot,
     loading: usageLoading,
     failed: usageFailed,
     refresh: refreshUsage,
-  } = useUsage();
+  } = useUsage(quotaReported);
   const modelCollator = React.useMemo(
     () => new Intl.Collator(locale, { numeric: true, sensitivity: "base" }),
     [locale],
@@ -1446,28 +1492,32 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   useEffect(() => {
     if (slashQuery === null || !cwd) return;
+    if (!capabilities.skills) return;
     const controller = new AbortController();
+    // Capability-gated: an engine with no skills surface must not be asked to
+    // scan for skills. Claude Code and Codex report `skills: false`, and
+    // without this they ran a full filesystem scan on every "/" keystroke.
     void fetch(`/api/skills?cwd=${encodeURIComponent(cwd)}`, { signal: controller.signal })
-      .then((response) => response.ok ? response.json() as Promise<{ skills?: Array<{ name?: string; disableModelInvocation?: boolean }> }> : null)
+      .then((response) => response?.ok ? response.json() as Promise<{ skills?: Array<{ name?: string; disableModelInvocation?: boolean }> }> : null)
       .then((data) => {
         if (!data) return;
         setDormantSkillNames(new Set((data.skills ?? []).flatMap((skill) => skill.disableModelInvocation && skill.name ? [skill.name] : [])));
       })
       .catch(() => {});
     return () => controller.abort();
-  }, [cwd, slashQuery]);
+  }, [cwd, slashQuery, capabilities.skills]);
 
   const builtinSlashCommands: SlashCommandPaletteItem[] = React.useMemo(
-    () => BUILTIN_SLASH_COMMAND_DEFS.map((def) => ({
+    () => [...WEB_SLASH_COMMAND_DEFS, ...(chatExtras ? RPC_SLASH_COMMAND_DEFS : [])].map((def) => ({
       name: def.name,
       description: t(def.descriptionKey),
       ...(def.argumentHintKey ? { argumentHint: t(def.argumentHintKey) } : {}),
       source: "builtin" as const,
     })),
-    [t],
+    [t, chatExtras],
   );
 
-  // Externally reported commands (extension/prompt/skill/ompBuiltin) group
+  // Externally reported commands (extension/prompt/skill/engineBuiltin) group
   // below the client built-ins; any name the web UI intercepts itself —
   // whether an omp builtin or a user extension — is dropped so each command
   // appears exactly once and the client interception behavior is unchanged.
@@ -1475,8 +1525,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     () => (slashCommands ?? []).flatMap((command): SlashCommandPaletteItem[] => {
       const source = command.source as string;
       if (CLIENT_BUILTIN_COMMAND_NAMES.has(command.name)) return [];
+      // Whatever the engine calls its own builtins on the wire ("builtin"
+      // from pi's get_commands, "ompBuiltin" from omp's), they are the
+      // ENGINE's, not the web UI's, and group under the engine's own name.
       if (source === "builtin" || source === "ompBuiltin") {
-        return [{ name: command.name, description: command.description, source: "ompBuiltin" }];
+        return [{ name: command.name, description: command.description, source: "engineBuiltin" }];
       }
       return [command];
     }),
@@ -1994,12 +2047,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   // Build model options: prefer modelList (has provider info), fallback to modelNames
   const [visibleModelKeys, setVisibleModelKeys] = useState<Set<string> | null>(null);
+  const engineId = engine?.id ?? null;
   useEffect(() => {
-    const refresh = () => setVisibleModelKeys(readVisibleModelKeys());
+    const refresh = () => setVisibleModelKeys(readVisibleModelKeys(engineId));
     refresh();
     window.addEventListener(STORAGE_EVENTS.composerModelsChange, refresh);
     return () => window.removeEventListener(STORAGE_EVENTS.composerModelsChange, refresh);
-  }, []);
+  }, [engineId]);
 
   const modelOptions: ModelOption[] = React.useMemo(() => {
     if (modelList && modelList.length > 0) {
@@ -2051,7 +2105,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       const defaultRole = data.roles?.default;
       const slash = defaultRole ? defaultRole.indexOf("/") : -1;
       if (!defaultRole || slash === -1) {
-        toast.info(t("chatInput.smartModelUnavailable"));
+        toast.info(t("chatInput.smartModelUnavailable", { name: engineName }));
         return;
       }
       const provider = defaultRole.slice(0, slash);
@@ -2066,16 +2120,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           return modelList?.find((m) => m.provider === provider && m.id === base);
         })();
       if (!match) {
-        toast.info(t("chatInput.smartModelUnavailable"));
+        toast.info(t("chatInput.smartModelUnavailable", { name: engineName }));
         return;
       }
       onModelChange(match.provider, match.id);
       onSmartModelPinned?.(match.provider, match.id);
     } catch (e) {
       console.error("Failed to resolve smart model:", e);
-      toast.info(t("chatInput.smartModelUnavailable"));
+      toast.info(t("chatInput.smartModelUnavailable", { name: engineName }));
     }
-  }, [modelList, onModelChange, onSmartModelPinned, t]);
+  }, [modelList, onModelChange, onSmartModelPinned, t, engineName]);
 
   // Turn-based engines take one prompt at a time: no steering, no follow-up
   // queue. Rather than leave Enter silently inert, the composer says it is
@@ -2242,9 +2296,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }}
       />
       <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
-        {/* The model registry is omp's; on an engine without chatExtras the
-            selector is hidden, so its load errors must not surface either. */}
-        <ModelErrorBanner error={chatExtras ? modelError : null} />
+        {/* A catalog error is worth reporting only where a picker exists to
+            act on it. An engine whose models live on the session reports no
+            catalog error at all — an empty global list is the honest answer
+            there, not a failure — so what survives this gate is a real one. */}
+        <ModelErrorBanner error={onModelChange ? modelError : null} />
         <ComposerModeStatus goal={activeGoal} plan={activePlan} />
         {/* Retry banner */}
         {retryInfo && (
@@ -2537,7 +2593,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                           textTransform: "uppercase",
                         }}
                       >
-                        <span>{t(SLASH_SOURCE_GROUP_LABEL_KEYS[group.source])}</span>
+                        <span>{t(SLASH_SOURCE_GROUP_LABEL_KEYS[group.source], { name: engineName })}</span>
                         <span style={{ fontFamily: "var(--font-mono)", fontWeight: 500 }}>{group.items.length}</span>
                       </div>
                       <div
@@ -2951,7 +3007,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   )}
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
                     {isAutoModelSelection && currentName
-                      ? `${t("chatInput.smartModel")} · ${currentName}`
+                      ? `${t("chatInput.smartModel", { name: engineName })} · ${currentName}`
                       : currentName ?? (modelOptions.length > 0
                         ? t("chatInput.selectModel")
                         : showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noModels"))}
@@ -2973,6 +3029,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     zIndex: 500,
                     overflow: "hidden", maxHeight: maxH, overflowY: "auto",
                     }}>
+                    {/* Smart resolves the ACTIVE engine's configured model
+                        ROLES (omp's config.yml, read through /api/model-roles).
+                        pi has chatExtras but no models surface and no roles
+                        file, so this row used to fetch omp's config on its
+                        behalf and then report it as unavailable. */}
+                    {capabilities.models && (
                     <button
                       className="dropdown-item"
                       key="smart-model-role"
@@ -2999,10 +3061,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                         : <span style={{ width: 10, flexShrink: 0 }} />}
                       <Sparkles size={13} strokeWidth={1.8} style={{ flexShrink: 0, marginTop: 2, color: isAutoModelSelection ? "var(--accent)" : "var(--text-dim)" }} />
                       <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
-                        <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t("chatInput.smartModel")}</span>
-                        <span style={{ fontSize: 11, color: "var(--text-dim)", fontWeight: 400, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t("chatInput.smartModelHint")}</span>
+                        <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t("chatInput.smartModel", { name: engineName })}</span>
+                        <span style={{ fontSize: 11, color: "var(--text-dim)", fontWeight: 400, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t("chatInput.smartModelHint", { name: engineName })}</span>
                       </span>
                     </button>
+                    )}
                     {modelsByProvider.length === 0 ? (
                       <div style={{ padding: "8px 12px", color: "var(--text-dim)", fontSize: 12, whiteSpace: "nowrap" }}>
                         {showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noAvailableModels")}
@@ -3097,7 +3160,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 onClick={() => {
                   const detail = [
                     t("chatInput.autoSwitchDetail", { from: autoModelSwitch.from, to: autoModelSwitch.to }),
-                    autoModelSwitch.role ? t("agentSession.fallbackAppliedDetail", { role: autoModelSwitch.role }) : null,
+                    autoModelSwitch.role ? t("agentSession.fallbackAppliedDetail", { role: autoModelSwitch.role, name: engineName }) : null,
                     autoModelSwitch.reason ? t("agentSession.fallbackReason", { reason: autoModelSwitch.reason }) : null,
                   ].filter(Boolean).join("\n");
                   toast.info(t("chatInput.autoSwitchChip"), detail, { durationMs: 12_000, clamp: true });
@@ -3152,7 +3215,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   }}>
                     {TOOL_PRESET_ORDER.map((preset) => {
                       const isActive = (toolPreset ?? "full") === preset;
-                      const warningKey = TOOL_PRESET_WARNING_KEY[preset];
+                      // The Core warning lists what is switched off. Subagents
+                      // are on that list only where the engine has them (pi
+                      // reports `subagents: false`), so the copy forks on the
+                      // flag rather than promising a loss that cannot happen.
+                      const warningKey = preset === "default" && !capabilities.subagents
+                        ? "chatInput.toolPresetCoreWarningNoSubagents"
+                        : TOOL_PRESET_WARNING_KEY[preset];
                       return (
                         <button
                           className="dropdown-item"
@@ -3177,7 +3246,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                             <span style={{ whiteSpace: "nowrap" }}>{t(TOOL_PRESET_LABEL_KEY[preset])}</span>
                             {warningKey && (
                               <span style={{ fontSize: 11, fontWeight: 400, color: "var(--status-warning)", whiteSpace: "normal" }}>
-                                {t(warningKey)}
+                                {t(warningKey, { name: engineName })}
                               </span>
                             )}
                           </span>
@@ -3237,7 +3306,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     {thinkingLevelOptions.map((lvl) => {
                       const isActive = (thinkingLevel ?? "auto") === lvl;
                       const descKey = THINKING_LEVEL_DESC_KEYS[lvl];
-                      const desc = descKey ? t(descKey) : "";
+                      // "auto" means "whatever the engine defaults to", so
+                      // its description names the ACTIVE engine.
+                      const desc = descKey ? t(descKey, { name: engineName }) : "";
                       const mappedVal = (lvl !== "auto" && thinkingLevelMap) ? thinkingLevelMap[lvl] : undefined;
                       const displayLabel = (mappedVal != null && mappedVal !== lvl) ? mappedVal : lvl;
                       const showOriginal = mappedVal != null && mappedVal !== lvl;
@@ -3280,7 +3351,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
             {/* Icon-only plan-quota gauge. The arc tracks the binding quota
                 window; context usage lives in the top bar and, in detail,
-                below the divider inside this popover. */}
+                below the divider inside this popover. Hidden entirely on an
+                engine that reports no plan quota — there the ring could only
+                ever be an empty dashed circle. */}
+              {quotaReported && (
               <div
                 ref={contextPopoverRef}
                 // marginRight doubles the visual space between the gauge and
@@ -3341,6 +3415,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   />
                 )}
               </div>
+              )}
 
             {/* Primary action: Send (idle) / Stop (running) */}
             {isStreaming ? (

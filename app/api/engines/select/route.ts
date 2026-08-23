@@ -1,10 +1,12 @@
 import { jsonError, requireAdmin } from "@/lib/auth/http";
 import { parseJsonWithinLimit } from "@/lib/bounded-form-data";
 import { getHarness, getHarnessById, selectHarness } from "@/lib/harness";
+import { clearEngineSessionsCache } from "@/lib/harness/engine-sessions";
 import { invalidateModelsCache } from "@/lib/models-cache";
 import { disposeUtilityRpc } from "@/lib/omp/rpc-utility";
 import { restartAllRpcSessions } from "@/lib/rpc-manager";
 import { invalidateSessionListCache } from "@/lib/session-reader";
+import { resetUsageCache } from "@/lib/usage/cache";
 import { GET as getEngines } from "../route";
 
 /**
@@ -59,6 +61,17 @@ export async function POST(request: Request) {
   // serves it: both belong to the engine that was just replaced.
   invalidateModelsCache();
   disposeUtilityRpc();
+  // Plan quota is one engine's account. A cached snapshot has a 60s TTL and is
+  // served stale-while-revalidate past it, so without this the composer's
+  // quota ring kept showing the previous engine's percentages after a switch —
+  // the exact failure resetUsageCache's docstring names, which until now had
+  // no caller at all.
+  resetUsageCache();
+  // The engine-session index is filtered by the active engine on every read,
+  // so a stale cache is not a leak — but the switch is the one moment the
+  // whole listing is about to be re-derived, and re-reading from disk here
+  // costs one file read.
+  clearEngineSessionsCache();
   if (!reaffirming) {
     try {
       await restartAllRpcSessions();

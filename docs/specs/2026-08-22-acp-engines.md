@@ -3,8 +3,9 @@
 Status: **phase 1 done**, **phase 3 done for the turn engines** (2026-08-23)
 — Hermes is a working Cody engine for chat and settings, and **Codex and
 Claude Code have both moved off their per-turn transports onto ACP** (see
-"Phase 3, as built" below). Phase 2 is still plan; omp and pi keep `rpcUi`
-deliberately. Owner-approved scope (2026-08-22): chat + settings for Hermes
+"Phase 3, as built" below). Phase 2 is part-built: **memory and skills are
+done** (see "Phase 2c, as built"), approval prompts are still plan. omp and pi
+keep `rpcUi` deliberately. Owner-approved scope (2026-08-22): chat + settings for Hermes
 first, the rest planned here so it does not get dropped half-built.
 
 ## Why ACP at all
@@ -150,6 +151,128 @@ features, but not IDE-shaped, and Cody is an IDE.
   sessions — the thing that makes it Hermes.
 - **Skills.** Hermes writes and refines its own skills. Cody already has a
   skills surface built for omp; it gets adapted rather than duplicated.
+  **DONE — see "Phase 2c, as built" below.**
+
+## Phase 2c, as built — the skills surface, adapted (2026-08-23)
+
+`capabilities.skills` is TRUE for Hermes. The existing surface — scan, toggle,
+store, install — now runs against Hermes' own conventions instead of omp's,
+and the parts Cody cannot express faithfully are visibly disabled rather than
+faked. Everything below was verified against a real `hermes-agent` 0.19.0
+install, not read off the docs.
+
+**The layout is nested, and that is the whole reason the surface was broken.**
+`lib/skills-service.ts` scanned `<root>/<name>/SKILL.md` with a one-level
+`readdir`. Hermes discovers with `rglob("SKILL.md")` under
+`$HERMES_HOME/skills`, and `hermes skills install --category security
+1password` writes `skills/security/1password/SKILL.md` — so a flat scan found
+NONE of a categorised install. `SkillScanRoot.recursive` now exists and is set
+by the Hermes branch only: omp's and pi's roots sit inside repositories and
+user config dirs, where a recursive walk would list every vendored,
+checked-out and archived `SKILL.md` in the tree as a loaded skill. The walk
+replicates Hermes' own pruning (`agent/skill_utils.iter_skill_index_files`):
+`.hub`, `node_modules`, VCS and cache dirs always, and a skill package's
+`references/templates/assets/scripts` only when the directory containing them
+is itself a skill — so `skills/scripts/<name>` stays a legitimate category.
+
+**Extra roots come from the engine's config**, `skills.external_dirs`,
+expanded the way Hermes expands it (`~`, `${VAR}`, relative against
+HERMES_HOME, existing dirs only). The bundled `optional-skills` inside the
+installed package are NOT a root: they are a catalog `hermes skills install`
+copies from, and Hermes loads a copy only once it is seeded into the skills
+root.
+
+**There is no project scope, so Cody stops offering one.** Hermes has one
+skills root per home plus read-only external dirs. `GET /api/skills` now
+reports `installScopes`, the store hides its scope selector when there is only
+one, and `/api/skills/install` refuses `scope: "project"` with a reason
+instead of installing globally under a project label.
+
+**Enable/disable is config, not frontmatter — and `hermes config set` cannot
+write it.** `skills.disabled` in `$HERMES_HOME/config.yaml` is a list of skill
+NAMES (`agent/skill_utils.get_disabled_skill_names`); nothing in Hermes reads
+`disable-model-invocation`, so the existing toggle would have reported success
+and changed nothing. Writing it is awkward for the reason `hermes-settings.ts`
+already documents: `hermes config set` stores one scalar per key and has no
+list form, and `hermes skills config` is an interactive curses checklist. What
+IS reachable is the function Hermes' own dashboard calls for this exact
+action, `hermes_cli.skills_config.save_disabled_skills`, which routes through
+`save_config` and keeps atomic writes, default stripping and the
+managed-scope guard. Cody runs it through the venv interpreter beside the
+binary — the same "ask the engine's own runtime" trick that reads
+DEFAULT_CONFIG — so the SKILL.md is never rewritten. Verified round-trip:
+toggling in Cody flips the Status column of `hermes skills list`, and the
+`SKILL.md` is byte-identical afterwards.
+
+When that interpreter is absent (a bare `pip install` onto PATH with no
+adjacent venv), `canToggle` comes back false and the switch renders read-only
+with an honest reason rather than writing a key Hermes ignores — the
+`readOnly`/`readOnlyReason` pattern `OmpSchemaSettings` already uses for
+unwritable list settings.
+
+**`hermes skills install` exits 0 whether or not it installed.** This is the
+trap of this phase, and it is the same shape as the version-probe traps the
+Claude and Codex migrations hit. Measured, all with status 0:
+
+- blocked by the security scanner — `Installation blocked: Blocked (community
+  source + caution verdict, 2 findings). Use --force to override.`
+- unresolvable identifier — `Error: Could not fetch '…' from any source.`
+- success — `Installed: security/1password`
+
+So success is read from the literal `Installed:` line, never the exit code.
+`--force` is deliberately never passed: overriding a blocked security verdict
+is the user's decision to make in a terminal, not Cody's.
+
+**Identifier translation, and where it stops.** Cody's store browses skills.sh
+and emits `owner/repo@slug`; Hermes addresses the same registry as
+`skills-sh/owner/repo/slug` (`tools/skills_hub.SkillsShSource`, confirmed with
+`hermes skills search --json`). That translation is exact and reversible, and
+the inverse is used to annotate installed skills so the store shows them as
+installed. Two honest limits: a `https://<domain>` well-known spec means "this
+provider's whole set" to `npx skills` and nothing to Hermes, so it is refused
+with a reason; and Hermes resolves a repo's skill path by trying
+`<repo>/<slug>`, `<repo>/skills/<slug>`, `<repo>/.agents/skills/<slug>` and
+`<repo>/.claude/skills/<slug>`, so a repo that nests deeper than that
+(`anthropics/skills`, `openai/skills`) fails to fetch — Hermes' own limit, and
+it surfaces as Hermes' own error text.
+
+**Update checks stay Hermes'.** Cody's check diffs a GitHub tree hash out of
+the skills.sh lock; Hermes keeps its own `content_hash` in
+`<skills root>/.hub/lock.json` and its own `hermes skills check`/`update`. So
+every Hermes install reports `canCheckForUpdates: false`: the per-skill Check
+button hides, the footer check-all is now gated on `canCheckForUpdates` (a
+strict improvement for every engine — a dead button that always answers
+"unsupported" helps nobody), and the System card says checks are unavailable
+instead of claiming "up to date" for a check that never ran.
+
+**One Hermes inconsistency worth knowing.** `.hub/lock.json` is keyed by the
+name resolved at INSTALL time, which is not always the frontmatter `name` a
+later scan reads: a skill whose SKILL.md says `name: PDF Generator` is locked
+under `pdf-generator`, and Hermes' own `hermes skills list` then reports it as
+source "local". The `install_path` it also records is exact, so Cody matches
+on that first and falls back to the name — which gives the user better
+provenance than Hermes' own list does.
+
+**One ungated fetch fixed on the way past.** `ChatInput` fetches `/api/skills`
+to dim dormant skills in the `/` palette, with no capability check, so Claude
+Code and Codex (`skills: false`) ran a full filesystem scan on every `/`
+keystroke. Its props arrive through `ChatWindow` and none of them carry
+capabilities, so it asks `lib/engine-capabilities.ts` instead: one memoized
+`/api/info` read per page load, permissive on anything but an explicit
+`false`, exactly as AppShell is.
+
+### Not done, and why
+
+- **`environments:` gating.** Hermes hides a skill tagged for an inactive
+  runtime environment (kanban/docker/s6). Detecting those means reading
+  Hermes' toolset config and container markers, and Hermes itself fails OPEN
+  on a tag it does not recognise. Over-listing an s6-only skill is cosmetic;
+  mis-detecting one and hiding a skill that IS loaded would be a lie, so only
+  `platforms:` is replicated.
+- **A Hermes-native store.** `hermes skills browse/search` reaches five
+  registries Cody's store does not (official/optional, ClawHub, LobeHub,
+  browse.sh, taps). Cody's store stays skills.sh-only; the rest is
+  `hermes skills install` in a terminal.
 
 ## Phase 3 — migrating the existing engines, honestly
 

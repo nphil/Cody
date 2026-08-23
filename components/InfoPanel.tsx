@@ -15,7 +15,13 @@ export interface InfoPanelProps {
 
 interface RuntimeInfo {
   codyVersion: string;
+  /** Named for the founding engine, but it is `harness.getVersion()` — the
+   * version of whatever engine is ACTIVE. */
   ompVersion: string | null;
+  /** Who that engine is. The version and agent dir below have always been the
+   * active engine's; only the labels around them said "OMP", so a Hermes
+   * user's pasted diagnostics read "OMP: 0.19.0". */
+  engineName: string;
   nodeVersion: string;
   platform: string;
   agentDir: string;
@@ -149,15 +155,24 @@ export function InfoPanel({ cwd, active, gitBranch, gitRepoRoot }: InfoPanelProp
     setError(null);
     try {
       const response = await fetch("/api/info", { signal: controller.signal });
-      const data = await response.json().catch(() => ({})) as Partial<RuntimeInfo> & { error?: string };
+      const data = await response.json().catch(() => ({})) as Partial<RuntimeInfo> & {
+        error?: string;
+        engine?: { shortName?: unknown; displayName?: unknown };
+      };
       if (stale()) return;
       if (!response.ok || typeof data.codyVersion !== "string") {
         setError(data.error ?? translate("info.loadFailed"));
         return;
       }
+      const engine = data.engine;
       setInfo({
         codyVersion: data.codyVersion,
         ompVersion: typeof data.ompVersion === "string" ? data.ompVersion : null,
+        engineName: typeof engine?.shortName === "string" && engine.shortName
+          ? engine.shortName
+          : typeof engine?.displayName === "string" && engine.displayName
+            ? engine.displayName
+            : translate("info.engineFallbackName"),
         nodeVersion: typeof data.nodeVersion === "string" ? data.nodeVersion : "",
         platform: typeof data.platform === "string" ? data.platform : "",
         agentDir: typeof data.agentDir === "string" ? data.agentDir : "",
@@ -187,7 +202,10 @@ export function InfoPanel({ cwd, active, gitBranch, gitRepoRoot }: InfoPanelProp
     const lines = [
       "Cody diagnostics",
       `Cody: v${diagnosticValue(process.env.NEXT_PUBLIC_CODY_VERSION ?? info?.codyVersion)} (${PACKAGE_NAME})`,
-      `OMP: ${diagnosticValue(info?.ompVersion)}`,
+      // The label follows the engine, never the founding one: a diagnostics
+      // paste that says "OMP" under Hermes sends the reader after the wrong
+      // changelog. Never localized — a paste lands in an English bug report.
+      `Engine: ${info?.engineName ?? "unknown"} ${diagnosticValue(info?.ompVersion)}`,
       `Node: ${diagnosticValue(info?.nodeVersion)}`,
       `Platform: ${diagnosticValue(info?.platform)}`,
       `Agent dir: ${diagnosticValue(info?.agentDir)}`,
@@ -279,7 +297,7 @@ export function InfoPanel({ cwd, active, gitBranch, gitRepoRoot }: InfoPanelProp
         </div>
 
         <div>
-          <div style={sectionHeadingStyle}>{t("info.section.omp")}</div>
+          <div style={sectionHeadingStyle}>{t("info.section.engine", { name: info?.engineName ?? t("info.engineFallbackName") })}</div>
           <Row label={t("info.label.version")} value={formatVersion(info?.ompVersion)} mono />
           <Row label={t("info.label.agentDir")} value={formatVersion(info?.agentDir)} mono />
           {info?.storage ? (

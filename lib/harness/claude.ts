@@ -66,6 +66,18 @@ function claudeEngineEnv(): Record<string, string> {
 }
 
 /**
+ * One argv, two jobs: it proves the CLI half of the install actually runs
+ * (`healthArgs`) and it prints the version Cody reports as Claude Code's
+ * (`engineCli.getVersion`). Shared so the number that gets VERIFIED is the
+ * number that gets SHOWN.
+ *
+ * It needs `claudeEngineEnv()`: with the bundled copy deliberately not
+ * installed, a bare run dies with "Claude native binary not found for
+ * linux-x64 … or set CLAUDE_CODE_EXECUTABLE".
+ */
+const CLAUDE_CLI_VERSION_ARGS = ["--cli", "--version"] as const;
+
+/**
  * Cody's display bridge (open_preview, preview_screenshot, read_app_logs) as
  * an MCP server on the session. This is how Claude Code has always reached
  * those tools — the per-turn path passed the same server as `--mcp-config` —
@@ -126,6 +138,17 @@ export const claudeHarness: HarnessAdapter = {
   // `@latest` like the adapter: every install IS the update path, so both
   // halves of the engine move together and neither can go stale alone.
   installAlso: ["@anthropic-ai/claude-code@latest"],
+  // Which of those two packages is which, so the card can label the numbers
+  // instead of showing the adapter's and calling it Claude Code's — and so
+  // the update check asks npm about BOTH. Without the second registry name a
+  // CLI left behind at 2.1.238 reads as "up to date" while 2.1.241 is
+  // published, because the adapter it sits under was already current.
+  engineCli: {
+    adapterLabel: "Claude Code ACP adapter",
+    label: "Claude Code CLI",
+    packageName: "@anthropic-ai/claude-code",
+    getVersion: () => getEngineVersion("claude-agent-acp", "CLAUDE", CLAUDE_CLI_VERSION_ARGS, claudeEngineEnv()),
+  },
   engineEnv: claudeEngineEnv,
   authHint:
     "Sign in by running `claude` once in a Cody terminal, or set ANTHROPIC_API_KEY on the container.",
@@ -146,16 +169,25 @@ export const claudeHarness: HarnessAdapter = {
   // verified both ways, it exits 0 with "2.1.241 (Claude Code)" when the chain
   // is whole and throws "Claude native binary not found … or set
   // CLAUDE_CODE_EXECUTABLE" when it is not.
-  healthArgs: ["--cli", "--version"],
+  healthArgs: CLAUDE_CLI_VERSION_ARGS,
+  // The ADAPTER's major, which is the package installSpec names — not the
+  // CLI's 2.x, which moves on its own schedule and is a different package
+  // entirely. 0.70.x is what Cody's ACP client has been exercised against;
+  // `engineCli.adapterLabel` is what the notice names, so a 1.0 adapter reads
+  // as a claim about the adapter and nothing else.
+  verifiedMajor: 0,
   capabilities: {
     // Verified end to end against the real adapter: initialize, session/new,
     // a prompt round trip, a tool call, an approval, and session/load of a
     // stored session id.
     liveSessions: true,
-    // The adapter DOES offer model selection (session/new returns a `model`
-    // config option), but Cody's model surface is omp's models.yml editor and
-    // the ACP client does not yet plumb a selection through. A dropdown wired
-    // to nothing is worse than no dropdown.
+    // FALSE means "no models.yml MANAGEMENT editor", which is what this flag
+    // gates — not "no models". The adapter's own model selection (a `model`
+    // config option on session/new) IS wired: acp-session captures it, reports
+    // it through get_state as `availableModels`, and switches it with
+    // set_model. That is deliberately data rather than a flag, because whether
+    // an agent offers models depends on the account the session opened with,
+    // which nothing static here could know.
     models: false,
     // Claude Code has skills of its own; the Cody surface is built against
     // omp's discovery and would list none of them.

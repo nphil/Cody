@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import packageJson from "../../../package.json";
-import { getHarness } from "@/lib/harness";
+import { engineOwnVersion, getHarness } from "@/lib/harness";
 import type { HarnessCapabilities } from "@/lib/harness/types";
 import { readEnv } from "@/lib/env";
 import { getDiskSpace } from "@/lib/disk-space";
@@ -52,7 +52,9 @@ export async function GET() {
     const harness = getHarness();
     const body: InfoResponse = {
       codyVersion: packageJson.version,
-      ompVersion: await harness.getVersion(),
+      // The engine's own version, not the ACP adapter Cody installs to drive
+      // it — the row is labelled with the engine's name (see engineOwnVersion).
+      ompVersion: await engineOwnVersion(harness),
       nodeVersion: process.version,
       platform: `${process.platform} ${process.arch}`,
       agentDir: harness.getAgentDir(),

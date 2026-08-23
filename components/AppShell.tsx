@@ -35,6 +35,7 @@ import { ProviderIcon } from "./ProviderIcon";
 import { providerBrand } from "@/lib/provider-brand";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import { ALL_CAPABILITIES, normalizeCapabilities, type ActiveEngineInfo, type EngineCapabilities, type SettingsTab } from "./SettingsTabs";
+import { loadEngineInfo } from "@/lib/engine-capabilities";
 import type { EnginesPayload } from "./EnginePicker";
 import { STORAGE_KEYS } from "@/lib/storage-keys";
 import { createPreviewAutoOpener, type PreviewAutoOpener } from "@/lib/preview-autoopen";
@@ -264,33 +265,21 @@ export function AppShell() {
   const [enginePickerOpen, setEnginePickerOpen] = useState(false);
   const [setupWizardOpen, setSetupWizardOpen] = useState(false);
   useEffect(() => {
-    const controller = new AbortController();
-    void fetch("/api/info", { cache: "no-store", signal: controller.signal })
-      .then((response) => (response.ok ? response.json() : null))
-      .then((data: { capabilities?: unknown; engine?: Partial<ActiveEngineInfo> } | null) => {
-        if (controller.signal.aborted) return;
-        if (!data) {
-          setCapabilitiesLoaded(true);
-          return;
-        }
-        setCapabilities(normalizeCapabilities(data.capabilities));
-        const engine = data.engine;
-        if (engine && typeof engine.id === "string") {
-          setActiveEngine({
-            id: engine.id,
-            displayName: engine.displayName ?? engine.id,
-            shortName: engine.shortName ?? engine.id,
-            experimental: engine.experimental === true,
-          });
-        }
-        setCapabilitiesLoaded(true);
-      })
-      .catch(() => {
-        // Keep the permissive defaults; an unreachable /api/info must not
-        // strip the UI down to the smallest engine's surface.
-        if (!controller.signal.aborted) setCapabilitiesLoaded(true);
-      });
-    return () => controller.abort();
+    let cancelled = false;
+    // One memoized /api/info read for the whole page (lib/engine-capabilities):
+    // what the engine can serve and who it is, threaded down as props from
+    // here. An unreachable /api/info yields no flags at all, which
+    // normalizeCapabilities turns back into the permissive omp-era defaults —
+    // gating must never bite on a failed request.
+    void loadEngineInfo().then(({ capabilities: flags, engine }) => {
+      if (cancelled) return;
+      setCapabilities(normalizeCapabilities(flags));
+      if (engine) setActiveEngine(engine);
+      setCapabilitiesLoaded(true);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
   useEffect(() => {
     const controller = new AbortController();
@@ -1141,6 +1130,7 @@ export function AppShell() {
         explorerRefreshKey={explorerRefreshKey}
         onAtMention={handleAtMention}
         onAtMentions={handleAtMentions}
+        engine={activeEngine}
       />
     </>
   );
@@ -1317,16 +1307,21 @@ export function AppShell() {
                   hasSession
                 />
               )}
-              <button
-                ref={systemBtnRef}
-                onClick={() => toggleTopPanel("system")}
-                title={t("appShell.system")}
-                aria-label={t("appShell.system")}
-                aria-pressed={activeTopPanel === "system"}
-                className="shell-toolbar-btn ui-focus-ring"
-              >
-                <ScrollText size={14} strokeWidth={1.8} aria-hidden="true" style={{ color: systemPrompt ? "var(--accent)" : undefined }} />
-              </button>
+              {/* The system prompt arrives on the rpc-dialect get_state; ACP's
+                  buildState carries no such field, so on those engines this
+                  panel could only ever open empty. Gated with its neighbours. */}
+              {capabilities.chatExtras && (
+                <button
+                  ref={systemBtnRef}
+                  onClick={() => toggleTopPanel("system")}
+                  title={t("appShell.system")}
+                  aria-label={t("appShell.system")}
+                  aria-pressed={activeTopPanel === "system"}
+                  className="shell-toolbar-btn ui-focus-ring"
+                >
+                  <ScrollText size={14} strokeWidth={1.8} aria-hidden="true" style={{ color: systemPrompt ? "var(--accent)" : undefined }} />
+                </button>
+              )}
             </div>
           </>
         )}
@@ -1860,10 +1855,9 @@ export function AppShell() {
               onOpenFile={handleOpenLinkedFile}
               onOpenPreview={handleAgentOpenPreview}
               onPreviewUrlsSeen={handlePreviewUrlsSeen}
-              advisorEnabled={capabilities.advisor && advisorEnabled}
-              chatExtras={capabilities.chatExtras}
-              fastModeCapable={capabilities.fastMode}
-              subagentsCapable={capabilities.subagents}
+              advisorEnabled={advisorEnabled}
+              capabilities={capabilities}
+              engine={activeEngine}
               toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
               thinkingDefaultExpanded={thinkingDefaultExpanded}
             />

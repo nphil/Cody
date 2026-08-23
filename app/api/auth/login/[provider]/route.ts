@@ -1,4 +1,5 @@
 import { homedir } from "os";
+import { requireEngine } from "@/lib/engine-guard";
 import { invalidateModelsCache } from "@/lib/models-cache";
 import { enableProvider } from "@/lib/omp/model-roles";
 import { RpcProcess, type RpcFrame } from "@/lib/omp/rpc-process";
@@ -69,6 +70,11 @@ export async function GET(
   { params }: { params: Promise<{ provider: string }> }
 ) {
   const { provider } = await params;
+  // The flow IS an omp child (`omp --mode rpc-ui`) driving omp's own OAuth
+  // extension into omp's credential store. Running it under another engine
+  // would sign the user in to something the active engine never reads.
+  const gate = requireEngine("omp", "Provider login");
+  if ("response" in gate) return gate.response;
   const token = `${provider}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const registry = getLoginRegistry();
   const encoder = new TextEncoder();

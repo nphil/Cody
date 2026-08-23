@@ -209,7 +209,30 @@ type AgentStateResponse = {
   // omp only reports a count; the queued texts are tracked client-side.
   queuedMessageCount?: number;
   todoPhases?: TodoPhase[];
+  // The engine's OWN model catalog, for engines that carry model selection as
+  // per-SESSION state instead of a sessionless registry (every ACP engine:
+  // the list an agent publishes depends on the account the session opened
+  // with). /api/models answers `catalogSource: "session"` for those and hands
+  // back an empty list rather than the neighbouring engine's catalog; these
+  // two fields are where the real list lives. `modelSelectable` is decided per
+  // SESSION, never per engine — an agent that published no selector reports
+  // false and the picker stays hidden.
+  availableModels?: { provider?: unknown; id?: unknown; name?: unknown }[];
+  modelSelectable?: boolean;
 };
+
+/** Read a session-scoped catalog off get_state, dropping anything malformed
+ * rather than rendering a row that cannot be selected. */
+function readSessionModels(state: AgentStateResponse | null | undefined): ModelEntry[] {
+  if (!state || !Array.isArray(state.availableModels)) return [];
+  return state.availableModels.flatMap((entry) => {
+    const provider = typeof entry?.provider === "string" ? entry.provider : "";
+    const id = typeof entry?.id === "string" ? entry.id : "";
+    if (!provider || !id) return [];
+    const name = typeof entry?.name === "string" && entry.name ? entry.name : id;
+    return [{ provider, id, name }];
+  });
+}
 
 function readLiveContextUsage(value: unknown): ContextUsageValue | null {
   if (!isRecord(value)) return null;
@@ -432,6 +455,10 @@ export interface UseAgentSessionOptions {
   /** False when the active engine has no subagents: skip the roster call
    * entirely rather than provoking an "unsupported" rejection per send. */
   subagentsCapable?: boolean;
+  /** What to call the engine in notices and toasts. These fire on any slow
+   * first connect and on any fallback event, so hardcoding "omp" told a
+   * Hermes user that omp was starting up. */
+  engineName?: string;
   /** The Interface & Behavior preference. When thinking is shown by default,
    *  session loads must NOT defer thinking text: a deferred block renders
    *  expanded-but-empty, the load's pin-to-bottom lands, and then hundreds of
@@ -674,6 +701,11 @@ type ModelsResponse = {
   thinkingLevels?: Record<string, string[]>;
   thinkingLevelMaps?: Record<string, Record<string, string | null>>;
   modelError?: string;
+  /** "global" — the sessionless registry this response carries. "session" —
+   * the engine publishes its models on the session instead, so `modelList` is
+   * legitimately empty here and the composer reads get_state. Deliberately
+   * NOT an error: nothing is broken. */
+  catalogSource?: "global" | "session";
 };
 
 type SlashCommandsResponse = {
@@ -726,6 +758,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [modelList, setModelList] = useState<ModelEntry[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelError, setModelError] = useState<string | null>(null);
+  // Where this engine's models live. "global" is the sessionless registry
+  // /api/models reads (omp, pi); "session" means the engine publishes them on
+  // the session itself and the route hands back an honest empty list. The
+  // composer must read the right one — showing the empty global list under an
+  // ACP engine is the "No models" bug wearing a different hat.
+  const [modelCatalogSource, setModelCatalogSource] = useState<"global" | "session">("global");
+  const [sessionModels, setSessionModels] = useState<{ list: ModelEntry[]; selectable: boolean }>(
+    () => ({ list: [], selectable: false }),
+  );
   const [liveModelMeta, setLiveModelMeta] = useState<ThinkingModelMeta | null>(null);
   const [modelThinkingLevels, setModelThinkingLevels] = useState<Record<string, string[]>>({});
   const [modelThinkingLevelMaps, setModelThinkingLevelMaps] = useState<Record<string, Record<string, string | null>>>({});
@@ -1051,6 +1092,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // Recover the ON-DISK roster from the parent session's task toolResults.
   // Survives page reloads and shows finished runs from previous sessions.
   const refreshSubagentHistory = useCallback(async (sid: string) => {
+    // Same gate as refreshSubagentRoster below: an engine with no subagent
+    // vocabulary has no roster to recover, and this fired on EVERY
+    // loadSession — a per-session request that could only ever answer empty.
+    if (opts.subagentsCapable === false) return;
     const generation = subagentRosterGenerationRef.current;
     try {
       const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/subagents`);
@@ -1069,7 +1114,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch {
       // Best effort; live frames take precedence while a run is active.
     }
-  }, [mergeSubagents]);
+  }, [mergeSubagents, opts.subagentsCapable]);
 
   // Hydrate the LIVE roster from get_subagents. The registry only holds
   // currently-running subagents, so this fills gaps after an SSE reconnect or
@@ -1169,6 +1214,24 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // idle-disposed session restarts omp, which re-resolves the model from the
   // session file — the freshly resolved model (and clamped thinking level)
   // must reach the composer so the ladder/active level match reality.
+  /** Adopt a session-scoped catalog off get_state. Engines with a global
+   * registry never send these fields, and an absent field must not be read as
+   * "the agent withdrew its selector" — only an explicit report replaces
+   * what is held. */
+  const adoptSessionModels = useCallback((state: AgentStateResponse | null | undefined) => {
+    if (!state || state.modelSelectable === undefined) return;
+    const list = readSessionModels(state);
+    const selectable = state.modelSelectable === true && list.length > 0;
+    setSessionModels((current) => {
+      if (current.selectable === selectable
+        && current.list.length === list.length
+        && current.list.every((entry, index) => entry.provider === list[index].provider && entry.id === list[index].id && entry.name === list[index].name)) {
+        return current;
+      }
+      return { list, selectable };
+    });
+  }, []);
+
   const refreshLiveModelState = useCallback(async (sid: string) => {
     const token = beginAuthoritativeModelSync();
     try {
@@ -1176,6 +1239,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (!res.ok) return;
       const agentState = await res.json() as { running: boolean; state?: AgentStateResponse };
       if (sessionIdRef.current !== sid) return;
+      adoptSessionModels(agentState.state);
       const applied = applyAuthoritativeModel(toThinkingModelMeta(agentState.state?.model), token);
       if (!applied) return; // stale snapshot — drop its thinking level too
       if (agentState.state?.thinkingLevel !== undefined) {
@@ -1196,7 +1260,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch {
       // Best effort; the next loadSession/reconcile re-syncs.
     }
-  }, [applyAuthoritativeModel, beginAuthoritativeModelSync]);
+  }, [applyAuthoritativeModel, beginAuthoritativeModelSync, adoptSessionModels]);
 
   /**
    * Adopt a `get_state.pendingPermissions` snapshot.
@@ -1222,6 +1286,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // reload the open session mid-run).
   const thinkingDefaultExpandedRef = useRef(thinkingDefaultExpanded === true);
   thinkingDefaultExpandedRef.current = thinkingDefaultExpanded === true;
+
+  // Same reasoning: the engine's display name is read from deep inside the
+  // event handler and the connect path, neither of which may change identity
+  // when /api/info finally answers. "Cody" is the placeholder until it does,
+  // so a notice never renders with an empty hole where a name belongs.
+  const engineNameRef = useRef(opts.engineName ?? "Cody");
+  engineNameRef.current = opts.engineName ?? "Cody";
 
   const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false, fenceRunId?: number) => {
     let messagesLoaded = false;
@@ -1291,6 +1362,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
 
         const liveState = agentState.state;
+        adoptSessionModels(liveState);
         const modelApplied = applyAuthoritativeModel(toThinkingModelMeta(liveState?.model), token);
         if (liveState) {
           if (liveState.contextUsage !== undefined) setLiveContextUsage(readLiveContextUsage(liveState.contextUsage));
@@ -1335,7 +1407,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (showLoading && !messagesLoaded) setLoading(false);
     }
-  }, [refreshSubagentHistory, applyAuthoritativeModel, beginAuthoritativeModelSync, adoptPermissionRequests]);
+  }, [refreshSubagentHistory, applyAuthoritativeModel, beginAuthoritativeModelSync, adoptPermissionRequests, adoptSessionModels]);
 
   const loadContext = useCallback(async (sid: string, leafId: string | null) => {
     const seq = ++contextRequestSeqRef.current;
@@ -1820,7 +1892,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // Only this (send-blocking) path announces a slow connect; the mount and
     // auto-reconnect paths call connectEvents directly and stay silent.
     const slowNotice = setTimeout(() => {
-      addNotice({ type: "info", message: translate("agentSession.startingAgent") });
+      addNotice({ type: "info", message: translate("agentSession.startingAgent", { name: engineNameRef.current }) });
     }, EVENT_STREAM_SLOW_CONNECT_MS);
     let result: EventStreamConnectionResult;
     try {
@@ -2283,6 +2355,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               // Stale terminal snapshot: the user switched sessions or started
               // the next run while this request was in flight — drop it.
               if (sessionIdRef.current !== endedSid || promptRunIdRef.current !== endedRunId) return;
+              adoptSessionModels(d.state);
               const applied = applyAuthoritativeModel(toThinkingModelMeta(d.state.model), endToken);
               if (!applied) return; // stale snapshot — drop everything derived from it
               if (d.state?.contextUsage !== undefined) setLiveContextUsage(readLiveContextUsage(d.state.contextUsage));
@@ -2555,7 +2628,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const to = typeof event.to === "string" ? event.to : "?";
         const role = typeof event.role === "string" ? event.role : "default";
         const reason = lastRetryErrorRef.current;
-        const detail = translate("agentSession.fallbackAppliedDetail", { role })
+        const detail = translate("agentSession.fallbackAppliedDetail", { role, name: engineNameRef.current })
           + (reason ? `\n${translate("agentSession.fallbackReason", { reason })}` : "");
         // The toast announces the switch once; the marker outlives it on the
         // composer until the model moves again, so a downgraded session never
@@ -2576,7 +2649,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         lastRetryErrorRef.current = null;
         toast.success(
           translate("agentSession.fallbackSucceeded", { model }),
-          translate("agentSession.fallbackSucceededDetail"),
+          translate("agentSession.fallbackSucceededDetail", { name: engineNameRef.current }),
           { durationMs: MODEL_SWITCH_TOAST_MS },
         );
         break;
@@ -2757,7 +2830,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as unknown as IncomingExtensionUiRequest);
         break;
     }
-  }, [addNotice, consumeQueuedMessage, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, maybeAutoNameSession, mergeSubagents, onAgentEnd, onPreviewUrlsSeen, reconcileAgentState, resetSubagentActivityState, applyAuthoritativeModel, beginAuthoritativeModelSync]);
+  }, [addNotice, consumeQueuedMessage, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, maybeAutoNameSession, mergeSubagents, onAgentEnd, onPreviewUrlsSeen, reconcileAgentState, resetSubagentActivityState, applyAuthoritativeModel, beginAuthoritativeModelSync, adoptSessionModels]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]): Promise<boolean> => {
@@ -3247,11 +3320,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const d = await res.json() as ModelsResponse;
       setModelNames(d.models);
       setModelError(d.modelError ?? null);
+      setModelCatalogSource(d.catalogSource === "session" ? "session" : "global");
       setModelThinkingLevels(d.thinkingLevels ?? {});
       setModelThinkingLevelMaps(d.thinkingLevelMaps ?? {});
       const nextModelList = d.modelList ?? [];
       setModelList(nextModelList);
-      if (isNew) {
+      // A session-scoped engine has no default to seed a new session with:
+      // the agent resolves its own on session/new and reports it back through
+      // get_state. Seeding from an empty global list would pin the composer to
+      // nothing at all.
+      if (isNew && d.catalogSource !== "session") {
         const match = d.defaultModel
           ? nextModelList.find((m) => m.id === d.defaultModel?.modelId && m.provider === d.defaultModel?.provider)
           : undefined;
@@ -3790,10 +3868,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setSessionStatsOverride(null);
   }, [messages.length, contextUsage?.tokens, contextUsage?.percent, contextUsage?.contextWindow]);
 
+  // What the composer must show. A session-scoped engine's models arrive on
+  // get_state, not from /api/models, and its `modelNames` map is built here so
+  // a name resolves the same way for every engine.
+  const effectiveModelList = modelCatalogSource === "session" ? sessionModels.list : modelList;
+  const effectiveModelNames = useMemo(() => (
+    modelCatalogSource === "session"
+      ? Object.fromEntries(sessionModels.list.map((entry) => [`${entry.provider}:${entry.id}`, entry.name]))
+      : modelNames
+  ), [modelCatalogSource, sessionModels.list, modelNames]);
+  /** Whether THIS session can change model at all. A global registry means
+   * the engine's own set_model surface (gated by chatExtras upstream); a
+   * session-scoped engine decides per session, because whether an ACP agent
+   * publishes a selector depends on the account it opened with. */
+  const modelSelectable = modelCatalogSource === "session" ? sessionModels.selectable : null;
+
   return {
     // State
     data, loading, error, activeLeafId, messages, entryIds, streamState,
-    agentRunning, modelNames, modelList, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel, fastModeEnabled, fastModeActive, autoRetryEnabled, interruptMode, autoCompactionEnabled, steeringMode, followUpMode,
+    agentRunning, modelNames: effectiveModelNames, modelList: effectiveModelList, modelSelectable, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel, fastModeEnabled, fastModeActive, autoRetryEnabled, interruptMode, autoCompactionEnabled, steeringMode, followUpMode,
     liveModelMeta,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats,

@@ -7,7 +7,29 @@ import { piHarness } from "./pi";
 import { readEngineState, writeEngineState } from "./state";
 import type { HarnessAdapter } from "./types";
 
-export type { EngineEvent, EngineSession, EngineSessionOptions, HarnessAdapter, HarnessCapabilities, RpcUiSpawn } from "./types";
+export type { EngineCliPart, EngineEvent, EngineSession, EngineSessionOptions, HarnessAdapter, HarnessCapabilities, RpcUiSpawn } from "./types";
+
+/**
+ * The version a user means by this engine's NAME.
+ *
+ * `HarnessAdapter.getVersion()` reports the package `installSpec` names, which
+ * for Claude Code and Codex is the ACP ADAPTER Cody installs to drive the
+ * engine — 0.70.x and 1.x, while the CLIs themselves are on 2.1.x and 0.14x.x.
+ * Showing that number under the engine's name is not a smaller truth, it is a
+ * different package's version. Anything that labels a number with the engine's
+ * name uses this; the adapter's own version belongs beside its own label
+ * (see EngineCliPart, and the update card's per-package breakdown).
+ *
+ * Falls back to the installed package's version when the CLI half cannot be
+ * read at all, because a half that DOES answer beats showing nothing.
+ */
+export async function engineOwnVersion(adapter: HarnessAdapter): Promise<string | null> {
+  const [engineVersion, packageVersion] = await Promise.all([
+    adapter.engineCli?.getVersion() ?? Promise.resolve(null),
+    adapter.getVersion(),
+  ]);
+  return engineVersion ?? packageVersion;
+}
 
 const ADAPTERS: Record<string, HarnessAdapter> = {
   [ompHarness.id]: ompHarness,

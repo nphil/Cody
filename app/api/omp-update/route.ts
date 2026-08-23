@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireAdmin, requireUser } from "@/lib/auth/http";
+import { requireEngine } from "@/lib/engine-guard";
 import { getHarnessById } from "@/lib/harness";
 import { EngineInstallError, installEngine, readInstallHistory } from "@/lib/harness/install";
 import { invalidateOmpCliCache } from "@/lib/omp/omp-cli";
@@ -11,6 +12,13 @@ export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
   try {
+    // Every branch below is omp's: omp's registry check, omp's installer,
+    // omp's RPC health probe, omp's session restart. The client already gates
+    // the button on `capabilities.updates`, but a client flag is not a guard —
+    // probed directly under Hermes this reported omp's version as the active
+    // engine's, and its `update` action would have installed omp.
+    const gate = requireEngine("omp", "The OMP runtime update check");
+    if ("response" in gate) return gate.response;
     const body = await request.json() as { action?: unknown };
     if (body.action === "check") {
       // Read-only: any signed-in user may see update status.

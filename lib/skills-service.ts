@@ -3,7 +3,17 @@ import { homedir } from "os";
 import * as path from "path";
 import { parse as parseYaml } from "yaml";
 import { getHarness } from "@/lib/harness";
-import type { SkillInfo } from "@/lib/api-types";
+import {
+  canToggleHermesSkills,
+  hermesPackageForIdentifier,
+  hermesSkillMatchesPlatform,
+  hermesSkillRoots,
+  isExcludedHermesSkillDir,
+  isHermesSkillSupportDir,
+  readHermesDisabledSkills,
+  readHermesSkillLock,
+} from "@/lib/harness/hermes-skills";
+import type { SkillInfo, SkillInstallScope } from "@/lib/api-types";
 import { annotateSkillsWithInstallInfo } from "@/lib/skill-lock";
 
 /**
@@ -16,7 +26,8 @@ import { annotateSkillsWithInstallInfo } from "@/lib/skill-lock";
  * .agents/skills walked up to the git root, <agent dir>/skills and
  * ~/.agents/skills — no .claude/.codex/.github compat dirs and no
  * managed-skills dir, so scanning those under pi would list skills the
- * engine never loads. Cody cannot import either Bun-only SDK, so the scan
+ * engine never loads. Hermes reads a narrower set again but a DEEPER one —
+ * see buildHermesScanRoots. Cody cannot import any of those SDKs, so the scan
  * rules are replicated per engine.
  */
 
@@ -38,6 +49,22 @@ interface SkillScanRoot {
   scope: "user" | "project";
   /** omp skips skills without a description for these providers. */
   requireDescription?: boolean;
+  /**
+   * Walk the whole tree instead of reading one level. Set ONLY for Hermes,
+   * which nests skills under category folders. omp's and pi's providers are
+   * deliberately one level deep: their roots sit inside repositories and user
+   * config dirs, so a recursive walk there would surface every vendored,
+   * checked-out or archived SKILL.md in the tree as a skill the engine loads,
+   * which is not true. Recursion belongs to the engine whose discovery is
+   * recursive, and nowhere else.
+   */
+  recursive?: boolean;
+  /** Extra gate the engine applies to a skill's frontmatter before loading
+   * it, beyond the `enabled: false` every engine honours. */
+  accepts?: (frontmatter: Record<string, unknown>) => boolean;
+  /** Engines that keep enable/disable outside the SKILL.md answer here
+   * instead of through the frontmatter key omp honours. */
+  isDisabled?: (name: string) => boolean;
 }
 
 export interface ParsedSkillFrontmatter {
@@ -106,11 +133,55 @@ function buildPiScanRoots(cwd: string): SkillScanRoot[] {
   return roots;
 }
 
+/**
+ * Hermes' discovery (agent/skill_utils.get_all_skills_dirs +
+ * iter_skill_index_files): its own `$HERMES_HOME/skills` first, then the
+ * `skills.external_dirs` from its config.yaml, each walked RECURSIVELY.
+ *
+ * Two differences from every other engine, both load-bearing:
+ *
+ * - **There is no project scope.** Hermes has one skills root per home plus
+ *   read-only external dirs; nothing is discovered from the workspace, so a
+ *   `.hermes/skills` beside the code would be listed by Cody and loaded by
+ *   nobody. Hence no `cwd` parameter here.
+ * - **Skills nest under category folders.** `hermes skills install --category
+ *   security 1password` writes `skills/security/1password/SKILL.md`, and
+ *   categories can nest further. Hermes finds them with `rglob("SKILL.md")`;
+ *   a flat readdir finds none of them.
+ *
+ * The bundled `optional-skills` shipped inside the installed package are NOT
+ * a root: they are a catalog `hermes skills install` copies FROM, and Hermes
+ * only loads a copy once it has been seeded into the skills root.
+ */
+function buildHermesScanRoots(): SkillScanRoot[] {
+  const agentDir = getHarness().getAgentDir();
+  const [own, ...external] = hermesSkillRoots(agentDir, homedir());
+  // Read once per scan, not once per skill: both are file reads.
+  const disabled = readHermesDisabledSkills(agentDir);
+  const shared = {
+    scope: "user",
+    recursive: true,
+    // Hermes hides a skill whose `platforms:` excludes this OS, so listing one
+    // would offer a skill the engine never loads.
+    accepts: (frontmatter: Record<string, unknown>) => hermesSkillMatchesPlatform(frontmatter.platforms),
+    // Enable/disable lives in `skills.disabled` in config.yaml, keyed by skill
+    // name. Nothing in Hermes reads the frontmatter key omp honours.
+    isDisabled: (name: string) => disabled.has(name),
+  } as const satisfies Omit<SkillScanRoot, "dir" | "source">;
+  return [
+    { dir: own, source: ".hermes", ...shared },
+    // External dirs are Hermes-owned only for reading (skill_utils
+    // is_external_skill_path): they are listed, never written to.
+    ...external.map((dir): SkillScanRoot => ({ dir, source: "external", ...shared })),
+  ];
+}
+
 /** Scan roots in omp's provider priority order (highest first): .omp (100),
  * .claude (80), .agent/.agents + .codex + .github (70), managed skills (5).
- * The pi engine gets its own narrower walk (buildPiScanRoots above). */
+ * pi and Hermes each get their own narrower walk (above). */
 function buildScanRoots(cwd: string): SkillScanRoot[] {
   if (getHarness().id === "pi") return buildPiScanRoots(cwd);
+  if (getHarness().id === "hermes") return buildHermesScanRoots();
   const home = homedir();
   // The ACTIVE engine's dir, not omp's. Reading lib/omp/paths here meant
   // every engine scanned ~/.omp/agent for its skills — so a Claude Code or
@@ -216,14 +287,60 @@ export function setDisableModelInvocation(content: string, disable: boolean): st
   return block + content.slice(match[0].length);
 }
 
+/** `root.dir` is user-controlled and can be outside the app. Keep runtime
+ * discovery opaque to Next's NFT tracer so builds never glob the user's
+ * profile (or protected Windows junctions). */
+function readDirEntries(dir: string) {
+  const readDirectory = Reflect.get(fs, "readdir") as typeof fs.readdir;
+  return readDirectory(dir, { withFileTypes: true });
+}
+
+/** Directories one level under a root, each a candidate skill package. */
+async function flatSkillDirs(root: string): Promise<string[]> {
+  const entries = await readDirEntries(root);
+  return entries
+    .filter((entry) => !entry.name.startsWith(".") && (entry.isDirectory() || entry.isSymbolicLink()))
+    .map((entry) => path.join(root, entry.name));
+}
+
+/**
+ * Every directory under `root` holding a SKILL.md, mirroring Hermes'
+ * `iter_skill_index_files`: dependency/VCS/cache dirs and Hermes' own `.hub`
+ * are pruned, and a skill package's progressive-disclosure subdirectories
+ * (references/templates/assets/scripts) are pruned only when the directory
+ * containing them is itself a skill — so an archived SKILL.md under
+ * `some-skill/references/` is documentation, while a category legitimately
+ * named `scripts/` stays discoverable.
+ */
+async function nestedSkillDirs(root: string): Promise<string[]> {
+  const found: string[] = [];
+  const visit = async (dir: string): Promise<void> => {
+    const entries = await readDirEntries(dir);
+    const hasSkillFile = entries.some((entry) => entry.name === "SKILL.md" && !entry.isDirectory());
+    if (hasSkillFile) found.push(dir);
+    // Hermes follows symlinks (os.walk(followlinks=True)); Dirent.isDirectory
+    // is false for one, so the child is visited and a bad link simply fails
+    // its own readdir below.
+    const children = entries.filter((entry) =>
+      (entry.isDirectory() || entry.isSymbolicLink())
+      && !isExcludedHermesSkillDir(entry.name)
+      && !isHermesSkillSupportDir(entry.name, hasSkillFile));
+    await Promise.all(children.map(async (entry) => {
+      try {
+        await visit(path.join(dir, entry.name));
+      } catch {
+        // An unreadable subtree hides its own skills, not the whole root.
+      }
+    }));
+  };
+  await visit(root);
+  return found;
+}
+
 async function scanRoot(root: SkillScanRoot, diagnostics: SkillDiagnostic[]): Promise<SkillInfo[]> {
-  let entries;
+  let skillDirs: string[];
   try {
-    // `root.dir` is user-controlled and can be outside the app. Keep this
-    // runtime discovery opaque to Next's NFT tracer so builds never glob the
-    // user's profile (or protected Windows junctions).
-    const readDirectory = Reflect.get(fs, "readdir") as typeof fs.readdir;
-    entries = await readDirectory(root.dir, { withFileTypes: true });
+    skillDirs = root.recursive ? await nestedSkillDirs(root.dir) : await flatSkillDirs(root.dir);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
       diagnostics.push({
@@ -236,10 +353,8 @@ async function scanRoot(root: SkillScanRoot, diagnostics: SkillDiagnostic[]): Pr
   }
 
   const skills: SkillInfo[] = [];
-  await Promise.all(entries.map(async (entry) => {
-    if (entry.name.startsWith(".")) return;
-    if (!entry.isDirectory() && !entry.isSymbolicLink()) return;
-    const skillPath = path.join(root.dir, entry.name, "SKILL.md");
+  await Promise.all(skillDirs.map(async (baseDir) => {
+    const skillPath = path.join(baseDir, "SKILL.md");
     let content: string;
     try {
       content = await fs.readFile(skillPath, "utf8");
@@ -251,24 +366,28 @@ async function scanRoot(root: SkillScanRoot, diagnostics: SkillDiagnostic[]): Pr
     }
     const { frontmatter } = parseSkillFrontmatter(content);
     if (frontmatter.enabled === false) return;
+    if (root.accepts && !root.accepts(frontmatter)) return;
     const description = typeof frontmatter.description === "string" ? frontmatter.description : "";
     if (root.requireDescription && !description) return;
     const rawName = frontmatter.name;
-    const name = typeof rawName === "string" && rawName.trim() ? rawName.trim() : entry.name;
+    const name = typeof rawName === "string" && rawName.trim() ? rawName.trim() : path.basename(baseDir);
     skills.push({
       name,
       description,
       filePath: skillPath,
-      baseDir: path.join(root.dir, entry.name),
-      disableModelInvocation: readDisableModelInvocation(frontmatter),
+      baseDir,
+      disableModelInvocation: root.isDisabled
+        ? root.isDisabled(name)
+        : readDisableModelInvocation(frontmatter),
       sourceInfo: { source: root.source, scope: root.scope },
     });
   }));
   return skills;
 }
 
-/** Discover skills for a cwd the way omp does. Name collisions resolve to the
- * highest-priority provider (scan-root order); result is sorted by name. */
+/** Discover skills for a cwd the way the active engine does. Name collisions
+ * resolve to the highest-priority provider (scan-root order); result is sorted
+ * by name. */
 export async function discoverSkills(cwd: string): Promise<SkillsWithDiagnostics> {
   const diagnostics: SkillDiagnostic[] = [];
   const byName = new Map<string, SkillInfo>();
@@ -284,10 +403,88 @@ export async function discoverSkills(cwd: string): Promise<SkillsWithDiagnostics
   return { skills, diagnostics };
 }
 
+/**
+ * Provenance for skills `hermes skills install` put on disk, read from
+ * Hermes' own ledger (`<skills root>/.hub/lock.json`) rather than the
+ * skills.sh `.skill-lock.json` Cody's other engines share — Hermes never
+ * writes that file, so the shared annotator would report every Hermes skill
+ * as hand-placed.
+ *
+ * `canCheckForUpdates` is false throughout: Cody's update check diffs a
+ * GitHub tree hash from the skills.sh lock, and Hermes tracks its own
+ * `content_hash` with its own `hermes skills check`/`update` pair. Claiming a
+ * check Cody cannot perform would be worse than not offering one.
+ */
+function annotateHermesInstalls(skills: SkillInfo[], skillsRoot: string): SkillInfo[] {
+  const lock = readHermesSkillLock(skillsRoot);
+  if (lock.size === 0) return skills;
+  // Hermes keys the ledger by the name it resolved at INSTALL time, which is
+  // not always the frontmatter `name` a later scan reads — a skill whose
+  // SKILL.md says `name: PDF Generator` is locked under `pdf-generator`, and
+  // Hermes' own `skills list` then reports it as source "local". The
+  // `install_path` it also records is exact, so match on that first and fall
+  // back to the name.
+  const byPath = new Map([...lock.values()].map((entry) => [entry.installPath, entry]));
+  return skills.map((skill) => {
+    const relativePath = path.relative(skillsRoot, skill.baseDir).split(path.sep).join("/");
+    const entry = byPath.get(relativePath) ?? lock.get(skill.name);
+    if (!entry) return skill;
+    const pkg = hermesPackageForIdentifier(entry.identifier);
+    return {
+      ...skill,
+      install: {
+        // The store compares this against its own `owner/repo@slug` specs, so
+        // a skill installed through Cody shows as installed. Identifiers from
+        // Hermes' other registries have no skills.sh equivalent and stay as
+        // themselves — they match nothing in the store, which is correct.
+        package: pkg ?? entry.identifier,
+        scope: "global" as SkillInstallScope,
+        source: entry.source || "hermes",
+        sourceType: pkg ? "github" : entry.source,
+        skillsShUrl: pkg ? `https://skills.sh/${entry.identifier.slice("skills-sh/".length)}` : undefined,
+        versionHash: entry.contentHash?.replace(/^sha256:/, ""),
+        canCheckForUpdates: false,
+      },
+    };
+  });
+}
+
 export async function loadSkillsWithInstallInfo(cwd: string) {
+  const harness = getHarness();
   const { skills, diagnostics } = await discoverSkills(cwd);
+  const agentDir = harness.getAgentDir();
   return {
-    skills: annotateSkillsWithInstallInfo(skills, { cwd, agentDir: getHarness().getAgentDir() }),
+    skills: harness.id === "hermes"
+      ? annotateHermesInstalls(skills, path.join(agentDir, "skills"))
+      : annotateSkillsWithInstallInfo(skills, { cwd, agentDir }),
     diagnostics,
+  };
+}
+
+/**
+ * What the active engine's skills surface can actually do, so the UI disables
+ * the controls that would not work instead of failing on click.
+ *
+ * `installScopes` is the honest shape of an engine's skill roots: omp and pi
+ * both discover project-scoped dirs, so a skill can be installed beside the
+ * code; Hermes has exactly one root per home (plus read-only external dirs)
+ * and would silently install "into the project" globally.
+ *
+ * `canToggle` is false only when Hermes was installed without the adjacent
+ * venv Cody needs to reach its config writer (see setHermesSkillDisabled).
+ */
+export interface SkillsSurface {
+  installScopes: SkillInstallScope[];
+  canToggle: boolean;
+}
+
+export function getSkillsSurface(): SkillsSurface {
+  const harness = getHarness();
+  if (harness.id !== "hermes") {
+    return { installScopes: ["global", "project"], canToggle: true };
+  }
+  return {
+    installScopes: ["global"],
+    canToggle: canToggleHermesSkills(harness.resolveBinary()),
   };
 }

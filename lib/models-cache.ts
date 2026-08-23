@@ -5,6 +5,23 @@ export interface ModelsData {
   thinkingLevels: Record<string, string[]>;
   connectedProviders?: { id: string; name: string; disabled: boolean }[];
   modelError?: string;
+  /**
+   * Where the ACTIVE engine's pickable models actually come from.
+   *
+   * "global" — a sessionless catalog, which is what `modelList` here IS
+   * (omp, pi: `get_available_models` on a `--no-session` utility child).
+   *
+   * "session" — the engine only offers models INSIDE a live session, so
+   * `modelList` is empty by design and the models are in the session's own
+   * `get_state`. ACP is the case: model selection is a session config option
+   * the agent reports at `session/new`.
+   *
+   * The distinction exists because the two look identical from the client —
+   * an empty list — and the difference between "this engine has no models"
+   * and "ask the session" is the difference between a hidden picker and a
+   * working one.
+   */
+  catalogSource?: "global" | "session";
 }
 
 interface ModelsCacheState {
