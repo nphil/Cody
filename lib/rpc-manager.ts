@@ -99,8 +99,12 @@ const SERVER_HOST_TOOL_NAMES = new Set(SERVER_HOST_TOOLS.map((tool) => tool.name
 const MCP_LIST_TIMEOUT_MS = 15_000;
 
 const RESTARTING_MESSAGE = "This session is restarting. Retry in a moment.";
-const BASH_EXCLUDE_MESSAGE =
-  "omp cannot run a shell command with its output excluded from the model context (`!!`): the RPC bash command has no exclusion option, so the output would silently enter the context anyway. Run it with a single `!` to share the output with the model, or use a terminal outside omp web.";
+
+/** Every rpc-dialect engine reaches the `!!` refusal, so the sentence names the
+ * one that actually raised it — a pi user told "omp cannot…" would go looking
+ * for a setting in an engine they are not running. */
+const bashExcludeMessage = (engine: string) =>
+  `${engine} cannot run a shell command with its output excluded from the model context (\`!!\`): the RPC bash command has no exclusion option, so the output would silently enter the context anyway. Run it with a single \`!\` to share the output with the model, or use a terminal outside Cody.`;
 
 /**
  * Failure raised by Cody itself (not by omp) carrying a stable snake_case
@@ -1354,12 +1358,13 @@ export class AgentSessionWrapper {
       }
 
       case "bash": {
-        // omp's RPC bash command is `{type:"bash", command}` only (rpc-types.ts)
-        // — there is no excludeFromContext option anywhere in modes/rpc. Running
-        // a `!!` command anyway would put output the user meant to keep private
-        // into the model context, so refuse instead of silently ignoring it.
+        // The rpc dialect's bash command is `{type:"bash", command}` only
+        // (rpc-types.ts) — there is no excludeFromContext option anywhere in
+        // modes/rpc. Running a `!!` command anyway would put output the user
+        // meant to keep private into the model context, so refuse instead of
+        // silently ignoring it.
         if (command.excludeFromContext === true) {
-          throw new WebRpcError(BASH_EXCLUDE_MESSAGE, "bash_exclude_unsupported");
+          throw new WebRpcError(bashExcludeMessage(this.engine.label), "bash_exclude_unsupported");
         }
         if (this.isRunning()) {
           throw new Error("Cannot run a shell command while the session is busy");
@@ -1521,6 +1526,18 @@ export function getRunningRpcSessionIds(): string[] {
 /** Stop all live omp children after an explicit runtime update. The browser will
  * reconnect sessions on demand and start them with the updated executable. */
 export async function restartAllRpcSessions(): Promise<number> {
+  // A start registers its session only AFTER the child reports ready, so a
+  // registry snapshot taken here misses one that is still booting. That child
+  // was launched for the OUTGOING engine: it would finish a moment later, run
+  // the whole turn on the old engine's credentials and write the old engine's
+  // transcript, while Cody reports the new engine as active — and it would be
+  // unreachable from the UI, because the session listing under the new engine
+  // never includes it. Settling the in-flight starts first brings them into
+  // the registry so the teardown below can actually reach them.
+  //
+  // allSettled, not all: a start that FAILS is not a reason to abandon the
+  // teardown of every session that started fine.
+  await Promise.allSettled([...getLocks().values()]);
   const sessions = [...new Set(getRegistry().values())];
   await Promise.all(sessions.map((session) => session.destroyAndWait()));
   return sessions.length;
@@ -1656,6 +1673,7 @@ export async function startRpcSession(
   if (inflight) return inflight;
 
   const harness = getHarness();
+  const launchedFor = harness.id;
   const createEngineSession = harness.createSession?.bind(harness);
 
   const starting = (async () => {
@@ -1691,6 +1709,19 @@ export async function startRpcSession(
       // concurrent resume/delete/archive paths could race that old child.
       await created.destroyAndWait();
       throw error;
+    }
+
+    // The engine can be switched while this child was booting. Registering it
+    // now would file a child of the PREVIOUS engine under the current one,
+    // which is the same leak the fence in restartAllRpcSessions closes from
+    // the other side — kept here too because this is the only check that
+    // holds for a start which finishes after that teardown has run.
+    if (getHarness().id !== launchedFor) {
+      await created.destroyAndWait();
+      throw new WebRpcError(
+        `The ${launchedFor} engine was switched away while this session was starting.`,
+        "engine_changed",
+      );
     }
 
     const realSessionId = created.sessionId;

@@ -6,7 +6,7 @@ import dynamic from "next/dynamic";
 import { AlertCircle, ArrowDown, ArrowUp, RefreshCw, Search, Sparkles, X } from "lucide-react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/primitives";
-import { SettingsTabs, type SettingsTab, type ActiveEngineInfo, type EngineCapabilities, ALL_CAPABILITIES, DEFAULT_HARNESS_LABEL, SCHEMA_TAB_CAPABILITY, getSettingsCategories, getNormalizedActive } from "./SettingsTabs";
+import { SettingsTabs, type SettingsTab, type ActiveEngineInfo, type EngineCapabilities, ALL_CAPABILITIES, DEFAULT_HARNESS_LABEL, SCHEMA_TAB_CAPABILITY, extensionsGroupDescription, getSettingsCategories, getNormalizedActive } from "./SettingsTabs";
 import { STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
 import { LOCALES, useI18n, type Locale } from "@/lib/i18n";
 import { readTerminalSoftKeyIds, TERMINAL_SOFT_KEYS, writeTerminalSoftKeyIds, type TerminalSoftKeyId } from "@/lib/terminal-preferences";
@@ -121,9 +121,9 @@ const SETTING_INDEX: SettingIndexEntry[] = [
   { tab: "intelligence", section: "Automatic Retry", label: "Max Attempts", description: "Retry limit before giving up." },
   { tab: "intelligence", section: "Automatic Retry", label: "Model Fallback", description: "Fall back to alternative model when retries exhaust." },
   // Extensions & Tools
-  { tab: "mcp", section: "Extensions & Tools", label: "Load Project MCP Servers", description: "Allow project-root MCP configuration to be discovered." },
-  { tab: "mcp", section: "Extensions & Tools", label: "Render MCP Markdown", description: "Render non-JSON MCP results as Markdown in transcript." },
-  { tab: "mcp", section: "Extensions & Tools", label: "MCP Resource Updates", description: "Inject server resource updates into conversation." },
+  { tab: "mcp", section: "Extensions & Tools", label: "Load Project MCP Servers", description: "Allow project-root MCP configuration to be discovered.", needsCapability: "mcp" },
+  { tab: "mcp", section: "Extensions & Tools", label: "Render MCP Markdown", description: "Render non-JSON MCP results as Markdown in transcript.", needsCapability: "mcp" },
+  { tab: "mcp", section: "Extensions & Tools", label: "MCP Resource Updates", description: "Inject server resource updates into conversation.", needsCapability: "mcp" },
 ];
 
 /** Ordered editor for compaction.methodOrder: enabled methods in preference
@@ -904,16 +904,19 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
               </div>
             )}
 
-            {/* EXTENSIONS & TOOLS TAB (MCP, SKILLS, PLUGINS). The MCP panel
-                itself is capability-gated: a skills-only engine (pi) shows the
-                group with just the sub-panels it serves. */}
-            {capabilities.mcp && (visitedTabs.has("mcp") || visitedTabs.has("skills") || visitedTabs.has("plugins")) && (
+            {/* EXTENSIONS & TOOLS TAB (MCP, SKILLS, PLUGINS). The group heading
+                and workspace-select hint are NOT behind capabilities.mcp: a
+                skills-only engine (pi, Hermes) has no MCP panel to fall back
+                on, so without a workspace this is the group's only content —
+                gating it on capabilities.mcp left the tab highlighted over a
+                blank pane. Only the MCP-specific controls stay gated. */}
+            {(visitedTabs.has("mcp") || visitedTabs.has("skills") || visitedTabs.has("plugins")) && (
               <div role="tabpanel" id="settings-panel-mcp" aria-labelledby="settings-tab-mcp" className="settings-scroll-column" style={{ display: currentTab === "mcp" ? "flex" : "none", height: "100%", minHeight: 0, flexDirection: "column", overflowY: "auto", padding: 20, gap: 16 }}>
                 <div>
                   <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>Extensions & Tools</h3>
-                  <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)" }}>Model Context Protocol servers, managed skills, and OMP plugins.</p>
+                  <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)" }}>{extensionsGroupDescription(capabilities)}.</p>
                 </div>
-                {cwd && (
+                {capabilities.mcp && cwd && (
                   <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(2, minmax(0, 1fr))", gap: 10 }}>
                     <NativeSetting label="Load Project MCP Servers" description="Allow project-root MCP configuration to be discovered.">
                       <ToggleSwitch
@@ -935,8 +938,14 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                     </NativeSetting>
                   </div>
                 )}
-                <McpConfig cwd={cwd} sessionId={sessionId} />
-                {!cwd && <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12 }}>Select a project workspace to view and edit its project MCP configuration.</p>}
+                {capabilities.mcp && <McpConfig cwd={cwd} sessionId={sessionId} />}
+                {!cwd && (
+                  <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12 }}>
+                    {capabilities.mcp
+                      ? "Select a project workspace to view and edit its project MCP configuration."
+                      : "Select a project workspace to manage its extensions."}
+                  </p>
+                )}
               </div>
             )}
 
