@@ -197,6 +197,11 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/.next ./.next
 COPY --from=build /app/bin ./bin
 COPY --from=build /app/lib ./lib
+# scripts/ ships so engine bring-up can be run against the RUNNING container:
+# `docker exec <name> node scripts/engine-bringup.mjs` spawns every installed
+# engine and reports whether it actually starts. The release gate runs it, and
+# it is the first thing to reach for when an instance stops answering.
+COPY --from=build /app/scripts ./scripts
 
 COPY docker/entrypoint.sh /usr/local/bin/cody-entrypoint
 RUN chmod 0755 /usr/local/bin/cody-entrypoint
