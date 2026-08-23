@@ -23,6 +23,16 @@
  * while Hermes opens one happily. Requiring it would hang the gate on two
  * engines out of three. `--sessions` opts in where credentials exist.
  *
+ * The same distinction bites the rpc dialect harder. Measured in a clean
+ * container: **omp refuses to start `--mode rpc-ui` at all** with no model
+ * configured — it prints "No models available. Use /login or set an API key
+ * environment variable." and exits 1 before answering anything. pi starts
+ * regardless. So an engine that came up far enough to TELL us it needs an
+ * account is reported as `needs setup`, not as a failure: it is a healthy
+ * binary asking for configuration, which is exactly the state a fresh image
+ * is in, and failing on it would mean the gate could never pass without
+ * shipping credentials into CI.
+ *
  * An engine that is NOT installed is skipped and reported as such — this runs
  * on developer machines and in a container where only some engines exist. It
  * fails only on an engine that IS installed and does not come up, and the
@@ -55,6 +65,17 @@ const { AcpEngineSession } = await jiti.import("../lib/harness/acp-session.ts");
 
 /** One engine gets this long to come up before it counts as wedged. */
 const BRINGUP_TIMEOUT_MS = 60_000;
+
+/**
+ * An engine saying "I have no account/model configured yet".
+ *
+ * This is ENGINE-AUTHORED PROSE and may change under us, which is the reason
+ * it is matched narrowly and reported loudly rather than swallowed: a
+ * `needs setup` line names the engine and prints its own words, so a phrasing
+ * change shows up as a FAILURE with the new text in the log — visible, and
+ * one line to fix — instead of quietly passing.
+ */
+const NEEDS_SETUP_RE = /no models available|set an api key|authentication required|not (?:logged in|authenticated)|no credentials/i;
 
 const args = process.argv.slice(2);
 const requireIndex = args.indexOf("--require");
@@ -141,7 +162,9 @@ function bringUpRpcUi(adapter, binary, cwd) {
     };
 
     child.stdout.setEncoding("utf8");
+    let seen = "";
     child.stdout.on("data", (chunk) => {
+      seen = (seen + chunk).slice(-4000);
       pending += chunk;
       let index = pending.indexOf("\n");
       while (index !== -1) {
@@ -162,7 +185,12 @@ function bringUpRpcUi(adapter, binary, cwd) {
     child.stderr.on("data", (chunk) => { stderr = (stderr + chunk.toString("utf8")).slice(-2000); });
     child.on("error", (error) => finish(new Error(`could not spawn ${binary}: ${error.message}`)));
     child.on("exit", (code, signal) => {
-      finish(new Error(`exited ${signal ? `on ${signal}` : `with code ${code}`} before answering get_state${stderr ? `\n${stderr.trim()}` : ""}`));
+      const said = `${stderr}\n${seen}`.trim();
+      if (NEEDS_SETUP_RE.test(said)) {
+        finish(null, { detail: `--mode ${mode}, needs setup`, needsSetup: said.split("\n")[0] });
+        return;
+      }
+      finish(new Error(`exited ${signal ? `on ${signal}` : `with code ${code}`} before answering get_state${said ? `\n${said}` : ""}`));
     });
 
     // rpc-ui accepts commands as soon as stdin is open; a command sent before
@@ -199,6 +227,7 @@ for (const adapter of engines) {
       transport,
       ms: Date.now() - started,
       detail: outcome.detail,
+      needsSetup: outcome.needsSetup ?? null,
       notices: outcome.notices ?? [],
     });
   } catch (error) {
@@ -216,7 +245,11 @@ for (const adapter of engines) {
 
 for (const result of results) {
   if (result.status === "ok") {
-    console.log(`ok       ${result.id.padEnd(8)} ${String(result.transport).padEnd(7)} ${result.detail} (${result.ms}ms)`);
+    // "setup" rather than "ok": the binary is healthy but the engine cannot
+    // work yet, and a bare ok would read as "signed in and ready".
+    const label = result.needsSetup ? "setup   " : "ok      ";
+    console.log(`${label} ${result.id.padEnd(8)} ${String(result.transport).padEnd(7)} ${result.detail} (${result.ms}ms)`);
+    if (result.needsSetup) console.log(`         └─ ${result.needsSetup}`);
     for (const notice of result.notices) console.log(`         └─ ${notice}`);
   } else if (result.status === "skipped") {
     console.log(`skipped  ${result.id.padEnd(8)} ${result.detail}`);
@@ -229,6 +262,7 @@ const failed = results.filter((result) => result.status === "failed");
 const missing = required.filter((id) => results.find((result) => result.id === id)?.status === "skipped");
 for (const id of missing) console.log(`FAILED   ${id.padEnd(8)} required by --require but not installed`);
 
-const ran = results.filter((result) => result.status === "ok").length;
-console.log(`\n${ran} engine(s) came up, ${failed.length} failed, ${results.length - ran - failed.length} skipped`);
+const ok = results.filter((result) => result.status === "ok");
+const setup = ok.filter((result) => result.needsSetup).length;
+console.log(`\n${ok.length} engine(s) came up${setup ? ` (${setup} awaiting credentials)` : ""}, ${failed.length} failed, ${results.length - ok.length - failed.length} skipped`);
 process.exit(failed.length + missing.length > 0 ? 1 : 0);
