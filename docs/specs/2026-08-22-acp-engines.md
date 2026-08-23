@@ -20,7 +20,8 @@ not a Hermes-shaped special case:
   auto-accepted because their non-interactive modes have nowhere to ask.
 - Any future ACP agent becomes a Cody engine for free.
 - There is an official, Node-friendly TypeScript SDK
-  (`@zed-industries/agent-client-protocol`, ESM, one dependency: `zod`), so
+  (`@agentclientprotocol/sdk`, ESM, zero dependencies — the older
+  `@zed-industries/agent-client-protocol` name is deprecated), so
   Cody does not hand-roll JSON-RPC framing or schema validation. This matters:
   Cody cannot import omp's own packages at all (Bun-only), so a
   plain-Node protocol library is a genuine advantage.
@@ -65,8 +66,8 @@ exactly as the turn engines do.
 
 ## Phase 1 — chat and settings (approved, in progress)
 
-**1a. Generic ACP client** (`lib/harness/acp/`). Engine-neutral from day one:
-no Hermes strings in it. Spawns the server, drives `ClientSideConnection`,
+**1a. Generic ACP client** (`lib/harness/acp-session.ts`) — DONE. Engine-neutral from day one:
+no Hermes strings in it. Spawns the server, drives the SDK's `ClientApp`,
 negotiates capabilities, and translates `session/update` into Cody's
 `EngineEvent` vocabulary. Implements the client side Cody can honestly serve —
 `fs/read_text_file` and `fs/write_text_file` against the workspace, permission
@@ -115,14 +116,39 @@ is right for two of the three and **wrong for omp**:
   gain here.
 - **Codex — assess.** Same per-turn limitation today. Depends on whether a
   maintained ACP adapter exists; verify before committing.
-- **omp — do NOT migrate.** omp's `rpc-ui` gives Cody strictly more than ACP
-  does: host tools (`open_preview`, `preview_screenshot`, `read_app_logs`),
-  subagent lifecycle events, forking, compaction, thinking levels, steering
-  and follow-up queues, and v3 `.jsonl` transcripts Cody reads directly.
-  ACP has no vocabulary for most of that. Moving omp to ACP would trade the
-  founding engine's best surfaces for protocol uniformity that benefits
-  nobody. omp keeps `rpc-ui`; ACP is how engines that *don't* speak rpc-ui
-  reach parity.
+- **omp — keep rpc-ui, but the margin is narrower than first written.**
+  An earlier draft of this spec claimed ACP "has no vocabulary" for omp's
+  best surfaces. That was wrong, and reading omp 18's own
+  `src/modes/acp/` corrects it. Over ACP omp advertises and implements:
+  `agent_thought_chunk` (thinking IS carried), `sessionCapabilities`
+  `{list, fork, resume, close}` (forking IS carried), `loadSession`,
+  `mcpCapabilities` `{http, sse}`, `promptCapabilities`
+  `{embeddedContext, image}`, `setSessionMode`, model listing and selection
+  through session config options, steering, and compaction.
+
+  What is genuinely absent over ACP, verified by grep across that directory:
+  - **Subagent telemetry.** No subagent mapping exists at all, so Cody's
+    composer subagent roster and transcript dialog would go dark.
+  - **Cody's host-tool bridge.** `set_host_tools` (`open_preview`,
+    `preview_screenshot`, `read_app_logs`) is an rpc-ui mechanism with no ACP
+    equivalent. MCP is the partial substitute — it is already how Claude and
+    Codex get `open_preview` — so this is recoverable, not lost.
+  - **Fine-grained `get_state`.** `queuedMessageCount`, `todoPhases`,
+    fast-mode and the context gauge have no direct ACP analogue; `plan`
+    updates and config options cover part of it.
+
+  Session `.jsonl` transcripts are written by omp regardless of transport, so
+  history browsing is NOT a casualty — an earlier claim here that it was is
+  also withdrawn.
+
+  Net: rpc-ui remains the richer path for omp and there is no reason to move
+  the founding engine off it today, but the gap is subagents plus a tool
+  bridge, not a chasm. Worth revisiting once Claude Code has migrated and the
+  ACP path has real mileage.
+- **pi — no change.** pi already rides the same rpc pipeline as omp via
+  `--mode rpc`, which is strictly richer than what a per-turn seam gives.
+  Whether pi also speaks ACP has not been verified and does not matter: there
+  is nothing to gain by moving it off the dialect Cody already drives.
 
 The end state is therefore three transports, each because it earns its place:
 `rpcUi` for the omp dialect, `acp` for the open standard, and the per-turn
