@@ -182,12 +182,17 @@ lib/
   skills-service.ts    pure-Node skill discovery mirroring the ACTIVE engine's
                        providers (omp's list, pi's narrower one, Hermes' nested
                        tree) + getSkillsSurface(): what the surface can do here
-  engine-capabilities.ts  memoized client read of /api/info's capability flags,
-                       for components with no props path from AppShell
+  engine-capabilities.ts  THE client read of /api/info: capability flags, the
+                       active engine's identity and its version, memoized once
+                       per page load. AppShell loads it and threads
+                       `capabilities` / `engine` down as props; callers off
+                       that path (engineSupports) share the same request
   skills-registry.ts   client for the public skills.sh registry endpoints (the
                        same ones `npx skills` uses): category browse, fuzzy/
                        semantic search, cached SKILL.md detail extraction
   storage-keys.ts      the cody: browser-storage namespace + legacy migration
+                       + engineScopedKey(): the keys that must not survive an
+                       engine switch (session ids, pinned models)
   stream-tuning.ts     tunable streaming pacing/motion params: defaults, clamping,
                        CSS-var diffing, localStorage store (playground: /dev/stream-tuner)
   workspace-tasks.ts   .cody/tasks.json schema validation + grouping
@@ -336,6 +341,18 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   `getAgentDir()`): accounts, checkpoints, engine selection, session owners,
   the engine session index, the tools prefix. Never route these through the
   active adapter's `getAgentDir()` — they must survive engine switches.
+- **Browser state that names an engine's things is scoped per engine.**
+  `ENGINE_SCOPED_KEYS` / `engineScopedKey()` (lib/storage-keys.ts) address
+  `cody:composer-models`, `cody:unread-session-ids` and
+  `cody:last-open-by-project` as `<key>:<engineId>`. Session ids are the
+  engine's own, and the composer's pinned-model list is an allowlist over ONE
+  engine's catalog: unscoped, an omp→pi switch left the composer saying "No
+  models" while `/api/models` had returned pi's whole catalog — with the
+  Models settings tab hidden on pi, so there was no way to recover it. An
+  unknown engine (`/api/info` still in flight) reads as "nothing stored", never
+  as the unscoped key; the pre-scoping value is deliberately abandoned rather
+  than adopted, because adopting it IS the bug. Everything else Cody stores
+  (theme, language, panel widths, sound) belongs to the human and stays global.
 - Non-omp live chat has two shapes, and `lib/harness/engine-transport.test.mjs`
   pins which engine rides which:
   - **ACP** (`acp-session.ts`) — one long-lived stdio JSON-RPC server,
@@ -399,6 +416,34 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   surfaces: a `false` **hides** the settings tab / panel card / composer
   control, it never renders a broken one. `/api/info` serves the active
   engine's capabilities to the client.
+- **The client gates on the WHOLE flag set, not a hand-picked subset.**
+  `AppShell` threads `capabilities` (all of them) and `engine` (identity) into
+  `ChatWindow` → `ChatInput` and into `SessionSidebar`; the composer derives
+  `chatExtras`/`fastMode`/`subagents` from that prop rather than receiving
+  three booleans. The three-boolean version is what produced four separate
+  leaks at once: with `models` and `skills` never threaded, the "Smart — OMP
+  roles" row (which fetches omp's `config.yml`) rendered on pi because it was
+  gated on `chatExtras`, which pi HAS. When a control needs a flag nobody
+  passed yet, read it off `capabilities` — do not add a fourth boolean.
+- **A few surfaces are one engine's own files, not a capability.** Session
+  import writes omp's `.jsonl` layout and archive moves it with omp's gc
+  layout; the routes refuse under any other engine (`requireEngine("omp", …)`)
+  and the controls follow with `engine.id === OMP_ENGINE_ID`
+  (components/SettingsTabs.tsx). The same is true of the composer's plan-quota
+  ring: `omp usage --json` is the only reader `lib/usage` has, so `/api/usage`
+  answers `{available:false, reason}` elsewhere — a VALUE, not an error — and
+  the ring hides rather than rendering a permanently empty dashed circle
+  (`useUsage(enabled)` also stops the 90-second poll behind it).
+- **Engine-specific copy names the ACTIVE engine.** Every user-facing string
+  that used to say "omp"/"OMP" now interpolates `{name}` from
+  `engine.shortName` (`chatInput.smartModel*`, `.thinkingAuto`,
+  `.toolPresetCoreWarning*`, `.groupEngineBuiltin`, `agentSession.startingAgent`,
+  `.fallbackAppliedDetail`, `.fallbackSucceededDetail`, `info.section.engine`).
+  `agentSession.startingAgent` fires on any slow first connect — i.e. exactly
+  the Hermes/Codex cold start — which is why it said "Starting omp…" to a
+  Hermes user. The Info panel's copyable diagnostics say
+  `Engine: <shortName> <version>` for the same reason: the VALUE was always
+  the active engine's, only the label lied.
 - **A capability flag is a UI convenience; the ROUTE is the boundary**
   (`lib/engine-guard.ts`). Every omp-shaped endpoint used to answer 200
   whichever engine was selected — probed directly under Hermes they served
@@ -439,6 +484,18 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   engine. Whether an agent offers models is per SESSION — it depends on the
   account the session opened with — so it is reported as data, never as a
   static capability flag that could not tell the truth about it.
+- **The composer reads whichever catalog is real.** `useAgentSession` keeps
+  `modelCatalogSource` from `/api/models` and, when it says `"session"`,
+  serves the composer the list it adopted off `get_state` instead (measured:
+  Hermes 0.19 publishes 11). It exposes `modelSelectable` — `null` for a
+  global-registry engine, where the rpc-dialect `set_model` surface
+  (`chatExtras`) decides as it always did, and a boolean for a session-scoped
+  one, where the SESSION decides. `ChatWindow` gates the picker on that, so no
+  new capability flag was invented for something a flag cannot know. A
+  session-scoped engine also seeds no `newSessionDefaultModel`: the agent
+  resolves its own on `session/new` and reports it back, and the picker only
+  appears once a session exists — before that there is genuinely nothing to
+  choose from.
 - **Agent memory is read-only, on purpose** (`capabilities.memory`,
   `HarnessAdapter.readMemory`, `/api/memory`, `components/MemoryPanel.tsx`).
   Memory is the agent's own account of what it learned, so Cody shows it and
@@ -1212,7 +1269,7 @@ handled or safely ignored.
 - **Hermes' skills, on Hermes' terms** (`lib/harness/hermes-skills.ts`, verified against 0.19.0). Its roots are `$HERMES_HOME/skills` plus `skills.external_dirs` from its `config.yaml`, each walked recursively — `hermes skills install --category security 1password` writes `skills/security/1password/SKILL.md`, and categories nest further. The walk prunes what Hermes prunes (`.hub`, `node_modules`, VCS/cache dirs, and a skill package's `references/templates/assets/scripts`, the last only when the containing dir is itself a skill). Enable/disable is `skills.disabled` in `config.yaml`, a list of skill NAMES — Hermes never reads the frontmatter key omp honours — and Cody writes it by running Hermes' OWN `skills_config.save_disabled_skills` through the venv interpreter beside the binary, the same "ask the engine's runtime" trick `hermes-settings.ts` uses (`hermes config set` stores scalars only and cannot write a list; `hermes skills config` is a curses checklist). A `platforms:` mismatch hides a skill, as it does in Hermes; `environments:` (kanban/docker/s6) is deliberately NOT replicated, because mis-detecting it would hide a skill that IS loaded. Provenance comes from `<skills root>/.hub/lock.json`, matched on `install_path` first because Hermes keys that ledger by the name it resolved at install time, which is not always the frontmatter `name`.
 - **`hermes skills install` exits 0 whether or not it installed.** Verified: a security-scan block prints "Installation blocked: …" and an unresolvable identifier prints "Error: Could not fetch …", both with status 0. `installHermesSkill` therefore reads success from a literal `Installed: <path>` line, and never passes `--force` (that overrides a blocked verdict, which is the user's call in a terminal). Cody's store spec `owner/repo@slug` becomes Hermes' `skills-sh/owner/repo/slug`; a `https://<domain>` whole-provider bundle has no Hermes equivalent and is refused with a reason.
 - **The surface reports what it can do.** `GET /api/skills` returns `installScopes` and `canToggle` beside the skills. Hermes has one skills root per home and no project scope, so its store hides the scope selector and `/api/skills/install` refuses `scope: "project"`; Cody's update check diffs a GitHub tree hash from the skills.sh lock, which Hermes' own hashes cannot answer, so every Hermes install reports `canCheckForUpdates: false`, the per-skill Check button and the footer check-all both hide, and the System card says checks are unavailable rather than "up to date".
-- **The composer's skill lookup is capability-gated.** `ChatInput` fetches `/api/skills` to dim dormant skills in the `/` palette and has no capability prop (its props come through `ChatWindow`), so it asks `lib/engine-capabilities.ts` — one memoized `/api/info` read per page load, permissive on anything but an explicit `false`. Without it, Claude Code and Codex (`skills: false`) ran a full filesystem scan on every `/` keystroke.
+- **The composer's skill lookup is capability-gated.** `ChatInput` fetches `/api/skills` to dim dormant skills in the `/` palette; it reads `capabilities.skills` off the flag set AppShell threads down. Without that gate, Claude Code and Codex (`skills: false`) ran a full filesystem scan on every `/` keystroke.
 - The skill store (`components/SkillsStore.tsx`, `/api/skills/store`, `lib/skills-registry.ts`) talks to skills.sh's public endpoints — `/api/search` (fuzzy for one word, semantic over descriptions for phrases) and `/api/download/{owner}/{repo}/{slug}` for SKILL.md details. The documented `/api/v1/*` surface needs a Vercel OIDC token, so browse views are category-seeded searches, never a scraped ranking. Well-known (non-GitHub) sources install as whole-provider bundles (`https://<domain>`) because the CLI has no per-skill selector for them; the UI says so.
 
 ### Update notifications (`/api/omp-update`, `/api/app-update`)

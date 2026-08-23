@@ -198,6 +198,7 @@ export const claudeHarness: HarnessAdapter = {
     // writes omp's config file. Not wired.
     mcp: false,
     nativeSettings: false,
+    configEditor: false,
     // The engine's OWN self-update route and session restart, both omp-shaped.
     // Cody installing Claude Code through npm is a separate thing, driven by
     // installSpec.

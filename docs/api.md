@@ -639,11 +639,27 @@ returns that terminal, which you then attach to over the terminal WebSocket.
                "supportsFastMode":true,"contextWindow":200000}],
  "defaultModel":{"provider":"…","modelId":"…"},
  "thinkingLevels":{"<provider>/<model-id>":["off","…"]},
- "connectedProviders":[{"id":"…","name":"…","disabled":false}]}
+ "connectedProviders":[{"id":"…","name":"…","disabled":false}],
+ "catalogSource":"global"}
 ```
 
-The registry is global rather than per-workspace; `?cwd=` is still accepted and
-ignored. Every id, provider name and effort level in here comes from the
+**Read `catalogSource` before you trust `modelList`.** Engines differ in where
+their models live, and an empty list is not an error:
+
+- `"global"` — the engine has a registry Cody can enumerate up front (omp, pi).
+  `modelList` is the catalogue.
+- `"session"` — the models belong to the SESSION, not to a registry (any ACP
+  engine: Claude Code, Codex, Hermes). `modelList` is `[]` and there is
+  deliberately no `modelError`, because nothing failed. Read the models from
+  the session instead: `GET /api/sessions/{id}/state` carries
+  `availableModels`, the current `model`, and `modelSelectable`; switch with
+  `POST /api/agent/{id}` `{"type":"set_model", …}`.
+
+A client that treats `modelList: []` as "this engine has no models" will hide
+its picker forever on three of the five engines Cody ships.
+
+The `"global"` registry is global rather than per-workspace; `?cwd=` is still
+accepted and ignored. Every id, provider name and effort level in here comes from the
 engine's own catalogue and changes without notice — enumerate it at runtime and
 never hardcode an entry. `defaultModel` may be `null` (it is cosmetic; the list
 is still usable). `thinkingLevels` always starts with `"off"`.

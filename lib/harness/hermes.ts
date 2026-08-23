@@ -91,6 +91,7 @@ export const hermesHarness: HarnessAdapter = {
     // the schema from it, so the panel is real and stays current with
     // upstream (lib/harness/hermes-settings.ts).
     nativeSettings: true,
+    configEditor: false,
     // This flag gates the engine's OWN self-update route and the session
     // restart control, both of which are omp-specific. Cody installing
     // Hermes through uv is a different thing entirely, driven by installSpec.

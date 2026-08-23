@@ -291,17 +291,21 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
   // such file (and no route that can read one), so skip the request entirely
   // rather than paint an error banner over panels that are already hidden.
   useEffect(() => {
-    if (!capabilities.nativeSettings) return;
+    // configEditor, not nativeSettings: /api/omp-settings serves omp's
+    // config.yml and refuses for every other engine. Hermes declares
+    // nativeSettings for its own SCHEMA panel, so fetching on that flag put a
+    // permanent 400 banner over its whole dialog.
+    if (!capabilities.configEditor) return;
     fetch("/api/omp-settings")
       .then((response) => (response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`))))
       .then((data: { settings?: NativeSettings }) => setNativeSettings(data.settings ?? {}))
       .catch((error) => setNativeSettingsError(error instanceof Error ? error.message : String(error)));
-  }, [nativeReloadToken, capabilities.nativeSettings]);
+  }, [nativeReloadToken, capabilities.configEditor]);
 
   // OMP's schema also backs the dialog-wide search, so a setting Cody never
   // hand-listed is still findable by name from the search box.
   useEffect(() => {
-    if (!capabilities.nativeSettings) {
+    if (!capabilities.configEditor) {
       setSchemaSearchIndex([]);
       return;
     }

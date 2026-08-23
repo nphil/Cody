@@ -8,6 +8,7 @@ import { NextResponse } from "next/server";
 import { requireEngine } from "@/lib/engine-guard";
 import { resolveOmpBin } from "@/lib/omp/omp-cli";
 import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
+import { getHarness } from "@/lib/harness";
 
 const execFileAsync = promisify(execFile);
 
@@ -51,12 +52,20 @@ export async function GET(
   const inline = new URL(req.url).searchParams.get("inline") === "1";
 
   try {
-    // The renderer is `omp --export`, and nothing else implements it. The
-    // Export item is gated client-side on `chatExtras`, which pi also has, so
-    // on a pi-only box this answered "omp binary not found" — a missing
-    // dependency, when the truth is that pi has no exporter.
-    const gate = requireEngine("omp", "Session HTML export");
-    if ("response" in gate) return gate.response;
+    // The renderer is `omp --export`, and nothing else implements it — but pi
+    // writes the SAME session .jsonl (see lib/harness/pi.ts), so omp renders a
+    // pi transcript correctly and this worked on any box with omp installed.
+    // Refusing for pi outright would take that away; the honest gate is the
+    // transport, not the engine id. The ACP engines keep their own storage and
+    // have no such file, so they still refuse.
+    //
+    // A pi-only box still lands on the resolveOmpBin() null check below, which
+    // names the missing renderer rather than pretending pi has one.
+    const harness = getHarness();
+    if (!harness.rpcUi) {
+      const gate = requireEngine("omp", "Session HTML export");
+      if ("response" in gate) return gate.response;
+    }
     const resolved = await resolveSessionPathOr404(id, req);
     if ("response" in resolved) return resolved.response;
     const filePath = resolved.filePath;

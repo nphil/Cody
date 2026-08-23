@@ -84,6 +84,7 @@ export const piHarness: HarnessAdapter = {
     plugins: false,
     mcp: false,
     nativeSettings: false,
+    configEditor: false,
     updates: false,
     // The full RPC-dialect chat surface: steer/follow-up, set_model,
     // thinking levels, fork, compact — plus the file-level history/branch
