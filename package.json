@@ -1,7 +1,7 @@
 {
   "name": "@nphil/cody",
   "version": "0.12.0",
-  "description": "Cody — a local web workspace for the oh-my-pi (omp) coding agent",
+  "description": "Cody \u2014 a local web workspace for the oh-my-pi (omp) coding agent",
   "homepage": "https://github.com/nphil/Cody#readme",
   "repository": {
     "type": "git",
@@ -43,7 +43,8 @@
     "test": "node --experimental-strip-types --test lib/*.test.mjs lib/auth/*.test.mjs lib/harness/*.test.mjs lib/i18n/*.test.mjs lib/model-plan/*.test.mjs lib/omp/*.test.mjs lib/usage/*.test.mjs components/*.test.mjs components/ui/*.test.mjs hooks/*.test.mjs bin/*.test.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "release:check": "npm test && npm run build"
+    "release:check": "npm test && npm run build",
+    "engines:bringup": "node scripts/engine-bringup.mjs"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.4.0",

@@ -163,6 +163,21 @@ jobs:
           # settings tab — and nothing else would notice.
           docker exec cody-smoke sh -c 'test -x "$(dirname "$(readlink -f /data/agent/tools/bin/hermes)")/python"' \
             || fail "uv install: no venv python beside the hermes shim — the settings panel derives its schema from there"
+
+          # Does each engine actually START on the transport Cody says it
+          # uses? Everything above proves the INSTALL; this proves the engine
+          # comes up — an ACP engine through initialize + session/new, an
+          # rpc-dialect engine through --mode rpc-ui + get_state. That is the
+          # layer where a bad adapter argv, a missing optional dependency, a
+          # protocol bump, or an engine silently left on the wrong transport
+          # shows itself, and none of it needs credentials.
+          #
+          # Runs here, with BOTH engines installed and before the uninstall
+          # below removes one. --require names them because they were just
+          # installed: "not installed" would mean the install lied.
+          docker exec cody-smoke sh -c 'cd /app && node scripts/engine-bringup.mjs --require omp,hermes' \
+            || fail "engine bring-up: an installed engine does not start on its declared transport"
+
           # Uninstall must use the manager that installed it. npm against a
           # uv-installed engine finds nothing to remove and exits 0, which read
           # as a successful uninstall while the engine sat untouched on disk.
