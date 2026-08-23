@@ -3,7 +3,7 @@ import { existsSync } from "fs";
 import { randomUUID } from "crypto";
 import { Readable, Writable } from "stream";
 import { ClientApp, ndJsonStream, PROTOCOL_VERSION, type ClientConnection } from "@agentclientprotocol/sdk";
-import type { EngineEvent, EngineSession, EngineSessionOptions } from "./types";
+import type { EngineEvent, EngineSession, EngineSessionOptions, EngineUsage } from "./types";
 import { getEngineSession, upsertEngineSession } from "./engine-sessions";
 import { EngineCommandError } from "./turn-session";
 
@@ -43,11 +43,46 @@ export interface AcpEngineSpec {
   readonly args: readonly string[];
   /** Extra environment for the child, merged over process.env. */
   readonly env?: Readonly<Record<string, string>>;
+  /**
+   * Where in a tool call's `_meta` this agent puts the real tool NAME.
+   *
+   * ACP's `title` is a human SENTENCE — one adapter renders a Bash call as
+   * "npm run typecheck" — so using it as the name fills Cody's tool chips with
+   * whole command lines instead of "Bash". The schema's own `name` field is
+   * marked UNSTABLE, which leaves `_meta`, and `_meta` is by definition each
+   * agent's own namespace. So the agent that has one says where it is, as a
+   * path of keys, and this module never learns any agent's name for itself.
+   */
+  readonly toolNameMetaPath?: readonly string[];
+  /**
+   * MCP servers to attach to the session, built per Cody session id.
+   *
+   * A function because the descriptor is session-scoped: Cody's display bridge
+   * (open_preview, preview_screenshot, read_app_logs) hands the server a
+   * capability token minted for exactly one session. Returning an empty list
+   * is normal and must stay cheap — it is what an engine without the bridge,
+   * or a server that cannot issue a token, reports.
+   */
+  readonly mcpServers?: (sessionId: string) => readonly AcpMcpServer[];
   /** One sentence telling the user how to configure this engine, appended
    * when a turn ends with no reply — overwhelmingly the shape of an engine
    * with no model or credentials yet. Engine-specific wording belongs here,
    * not in this module. */
   readonly setupHint?: string;
+}
+
+/**
+ * One stdio MCP server offered to the agent at session/new (ACP's
+ * `McpServerStdio`). The `type` field is deliberately absent: the shape is
+ * discriminated by its absence, and at least one adapter reads a stdio server
+ * as `!("type" in server)` — adding `type: "stdio"` makes it silently ignore
+ * the server, i.e. tools that never appear and no error anywhere.
+ */
+export interface AcpMcpServer {
+  readonly name: string;
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly env: ReadonlyArray<{ name: string; value: string }>;
 }
 
 /** Commands this transport can honestly serve. Everything else throws
@@ -118,6 +153,39 @@ function blockText(block: unknown): string {
   return candidate.type === "text" && typeof candidate.text === "string" ? candidate.text : "";
 }
 
+/** Follow a path of keys through nested plain objects; anything that is not a
+ * non-empty string at the end is "not there". */
+function readMetaString(meta: unknown, path: readonly string[]): string {
+  let current: unknown = meta;
+  for (const key of path) {
+    if (!current || typeof current !== "object") return "";
+    current = (current as Record<string, unknown>)[key];
+  }
+  return typeof current === "string" && current ? current : "";
+}
+
+/**
+ * What to CALL a tool call, in descending order of trustworthiness: the path
+ * the engine declared into its own `_meta`, then the schema's `name` (correct
+ * where present, but marked UNSTABLE so it often is not), then `title` — which
+ * is a human sentence and the last honest resort — then the tool KIND, so a
+ * call with nothing at all still renders as "edit" rather than "undefined".
+ */
+function toolCallName(call: Record<string, unknown>, metaPath?: readonly string[]): string {
+  const fromMeta = metaPath ? readMetaString(call._meta, metaPath) : "";
+  if (fromMeta) return fromMeta;
+  if (typeof call.name === "string" && call.name) return call.name;
+  if (typeof call.title === "string" && call.title) return call.title;
+  return String(call.kind ?? "tool");
+}
+
+/** What a translated `session/update` needs to know about the engine that sent
+ * it. Data only — the module still names no engine. */
+export interface AcpTranslateOptions {
+  /** AcpEngineSpec.toolNameMetaPath. */
+  readonly toolNameMetaPath?: readonly string[];
+}
+
 /** Streaming state carried across chunks of one assistant message. ACP sends
  * text as a run of `agent_message_chunk` notifications with no explicit start
  * or end, so the first chunk opens the message and the turn boundary closes
@@ -136,7 +204,11 @@ export interface AcpStreamState {
  * Unknown `sessionUpdate` kinds return NO events on purpose — ACP keeps
  * gaining variants, and an engine must not break on one it has not learned.
  */
-export function translateSessionUpdate(update: unknown, state: AcpStreamState): EngineEvent[] {
+export function translateSessionUpdate(
+  update: unknown,
+  state: AcpStreamState,
+  options: AcpTranslateOptions = {},
+): EngineEvent[] {
   if (!update || typeof update !== "object") return [];
   const kind = (update as { sessionUpdate?: unknown }).sessionUpdate;
 
@@ -159,11 +231,11 @@ export function translateSessionUpdate(update: unknown, state: AcpStreamState): 
       return text ? [{ type: "thinking", delta: text }] : [];
     }
     case "tool_call": {
-      const call = update as { toolCallId?: unknown; title?: unknown; kind?: unknown };
+      const call = update as Record<string, unknown>;
       return [{
         type: "tool_execution_start",
         toolCallId: typeof call.toolCallId === "string" ? call.toolCallId : "",
-        toolName: typeof call.title === "string" ? call.title : String(call.kind ?? "tool"),
+        toolName: toolCallName(call, options.toolNameMetaPath),
       }];
     }
     case "tool_call_update": {
@@ -178,6 +250,43 @@ export function translateSessionUpdate(update: unknown, state: AcpStreamState): 
     default:
       return [];
   }
+}
+
+/**
+ * A turn's token usage, from the `PromptResponse.usage` the agent returns when
+ * the turn ends. Null when the agent reports none, or reports only zeroes —
+ * an empty frame would add nothing and still cost a render.
+ *
+ * This is the ONE place Cody's usage rule (lib/harness/types.ts: every frame
+ * is a delta to ADD) meets ACP cleanly. `PromptResponse.usage` describes the
+ * turn that just ended, so consecutive turns sum correctly with no
+ * bookkeeping. The `usage_update` NOTIFICATIONS during a turn are cumulative
+ * for the session and would double-count against this, which is why they are
+ * deliberately not translated.
+ *
+ * Cost is not read here. ACP's cost shape is not stated to be per-turn, and a
+ * cumulative figure added as a delta compounds into a number that is wrong and
+ * looks authoritative. Tokens are exact; a missing cost line is honest.
+ *
+ * Cody's arithmetic is input + output + cacheRead + cacheWrite, and ACP already
+ * reports cached reads and writes BESIDE a cache-free input count — verified
+ * against a live turn whose four fields summed to its own `totalTokens` — so
+ * the mapping needs no subtraction.
+ *
+ * Exported for the test: the arithmetic is the whole point of the function.
+ */
+export function readPromptUsage(raw: unknown): EngineUsage | null {
+  if (!raw || typeof raw !== "object") return null;
+  const source = raw as Record<string, unknown>;
+  const count = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0);
+  const usage: EngineUsage = {
+    input: count(source.inputTokens),
+    output: count(source.outputTokens),
+    cacheRead: count(source.cachedReadTokens),
+    cacheWrite: count(source.cachedWriteTokens),
+  };
+  const total = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+  return total > 0 ? usage : null;
 }
 
 /** Why a turn produced no assistant content, in the user's terms. Exported
@@ -213,6 +322,17 @@ export class AcpEngineSession implements EngineSession {
   private onDestroyCallback: (() => void) | null = null;
   private onIdentityChangeCallback: ((oldId: string, newId: string) => void) | null = null;
   private readyPromise: Promise<void> | null = null;
+  /**
+   * Settles when `initialize` completes — BEFORE `session/new`.
+   *
+   * The two are not the same question, and conflating them costs a release
+   * gate. `initialize` needs no credentials: it proves the binary exists,
+   * spawns, and speaks ACP at the version Cody drives. `session/new` is where
+   * an agent reaches for the user's account — measured, the Claude adapter
+   * HANGS there with none, and Codex answers "Authentication required". So
+   * "the engine came up" is answerable in CI and "a session opened" is not.
+   */
+  private connected = Promise.withResolvers<void>();
   private childExit: Promise<void> | null = null;
   private killTimer: ReturnType<typeof setTimeout> | null = null;
   private _alive = true;
@@ -336,6 +456,23 @@ export class AcpEngineSession implements EngineSession {
   // --------------------------------------------------------------------------
   // Lifecycle
 
+  /**
+   * Resolves once the agent has answered `initialize` — it is running and
+   * speaks the protocol — without waiting for a session to open.
+   *
+   * This is what a release gate can assert: `session/new` reaches for
+   * credentials CI does not have, and waiting for it would either hang the
+   * build or force the gate to carry secrets.
+   */
+  async waitUntilConnected(): Promise<void> {
+    const ready = this.ensureReady();
+    // Whichever settles first wins: connect resolving past initialize, or the
+    // whole attempt failing. The catch keeps a later rejection from going
+    // unhandled once `connected` has already won the race.
+    ready.catch(() => {});
+    await Promise.race([this.connected.promise, ready]);
+  }
+
   /** Spawn, handshake and open a session — once per instance. */
   private ensureReady(): Promise<void> {
     if (!this.readyPromise) {
@@ -344,6 +481,10 @@ export class AcpEngineSession implements EngineSession {
         // re-runs it, and the session reports itself dead meanwhile.
         this.readyPromise = null;
         this._alive = false;
+        this.connected.reject(error instanceof Error ? error : new Error(String(error)));
+        // A fresh deferred, so a retry is not answered by the failed attempt.
+        this.connected = Promise.withResolvers<void>();
+        this.connected.promise.catch(() => {});
         // The agent's own stderr is usually the only thing that says WHY —
         // e.g. an ACP extra that was never installed — so it rides along.
         const detail = this.stderrTail.trim();
@@ -388,7 +529,7 @@ export class AcpEngineSession implements EngineSession {
     const connection = app.connect(ndJsonStream(output, input));
     this.connection = connection;
 
-    await connection.agent.request("initialize", {
+    const initialized = connection.agent.request("initialize", {
       protocolVersion: PROTOCOL_VERSION,
       // Claim NOTHING that registerHandlers does not answer. An agent that
       // believes an advertised capability and calls it gets -32601 back;
@@ -397,19 +538,35 @@ export class AcpEngineSession implements EngineSession {
       // terminals land here when phase 2 wires their handlers.
       clientCapabilities: {},
     });
+    await initialized;
+    // The agent is up and speaking ACP. Everything past this point can need
+    // the user's account, so this is the last point a check can reach without
+    // one.
+    this.connected.resolve();
+
+    // Built once and used for BOTH session/load and session/new: a resumed
+    // session that lost its MCP servers is a session whose tools silently
+    // stopped existing. A builder that throws (an unconfigured capability
+    // issuer, say) costs the session its extra tools, never its chat.
+    let mcpServers: readonly AcpMcpServer[] = [];
+    try {
+      mcpServers = this.spec.mcpServers?.(this._sessionId) ?? [];
+    } catch {
+      mcpServers = [];
+    }
 
     if (this.acpSessionId) {
       // A known session resumes; an agent without loadSession says so and the
       // catch falls through to a fresh session rather than failing the chat.
       try {
-        await connection.agent.request("session/load", { sessionId: this.acpSessionId, cwd: this.cwd, mcpServers: [] });
+        await connection.agent.request("session/load", { sessionId: this.acpSessionId, cwd: this.cwd, mcpServers });
         return;
       } catch {
         this.acpSessionId = null;
       }
     }
 
-    const created = await connection.agent.request("session/new", { cwd: this.cwd, mcpServers: [] });
+    const created = await connection.agent.request("session/new", { cwd: this.cwd, mcpServers });
     const newId = (created as { sessionId?: unknown }).sessionId;
     if (typeof newId === "string" && newId) {
       this.acpSessionId = newId;
@@ -514,7 +671,7 @@ export class AcpEngineSession implements EngineSession {
     const direct = payload as { update?: unknown; params?: { update?: unknown } };
     const update = direct.update ?? direct.params?.update;
     if (update === undefined) return;
-    for (const event of translateSessionUpdate(update, this.stream)) {
+    for (const event of translateSessionUpdate(update, this.stream, { toolNameMetaPath: this.spec.toolNameMetaPath })) {
       this.emit(event);
     }
   }
@@ -567,6 +724,8 @@ export class AcpEngineSession implements EngineSession {
       });
       const answered = this.stream.open;
       this.finishTurn();
+      const usage = readPromptUsage((result as { usage?: unknown }).usage);
+      if (usage) this.emit({ type: "usage_event", usage });
       const stopReason = (result as { stopReason?: unknown }).stopReason;
       const reason = typeof stopReason === "string" ? stopReason : "end_turn";
       // A turn that ends having said NOTHING leaves the user staring at their

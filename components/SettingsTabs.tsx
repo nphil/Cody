@@ -1,6 +1,6 @@
 "use client";
 
-import { Cable, Cpu, KeyRound, RefreshCw, Server, Settings2, ShieldCheck, SlidersHorizontal, Sparkles, UserRound } from "lucide-react";
+import { Brain, Cable, Cpu, KeyRound, RefreshCw, Server, Settings2, ShieldCheck, SlidersHorizontal, Sparkles, UserRound } from "lucide-react";
 import type { ComponentType, CSSProperties } from "react";
 
 export type SettingsTab =
@@ -10,6 +10,7 @@ export type SettingsTab =
   | "models"
   | "providers"
   | "intelligence"
+  | "memory"
   | "extensions"
   | "mcp"
   | "omp"
@@ -36,6 +37,7 @@ export interface EngineCapabilities {
   fastMode: boolean;
   advisor: boolean;
   subagents: boolean;
+  memory: boolean;
 }
 
 /** The active engine's identity, also from GET /api/info. */
@@ -46,8 +48,14 @@ export interface ActiveEngineInfo {
   experimental: boolean;
 }
 
-/** Everything on: what an older server (no `capabilities` in /api/info) and
- * omp both mean. Gating only ever bites on an explicit `false`. */
+/** What an older server (no `capabilities` in /api/info) and omp both mean.
+ * Everything omp serves is on, so gating only ever bites on an explicit
+ * `false` — with one exception, below.
+ *
+ * `memory` defaults OFF because it is the one flag omp itself reports false:
+ * omp keeps memory but exposes no read-back, so defaulting it on would show a
+ * Memory tab whose route answers 400. A capability flag hides a surface, it
+ * never renders a broken one. */
 export const ALL_CAPABILITIES: EngineCapabilities = {
   liveSessions: true,
   models: true,
@@ -60,10 +68,12 @@ export const ALL_CAPABILITIES: EngineCapabilities = {
   fastMode: true,
   advisor: true,
   subagents: true,
+  memory: false,
 };
 
 /** Coerce whatever /api/info returned into a full flag set, defaulting every
- * missing or non-boolean flag to true so today's omp behavior is unchanged. */
+ * missing or non-boolean flag to ALL_CAPABILITIES' value so today's omp
+ * behavior is unchanged. */
 export function normalizeCapabilities(value: unknown): EngineCapabilities {
   if (!value || typeof value !== "object") return ALL_CAPABILITIES;
   const source = value as Record<string, unknown>;
@@ -160,6 +170,10 @@ export const SETTINGS_CATEGORIES: TabItem[] = [
   // and is just as useful on a headless Docker install as on desktop.
   { id: "localai", label: "Local AI", description: "Detect Ollama, LM Studio, and llama.cpp running near this instance", Icon: Server },
   { id: "intelligence", label: "Agent & Intelligence", description: "Advisor, memory, autolearn, compaction and retry", Icon: Sparkles, needsCapability: "nativeSettings" },
+  // Sits next to Agent & Intelligence — that tab CONFIGURES memory, this one
+  // shows what the engine actually wrote. Hidden unless the engine can hand
+  // its memory back (Hermes today; omp keeps memory but cannot read it out).
+  { id: "memory", label: "Agent Memory", description: "What the agent has written down and remembers between sessions", Icon: Brain, needsCapability: "memory" },
   { id: "mcp", label: "Extensions & Tools", description: "MCP servers, managed skills, and plugins", Icon: Cable, needsCapability: ["mcp", "skills", "plugins"] },
   { id: "system", label: "System & Updates", description: "Updates for the app, agent engines, and skills, plus session restart", Icon: RefreshCw },
   { id: "omp", label: `All ${DEFAULT_HARNESS_LABEL} Settings`, description: `Every setting ${DEFAULT_HARNESS_LABEL} declares, read from its own schema`, Icon: SlidersHorizontal, pinBottom: true, needsCapability: "nativeSettings" },

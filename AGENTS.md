@@ -108,6 +108,8 @@ app/api/
   omp-settings/route.ts           GET/PUT native config.yml settings (allow-listed)
   omp-settings/schema/route.ts    GET omp's own settings schema + values; PUT a dotted-path patch
   mcp/route.ts                    GET/POST/PUT/DELETE project MCP servers
+  memory/route.ts                 GET the active engine's persistent memory, read-only
+                                   (400 `unsupported` unless capabilities.memory)
   plugins/route.ts                GET/POST plugin management (shells out to `omp plugin`)
   plugins/marketplace/route.ts    GET browse configured marketplaces + catalogs | POST
                                    add/remove/update marketplace, install/uninstall/upgrade
@@ -133,14 +135,16 @@ lib/
     provider.ts        RasterWebProvider: puppeteer-core + system Chromium → JPEG WS stream
     native-gateway.ts  candidate ranking; optional CODY_PREVIEW_BASE_URL
                        wildcard-subdomain reverse proxy
-    engine-tools.ts    bundled display-MCP launch config for Claude (JSON) / Codex (TOML)
+    engine-tools.ts    bundled display-MCP launch descriptors: --mcp-config JSON for a
+                       per-turn CLI, an ACP McpServerStdio for an ACP session
     access.ts          authorizeDisplaySession(): request auth for display routes
     csp.ts             buildContentSecurityPolicy(): loopback + this host's
                        private LAN/CGNAT frame-src/connect-src for proxy.ts
   file-access.ts       allowed file roots for /api/files and worktrees
-  harness/             pluggable engine seam: adapters (omp/claude/codex), runtime
-                       selection state, turn-based sessions + stream translators,
-                       session index, binary probe + on-demand install (docs/harnesses.md)
+  harness/             pluggable engine seam: adapters (omp/pi/claude/codex/hermes),
+                       runtime selection state, three transports (rpc-ui, ACP,
+                       per-turn), session index, binary probe + on-demand install
+                       (docs/harnesses.md)
   file-paths.ts        client/server path encoding helpers
   markdown.ts          shared markdown helpers
   npx.ts               npx runner used by skill install
@@ -205,6 +209,8 @@ components/
                       model's vendor. Never hotlinked — see the note below
   ModelsConfig.tsx    modal for models/auth configuration
   McpConfig.tsx       project MCP server editor (Settings → MCP tab)
+  MemoryPanel.tsx     Settings → Agent Memory: the engine's own memory documents,
+                      read-only, each with its path (capability-gated)
   PluginsConfig.tsx   modal for installed plugins; opens PluginMarketplace
   PluginMarketplace.tsx marketplace dialog: browse/search/install across
                       configured `omp` marketplaces, manage marketplaces
@@ -301,7 +307,7 @@ is a reserved seam if per-uid isolation is ever wanted.
 ## Pluggable engines (`lib/harness/`)
 
 The coding agent under the UI is a swappable **engine**: omp (founding,
-full-featured), Claude Code and Codex (experimental, turn-based). Full
+full-featured), plus pi, Claude Code, Codex and Hermes (experimental). Full
 architecture: `docs/harnesses.md`. The load-bearing rules:
 
 - `getHarness()` resolves persisted selection (`cody-engine.json`) →
@@ -311,18 +317,48 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   `getAgentDir()`): accounts, checkpoints, engine selection, session owners,
   the engine session index, the tools prefix. Never route these through the
   active adapter's `getAgentDir()` — they must survive engine switches.
-- Non-omp live chat: `TurnEngineSession` spawns one CLI process per turn
-  (`claude -p --output-format stream-json` / `codex exec --json`), and
-  `claude-stream.ts`/`codex-stream.ts` translate NDJSON into the pi event
-  vocabulary. Commands beyond prompt/abort/get_state/get_messages throw code
-  `"unsupported"` — the UI tolerates that by design. Session metadata for
-  these engines lives in `cody-engine-sessions.json`
+- Non-omp live chat has two shapes, and `lib/harness/engine-transport.test.mjs`
+  pins which engine rides which:
+  - **ACP** (`acp-session.ts`) — one long-lived stdio JSON-RPC server,
+    `session/new` once and `session/prompt` per turn. An engine is a data
+    description (`AcpEngineSpec`), never a class. Codex speaks it through
+    `@agentclientprotocol/codex-acp`; the `codex` CLI itself has no ACP mode.
+  - **Per turn** (`TurnEngineSession` + a `<id>-stream.ts` translator) — one
+    CLI process per prompt, NDJSON translated into the pi event vocabulary.
+    The fallback for a CLI that offers nothing better. `EngineCommandError`
+    lives in `turn-session.ts` and is shared by both transports.
+
+  Both throw code `"unsupported"` for commands beyond
+  prompt/abort/get_state/get_messages — the UI tolerates that by design — and
+  both keep session metadata in `cody-engine-sessions.json`
   (`lib/harness/engine-sessions.ts`), keyed by Cody session id; ownership
   uses the same session-owners sidecar as omp.
+- **An engine's binary is not always its CLI.** An ACP adapter is what Cody
+  installs, probes and version-checks, while the CLI underneath is a separate
+  concern — so `HarnessAdapter` states them apart: `installAlso` installs the
+  CLI as its own package (Cody owns its version), `skipNativeOptional` stops
+  the adapter shipping a duplicate copy, `engineEnv()` joins the two halves
+  with one env table used by the live session, the post-install probe AND a
+  Cody terminal, `cliArgs` names the argv that opens the interactive CLI (an
+  ACP adapter run bare is a JSON-RPC server, not a TUI), and `healthArgs` is
+  the probe that runs the REAL entry point. Codex is the worked example:
+  `codex-acp --version` answers from its own bundle and reports healthy with
+  no Codex to drive, so the install is verified with `codex-acp cli -V`.
 - Capability flags (`HarnessCapabilities`, including `chatExtras`) gate UI
   surfaces: a `false` **hides** the settings tab / panel card / composer
   control, it never renders a broken one. `/api/info` serves the active
   engine's capabilities to the client.
+- **Agent memory is read-only, on purpose** (`capabilities.memory`,
+  `HarnessAdapter.readMemory`, `/api/memory`, `components/MemoryPanel.tsx`).
+  Memory is the agent's own account of what it learned, so Cody shows it and
+  never writes it; each document carries its `path` precisely so the user can
+  open and edit the file themselves. The flag is true only when an engine
+  keeps memory AND can hand it back — Hermes today; omp keeps memory but
+  exposes no read-back, so its surface stays hidden rather than empty. That is
+  also why `memory` is the one flag defaulting to FALSE in
+  `ALL_CAPABILITIES` (components/SettingsTabs.tsx). A document that does not
+  exist yet is the normal state of a fresh install: the panel says the agent
+  has not written anything here yet, never an error.
 - The Docker image ships NO engine — omp included. Every engine installs
   from the picker into the persistent tools prefix (`CODY_TOOLS_DIR`,
   default `<data dir>/tools`; entrypoint puts its `bin` first on PATH), and
@@ -356,7 +392,8 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   `lib/omp/` and `lib/harness/`, importing `lib/omp/*` fails the test unless
   the file is on the in-test allowlist with a written reason, stale allowlist
   entries fail too (the list only ratchets down), and the adapter/translator
-  modules (`harness/omp|claude|codex|*-stream`) are private to the seam —
+  modules (`harness/omp|claude|codex|hermes|claude-stream|acp-session`) are
+  private to the seam —
   everything else goes through `@/lib/harness` or its engine-neutral
   submodules. New engine-neutral code must NOT import `lib/omp` directly;
   route it through the harness (capabilities, adapter methods, or the engine
@@ -441,9 +478,10 @@ appears without a Cody change.
   the latest `DisplayRequestV1` from `useDisplayRequests` (SSE snapshot + live
   events), and a live event both opens the panel and marks the (session, url)
   pair handled for the auto-opener.
-- Host tools exist only on omp's rpc-ui protocol; turn engines (Claude Code /
-  Codex) get the assistant-text detection path here, plus `open_preview` via
-  the bundled display MCP server (see `lib/display/` below).
+- Host tools exist only on omp's rpc-ui protocol; every other engine gets the
+  assistant-text detection path here, plus the bundled display MCP server (see
+  `lib/display/` below) — as `--mcp-config` on a per-turn CLI's argv, or as an
+  ACP `McpServerStdio` named at `session/new`.
 
 ### Preview screenshots (`lib/preview-screenshot.ts`)
 - `preview_screenshot` is a SERVER-implemented host tool (rpc-manager
@@ -548,9 +586,15 @@ appears without a Cody change.
 - **Per-engine wiring**: omp gets a Cody-owned `open_preview` host tool —
   `lib/rpc-manager.ts` sends `set_host_tools` at session start, merges it into
   any browser-registered tool list, and routes the `host_tool_call` to
-  `publishDisplayRequest`. Claude/Codex get the bundled stdio MCP server
-  (`bin/cody-display-mcp.js`) via `lib/display/engine-tools.ts` —
-  `--mcp-config` JSON for Claude, `-c` TOML args for Codex.
+  `publishDisplayRequest`. Every other engine gets the bundled stdio MCP
+  server (`bin/cody-display-mcp.js`) via `lib/display/engine-tools.ts` —
+  `claudeDisplayMcpConfig` for a per-turn CLI's `--mcp-config`,
+  `displayMcpAcpServer` for an ACP session's `mcpServers`. The ACP builder
+  MINTS a capability token, so it throws when the server's internal display
+  origin/secret are absent; an adapter's `mcpServers` hook must catch that and
+  report an empty list. `scripts/engine-bringup.mjs` drives adapters with no
+  server behind them, and a throw there aborts `session/new` — no bridge is a
+  missing Preview button, a throw is a chat that will not open.
 - **Client**: `hooks/useDisplayRequests.ts` subscribes to the SSE route;
   `AppShell` auto-opens the right panel in `preview` mode on live requests —
   the explicit, server-driven trigger alongside the client-side URL sniffing
