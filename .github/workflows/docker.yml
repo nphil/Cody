@@ -141,6 +141,39 @@ jobs:
           docker exec cody-smoke /data/agent/tools/bin/omp --version \
             || fail "fresh install: installed omp does not run from the tools prefix"
 
+          # The OTHER install mechanism. Everything above exercises the npm
+          # branch; Hermes is a PyPI package installed with `uv tool install`,
+          # and until this ran here the whole uv path — its directory
+          # overrides, its subcommand version probe, the venv its settings
+          # panel reads, and its uninstall — had never executed inside the
+          # image at all.
+          hermes=$(curl -s -o /tmp/hermes-body -w '%{http_code}' -b /tmp/smoke-cookies \
+            -H 'Content-Type: application/json' -d '{"id":"hermes"}' \
+            --max-time 300 \
+            http://127.0.0.1:30177/api/engines/install || echo 000)
+          [ "$hermes" = "200" ] || fail "uv install: hermes install expected 200, got $hermes ($(cat /tmp/hermes-body))"
+          # Probed through the ACP entry point, never a bare --version: the ACP
+          # server ships as an optional extra, and `hermes --version` reports a
+          # healthy version with or without it — an engine that installs clean
+          # and then dies on every chat turn.
+          docker exec cody-smoke /data/agent/tools/bin/hermes acp --version \
+            || fail "uv install: hermes acp does not run — the [acp] extra is missing from the install"
+          # The Hermes settings panel derives its schema by running the venv
+          # interpreter uv places beside the shim's target. No python there, no
+          # settings tab — and nothing else would notice.
+          docker exec cody-smoke sh -c 'test -x "$(dirname "$(readlink -f /data/agent/tools/bin/hermes)")/python"' \
+            || fail "uv install: no venv python beside the hermes shim — the settings panel derives its schema from there"
+          # Uninstall must use the manager that installed it. npm against a
+          # uv-installed engine finds nothing to remove and exits 0, which read
+          # as a successful uninstall while the engine sat untouched on disk.
+          hermes_rm=$(curl -s -o /tmp/hermes-rm -w '%{http_code}' -b /tmp/smoke-cookies \
+            -X DELETE -H 'Content-Type: application/json' -d '{"id":"hermes"}' \
+            --max-time 120 \
+            http://127.0.0.1:30177/api/engines/install || echo 000)
+          [ "$hermes_rm" = "200" ] || fail "uv uninstall: expected 200, got $hermes_rm ($(cat /tmp/hermes-rm))"
+          docker exec cody-smoke test ! -e /data/agent/tools/bin/hermes \
+            || fail "uv uninstall: reported success but /data/agent/tools/bin/hermes is still installed"
+
           # Screenshot capability contract: the preview_screenshot host tool
           # and the Preview capture button need the bundled headless Chromium.
           # --version alone would not catch a renderer that cannot start in
@@ -180,7 +213,7 @@ jobs:
             echo "::warning::omp settings schema did not load in the image"
           fi
           docker rm -f cody-smoke >/dev/null
-          echo "fresh-install verified (locked, setup mints an admin, omp installs from the picker and runs, screenshots capture)"
+          echo "fresh-install verified (locked, setup mints an admin, omp installs via npm and hermes via uv, both run, uv uninstall removes, screenshots capture)"
 
           # ------------------------------------------------------------------
           # Password mode + SSH: CODY_PASSWORD still enables the env-managed

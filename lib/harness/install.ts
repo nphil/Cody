@@ -547,23 +547,47 @@ export function installEngine(request: EngineInstallRequest): Promise<EngineInst
 const UNINSTALL_TIMEOUT_MS = 60_000;
 
 /**
- * Remove an engine that Cody npm-installed into the persistent tools prefix.
+ * Remove an engine Cody installed into the persistent tools prefix.
  * Policy lives in the DELETE route (admin, not the active engine, binary
- * actually managed by Cody); this only runs npm and drops the binary caches
- * so the next probe sees the removal.
+ * actually managed by Cody); this only runs the package manager and drops the
+ * binary caches so the next probe sees the removal.
+ *
+ * The manager has to match the one that INSTALLED it. Running npm against a
+ * uv-installed engine is not a loud failure — npm reports nothing to remove
+ * and exits 0, so the route answered "uninstalled" while the engine sat
+ * untouched on disk and kept running.
  */
-export function uninstallEngine(request: { id: string; packageName: string; binaryName: string }): Promise<void> {
+export function uninstallEngine(request: {
+  id: string;
+  packageName: string;
+  binaryName: string;
+  installVia?: "npm" | "uv";
+}): Promise<void> {
   if (inFlight.has(request.id)) {
     return Promise.reject(new EngineInstallError(`An install of ${request.id} is still running; wait for it to finish.`, ""));
   }
   const prefix = getToolsDir();
-  const args = ["uninstall", "-g", "--prefix", prefix, request.packageName];
-  const npmCli = findNpmCli();
-  const command = npmCli ? execPath : "npm";
-  const commandArgs = npmCli ? [npmCli, ...args] : args;
+  const viaUv = request.installVia === "uv";
+  // The same directory overrides the install used, or uv would look for the
+  // tool in its default location and find nothing to remove.
+  const env = viaUv
+    ? {
+      ...process.env,
+      UV_TOOL_DIR: join(prefix, "uv-tools"),
+      UV_TOOL_BIN_DIR: join(prefix, "bin"),
+      UV_CACHE_DIR: join(prefix, "uv-cache"),
+    }
+    : process.env;
+  const npmCli = viaUv ? null : findNpmCli();
+  const command = viaUv ? "uv" : (npmCli ? execPath : "npm");
+  const commandArgs = viaUv
+    ? ["tool", "uninstall", request.packageName]
+    : (npmCli
+      ? [npmCli, "uninstall", "-g", "--prefix", prefix, request.packageName]
+      : ["uninstall", "-g", "--prefix", prefix, request.packageName]);
 
   return new Promise<void>((resolve, reject) => {
-    const child = spawn(command, commandArgs, { env: process.env, stdio: ["ignore", "ignore", "pipe"] });
+    const child = spawn(command, commandArgs, { env, stdio: ["ignore", "ignore", "pipe"] });
     let stderr = "";
     let timedOut = false;
     let killTimer: NodeJS.Timeout | undefined;
@@ -578,7 +602,7 @@ export function uninstallEngine(request: { id: string; packageName: string; bina
     });
     child.on("error", (error) => {
       clearTimeout(timeout);
-      reject(new EngineInstallError(`Could not run npm to uninstall ${request.packageName}`, String(error)));
+      reject(new EngineInstallError(`Could not run ${command} to uninstall ${request.packageName}`, String(error)));
     });
     child.on("close", (code, signal) => {
       clearTimeout(timeout);
@@ -595,7 +619,7 @@ export function uninstallEngine(request: { id: string; packageName: string; bina
         return;
       }
       const how = signal ? `was killed with ${signal}` : `exited with code ${code}`;
-      reject(new EngineInstallError(`npm uninstall ${request.packageName} ${how}`, tail(stderr)));
+      reject(new EngineInstallError(`${viaUv ? "uv tool" : "npm"} uninstall ${request.packageName} ${how}`, tail(stderr)));
     });
   });
 }

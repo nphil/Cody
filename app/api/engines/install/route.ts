@@ -5,7 +5,7 @@ import { parseJsonWithinLimit } from "@/lib/bounded-form-data";
 import { getHarness, getHarnessById } from "@/lib/harness";
 import { getToolsDir, probeEngineVersion } from "@/lib/harness/engine-bin";
 import { EngineInstallError, installEngine, isEngineInstalling, readInstallHistory, uninstallEngine } from "@/lib/harness/install";
-import { packageNameFromSpec } from "@/lib/harness/updates";
+import { packageNameFromSpec, pypiNameFromSpec } from "@/lib/harness/updates";
 import { invalidateOmpCliCache } from "@/lib/omp/omp-cli";
 import { restartAllRpcSessions } from "@/lib/rpc-manager";
 
@@ -92,13 +92,21 @@ export async function POST(request: Request) {
   // cached probe described.
   if (adapter.id === "omp") invalidateOmpCliCache();
 
-  // installEngine dropped the binary caches, so this probe sees what npm just
-  // wrote. npm resolves a platform-native optional dependency on a best-effort
-  // basis and exits 0 when it cannot, which leaves a CLI that fails on every
-  // invocation — running it once is the only way to tell the two apart.
+  // installEngine dropped the binary caches, so this probe sees what the
+  // installer just wrote. npm resolves a platform-native optional dependency
+  // on a best-effort basis and exits 0 when it cannot, which leaves a CLI that
+  // fails on every invocation — running it once is the only way to tell the
+  // two apart.
+  //
+  // The adapter's own versionArgs, not a bare --version: an engine whose
+  // entry point lives behind a subcommand is only verified by running THAT.
+  // Hermes' ACP server sits behind an optional extra, and `hermes --version`
+  // reports a healthy 0.19.0 whether or not the extra is present — so a bare
+  // probe would bless an install whose every chat turn then dies with "ACP
+  // dependencies not installed".
   const binary = adapter.resolveBinary();
   const probe = binary
-    ? await probeEngineVersion(binary)
+    ? await probeEngineVersion(binary, adapter.versionArgs)
     : { version: null, error: `The installer finished but no ${adapter.binaryName} binary is installed.` };
 
   if (!probe.version) {
@@ -179,8 +187,13 @@ export async function DELETE(request: Request) {
   try {
     await uninstallEngine({
       id: adapter.id,
-      packageName: packageNameFromSpec(adapter.installSpec),
+      // Ecosystems name packages differently, and the extras marker in a PyPI
+      // spec ("hermes-agent[acp]") is not part of the installed tool's name.
+      packageName: adapter.installVia === "uv"
+        ? pypiNameFromSpec(adapter.installSpec)
+        : packageNameFromSpec(adapter.installSpec),
       binaryName: adapter.binaryName,
+      installVia: adapter.installVia,
     });
   } catch (error) {
     const detail = error instanceof EngineInstallError ? error.detail : "";
