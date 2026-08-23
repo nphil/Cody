@@ -3,7 +3,7 @@ import { invalidateModelsCache } from "@/lib/models-cache";
 import { disposeUtilityRpc } from "@/lib/omp/rpc-utility";
 import { readSchemaSettings, writeSchemaSettings } from "@/lib/omp/settings-values";
 import { getHarness } from "@/lib/harness";
-import { getHermesSettingsSchema, readHermesSettingsValues, writeHermesSetting } from "@/lib/harness/hermes-settings";
+import { LIST_WRITE_UNSUPPORTED, getHermesSettingsSchema, readHermesSettingsValues, resetHermesSetting, writeHermesSetting } from "@/lib/harness/hermes-settings";
 
 /**
  * OMP's own settings schema plus the values currently persisted for it. The
@@ -23,8 +23,17 @@ function readHermesSchema(harness: ReturnType<typeof getHarness>) {
   return {
     path: `${home}/config.yaml`,
     schema,
-    values: schema ? readHermesSettingsValues(home) : {},
+    values: schema ? readHermesSettingsValues(home, schema.settings) : {},
   };
+}
+
+/** Why Hermes cannot take this patch entry, or null when it can. A `null`
+ * entry is the panel's Reset and goes to `hermes config unset`. */
+function unwritableReason(value: unknown): string | null {
+  if (value === null) return null;
+  if (Array.isArray(value)) return LIST_WRITE_UNSUPPORTED;
+  if (typeof value === "boolean" || typeof value === "number" || typeof value === "string") return null;
+  return `Cody has no config form for a ${value === undefined ? "missing" : typeof value} value`;
 }
 
 export function GET() {
@@ -64,12 +73,34 @@ export async function PUT(request: Request) {
       const binary = active.resolveBinary();
       if (!binary) return NextResponse.json({ error: "hermes binary not found" }, { status: 400 });
       const written: string[] = [];
+      const rejected: Array<{ key: string; reason: string }> = [];
       for (const [key, value] of Object.entries(patch as Record<string, unknown>)) {
-        if (typeof value !== "boolean" && typeof value !== "number" && typeof value !== "string") continue;
-        writeHermesSetting(binary, key, value);
-        written.push(key);
+        const reason = unwritableReason(value);
+        if (reason) {
+          rejected.push({ key, reason });
+          continue;
+        }
+        try {
+          if (value === null) resetHermesSetting(binary, key);
+          else writeHermesSetting(binary, key, value as boolean | number | string);
+          written.push(key);
+        } catch (error) {
+          // One key Hermes refuses must not abort the rest of the patch, nor
+          // disappear: it is named in the response instead.
+          rejected.push({ key, reason: error instanceof Error ? error.message : String(error) });
+        }
       }
-      return NextResponse.json({ success: true, written, values: readHermesSchema(active).values });
+      const { values } = readHermesSchema(active);
+      if (rejected.length === 0) return NextResponse.json({ success: true, written, values });
+      // A save that did not happen is never reported as one. The panel shows
+      // `error`, so the keys Hermes would not take are named there.
+      return NextResponse.json({
+        success: false,
+        written,
+        rejected,
+        values,
+        error: `Not saved — ${rejected.map((entry) => `${entry.key}: ${entry.reason}`).join("; ")}`,
+      });
     }
     const written = writeSchemaSettings(patch as Record<string, unknown>);
     if (written.length > 0) {

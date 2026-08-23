@@ -60,6 +60,7 @@ export const chipStyle = {
  * panels and the schema-driven one share this wording, so a terminal-only
  * setting reads the same whichever surface shows it. */
 export const TERMINAL_ONLY_BADGE = "Terminal only";
+export const READ_ONLY_BADGE = "Read-only";
 
 export function slugify(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");

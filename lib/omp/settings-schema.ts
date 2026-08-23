@@ -50,6 +50,12 @@ export interface OmpSetting {
   /** OMP populates the choices from a runtime registry (its TUI theme list).
    * Cody has no equivalent registry, so those render as a free text field. */
   runtimeOptions?: boolean;
+  /** The engine can SHOW this setting but not accept a write for it. The panel
+   * renders the real value and disables editing, because offering a control
+   * whose save always fails is worse than not offering one. */
+  readOnly?: boolean;
+  /** One clause saying why, shown with the setting. */
+  readOnlyReason?: string;
   /** Array settings whose element order is meaningful upstream. */
   ordered?: boolean;
   /** Name of the OMP predicate gating visibility; see SETTING_CONDITIONS. */
