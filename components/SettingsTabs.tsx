@@ -125,6 +125,17 @@ export interface TabItem {
  * only what renders before that lands. */
 export const DEFAULT_HARNESS_LABEL = "OMP";
 
+/** The founding engine's id, as `/api/info` reports it.
+ *
+ * Capability flags cover almost everything the UI gates on, but a few routes
+ * are ONE engine's own files rather than a capability anything else could
+ * grow — session import writes omp's .jsonl layout, archive moves it with
+ * omp's gc layout — and the server refuses them under any other engine
+ * (lib/engine-guard `requireEngine("omp", …)`). The client half of that rule
+ * needs the same id, so it is named once here instead of being spelled out
+ * as a bare string wherever a control mirrors such a route. */
+export const OMP_ENGINE_ID = "omp";
+
 /** The Extensions & Tools group description, composed from what the active
  * engine actually serves so a skills-only engine (pi) is not promised MCP. */
 function extensionsGroupDescription(capabilities: EngineCapabilities): string {

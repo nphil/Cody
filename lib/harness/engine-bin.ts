@@ -26,7 +26,27 @@ const VERSION_TIMEOUT_MS = 10_000;
 const PROBE_ERROR_LIMIT = 400;
 
 const binCache = new Map<string, { path: string | null; missAt: number }>();
-const versionCache = new Map<string, { version: string | null; missAt: number }>();
+interface VersionProbe { version: string | null; missAt: number }
+/**
+ * Version probes, keyed by binary and then by the argv it was asked.
+ *
+ * One binary answers two different questions: an ACP adapter reports its
+ * own package version for `--version` and the version of the CLI it drives
+ * for `--cli --version`, and Cody shows both. A flat map keyed by binary
+ * name alone served whichever answer landed first as though it were both.
+ *
+ * Nested rather than a composite string key so an install drops every
+ * answer for a binary by deleting ONE entry — no separator to choose, and
+ * no prefix match that a similarly-named binary could satisfy.
+ */
+const versionCache = new Map<string, Map<string, VersionProbe>>();
+
+/** Remember one probe, creating this binary's bucket on first use. */
+function cacheVersion(binaryName: string, argvKey: string, probe: VersionProbe): void {
+  const perArgv = versionCache.get(binaryName) ?? new Map<string, VersionProbe>();
+  perArgv.set(argvKey, probe);
+  versionCache.set(binaryName, perArgv);
+}
 
 /** Persistent prefix for engines Cody installs itself. */
 export function getToolsDir(): string {
@@ -64,23 +84,39 @@ function matchVersion(output: string): string | null {
   return match ? match[0] : null;
 }
 
-export function getEngineVersion(binaryName: string, envSuffix: string, versionArgs: readonly string[] = ["--version"]): Promise<string | null> {
-  const cached = versionCache.get(binaryName);
+/**
+ * The version an installed engine reports for itself, cached per argv.
+ *
+ * @param envSuffix Env-var stem: "CLAUDE" resolves CODY_CLAUDE_BIN.
+ * @param extraEnv Environment the engine needs to find its own parts
+ *   (HarnessAdapter.engineEnv). An adapter asked for the version of the CLI
+ *   underneath it cannot answer without this — the CLI is a separate package,
+ *   and the env is what joins the two halves.
+ */
+export function getEngineVersion(
+  binaryName: string,
+  envSuffix: string,
+  versionArgs: readonly string[] = ["--version"],
+  extraEnv?: Record<string, string>,
+): Promise<string | null> {
+  const argvKey = JSON.stringify(versionArgs);
+  const cached = versionCache.get(binaryName)?.get(argvKey);
   if (cached?.version) return Promise.resolve(cached.version);
   if (cached && Date.now() - cached.missAt < MISS_TTL_MS) return Promise.resolve(null);
   const bin = resolveEngineBin(binaryName, envSuffix);
   if (!bin) return Promise.resolve(null);
   const { promise, resolve } = Promise.withResolvers<string | null>();
-  execFile(bin, [...versionArgs], { timeout: VERSION_TIMEOUT_MS }, (error, stdout, stderr) => {
+  const env = extraEnv ? { ...process.env, ...extraEnv } : process.env;
+  execFile(bin, [...versionArgs], { timeout: VERSION_TIMEOUT_MS, env }, (error, stdout, stderr) => {
     if (error) {
-      versionCache.set(binaryName, { version: null, missAt: Date.now() });
+      cacheVersion(binaryName, argvKey, { version: null, missAt: Date.now() });
       resolve(null);
       return;
     }
     // pi prints its version to stderr; the clean exit above is what proves
     // the binary ran, so on success either stream may carry the number.
     const version = matchVersion(String(stdout)) ?? matchVersion(String(stderr)) ?? (String(stdout).trim() || null);
-    versionCache.set(binaryName, { version, missAt: version ? 0 : Date.now() });
+    cacheVersion(binaryName, argvKey, { version, missAt: version ? 0 : Date.now() });
     resolve(version);
   });
   return promise;
@@ -157,7 +193,15 @@ export function probeEngineVersion(
   return promise;
 }
 
-/** Clear probes after an install so the next request sees the new binary. */
+/**
+ * Clear probes after an install so the next request sees the new binary.
+ *
+ * A hit is cached forever (only misses expire), so anything an install
+ * REPLACED has to be dropped here or the stale answer outlives it for the
+ * lifetime of the server. Dropping a binary drops every argv it was asked
+ * about, because every one of those answers described the tree npm has just
+ * overwritten.
+ */
 export function invalidateEngineBinCache(binaryName?: string): void {
   if (binaryName) {
     binCache.delete(binaryName);

@@ -67,13 +67,22 @@ export const hermesHarness: HarnessAdapter = {
     "Hermes brings its own model configuration: run `hermes setup` once in a Cody terminal to pick a provider and add keys.",
   capabilities: {
     liveSessions: true,
-    // Hermes exposes models through its own config (and, over ACP, session
-    // config options). Until Cody reads them (phase 1d) the composer's model
-    // control would be a dropdown with nothing in it, so it stays hidden.
+    // This flag means the models.yml EDITOR, which is omp's file format —
+    // not "has models". Cody does read Hermes' models now: they arrive with
+    // the ACP session rather than from a global registry, and reach the
+    // composer through get_state's availableModels with /api/models
+    // reporting catalogSource: "session". pi is the proof the two are
+    // different questions — it declares models: false and still serves its
+    // own 119-model catalog.
     models: false,
-    // Hermes has skills, but they are its own format and store — the existing
-    // skills surface is built against omp's discovery. Phase 2 adapts it.
-    skills: false,
+    // Hermes writes and refines its own skills, and the existing surface now
+    // reads them on Hermes' terms: the recursive `$HERMES_HOME/skills` tree
+    // plus `skills.external_dirs`, enable/disable through `skills.disabled` in
+    // its config.yaml, and installs through `hermes skills install`
+    // (lib/harness/hermes-skills.ts). What Cody cannot do faithfully is
+    // disabled rather than faked — there is no project scope, and the update
+    // check belongs to `hermes skills check`.
+    skills: true,
     plugins: false,
     // ACP carries MCP capabilities, but Cody's MCP editor writes omp's config
     // file; Hermes keeps its own. Not wired yet.

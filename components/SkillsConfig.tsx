@@ -14,6 +14,7 @@ import { SettingsTabs, type SettingsTab } from "./SettingsTabs";
 import { SkillsStore } from "./SkillsStore";
 import type {
   SkillInfo as Skill,
+  SkillInstallScope,
   SkillUpdateResult,
 } from "@/lib/api-types";
 
@@ -60,10 +61,14 @@ function shortVersion(version?: string): string {
 function Toggle({
   enabled,
   loading,
+  readOnly,
   onToggle,
 }: {
   enabled: boolean;
   loading: boolean;
+  /** The active engine keeps this state somewhere Cody cannot write. Show
+   * what is in effect, refuse to pretend it can be changed here. */
+  readOnly: boolean;
   onToggle: () => void;
 }) {
   const { t } = useI18n();
@@ -71,12 +76,14 @@ function Toggle({
     <button
       type="button"
       onClick={onToggle}
-      disabled={loading}
+      disabled={loading || readOnly}
       aria-pressed={enabled}
       title={
-        enabled
-          ? t("skillsConfig.visibleInPrompt")
-          : t("skillsConfig.hiddenFromPrompt")
+        readOnly
+          ? t("skillsConfig.toggleUnavailable")
+          : enabled
+            ? t("skillsConfig.visibleInPrompt")
+            : t("skillsConfig.hiddenFromPrompt")
       }
       style={{
         flexShrink: 0,
@@ -85,7 +92,8 @@ function Toggle({
         borderRadius: 11,
         border: "none",
         padding: 0,
-        cursor: loading ? "wait" : "pointer",
+        cursor: readOnly ? "not-allowed" : loading ? "wait" : "pointer",
+        opacity: readOnly ? 0.55 : 1,
         background: enabled ? "var(--accent)" : "var(--border)",
         position: "relative",
         transition: "background var(--dur-med) var(--ease-out-warm)",
@@ -114,6 +122,7 @@ function SkillDetail({
   cwd,
   onToggle,
   toggling,
+  canToggle,
   saveError,
   updateStatus,
   checkingUpdate,
@@ -126,6 +135,7 @@ function SkillDetail({
   cwd: string;
   onToggle: (skill: Skill) => void;
   toggling: boolean;
+  canToggle: boolean;
   saveError: string | null;
   updateStatus?: SkillUpdateResult;
   checkingUpdate: boolean;
@@ -182,6 +192,7 @@ function SkillDetail({
         <Toggle
           enabled={enabled}
           loading={toggling}
+          readOnly={!canToggle}
           onToggle={() => onToggle(skill)}
         />
         {saveError && (
@@ -190,6 +201,12 @@ function SkillDetail({
           </span>
         )}
       </div>
+
+      {!canToggle && (
+        <span style={{ fontSize: 12, color: "var(--text-dim)", lineHeight: 1.5, marginTop: -12 }}>
+          {t("skillsConfig.toggleUnavailable")}
+        </span>
+      )}
 
       {skill.install?.skillsShUrl && (
         <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
@@ -377,6 +394,11 @@ export function SkillsConfig({
   const isMobile = useIsMobile();
   const { t, tn } = useI18n();
   const [skills, setSkills] = useState<Skill[]>([]);
+  // What this engine's skills surface can actually do, reported by the scan
+  // (GET /api/skills). Defaults match omp, so a server that does not answer
+  // keeps the full surface rather than disabling controls that work.
+  const [installScopes, setInstallScopes] = useState<SkillInstallScope[]>(["global", "project"]);
+  const [canToggle, setCanToggle] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -394,10 +416,18 @@ export function SkillsConfig({
     setError(null);
     try {
       const res = await fetch(`/api/skills?cwd=${encodeURIComponent(cwd)}`);
-      const d = (await res.json()) as { skills?: Skill[]; error?: string; code?: string };
+      const d = (await res.json()) as {
+        skills?: Skill[];
+        installScopes?: SkillInstallScope[];
+        canToggle?: boolean;
+        error?: string;
+        code?: string;
+      };
       if (!res.ok || d.error) throw new Error(formatApiError(d.error ? d : `HTTP ${res.status}`));
       const list = d.skills ?? [];
       setSkills(list);
+      if (d.installScopes?.length) setInstallScopes(d.installScopes);
+      if (typeof d.canToggle === "boolean") setCanToggle(d.canToggle);
       if (list.length > 0 && !selected) setSelected(list[0].filePath);
       return list;
     } catch (e) {
@@ -858,6 +888,7 @@ export function SkillsConfig({
                 cwd={cwd}
                 onToggle={toggle}
                 toggling={toggling.has(selectedSkill.filePath)}
+                canToggle={canToggle}
                 saveError={saveError}
                 updateStatus={
                   updateKey(selectedSkill)
@@ -903,7 +934,10 @@ export function SkillsConfig({
           }}
         >
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            {skills.some((skill) => Boolean(skill.install)) && (
+            {/* Only when a check would do something: an engine whose installs
+                carry no comparable version (Hermes tracks its own hashes and
+                checks them with `hermes skills check`) gets no dead button. */}
+            {skills.some((skill) => skill.install?.canCheckForUpdates) && (
               <button
                 onClick={() => void checkForUpdates()}
                 disabled={checkingAll || updatingSkill !== null}
@@ -954,6 +988,7 @@ export function SkillsConfig({
         {storeOpen && (
           <SkillsStore
             cwd={cwd}
+            scopes={installScopes}
             installedPackages={{
               global: new Set(
                 skills

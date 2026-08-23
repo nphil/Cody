@@ -52,6 +52,38 @@ export const STORAGE_PREFIXES = {
   previewUrl: "cody:preview-url:",
 } as const;
 
+/**
+ * Keys above whose value belongs to ONE engine's world and must not survive
+ * an engine switch. Session ids are the engine's own (omp's ids mean nothing
+ * to pi, and pi's mean nothing to Hermes), and a pinned model list written
+ * against omp's catalog left the composer on pi showing "No models" for a
+ * catalog that had loaded fine — with the Models settings tab hidden there,
+ * so there was no way back.
+ *
+ * Scoped values live at `<key>:<engineId>`; the SHAPE of each value is
+ * unchanged, only its address. Everything else Cody stores (theme, language,
+ * panel widths, sound) is a property of the human, not the engine, and stays
+ * global on purpose.
+ *
+ * The unscoped predecessor is deliberately abandoned rather than adopted into
+ * the active engine's scope: adopting it is precisely the bug — it would hand
+ * omp's pins to whichever engine happened to be selected on the next load.
+ * Each of these is a UI convenience that costs one reset to rebuild.
+ */
+export const ENGINE_SCOPED_KEYS = [
+  STORAGE_KEYS.composerModels,
+  STORAGE_KEYS.unreadSessions,
+  STORAGE_KEYS.lastOpenByProject,
+] as const;
+
+/** Address one of ENGINE_SCOPED_KEYS for a given engine. Null while the
+ * active engine is still unknown (`/api/info` in flight): callers must treat
+ * that as "nothing stored yet" rather than reading the global key, which is
+ * another engine's data by definition. */
+export function engineScopedKey(key: string, engineId: string | null | undefined): string | null {
+  return engineId ? `${key}:${engineId}` : null;
+}
+
 /** sessionStorage prefixes — per-tab and rebuilt on demand, so they are not
  * migrated, only renamed. Both are completed with a session id. */
 export const SESSION_STORAGE_PREFIXES = {

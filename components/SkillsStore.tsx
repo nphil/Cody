@@ -56,11 +56,16 @@ function installsBadge(skill: RegistrySkill, label: string): string {
 
 export function SkillsStore({
   cwd,
+  scopes,
   installedPackages,
   onInstalled,
   onClose,
 }: {
   cwd: string;
+  /** Scopes the ACTIVE engine can actually install into, from GET /api/skills.
+   * Hermes has one skills root per home and no project-scoped dir at all, so
+   * offering "project" there would install globally under a project label. */
+  scopes: readonly SkillInstallScope[];
   installedPackages: Record<SkillInstallScope, ReadonlySet<string>>;
   onInstalled: () => void;
   onClose: () => void;
@@ -79,7 +84,11 @@ export function SkillsStore({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<SkillStoreDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
-  const [scope, setScope] = useState<SkillInstallScope>("global");
+  const [selectedScope, setScope] = useState<SkillInstallScope>(scopes[0] ?? "global");
+  // The scope list can narrow after mount — the System card opens the store
+  // and refreshes the scan in parallel — so a selection the engine no longer
+  // offers must never reach an install request.
+  const scope = scopes.includes(selectedScope) ? selectedScope : (scopes[0] ?? "global");
   const [installing, setInstalling] = useState<string | null>(null);
   const [installedNow, setInstalledNow] = useState<Set<string>>(new Set());
   const [reloadNonce, setReloadNonce] = useState(0);
@@ -655,33 +664,37 @@ export function SkillsStore({
 
                     {/* Scope + install */}
                     <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                      <div
-                        style={{
-                          display: "flex",
-                          borderRadius: "var(--radius-control)",
-                          border: "1px solid var(--border)",
-                          overflow: "hidden",
-                          fontSize: 12,
-                          flexShrink: 0,
-                        }}
-                      >
-                        {(["global", "project"] as const).map((s) => (
-                          <button
-                            key={s}
-                            onClick={() => setScope(s)}
-                            style={{
-                              padding: "4px 12px",
-                              border: "none",
-                              cursor: "pointer",
-                              background: scope === s ? "var(--bg-selected)" : "none",
-                              color: scope === s ? "var(--accent)" : "var(--text-dim)",
-                              fontWeight: scope === s ? 600 : 400,
-                            }}
-                          >
-                            {t(s === "global" ? "skillsConfig.scopeGlobal" : "skillsConfig.scopeProject")}
-                          </button>
-                        ))}
-                      </div>
+                      {/* One scope is not a choice: an engine with a single
+                          skills root (Hermes) gets no selector at all. */}
+                      {scopes.length > 1 && (
+                        <div
+                          style={{
+                            display: "flex",
+                            borderRadius: "var(--radius-control)",
+                            border: "1px solid var(--border)",
+                            overflow: "hidden",
+                            fontSize: 12,
+                            flexShrink: 0,
+                          }}
+                        >
+                          {scopes.map((option) => (
+                            <button
+                              key={option}
+                              onClick={() => setScope(option)}
+                              style={{
+                                padding: "4px 12px",
+                                border: "none",
+                                cursor: "pointer",
+                                background: scope === option ? "var(--bg-selected)" : "none",
+                                color: scope === option ? "var(--accent)" : "var(--text-dim)",
+                                fontWeight: scope === option ? 600 : 400,
+                              }}
+                            >
+                              {t(option === "global" ? "skillsConfig.scopeGlobal" : "skillsConfig.scopeProject")}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                       <button
                         onClick={() => {
                           if (!isInstalled(selected) && installing === null) void install(selected);

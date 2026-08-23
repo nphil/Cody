@@ -137,12 +137,24 @@ async function startProcess(state: UtilityRpcState, launch?: RpcProcessLaunch): 
   return proc;
 }
 
-/** Run one RPC command on the shared utility process (lazy start, serialized,
+/**
+ * Run one RPC command on the shared utility process (lazy start, serialized,
  * idle-killed). Rejections from earlier commands never poison the queue.
- * `launch` selects a non-omp rpc-dialect engine (see utilityRpcLaunchFor in
- * lib/rpc-manager); absent means the installed omp. The shared child is keyed
- * by engine — a command for a different engine disposes the old child first,
- * so an engine switch can never be answered by the previous engine's process. */
+ *
+ * `launch` selects a non-omp rpc-dialect engine (see `utilityRpcLaunchFor` in
+ * lib/rpc-manager). **An absent `launch` means the installed OMP** — it is a
+ * choice of engine, not a default, and the only callers entitled to make it
+ * are surfaces that have already established omp is the active engine
+ * (lib/engine-guard). Passing `undefined` because an engine "has no launch" is
+ * how /api/models came to serve omp's catalog on Claude Code; that path now
+ * throws instead.
+ *
+ * The shared child is keyed by engine — a command for a different engine
+ * disposes the old child first, so an engine switch can never be answered by
+ * the previous engine's process, and equally a launch-less call while another
+ * engine's child is live would KILL it to start omp. One more reason the
+ * omp-only callers refuse rather than reaching here.
+ */
 export function runUtilityCommand<T = unknown>(
   command: { type: string; [key: string]: unknown },
   timeoutMs: number = DEFAULT_COMMAND_TIMEOUT_MS,

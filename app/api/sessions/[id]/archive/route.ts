@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requireEngine } from "@/lib/engine-guard";
 import { archiveSessionFileWithArtifacts } from "@/lib/omp/session-files";
 import {
   invalidateSessionListCache,
@@ -16,6 +17,12 @@ export async function POST(
 ) {
   const { id } = await params;
   try {
+    // Archiving moves an OMP .jsonl and its sibling artifacts using omp's own
+    // gc layout. An engine that owns its storage has no such file — Delete,
+    // next door, already dispatches for exactly this reason — so this says
+    // `unsupported` instead of the bare 404 a missing path produced.
+    const gate = requireEngine("omp", "Session archiving");
+    if ("response" in gate) return gate.response;
     const resolved = await resolveSessionPathOr404(id, req);
     if ("response" in resolved) return resolved.response;
     const filePath = resolved.filePath;

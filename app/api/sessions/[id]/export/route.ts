@@ -5,6 +5,7 @@ import { tmpdir } from "os";
 import { basename, join } from "path";
 import { promisify } from "util";
 import { NextResponse } from "next/server";
+import { requireEngine } from "@/lib/engine-guard";
 import { resolveOmpBin } from "@/lib/omp/omp-cli";
 import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
 
@@ -50,6 +51,12 @@ export async function GET(
   const inline = new URL(req.url).searchParams.get("inline") === "1";
 
   try {
+    // The renderer is `omp --export`, and nothing else implements it. The
+    // Export item is gated client-side on `chatExtras`, which pi also has, so
+    // on a pi-only box this answered "omp binary not found" — a missing
+    // dependency, when the truth is that pi has no exporter.
+    const gate = requireEngine("omp", "Session HTML export");
+    if ("response" in gate) return gate.response;
     const resolved = await resolveSessionPathOr404(id, req);
     if ("response" in resolved) return resolved.response;
     const filePath = resolved.filePath;

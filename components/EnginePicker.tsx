@@ -29,7 +29,19 @@ export interface EngineSummary {
   installed: boolean;
   /** An install/update npm run is in flight server-side right now. */
   installing: boolean;
+  /** The ENGINE's own version — the CLI's for an engine Cody installs as an
+   * ACP adapter plus the CLI it drives, so the card never shows the adapter's
+   * number under the engine's name. */
   version: string | null;
+  /** The ACP adapter's own version, for a two-package engine; null otherwise.
+   * Labelled by `adapterLabel` — never shown bare, since it belongs to a
+   * different package than `version`. */
+  adapterVersion: string | null;
+  /** English labels from the adapter for those two packages ("Claude Code ACP
+   * adapter", "Claude Code CLI"); null for single-package engines. Adapter
+   * data, not translation keys — same as `tagline` and `authHint`. */
+  adapterLabel: string | null;
+  engineCliLabel: string | null;
   /** Cody can npm-install this engine itself. */
   installable: boolean;
   /** Cody itself installed the resolved binary into its tools prefix, so

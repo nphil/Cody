@@ -90,6 +90,17 @@ function codexEngineEnv(): Record<string, string> {
 }
 
 /**
+ * One argv, two jobs: it proves the CLI half of the install actually runs
+ * (`healthArgs`) and it prints the version Cody reports as Codex's
+ * (`engineCli.getVersion`). Shared so the number that gets VERIFIED is the
+ * number that gets SHOWN.
+ *
+ * It needs `codexEngineEnv()`: with the adapter's own platform-native copy
+ * deliberately not installed, only `CODEX_PATH` leads to a Codex to run.
+ */
+const CODEX_CLI_VERSION_ARGS = ["cli", "-V"] as const;
+
+/**
  * Cody's host tools (open_preview, preview_screenshot, read_app_logs) as an
  * MCP server the agent connects for this session — the ACP replacement for the
  * `-c mcp_servers.…` TOML overrides the old per-turn argv carried.
@@ -154,6 +165,17 @@ export const codexHarness: HarnessAdapter = {
   // update and revert like any other engine — 324 MB in total, and a real
   // `codex` on the tools prefix's PATH for `codex login` and SSH sessions.
   installAlso: ["@openai/codex@latest"],
+  // Which of those two packages is which, so the card can label the numbers
+  // instead of showing the adapter's and calling it Codex's — and so the
+  // update check asks npm about BOTH. Without the second registry name a CLI
+  // left behind at 0.148.0 reads as "up to date" while 0.149.0 is published,
+  // because the adapter it sits under was already current.
+  engineCli: {
+    adapterLabel: "Codex ACP adapter",
+    label: "Codex CLI",
+    packageName: "@openai/codex",
+    getVersion: () => getEngineVersion("codex-acp", "CODEX", CODEX_CLI_VERSION_ARGS, codexEngineEnv()),
+  },
   skipNativeOptional: true,
   // `codex login` and not the adapter's own `codex-acp login`: `installAlso`
   // puts the real CLI on the tools prefix PATH, both write the same
@@ -185,15 +207,22 @@ export const codexHarness: HarnessAdapter = {
   // `cli -V`, not `cli --version`: the adapter scans the WHOLE argv for
   // `--version` and short-circuits, so `cli --version` reports the adapter
   // again and proves nothing. `-V` reaches Codex and prints its version.
-  healthArgs: ["cli", "-V"],
+  healthArgs: CODEX_CLI_VERSION_ARGS,
+  // The ADAPTER's major, which is the package installSpec names — not the
+  // CLI's 0.x, which moves on its own schedule and is a different package
+  // entirely. 1.x is what Cody's ACP client has been exercised against;
+  // `engineCli.adapterLabel` is what the notice names, so a 2.0 adapter reads
+  // as a claim about the adapter and nothing else.
+  verifiedMajor: 1,
   capabilities: {
     // Verified end to end against the real adapter: initialize, session/new,
     // a prompt round trip, and session/load of a stored thread id.
     liveSessions: true,
-    // The adapter DOES carry models (session/new returns availableModels, and
-    // it accepts a model config option), but Cody's model surface is omp's
-    // models.yml editor and the ACP client does not yet plumb the selection
-    // through. A dropdown wired to nothing is worse than no dropdown.
+    // FALSE means "no models.yml MANAGEMENT editor", which is what this flag
+    // gates — not "no models". The adapter's own model config option IS wired
+    // through acp-session (get_state's `availableModels` + set_model), as
+    // per-session data rather than a static flag: what Codex offers depends
+    // on the account the session opened with.
     models: false,
     // Codex has skills of its own (~/.codex/skills); the Cody surface is built
     // against omp's discovery and would list none of them.

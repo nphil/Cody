@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requireCapability } from "@/lib/engine-guard";
 import { existsSync, promises as fs } from "fs";
 import { basename, extname, join } from "path";
 import { parseJsonLoose, runOmpCli } from "@/lib/omp/plugin-cli";
@@ -228,6 +229,10 @@ function pluginErrorResponse(error: unknown): NextResponse {
 }
 
 export async function GET(req: Request) {
+  // `omp plugin …` is the only implementation here; an engine that reports
+  // `capabilities.plugins` false has no plugin CLI for Cody to shell out to.
+  const gate = requireCapability("plugins", "plugin management");
+  if ("response" in gate) return gate.response;
   const { searchParams } = new URL(req.url);
   const cwd = searchParams.get("cwd");
   if (!cwd) return NextResponse.json({ error: "cwd required", code: "cwd_required" }, { status: 400 });
@@ -245,6 +250,10 @@ export async function GET(req: Request) {
 
 // POST /api/plugins body: { action, source?, scope?, cwd }
 export async function POST(req: Request) {
+  // `omp plugin …` is the only implementation here; an engine that reports
+  // `capabilities.plugins` false has no plugin CLI for Cody to shell out to.
+  const gate = requireCapability("plugins", "plugin management");
+  if ("response" in gate) return gate.response;
   try {
     const body = await req.json() as {
       action?: PluginAction;

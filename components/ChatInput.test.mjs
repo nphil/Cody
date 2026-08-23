@@ -106,6 +106,8 @@ test("renders goal, planning, and advisor indicators at the composer", () => {
   assert.match(html, /(Advisor enabled|chatInput\.advisorEnabled)/);
 });
 
+const ompEngine = { id: "omp", displayName: "OMP", shortName: "omp", experimental: false };
+
 test("renders the composer ring as an absence before the first usage read lands", () => {
   // The ring gauges the plan quota, which nothing has reported yet — context
   // usage lives in the top bar and never drove this gauge.
@@ -114,6 +116,7 @@ test("renders the composer ring as an absence before the first usage read lands"
       onSend() {},
       onAbort() {},
       isStreaming: false,
+      engine: ompEngine,
     }),
   );
 
@@ -530,6 +533,7 @@ test("the ring's tooltip names the model it is answering for", () => {
       model: { provider: "anthropic", modelId: "vendor-b-2" },
       modelList: [{ provider: "anthropic", modelId: "vendor-b-2", id: "vendor-b-2", name: "Vendor B2" }],
       modelNames: {},
+      engine: ompEngine,
     }),
   );
 
@@ -784,4 +788,67 @@ test("the absent popover names the silence without inventing sections", () => {
   assert.match(html, /Claude — 5-hour window/);
   assert.match(html, /width:80%/);
   assert.doesNotMatch(html, /anthropic/i);
+});
+
+
+test("the quota ring is absent on an engine that reports no plan quota", () => {
+  // `omp usage --json` is the only reader Cody has, and /api/usage answers
+  // {available:false, reason} for every other engine — a value, not an error.
+  // A ring that can only ever be an empty dashed circle is dead chrome.
+  const html = renderToStaticMarkup(
+    React.createElement(ChatInput, {
+      onSend() {},
+      onAbort() {},
+      isStreaming: false,
+      engine: { id: "hermes", displayName: "Hermes", shortName: "Hermes", experimental: true },
+    }),
+  );
+
+  assert.doesNotMatch(html, /aria-haspopup="dialog"/);
+});
+
+test("engine-specific composer copy carries the engine's name instead of omp's", () => {
+  // Every one of these rendered a literal "omp"/"OMP" on pi and Hermes. They
+  // are interpolated with the ACTIVE engine's shortName now, so each must
+  // declare the placeholder — in all three locales, which the locales test
+  // then holds in lockstep.
+  const engineNamed = [
+    "chatInput.smartModel",
+    "chatInput.smartModelHint",
+    "chatInput.smartModelUnavailable",
+    "chatInput.thinkingAuto",
+    "chatInput.toolPresetCoreWarning",
+    "chatInput.toolPresetCoreWarningNoSubagents",
+    "chatInput.groupEngineBuiltin",
+    "agentSession.startingAgent",
+    "agentSession.fallbackAppliedDetail",
+    "agentSession.fallbackSucceededDetail",
+  ];
+  for (const [name, dict] of Object.entries(locales)) {
+    for (const key of engineNamed) {
+      assert.ok(key in dict, `${name}.json is missing ${key}`);
+      assert.ok(dict[key].includes("{name}"), `${name}.json "${key}" must name the active engine`);
+      assert.doesNotMatch(dict[key], /\bomp\b/i, `${name}.json "${key}" still hardcodes omp`);
+    }
+    // The resume hint used to send every engine's user to `omp --resume`;
+    // pi resumes with --session and an ACP engine has no such flag at all.
+    assert.doesNotMatch(dict["errors.session_file_too_large"], /omp/i);
+  }
+});
+
+test("the rpc-dialect slash builtins are offered only where the engine answers them", () => {
+  // compact / reload / name / session / copy are rpc-dialect commands wearing
+  // a slash; an ACP engine answers all five "unsupported". The web-native
+  // prompt-composing commands need nothing from the engine and stay.
+  assert.match(composerSource, /\[\.\.\.WEB_SLASH_COMMAND_DEFS, \.\.\.\(chatExtras \? RPC_SLASH_COMMAND_DEFS : \[\]\)\]/);
+  // The interception set stays complete whatever the engine: a hand-typed
+  // /compact must still reach the dispatcher, which answers with the engine's
+  // own honest "unsupported" rather than sending prose to the model.
+  assert.match(
+    composerSource,
+    /const CLIENT_BUILTIN_COMMAND_NAMES = new Set\(\s*\[\.\.\.WEB_SLASH_COMMAND_DEFS, \.\.\.RPC_SLASH_COMMAND_DEFS\]/,
+  );
+  // Smart resolves omp's model ROLES; the row follows the models capability,
+  // not chatExtras, which pi has and roles it does not.
+  assert.match(composerSource, /\{capabilities\.models && \(\s*<button/);
 });

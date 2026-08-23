@@ -13,7 +13,22 @@
 export interface HarnessCapabilities {
   /** Live chat via a child process (send prompts, stream events). */
   liveSessions: boolean;
-  /** Model/provider management UI (models.yml-style configuration). */
+  /**
+   * The model/provider MANAGEMENT editor (models.yml-style configuration):
+   * the Models & Auth panel, the provider list, the roles planner, the
+   * unrestricted catalog. omp-only today.
+   *
+   * It is NOT the composer's model PICKER, and conflating the two costs a
+   * release: pi reports false here and still serves its own 119-model catalog
+   * from `/api/models`, while every ACP engine offers models per SESSION.
+   * Which models a session can pick is therefore reported as DATA, never as a
+   * flag — `/api/models` says `catalogSource: "global" | "session"`, and an
+   * ACP session's `get_state` carries `{model, availableModels,
+   * modelSelectable}` discovered at `session/new`. A static flag could not
+   * tell the truth about it anyway: what an ACP agent offers depends on the
+   * account it opened the session with, so the same adapter can honestly
+   * answer differently on two machines.
+   */
   models: boolean;
   /** Skill discovery/install/update surfaces. */
   skills: boolean;
@@ -175,6 +190,39 @@ export interface RpcUiSpawn {
   readonly commands?: ReadonlySet<string>;
 }
 
+/**
+ * The two halves of an engine Cody installs as TWO packages: the ACP adapter
+ * `installSpec` names, and the engine CLI from `installAlso` that the adapter
+ * drives. Present only when those are different things.
+ *
+ * It exists because every number Cody already had was the ADAPTER's — the
+ * version probe, the registry comparison, the revert pin, the `verifiedMajor`
+ * marker — and none of them is the number a user means by "Claude Code". A
+ * card reading "Claude Code v0.70.0" beside a `claude --version` of 2.1.241
+ * is not a rounding error, it is the wrong package. Naming both halves makes
+ * the display honest AND gives the update check the second registry name it
+ * needs: an adapter-only comparison reports a CLI twenty releases behind as
+ * "up to date", forever.
+ */
+export interface EngineCliPart {
+  /** What `installSpec` itself is, wherever its version is shown —
+   * "Claude Code ACP adapter". Also the subject of the `verifiedMajor`
+   * notice, whose major belongs to this package and not to the CLI. */
+  readonly adapterLabel: string;
+  /** The CLI underneath, wherever ITS version is shown — "Claude Code CLI". */
+  readonly label: string;
+  /** Which `installAlso` package the CLI comes from — the registry name for
+   * the second half of the update check. */
+  readonly packageName: string;
+  /**
+   * Version of the CLI that will ACTUALLY run: the adapter's own health argv
+   * with `engineEnv` applied, not whatever npm last unpacked. Null when it
+   * cannot be read — which is exactly the state a half-finished update leaves
+   * behind, so the caller must render it as unknown rather than as absent.
+   */
+  getVersion(): Promise<string | null>;
+}
+
 export interface HarnessAdapter {
   /** Stable id, also the CODY_HARNESS value that selects this adapter. */
   readonly id: string;
@@ -207,6 +255,13 @@ export interface HarnessAdapter {
    * Cody would rather own (see `skipNativeOptional`).
    */
   readonly installAlso?: readonly string[];
+  /**
+   * The engine CLI half of a two-package install — see EngineCliPart. Absent
+   * for every engine whose `installSpec` IS the engine (omp, pi, hermes), and
+   * absent is what tells the update check and the UI there is one version to
+   * report rather than two.
+   */
+  readonly engineCli?: EngineCliPart;
   /**
    * Install `installSpec` WITHOUT its platform-gated optional dependencies —
    * the mechanism by which an adapter that bundles a ~300 MB copy of a CLI
@@ -272,7 +327,15 @@ export interface HarnessAdapter {
    * the System & Updates card warns that new engine features may not surface
    * in Cody yet (schema-driven surfaces keep working; bespoke ones lag).
    * Bump it in the same commit as the compatibility audit for that major.
-   * Absent = never warn. */
+   * Absent = never warn.
+   *
+   * It is a major of the package `installSpec` names, always. For a
+   * two-package engine that is the ADAPTER's major (0 for
+   * claude-agent-acp, 1 for codex-acp) and not the CLI's (2.x, 0.x) — two
+   * unrelated number lines. `engineCli.adapterLabel` is what the notice names
+   * for exactly that reason: "Claude Code v1.0.0 is a newer major release"
+   * would be read as a claim about the CLI, which is a different package
+   * moving at a different pace. */
   readonly verifiedMajor?: number;
   /** How to authenticate this engine, shown in the picker and engine card
    * (e.g. "Run `claude` in a Cody terminal to sign in, or set

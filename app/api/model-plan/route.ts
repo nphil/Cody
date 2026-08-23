@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requireEngine } from "@/lib/engine-guard";
 import { invalidateModelsCache } from "@/lib/models-cache";
 import { bestAvailableModel, deriveChains, heuristicPlan, providerOf, resolveRosterModel, ROLE_NAMES, validatePlan } from "@/lib/model-plan/derive";
 import { planWithModel } from "@/lib/model-plan/planner";
@@ -9,6 +10,14 @@ import { restartIdleRpcSessions } from "@/lib/rpc-manager";
 import { isRecord } from "@/lib/type-guards";
 
 export const dynamic = "force-dynamic";
+
+/**
+ * The model-roles planner reads omp's live registry (a `--no-session` omp
+ * child) and writes omp's `config.yml`. Every read and every write here is
+ * omp's; under another engine it would plan roles nobody consults, using a
+ * roster that engine cannot reach.
+ */
+const SURFACE = "The OMP model-roles planner";
 
 // A planner has to read a roster of every installed model and answer with a
 // JSON object. Nothing else about the model matters — capability filters here
@@ -23,6 +32,8 @@ function plannerCandidates(models: RosterModel[]): RosterModel[] {
 
 export async function GET() {
   try {
+    const gate = requireEngine("omp", SURFACE);
+    if ("response" in gate) return gate.response;
     const roster = await loadRoster();
     const { roles } = readModelRoles();
     const { settings } = readNativeSettings();
@@ -48,6 +59,8 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
+    const gate = requireEngine("omp", SURFACE);
+    if ("response" in gate) return gate.response;
     const body = await request.json().catch(() => ({})) as { plannerModel?: unknown; mode?: unknown };
     const roster = await loadRoster();
     if (roster.models.length === 0) {
@@ -100,6 +113,8 @@ export async function POST(request: Request) {
 
 export async function PUT(request: Request) {
   try {
+    const gate = requireEngine("omp", SURFACE);
+    if ("response" in gate) return gate.response;
     const body = await request.json() as { roles?: unknown; chains?: unknown; usageAwareFallback?: unknown };
     if (!isRecord(body.roles)) return NextResponse.json({ error: "roles must be an object" }, { status: 400 });
     if (!isRecord(body.chains)) return NextResponse.json({ error: "chains must be an object" }, { status: 400 });
@@ -158,6 +173,8 @@ export async function PUT(request: Request) {
  * the derived fallback chains — leaving unrelated retry tuning untouched. */
 export async function DELETE() {
   try {
+    const gate = requireEngine("omp", SURFACE);
+    if ("response" in gate) return gate.response;
     const clearedRoles = clearModelRoles();
     const clearedPaths = deleteNativeSettingsPaths(["retry.fallbackChains", "retry.usageAwareFallback"]);
     invalidateModelsCache();

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requireEngine } from "@/lib/engine-guard";
 import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -28,6 +29,10 @@ export async function POST(req: Request) {
   let tempDir: string | undefined;
 
   try {
+    // The probe spawns omp against a throwaway models.yml. It proves nothing
+    // about any other engine and must not spawn omp behind one.
+    const gate = requireEngine("omp", "The models.yml connectivity test");
+    if ("response" in gate) return gate.response;
     const body = await req.json() as { providerName?: unknown; provider?: unknown; model?: unknown };
     const providerName = typeof body.providerName === "string" ? body.providerName.trim() : "";
     if (!providerName) return NextResponse.json({ ok: false, error: "providerName is required", code: "provider_name_required" }, { status: 400 });

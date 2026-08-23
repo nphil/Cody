@@ -17,6 +17,8 @@ import { ComposerPanels } from "./ComposerPanels";
 import { StatusTextCrossfade } from "./StatusTextCrossfade";
 import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-layout";
 import { useAgentSession, type AgentPhase, type NoticeItem, type RunningToolInfo, type StreamAlert, type SubagentInfo } from "@/hooks/useAgentSession";
+import { ALL_CAPABILITIES, type ActiveEngineInfo, type EngineCapabilities } from "./SettingsTabs";
+import { loadEngineInfo } from "@/lib/engine-capabilities";
 import { useAudio } from "@/hooks/useAudio";
 import { useStreamTuning } from "@/hooks/useStreamTuning";
 import { streamTuningCssVars } from "@/lib/stream-tuning";
@@ -37,14 +39,14 @@ interface Props {
   session: SessionInfo | null;
   newSessionCwd: string | null;
   advisorEnabled?: boolean;
-  /** The active engine serves the rpc-dialect chat extras (thinking levels,
-   * model switching, forking, compaction, steering). False hides those
-   * affordances instead of letting them fail against the engine. */
-  chatExtras?: boolean;
-  /** Engine supports priority fast mode (omp set_fast_mode). */
-  fastModeCapable?: boolean;
-  /** Engine emits subagent rosters/progress (omp get_subagents + frames). */
-  subagentsCapable?: boolean;
+  /** Everything the ACTIVE engine can serve, straight from AppShell's one
+   * `/api/info` read. The whole flag set travels together rather than as a
+   * hand-picked subset: a control gated on the wrong neighbouring flag is
+   * exactly how omp-only surfaces leaked onto pi and Hermes. */
+  capabilities?: EngineCapabilities;
+  /** Who the active engine is, for labels that used to say "omp" whatever
+   * was running. Null until `/api/info` answers. */
+  engine?: ActiveEngineInfo | null;
   toolCallsDefaultCollapsed?: boolean;
   thinkingDefaultExpanded?: boolean;
   onAgentEnd?: () => void;
@@ -259,24 +261,29 @@ function withAssistantBlocks(
   return next;
 }
 
-function OmpRuntimeVersion() {
+/** The empty-chat screen's "which agent am I talking to" line.
+ *
+ * It used to read `omp v<version>` on every engine, from `/api/omp-version` —
+ * the single most visible thing an engine switch left behind. Both halves now
+ * come from the active engine: the name from AppShell's identity prop (so it
+ * is right on first paint), the version from the same memoized `/api/info`
+ * snapshot AppShell already loaded, which reports `harness.getVersion()`. */
+function EngineRuntimeVersion({ engine }: { engine: ActiveEngineInfo | null }) {
   const { t } = useI18n();
   const [version, setVersion] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/omp-version")
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data: { version: string | null } | null) => {
-        if (!cancelled && data?.version) setVersion(data.version);
-      })
-      .catch(() => {});
+    void loadEngineInfo().then((info) => {
+      if (!cancelled) setVersion(info.version);
+    });
     return () => {
       cancelled = true;
     };
   }, []);
+  if (!engine) return null;
   return (
     <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-      omp <span style={{ color: "var(--text)" }}>{version ? `v${version}` : t("chatWindow.versionNotFound")}</span>
+      {engine.shortName} <span style={{ color: "var(--text)" }}>{version ? `v${version}` : t("chatWindow.versionNotFound")}</span>
     </span>
   );
 }
@@ -670,8 +677,16 @@ const CommittedTranscript = memo(function CommittedTranscript({
 /** Memoized: AppShell holds ~60 state values (git badge polls, update checks,
  *  the context-usage tick ChatWindow itself pushes up), and each of those
  *  re-renders would otherwise rebuild this whole tree. */
-export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, advisorEnabled, chatExtras = true, fastModeCapable = true, subagentsCapable = true, toolCallsDefaultCollapsed = true, thinkingDefaultExpanded = false, onAgentEnd, onSessionNamed, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onModelUsageChange, onOpenFile, onOpenPreview, onPreviewUrlsSeen }: Props) {
+export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, advisorEnabled: advisorPreferred, capabilities = ALL_CAPABILITIES, engine = null, toolCallsDefaultCollapsed = true, thinkingDefaultExpanded = false, onAgentEnd, onSessionNamed, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onModelUsageChange, onOpenFile, onOpenPreview, onPreviewUrlsSeen }: Props) {
   const { t, tn } = useI18n();
+  // The three flags this file reasons about most, unpacked once. They are
+  // derived from the prop rather than passed as separate props so that every
+  // OTHER flag (models, skills, …) is available here too, instead of having
+  // to be plumbed one at a time the next time a control needs one.
+  const chatExtras = capabilities.chatExtras;
+  const fastModeCapable = capabilities.fastMode;
+  const subagentsCapable = capabilities.subagents;
+  const advisorEnabled = capabilities.advisor && advisorPreferred;
   const { playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
   const tuning = useStreamTuning();
@@ -696,7 +711,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
 
   const {
     loading, error, messages, entryIds, streamState,
-    agentRunning, bashRunning, pendingBash, modelNames, modelList, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, thinkingLevel, fastModeEnabled, fastModeActive, toolPreset,
+    agentRunning, bashRunning, pendingBash, modelNames, modelList, modelSelectable, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, thinkingLevel, fastModeEnabled, fastModeActive, toolPreset,
     liveModelMeta,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactResult, displayModel: displayModelValue, sessionStats,
@@ -714,7 +729,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     handleBuiltinSlashCommand,
     handleThinkingLevelChange, handleFastModeChange, handleToolPresetChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, loadSlashCommands,
   } = useAgentSession({
-    session, newSessionCwd, advisorEnabled, subagentsCapable, thinkingDefaultExpanded, onAgentEnd: wrappedOnAgentEnd, onSessionNamed, onSessionCreated, onSessionForked,
+    session, newSessionCwd, advisorEnabled, subagentsCapable, engineName: engine?.shortName, thinkingDefaultExpanded, onAgentEnd: wrappedOnAgentEnd, onSessionNamed, onSessionCreated, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
     onOpenFile, onOpenPreview, onPreviewUrlsSeen,
   });
@@ -1041,6 +1056,18 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
   // Steering and the follow-up queue are omp-protocol commands; a turn-based
   // engine answers them "unsupported", so they are not offered at all — the
   // composer shows a waiting state for the duration of the turn instead.
+  // "Smart" is omp's model-ROLE resolution (config.yml modelRoles reached
+  // through /api/model-roles), not a generic "pick one for me". Only an engine
+  // with the models surface has roles to resolve, so pi — which has chatExtras
+  // but not models — was being offered a control that fetched omp's config.
+  const smartModelCapable = capabilities.models;
+  // Who may change the model. `modelSelectable` is null for an engine with a
+  // global registry — there the rpc-dialect set_model surface is what decides,
+  // as it always did. It is a boolean for a session-scoped engine (ACP), where
+  // the answer belongs to the SESSION: whether the agent published a selector
+  // depends on the account it opened with, which is why no capability flag can
+  // stand in for it.
+  const canChangeModel = modelSelectable === null ? chatExtras : modelSelectable;
   const chatInputElement = (
     <ChatInput
       ref={chatInputRef}
@@ -1050,16 +1077,17 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       onFollowUp={chatExtras && agentRunning ? handleFollowUp : undefined}
       onPromptWithStreamingBehavior={chatExtras && agentRunning ? handlePromptWithStreamingBehavior : undefined}
       isStreaming={sessionBusy}
-      chatExtras={chatExtras}
+      capabilities={capabilities}
+      engine={engine}
       model={displayModelValue}
-      isAutoModelSelection={isAutoModelSelection}
+      isAutoModelSelection={smartModelCapable && isAutoModelSelection}
       modelNames={modelNames}
       modelList={modelList}
       modelsLoading={modelsLoading}
       modelError={modelError}
-      onModelChange={chatExtras ? handleModelChange : undefined}
-      onSelectSmartModel={chatExtras && isNew ? selectSmartModel : undefined}
-      onSmartModelPinned={chatExtras ? markSmartPinnedModel : undefined}
+      onModelChange={canChangeModel ? handleModelChange : undefined}
+      onSelectSmartModel={smartModelCapable && isNew ? selectSmartModel : undefined}
+      onSmartModelPinned={smartModelCapable ? markSmartPinnedModel : undefined}
       autoModelSwitch={autoModelSwitch}
       onAbortCompaction={handleAbortCompaction}
       isCompacting={isCompacting}
@@ -1079,7 +1107,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       retryInfo={retryInfo}
       activeGoal={activeGoal}
       activePlan={activePlan}
-      advisorEnabled={chatExtras && advisorEnabled}
+      advisorEnabled={advisorEnabled}
       queuedMessages={queuedMessages}
       inputHistory={inputHistory}
       onRemoveQueuedMessage={removeQueuedMessage}
@@ -1198,7 +1226,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
                 <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
                   cody <span style={{ color: "var(--text)" }}>v{process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0"}</span>
                 </span>
-                <OmpRuntimeVersion />
+                <EngineRuntimeVersion engine={engine} />
               </div>
             </div>
             <NoticeShelf notices={notices} align="right" />

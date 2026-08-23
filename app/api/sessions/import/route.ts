@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requireEngine } from "@/lib/engine-guard";
 import { apiErrorResponse } from "@/lib/api-utils";
 import { mkdirSync, writeFileSync } from "fs";
 import path from "path";
@@ -26,6 +27,13 @@ function isoSessionTimestamp(): string {
 // user previously authorized through projects, sessions, or cwd selection.
 export async function POST(req: Request) {
   try {
+    // The file is written into OMP's sessions layout (getSessionsDir +
+    // getSessionDirNameForCwd) and read back by omp's transcript reader.
+    // Under pi it landed where pi never looks; under an ACP engine, which
+    // owns its own storage, nowhere at all — and the user was told
+    // "imported" either way, permanently.
+    const gate = requireEngine("omp", "Session import");
+    if ("response" in gate) return gate.response;
     const body = await parseJsonWithinLimit<{ fileName?: unknown; content?: unknown }>(req, MAX_IMPORT_REQUEST_BYTES);
     const fileName = typeof body.fileName === "string" ? body.fileName.trim() : "";
     const content = typeof body.content === "string" ? body.content : "";

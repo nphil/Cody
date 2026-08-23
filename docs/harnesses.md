@@ -254,9 +254,15 @@ format/size ladder (`lib/preview-screenshot.ts`).
    - **Per turn** only if neither applies: write a translator
      (`<id>-stream.ts`) and reuse `TurnEngineSession`.
    If the engine ships as an adapter plus a separate CLI, say so in the
-   adapter — `installAlso`, `skipNativeOptional`, `engineEnv()`, `cliArgs`
-   and `healthArgs` exist for exactly that shape, and `codex.ts` is the
-   worked example.
+   adapter — `installAlso`, `skipNativeOptional`, `engineEnv()`, `cliArgs`,
+   `healthArgs` and `engineCli` exist for exactly that shape, and `codex.ts`
+   is the worked example. `engineCli` is the one that keeps the UPDATE path
+   honest: it names which `installAlso` package is the engine CLI, how to read
+   the version of the CLI that will actually run, and what to call each half
+   on screen. Without it the card shows the ADAPTER's version under the
+   engine's name, and the update check compares only the adapter — so a CLI
+   twenty releases behind reads as "up to date", forever, because the adapter
+   it sits under was already current.
 4. Give it `installSpec`/`authHint` so the picker can install and explain it.
 5. Wire the display tool so the engine can open Cody's Preview panel.
    Two existing shapes:

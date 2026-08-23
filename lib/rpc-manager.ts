@@ -284,15 +284,35 @@ export function buildEngineRpcLaunch(
 
 /**
  * Launch for the shared UTILITY process (global registry queries: available
- * models, default model — see lib/omp/rpc-utility). `undefined` for omp:
- * rpc-utility's default path already spawns the installed omp, and the
- * omp-only auth routes share that process. Other rpc-dialect engines (pi)
- * get a sessionless launch; `--no-session --no-skills` exist in pi's parser
- * with omp's semantics.
+ * models, default model — see lib/omp/rpc-utility). `undefined` for omp AND
+ * ONLY for omp: rpc-utility's default path spawns the installed omp, and the
+ * omp-only auth routes share that process. Other rpc-dialect engines (pi) get
+ * a sessionless launch; `--no-session --no-skills` exist in pi's parser with
+ * omp's semantics.
+ *
+ * An engine that does NOT speak the dialect at all (every ACP engine: claude,
+ * codex, hermes) THROWS `unsupported` rather than returning `undefined`.
+ *
+ * That is the whole point of this function's contract, and the bug it exists
+ * to make impossible: it used to answer `undefined` for those engines too, and
+ * `undefined` is rpc-utility's "spawn the installed omp" signal. So
+ * `GET /api/models` faithfully asked omp for its catalog and served it as
+ * Claude Code's — 150 omp models in the composer of an engine that had never
+ * heard of them. A launch that means "some other engine" must never be
+ * spelled the same way as a launch that means "this one".
+ *
+ * Callers turn the throw into an honest empty answer; failures on the models
+ * path are values, never exceptions that reach the client as a 500.
  */
 export function utilityRpcLaunchFor(harness: HarnessAdapter): RpcProcessLaunch | undefined {
   const spec = harness.rpcUi;
-  if (!spec || harness.id === "omp") return undefined;
+  if (!spec) {
+    throw new WebRpcError(
+      `${harness.displayName} does not speak the RPC utility protocol, so it has no global model catalog to read.`,
+      "unsupported",
+    );
+  }
+  if (harness.id === "omp") return undefined;
   const bin = harness.resolveBinary();
   if (!bin) {
     throw new WebRpcError(

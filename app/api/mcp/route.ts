@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requireCapability } from "@/lib/engine-guard";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { deleteMcpServer, parseMcpListOutput, readDiscoveredMcpServers, readMcpConfig, readUserMcpConfig, type McpLiveServer, validateMcpServer, writeMcpServer } from "@/lib/omp/mcp-config";
 import { readSessionHeader, resolveSessionPath } from "@/lib/session-reader";
@@ -25,6 +26,12 @@ async function allowedCwd(cwd: unknown): Promise<string> {
 
 export async function GET(request: Request) {
   try {
+    // omp's mcp.json conventions (project + user level). The MCP editor is
+    // hidden client-side on engines that report `capabilities.mcp` false; the
+    // route says the same thing, so a direct call cannot read or write omp's
+    // config behind another engine.
+    const gate = requireCapability("mcp", "project MCP server management");
+    if ("response" in gate) return gate.response;
     const params = new URL(request.url).searchParams;
     const requestedCwd = params.get("cwd");
     const cwd = requestedCwd ? await allowedCwd(requestedCwd) : null;
@@ -90,6 +97,12 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
+    // omp's mcp.json conventions (project + user level). The MCP editor is
+    // hidden client-side on engines that report `capabilities.mcp` false; the
+    // route says the same thing, so a direct call cannot read or write omp's
+    // config behind another engine.
+    const gate = requireCapability("mcp", "project MCP server management");
+    if ("response" in gate) return gate.response;
     const body = await request.json() as { cwd?: unknown; name?: unknown; previousName?: unknown; server?: unknown };
     const cwd = await allowedCwd(body.cwd);
     validateMcpServer(body.name, body.server);
@@ -102,6 +115,12 @@ export async function POST(request: Request) {
 
 export async function PUT(request: Request) {
   try {
+    // omp's mcp.json conventions (project + user level). The MCP editor is
+    // hidden client-side on engines that report `capabilities.mcp` false; the
+    // route says the same thing, so a direct call cannot read or write omp's
+    // config behind another engine.
+    const gate = requireCapability("mcp", "project MCP server management");
+    if ("response" in gate) return gate.response;
     const body = await request.json() as { name?: unknown; server?: unknown };
     validateMcpServer(body.name, body.server);
     return NextResponse.json({ success: true, message: "MCP server configuration is valid" });
@@ -112,6 +131,12 @@ export async function PUT(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
+    // omp's mcp.json conventions (project + user level). The MCP editor is
+    // hidden client-side on engines that report `capabilities.mcp` false; the
+    // route says the same thing, so a direct call cannot read or write omp's
+    // config behind another engine.
+    const gate = requireCapability("mcp", "project MCP server management");
+    if ("response" in gate) return gate.response;
     const body = await request.json() as { cwd?: unknown; name?: unknown };
     const cwd = await allowedCwd(body.cwd);
     if (typeof body.name !== "string") throw new Error("name is required");

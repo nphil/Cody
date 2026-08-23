@@ -1,3 +1,4 @@
+import { getHarness } from "../harness";
 import { type OmpLoginProvider, type OmpModel, runUtilityCommand } from "../omp/rpc-utility";
 
 /**
@@ -95,9 +96,22 @@ export function buildRoster(models: OmpModel[], loginProviders: OmpLoginProvider
   };
 }
 
-/** Snapshot the installed omp's live registry: every model it can currently
- * reach, plus which providers the user is signed in to. */
+/**
+ * Snapshot the installed omp's live registry: every model it can currently
+ * reach, plus which providers the user is signed in to.
+ *
+ * Refuses under any other engine rather than spawning omp behind it. Its one
+ * caller (/api/model-plan) is already gated, so this is the module refusing
+ * on its own account: `runUtilityCommand` with no launch means "the installed
+ * omp", and a helper that quietly does that while another engine is active is
+ * the shape of the bug this whole change exists to remove. It also disposes a
+ * live pi utility child as a side effect, since that child is keyed by engine.
+ */
 export async function loadRoster(): Promise<Roster> {
+  const active = getHarness();
+  if (active.id !== "omp") {
+    throw new Error(`The model-roles roster reads omp's registry, and ${active.displayName} is the active engine.`);
+  }
   const { models } = await runUtilityCommand<{ models: OmpModel[] }>({ type: "get_available_models" }, MODELS_TIMEOUT_MS);
   const { providers } = await runUtilityCommand<{ providers: OmpLoginProvider[] }>({ type: "get_login_providers" }, PROVIDERS_TIMEOUT_MS);
   return buildRoster(models, providers);
