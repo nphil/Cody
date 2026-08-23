@@ -55,9 +55,25 @@ export interface EngineInstallRequest {
   /** Which package manager installs the spec. Defaults to npm — every engine
    * before Hermes was an npm package; Hermes is Python, on PyPI. */
   installVia?: "npm" | "uv";
-  /** Args that make the installed binary print its version, for the
-   * post-install health probe. Defaults to ["--version"]. */
+  /** Further npm specs the engine needs, installed into the same prefix by the
+   * same job, one invocation each (HarnessAdapter.installAlso). */
+  installAlso?: readonly string[];
+  /** Install `installSpec` without its platform-gated optional dependencies
+   * (HarnessAdapter.skipNativeOptional). npm-only. */
+  skipNativeOptional?: boolean;
+  /** Environment the installed engine needs in order to find its own parts,
+   * so the health probe below runs what a chat turn will run
+   * (HarnessAdapter.engineEnv). */
+  engineEnv?: () => Record<string, string>;
+  /** Args that make the installed binary print its version. Defaults to
+   * ["--version"]. */
   versionArgs?: readonly string[];
+  /** Args that prove the engine's real entry point RUNS, for the post-install
+   * health probe. Defaults to `versionArgs`: for most engines one invocation
+   * answers both questions, and where it does not (Codex's ACP adapter
+   * reports its own version without ever spawning Codex) the health probe is
+   * the one that must exercise the code a chat turn will take. */
+  healthArgs?: readonly string[];
   /** Version installed BEFORE this run (probed by the route); recorded on
    * success so a broken update can be reverted. Omit to leave the record
    * untouched. */
@@ -280,9 +296,16 @@ export function measureTreeBytes(dir: string, entryCap = SIZE_WALK_ENTRY_CAP): n
  * prevent. Measuring the installed tree sizes the requirement to the engine
  * actually being updated.
  */
-export function requiredFreeBytes(prefix: string, packageName: string): number {
-  const installed = measureTreeBytes(packageInstallDir(prefix, packageName));
-  if (installed === null || installed === 0) return MIN_FREE_BYTES;
+export function requiredFreeBytes(prefix: string, packageName: string | readonly string[]): number {
+  const names = typeof packageName === "string" ? [packageName] : packageName;
+  let installed = 0;
+  for (const name of names) {
+    // One unmeasurable tree does not invalidate the others; it just means the
+    // total is a floor rather than a ceiling, which is the safe direction.
+    const measured = measureTreeBytes(packageInstallDir(prefix, name));
+    if (measured !== null) installed += measured;
+  }
+  if (installed === 0) return MIN_FREE_BYTES;
   return Math.max(MIN_FREE_BYTES, installed + HEADROOM_BYTES);
 }
 
@@ -358,23 +381,59 @@ function diskFailureMessage(stderr: string, prefix: string, cacheDir: string): s
     : `Ran out of disk space while writing to ${culprit}${free}. Free up space on that filesystem and try again.`;
 }
 
+/**
+ * npm's `--omit=optional` is IGNORED by `npm install -g` (verified against npm
+ * 10.9 as a flag, as NPM_CONFIG_OMIT, and through --userconfig: all three
+ * installed the platform binary anyway). The platform gate is the lever that
+ * does work globally — `--os`/`--cpu` values matching no package's `os`/`cpu`
+ * field make npm skip exactly the platform-specific optional dependencies,
+ * and nothing else. That is how an adapter that bundles a copy of a CLI Cody
+ * already installs stops shipping the second copy.
+ */
+const SKIP_NATIVE_OPTIONAL_ARGS = ["--os=none", "--cpu=none"];
+
+/** One package-manager invocation of an install job. */
+interface InstallStep {
+  spec: string;
+  skipNativeOptional?: boolean;
+}
+
+/**
+ * The invocations one install runs, in order. Each package gets its own,
+ * because the flags are per-package: the adapter is installed without its
+ * bundled CLI, while the CLI beside it needs precisely the platform binary
+ * that flag suppresses.
+ */
+function installSteps(request: EngineInstallRequest): InstallStep[] {
+  const primary: InstallStep = { spec: request.installSpec, skipNativeOptional: request.skipNativeOptional };
+  // uv has no equivalent, and no engine on it needs one.
+  if (request.installVia === "uv") return [primary];
+  return [primary, ...(request.installAlso ?? []).map((spec) => ({ spec }))];
+}
+
 function runInstall(request: EngineInstallRequest): Promise<EngineInstallResult> {
   const prefix = getToolsDir();
   const viaUv = request.installVia === "uv";
   const cacheDir = viaUv ? join(prefix, "uv-cache") : getNpmCacheDir();
-  const packageName = packageNameFromSpec(request.installSpec);
+  const steps = installSteps(request);
+  const packageNames = steps.map((step) => packageNameFromSpec(step.spec));
+  const npmCli = viaUv ? null : findNpmCli();
+  const command = viaUv ? "uv" : (npmCli ? execPath : "npm");
   // uv installs a Python tool into the same prefix npm uses, so both engines
   // land in one `bin` that engine-bin already searches. --force makes a repeat
   // install an UPDATE rather than a no-op, matching npm's `@latest` behavior.
-  const args = viaUv
-    ? ["tool", "install", "--force", request.installSpec]
-    : ["install", "-g", "--prefix", prefix, request.installSpec];
-  const npmCli = viaUv ? null : findNpmCli();
-  const command = viaUv ? "uv" : (npmCli ? execPath : "npm");
-  const commandArgs = npmCli ? [npmCli, ...args] : args;
+  const argsFor = (step: InstallStep): string[] => {
+    const args = viaUv
+      ? ["tool", "install", "--force", step.spec]
+      : [
+        "install", "-g", "--prefix", prefix,
+        ...(step.skipNativeOptional ? SKIP_NATIVE_OPTIONAL_ARGS : []),
+        step.spec,
+      ];
+    return npmCli ? [npmCli, ...args] : args;
+  };
   const startedAt = Date.now();
   const job = beginJob(request.id);
-  appendJobLog(job, `$ ${command} ${commandArgs.join(" ")}\n`);
 
   return new Promise<EngineInstallResult>((resolve, reject) => {
     try {
@@ -395,18 +454,22 @@ function runInstall(request: EngineInstallRequest): Promise<EngineInstallResult>
     // Sweep any tree a previous interrupted run renamed aside: npm would try
     // to rename onto that exact path and fail with ENOTEMPTY every time. uv
     // replaces a tool directory outright, so it has no equivalent leftover.
-    const swept = viaUv ? [] : cleanStaleInstallDirs(prefix, packageName);
+    // Every package this job installs is swept, not just the first: a leftover
+    // under a companion package blocks its update just as permanently.
+    const swept = viaUv ? [] : packageNames.flatMap((name) => cleanStaleInstallDirs(prefix, name));
     for (const path of swept) {
       appendJobLog(job, `Removed leftover directory from an interrupted install: ${path}\n`);
     }
 
     // Preflight: a five-minute download that dies on a full disk teaches the
-    // admin nothing. Refuse up front, naming the path and the space left.
+    // admin nothing. Refuse up front, naming the path and the space left. The
+    // requirement covers every package the job installs, since they land on
+    // the same filesystem within the same run.
     const spaceProblem = checkInstallDiskSpace(
       prefix,
       cacheDir,
       getDiskSpace,
-      requiredFreeBytes(prefix, packageName),
+      requiredFreeBytes(prefix, packageNames),
     );
     if (spaceProblem) {
       appendJobLog(job, `${spaceProblem}\n`);
@@ -429,91 +492,119 @@ function runInstall(request: EngineInstallRequest): Promise<EngineInstallResult>
         UV_CACHE_DIR: cacheDir,
       }
       : process.env;
-    const child = spawn(command, commandArgs, { env, stdio: ["ignore", "pipe", "pipe"] });
 
-    let stderr = "";
     let settled = false;
-    let timedOut = false;
-    let killTimer: NodeJS.Timeout | null = null;
-
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      killTimer = setTimeout(() => child.kill("SIGKILL"), KILL_GRACE_MS);
-    }, INSTALL_TIMEOUT_MS);
-
     const finish = (error: EngineInstallError | null, result?: EngineInstallResult): void => {
       if (settled) return;
       settled = true;
-      clearTimeout(timeout);
-      if (killTimer) clearTimeout(killTimer);
       finishJob(job, error);
       if (error) reject(error);
       else resolve(result as EngineInstallResult);
     };
 
-    child.stdout?.on("data", (chunk: Buffer) => {
-      appendJobLog(job, chunk.toString("utf8"));
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      const text = chunk.toString("utf8");
-      stderr = tail(stderr + text, STDERR_TAIL_LIMIT * 2);
-      appendJobLog(job, text);
-    });
-
-    child.on("error", (error) => {
-      finish(new EngineInstallError(`Could not run ${command} to install ${request.installSpec}${viaUv ? " — is uv installed on this host?" : ""}`, String(error)));
-    });
-
-    child.on("close", (code, signal) => {
-      if (timedOut) {
-        finish(new EngineInstallError(`Installing ${request.installSpec} timed out after 5 minutes`, tail(stderr)));
+    /**
+     * npm exiting 0 is not proof the engine RUNS. An install interrupted by a
+     * full disk can leave a truncated native addon behind that only faults at
+     * load time, so the binary is probed before this is called a success —
+     * otherwise Cody reports a healthy engine that crashes on every
+     * invocation. The engine's own environment rides along, or the probe would
+     * verify a different installation than the one a chat turn will run.
+     */
+    const verify = (stderrTail: string): void => {
+      invalidateEngineBinCache(request.binaryName);
+      const binary = resolveEngineBin(request.binaryName, request.id.toUpperCase());
+      if (!binary) {
+        finish(new EngineInstallError(
+          `npm installed ${request.installSpec} but no ${request.binaryName} binary appeared in ${prefix}.`,
+          stderrTail,
+        ));
         return;
       }
-      if (code === 0) {
-        // npm exiting 0 is not proof the engine RUNS. An install interrupted
-        // by a full disk can leave a truncated native addon behind that only
-        // faults at load time, so the binary is probed before this is called a
-        // success — otherwise Cody reports a healthy engine that crashes on
-        // every invocation.
-        invalidateEngineBinCache(request.binaryName);
-        const binary = resolveEngineBin(request.binaryName, request.id.toUpperCase());
-        if (!binary) {
+      const probeArgs = request.healthArgs ?? request.versionArgs ?? ["--version"];
+      void probeEngineVersion(binary, probeArgs, request.engineEnv?.()).then((probe) => {
+        if (probe.error) {
           finish(new EngineInstallError(
-            `npm installed ${request.installSpec} but no ${request.binaryName} binary appeared in ${prefix}.`,
+            `${request.installSpec} installed but ${request.binaryName} does not run — the install is damaged. Reinstall it, or revert to the previous version.`,
+            probe.error,
+          ));
+          return;
+        }
+        finish(null, { id: request.id, installSpec: request.installSpec, prefix, durationMs: Date.now() - startedAt });
+      });
+    };
+
+    /** One package-manager run. Steps are sequential: two npm processes against
+     * the same prefix corrupt each other's bin symlinks, which is the very
+     * thing the per-engine serialization above exists to prevent. */
+    const runStep = (index: number): void => {
+      if (index >= steps.length) return;
+      const step = steps[index];
+      const stepPackage = packageNames[index];
+      const commandArgs = argsFor(step);
+      appendJobLog(job, `$ ${command} ${commandArgs.join(" ")}\n`);
+      const child = spawn(command, commandArgs, { env, stdio: ["ignore", "pipe", "pipe"] });
+
+      let stderr = "";
+      let timedOut = false;
+      let killTimer: NodeJS.Timeout | null = null;
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGTERM");
+        killTimer = setTimeout(() => child.kill("SIGKILL"), KILL_GRACE_MS);
+      }, INSTALL_TIMEOUT_MS);
+      const clearTimers = (): void => {
+        clearTimeout(timeout);
+        if (killTimer) clearTimeout(killTimer);
+      };
+
+      child.stdout?.on("data", (chunk: Buffer) => {
+        appendJobLog(job, chunk.toString("utf8"));
+      });
+      child.stderr?.on("data", (chunk: Buffer) => {
+        const text = chunk.toString("utf8");
+        stderr = tail(stderr + text, STDERR_TAIL_LIMIT * 2);
+        appendJobLog(job, text);
+      });
+
+      child.on("error", (error) => {
+        clearTimers();
+        finish(new EngineInstallError(`Could not run ${command} to install ${step.spec}${viaUv ? " — is uv installed on this host?" : ""}`, String(error)));
+      });
+
+      child.on("close", (code, signal) => {
+        clearTimers();
+        if (settled) return;
+        if (timedOut) {
+          finish(new EngineInstallError(`Installing ${step.spec} timed out after 5 minutes`, tail(stderr)));
+          return;
+        }
+        if (code === 0) {
+          // The health probe runs once, after the LAST package: an engine
+          // split across two packages is only whole when both are in place.
+          if (index === steps.length - 1) verify(tail(stderr));
+          else runStep(index + 1);
+          return;
+        }
+        if (/ENOTEMPTY/.test(stderr)) {
+          finish(new EngineInstallError(
+            `npm could not replace the existing ${stepPackage} install (ENOTEMPTY) — a previous interrupted install left a directory behind. Cody removed what it found; run the update again, and if it still fails delete the leftover \`.\`-prefixed directory under ${dirname(packageInstallDir(prefix, stepPackage))}.`,
             tail(stderr),
           ));
           return;
         }
-        void probeEngineVersion(binary, request.versionArgs ?? ["--version"]).then((probe) => {
-          if (probe.error) {
-            finish(new EngineInstallError(
-              `${request.installSpec} installed but ${request.binaryName} does not run — the install is damaged. Reinstall it, or revert to the previous version.`,
-              probe.error,
-            ));
-            return;
-          }
-          finish(null, { id: request.id, installSpec: request.installSpec, prefix, durationMs: Date.now() - startedAt });
-        });
-        return;
-      }
-      if (/ENOTEMPTY/.test(stderr)) {
-        finish(new EngineInstallError(
-          `npm could not replace the existing ${packageName} install (ENOTEMPTY) — a previous interrupted install left a directory behind. Cody removed what it found; run the update again, and if it still fails delete the leftover \`.\`-prefixed directory under ${dirname(packageInstallDir(prefix, packageName))}.`,
-          tail(stderr),
-        ));
-        return;
-      }
-      // A disk failure gets named rather than passed through as npm's
-      // "Unknown system error -122", which reads like a Cody bug.
-      const diskMessage = diskFailureMessage(stderr, prefix, cacheDir);
-      if (diskMessage) {
-        finish(new EngineInstallError(diskMessage, tail(stderr)));
-        return;
-      }
-      const how = signal ? `was killed with ${signal}` : `exited with code ${code}`;
-      finish(new EngineInstallError(`Installing ${request.installSpec} ${how}`, tail(stderr)));
-    });
+        // A disk failure gets named rather than passed through as npm's
+        // "Unknown system error -122", which reads like a Cody bug.
+        const diskMessage = diskFailureMessage(stderr, prefix, cacheDir);
+        if (diskMessage) {
+          finish(new EngineInstallError(diskMessage, tail(stderr)));
+          return;
+        }
+        const how = signal ? `was killed with ${signal}` : `exited with code ${code}`;
+        finish(new EngineInstallError(`Installing ${step.spec} ${how}`, tail(stderr)));
+      });
+    };
+
+    runStep(0);
   });
 }
 
@@ -560,6 +651,10 @@ const UNINSTALL_TIMEOUT_MS = 60_000;
 export function uninstallEngine(request: {
   id: string;
   packageName: string;
+  /** Companion packages the install added beside the primary. Removed in the
+   * same npm run — leaving one behind orphans hundreds of megabytes that
+   * nothing will ever offer to delete again. */
+  alsoPackageNames?: readonly string[];
   binaryName: string;
   installVia?: "npm" | "uv";
 }): Promise<void> {
@@ -580,11 +675,14 @@ export function uninstallEngine(request: {
     : process.env;
   const npmCli = viaUv ? null : findNpmCli();
   const command = viaUv ? "uv" : (npmCli ? execPath : "npm");
+  // uv has no companion packages (they are an npm-only mechanism), so its
+  // argv stays a single tool name.
+  const removing = viaUv ? [request.packageName] : [request.packageName, ...(request.alsoPackageNames ?? [])];
   const commandArgs = viaUv
     ? ["tool", "uninstall", request.packageName]
     : (npmCli
-      ? [npmCli, "uninstall", "-g", "--prefix", prefix, request.packageName]
-      : ["uninstall", "-g", "--prefix", prefix, request.packageName]);
+      ? [npmCli, "uninstall", "-g", "--prefix", prefix, ...removing]
+      : ["uninstall", "-g", "--prefix", prefix, ...removing]);
 
   return new Promise<void>((resolve, reject) => {
     const child = spawn(command, commandArgs, { env, stdio: ["ignore", "ignore", "pipe"] });

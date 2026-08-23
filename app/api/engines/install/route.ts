@@ -73,7 +73,11 @@ export async function POST(request: Request) {
       binaryName: adapter.binaryName,
       currentVersion,
       installVia: adapter.installVia,
+      installAlso: adapter.installAlso,
+      skipNativeOptional: adapter.skipNativeOptional,
+      engineEnv: adapter.engineEnv?.bind(adapter),
       versionArgs: adapter.versionArgs,
+      healthArgs: adapter.healthArgs,
     });
   } catch (error) {
     const detail = error instanceof EngineInstallError ? error.detail : "";
@@ -98,15 +102,16 @@ export async function POST(request: Request) {
   // fails on every invocation — running it once is the only way to tell the
   // two apart.
   //
-  // The adapter's own versionArgs, not a bare --version: an engine whose
+  // The adapter's own health probe, not a bare --version: an engine whose
   // entry point lives behind a subcommand is only verified by running THAT.
   // Hermes' ACP server sits behind an optional extra, and `hermes --version`
   // reports a healthy 0.19.0 whether or not the extra is present — so a bare
   // probe would bless an install whose every chat turn then dies with "ACP
-  // dependencies not installed".
+  // dependencies not installed". Codex's ACP adapter is the same shape: it
+  // answers --version from its own bundle without ever spawning Codex.
   const binary = adapter.resolveBinary();
   const probe = binary
-    ? await probeEngineVersion(binary, adapter.versionArgs)
+    ? await probeEngineVersion(binary, adapter.healthArgs ?? adapter.versionArgs, adapter.engineEnv?.())
     : { version: null, error: `The installer finished but no ${adapter.binaryName} binary is installed.` };
 
   if (!probe.version) {
@@ -134,8 +139,14 @@ export async function POST(request: Request) {
     await restartAllRpcSessions().catch(() => {});
   }
 
+  // The health probe proved the engine RUNS; it did not necessarily report
+  // the version of the package that was installed (Codex's adapter health
+  // probe prints the Codex CLI's version, not the adapter's). The number that
+  // goes back is the one the engine card shows, read the same way.
+  const installedVersion = (await adapter.getVersion()) ?? probe.version;
+
   return NextResponse.json(
-    { id: adapter.id, installed: true, version: probe.version },
+    { id: adapter.id, installed: true, version: installedVersion },
     { headers: { "Cache-Control": "no-store" } },
   );
 }
@@ -192,6 +203,9 @@ export async function DELETE(request: Request) {
       packageName: adapter.installVia === "uv"
         ? pypiNameFromSpec(adapter.installSpec)
         : packageNameFromSpec(adapter.installSpec),
+      // An engine split across packages is removed whole; otherwise the
+      // companion stays on disk with nothing left to offer deleting it.
+      alsoPackageNames: adapter.installAlso?.map(packageNameFromSpec),
       binaryName: adapter.binaryName,
       installVia: adapter.installVia,
     });

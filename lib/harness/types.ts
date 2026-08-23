@@ -195,11 +195,78 @@ export interface HarnessAdapter {
   /** Which package manager installs `installSpec`. Defaults to npm, which is
    * what every engine used before Hermes — a Python program on PyPI. */
   readonly installVia?: "npm" | "uv";
+  /**
+   * Further packages the engine cannot run without, installed into the same
+   * prefix by the same job (npm only, one invocation each so per-package
+   * flags stay per-package). Pin them `@latest` like `installSpec`: every
+   * install IS the update path, and a stale companion is the same broken
+   * engine as a stale primary.
+   *
+   * Claude Code is the case: what Cody installs is the ACP adapter, and what
+   * the adapter drives is the `claude` CLI, which the adapter can bundle but
+   * Cody would rather own (see `skipNativeOptional`).
+   */
+  readonly installAlso?: readonly string[];
+  /**
+   * Install `installSpec` WITHOUT its platform-gated optional dependencies —
+   * the mechanism by which an adapter that bundles a ~300 MB copy of a CLI
+   * Cody already installs stops shipping the second copy.
+   *
+   * npm's `--omit=optional` is silently ignored by `npm install -g` (verified
+   * against npm 10.9 in every spelling: flag, NPM_CONFIG_OMIT, userconfig).
+   * What does work globally is the platform gate: `--os=none --cpu=none`
+   * matches no `os`/`cpu` field, so npm skips exactly the platform-specific
+   * optional dependencies and nothing else. The engine must then be told
+   * where the real binary is — see `engineEnv`.
+   */
+  readonly skipNativeOptional?: boolean;
   /** Args that make the binary print its version. Defaults to ["--version"].
    * Hermes needs ["acp", "--version"]: its plain --version prints a report
    * whose lines include the PYTHON version, which a first-match scan would
    * happily report as the engine's. */
   readonly versionArgs?: readonly string[];
+  /**
+   * Args that prove the engine's REAL entry point runs, for the post-install
+   * verification. Defaults to `versionArgs` — for most engines the two
+   * questions have one answer.
+   *
+   * They come apart when the version Cody must REPORT and the code path Cody
+   * must EXERCISE live in different places. Codex is the case: Cody installs
+   * the ACP adapter, so the version the update check compares with the
+   * registry is the adapter's (`--version`) — but the adapter answers that
+   * from its own bundle before it ever touches Codex, and npm resolves the
+   * platform-native Codex binary on a best-effort basis. A bare probe would
+   * bless an install that reports a healthy adapter and dies on every turn.
+   * `["cli", "-V"]` runs the Codex the adapter would drive, and fails loudly
+   * when it is missing.
+   */
+  readonly healthArgs?: readonly string[];
+  /**
+   * Argv that opens this engine's INTERACTIVE CLI, when a bare invocation is
+   * not it. Defaults to none — `omp`, `claude` and `codex` all start their own
+   * TUI when run with no arguments.
+   *
+   * ACP adapters do not: run bare, they are JSON-RPC servers reading stdin, so
+   * a Cody terminal launching one would swallow the user's keystrokes as
+   * malformed protocol frames. `@agentclientprotocol/codex-acp` forwards
+   * `cli <args>` to the real Codex CLI, which is what a terminal — and the
+   * `codex-acp cli login` in its authHint — actually wants.
+   */
+  readonly cliArgs?: readonly string[];
+  /**
+   * Environment this engine needs in order to find its own parts, merged over
+   * `process.env` everywhere Cody runs it: the live session, the post-install
+   * health probe, and a Cody terminal. One source, three uses — so the engine
+   * that gets VERIFIED is always the engine that RUNS.
+   *
+   * A function, not a table: it resolves paths at call time, so an engine
+   * installed (or moved) after the server booted is found without a restart.
+   * It is merged OVER `process.env` at every call site, so an implementation
+   * that must not overrule an operator's own export omits that key itself —
+   * a deliberate `CLAUDE_CODE_EXECUTABLE` on the container is a choice Cody
+   * has no business quietly reversing.
+   */
+  engineEnv?(): Record<string, string>;
   /** Newest engine MAJOR version this Cody build has been audited against.
    * When the registry offers — or the user has installed — a later major,
    * the System & Updates card warns that new engine features may not surface

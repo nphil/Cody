@@ -20,6 +20,7 @@ const McpConfig = dynamic(() => import("./McpConfig").then((module) => module.Mc
 const OmpSchemaSettings = dynamic(() => import("./settings/OmpSchemaSettings").then((module) => module.OmpSchemaSettings), { loading: SettingsTabLoading });
 const AccountSettings = dynamic(() => import("./settings/AccountSettings").then((module) => module.AccountSettings), { loading: SettingsTabLoading });
 const LocalAiConfig = dynamic(() => import("./settings/LocalAiConfig").then((module) => module.LocalAiConfig), { loading: SettingsTabLoading });
+const MemoryPanel = dynamic(() => import("./MemoryPanel").then((module) => module.MemoryPanel), { loading: SettingsTabLoading });
 const SystemUpdates = dynamic(() => import("./settings/SystemUpdates").then((module) => module.SystemUpdates), { loading: SettingsTabLoading });
 
 // Mirrors omp 17.4's compaction.methodOrder (session/compaction-methods.ts):
@@ -932,6 +933,18 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
             {cwd && capabilities.plugins && visitedTabs.has("plugins") && (
               <div role="tabpanel" id="settings-panel-plugins" aria-labelledby="settings-tab-plugins" style={{ display: activeTab === "plugins" ? "flex" : "none", height: "100%", minHeight: 0, flexDirection: "column" }}>
                 <PluginsConfig embedded cwd={cwd} sessionId={sessionId} onClose={onClose} onReloaded={onPluginsReloaded} />
+              </div>
+            )}
+
+            {/* AGENT MEMORY TAB — read-only, and hidden entirely on an engine
+                that cannot hand its memory back (components/MemoryPanel.tsx).
+                Same three-site gate as the skills sub-panel: the tab list and
+                the visible-tab set both come from `needsCapability: "memory"`
+                in SETTINGS_CATEGORIES, and this render gates on the flag too
+                so a capability payload arriving late can never paint it. */}
+            {capabilities.memory && visitedTabs.has("memory") && (
+              <div role="tabpanel" id="settings-panel-memory" aria-labelledby="settings-tab-memory" style={{ display: currentTab === "memory" ? "flex" : "none", flexDirection: "column" }}>
+                <MemoryPanel engineName={engine?.shortName ?? null} />
               </div>
             )}
 

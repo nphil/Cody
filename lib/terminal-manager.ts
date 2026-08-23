@@ -93,15 +93,25 @@ function terminalCommand(mode: SpawnMode): SpawnCommand {
   const engine = harness.resolveBinary();
   if (!engine) return { command: shell, args: [] };
 
+  // Positionals are consumed up front so whatever remains is the engine's own
+  // argv. Most engines open their TUI when run bare; an ACP adapter run bare
+  // is a JSON-RPC server that would read the user's keystrokes as protocol
+  // frames, so it names the argv that reaches its interactive CLI instead.
   const script = [
-    `printf 'Cody: starting %s — exit the engine to drop to a shell.\\n' "$1"`,
-    `"$2" || true`,
-    `printf 'Cody: %s exited — this is a plain shell now.\\n' "$1"`,
-    `exec "$3" -i`,
+    `name="$1"; engine="$2"; shell="$3"; shift 3`,
+    `printf 'Cody: starting %s — exit the engine to drop to a shell.\\n' "$name"`,
+    `"$engine" "$@" || true`,
+    `printf 'Cody: %s exited — this is a plain shell now.\\n' "$name"`,
+    `exec "$shell" -i`,
   ].join("\n");
   return {
     command: "/bin/sh",
-    args: ["-c", script, "cody-terminal", harness.binaryName, engine, shell],
+    args: ["-c", script, "cody-terminal", harness.binaryName, engine, shell, ...(harness.cliArgs ?? [])],
+    // Whatever the engine needs to find its own parts, the same values the
+    // live session and the post-install probe get. Without it, an engine Cody
+    // points at a CLI it manages separately would fail in a terminal only —
+    // the one place the user goes to sign in.
+    env: harness.engineEnv?.(),
   };
 }
 

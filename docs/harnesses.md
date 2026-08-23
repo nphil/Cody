@@ -4,9 +4,10 @@ Cody is the IDE; the coding agent underneath it — the **engine** — is
 swappable. The same UI ships with [omp (oh-my-pi)](https://github.com/can1357/oh-my-pi)
 as its founding, fully-featured engine, and can drive
 [Pi](https://pi.dev) (omp's ancestor, over its native RPC mode),
-[Claude Code](https://www.npmjs.com/package/@anthropic-ai/claude-code) or
-[Codex](https://www.npmjs.com/package/@openai/codex) as experimental engines
-today. New engines are added by implementing one adapter — the UI, accounts,
+[Claude Code](https://www.npmjs.com/package/@anthropic-ai/claude-code),
+[Codex](https://www.npmjs.com/package/@openai/codex) (over the Agent Client
+Protocol) or [Hermes](https://github.com/NousResearch/hermes-agent) as
+experimental engines today. New engines are added by implementing one adapter — the UI, accounts,
 terminals, git surface, files, checkpoints and themes all stay.
 
 ## Picking an engine
@@ -31,30 +32,49 @@ Engines Cody installs from the picker land in a persistent npm prefix
 (`CODY_TOOLS_DIR`, default `<data dir>/tools`) so they survive container
 image updates. Binaries are resolved per engine: `CODY_OMP_BIN` /
 `CODY_PI_BIN` / `CODY_CLAUDE_BIN` / `CODY_CODEX_BIN` override → tools
-prefix → `PATH`.
+prefix → `PATH`. An engine whose ACP adapter is a different package from its
+CLI has an override for each: Codex resolves `CODY_CODEX_BIN` for the
+adapter and `CODY_CODEX_CLI_BIN` (or Codex's own `CODEX_PATH`) for the CLI
+underneath it.
 
 ### Experimental engines, honestly
 
-Claude Code and Codex run **one CLI process per turn** (`claude -p
---output-format stream-json`, `codex exec --json`), translated server-side
-into the event stream the UI renders. That buys a plain, reliable chat:
-prompt, streamed reply, tool activity, abort. What it does not buy (yet):
-forking, compaction, thinking levels, model switching from the composer,
-skills/plugins/MCP management, transcript replay across server restarts, or
-the agent-callable host tools (`open_file` / `open_url` / `notify` /
-`preview_screenshot` / `read_app_logs` — omp's rpc-ui bridge; `open_preview`
-still works via the bundled display MCP server, loopback URLs in assistant
-replies still auto-open the Preview panel on every engine, and the Preview
-panel's capture button screenshots the app server-side regardless of
-engine) — those surfaces hide automatically via capability flags. Both engines run
-non-interactively with edits auto-accepted inside the workspace (there is no
-approval channel in their non-interactive modes) — treat the workspace as
-theirs while a turn runs.
+**Codex** runs over the [Agent Client Protocol](https://agentclientprotocol.com):
+one long-lived `codex-acp` process per session, `session/new` once and
+`session/prompt` per turn. The `codex` CLI has no ACP mode, so Cody installs
+the official adapter `@agentclientprotocol/codex-acp` and the Codex CLI as
+two packages it can version independently, joined by `CODEX_PATH`. Because
+the ACP session id IS the Codex thread id, sessions recorded under the old
+per-turn transport resume unchanged.
+
+**Claude Code** rides ACP too, through
+`@agentclientprotocol/claude-agent-acp`. The per-turn transport
+(`TurnEngineSession` plus a `<id>-stream.ts` translator) remains as the
+fallback for a CLI that offers nothing better.
+
+Either way you get a plain, reliable chat: prompt, streamed reply, tool
+activity, abort. What it does not buy (yet): forking, compaction, thinking
+levels, model switching from the composer, skills/plugins/MCP management,
+transcript replay across server restarts, or the agent-callable host tools
+(`open_file` / `open_url` / `notify` / `preview_screenshot` /
+`read_app_logs` — omp's rpc-ui bridge; `open_preview` still works via the
+bundled display MCP server, loopback URLs in assistant replies still
+auto-open the Preview panel on every engine, and the Preview panel's capture
+button screenshots the app server-side regardless of engine) — those
+surfaces hide automatically via capability flags.
+
+What ACP adds over the per-turn transport it replaced: an approval channel.
+The agent can stop mid-turn and ask before a tool call, and Cody renders the
+agent's own options rather than inventing Allow/Deny. A per-turn CLI has
+nowhere to ask, so it runs with edits auto-accepted inside the workspace —
+treat the workspace as its own while a turn runs.
 
 Authentication belongs to the engine, not Cody: run `claude` or
-`codex login` once in a Cody terminal (credential state lives under the
-container's persistent HOME), or set `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`
-on the container. Codex can also target local models (`--oss`,
+`codex-acp cli login` once in a Cody terminal (credential state lives under
+the container's persistent HOME), or set `ANTHROPIC_API_KEY` /
+`OPENAI_API_KEY` on the container. A Cody terminal opens the active engine's
+interactive CLI for you — for an ACP engine that is the adapter's passthrough
+(`codex-acp cli`), never the bare binary, which is a JSON-RPC server. Codex can also target local models (`--oss`,
 `model_provider` overrides in its own config), and omp's model registry
 supports custom providers — local inference stays reachable on both paths.
 
@@ -131,27 +151,43 @@ What pi serves is flagged per surface, not as one bundle:
   binary resolution + version probing, directory layout,
   `HarnessCapabilities` flags (liveSessions, models, skills, plugins, mcp,
   nativeSettings, updates, chatExtras), and exactly one live-chat shape:
-  `createSession` — the factory for turn-based engines — or `rpcUi`, the
-  `RpcUiSpawn` descriptor for engines that speak the pi/omp RPC dialect.
+  `createSession` — the factory an ACP or per-turn engine returns a session
+  from — or `rpcUi`, the `RpcUiSpawn` descriptor for engines that speak the
+  pi/omp RPC dialect.
   `EngineSession` is the session surface the app consumes; omp's
   `AgentSessionWrapper` satisfies it structurally.
 - `index.ts` — the registry and `getHarness()`: persisted selection →
   `CODY_HARNESS` → omp. `selectHarness()` persists a switch.
 - `state.ts` — `cody-engine.json` persistence (active engine + onboarded).
-- `omp.ts` / `pi.ts` / `claude.ts` / `codex.ts` — the adapters.
+- `omp.ts` / `pi.ts` / `claude.ts` / `codex.ts` / `hermes.ts` — the adapters.
+- `acp-session.ts` — `AcpEngineSession`, the engine-neutral Agent Client
+  Protocol client: one long-lived stdio JSON-RPC server per session, driven
+  from an `AcpEngineSpec` (binary, argv, env, MCP servers, setup hint). It
+  names no engine. Codex rides it through the
+  `@agentclientprotocol/codex-acp` adapter, since the `codex` CLI has no ACP
+  mode of its own.
 - `turn-session.ts` — `TurnEngineSession`, the shared one-process-per-turn
-  base; `claude-stream.ts` / `codex-stream.ts` translate each CLI's NDJSON
-  into the pi event vocabulary (`agent_start`, `message_*`,
-  `tool_execution_*`, `agent_end`, `notice`).
+  base for CLIs that offer nothing better; `claude-stream.ts` translates the
+  CLI's NDJSON into the pi event vocabulary (`agent_start`, `message_*`,
+  `tool_execution_*`, `agent_end`, `notice`). `EngineCommandError` lives here
+  and is shared by both transports.
+- `engine-transport.test.mjs` / `../../scripts/engine-bringup.mjs` — which
+  engine rides which transport, pinned; and whether an installed engine
+  actually comes up (`initialize` + `session/new` for ACP, `--mode` +
+  `get_state` for rpc-ui). Neither needs credentials.
 - `engine-sessions.ts` — the session index sidecar for engines that own
   their transcripts (`cody-engine-sessions.json`).
 - `engine-bin.ts` / `install.ts` — binary probing, on-demand npm install
   into the tools prefix, and uninstall from it.
-- `../display/engine-tools.ts` — display-tool launch configs for engines
+- `../display/engine-tools.ts` — display-tool launch descriptors for engines
   that speak MCP: `claudeDisplayMcpConfig()` (JSON for `--mcp-config`) and
-  `codexDisplayMcpArgs()` (`-c` TOML overrides), both wrapping
-  `createDisplayMcpLaunch()` (bundled `bin/cody-display-mcp.js` + internal
-  endpoint + session-scoped capability token).
+  `displayMcpAcpServer()` (an ACP `McpServerStdio` for a session's
+  `mcpServers`), both wrapping `createDisplayMcpLaunch()` (bundled
+  `bin/cody-display-mcp.js` + internal endpoint + session-scoped capability
+  token). Minting that token needs the running server's display origin and
+  secret, so the ACP builder THROWS without them — an adapter's `mcpServers`
+  hook catches it and returns an empty list, because a missing Preview button
+  must not become a session that will not open.
 - API: `GET /api/engines`, `POST /api/engines/select`,
   `POST /api/engines/install`, `DELETE /api/engines/install` (admin-only
   mutations).
@@ -199,12 +235,19 @@ format/size ladder (`lib/preview-screenshot.ts`).
 1. Implement `HarnessAdapter` in `lib/harness/<id>.ts`; register it in
    `lib/harness/index.ts`.
 2. Set capability flags honestly — every `false` hides its surface.
-3. If the engine's CLI can run a turn non-interactively with streamed JSON
-   output, write a translator (`<id>-stream.ts`) and reuse
-   `TurnEngineSession` — that is all Claude Code and Codex needed. An engine
-   speaking the pi/omp RPC dialect gets the full live pipeline for the cost
-   of an `RpcUiSpawn` descriptor — that is all Pi needed. Anything else with
-   a persistent RPC mode can implement `EngineSession` directly.
+3. Pick a transport, in this order:
+   - **ACP** if the engine (or an adapter for it) speaks the Agent Client
+     Protocol — the richest of the three and the only one with an approval
+     channel. It costs an `AcpEngineSpec`, no new class: that is all Hermes
+     and Codex needed. Record it in `lib/harness/engine-transport.test.mjs`.
+   - **rpc-ui** if it speaks the pi/omp RPC dialect — the full live pipeline
+     for the cost of an `RpcUiSpawn` descriptor, which is all Pi needed.
+   - **Per turn** only if neither applies: write a translator
+     (`<id>-stream.ts`) and reuse `TurnEngineSession`.
+   If the engine ships as an adapter plus a separate CLI, say so in the
+   adapter — `installAlso`, `skipNativeOptional`, `engineEnv()`, `cliArgs`
+   and `healthArgs` exist for exactly that shape, and `codex.ts` is the
+   worked example.
 4. Give it `installSpec`/`authHint` so the picker can install and explain it.
 5. Wire the display tool so the engine can open Cody's Preview panel.
    Two existing shapes:
@@ -212,13 +255,14 @@ format/size ladder (`lib/preview-screenshot.ts`).
      Cody-owned `open_preview` tool at session start (omp uses
      `set_host_tools` in `lib/rpc-manager.ts`) and route its tool call to
      `publishDisplayRequest()`.
-   - **Stdio MCP** (Claude Code / Codex): if the engine can load MCP servers,
+   - **Stdio MCP** (every other engine): if the engine can load MCP servers,
      pass the bundled `bin/cody-display-mcp.js` via
      `lib/display/engine-tools.ts` — `claudeDisplayMcpConfig(sessionId)` as a
-     `--mcp-config` JSON blob, or `codexDisplayMcpArgs(sessionId)` as `-c`
-     TOML args (see `claude-stream.ts` / `codex-stream.ts` /
-     `turn-session.ts`). The MCP server posts to `/api/internal/display`
-     with the capability token minted per session — no Cody cookie needed.
+     `--mcp-config` JSON blob on a per-turn CLI's argv (see
+     `claude-stream.ts` / `turn-session.ts`), or `displayMcpAcpServer(id)`
+     from an ACP adapter's `mcpServers` hook (see `codex.ts`). The MCP server
+     posts to `/api/internal/display` with the capability token minted per
+     session — no Cody cookie needed.
    Either shape only publishes a loopback URL — an engine never picks how the
    preview renders. Cody resolves that URL into a ranked `candidates` list
    (direct real-origin iframe, then the `CODY_PREVIEW_BASE_URL` gateway, then

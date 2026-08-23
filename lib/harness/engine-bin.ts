@@ -109,9 +109,15 @@ function probeFailureText(stderr: string, stdout: string, error: Error | null): 
 export function probeEngineVersion(
   binaryPath: string,
   versionArgs: readonly string[] = ["--version"],
+  extraEnv?: Record<string, string>,
 ): Promise<{ version: string | null; error: string | null }> {
   const { promise, resolve } = Promise.withResolvers<{ version: string | null; error: string | null }>();
-  execFile(binaryPath, [...versionArgs], { timeout: VERSION_TIMEOUT_MS }, (error, stdout, stderr) => {
+  // An engine that needs pointing at its own parts (HarnessAdapter.engineEnv)
+  // needs it HERE too, or the probe verifies a different installation than
+  // the one a chat turn will run. Merged the same way the live session merges
+  // it, so the two cannot diverge.
+  const env = extraEnv ? { ...process.env, ...extraEnv } : process.env;
+  execFile(binaryPath, [...versionArgs], { timeout: VERSION_TIMEOUT_MS, env }, (error, stdout, stderr) => {
     const out = String(stdout ?? "");
     const err = String(stderr ?? "");
     // Exit status decides whether the binary ran: a failing CLI that names a

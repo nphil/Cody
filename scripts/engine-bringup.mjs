@@ -8,15 +8,20 @@
  * where a broken install, a missing optional dependency, an adapter that
  * changed its argv, or a protocol version bump actually shows up.
  *
- * Deliberately stops short of a prompt. A turn needs credentials, which CI
- * does not have and must not need; and the failure this guards against is
- * "the engine does not come up at all", which is exactly what a handshake
- * answers. What each engine has to prove:
+ * What is REQUIRED to pass is credential-free, because a release gate cannot
+ * carry the user's account:
  *
- *   ACP engines (claude, codex, hermes) — spawn, `initialize`, `session/new`.
- *     A session id means the agent is live and ready to take a prompt.
+ *   ACP engines (claude, codex, hermes) — spawn and answer `initialize`.
+ *     That proves the binary exists, runs, and speaks ACP at the version Cody
+ *     drives it with.
  *   rpc-ui engines (omp, pi) — spawn with the engine's own `--mode`, then
  *     answer `get_state`. That is the same first command rpc-manager sends.
+ *
+ * Opening a session is reported but never required, and that line is drawn
+ * from measurement rather than caution: with no credentials the Claude
+ * adapter HANGS on `session/new` and Codex answers "Authentication required",
+ * while Hermes opens one happily. Requiring it would hang the gate on two
+ * engines out of three. `--sessions` opts in where credentials exist.
  *
  * An engine that is NOT installed is skipped and reported as such — this runs
  * on developer machines and in a container where only some engines exist. It
@@ -26,6 +31,9 @@
  * Usage:
  *   node scripts/engine-bringup.mjs             # every installed engine
  *   node scripts/engine-bringup.mjs omp hermes  # only these
+ *   node scripts/engine-bringup.mjs --sessions      # also open a session
+ *       …needs each engine signed in; without credentials two of three hang
+ *       or refuse, which is why it is not the default.
  *   node scripts/engine-bringup.mjs --require omp,hermes
  *       …additionally FAIL if one of those is not installed, which is what
  *       the smoke gate wants: it just installed them, so absent means broken.
@@ -57,6 +65,8 @@ const required = requireIndex === -1
 // drop the first engine named on the command line.
 const requireValueIndex = requireIndex === -1 ? -1 : requireIndex + 1;
 const selected = args.filter((arg, index) => !arg.startsWith("--") && index !== requireValueIndex);
+/** Also open a session — only meaningful where the engine is signed in. */
+const openSession = args.includes("--sessions");
 
 function withTimeout(promise, label) {
   return Promise.race([
@@ -68,7 +78,7 @@ function withTimeout(promise, label) {
 /** Spawn an ACP engine through the real session class and complete the
  * handshake. Uses the adapter's own createSession, so this exercises the spec
  * Cody actually ships rather than a hand-built argv. */
-async function bringUpAcp(adapter, cwd) {
+async function bringUpAcp(adapter, cwd, { openSession }) {
   const session = adapter.createSession({ sessionId: "", cwd });
   // Without this the check is worthless. A per-turn session spawns nothing
   // until a prompt, so its waitUntilReady() resolves instantly and this
@@ -79,17 +89,34 @@ async function bringUpAcp(adapter, cwd) {
     throw new Error("declares no ACP session — createSession returned a per-turn session, so no handshake is possible");
   }
   const notices = [];
-  session.onEvent((event) => {
+  // Unsubscribed before teardown below. Killing the child while connect() is
+  // still in session/new makes the session report a failed start, which is
+  // true of the teardown and not of the engine — printed under a green line
+  // it reads as a contradiction.
+  const stopListening = session.onEvent((event) => {
     if (event.type === "notice") notices.push(`${event.level}: ${event.message}`);
   });
   try {
-    await withTimeout(session.waitUntilReady(), `${adapter.id} handshake`);
-    // waitUntilReady resolving means initialize AND session/new (or a
-    // successful session/load) completed — the agent is ready for a prompt.
-    const state = await withTimeout(session.send({ type: "get_state" }), `${adapter.id} get_state`);
-    if (!state || typeof state !== "object") throw new Error("get_state returned nothing");
-    return { detail: "initialize + session/new + get_state", notices };
+    // The required half: no credentials involved.
+    await withTimeout(session.waitUntilConnected(), `${adapter.id} initialize`);
+    if (!openSession) return { detail: "spawned + initialize", notices };
+
+    try {
+      await withTimeout(session.waitUntilReady(), `${adapter.id} session/new`);
+      const state = await withTimeout(session.send({ type: "get_state" }), `${adapter.id} get_state`);
+      if (!state || typeof state !== "object") throw new Error("get_state returned nothing");
+      return { detail: "initialize + session/new + get_state", notices };
+    } catch (error) {
+      // Not a failure of the engine — a session it will not open without an
+      // account. Said out loud, so a green line is never mistaken for
+      // "signed in and ready to work".
+      return {
+        detail: `spawned + initialize (no session: ${error instanceof Error ? error.message : String(error)})`,
+        notices,
+      };
+    }
   } finally {
+    stopListening();
     await session.destroyAndWait().catch(() => {});
   }
 }
@@ -165,7 +192,7 @@ for (const adapter of engines) {
   try {
     const outcome = adapter.rpcUi
       ? await bringUpRpcUi(adapter, binary, cwd)
-      : await bringUpAcp(adapter, cwd);
+      : await bringUpAcp(adapter, cwd, { openSession });
     results.push({
       id: adapter.id,
       status: "ok",

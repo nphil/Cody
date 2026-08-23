@@ -5,9 +5,8 @@ import { createInterface } from "readline";
 import type { AgentMessage } from "../types";
 import type { WebSessionState } from "../pi-types";
 import { buildClaudeTurnArgv, createClaudeTurnState, translateClaudeLine } from "./claude-stream";
-import { buildCodexTurnArgv, createCodexTurnState, translateCodexLine } from "./codex-stream";
 import { resolveEngineBin } from "./engine-bin";
-import { claudeDisplayMcpConfig, codexDisplayMcpArgs } from "../display/engine-tools";
+import { claudeDisplayMcpConfig } from "../display/engine-tools";
 import { engineSessionTitle, getEngineSession, renameEngineSession, upsertEngineSession } from "./engine-sessions";
 import type { EngineEvent, EngineSession, EngineSessionOptions } from "./types";
 
@@ -15,10 +14,10 @@ import type { EngineEvent, EngineSession, EngineSessionOptions } from "./types";
  * Live chat for engines whose CLI runs ONE TURN PER PROCESS.
  *
  * omp keeps a long-lived `--mode rpc-ui` child and speaks a bidirectional
- * protocol with it (lib/rpc-manager.ts). Claude Code and Codex have no such
- * mode: each prompt is a fresh `claude -p …` / `codex exec …` process that
- * streams NDJSON and exits, and continuity comes from passing the engine's own
- * session id back on the next turn. This class is that pattern, factored once:
+ * protocol with it (lib/rpc-manager.ts). Claude Code has no such mode: each
+ * prompt is a fresh `claude -p …` process that streams NDJSON and exits, and
+ * continuity comes from passing the engine's own session id back on the next
+ * turn. This class is that pattern, factored once:
  *
  *   send({type:"prompt"}) → emit agent_start + the user echo → spawn a child →
  *   translate every stdout line into pi-vocabulary events → on exit emit a
@@ -52,7 +51,7 @@ export class EngineCommandError extends Error {
  * session afterwards.
  */
 export interface TurnStreamState {
-  /** Engine-native session id seen in the stream (claude init / codex thread). */
+  /** Engine-native session id seen in the stream (claude init). */
   engineSessionId: string | null;
   /** Model the engine reported for this turn, when it reports one at all. */
   model: string | null;
@@ -93,14 +92,13 @@ export interface TurnArgvInput {
   engineSessionId: string | null;
   /** True when a previous turn already created the engine-side session. */
   resume: boolean;
-  /** Per-turn, session-scoped Cody display MCP launch arguments. */
+  /** Per-turn, session-scoped Cody display MCP launch configuration. */
   displayMcpConfig?: string;
-  displayMcpArgs?: string[];
 }
 
 /** Everything that differs between one turn-based engine and another. */
 export interface EngineTurnSpec {
-  /** Engine id, matching the HarnessAdapter ("claude", "codex"). */
+  /** Engine id, matching the HarnessAdapter ("claude"). */
   id: string;
   /** Human name, used in "…not supported by the Claude Code engine". */
   name: string;
@@ -109,8 +107,8 @@ export interface EngineTurnSpec {
   /** Model label shown before/unless the engine reports its own. */
   defaultModel: string;
   /** True when the engine accepts a caller-chosen session id on the first turn
-   * (claude --session-id). False engines mint their own and Cody re-keys the
-   * session when the id arrives (codex thread.started). */
+   * (claude --session-id). An engine that mints its own instead leaves this
+   * false, and Cody re-keys the session when the id arrives in the stream. */
   preassignsIdentity: boolean;
   resolveBin(): string | null;
   buildArgv(input: TurnArgvInput): string[];
@@ -385,7 +383,6 @@ export class TurnEngineSession implements EngineSession {
     // resumable, and every later turn would --resume a session never created.
     const state = this.spec.createState({ engineSessionId: null, model: this.model });
     const displayMcpConfig = this.spec.id === "claude" ? claudeDisplayMcpConfig(this._sessionId) : undefined;
-    const displayMcpArgs = this.spec.id === "codex" ? codexDisplayMcpArgs(this._sessionId) : undefined;
     const argv = this.spec.buildArgv({
       prompt,
       cwd: this.cwd,
@@ -393,7 +390,6 @@ export class TurnEngineSession implements EngineSession {
       engineSessionId: this.engineSessionId,
       resume: this.engineSessionExists && !!this.engineSessionId,
       displayMcpConfig,
-      displayMcpArgs,
     });
 
     let child: ChildProcess;
@@ -522,7 +518,7 @@ export class TurnEngineSession implements EngineSession {
     if (!engineId || engineId === this.engineSessionId) return;
     this.engineSessionId = engineId;
     if (this.spec.preassignsIdentity || engineId === this._sessionId) return;
-    // Engines that mint their own id (codex thread.started) re-key the session:
+    // Engines that mint their own id re-key the session:
     // the index row moves and the registry is told to move with it.
     const oldId = this._sessionId;
     this._sessionId = engineId;
@@ -628,23 +624,6 @@ export const claudeTurnSpec: EngineTurnSpec = {
   translate: (line, state) => translateClaudeLine(line, state),
 };
 
-/** Codex: `codex exec` per turn, thread id minted by the engine. */
-export const codexTurnSpec: EngineTurnSpec = {
-  id: "codex",
-  name: "Codex",
-  provider: "openai",
-  defaultModel: "codex",
-  preassignsIdentity: false,
-  resolveBin: () => resolveEngineBin("codex", "CODEX"),
-  buildArgv: (input) => buildCodexTurnArgv(input),
-  createState: (seed) => createCodexTurnState(seed),
-  translate: (line, state) => translateCodexLine(line, state),
-};
-
 export function createClaudeSession(options: EngineSessionOptions): EngineSession {
   return new TurnEngineSession(claudeTurnSpec, options);
-}
-
-export function createCodexSession(options: EngineSessionOptions): EngineSession {
-  return new TurnEngineSession(codexTurnSpec, options);
 }
