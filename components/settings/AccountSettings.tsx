@@ -150,7 +150,15 @@ function AgentEngineSection({ isMobile }: { isMobile: boolean }) {
     void post("/api/engines/select", engine.id)
       // Everything the page loaded came from the old engine — capabilities,
       // model lists, live sessions. Reload rather than reconcile.
-      .then(() => window.location.reload())
+      //
+      // assign("/") rather than reload(): a reload keeps the query string, and
+      // `?session=<id>` names a session of the OLD engine. The sidebar's
+      // restore then hunts for an id that is not in the new engine's list,
+      // retrying for eight seconds behind a blank loading pane before giving
+      // up — and because the id stays in the address bar, every later refresh
+      // of that URL stalls the same way. A session id is engine-scoped state,
+      // exactly like ENGINE_SCOPED_KEYS.
+      .then(() => window.location.assign("/"))
       .catch((failure: unknown) => {
         setError(failure instanceof Error ? failure.message : String(failure));
         setSelecting(null);

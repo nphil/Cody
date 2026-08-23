@@ -3,12 +3,23 @@ import { invalidateModelsCache } from "@/lib/models-cache";
 import { disposeUtilityRpc } from "@/lib/omp/rpc-utility";
 import { readSchemaSettings, writeSchemaSettings } from "@/lib/omp/settings-values";
 import { getHarness } from "@/lib/harness";
+import { requireCapability } from "@/lib/engine-guard";
 import { LIST_WRITE_UNSUPPORTED, getHermesSettingsSchema, readHermesSettingsValues, resetHermesSetting, writeHermesSetting } from "@/lib/harness/hermes-settings";
 
 /**
  * OMP's own settings schema plus the values currently persisted for it. The
  * settings panel renders from this rather than a hand-kept list, so an upstream
  * addition shows up in its declared tab and group without a Cody release.
+ *
+ * Engine-generic, but only for the engines that HAVE such a schema: omp reads
+ * its TypeScript one, Hermes derives one from its DEFAULT_CONFIG, and both
+ * declare `nativeSettings`. An engine that declares neither used to fall
+ * through to omp's branch and get omp's ~550-key schema and omp's config.yml
+ * values back, stamped with its OWN id and shortName — "All Pi Settings" over
+ * omp's settings. PUT was worse than misleading: it wrote omp's config.yml
+ * while another engine was active, reporting success. The tab is hidden on
+ * those engines, but a hidden tab is a UI convenience and this is the
+ * boundary.
  */
 
 export const dynamic = "force-dynamic";
@@ -36,9 +47,13 @@ function unwritableReason(value: unknown): string | null {
   return `Cody has no config form for a ${value === undefined ? "missing" : typeof value} value`;
 }
 
+const SURFACE = "a settings schema of its own";
+
 export function GET() {
   try {
-    const active = getHarness();
+    const gate = requireCapability("nativeSettings", SURFACE);
+    if ("response" in gate) return gate.response;
+    const active = gate.harness;
     const { path, schema, values } = active.id === "hermes"
       ? readHermesSchema(active)
       : readSchemaSettings();
@@ -65,7 +80,9 @@ export async function PUT(request: Request) {
     if (typeof patch !== "object" || patch === null || Array.isArray(patch)) {
       return NextResponse.json({ error: "patch must be an object of setting paths" }, { status: 400 });
     }
-    const active = getHarness();
+    const gate = requireCapability("nativeSettings", SURFACE);
+    if ("response" in gate) return gate.response;
+    const active = gate.harness;
     if (active.id === "hermes") {
       // Written through `hermes config set`, never by editing its YAML: the
       // CLI owns validation, coercion and config migration, and a file Cody
