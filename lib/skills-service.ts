@@ -3,7 +3,6 @@ import { homedir } from "os";
 import * as path from "path";
 import { parse as parseYaml } from "yaml";
 import { getHarness } from "@/lib/harness";
-import { getAgentDir } from "@/lib/omp/paths";
 import type { SkillInfo } from "@/lib/api-types";
 import { annotateSkillsWithInstallInfo } from "@/lib/skill-lock";
 
@@ -113,7 +112,11 @@ function buildPiScanRoots(cwd: string): SkillScanRoot[] {
 function buildScanRoots(cwd: string): SkillScanRoot[] {
   if (getHarness().id === "pi") return buildPiScanRoots(cwd);
   const home = homedir();
-  const agentDir = getAgentDir();
+  // The ACTIVE engine's dir, not omp's. Reading lib/omp/paths here meant
+  // every engine scanned ~/.omp/agent for its skills — so a Claude Code or
+  // Codex session offered omp's skills, which it cannot load. The pi branch
+  // above already did this correctly; this one did not.
+  const agentDir = getHarness().getAgentDir();
   const ancestors = getAncestorDirs(cwd);
   const projectAncestors = ancestors.filter((dir) => dir !== home);
   const roots: SkillScanRoot[] = [];
@@ -284,7 +287,7 @@ export async function discoverSkills(cwd: string): Promise<SkillsWithDiagnostics
 export async function loadSkillsWithInstallInfo(cwd: string) {
   const { skills, diagnostics } = await discoverSkills(cwd);
   return {
-    skills: annotateSkillsWithInstallInfo(skills, { cwd, agentDir: getAgentDir() }),
+    skills: annotateSkillsWithInstallInfo(skills, { cwd, agentDir: getHarness().getAgentDir() }),
     diagnostics,
   };
 }

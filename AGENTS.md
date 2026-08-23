@@ -144,6 +144,9 @@ lib/
   file-paths.ts        client/server path encoding helpers
   markdown.ts          shared markdown helpers
   npx.ts               npx runner used by skill install
+  permission-request.ts pure client-side readers for an ACP engine's approval
+                        requests: option/request parsing off the wire and off
+                        get_state, plus the defensive ToolCallUpdate summary
   pi-types.ts          local structural types for agent/RPC objects
   preview-url.ts       loopback preview URL rules: normalize/extract/probe
   preview-autoopen.ts  when an assistant-mentioned URL auto-opens the Preview panel
@@ -195,6 +198,8 @@ components/
   InfoPanel.tsx       right-panel Info tool: versions + workspace diagnostics
   ChatMinimap.tsx     scroll minimap alongside the message list
   MarkdownBody.tsx    markdown renderer
+  PermissionRequestCard.tsx one approval an ACP engine is blocked on, rendered
+                      inline at the live tail of the transcript (never a modal)
   ProviderIcon.tsx    vendored brand marks (models.dev logo set + simple-icons for
                       the few it stubs); ProviderIcon = a provider, ModelIcon = a
                       model's vendor. Never hotlinked — see the note below
@@ -748,6 +753,42 @@ omp emits no `prompt_done` / `prompt_error` / `queue_update` /
 events, and the queue length comes from `get_state.queuedMessageCount`.
 New frame types (`turn_start/end`, `notice`, `todo_reminder`, ...) must be
 handled or safely ignored.
+
+### Approval prompts: inline, and the agent owns the buttons
+- An ACP engine (`lib/harness/acp-session.ts`) can stop mid-turn and ask
+  permission. The turn GENUINELY blocks on the answer, so the card is not a
+  notification — it is the only way that turn ever finishes.
+- Frames: `permission_request` {requestId, toolCall, options} adds a card,
+  `permission_resolved` {requestId, outcome} removes it. Resolution is emitted
+  for EVERY settlement — this browser, another tab, an abort, the turn ending,
+  the session dying — so it is the single removal path.
+  `respond_permission` answers; `{answered:false}` means it was already gone.
+- **`get_state.pendingPermissions` is the reload path, and it is not optional.**
+  The request event fired before the reloaded page existed, so state is the
+  only place the open approval can still be found; without adopting it a
+  blocked turn renders as a session that waits forever with nothing to click.
+  It is adopted in `loadSession` (which needs no run in flight) AND in
+  `reconcileAgentState` — there it must be read BEFORE the busy early-return,
+  because a turn blocked on an approval is precisely a busy turn.
+- **Render the agent's own options, in its order. `kind` is a styling hint,
+  never an identity.** Hermes sends five options and TWO of them share
+  `kind: "allow_always"` ("Allow for session" and "Allow always") — ACP has no
+  session-scoped kind. Deduping, grouping or reordering by kind deletes a real
+  grant. `optionId` is the identity (and the React key), `name` is the label
+  and is passed through untranslated: it is the only thing separating two
+  options that share a kind.
+- Styling says two things and no more: allow vs refuse (allow_once is the one
+  filled primary; refusal is the quiet secondary, because refusing is safe),
+  and durable vs one-shot (`*_always` carries a "Remembered" badge and is
+  never the filled button, so a lasting grant cannot be a one-click accident).
+- The double-click latch is a **ref**, not the `disabled` state: two clicks
+  dispatched inside one task both read the pre-render state, and `disabled`
+  only reaches the DOM after React commits — measured sending three answers
+  through a state-only guard.
+- `toolCall` is whatever the agent sent. One engine builds a different payload
+  for a shell command than for a file edit, and `title`/`kind` are both
+  optional, so every field is read defensively (`lib/permission-request.ts`)
+  and an unrecognised kind renders verbatim rather than as a missing i18n key.
 
 ### Long tool calls narrate themselves
 - `tool_execution_update` frames are handled, not dropped: the newest text

@@ -153,13 +153,63 @@ features, but not IDE-shaped, and Cody is an IDE.
 The owner's stated goal is to move omp, Claude Code and Codex onto ACP. That
 is right for two of the three and **wrong for omp**:
 
-- **Claude Code — migrate.** There is an official adapter
-  (`zed-industries/claude-code-acp`). Today Cody drives it as one process per
-  turn (`claude -p --output-format stream-json`), which buys no approval
-  channel, no persistent session, and coarse tool reporting. ACP is a strict
-  gain here.
-- **Codex — assess.** Same per-turn limitation today. Depends on whether a
-  maintained ACP adapter exists; verify before committing.
+- **Claude Code — migrate**, but NOT via the package this spec first named.
+  `@zed-industries/claude-code-acp` is **deprecated on npm across all 73
+  versions** ("renamed to @agentclientprotocol/claude-agent-acp"), last
+  published 2026-02-17, and its GitHub repo 301-redirects to the new org.
+  The live package is **`@agentclientprotocol/claude-agent-acp`** — 0.70.0
+  published 2026-08-18, ~1.0M weekly downloads, published by the same three
+  maintainers as `@agentclientprotocol/sdk`, which Cody already depends on.
+  Verified by a real handshake, it advertises `loadSession`,
+  `session/request_permission`, `agent_thought_chunk`, `plan`, model selection
+  as a config option, `promptCapabilities {image, embeddedContext}`,
+  `setSessionMode`, session fork/list/delete/close, terminals, steering, and
+  opt-in nested subagent transcripts.
+
+  The ACP `sessionId` IS Claude Code's own session id — the same value Cody
+  already stores as `engineSessionId` and passes to `--session-id`/`--resume`
+  — so no migration of stored ids is needed.
+
+  Two real fidelity costs, both accepted deliberately:
+  - **No intra-turn message boundary.** `agent_message_chunk` carries content
+    and nothing else, so the only boundary is the turn. Today Cody renders one
+    bubble per API call within a turn.
+  - **Per-call token granularity becomes a turn total.** `PromptResponse.usage`
+    is also marked UNSTABLE in the ACP schema, so it may move.
+
+  And one trap: the adapter's tool `title` is a human SENTENCE
+  ("npm run typecheck"), not a tool name; the real name is in
+  `_meta.claudeCode.toolName`. The standard `name` field is marked UNSTABLE.
+
+- **Codex — migrate.** The assessment resolves cleanly: **
+  `@agentclientprotocol/codex-acp`** 1.6.2, published 2026-08-20, ~1.1M weekly
+  downloads — MORE than the Claude adapter — same org, same maintainers. It
+  drives `codex app-server` over JSON-RPC rather than `codex exec`, so it
+  swaps a per-turn process for a persistent session. Its `sessionId` is the
+  Codex thread id Cody already stores, and its usage mapping already performs
+  the cached-input subtraction `codex-stream.ts` hand-rolls today. Only `fork`
+  is missing relative to the Claude adapter.
+
+  The `codex` CLI itself does NOT speak ACP: zero occurrences of "acp" in its
+  subcommand enum, no acp crate, nothing in its README or changelog. ACP for
+  Codex runs through the adapter, and there is no sign that changes.
+
+  Every other candidate is a downstream fork of the official adapter, or dead
+  (`acp-claude-code` and `@mrtkrcm/acp-claude-code` were last published
+  2025-09 and are ~12 months stale). `@zed-industries/*codex*` does not exist.
+
+- **Both adapters bundle their engine.** Claude's pulls ~309 MB of native
+  binary as a platform-specific optional dependency; installing it naively
+  would duplicate a CLI Cody already manages and blow through the disk
+  preflight the ZFS incident earned. Both honour an override —
+  `CLAUDE_CODE_EXECUTABLE` and `CODEX_PATH` — which keeps engine version
+  management in Cody's hands and is the path to take.
+
+- **A root guard worth knowing.** The Claude adapter offers a
+  `bypassPermissions` permission option only when
+  `ALLOW_BYPASS = !IS_ROOT || !!process.env.IS_SANDBOX`. Cody's container runs
+  as root with no `USER` directive, so the guard holds — unless something sets
+  `IS_SANDBOX`, which defeats it. Worth an assertion in the smoke contract.
 - **omp — keep rpc-ui, but the margin is narrower than first written.**
   An earlier draft of this spec claimed ACP "has no vocabulary" for omp's
   best surfaces. That was wrong, and reading omp 18's own

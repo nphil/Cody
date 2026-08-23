@@ -10,6 +10,7 @@ import { imageSource, MessageView } from "./MessageView";
 import { ClickableImage } from "./ImageLightbox";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ExtensionDialog } from "./ExtensionDialog";
+import { PermissionRequestCard } from "./PermissionRequestCard";
 import { SubagentTranscriptDialog } from "./SubagentTranscriptDialog";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ComposerPanels } from "./ComposerPanels";
@@ -701,6 +702,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     isCompacting, compactResult, displayModel: displayModelValue, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
     notices, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
+    permissionRequests, respondToPermission,
     isAutoModelSelection, autoModelSwitch, markSmartPinnedModel,
     agentPhase, streamDegraded, streamAlert, dismissStreamAlert, retryEventStream, activeGoal, activePlan,
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases,
@@ -1349,6 +1351,22 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
                 )}
               </div>
             )}
+
+            {/* Approvals the agent is blocked on, INLINE at the live tail of
+                the transcript — last thing above the composer, where the
+                running-tool indicator and the status line already are.
+                Deliberately not a modal (ExtensionDialog is, and this is not
+                that): the request arrives mid-stream and the answer usually
+                depends on what the agent just said, so the user has to be able
+                to read the conversation while deciding. The follow-scroll
+                brings it into view like any other tail content. */}
+            {permissionRequests.map((request) => (
+              <PermissionRequestCard
+                key={request.requestId}
+                request={request}
+                onRespond={respondToPermission}
+              />
+            ))}
 
             {pendingBash && (
               <MessageView
