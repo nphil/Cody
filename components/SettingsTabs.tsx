@@ -172,6 +172,19 @@ export function getSettingsCategories(
     });
 }
 
+/**
+ * The flag that decides whether the schema-driven "All <engine> Settings" tab
+ * exists — and therefore whether its schema is worth fetching at all.
+ *
+ * Named once and shared because the tab and the fetch behind it drifted apart
+ * twice: the route is engine-GENERIC (it serves omp's TypeScript schema and
+ * Hermes\' DEFAULT_CONFIG-derived one through the same panel), so guarding the
+ * fetch on `configEditor` — which means "Cody has hand-built editors for this
+ * engine", omp alone — left Hermes with a settings tab whose contents the
+ * dialog search could not find. One constant, one answer.
+ */
+export const SCHEMA_TAB_CAPABILITY = "nativeSettings" satisfies keyof EngineCapabilities;
+
 export const SETTINGS_CATEGORIES: TabItem[] = [
   { id: "accounts", label: "User Accounts", description: "Your profile, password, and who can sign in", Icon: UserRound },
   { id: "general", label: "Interface & Behavior", description: "UI preferences, completion sound, submission mode", Icon: Settings2 },
@@ -189,7 +202,7 @@ export const SETTINGS_CATEGORIES: TabItem[] = [
   { id: "memory", label: "Agent Memory", description: "What the agent has written down and remembers between sessions", Icon: Brain, needsCapability: "memory" },
   { id: "mcp", label: "Extensions & Tools", description: "MCP servers, managed skills, and plugins", Icon: Cable, needsCapability: ["mcp", "skills", "plugins"] },
   { id: "system", label: "System & Updates", description: "Updates for the app, agent engines, and skills, plus session restart", Icon: RefreshCw },
-  { id: "omp", label: `All ${DEFAULT_HARNESS_LABEL} Settings`, description: `Every setting ${DEFAULT_HARNESS_LABEL} declares, read from its own schema`, Icon: SlidersHorizontal, pinBottom: true, needsCapability: "nativeSettings" },
+  { id: "omp", label: `All ${DEFAULT_HARNESS_LABEL} Settings`, description: `Every setting ${DEFAULT_HARNESS_LABEL} declares, read from its own schema`, Icon: SlidersHorizontal, pinBottom: true, needsCapability: SCHEMA_TAB_CAPABILITY },
 ];
 
 export const getNormalizedActive = (tab: SettingsTab): SettingsTab => {
