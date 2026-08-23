@@ -321,12 +321,20 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   pins which engine rides which:
   - **ACP** (`acp-session.ts`) — one long-lived stdio JSON-RPC server,
     `session/new` once and `session/prompt` per turn. An engine is a data
-    description (`AcpEngineSpec`), never a class. Codex speaks it through
-    `@agentclientprotocol/codex-acp`; the `codex` CLI itself has no ACP mode.
+    description (`AcpEngineSpec`), never a class. Hermes speaks it natively
+    (`hermes acp`); Claude Code and Codex speak it through
+    `@agentclientprotocol/claude-agent-acp` and `@agentclientprotocol/codex-acp`
+    — neither CLI has an ACP mode of its own. It is the only transport with a
+    real approval channel (`session/request_permission`), which is why an ACP
+    engine can stop mid-turn and ask.
   - **Per turn** (`TurnEngineSession` + a `<id>-stream.ts` translator) — one
     CLI process per prompt, NDJSON translated into the pi event vocabulary.
-    The fallback for a CLI that offers nothing better. `EngineCommandError`
-    lives in `turn-session.ts` and is shared by both transports.
+    NO ENGINE RIDES IT ANY MORE: Claude Code was the last, and
+    `turn-session.ts`/`claude-stream.ts` are dead code kept only because
+    `EngineCommandError` still lives there. Retiring them (rehome that class,
+    delete both modules and their two test files, drop
+    `TURN_SESSION_ALLOWLIST` from `lib/architecture.test.mjs`) is a standing
+    follow-up, not a refactor to do incidentally.
 
   Both throw code `"unsupported"` for commands beyond
   prompt/abort/get_state/get_messages — the UI tolerates that by design — and
@@ -343,7 +351,31 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   ACP adapter run bare is a JSON-RPC server, not a TUI), and `healthArgs` is
   the probe that runs the REAL entry point. Codex is the worked example:
   `codex-acp --version` answers from its own bundle and reports healthy with
-  no Codex to drive, so the install is verified with `codex-acp cli -V`.
+  no Codex to drive, so the install is verified with `codex-acp cli -V`;
+  Claude Code is the same shape, verified with `claude-agent-acp --cli
+  --version`.
+- **`--omit=optional` does nothing for a global npm install.** Verified four
+  ways against npm 10.9 (flag, `--no-optional`, `NPM_CONFIG_OMIT`,
+  `--userconfig`): all of them installed the ~300 MB platform binary anyway.
+  What works is the platform gate — `--os=none --cpu=none` matches no
+  package's `os`/`cpu`, so npm skips exactly the platform-specific optional
+  dependencies. That is what `skipNativeOptional` sends, and it is applied
+  PER PACKAGE, because the CLI installed beside the adapter needs precisely
+  the binary the flag suppresses.
+- **Cody's display tools reach an ACP engine over MCP.** `open_preview` and
+  friends ride `session/new`'s `mcpServers` as an `McpServerStdio`
+  (`lib/display/engine-tools.ts` `displayMcpAcpServer`, wired through
+  `AcpEngineSpec.mcpServers`). Two traps: the descriptor must carry NO `type`
+  field (adapters discriminate stdio by its absence and silently drop a
+  server that has one), and building it throws when the display secret is
+  unset, so the hook catches — a failed token must cost the session its
+  Preview button, never its chat.
+- **An ACP tool `title` is a sentence, not a tool name.** The Claude adapter
+  renders a Bash call as the command line. The real name rides in the agent's
+  own `_meta`, so `AcpEngineSpec.toolNameMetaPath` names the path as DATA
+  (`["claudeCode", "toolName"]`) and `acp-session.ts` stays engine-neutral —
+  `lib/architecture.test.mjs` guards that seam, and the module's docstring
+  promises it.
 - Capability flags (`HarnessCapabilities`, including `chatExtras`) gate UI
   surfaces: a `false` **hides** the settings tab / panel card / composer
   control, it never renders a broken one. `/api/info` serves the active

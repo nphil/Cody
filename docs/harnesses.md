@@ -35,7 +35,9 @@ image updates. Binaries are resolved per engine: `CODY_OMP_BIN` /
 prefix → `PATH`. An engine whose ACP adapter is a different package from its
 CLI has an override for each: Codex resolves `CODY_CODEX_BIN` for the
 adapter and `CODY_CODEX_CLI_BIN` (or Codex's own `CODEX_PATH`) for the CLI
-underneath it.
+underneath it; Claude Code resolves `CODY_CLAUDE_BIN` for the adapter and
+`CODY_CLAUDE_CLI_BIN` (or Claude's own `CLAUDE_CODE_EXECUTABLE`) for the
+`claude` CLI.
 
 ### Experimental engines, honestly
 
@@ -47,10 +49,13 @@ two packages it can version independently, joined by `CODEX_PATH`. Because
 the ACP session id IS the Codex thread id, sessions recorded under the old
 per-turn transport resume unchanged.
 
-**Claude Code** rides ACP too, through
-`@agentclientprotocol/claude-agent-acp`. The per-turn transport
-(`TurnEngineSession` plus a `<id>-stream.ts` translator) remains as the
-fallback for a CLI that offers nothing better.
+**Claude Code** rides ACP too, on the same two-package shape: the official
+adapter `@agentclientprotocol/claude-agent-acp` plus the `claude` CLI Cody
+already version-managed, joined by `CLAUDE_CODE_EXECUTABLE`. The ACP session
+id IS Claude Code's own session id, so sessions recorded under the old
+per-turn transport resume unchanged. The per-turn transport
+(`TurnEngineSession` plus a `<id>-stream.ts` translator) is the fallback for
+a CLI that offers nothing better — no engine uses it today.
 
 Either way you get a plain, reliable chat: prompt, streamed reply, tool
 activity, abort. What it does not buy (yet): forking, compaction, thinking
@@ -163,14 +168,18 @@ What pi serves is flagged per surface, not as one bundle:
 - `acp-session.ts` — `AcpEngineSession`, the engine-neutral Agent Client
   Protocol client: one long-lived stdio JSON-RPC server per session, driven
   from an `AcpEngineSpec` (binary, argv, env, MCP servers, setup hint). It
-  names no engine. Codex rides it through the
-  `@agentclientprotocol/codex-acp` adapter, since the `codex` CLI has no ACP
-  mode of its own.
+  names no engine — an engine-specific fact (where the agent hides the real
+  tool name, which MCP servers to attach) reaches it as spec DATA. Hermes
+  speaks ACP natively; Claude Code and Codex ride it through the
+  `@agentclientprotocol/claude-agent-acp` and `@agentclientprotocol/codex-acp`
+  adapters, since neither CLI has an ACP mode of its own.
 - `turn-session.ts` — `TurnEngineSession`, the shared one-process-per-turn
   base for CLIs that offer nothing better; `claude-stream.ts` translates the
   CLI's NDJSON into the pi event vocabulary (`agent_start`, `message_*`,
-  `tool_execution_*`, `agent_end`, `notice`). `EngineCommandError` lives here
-  and is shared by both transports.
+  `tool_execution_*`, `agent_end`, `notice`). **No engine rides this today** —
+  Claude Code was the last and moved to ACP. Both modules survive only because
+  `EngineCommandError` lives here; retiring them means rehoming that class
+  first.
 - `engine-transport.test.mjs` / `../../scripts/engine-bringup.mjs` — which
   engine rides which transport, pinned; and whether an installed engine
   actually comes up (`initialize` + `session/new` for ACP, `--mode` +
@@ -257,10 +266,12 @@ format/size ladder (`lib/preview-screenshot.ts`).
      `publishDisplayRequest()`.
    - **Stdio MCP** (every other engine): if the engine can load MCP servers,
      pass the bundled `bin/cody-display-mcp.js` via
-     `lib/display/engine-tools.ts` — `claudeDisplayMcpConfig(sessionId)` as a
-     `--mcp-config` JSON blob on a per-turn CLI's argv (see
-     `claude-stream.ts` / `turn-session.ts`), or `displayMcpAcpServer(id)`
-     from an ACP adapter's `mcpServers` hook (see `codex.ts`). The MCP server
+     `lib/display/engine-tools.ts` — `displayMcpAcpServer(id)` from an ACP
+     adapter's `mcpServers` hook (see `claude.ts` / `codex.ts`), or
+     `claudeDisplayMcpConfig(sessionId)` as a `--mcp-config` JSON blob on a
+     per-turn CLI's argv (`turn-session.ts`, which no engine uses now). The
+     ACP descriptor must carry NO `type` field: adapters discriminate a stdio
+     server by its absence and silently ignore one that has it. The MCP server
      posts to `/api/internal/display` with the capability token minted per
      session — no Cody cookie needed.
    Either shape only publishes a loopback URL — an engine never picks how the

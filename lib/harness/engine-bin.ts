@@ -86,11 +86,32 @@ export function getEngineVersion(binaryName: string, envSuffix: string, versionA
   return promise;
 }
 
-/** Why a probe came back empty, in the order most likely to name the real
- * cause: the binary's stderr, then its stdout, then the spawn failure. */
+/** Stack frames and the internal-module noise around them: `    at foo (…)`,
+ * `    at node:internal/…`, and V8's `^` caret line. Never the actionable
+ * part of a failure, and on a Node crash they are most of the bytes. */
+const STACK_FRAME_RE = /^\s*(?:at\s|\^+\s*$|node:internal)/;
+
+/**
+ * Why a probe came back empty, in the order most likely to name the real
+ * cause: the binary's stderr, then its stdout, then the spawn failure.
+ *
+ * Stack frames are dropped BEFORE the length cap, because the cap keeps the
+ * tail and a Node crash puts its one useful sentence on the first line. An
+ * engine installed without its platform-native package fails exactly that
+ * way — "Missing optional dependency @openai/codex-linux-x64" followed by
+ * thirty frames — so the unfiltered tail showed the user thirty frames and
+ * hid the sentence that names the fix.
+ *
+ * The tail is still what survives the cap for everything else: a CLI that
+ * logs progress and then fails puts its error last.
+ */
 function probeFailureText(stderr: string, stdout: string, error: Error | null): string {
   const text = [stderr, stdout, error?.message ?? ""]
-    .map((part) => part.trim())
+    .map((part) => part
+      .split("\n")
+      .filter((line) => !STACK_FRAME_RE.test(line))
+      .join("\n")
+      .trim())
     .find((part) => part.length > 0);
   if (!text) return "The version probe produced no output.";
   return text.length <= PROBE_ERROR_LIMIT ? text : `…${text.slice(-PROBE_ERROR_LIMIT)}`;
