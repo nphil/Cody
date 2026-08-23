@@ -47,6 +47,8 @@ interface Props {
   toolCallsDefaultCollapsed?: boolean;
   thinkingDefaultExpanded?: boolean;
   onAgentEnd?: () => void;
+  /** The server gave a nameless session a name — reload the session list. */
+  onSessionNamed?: () => void;
   onSessionCreated?: (session: SessionInfo) => void;
   onSessionForked?: (newSessionId: string) => void;
   modelsRefreshKey?: number;
@@ -667,7 +669,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
 /** Memoized: AppShell holds ~60 state values (git badge polls, update checks,
  *  the context-usage tick ChatWindow itself pushes up), and each of those
  *  re-renders would otherwise rebuild this whole tree. */
-export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, advisorEnabled, chatExtras = true, fastModeCapable = true, subagentsCapable = true, toolCallsDefaultCollapsed = true, thinkingDefaultExpanded = false, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onModelUsageChange, onOpenFile, onOpenPreview, onPreviewUrlsSeen }: Props) {
+export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, advisorEnabled, chatExtras = true, fastModeCapable = true, subagentsCapable = true, toolCallsDefaultCollapsed = true, thinkingDefaultExpanded = false, onAgentEnd, onSessionNamed, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onModelUsageChange, onOpenFile, onOpenPreview, onPreviewUrlsSeen }: Props) {
   const { t, tn } = useI18n();
   const { playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -710,7 +712,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     handleBuiltinSlashCommand,
     handleThinkingLevelChange, handleFastModeChange, handleToolPresetChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, loadSlashCommands,
   } = useAgentSession({
-    session, newSessionCwd, advisorEnabled, subagentsCapable, thinkingDefaultExpanded, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked,
+    session, newSessionCwd, advisorEnabled, subagentsCapable, thinkingDefaultExpanded, onAgentEnd: wrappedOnAgentEnd, onSessionNamed, onSessionCreated, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
     onOpenFile, onOpenPreview, onPreviewUrlsSeen,
   });

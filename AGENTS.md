@@ -154,6 +154,8 @@ lib/
                        modelBrand() reads the VENDOR off a model id so gateway rows
                        (one OpenRouter key, many vendors) don't all wear one mark
   rpc-manager.ts       session registry + startRpcSession over RpcProcess
+  session-namer.ts     3-4 word model-written session names: a one-shot omp run
+                       plus the pure normalizer that turns its answer into a name
   session-reader.ts    session .jsonl parsing + path cache + buildSessionContext
   skills-service.ts    pure-Node skill discovery mirroring omp's providers
   skills-registry.ts   client for the public skills.sh registry endpoints (the

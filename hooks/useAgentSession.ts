@@ -429,6 +429,9 @@ export interface UseAgentSessionOptions {
    *  blocks that would start collapsed. */
   thinkingDefaultExpanded?: boolean;
   onAgentEnd?: () => void;
+  /** A nameless session just got a name from the server: reload the session
+   *  list so the sidebar stops showing the first-message fallback. */
+  onSessionNamed?: () => void;
   onSessionCreated?: (session: SessionInfo) => void;
   onSessionForked?: (newSessionId: string) => void;
   modelsRefreshKey?: number;
@@ -456,6 +459,9 @@ const PROMPT_SETTLE_INITIAL_DELAY_MS = 800;
 const PROMPT_SETTLE_POLL_MS = 600;
 const PROMPT_SETTLE_MAX_MS = 20_000;
 const AGENT_STATE_RECONCILE_MS = 15_000;
+/** Naming attempts per session per mount: one for the normal case, one spare
+ * for a turn that ended before the engine had flushed the session file. */
+const AUTO_NAME_MAX_ATTEMPTS = 2;
 /** Model-switch toasts explain a mid-run change of engine behavior — worth a
  * slow read, so they stay up far longer than the 4s default. */
 const MODEL_SWITCH_TOAST_MS = 10_000;
@@ -678,7 +684,7 @@ function toSlashCommandInfo(command: RpcAvailableSlashCommand): SlashCommandInfo
 
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
-    session, newSessionCwd, advisorEnabled, thinkingDefaultExpanded, onAgentEnd, onSessionCreated, onSessionForked,
+    session, newSessionCwd, advisorEnabled, thinkingDefaultExpanded, onAgentEnd, onSessionNamed, onSessionCreated, onSessionForked,
     modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
     onOpenFile, onOpenPreview, onPreviewUrlsSeen,
   } = opts;
@@ -730,6 +736,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // The last provider error auto-retry reported, kept past auto_retry_end so a
   // retry_fallback_applied toast can name the reason for the model switch.
   const lastRetryErrorRef = useRef<string | null>(null);
+  /** Naming attempts already spent, per session id — the auto-name call must
+   * not repeat once a session has a name (or has proved unnameable). */
+  const autoNameAttemptsRef = useRef(new Map<string, number>());
   const [liveContextUsage, setLiveContextUsage] = useState<ContextUsageValue | null>(null);
   // Usage recorded outside the parent transcript, kept apart so the headline
   // adds each source exactly once. `subagentUsage` is summed from the
@@ -1970,6 +1979,29 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [finishPromptWithoutStream, refreshSubagentRoster]);
 
+  // A session with no name of its own shows a 50-character slice of its first
+  // message in the sidebar — a sentence fragment, not a name. Once the first
+  // turn has ended (the transcript is on disk and the engine has had its own
+  // chance to title the session) ask the server for a real one.
+  //
+  // Fire-and-forget by contract: nothing is awaited and every failure is
+  // silent, because naming is a convenience the turn must never wait on — the
+  // sidebar simply keeps the fallback it already had.
+  const maybeAutoNameSession = useCallback((sid: string) => {
+    if (session?.name) return;
+    const attempts = autoNameAttemptsRef.current.get(sid) ?? 0;
+    if (attempts >= AUTO_NAME_MAX_ATTEMPTS) return;
+    autoNameAttemptsRef.current.set(sid, attempts + 1);
+    fetch(`/api/sessions/${encodeURIComponent(sid)}/auto-name`, { method: "POST" })
+      .then((res) => {
+        // Either the session now has a name or it has nothing nameable in it
+        // (409); neither is worth a second call.
+        if (res.ok || res.status === 409) autoNameAttemptsRef.current.set(sid, AUTO_NAME_MAX_ATTEMPTS);
+        if (res.ok && hookAliveRef.current) onSessionNamed?.();
+      })
+      .catch(() => {});
+  }, [onSessionNamed, session?.name]);
+
   // Recovery net for missed SSE events: while the agent is running, verify
   // against the server periodically and whenever the tab returns to the
   // foreground or the network comes back.
@@ -2443,7 +2475,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // 15s reconcile poll, so items check off as they complete instead of
       // arriving in poll-sized batches.
       case "turn_end":
-        if (sessionIdRef.current) void reconcileAgentState(sessionIdRef.current);
+        if (sessionIdRef.current) {
+          void reconcileAgentState(sessionIdRef.current);
+          maybeAutoNameSession(sessionIdRef.current);
+        }
         break;
       case "usage_event": {
         // Claude Code and codex account for themselves instead of recording
@@ -2610,7 +2645,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as unknown as IncomingExtensionUiRequest);
         break;
     }
-  }, [addNotice, consumeQueuedMessage, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, mergeSubagents, onAgentEnd, onPreviewUrlsSeen, reconcileAgentState, resetSubagentActivityState, applyAuthoritativeModel, beginAuthoritativeModelSync]);
+  }, [addNotice, consumeQueuedMessage, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, maybeAutoNameSession, mergeSubagents, onAgentEnd, onPreviewUrlsSeen, reconcileAgentState, resetSubagentActivityState, applyAuthoritativeModel, beginAuthoritativeModelSync]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]): Promise<boolean> => {

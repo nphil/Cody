@@ -345,7 +345,7 @@ notes are missing, and is what clients should key any "stale" caveat off.
 | `/api/sessions/<id>/state` | GET | `{running}` (+ `state` when live) |
 | `/api/sessions/<id>/context` | GET | context window accounting |
 | `/api/sessions/<id>/export` | GET | transcript export |
-| `/api/sessions/<id>/auto-name` | POST | engine-generated title |
+| `/api/sessions/<id>/auto-name` | POST | name a session: engine title, else a short model-written name, else a first-message truncation |
 | `/api/sessions/<id>/subagents` | GET | subagent roster |
 | `/api/sessions/<id>/subagents/<subagentId>` | GET | one subagent's transcript |
 | `/api/sessions/<id>/media` | GET | attachments referenced by the transcript |
