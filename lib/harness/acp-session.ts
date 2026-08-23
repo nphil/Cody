@@ -180,7 +180,9 @@ export class AcpEngineSession implements EngineSession {
   private childExit: Promise<void> | null = null;
   private killTimer: ReturnType<typeof setTimeout> | null = null;
   private _alive = true;
-  private running = false;
+  /** The turn in flight, if any. ACP's session/prompt resolves only at end
+   * of turn, so it runs detached and this is what "busy" means. */
+  private turn: Promise<void> | null = null;
   /** Assistant text of the turn in flight, accumulated for get_messages. */
   private stream: AcpStreamState = { open: false, text: "" };
   private currentModel: string | null = null;
@@ -210,8 +212,11 @@ export class AcpEngineSession implements EngineSession {
     return this._alive;
   }
 
+  /** A TURN is in flight — not merely "the agent process is up". An ACP
+   * connection is long-lived, so reporting the process would light the
+   * sidebar's running indicator on every idle session, forever. */
   isRunning(): boolean {
-    return this._alive && this.running;
+    return this._alive && this.turn !== null;
   }
 
   start(): void {
@@ -318,7 +323,6 @@ export class AcpEngineSession implements EngineSession {
       child.once("exit", () => {
         if (this.killTimer) clearTimeout(this.killTimer);
         this.killTimer = null;
-        this.running = false;
         this._alive = false;
         resolve();
       });
@@ -341,12 +345,12 @@ export class AcpEngineSession implements EngineSession {
 
     await connection.agent.request("initialize", {
       protocolVersion: PROTOCOL_VERSION,
-      clientCapabilities: {
-        // Cody serves file reads/writes against the workspace it already
-        // guards; terminals are deliberately absent until the terminal
-        // surface is wired, and claiming them would strand the agent.
-        fs: { readTextFile: true, writeTextFile: true },
-      },
+      // Claim NOTHING that registerHandlers does not answer. An agent that
+      // believes an advertised capability and calls it gets -32601 back;
+      // Hermes happens to ignore clientCapabilities and use its own file
+      // tools, but this transport exists to carry engines that do not. fs and
+      // terminals land here when phase 2 wires their handlers.
+      clientCapabilities: {},
     });
 
     if (this.acpSessionId) {
@@ -354,7 +358,6 @@ export class AcpEngineSession implements EngineSession {
       // catch falls through to a fresh session rather than failing the chat.
       try {
         await connection.agent.request("session/load", { sessionId: this.acpSessionId, cwd: this.cwd, mcpServers: [] });
-        this.running = true;
         return;
       } catch {
         this.acpSessionId = null;
@@ -367,13 +370,12 @@ export class AcpEngineSession implements EngineSession {
       this.acpSessionId = newId;
       upsertEngineSession(this._sessionId, { engine: this.spec.id, engineSessionId: newId, cwd: this.cwd });
     }
-    this.running = true;
   }
 
   /** Client-side ACP methods the agent may call on Cody. */
   private registerHandlers(app: ClientApp): void {
-    app.onNotification("session/update", (params: unknown) => {
-      this.handleUpdate(params);
+    app.onNotification("session/update", (ctx: unknown) => {
+      this.handleUpdate(ctx);
     });
     // Permissions get their real approve/deny UI in phase 2 (see the spec).
     // Until then the honest behavior is to REFUSE rather than silently
@@ -384,9 +386,24 @@ export class AcpEngineSession implements EngineSession {
     }));
   }
 
-  private handleUpdate(params: unknown): void {
-    if (!params || typeof params !== "object") return;
-    for (const event of translateSessionUpdate((params as { update?: unknown }).update, this.stream)) {
+  /**
+   * The SDK hands a notification CONTEXT to the handler — `{params, signal,
+   * agent}` — not the raw params, which is what its own built-in handlers
+   * assume (`(ctx) => implementation.cancel(ctx.params)`). Reading `.update`
+   * off the context instead of off `ctx.params` silently discarded every
+   * frame the agent sent: no streamed text, no thinking, no tool calls, and
+   * every turn ending in the "no reply" notice.
+   *
+   * Both shapes are accepted so a future SDK that passes params directly
+   * keeps working; unwrapping is decided by which object actually carries
+   * `update`, never by shape-guessing.
+   */
+  private handleUpdate(payload: unknown): void {
+    if (!payload || typeof payload !== "object") return;
+    const direct = payload as { update?: unknown; params?: { update?: unknown } };
+    const update = direct.update ?? direct.params?.update;
+    if (update === undefined) return;
+    for (const event of translateSessionUpdate(update, this.stream)) {
       this.emit(event);
     }
   }
@@ -394,17 +411,44 @@ export class AcpEngineSession implements EngineSession {
   // --------------------------------------------------------------------------
   // Commands
 
-  private async prompt(command: Record<string, unknown>): Promise<unknown> {
+  /**
+   * Launch a turn and ACKNOWLEDGE it — the turn itself runs detached and
+   * reports through events.
+   *
+   * ACP's `session/prompt` request resolves only when the whole turn ends,
+   * but Cody's prompt POST is an acknowledgement that the browser aborts
+   * after 30 seconds. Awaiting the turn here made every Hermes turn longer
+   * than that surface as a FAILED send: the user's message rolled back out
+   * of the transcript and into the composer, under a banner promising the
+   * prompt never started, while the agent carried on working. The turn
+   * engines return as soon as the turn is launched; this now matches them.
+   */
+  private async prompt(command: Record<string, unknown>): Promise<null> {
     await this.ensureReady();
     const connection = this.connection;
     if (!connection || !this.acpSessionId) {
       throw new EngineCommandError("prompt", `${this.spec.name} session is not ready`, "session_dead");
     }
+    if (this.turn) {
+      throw new EngineCommandError(
+        "prompt",
+        `The ${this.spec.name} engine runs one turn at a time. Wait for the current turn to finish`,
+        "session_busy",
+      );
+    }
     const text = typeof command.message === "string" ? command.message : "";
     this.messages.push({ role: "user", content: [{ type: "text", text }] });
     this.emit({ type: "agent_start" });
     this.emit({ type: "turn_start" });
+    this.turn = this.runTurn(connection, text).finally(() => {
+      this.turn = null;
+    });
+    return null;
+  }
 
+  /** The detached body of one turn. Never rejects: a failure is reported to
+   * the session as events, because by now nobody is awaiting a promise. */
+  private async runTurn(connection: ClientConnection, text: string): Promise<void> {
     try {
       const result = await connection.agent.request("session/prompt", {
         sessionId: this.acpSessionId,
@@ -422,13 +466,11 @@ export class AcpEngineSession implements EngineSession {
       if (!answered) this.emit({ type: "notice", level: "warning", message: emptyTurnMessage(this.spec.name, reason, this.spec.setupHint) });
       this.emit({ type: "turn_end" });
       this.emit({ type: "agent_end", stopReason: reason });
-      return { stopReason };
     } catch (error) {
       this.finishTurn();
       this.emit({ type: "notice", level: "error", message: `${this.spec.name}: ${String(error)}` });
       this.emit({ type: "turn_end" });
       this.emit({ type: "agent_end", stopReason: "error" });
-      throw new EngineCommandError("prompt", String(error), "prompt_failed");
     }
   }
 
@@ -457,11 +499,22 @@ export class AcpEngineSession implements EngineSession {
     return null;
   }
 
+  /**
+   * The browser reconciles every 15 seconds by asking whether the turn is
+   * still live, and `isStreaming || isPromptRunning || isCompacting` is the
+   * ONLY evidence it accepts. Hard-coding isStreaming:false told it every
+   * turn past 15 seconds had finished: it ended the run, unlocked the
+   * composer under a still-working agent, and dropped the turn's real
+   * terminal events. These now follow the live turn, as the turn engines' do.
+   */
   private buildState(): Record<string, unknown> {
+    const running = this.turn !== null;
     return {
       sessionId: this._sessionId,
       model: this.currentModel,
-      isStreaming: false,
+      isStreaming: running,
+      isPromptRunning: running,
+      isCompacting: false,
       messageCount: this.messages.length,
       queuedMessageCount: 0,
       sessionFile: "",

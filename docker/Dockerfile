@@ -177,7 +177,10 @@ RUN bun --version
 # (UV_TOOL_DIR / UV_TOOL_BIN_DIR). uv is a single static binary, so it is
 # copied out of its official image rather than piping an installer to a
 # shell — same trust model as bun above, and no third package manager.
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+# Pinned, not :latest — a floating base makes two builds of the same commit
+# produce different images, and uv is on the critical path of installing an
+# engine. Bump it deliberately, the way node:22-bookworm-slim is bumped.
+COPY --from=ghcr.io/astral-sh/uv:0.12.5 /uv /uvx /usr/local/bin/
 RUN uv --version
 
 ENV NODE_ENV=production \

@@ -8,7 +8,7 @@ does not get dropped half-built.
 ## Why ACP at all
 
 [Hermes Agent](https://github.com/NousResearch/hermes-agent) (Nous Research,
-v0.20.x) ships `hermes acp` — a stdio JSON-RPC server speaking the
+v0.19.0 on PyPI as of 2026-08-23) ships `hermes acp` — a stdio JSON-RPC server speaking the
 [Agent Client Protocol](https://agentclientprotocol.com), already used in
 production by Zed, VS Code and JetBrains. ACP is an open standard for exactly
 the thing Cody does: an editor driving a coding agent.
@@ -82,8 +82,18 @@ prefix → `PATH`.
 Two things only a real install could have taught us, both now pinned by tests:
 the ACP server lives behind an extras marker, so the spec is
 `hermes-agent[acp]` and a plain `hermes-agent` installs fine and then exits
-"ACP dependencies not installed"; and `hermes --version` reports the *Python*
-version, so the adapter probes `hermes acp --version`.
+"ACP dependencies not installed"; and the adapter probes `hermes acp
+--version` rather than a bare `--version`.
+
+That second one is worth stating precisely, because an earlier note here got
+it wrong: `hermes --version` does NOT report the Python version. It prints a
+multi-line banner whose first line carries the real version, and the probe's
+leftmost-match reads it correctly. The reason to probe the subcommand is
+better than that: `hermes acp --version` runs the ACP entry point, so it fails
+when the extra is missing. A bare `--version` succeeds either way — which
+means it would report a healthy install of an engine whose every chat turn
+then dies. `app/api/engines/install/route.ts` verifies through the adapter's
+`versionArgs` for exactly this reason.
 
 **1c. Non-npm install** — DONE. Hermes is not on npm. `lib/harness/install.ts`
 gained a second mechanism, `installVia: "uv"`, running `uv tool install
