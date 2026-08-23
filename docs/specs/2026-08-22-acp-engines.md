@@ -1,11 +1,11 @@
 # ACP engines: Hermes first, and what comes after
 
-Status: **phase 1 done**, **phase 3 underway** (2026-08-23) — Hermes is a
-working Cody engine for chat and settings, and **Codex has moved off its
-per-turn transport onto ACP** (see "Phase 3, as built" below). Phase 2 and
-Claude Code's migration are still plan. Owner-approved scope (2026-08-22):
-chat + settings for Hermes first, the rest planned here so it does not get
-dropped half-built.
+Status: **phase 1 done**, **phase 3 done for the turn engines** (2026-08-23)
+— Hermes is a working Cody engine for chat and settings, and **Codex and
+Claude Code have both moved off their per-turn transports onto ACP** (see
+"Phase 3, as built" below). Phase 2 is still plan; omp and pi keep `rpcUi`
+deliberately. Owner-approved scope (2026-08-22): chat + settings for Hermes
+first, the rest planned here so it does not get dropped half-built.
 
 ## Why ACP at all
 
@@ -156,7 +156,8 @@ features, but not IDE-shaped, and Cody is an IDE.
 The owner's stated goal is to move omp, Claude Code and Codex onto ACP. That
 is right for two of the three and **wrong for omp**:
 
-- **Claude Code — migrate**, but NOT via the package this spec first named.
+- **Claude Code — MIGRATED** (see "Phase 3, as built"), but NOT via the
+  package this spec first named.
   `@zed-industries/claude-code-acp` is **deprecated on npm across all 73
   versions** ("renamed to @agentclientprotocol/claude-agent-acp"), last
   published 2026-02-17, and its GitHub repo 301-redirects to the new org.
@@ -357,12 +358,164 @@ only the input/cache-write split is coarser than before.
   the SSH profile now opens the Codex CLI directly rather than through the
   adapter, so it does not inherit `engineEnv()`. Worth aligning when that
   file is next touched.
-- **`uninstallEngine` removes only `installSpec`'s package.** Uninstalling
-  Codex leaves the `@openai/codex` that `installAlso` installed behind.
-- **Upgraders carry a dead tree.** An instance that installed
-  `@openai/codex` under the old transport keeps it — and it is now the copy
-  `engineEnv()` points at, so it is not wasted, but the adapter's own slim
-  install means the numbers above assume a clean prefix.
+- **Upgraders carry a fat adapter until they reinstall.** An instance that
+  installed Codex before this change has the OLD `@openai/codex` (which
+  `engineEnv()` now points at, so it is not wasted) and, on the next update,
+  a slim adapter. The 324 MB figure assumes a clean prefix; re-running the
+  engine card's Update action is what gets an existing instance there.
+
+## Phase 3, as built — Claude Code on ACP (2026-08-23)
+
+Claude Code is off `claude -p --output-format stream-json`.
+`lib/harness/claude.ts` now builds an `AcpEngineSession` from an
+`AcpEngineSpec`, the same shape `hermes.ts` and `codex.ts` use, and no
+per-turn path remains in that file.
+
+**What the adapter actually advertises**, from a live `initialize` against
+0.70.0: `loadSession: true`, `promptCapabilities {image, embeddedContext}`,
+`mcpCapabilities {http, sse}`, `sessionCapabilities {additionalDirectories,
+close, delete, fork, list, resume}`, `auth.logout`, `providers`, and
+`_meta.steering.supported`. `fork` is the one capability the Codex adapter
+lacks.
+
+**Session identity carries over with no migration**, verified rather than
+assumed. `session/new` returned `fa7bd5d9-...`; a second `AcpEngineSession`
+built for the same Cody session id resumed THAT id through `session/load`,
+and `cody-engine-sessions.json` still holds the same `engineSessionId`
+afterwards. Two fallbacks were exercised too, because both look identical
+from the outside and only one is a bug: a session id the CLI has never heard
+of, and a session that was opened but never prompted (no transcript exists to
+load, so `session/load` legitimately refuses). Both fall through to
+`session/new` and the chat opens - which is why the resume test has to send a
+turn first, or it proves nothing.
+
+**Capability flags did not change**, and that is the honest answer for the
+same reason it was for Codex: the migration changed the transport, not the
+surfaces. The adapter carries model selection as a session config option,
+`setSessionMode` with five modes, `plan` and thinking - but Cody's model
+picker, mode control and composer extras are built against omp's commands and
+nothing plumbs the ACP equivalents through yet. What changed WITHOUT a flag:
+Claude Code can now stop mid-turn and ask, because ACP has an approval
+channel and `claude -p` had nowhere to ask.
+
+**One copy of the CLI, not two.** The adapter bundles a ~309 MB
+platform-native Claude CLI as an optional dependency of
+`@anthropic-ai/claude-agent-sdk`, and Cody already installs and
+version-manages `@anthropic-ai/claude-code`. Installing both naively is 688 MB
+of which 309 MB is a duplicate - the shape of the ZFS quota exhaustion that
+put the disk guards in `install.ts` there. So `skipNativeOptional` installs
+the adapter without its bundle and `engineEnv()` sets
+`CLAUDE_CODE_EXECUTABLE` to the CLI `installAlso` puts in the tools prefix.
+Measured on a clean prefix: 379 MB total, one native binary, with `claude` and
+`claude-agent-acp` both on the tools `PATH`.
+
+**npm ignores `--omit=optional` for a global install.** This is the mechanism
+note that matters, because the obvious flag silently does nothing: verified
+against npm 10.9 as `--omit=optional`, as `--no-optional`, as
+`NPM_CONFIG_OMIT=optional`, and through `--userconfig` - all four installed
+the 309 MB package anyway (105 packages, 360 MB every time). What DOES work
+globally is the platform gate: `--os=none --cpu=none` matches no package's
+`os`/`cpu` field, so npm skips exactly the platform-specific optional
+dependencies and nothing else (104 packages, 52 MB). That is
+`SKIP_NATIVE_OPTIONAL_ARGS` in `lib/harness/install.ts`, and it is applied
+per package - the CLI beside the adapter needs precisely the platform binary
+the flag suppresses, so the two are separate npm invocations rather than one.
+
+**The health probe has to run the CLI, not the adapter.** `claude-agent-acp
+--version` is answered from the adapter's own `package.json` before it looks
+at Claude at all, so it reports a healthy 0.70.0 with no CLI underneath -
+which is exactly the state `skipNativeOptional` creates on purpose and
+exactly the state a failed companion install leaves by accident. `healthArgs`
+is therefore `["--cli", "--version"]`, which forwards to the CLI the adapter
+would drive: verified both ways, it prints "2.1.241 (Claude Code)" when the
+chain is whole and throws "Claude native binary not found ... or set
+CLAUDE_CODE_EXECUTABLE" when it is not. `versionArgs` stays a bare
+`--version`, because that is the package `installSpec` names and the one the
+update check compares with the registry.
+
+**The environment is computed once and used three times.**
+`HarnessAdapter.engineEnv()` is merged over `process.env` for the live
+session, for the post-install health probe, and for a Cody terminal - so the
+CLI that gets VERIFIED is always the CLI that RUNS. It returns `{}` when
+`CLAUDE_CODE_EXECUTABLE` is already exported: an operator who set it has
+chosen a CLI, and Cody substituting its own would be the hardest kind of bug
+to see, because everything keeps working against the wrong binary.
+
+**Tool chips say "Bash", not "cat hello.txt".** The trap this spec recorded is
+real and now handled: the adapter's `title` is human prose (the command line
+for a shell call), and the tool's actual name is at
+`_meta.claudeCode.toolName`. `acp-session.ts` stays engine-neutral by taking
+the PATH as spec data - `toolNameMetaPath: ["claudeCode", "toolName"]` in
+`claude.ts` - and resolving name from the `_meta` path, then the schema's
+UNSTABLE `name`, then `title`, then `kind`. Verified against a live tool
+call: the event Cody emitted carried `toolName: "Bash"`.
+
+**The host-tool bridge survived.** `open_preview` reached Claude Code as a
+`--mcp-config` blob on the per-turn argv; ACP carries it as an
+`McpServerStdio` named at `session/new`, through the same
+`displayMcpAcpServer()` the Codex migration also uses. One trap worth naming:
+ACP discriminates a stdio server by the ABSENCE of a `type` field, and this
+adapter tests `!("type" in server)` before connecting it - a well-meaning
+`type: "stdio"` is not a no-op, it silently drops the server. Verified: the
+descriptor starts `bin/cody-display-mcp.js`, which answers `tools/list` with
+`open_preview`, and `session/new` with it attached still opens in under two
+seconds.
+
+**Usage is a turn total now, as this spec predicted.** `acp-session.ts`
+translates `PromptResponse.usage` into one additive `usage_event` per turn -
+`{input, output, cacheRead, cacheWrite}`, whose four fields summed to the
+agent's own `totalTokens` on a live turn, so no subtraction is needed. Cost
+is deliberately NOT read: ACP does not state its cost figure is per-turn, and
+a cumulative number added as a delta compounds into something wrong that
+looks authoritative. The `usage_update` notifications that arrive DURING a
+turn are cumulative for the session and are ignored for the same reason.
+
+**The root guard, sharpened.** The adapter allows `bypassPermissions` only
+when `ALLOW_BYPASS = !IS_ROOT || !!process.env.IS_SANDBOX`. Cody's container
+runs as root and sets no `IS_SANDBOX`, so the guard holds and a
+`permissions.defaultMode: bypassPermissions` in the user's settings is
+ignored with a log line. The failure mode if something ever sets `IS_SANDBOX`
+is worse than "the guard is off": the mode reaches the CLI, which refuses
+`--dangerously-skip-permissions` under root, and `session/new` fails outright
+with that message. Observed directly - this repo is developed inside a Claude
+Code sandbox, which exports `IS_SANDBOX=yes`.
+
+### Costs and follow-ups, stated plainly
+
+- **No intra-turn message boundary**, as predicted. `agent_message_chunk`
+  carries content and nothing else, so one turn is one bubble where the
+  per-turn path rendered one per API call.
+- **`get_messages` starts empty on a resumed session.** `session/load`
+  restores the AGENT's context, not Cody's copy of the transcript, and the
+  ACP client only banks messages it saw itself. The per-turn path behaved the
+  same way, so this is not a regression - but it is why a reconnected session
+  looks blank until the sidebar reads `~/.claude/projects`.
+- **`turn-session.ts` and `claude-stream.ts` are now dead** for every engine:
+  nothing calls `createClaudeSession` from `turn-session.ts` any more. They
+  were deliberately left in place (both migrations were scoped not to delete
+  them) and retiring them is one small follow-up: move `EngineCommandError`
+  to an engine-neutral module, delete the two modules along with
+  `turn-session.test.mjs` and `stream-translate.test.mjs`, and drop
+  `TURN_SESSION_ALLOWLIST` plus the `claude-stream`/`turn-session` entries
+  from `lib/architecture.test.mjs`.
+- **`docker/entrypoint.sh` still maps `claude) _cody_bin=claude`.** That keeps
+  working because `installAlso` puts `claude` back on the tools `PATH`, but
+  the SSH profile opens the CLI directly rather than through
+  `claude-agent-acp --cli`, so it does not inherit `engineEnv()`. Harmless
+  for Claude (the CLI needs no pointing at itself) and worth aligning with
+  `cliArgs` when that file is next touched.
+- **Upgraders keep their old `@anthropic-ai/claude-code`** - which is now
+  exactly the copy `engineEnv()` points at, so nothing is wasted. The
+  measured 379 MB assumes a clean prefix.
+- **A nested Claude Code environment makes `session/new` crawl.** With this
+  dev container's full agent environment inherited (a dozen `CLAUDE_CODE_*`
+  variables naming file descriptors and sockets the child never gets),
+  `session/new` took 122 s instead of 1.4 s; with them stripped it is
+  instant. Not attributable to any single variable by bisection, and it does
+  not affect the container, which has none of them. It DOES affect the
+  self-development loop: an `npm run dev` started from inside a Claude Code
+  session inherits them. Strip them, or start the dev server from a plain
+  shell.
 
 ## Known friction
 
