@@ -25,6 +25,9 @@ export const ompHarness: HarnessAdapter = {
     fastMode: true,
     advisor: true,
     subagents: true,
+    // omp has memory (mnemopi, hindsight) but exposes no read-back Cody
+    // can call, so the surface stays hidden rather than empty.
+    memory: false,
   },
   resolveBinary: () => resolveOmpBin(),
   getVersion: () => getOmpVersion(),

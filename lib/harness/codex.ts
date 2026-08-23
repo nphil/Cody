@@ -34,6 +34,7 @@ export const codexHarness: HarnessAdapter = {
     fastMode: false,
     advisor: false,
     subagents: false,
+    memory: false,
   },
   resolveBinary: () => resolveEngineBin("codex", "CODEX"),
   getVersion: () => getEngineVersion("codex", "CODEX"),

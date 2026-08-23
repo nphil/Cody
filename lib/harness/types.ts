@@ -38,6 +38,11 @@ export interface HarnessCapabilities {
   advisor: boolean;
   /** Subagent rosters/progress (`get_subagents`, subagent frames) — omp-only. */
   subagents: boolean;
+  /** The engine keeps persistent memory across sessions AND can hand Cody its
+   * contents to display (see `readMemory`). A flag on its own is not enough:
+   * omp has memory too, but exposes no way to read it back, so it stays
+   * false and the surface stays hidden rather than empty. */
+  memory: boolean;
 }
 
 /**
@@ -78,6 +83,22 @@ export interface EngineUsage {
   cacheWrite: number;
   /** First-party spend in USD, when the engine reports one at all. */
   cost?: number;
+}
+
+/** One document of an engine's persistent memory. */
+export interface MemoryDocument {
+  /** Stable id within the engine ("memory", "user"). */
+  id: string;
+  /** Human label for the section heading. */
+  label: string;
+  /** One clause on what this document is for, from the engine's own docs. */
+  description: string;
+  /** Absolute path, shown so the user can find and edit it themselves. */
+  path: string;
+  /** Raw contents; "" when the file does not exist yet. */
+  content: string;
+  /** False when the file is absent — a fresh install, not an error. */
+  exists: boolean;
 }
 
 export interface EngineSessionOptions {
@@ -209,4 +230,15 @@ export interface HarnessAdapter {
   createSession?(options: EngineSessionOptions): EngineSession;
   /** RPC-dialect spawn descriptor (omp, pi). See RpcUiSpawn. */
   readonly rpcUi?: RpcUiSpawn;
+  /**
+   * The engine's persistent memory, as documents to display. Present only
+   * when `capabilities.memory` is true.
+   *
+   * Read-only on purpose. Memory is the agent's own account of what it has
+   * learned; a user editing it through Cody would be rewriting the engine's
+   * notes behind its back, and every engine curates it differently. Showing
+   * it answers the question users actually have — "what does it think it
+   * knows about me?" — without pretending Cody owns the file.
+   */
+  readMemory?(): MemoryDocument[];
 }

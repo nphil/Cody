@@ -34,6 +34,7 @@ export const claudeHarness: HarnessAdapter = {
     fastMode: false,
     advisor: false,
     subagents: false,
+    memory: false,
   },
   resolveBinary: () => resolveEngineBin("claude", "CLAUDE"),
   getVersion: () => getEngineVersion("claude", "CLAUDE"),
