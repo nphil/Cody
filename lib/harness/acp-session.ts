@@ -52,7 +52,43 @@ export interface AcpEngineSpec {
 
 /** Commands this transport can honestly serve. Everything else throws
  * "unsupported", which the UI is built to tolerate by hiding the surface. */
-const SUPPORTED_COMMANDS = new Set(["prompt", "abort", "get_state", "get_messages"]);
+const SUPPORTED_COMMANDS = new Set(["prompt", "abort", "get_state", "get_messages", "respond_permission"]);
+
+/** One choice the AGENT offered for a permission request. Cody renders the
+ * agent's own options rather than inventing Allow/Deny buttons: only the agent
+ * knows whether "always" is on the table, and `kind` is what tells the UI
+ * which choice is the dangerous one. */
+export interface AcpPermissionOption {
+  optionId: string;
+  name: string;
+  kind: "allow_once" | "allow_always" | "reject_once" | "reject_always";
+}
+
+/** The two answers the protocol allows. */
+type PermissionOutcome = { outcome: "cancelled" } | { outcome: "selected"; optionId: string };
+
+/** A permission request waiting on a human. */
+interface PendingPermission {
+  requestId: string;
+  toolCall: unknown;
+  options: AcpPermissionOption[];
+  /** Settles the JSON-RPC request the agent is blocked on. */
+  settle: (outcome: PermissionOutcome) => void;
+}
+
+/** Only the shapes Cody can render; an option missing a field is dropped
+ * rather than shown as a button that means nothing. */
+function readPermissionOptions(raw: unknown): AcpPermissionOption[] {
+  if (!Array.isArray(raw)) return [];
+  const kinds = new Set(["allow_once", "allow_always", "reject_once", "reject_always"]);
+  return raw.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const { optionId, name, kind } = entry as Record<string, unknown>;
+    if (typeof optionId !== "string" || typeof name !== "string") return [];
+    if (typeof kind !== "string" || !kinds.has(kind)) return [];
+    return [{ optionId, name, kind: kind as AcpPermissionOption["kind"] }];
+  });
+}
 
 /** Grace period between SIGTERM and SIGKILL when tearing a session down. */
 const KILL_GRACE_MS = 3_000;
@@ -183,6 +219,9 @@ export class AcpEngineSession implements EngineSession {
   /** The turn in flight, if any. ACP's session/prompt resolves only at end
    * of turn, so it runs detached and this is what "busy" means. */
   private turn: Promise<void> | null = null;
+  /** Permission requests the agent is blocked on, by request id. */
+  private pendingPermissions = new Map<string, PendingPermission>();
+  private nextPermissionId = 1;
   /** Assistant text of the turn in flight, accumulated for get_messages. */
   private stream: AcpStreamState = { open: false, text: "" };
   private currentModel: string | null = null;
@@ -258,6 +297,8 @@ export class AcpEngineSession implements EngineSession {
         return this.prompt(command);
       case "abort":
         return this.abort();
+      case "respond_permission":
+        return this.respondPermission(command);
       case "get_state":
         return this.buildState();
       default:
@@ -273,6 +314,10 @@ export class AcpEngineSession implements EngineSession {
     if (this.destroyPromise) return this.destroyPromise;
     if (!this._alive) return;
     this._alive = false;
+    // Before the connection closes: settling these resolves the agent's own
+    // blocked requests, and the UI listener is still attached to hear that
+    // the cards are gone.
+    this.cancelPendingPermissions();
     const pending = this.childExit ?? Promise.resolve();
     this.destroyPromise = pending;
     try {
@@ -377,13 +422,79 @@ export class AcpEngineSession implements EngineSession {
     app.onNotification("session/update", (ctx: unknown) => {
       this.handleUpdate(ctx);
     });
-    // Permissions get their real approve/deny UI in phase 2 (see the spec).
-    // Until then the honest behavior is to REFUSE rather than silently
-    // auto-approve: an agent editing files nobody sanctioned is worse than an
-    // agent that reports it could not.
-    app.onRequest("session/request_permission", async () => ({
-      outcome: { outcome: "cancelled" as const },
-    }));
+    app.onRequest("session/request_permission", (ctx: unknown) => this.requestPermission(ctx));
+  }
+
+  /**
+   * The agent wants permission for a tool call, and its JSON-RPC request stays
+   * open until a human answers. That is the point: this is the only Cody
+   * transport with a real approval channel, so the turn genuinely waits rather
+   * than auto-approving and telling the user afterwards.
+   *
+   * There is deliberately NO timeout. An unanswered request is not an error —
+   * the user may be reading the diff — and expiring it would either fabricate
+   * a refusal the agent then reports as a failure, or worse, an approval.
+   * Abort and destroy both settle whatever is outstanding, and the request is
+   * carried in get_state so a browser that reloads still finds it.
+   */
+  private requestPermission(ctx: unknown): Promise<{ outcome: PermissionOutcome }> {
+    const params = (ctx && typeof ctx === "object" ? (ctx as { params?: unknown }).params ?? ctx : {}) as Record<string, unknown>;
+    const options = readPermissionOptions(params.options);
+    const requestId = `perm-${this.nextPermissionId++}`;
+
+    // An agent that offers no option Cody can render leaves nothing to click,
+    // so refusing is the only honest answer — approving would grant something
+    // the user was never shown.
+    if (options.length === 0) {
+      this.emit({
+        type: "notice",
+        level: "warning",
+        message: `${this.spec.name} asked for permission but offered no options Cody could show, so it was declined.`,
+      });
+      return Promise.resolve({ outcome: { outcome: "cancelled" } });
+    }
+
+    const { promise, resolve } = Promise.withResolvers<{ outcome: PermissionOutcome }>();
+    const pending: PendingPermission = {
+      requestId,
+      toolCall: params.toolCall ?? null,
+      options,
+      settle: (outcome) => {
+        if (!this.pendingPermissions.delete(requestId)) return;
+        this.emit({ type: "permission_resolved", requestId, outcome: outcome.outcome });
+        resolve({ outcome });
+      },
+    };
+    this.pendingPermissions.set(requestId, pending);
+    this.emit({ type: "permission_request", requestId, toolCall: pending.toolCall, options });
+    return promise;
+  }
+
+  /** Answer one outstanding request. An unknown id is a stale click — the
+   * request was already cancelled or answered in another tab — and says so
+   * rather than throwing the whole command. */
+  private respondPermission(command: Record<string, unknown>): { answered: boolean } {
+    const requestId = typeof command.requestId === "string" ? command.requestId : "";
+    const pending = this.pendingPermissions.get(requestId);
+    if (!pending) return { answered: false };
+    const optionId = typeof command.optionId === "string" ? command.optionId : "";
+    const chosen = pending.options.find((option) => option.optionId === optionId);
+    // No recognised option means deny: an unrecognised id must never be
+    // resolved into an approval.
+    pending.settle(chosen ? { outcome: "selected", optionId: chosen.optionId } : { outcome: "cancelled" });
+    return { answered: true };
+  }
+
+  /**
+   * Settle everything outstanding as cancelled. The protocol REQUIRES it on
+   * cancellation — "a client [that cancels] MUST respond to all pending
+   * session/request_permission requests with this Cancelled outcome" — and a
+   * dying session must do it too, or the agent's request never settles.
+   */
+  private cancelPendingPermissions(): void {
+    for (const pending of [...this.pendingPermissions.values()]) {
+      pending.settle({ outcome: "cancelled" });
+    }
   }
 
   /**
@@ -474,8 +585,12 @@ export class AcpEngineSession implements EngineSession {
     }
   }
 
-  /** Close the open assistant message and bank it for get_messages. */
+  /** Close the open assistant message and bank it for get_messages. Any
+   * permission still outstanding dies with the turn that raised it: nothing
+   * will act on the answer now, and leaving the card on screen invites a
+   * click that does nothing. */
   private finishTurn(): void {
+    this.cancelPendingPermissions();
     if (!this.stream.open) return;
     const text = this.stream.text;
     this.emit({ type: "message_end", content: [{ type: "text", text }] });
@@ -488,6 +603,11 @@ export class AcpEngineSession implements EngineSession {
    * (with stopReason "cancelled") and emits the terminal events, so this must
    * not emit its own or the UI would see the turn end twice. */
   private async abort(): Promise<null> {
+    // Ordered before the notification, not after: the protocol says a client
+    // that cancels MUST answer every outstanding permission request with
+    // `cancelled`, and an agent that is blocked on one cannot act on the
+    // cancellation until it is unblocked.
+    this.cancelPendingPermissions();
     const connection = this.connection;
     if (connection && this.acpSessionId) {
       try {
@@ -519,6 +639,14 @@ export class AcpEngineSession implements EngineSession {
       queuedMessageCount: 0,
       sessionFile: "",
       cwd: this.cwd,
+      // Carried in state, not only in the event stream: a reload drops the
+      // events it already missed, and a turn blocked on an approval nobody
+      // can see any more is a session that looks hung.
+      pendingPermissions: [...this.pendingPermissions.values()].map((entry) => ({
+        requestId: entry.requestId,
+        toolCall: entry.toolCall,
+        options: entry.options,
+      })),
     };
   }
 
