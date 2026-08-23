@@ -11,6 +11,11 @@ import type {
   SessionTreeNode,
 } from "@/lib/types";
 import { normalizeToolCalls } from "@/lib/normalize";
+import {
+  readPermissionRequest,
+  readPermissionRequests,
+  type AgentPermissionRequest,
+} from "@/lib/permission-request";
 import { extractLoopbackUrls, normalizePreviewUrl } from "@/lib/preview-url";
 import { derivePersistedContextUsage, type ContextUsageValue } from "@/lib/context-usage";
 import type { ThinkingModelMeta } from "@/lib/thinking-levels";
@@ -195,6 +200,12 @@ type AgentStateResponse = {
   isCompacting?: boolean;
   extensionStatuses?: ExtensionStatusItem[];
   extensionWidgets?: ExtensionWidgetItem[];
+  // Approvals the engine is blocked on right now. Carried in state, not only
+  // in the event stream, so a reloaded tab finds the request whose event it
+  // was not connected for — without this, a blocked turn looks hung forever.
+  // Only ACP engines report it; every other engine leaves it undefined, and
+  // undefined must never be read as "nothing is pending".
+  pendingPermissions?: unknown;
   // omp only reports a count; the queued texts are tracked client-side.
   queuedMessageCount?: number;
   todoPhases?: TodoPhase[];
@@ -788,6 +799,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [sessionStatsOverride, setSessionStatsOverride] = useState<SessionStatsInfo | null>(null);
   const [extensionDialog, setExtensionDialog] = useState<ExtensionUiDialogRequest | null>(null);
   const [extensionCustomUi, setExtensionCustomUi] = useState<ExtensionUiCustomRequest | null>(null);
+  // Approvals the agent is blocked on. Plural and ordered: the protocol allows
+  // more than one outstanding at a time, and each is answered on its own.
+  const [permissionRequests, setPermissionRequests] = useState<AgentPermissionRequest[]>([]);
   const [extensionStatuses, setExtensionStatuses] = useState<ExtensionStatusItem[]>([]);
   const [extensionWidgets, setExtensionWidgets] = useState<ExtensionWidgetItem[]>([]);
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [] });
@@ -1184,6 +1198,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [applyAuthoritativeModel, beginAuthoritativeModelSync]);
 
+  /**
+   * Adopt a `get_state.pendingPermissions` snapshot.
+   *
+   * This is what makes a reload survivable: the permission_request event fired
+   * before this page existed, so state is the only place the open request can
+   * still be found. It runs on every reconcile poll too, so the array identity
+   * is kept when the same requests are still open — a fresh array every 15s
+   * would re-render the card (and reset nothing, but churn everything below
+   * it) for no reason.
+   */
+  const adoptPermissionRequests = useCallback((raw: unknown) => {
+    const next = readPermissionRequests(raw);
+    setPermissionRequests((prev) => (
+      prev.length === next.length && prev.every((request, index) => request.requestId === next[index].requestId)
+        ? prev
+        : next
+    ));
+  }, []);
+
   // Ref, not a dependency: loadSession must stay identity-stable across a
   // preference toggle (a new identity would re-run the mount effect and
   // reload the open session mid-run).
@@ -1272,10 +1305,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (liveState.followUpMode !== undefined) setFollowUpMode(liveState.followUpMode);
           if (liveState.extensionStatuses !== undefined) setExtensionStatuses(liveState.extensionStatuses ?? []);
           if (liveState.extensionWidgets !== undefined) setExtensionWidgets(liveState.extensionWidgets ?? []);
+          // THE reload path. A page load never sees the permission_request
+          // event that fired before it, so without adopting state here a tab
+          // reopened on a blocked turn shows a session that waits forever with
+          // nothing to click. Engines with no approval channel omit the field
+          // entirely, and undefined must not be read as "none pending".
+          if (liveState.pendingPermissions !== undefined) adoptPermissionRequests(liveState.pendingPermissions);
           if (liveState.todoPhases !== undefined) setTodoPhases(liveState.todoPhases ?? []);
           if (liveState.queuedMessageCount === 0 && Date.now() - queueMutatedAtRef.current >= 5000) setQueuedMessages(EMPTY_QUEUE);
-        } else if (!agentState.running && Date.now() - queueMutatedAtRef.current >= 5000) {
-          setQueuedMessages(EMPTY_QUEUE);
+        } else {
+          // No live engine at all, so nothing can be blocked on an approval.
+          // A card carried over from the previous session would be
+          // unanswerable — the request it names died with its process.
+          adoptPermissionRequests(undefined);
+          if (!agentState.running && Date.now() - queueMutatedAtRef.current >= 5000) {
+            setQueuedMessages(EMPTY_QUEUE);
+          }
         }
         if (showLoading) setLoading(false);
         return agentState;
@@ -1290,7 +1335,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (showLoading && !messagesLoaded) setLoading(false);
     }
-  }, [refreshSubagentHistory, applyAuthoritativeModel, beginAuthoritativeModelSync]);
+  }, [refreshSubagentHistory, applyAuthoritativeModel, beginAuthoritativeModelSync, adoptPermissionRequests]);
 
   const loadContext = useCallback(async (sid: string, leafId: string | null) => {
     const seq = ++contextRequestSeqRef.current;
@@ -1513,6 +1558,37 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       console.error("Failed to send extension UI response:", e);
     }
   }, []);
+
+  /**
+   * Answer one approval the agent is blocked on. Optimistic like the
+   * extension-UI reply above: the card goes as soon as it is clicked, because
+   * the click is the decision and leaving it on screen invites a second one.
+   *
+   * A failure is logged, never thrown — the caller is a click handler in the
+   * transcript, and the server already treats a stale answer as a no-op
+   * (`{ answered: false }`) rather than an error. The authoritative removal is
+   * the `permission_resolved` event, which arrives for every settlement:
+   * this answer, an abort, the turn ending, or the session dying.
+   */
+  const respondToPermission = useCallback(async (requestId: string, optionId: string) => {
+    const sid = sessionIdRef.current;
+    setPermissionRequests((prev) => prev.filter((request) => request.requestId !== requestId));
+    if (!sid) return;
+    try {
+      await sendAgentCommand(sid, { type: "respond_permission", requestId, optionId });
+    } catch (e) {
+      console.error("Failed to answer permission request:", e);
+    }
+  }, []);
+
+  // A request belongs to the conversation that raised it. Switching sessions
+  // must drop the cards immediately rather than let another session's approval
+  // hang over the new transcript — clicking it would answer a request in a
+  // conversation the user is no longer looking at. The new session's own
+  // pending approvals arrive from its get_state hydration.
+  useEffect(() => {
+    setPermissionRequests((prev) => (prev.length === 0 ? prev : []));
+  }, [session?.id]);
 
   // ---------------------------------------------------------------------
   // Host-tool bridge: Cody registers tools the AGENT can call. The server
@@ -1961,6 +2037,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setIsCompacting(state?.isCompacting ?? false);
       // Also mid-run: this poll is the only todo-phase refresh while streaming.
       if (state?.todoPhases !== undefined) setTodoPhases(state.todoPhases ?? []);
+      // Approvals are mirrored BEFORE the busy check below, because a turn
+      // blocked on one is precisely a busy turn — reading them after the early
+      // return would only ever see a session that no longer has any. This is
+      // the recovery net for a permission event lost to a dropped stream;
+      // the reload case is handled in loadSession, which does not require a
+      // run to be in flight at all.
+      if (state?.pendingPermissions !== undefined) adoptPermissionRequests(state.pendingPermissions);
       // And the only reliable re-sync for a missed subagent lifecycle frame.
       void refreshSubagentRoster(sid);
       if ((!state || state.queuedMessageCount === 0) && Date.now() - queueMutatedAtRef.current >= 5000) setQueuedMessages(EMPTY_QUEUE);
@@ -1977,7 +2060,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch {
       // Network still down — the next poll / visibility / online tick retries.
     }
-  }, [finishPromptWithoutStream, refreshSubagentRoster]);
+  }, [finishPromptWithoutStream, refreshSubagentRoster, adoptPermissionRequests]);
 
   // A session with no name of its own shows a 50-character slice of its first
   // message in the sidebar — a sentence fragment, not a name. Once the first
@@ -2248,6 +2331,35 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             message,
           });
         }
+        break;
+      }
+      // An ACP engine has stopped mid-turn to ask whether it may do the thing
+      // it is about to do. The turn genuinely blocks on the answer, so this
+      // card is not a notification — it is the only way the turn finishes.
+      case "permission_request": {
+        const request = readPermissionRequest(event);
+        // Nothing clickable means nothing to render; the server already
+        // declines those, and a card that can never be answered would read as
+        // the hang it exists to prevent.
+        if (!request) break;
+        setPermissionRequests((prev) => (
+          prev.some((existing) => existing.requestId === request.requestId)
+            ? prev
+            : [...prev, request]
+        ));
+        break;
+      }
+      // Settled — by this browser, another tab, an abort, the turn ending, or
+      // the session dying. Every one of those emits this, so it is the single
+      // removal path and the card can never outlive the request.
+      case "permission_resolved": {
+        const requestId = typeof event.requestId === "string" ? event.requestId : "";
+        if (!requestId) break;
+        setPermissionRequests((prev) => (
+          prev.some((existing) => existing.requestId === requestId)
+            ? prev.filter((existing) => existing.requestId !== requestId)
+            : prev
+        ));
         break;
       }
       case "command_output": {
@@ -3579,7 +3691,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
       }
     }
-  }, [messages, streamState, agentRunning, agentPhase, extensionWidgets, isCompacting, retryInfo, activeSubagentCount, todoPhases, scrollToBottom, loading]);
+  }, [messages, streamState, agentRunning, agentPhase, extensionWidgets, isCompacting, retryInfo, activeSubagentCount, todoPhases, permissionRequests, scrollToBottom, loading]);
 
   // The follow effect above only runs on React state changes, but the scroll
   // geometry also moves without one, in two directions:
@@ -3687,6 +3799,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
     notices: noticeState.visible, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
+    permissionRequests, respondToPermission,
     // Smart is on for an unpinned new session, and stays on after the pin —
     // whether Smart resolved it (live pick) or the engine did (Smart spawn) —
     // for as long as the running model is still the one Smart chose in THIS
