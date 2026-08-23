@@ -108,7 +108,7 @@ export function ToggleSwitch({ checked, onChange, disabled }: { checked: boolean
 
 export function NativeSetting({ label, description, scope, badge, searchId, control, children }: {
   label: string;
-  description: string;
+  description?: string;
   /** Where the value lives when it is not the harness's own config file. The
    * common case carries no chip: badging the majority is noise. */
   scope?: "Cody only" | "Workspace";
