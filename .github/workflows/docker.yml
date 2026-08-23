@@ -164,6 +164,31 @@ jobs:
           docker exec cody-smoke sh -c 'test -x "$(dirname "$(readlink -f /data/agent/tools/bin/hermes)")/python"' \
             || fail "uv install: no venv python beside the hermes shim — the settings panel derives its schema from there"
 
+          # The remaining three. Cody ships five engines and the owner uses
+          # more than one, so a gate that only ever proved two was proving the
+          # wrong thing. pi rides the same rpc dialect as omp with a different
+          # --mode; claude and codex each install TWO packages — the ACP
+          # adapter plus the real engine CLI, joined by an env override — and
+          # that two-package path exists ONLY on this route, so nothing else
+          # would catch it breaking.
+          for engine in pi claude codex; do
+            code=$(curl -s -o /tmp/eng-body -w '%{http_code}' -b /tmp/smoke-cookies \
+              -H 'Content-Type: application/json' -d "{\"id\":\"$engine\"}" \
+              --max-time 420 \
+              http://127.0.0.1:30177/api/engines/install || echo 000)
+            [ "$code" = "200" ] || fail "engine install: $engine expected 200, got $code ($(cat /tmp/eng-body))"
+            grep -q '"installed":true' /tmp/eng-body \
+              || fail "engine install: $engine did not report installed ($(cat /tmp/eng-body))"
+          done
+          # The companion CLIs, not just the adapters. `--os=none --cpu=none`
+          # suppresses the adapter's own bundled binary on purpose, so if
+          # installAlso ever stops running these are simply absent and every
+          # turn dies at runtime with the adapter reporting a healthy version.
+          docker exec cody-smoke test -x /data/agent/tools/bin/claude \
+            || fail "engine install: claude-agent-acp installed without the Claude CLI beside it"
+          docker exec cody-smoke test -x /data/agent/tools/bin/codex \
+            || fail "engine install: codex-acp installed without the Codex CLI beside it"
+
           # Does each engine actually START on the transport Cody says it
           # uses? Everything above proves the INSTALL; this proves the engine
           # comes up — an ACP engine through initialize + session/new, an
@@ -172,10 +197,10 @@ jobs:
           # protocol bump, or an engine silently left on the wrong transport
           # shows itself, and none of it needs credentials.
           #
-          # Runs here, with BOTH engines installed and before the uninstall
-          # below removes one. --require names them because they were just
-          # installed: "not installed" would mean the install lied.
-          docker exec cody-smoke sh -c 'cd /app && node scripts/engine-bringup.mjs --require omp,hermes' \
+          # Runs here, with ALL FIVE installed and before the uninstall below
+          # removes one. --require names them because they were just installed:
+          # "not installed" would mean the install lied.
+          docker exec cody-smoke sh -c 'cd /app && node scripts/engine-bringup.mjs --require omp,pi,claude,codex,hermes' \
             || fail "engine bring-up: an installed engine does not start on its declared transport"
 
           # Uninstall must use the manager that installed it. npm against a
