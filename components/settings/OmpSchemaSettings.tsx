@@ -4,7 +4,7 @@ import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "r
 import { AlertCircle, RefreshCw, RotateCcw } from "lucide-react";
 import { HOST_CONDITIONS, SETTING_CONDITIONS, isConditionSatisfied, type HostFacts } from "@/lib/omp/settings-conditions";
 import type { OmpSetting, OmpSettingOption, OmpSettingsSchema } from "@/lib/omp/settings-schema";
-import { NativeSetting, SettingsHighlightContext, TERMINAL_ONLY_BADGE, ToggleSwitch, nativeInputStyle, nativeOptionStyle, nativeSelectStyle } from "./primitives";
+import { NativeSetting, READ_ONLY_BADGE, SettingsHighlightContext, TERMINAL_ONLY_BADGE, ToggleSwitch, nativeInputStyle, nativeOptionStyle, nativeSelectStyle } from "./primitives";
 
 /**
  * Renders OMP's settings from OMP's own schema: its tabs, its section order,
@@ -319,7 +319,11 @@ function SchemaSettingRow({ setting, value, overridden, onChange }: {
   overridden: boolean;
   onChange: (value: OmpSettingValue | null) => void;
 }) {
-  const description = [setting.description, setting.condition ? describeCondition(setting.condition) : null]
+  const description = [
+    setting.description,
+    setting.condition ? describeCondition(setting.condition) : null,
+    setting.readOnly ? setting.readOnlyReason : null,
+  ]
     .filter(Boolean)
     .join(" ");
   const control = <SchemaControl setting={setting} value={value} onChange={onChange} />;
@@ -333,14 +337,14 @@ function SchemaSettingRow({ setting, value, overridden, onChange }: {
       // carried a description (omp's do); Hermes declares none, which made it
       // every row.
       description={description || undefined}
-      badge={setting.terminalOnly ? TERMINAL_ONLY_BADGE : undefined}
+      badge={setting.readOnly ? READ_ONLY_BADGE : (setting.terminalOnly ? TERMINAL_ONLY_BADGE : undefined)}
       searchId={`omp-${setting.key}`}
       control={
         <>
           {!inline && control}
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
             <code style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono, monospace)", minWidth: 0, overflowWrap: "anywhere" }}>{setting.key}</code>
-            {overridden && (
+            {overridden && !setting.readOnly && (
               <button
                 type="button"
                 onClick={() => onChange(null)}
@@ -364,6 +368,8 @@ function SchemaControl({ setting, value, onChange }: {
   value: OmpSettingValue | undefined;
   onChange: (value: OmpSettingValue) => void;
 }) {
+  if (setting.readOnly) return <ReadOnlyValue setting={setting} value={value} />;
+
   if (setting.type === "boolean") {
     return <ToggleSwitch checked={value === true} onChange={onChange} />;
   }
@@ -428,6 +434,25 @@ function SchemaControl({ setting, value, onChange }: {
       onChange={(event) => onChange(event.target.value)}
       style={{ ...nativeInputStyle, width: "100%" }}
     />
+  );
+}
+
+/** A setting the engine will not let Cody write. The value is still worth
+ * showing — the user needs to know what the engine is actually configured
+ * with — but the control is static, since a save that always fails is a
+ * worse answer than an honest read-only row. */
+function ReadOnlyValue({ setting, value }: { setting: OmpSetting; value: OmpSettingValue | undefined }) {
+  const text = Array.isArray(value)
+    ? (value.length > 0 ? value.join("\n") : "(empty)")
+    : (value === undefined || value === "" ? "(unset)" : String(value));
+  return (
+    <pre
+      aria-label={setting.label}
+      aria-readonly="true"
+      style={{ ...nativeInputStyle, width: "100%", margin: 0, whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontFamily: "var(--font-mono, monospace)", color: "var(--text-muted)", background: "var(--bg-subtle, transparent)" }}
+    >
+      {text}
+    </pre>
   );
 }
 
