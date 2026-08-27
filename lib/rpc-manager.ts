@@ -1011,6 +1011,10 @@ export class AgentSessionWrapper {
       resolveOutput = resolve;
       rejectOutput = reject;
     });
+    // The timeout, destroy, and sendCommand-failure paths all reject this
+    // promise while the only `await output` (success path) may never run —
+    // swallow the orphan so it cannot surface as an unhandledRejection.
+    void output.catch(() => {});
     const waiter = {
       resolve: resolveOutput,
       reject: rejectOutput,
