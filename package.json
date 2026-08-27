@@ -1,7 +1,7 @@
 {
   "name": "@nphil/cody",
-  "version": "0.12.0",
-  "description": "Cody \u2014 a local web workspace for the oh-my-pi (omp) coding agent",
+  "version": "0.12.1",
+  "description": "Cody — a local web workspace for the oh-my-pi (omp) coding agent",
   "homepage": "https://github.com/nphil/Cody#readme",
   "repository": {
     "type": "git",
