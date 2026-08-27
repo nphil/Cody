@@ -239,7 +239,11 @@ export function extractSubagentHistory(sessionFilePath: string): SubagentHistory
       entry.transcriptAvailable = true;
     }
   }
-  return roster.sort((a, b) => a.index - b.index || a.id.localeCompare(b.id));
+  // File-walk order IS chronological: task toolResults land in the parent
+  // session in completion order, and within one call progress[] is already
+  // index-ordered. Sorting by `index` here would interleave turns (the index
+  // restarts at 0 for every task call), scrambling "most recent" downstream.
+  return roster;
 }
 
 /** Cap on transcript bytes materialized for the dialog (files are small). */

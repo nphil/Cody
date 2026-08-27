@@ -265,21 +265,21 @@ test("selectVisibleSubagents orders stably and caps all-terminal rosters", async
     "completed", "failed", "started", "completed", "aborted", "started",
     "completed", "completed", "started", "failed", "completed", "started",
   ]);
-  // Expanded: full roster, actives first, both groups keep incoming order.
+  // Expanded: full roster, actives first (incoming order), terminals newest-first.
   assert.deepEqual(
     selectVisibleSubagents(mixed, true).map((subagent) => subagent.id),
-    ["s3", "s6", "s9", "s12", "s1", "s2", "s4", "s5", "s7", "s8", "s10", "s11"],
+    ["s3", "s6", "s9", "s12", "s11", "s10", "s8", "s7", "s5", "s4", "s2", "s1"],
   );
   // Collapsed: actives claim slots, most recent terminals fill the rest.
   assert.deepEqual(
     selectVisibleSubagents(mixed, false).map((subagent) => subagent.id),
-    ["s3", "s6", "s9", "s12", "s8", "s10", "s11"],
+    ["s3", "s6", "s9", "s12", "s11", "s10", "s8"],
   );
   // All-terminal rosters keep the same seven-chip cap: the most recent seven.
   const settled = roster(Array.from({ length: 10 }, () => "completed"));
   assert.deepEqual(
     selectVisibleSubagents(settled, false).map((subagent) => subagent.id),
-    ["s4", "s5", "s6", "s7", "s8", "s9", "s10"],
+    ["s10", "s9", "s8", "s7", "s6", "s5", "s4"],
   );
   // More actives than slots: the first seven actives win.
   const busy = roster(Array.from({ length: 9 }, () => "started"));

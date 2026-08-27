@@ -84,7 +84,7 @@ export function TodoList({ phases = [], collapsible = false, defaultExpanded = f
       )}
       {!collapsed && (
         <>
-      <div className="grid gap-3 px-3 py-2.5">
+      <div className="grid gap-3 px-3 py-2.5" style={{ maxHeight: "min(40vh, 320px)", overflowY: "auto" }}>
         {displayedPhases.map((phase, phaseIndex) => (
           <div key={phase.id ?? `${phase.name}-${phaseIndex}`} className="grid gap-1.5">
             <div className="text-[11px] font-medium text-text-muted">{phase.name}</div>

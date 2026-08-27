@@ -1086,7 +1086,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
         byId.set(entry.id, { ...existing, ...entry });
       }
-      return [...byId.values()].sort((a, b) => a.index - b.index || a.id.localeCompare(b.id));
+      // Preserve insertion order (chronological): history arrives file-ordered,
+      // live frames arrive as they happen, and existing entries keep their
+      // position on update. Sorting by `index` would interleave turns, since
+      // omp restarts the index for every task call.
+      return [...byId.values()];
     });
   }, []);
 
