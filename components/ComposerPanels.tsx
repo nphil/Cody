@@ -125,14 +125,15 @@ function SubagentActivityLine({ subagent }: { subagent: SubagentInfo }) {
  * "Show all" toggle. */
 const MAX_VISIBLE_SUBAGENTS = 7;
 
-/** Roster display order: agents still working (`started`) come first in
- * incoming (chronological) order, settled ones (completed / failed / aborted)
- * after, newest first — so the freshest results sit next to the actives and
- * old runs sink to the bottom. When `showAll` is off and the roster exceeds
- * `MAX_VISIBLE_SUBAGENTS`, actives claim the visible slots first and the
- * remainder is filled with the most recent terminal agents. */
+/** Roster display order: newest first, running before settled. Agents still
+ * working (`started`) lead the list — most recently spawned first — and
+ * settled ones (completed / failed / aborted) follow, also newest first, so
+ * the freshest activity is always at the TOP and old runs sink. When
+ * `showAll` is off and the roster exceeds `MAX_VISIBLE_SUBAGENTS`, actives
+ * claim the visible slots first and the remainder is filled with the most
+ * recent terminal agents. */
 export function selectVisibleSubagents(subagents: SubagentInfo[], showAll: boolean): SubagentInfo[] {
-  const active = subagents.filter((subagent) => subagent.status === "started");
+  const active = subagents.filter((subagent) => subagent.status === "started").reverse();
   const terminal = subagents.filter((subagent) => subagent.status !== "started").reverse();
   if (showAll || subagents.length <= MAX_VISIBLE_SUBAGENTS) return [...active, ...terminal];
   const visibleActive = active.slice(0, MAX_VISIBLE_SUBAGENTS);

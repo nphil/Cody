@@ -45,9 +45,7 @@ import {
   parseSubagentProgress,
   parseSubagentSnapshot,
   type SubagentActivityEvent,
-  type SubagentHistoryEntry,
   type SubagentInfo,
-  type SubagentProgress,
   type SubagentSnapshotLike,
 } from "@/lib/subagent-types";
 
@@ -133,44 +131,6 @@ function pruneSubagentIdMap<T>(map: Record<string, T>): Record<string, T> {
   return next;
 }
 
-/** Convert a recovered on-disk history entry into roster form. */
-function historyEntryToSubagentInfo(entry: SubagentHistoryEntry): SubagentInfo {
-  const info: SubagentInfo = {
-    id: entry.id,
-    agent: entry.agent,
-    agentSource: entry.agentSource,
-    description: entry.description,
-    status: entry.status,
-    task: entry.task,
-    assignment: entry.assignment,
-    index: entry.index,
-    sessionFile: entry.sessionFile,
-    source: "history",
-    detached: entry.detached,
-    result: entry.result,
-  };
-  const progress: SubagentProgress = {
-    status: entry.status === "started" ? "running" : entry.status,
-    task: entry.task,
-    assignment: entry.assignment,
-    description: entry.description,
-    lastIntent: entry.lastIntent,
-    toolCount: entry.toolCount,
-    requests: entry.requests,
-    tokens: entry.tokens,
-    contextTokens: entry.contextTokens,
-    contextWindow: entry.contextWindow,
-    cost: entry.cost,
-    durationMs: entry.durationMs,
-    modelOverride: entry.modelOverride,
-    modelRole: entry.modelRole,
-    resolvedModel: entry.resolvedModel,
-    resolvedModelIsFallback: entry.resolvedModelIsFallback,
-    retryFailure: entry.retryFailure,
-  };
-  info.progress = progress;
-  return info;
-}
 
 interface CompactCommandResult {
   tokensBefore?: number;
@@ -904,6 +864,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // While set, follow scrolls stay instant; the layout effect below consumes
   // it on the reload's commit to re-pin before that commit paints.
   const completionRepinFromRef = useRef<AgentMessage[] | null>(null);
+  // Reader's scroll offset captured when a terminal reload is armed while
+  // the user is scrolled up (NOT following). The re-pin layout effect
+  // restores it across the reload commit — without this, the wholesale
+  // `messages` replacement re-realizes every turn's content-visibility
+  // placeholder and the kept scrollTop lands on shifted content, which is
+  // the "completion ding threw me way up the transcript" bug.
+  const completionScrollAnchorRef = useRef<number | null>(null);
   const executeBashRef = useRef<(command: string, excludeFromContext: boolean) => Promise<void> | undefined>(undefined);
   const userScrollIntentUntilRef = useRef(0);
   const ignoreProgrammaticScrollUntilRef = useRef(0);
@@ -1076,50 +1043,49 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const existing = byId.get(entry.id);
         if (existing && skipNewerThan !== undefined && (existing.lastUpdate ?? 0) >= skipNewerThan) continue;
         if (!existing) {
-          byId.set(entry.id, entry);
-          continue;
-        }
-        if (entry.source === "history" && existing.source !== "history") continue;
-        if (entry.source !== "history" && existing.source === "history") {
+          // A terminal frame for an id this roster never saw, landing outside
+          // a run (late detached completion, out-of-order frame), is
+          // archaeology: adding it would resurrect a chip the run-end prune
+          // just removed. A *running* subagent is always adopted.
+          if (entry.status !== "started" && !agentRunningRef.current) continue;
           byId.set(entry.id, entry);
           continue;
         }
         byId.set(entry.id, { ...existing, ...entry });
       }
-      // Preserve insertion order (chronological): history arrives file-ordered,
-      // live frames arrive as they happen, and existing entries keep their
-      // position on update. Sorting by `index` would interleave turns, since
-      // omp restarts the index for every task call.
+      // Preserve insertion order (chronological): live frames arrive as they
+      // happen and existing entries keep their position on update. Sorting by
+      // `index` would interleave task calls, since omp restarts the index for
+      // every call.
       return [...byId.values()];
     });
   }, []);
 
-  // Recover the ON-DISK roster from the parent session's task toolResults.
-  // Survives page reloads and shows finished runs from previous sessions.
-  const refreshSubagentHistory = useCallback(async (sid: string) => {
-    // Same gate as refreshSubagentRoster below: an engine with no subagent
-    // vocabulary has no roster to recover, and this fired on EVERY
-    // loadSession — a per-session request that could only ever answer empty.
+  // Subagent usage summed server-side from the children's own transcripts.
+  // A fresh snapshot, not a delta: the route re-sums every child transcript
+  // on each call, so this REPLACES the running total — it sharpens while
+  // children work and settles at run end. The roster itself is deliberately
+  // NOT recovered from disk: the composer panel is a live view of the
+  // CURRENT run, and seeding it with every subagent the session ever ran is
+  // what bloated long conversations to 20+ stale chips. Past runs stay
+  // reachable through each task call's in-message summary (TaskResultPanel).
+  const refreshSubagentUsage = useCallback(async (sid: string) => {
+    // Engines with no subagent vocabulary have nothing to sum, and this
+    // fired on EVERY loadSession — a request that could only answer empty.
     if (opts.subagentsCapable === false) return;
     const generation = subagentRosterGenerationRef.current;
     try {
       const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/subagents`);
       if (!res.ok) return;
-      const data = await res.json() as { subagents?: SubagentHistoryEntry[]; subagentUsage?: UsageTotals | null };
+      const data = await res.json() as { subagentUsage?: UsageTotals | null };
       // Fence AFTER the awaited json: the session or roster generation may
       // have changed while the response was in flight.
       if (sessionIdRef.current !== sid || subagentRosterGenerationRef.current !== generation) return;
-      const entries = (data.subagents ?? []).map(historyEntryToSubagentInfo);
-      mergeSubagents(entries);
-      // A fresh snapshot, not a delta: the route re-sums every child transcript
-      // on each call, so this replaces the running total rather than adding to
-      // it. Live children's transcripts grow while they work, so the figure
-      // sharpens with each refresh and settles at run end.
       setSubagentUsage(data.subagentUsage ?? null);
     } catch {
-      // Best effort; live frames take precedence while a run is active.
+      // Best effort; the headline just misses child usage until the next call.
     }
-  }, [mergeSubagents, opts.subagentsCapable]);
+  }, [opts.subagentsCapable]);
 
   // Hydrate the LIVE roster from get_subagents. The registry only holds
   // currently-running subagents, so this fills gaps after an SSE reconnect or
@@ -1157,14 +1123,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const next = prev.filter((s) => s.source !== "live" || liveIds.has(s.id) || (s.lastUpdate ?? 0) >= requestedAt);
         return next.length === prev.length ? prev : next;
       });
-      // Mid-run disk history can gain completed task calls that live frames
-      // missed (a child finishing before the subscription attached is deleted
-      // from the registry) — re-check so such children appear before agent_end.
-      void refreshSubagentHistory(sid);
+      // Child transcripts grew while this ran — refresh the usage headline.
+      void refreshSubagentUsage(sid);
     } catch {
       // Best effort: subagent_lifecycle/progress frames are the primary source.
     }
-  }, [mergeSubagents, refreshSubagentHistory, opts.subagentsCapable]);
+  }, [mergeSubagents, refreshSubagentUsage, opts.subagentsCapable]);
 
   // Clear per-run activity state at run end. MUST also cancel the pending
   // version-flush rAF: a queued subagent_event flush would otherwise repopulate
@@ -1334,9 +1298,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setMessages(d.context.messages);
       setEntryIds(d.context.entryIds ?? []);
       setTodoPhases(d.context.todoPhases ?? []);
-      // Recover on-disk subagent history (task toolResults) for this session —
-      // populates the composer roster for finished/past runs.
-      void refreshSubagentHistory(sid);
+      // Child-transcript usage for the headline. The roster is NOT seeded
+      // from history — it is a live view of the current run only.
+      void refreshSubagentUsage(sid);
       setCurrentModelOverride(null);
       setError(null);
       if (d.context.thinkingLevel && d.context.thinkingLevel !== "off") {
@@ -1412,7 +1376,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (showLoading && !messagesLoaded) setLoading(false);
     }
-  }, [refreshSubagentHistory, applyAuthoritativeModel, beginAuthoritativeModelSync, adoptPermissionRequests, adoptSessionModels]);
+  }, [refreshSubagentUsage, applyAuthoritativeModel, beginAuthoritativeModelSync, adoptPermissionRequests, adoptSessionModels]);
 
   const loadContext = useCallback(async (sid: string, leafId: string | null) => {
     const seq = ++contextRequestSeqRef.current;
@@ -1990,10 +1954,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // must not overwrite the messages of the run currently streaming.
     if (runId !== undefined && promptRunIdRef.current !== runId) return;
     try {
-      // The reload below replaces `messages` wholesale; if the user is
-      // following, the follow logic must re-pin instantly through the reflow
-      // (see the terminal re-pin effect) — a smooth scroll would race it.
-      completionRepinFromRef.current = completionScrollAllowedRef.current ? messagesRef.current : null;
+      // The reload below replaces `messages` wholesale. A follower must be
+      // re-pinned instantly through the reflow; a reader scrolled up must
+      // keep the exact offset (see the terminal re-pin effect).
+      completionRepinFromRef.current = messagesRef.current;
+      completionScrollAnchorRef.current = completionScrollAllowedRef.current
+        ? null
+        : scrollContainerRef.current?.scrollTop ?? null;
       // Pass the fence into loadSession: the pre-check above only guards the
       // start — a next prompt that begins while the reload is in flight must
       // not be overwritten by the finished run's snapshot.
@@ -2012,14 +1979,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // Bound per-run activity state: without this, subagentEvents and the
       // transcript-version map retain one entry per subagent id forever.
       resetSubagentActivityState();
-      // loadSession above already hydrated on-disk history, but it may have
-      // resolved BEFORE this clear — re-issue so finished runs repopulate the
-      // roster (merge is idempotent).
-      if (sid) void refreshSubagentHistory(sid);
+      // The run is over: the roster stays EMPTY (still-working detached
+      // children re-adopt themselves through their live frames). Only the
+      // usage headline is refreshed from the settled child transcripts.
+      if (sid) void refreshSubagentUsage(sid);
       dispatch({ type: "end" });
       onAgentEnd?.();
     }
-  }, [loadSession, onAgentEnd, refreshSubagentHistory, resetSubagentActivityState]);
+  }, [loadSession, onAgentEnd, refreshSubagentUsage, resetSubagentActivityState]);
 
   // The engine restarted (container restart, crash) while this client was
   // waiting for a turn: the resumed engine is idle and no agent_end will ever
@@ -2343,14 +2310,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setAgentPhase(null);
         setRetryInfo(null);
         setSubagents([]);
-      subagentRosterGenerationRef.current += 1;
+        subagentRosterGenerationRef.current += 1;
         resetSubagentActivityState();
         dispatch({ type: "end" });
         if (endedSid) {
-          // Same contract as finishPromptWithoutStream: arm the terminal
-          // re-pin before the reload so a smooth scroll never races the
-          // content-visibility reflow of the reloaded transcript.
-          completionRepinFromRef.current = completionScrollAllowedRef.current ? messagesRef.current : null;
+          // Same contract as finishPromptWithoutStream: re-pin a follower,
+          // anchor a reader, before the reload's content-visibility reflow.
+          completionRepinFromRef.current = messagesRef.current;
+          completionScrollAnchorRef.current = completionScrollAllowedRef.current
+            ? null
+            : scrollContainerRef.current?.scrollTop ?? null;
           void loadSession(endedSid, false, false, endedRunId);
           const endToken = beginAuthoritativeModelSync();
           fetch(`/api/agent/${encodeURIComponent(endedSid)}`)
@@ -3817,19 +3786,38 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // re-enters a `.chat-turn` wrapper whose content-visibility placeholder
   // only realizes its true height as it paints. A smooth scroll issued
   // against the pre-reload geometry animates toward a stale offset and lands
-  // mid-conversation. If the user was following when the run ended, pin the
-  // viewport back to the bottom before this commit paints, and once more a
-  // frame later after realized heights settle. A user who scrolled up
-  // (completionScrollAllowedRef === false) is left alone.
+  // mid-conversation. Two cases, both handled before this commit paints and
+  // once more a frame later after realized heights settle:
+  //  - the user was FOLLOWING: pin the viewport back to the bottom;
+  //  - the user was READING (scrolled up): restore the exact scrollTop the
+  //    arming site captured. Reading means they want to stay exactly there —
+  //    a completion must never move them. The per-turn intrinsic-size
+  //    estimates make the above-viewport geometry reproducible across the
+  //    reload, so the restored offset shows the same content.
+  // A fresh user wheel/keyboard scroll always wins over the re-assert.
   useLayoutEffect(() => {
     const from = completionRepinFromRef.current;
     if (from === null || from === messages) return;
     completionRepinFromRef.current = null;
-    if (!completionScrollAllowedRef.current) return;
-    scrollToBottom("instant");
-    requestAnimationFrame(() => {
-      if (completionScrollAllowedRef.current) scrollToBottom("instant");
-    });
+    const anchor = completionScrollAnchorRef.current;
+    completionScrollAnchorRef.current = null;
+    if (completionScrollAllowedRef.current) {
+      scrollToBottom("instant");
+      requestAnimationFrame(() => {
+        if (completionScrollAllowedRef.current) scrollToBottom("instant");
+      });
+      return;
+    }
+    if (anchor === null) return;
+    const restore = () => {
+      if (Date.now() <= userScrollIntentUntilRef.current) return;
+      const container = scrollContainerRef.current;
+      if (!container) return;
+      ignoreProgrammaticScrollUntilRef.current = Date.now() + PROGRAMMATIC_SCROLL_IGNORE_MS;
+      container.scrollTop = anchor;
+    };
+    restore();
+    requestAnimationFrame(restore);
   }, [messages, scrollToBottom]);
 
   useEffect(() => () => {

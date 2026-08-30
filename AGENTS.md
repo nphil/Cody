@@ -1147,24 +1147,33 @@ handled or safely ignored.
   (`⟳ retrying N/M`) takes precedence over the tool line. `subagent_event`
   frames also feed a bounded per-subagent activity buffer shown in the
   transcript dialog.
-- **Roster hydration**: `get_subagents` snapshots (which carry progress)
-  rehydrate the roster after SSE reconnect (`refreshSubagentRoster`, wired
-  into mount, send, and the reconcile poll). Terminal subagents vanish from
-  the RPC registry — history fills that gap.
+- **The roster is run-scoped, on purpose** (`useAgentSession`): the composer
+  panel is a live view of the CURRENT run, newest activity first (actives
+  lead, then settled, both newest-first — `selectVisibleSubagents`). It is
+  NEVER seeded from on-disk history: run end clears it to empty and it stays
+  empty (still-working detached children re-adopt themselves through their
+  live frames; `mergeSubagents` refuses terminal frames for unknown ids
+  outside a run so late completions cannot resurrect chips). Seeding from
+  `extractSubagentHistory` is the removed design that bloated long
+  conversations to 20+ stale chips — do not bring it back; past runs stay
+  reachable through each task call's in-message summary (TaskResultPanel).
+  `get_subagents` snapshots still rehydrate the LIVE roster after SSE
+  reconnect (`refreshSubagentRoster`, wired into mount, send, and the
+  reconcile poll); the `/subagents` route is now consumed only for its
+  `subagentUsage` sum (`refreshSubagentUsage`).
 - **On-disk history** (`lib/subagent-history.ts`, `/api/sessions/[id]/subagents*`):
   omp persists each subagent's transcript to the parent session's sibling
   artifacts dir (`<session-dir>/<subagent-id>.jsonl`) and the parent file's
-  task toolResults keep `progress[]`/`results[]` snapshots. Cody recovers
-  the roster from disk (`extractSubagentHistory`, result fields win over the
-  mid-run snapshot), so past/finished runs show in the composer panel after a
-  reload. The transcript route pages the sibling file byte-wise (mirroring
-  `get_subagent_messages`, which is RPC-registry-gated and refuses files it
-  doesn't know). The dialog reads only the final output — `<id>.md` via
-  `?mode=completion` (bounded tail read that also works for transcripts
-  beyond the 16MB paging cap) with a live `get_subagents` snapshot fallback
-  for header enrichment; it never pages the raw transcript. Subagent ids are
-  `[A-Za-z0-9_-]{1,80}` — the route validates before joining to confine reads
-  to the sibling dir.
+  task toolResults keep `progress[]`/`results[]` snapshots
+  (`extractSubagentHistory` still reads them for the route's roster payload
+  and usage sum). The transcript route pages the sibling file byte-wise
+  (mirroring `get_subagent_messages`, which is RPC-registry-gated and
+  refuses files it doesn't know). The dialog reads only the final output —
+  `<id>.md` via `?mode=completion` (bounded tail read that also works for
+  transcripts beyond the 16MB paging cap) with a live `get_subagents`
+  snapshot fallback for header enrichment; it never pages the raw
+  transcript. Subagent ids are `[A-Za-z0-9_-]{1,80}` — the route validates
+  before joining to confine reads to the sibling dir.
 - **In-message task summary** (`components/MessageView.tsx` TaskResultPanel):
   the session reader allowlists a SIZE-BOUNDED subset of `task` toolResult
   details (telemetry only — no `output`/`stderr`, long text truncated to
@@ -1244,6 +1253,15 @@ handled or safely ignored.
 - A manual scroll-up sets `completionScrollAllowedRef = false` and disables
   following until the next prompt; `scrollUserMsgToTop` handles the
   pending-scroll after sending.
+- **A completion never moves a reader.** The terminal reload replaces
+  `messages` wholesale and every turn re-realizes its content-visibility
+  placeholder, so a reader's kept scrollTop would land on shifted content —
+  the "completion ding scrolled me way up" bug. The arming sites
+  (finishPromptWithoutStream, agent_end) capture the reader's scrollTop in
+  `completionScrollAnchorRef`; the terminal re-pin layout effect restores it
+  pre-paint and once more a frame later (followers get pinned to the bottom
+  instead, as before). A fresh user wheel/keyboard scroll always wins over
+  the re-assert.
 - Programmatic smooth scrolling must respect `prefers-reduced-motion`
   (`usePrefersReducedMotion` in `hooks/usePrefersReducedMotion.ts` — also the
   only way to stop SVG SMIL animations, which CSS cannot).
