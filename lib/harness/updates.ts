@@ -63,7 +63,7 @@ export interface EngineUpdateStatus {
    * is more than one. Empty for a single-package engine — the headline
    * already says everything there is to say. */
   components: EngineComponentStatus[];
-  /** Label for the package `verifiedMajor` and `installedVersion` describe
+  /** Label for the package `verifiedVersion` and `installedVersion` describe
    * ("Claude Code ACP adapter"), so the compat notice cannot be read as a
    * claim about the CLI's unrelated major. Null for single-package engines,
    * where the engine's own name is already the right subject. */
@@ -80,12 +80,15 @@ export interface EngineUpdateStatus {
    * so a healthy engine never pays for the extra probe. */
   probeError: string | null;
   /** The registry's latest is a bigger major than this Cody build has been
-   * exercised against (adapter.verifiedMajor) — the update card warns before
-   * the jump instead of after it. */
+   * exercised against (adapter.verifiedVersion) — the update card warns
+   * before the jump instead of after it. */
   latestBeyondVerified: boolean;
   /** The installed binary is already past the verified major — the row keeps
    * a visible marker that Cody may not surface everything this engine can do. */
   installedBeyondVerified: boolean;
+  /** The exact version this Cody build was audited against (the package
+   * `installSpec` names), shown on the engine card. Null when unmarked. */
+  verifiedVersion: string | null;
 }
 
 // Lives in ./install (which owns the spec) and is re-exported here because
@@ -103,9 +106,10 @@ export function majorVersionOf(version: string | null): number | null {
  * notice exists for a provable jump, not as ambient anxiety. */
 export function isBeyondVerifiedMajor(
   version: string | null,
-  verifiedMajor: number | undefined,
+  verifiedVersion: string | undefined,
 ): boolean {
-  if (verifiedMajor === undefined) return false;
+  const verifiedMajor = majorVersionOf(verifiedVersion ?? null);
+  if (verifiedMajor === null) return false;
   const major = majorVersionOf(version);
   return major !== null && major > verifiedMajor;
 }
@@ -245,8 +249,9 @@ export async function engineUpdateStatus(
     previousVersion: revertsSomething ? previous : null,
     previousEngineVersion: revertsSomething ? previousEngine : null,
     probeError: binary ? (await probeEngineVersion(binary, adapter.versionArgs)).error : null,
-    latestBeyondVerified: isBeyondVerifiedMajor(latestVersion, adapter.verifiedMajor),
-    installedBeyondVerified: isBeyondVerifiedMajor(installedVersion, adapter.verifiedMajor),
+    latestBeyondVerified: isBeyondVerifiedMajor(latestVersion, adapter.verifiedVersion),
+    installedBeyondVerified: isBeyondVerifiedMajor(installedVersion, adapter.verifiedVersion),
+    verifiedVersion: adapter.verifiedVersion ?? null,
   };
 }
 

@@ -69,6 +69,9 @@ export const piHarness: HarnessAdapter = {
   tagline: "The pi.dev coding agent — omp's ancestor, driven over its native RPC mode.",
   experimental: true,
   installSpec: "@mariozechner/pi-coding-agent@latest",
+  // Exercised through the shared rpc-dialect transport (engine bring-up runs
+  // it on every image build) — the version those runs last audited.
+  verifiedVersion: "0.73.1",
   authHint:
     "Run `pi` once in a Cody terminal to configure a provider, or set provider API keys (ANTHROPIC_API_KEY, OPENAI_API_KEY, …) on the container.",
   capabilities: {

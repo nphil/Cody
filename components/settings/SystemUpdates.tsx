@@ -674,10 +674,10 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
           // Cody build was verified against: warn before the jump, mark after
           // it. Core surfaces keep working — the point is that brand-new
           // engine features may not show up in Cody until Cody updates.
-          // `verifiedMajor` is a major of the package Cody installs, which for
-          // a two-package engine is the ADAPTER — a different number line from
-          // the CLI's. Naming the adapter keeps the sentence from reading as a
-          // claim about "Claude Code v1.0.0" when Claude Code is on 2.1.x.
+          // `verifiedVersion` is a version of the package Cody installs, which
+          // for a two-package engine is the ADAPTER — a different number line
+          // from the CLI's. Naming the adapter keeps the sentence from reading
+          // as a claim about "Claude Code v1.0.0" when Claude Code is on 2.1.x.
           const compatSubject = status?.adapterLabel ?? engine.name;
           const compatVersion = status?.latestVersion ?? null;
           const compatWarning = canManage && status?.latestBeyondVerified && updateAvailable === true && compatVersion
@@ -700,6 +700,15 @@ export function SystemUpdates({ cwd, capabilities, onOmpUpdateAvailabilityChange
                   >
                     <TriangleAlert size={10} aria-hidden="true" style={{ flexShrink: 0, marginRight: 3, verticalAlign: "-1px" }} />
                     {t("updates.engines.aheadChip")}
+                  </span>
+                )}
+                {engine.verifiedVersion && (
+                  <span
+                    style={{ ...chipStyle, color: "var(--text-dim)" }}
+                    title={t("updates.engines.verifiedTitle", { name: engine.adapterLabel ?? engine.name, version: engine.verifiedVersion })}
+                    aria-label={t("updates.engines.verifiedTitle", { name: engine.adapterLabel ?? engine.name, version: engine.verifiedVersion })}
+                  >
+                    {t("updates.engines.verifiedChip", { version: engine.verifiedVersion })}
                   </span>
                 )}
                 <span style={{ flex: 1 }} />

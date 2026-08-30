@@ -1309,6 +1309,8 @@
   "updates.engines.updateFailed": "无法更新 {name}",
   "updates.engines.updateTo": "更新到 v{version}",
   "updates.engines.updated": "{name} 已更新",
+  "updates.engines.verifiedChip": "适配 v{version}",
+  "updates.engines.verifiedTitle": "此 Cody 构建最后针对 {name} v{version} 完成验证。更新的引擎版本仍可正常使用，但引擎的新功能可能要等 Cody 自身更新后才会出现。",
   "updates.notice.appTitle": "Cody 有可用更新",
   "updates.notice.engineTitle": "{name} 有可用更新",
   "updates.omp.changelog": "查看更新日志",

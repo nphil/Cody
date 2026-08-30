@@ -59,6 +59,9 @@ export const hermesHarness: HarnessAdapter = {
   // installed", i.e. an engine that looks healthy and cannot start.
   installSpec: "hermes-agent[acp]",
   installVia: "uv",
+  // Measured against live Hermes 0.19.0: ACP model surface, skills tree,
+  // settings-schema derivation, and the [acp] extra's entry point.
+  verifiedVersion: "0.19.0",
   // `hermes --version` prints a report whose lines include "Python: 3.11.15";
   // a first-match version scan would report the PYTHON version as the
   // engine's. The acp subcommand prints the bare number.

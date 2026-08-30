@@ -207,8 +207,9 @@ export interface RpcUiSpawn {
  * drives. Present only when those are different things.
  *
  * It exists because every number Cody already had was the ADAPTER's — the
- * version probe, the registry comparison, the revert pin, the `verifiedMajor`
- * marker — and none of them is the number a user means by "Claude Code". A
+ * version probe, the registry comparison, the revert pin, the
+ * `verifiedVersion` marker — and none of them is the number a user means by
+ * "Claude Code". A
  * card reading "Claude Code v0.70.0" beside a `claude --version` of 2.1.241
  * is not a rounding error, it is the wrong package. Naming both halves makes
  * the display honest AND gives the update check the second registry name it
@@ -217,7 +218,7 @@ export interface RpcUiSpawn {
  */
 export interface EngineCliPart {
   /** What `installSpec` itself is, wherever its version is shown —
-   * "Claude Code ACP adapter". Also the subject of the `verifiedMajor`
+   * "Claude Code ACP adapter". Also the subject of the `verifiedVersion`
    * notice, whose major belongs to this package and not to the CLI. */
   readonly adapterLabel: string;
   /** The CLI underneath, wherever ITS version is shown — "Claude Code CLI". */
@@ -333,21 +334,23 @@ export interface HarnessAdapter {
    * has no business quietly reversing.
    */
   engineEnv?(): Record<string, string>;
-  /** Newest engine MAJOR version this Cody build has been audited against.
-   * When the registry offers — or the user has installed — a later major,
-   * the System & Updates card warns that new engine features may not surface
-   * in Cody yet (schema-driven surfaces keep working; bespoke ones lag).
-   * Bump it in the same commit as the compatibility audit for that major.
-   * Absent = never warn.
+  /** Exact engine version this Cody build was last audited against — the
+   * marker for "what version of the engine was Cody built to". Its MAJOR
+   * drives the System & Updates warnings: when the registry offers — or the
+   * user has installed — a later major, the card warns that new engine
+   * features may not surface in Cody yet (schema-driven surfaces keep
+   * working; bespoke ones lag). The full string is shown on the engine's
+   * update card. Bump it in the same commit as each compatibility audit.
+   * Absent = never warn, nothing shown.
    *
-   * It is a major of the package `installSpec` names, always. For a
-   * two-package engine that is the ADAPTER's major (0 for
-   * claude-agent-acp, 1 for codex-acp) and not the CLI's (2.x, 0.x) — two
+   * It is a version of the package `installSpec` names, always. For a
+   * two-package engine that is the ADAPTER's version (0.x for
+   * claude-agent-acp, 1.x for codex-acp) and not the CLI's (2.x, 0.x) — two
    * unrelated number lines. `engineCli.adapterLabel` is what the notice names
    * for exactly that reason: "Claude Code v1.0.0 is a newer major release"
    * would be read as a claim about the CLI, which is a different package
    * moving at a different pace. */
-  readonly verifiedMajor?: number;
+  readonly verifiedVersion?: string;
   /** How to authenticate this engine, shown in the picker and engine card
    * (e.g. "Run `claude` in a Cody terminal to sign in, or set
    * ANTHROPIC_API_KEY on the container"). */

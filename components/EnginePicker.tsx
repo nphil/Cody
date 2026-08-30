@@ -37,6 +37,9 @@ export interface EngineSummary {
    * Labelled by `adapterLabel` — never shown bare, since it belongs to a
    * different package than `version`. */
   adapterVersion: string | null;
+  /** Exact `installSpec`-package version this Cody build was audited
+   * against; null when the adapter carries no marker. */
+  verifiedVersion: string | null;
   /** English labels from the adapter for those two packages ("Claude Code ACP
    * adapter", "Claude Code CLI"); null for single-package engines. Adapter
    * data, not translation keys — same as `tagline` and `authHint`. */

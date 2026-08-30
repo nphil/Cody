@@ -553,7 +553,7 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
     reading "Claude Code v0.70.0" beside a `claude --version` of 2.1.241 is
     not a rounding error. `installedVersion`/`latestVersion` stay the PACKAGE
     `installSpec` names, because that is what a revert pins and what
-    `verifiedMajor` measures.
+    `verifiedVersion` measures.
   - **The update check asks BOTH registries.** `engineCli.packageName` is the
     second lookup. The adapter goes months between releases while the CLI
     ships most days, so an adapter-only comparison reports a CLI many releases
@@ -572,21 +572,24 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   (`lib/harness/engine-bin.ts`), and an install drops every argv's answer for
   every binary, because a cache HIT never expires and the companion CLI's bin
   name is not something the installer models.
-- **`HarnessAdapter.verifiedMajor`** is the newest engine MAJOR this Cody
-  build was audited against (omp: 18, claude-agent-acp: 0, codex-acp: 1).
-  `checkEngineUpdates` compares it to
-  the latest/installed versions (`latestBeyondVerified` /
-  `installedBeyondVerified`) and System & Updates warns before — and marks
-  after — a jump past it: core surfaces keep working (settings are
-  schema-driven, unknown RPC frames are tolerated), but brand-new engine
-  features may not appear in Cody until Cody updates. Bump the marker in the
-  same commit as each major's compatibility audit. It is always a major of
-  the package `installSpec` names, so for a two-package engine it is the
-  ADAPTER's — which is why the notice names `engineCli.adapterLabel` rather
-  than the engine's brand ("Claude Code ACP adapter v1.0.0", never "Claude
-  Code v1.0.0" while Claude Code is on 2.1.x). The CLI half crossing a major
-  raises no notice today: Cody speaks to the adapter, and an ACP engine's
-  Cody surfaces are capability-gated almost entirely off.
+- **`HarnessAdapter.verifiedVersion`** is the exact engine version this Cody
+  build was last audited against — every adapter carries one (omp: 18.0.11,
+  claude-agent-acp: 0.70.0, codex-acp: 1.7.0, pi: 0.73.1, hermes: 0.19.0).
+  It is shown verbatim on the System & Updates engine card ("Built to
+  vX.Y.Z", served through `/api/engines`), and its MAJOR drives the
+  warnings: `checkEngineUpdates` compares it to the latest/installed
+  versions (`latestBeyondVerified` / `installedBeyondVerified`) and System &
+  Updates warns before — and marks after — a jump past it: core surfaces
+  keep working (settings are schema-driven, unknown RPC frames are
+  tolerated), but brand-new engine features may not appear in Cody until
+  Cody updates. Bump the marker in the same commit as each compatibility
+  audit. It is always a version of the package `installSpec` names, so for a
+  two-package engine it is the ADAPTER's — which is why the notice names
+  `engineCli.adapterLabel` rather than the engine's brand ("Claude Code ACP
+  adapter v1.0.0", never "Claude Code v1.0.0" while Claude Code is on
+  2.1.x). The CLI half crossing a major raises no notice today: Cody speaks
+  to the adapter, and an ACP engine's Cody surfaces are capability-gated
+  almost entirely off.
 - **The seam is CI-enforced** (`lib/architecture.test.mjs`): outside
   `lib/omp/` and `lib/harness/`, importing `lib/omp/*` fails the test unless
   the file is on the in-test allowlist with a written reason, stale allowlist

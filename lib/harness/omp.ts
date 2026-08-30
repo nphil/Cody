@@ -12,7 +12,9 @@ export const ompHarness: HarnessAdapter = {
   binaryName: "omp",
   tagline: "The oh-my-pi coding agent. Cody's founding engine, every surface enabled.",
   installSpec: "@oh-my-pi/pi-coding-agent@latest",
-  verifiedMajor: 18,
+  // Audited against the 18.0.11 changelog + full test suite (settings schema,
+  // rpc-utility, usage, session format) with 18.0.11 installed and live.
+  verifiedVersion: "18.0.11",
   capabilities: {
     liveSessions: true,
     models: true,

@@ -1309,6 +1309,8 @@
   "updates.engines.updateFailed": "Could not update {name}",
   "updates.engines.updateTo": "Update to v{version}",
   "updates.engines.updated": "{name} was updated",
+  "updates.engines.verifiedChip": "Built to v{version}",
+  "updates.engines.verifiedTitle": "This Cody build was last audited against {name} v{version}. Newer engine releases keep working, but brand-new engine features may not appear in Cody until Cody itself updates.",
   "updates.notice.appTitle": "Cody update available",
   "updates.notice.engineTitle": "{name} update available",
   "updates.omp.changelog": "View changelog",

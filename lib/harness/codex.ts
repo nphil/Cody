@@ -208,12 +208,12 @@ export const codexHarness: HarnessAdapter = {
   // `--version` and short-circuits, so `cli --version` reports the adapter
   // again and proves nothing. `-V` reaches Codex and prints its version.
   healthArgs: CODEX_CLI_VERSION_ARGS,
-  // The ADAPTER's major, which is the package installSpec names — not the
+  // The ADAPTER's version, which is the package installSpec names — not the
   // CLI's 0.x, which moves on its own schedule and is a different package
-  // entirely. 1.x is what Cody's ACP client has been exercised against;
+  // entirely. 1.7.0 is what Cody's ACP client has been exercised against;
   // `engineCli.adapterLabel` is what the notice names, so a 2.0 adapter reads
   // as a claim about the adapter and nothing else.
-  verifiedMajor: 1,
+  verifiedVersion: "1.7.0",
   capabilities: {
     // Verified end to end against the real adapter: initialize, session/new,
     // a prompt round trip, and session/load of a stored thread id.

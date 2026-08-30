@@ -170,12 +170,12 @@ export const claudeHarness: HarnessAdapter = {
   // is whole and throws "Claude native binary not found … or set
   // CLAUDE_CODE_EXECUTABLE" when it is not.
   healthArgs: CLAUDE_CLI_VERSION_ARGS,
-  // The ADAPTER's major, which is the package installSpec names — not the
+  // The ADAPTER's version, which is the package installSpec names — not the
   // CLI's 2.x, which moves on its own schedule and is a different package
-  // entirely. 0.70.x is what Cody's ACP client has been exercised against;
+  // entirely. 0.70.0 is what Cody's ACP client has been exercised against;
   // `engineCli.adapterLabel` is what the notice names, so a 1.0 adapter reads
   // as a claim about the adapter and nothing else.
-  verifiedMajor: 0,
+  verifiedVersion: "0.70.0",
   capabilities: {
     // Verified end to end against the real adapter: initialize, session/new,
     // a prompt round trip, a tool call, an approval, and session/load of a

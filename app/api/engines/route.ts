@@ -59,6 +59,9 @@ export async function GET(request: Request) {
           adapterVersion: adapter.engineCli ? versions[index] : null,
           adapterLabel: adapter.engineCli?.adapterLabel ?? null,
           engineCliLabel: adapter.engineCli?.label ?? null,
+          // The audited-against marker, verbatim from the adapter: the
+          // version of `installSpec`'s package this Cody build was built to.
+          verifiedVersion: adapter.verifiedVersion ?? null,
           installable: Boolean(adapter.installSpec),
           // Cody npm-installed this binary into its own tools prefix, so Cody
           // can also uninstall it. A PATH or env-override install is the

@@ -1309,6 +1309,8 @@
   "updates.engines.updateFailed": "{name} を更新できませんでした",
   "updates.engines.updateTo": "v{version} に更新",
   "updates.engines.updated": "{name} を更新しました",
+  "updates.engines.verifiedChip": "v{version} 対応版",
+  "updates.engines.verifiedTitle": "この Cody ビルドは {name} v{version} を対象に検証されています。より新しいエンジンリリースでも動作しますが、エンジンの新機能は Cody 自体が更新されるまで Cody に表示されない場合があります。",
   "updates.notice.appTitle": "Cody の更新があります",
   "updates.notice.engineTitle": "{name} の更新があります",
   "updates.omp.changelog": "変更履歴を表示",
