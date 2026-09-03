@@ -74,7 +74,7 @@ npm start              # …在 127.0.0.1:30177 提供服务（0.0.0.0 用 start
 | **Codex** | 实验性 | 与 Claude Code 相同的简洁对话界面 |
 
 - **在 UI 中安装与更新**：引导流程中的选择界面，以及 设置 → 用户账户 → Agent 引擎 都可以按需安装引擎，并为每个引擎提供**更新**按钮（omp 还在 Updates 面板和 System 标签页的版本检查旁提供一键“立即更新”）。更新当前活动的引擎会重启正在运行的会话，确保不会有会话继续使用过期的二进制文件。
-- **凭证归各引擎自己管理**：在 Cody 终端中运行一次 `claude` 或 `codex login`（状态会保存在 `/data/home` 中），或在容器上设置 `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`。omp 的提供方在设置中管理。
+- **API 密钥只需填一次**：在 设置 → API Keys & Providers 中输入一次提供商密钥（Anthropic、OpenAI、OpenRouter、Gemini、Bedrock 等），Cody 会以环境变量的形式交给每个引擎，效果与在容器上设置环境变量相同，切换引擎时无需重新填写凭证。引擎自身的登录方式依然可用：在 Cody 终端中运行一次 `claude` 或 `codex login`（状态会保存在 `/data/home` 中）。omp 的 OAuth 账户和模型注册表也在同一个标签页中。
 - **本地模型同样可用**：omp 的模型注册表支持自定义提供方；Codex 支持 `--oss` 或自定义的 `model_provider` 端点；Claude 引擎遵循 `ANTHROPIC_BASE_URL`。任何 OpenAI/Anthropic 兼容的网关（vLLM、Ollama，或是 NVIDIA Switchyard 这类路由代理）都可以接入你所运行的任意引擎。
 - **按能力显示的 UI**：引擎无法提供的界面会被隐藏，而不是显示为损坏状态 —— 切换到 Claude/Codex 时，设置会收起为 Cody 自身的标签页，仅限 omp 的输入框控件也会消失。
 - **添加新引擎**：每个引擎对应一个适配器。所需实现的约定与检查清单（Cline、Cursor 等）见 [docs/harnesses.md](docs/harnesses.md)。
@@ -145,7 +145,7 @@ Cody 是一个由 Node 托管的 Next.js 应用，驱动已安装的引擎二进
 
 - **引擎接入层**（`lib/harness/`）：每个引擎对应一个适配器 —— 包含身份标识、能力标志、二进制探测、安装规范以及实时会话工厂。运行时选择的引擎会持久化到实例数据目录中；能力标志控制着每一处引擎相关的界面元素。
 - **omp 会话**：为每个活动会话启动一个 `omp --mode rpc-ui`（基于 stdio 的 NDJSON）子进程，在可用时协商 RPC v2 并进行有边界限制的分块重组。会话历史直接读取 omp 原生的 JSONL 文件，标题修改、归档、删除等维护操作都会避免与实时写入发生竞争。
-- **Claude Code / Codex / Hermes 会话**：每个会话启动一个长期运行的进程，通过 stdio 使用 [Agent Client Protocol](https://agentclientprotocol.com) 通信，并在服务器端转换为与 UI 渲染相同的事件流。ACP 是这里唯一具备真正审批通道的传输方式，因此这些引擎可以在轮次中途暂停并请求确认；中止会取消该轮次，恢复则使用引擎原生的会话 ID。
+- **Claude Code / Codex / Hermes 会话**：每个会话启动一个长期运行的进程，通过 stdio 使用 [Agent Client Protocol](https://agentclientprotocol.com) 通信，并在服务器端转换为与 UI 渲染相同的事件流。ACP 是这里唯一具备真正审批通道的传输方式，因此这些引擎可以在轮次中途暂停并请求确认；中止会取消该轮次，恢复则使用引擎原生的会话 ID。代理自身的权限模式（Claude 的 Manual / Accept edits / Plan / Auto、Codex 的审批级别、Hermes 的 Default / Accept Edits / Don't Ask）可在输入框中模型选择器旁边的选择器里切换。
 - **引擎安装/更新**：针对运行时最先解析出的持久化前缀目录执行 npm 操作 —— 安装与更新是同一个操作，更新当前活动引擎会重启其正在运行的会话。
 - **omp 的配置入口**：模型/`models.yml`、经过白名单限定的 `config.yml` 设置、技能发现、`omp plugin`，以及项目 MCP 服务器（`.omp/mcp.json`）—— 全部通过该二进制文件或其原生文件完成，并全部受能力标志控制。
 - **终端**：自定义的 Node 启动器在同一端口上同时提供 Next.js 服务和同源的终端 WebSocket；每个标签页都拥有一个服务器端的 `node-pty` shell，浏览器断开连接后依然存活。

@@ -11,6 +11,7 @@ import * as pty from "node-pty";
 import type { IPty } from "node-pty";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "./file-access";
 import { getHarness } from "./harness";
+import { engineChildEnv } from "./harness/provider-keys";
 
 export type TerminalInfo = {
   id: string;
@@ -65,7 +66,10 @@ export async function authorizeTerminalCwd(input: string): Promise<string> {
 
 function terminalEnvironment(): Record<string, string> {
   const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
+  // Provider keys saved in Settings are part of a terminal's environment too:
+  // this is where a user runs an engine's own login or setup command, and it
+  // should see the same credentials the chat session does.
+  for (const [key, value] of Object.entries(engineChildEnv())) {
     if (typeof value === "string") env[key] = value;
   }
   env.TERM = "xterm-256color";

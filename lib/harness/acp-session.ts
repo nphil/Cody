@@ -6,6 +6,7 @@ import { ClientApp, ndJsonStream, PROTOCOL_VERSION, type ClientConnection } from
 import type { EngineEvent, EngineSession, EngineSessionOptions, EngineUsage } from "./types";
 import { getEngineSession, upsertEngineSession } from "./engine-sessions";
 import { EngineCommandError } from "./errors";
+import { engineChildEnv } from "./provider-keys";
 
 /**
  * A live chat session driven over the Agent Client Protocol.
@@ -93,7 +94,7 @@ export interface AcpMcpServer {
  * "unsupported" per session when the agent published no model selector (see
  * setModel). A command in this set is a promise about Cody, not about the
  * engine on the other end of the pipe. */
-const SUPPORTED_COMMANDS = new Set(["prompt", "abort", "get_state", "get_messages", "respond_permission", "set_model"]);
+const SUPPORTED_COMMANDS = new Set(["prompt", "abort", "get_state", "get_messages", "respond_permission", "set_model", "set_mode"]);
 
 /** One choice the AGENT offered for a permission request. Cody renders the
  * agent's own options rather than inventing Allow/Deny buttons: only the agent
@@ -250,6 +251,45 @@ export function readSessionModelState(raw: unknown): AcpModelSurface | null {
     ? state.currentModelId
     : options[0].value;
   return { configId: null, current, options };
+}
+
+/**
+ * An ACP session's MODES: the agent's own permission postures ("ask before
+ * edits", "accept edits", "don't ask"), published on `session/new` as
+ * `modes: {availableModes: [{id, name, description}], currentModeId}`, changed
+ * with `session/set_mode {sessionId, modeId}` and announced back as a
+ * `current_mode_update`. Both installed ACP agents that offer modes use this
+ * one shape (measured against Hermes 0.19 and Codex's adapter).
+ *
+ * Modes are the ACP counterpart of omp's approval-mode setting, but they are
+ * per SESSION and chosen by the agent, so they belong in the composer next to
+ * the model picker rather than in Settings. An agent that publishes none gets
+ * `null` here and no picker.
+ */
+export interface AcpModeSurface {
+  current: string;
+  options: Array<{ id: string; name: string; description?: string }>;
+}
+
+export function readModeSurface(response: unknown): AcpModeSurface | null {
+  if (!response || typeof response !== "object") return null;
+  const modes = (response as { modes?: unknown }).modes;
+  if (!modes || typeof modes !== "object") return null;
+  const state = modes as { availableModes?: unknown; currentModeId?: unknown };
+  if (!Array.isArray(state.availableModes)) return null;
+  const options = state.availableModes.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const { id, name, description } = entry as Record<string, unknown>;
+    if (typeof id !== "string" || !id) return [];
+    return [{
+      id,
+      name: typeof name === "string" && name ? name : id,
+      ...(typeof description === "string" && description ? { description } : {}),
+    }];
+  });
+  if (options.length === 0) return null;
+  const current = typeof state.currentModeId === "string" && state.currentModeId ? state.currentModeId : options[0].id;
+  return { current, options };
 }
 
 /**
@@ -489,6 +529,8 @@ export class AcpEngineSession implements EngineSession {
    * published none. Captured at session open and kept current from the
    * agent's update notifications — see AcpModelSurface. */
   private models: AcpModelSurface | null = null;
+  /** The session's modes, when the agent offers any (see readModeSurface). */
+  private modes: AcpModeSurface | null = null;
   /** Recent agent stderr, reported only if the connection fails. */
   private stderrTail = "";
   destroyPromise: Promise<void> | null = null;
@@ -565,6 +607,8 @@ export class AcpEngineSession implements EngineSession {
         return this.respondPermission(command);
       case "set_model":
         return this.setModel(command);
+      case "set_mode":
+        return this.setMode(command);
       case "get_state":
         return this.buildState();
       default:
@@ -647,7 +691,10 @@ export class AcpEngineSession implements EngineSession {
   private async connect(): Promise<void> {
     const child = spawn(this.spec.binaryPath, [...this.spec.args], {
       cwd: this.cwd,
-      env: { ...process.env, ...this.spec.env },
+      // Provider keys saved in Settings ride along with the spec's own
+      // variables (lib/harness/provider-keys.ts): the one credential path all
+      // five engines share is their environment.
+      env: engineChildEnv(this.spec.env),
       stdio: ["pipe", "pipe", "pipe"],
     });
     this.child = child;
@@ -707,6 +754,7 @@ export class AcpEngineSession implements EngineSession {
       try {
         const loaded = await connection.agent.request("session/load", { sessionId: this.acpSessionId, cwd: this.cwd, mcpServers });
         this.applyModelSurface(readModelSurface(loaded), { announce: false });
+        this.modes = readModeSurface(loaded);
         return;
       } catch {
         this.acpSessionId = null;
@@ -719,6 +767,7 @@ export class AcpEngineSession implements EngineSession {
     // what the composer reads, and a picker that renders one turn late looks
     // like an engine with no models.
     this.applyModelSurface(readModelSurface(created), { announce: false });
+    this.modes = readModeSurface(created);
     const newId = (created as { sessionId?: unknown }).sessionId;
     if (typeof newId === "string" && newId) {
       this.acpSessionId = newId;
@@ -841,6 +890,39 @@ export class AcpEngineSession implements EngineSession {
     if (frame.sessionUpdate === "current_model_update" && typeof frame.modelId === "string" && this.models) {
       this.applyModelSurface({ ...this.models, current: frame.modelId }, { announce: true });
     }
+    // The agent changed its own mode — the user typed a command at it, or it
+    // escalated after a refusal. The composer's picker must follow.
+    const modeFrame = frame as { currentModeId?: unknown; modeId?: unknown };
+    const modeId = typeof modeFrame.currentModeId === "string" ? modeFrame.currentModeId : typeof modeFrame.modeId === "string" ? modeFrame.modeId : null;
+    if (frame.sessionUpdate === "current_mode_update" && modeId && this.modes && this.modes.options.some((option) => option.id === modeId)) {
+      this.modes = { ...this.modes, current: modeId };
+      this.emit({ type: "mode_changed", modeId });
+    }
+  }
+
+  /**
+   * Switch the session's mode. `session/set_mode` answers with an empty
+   * object; the agent may confirm with a `current_mode_update`, which the
+   * handler above absorbs as a no-op when it names the mode just chosen.
+   */
+  private async setMode(command: Record<string, unknown>): Promise<Record<string, unknown>> {
+    await this.ensureReady();
+    if (!this.modes) {
+      throw new EngineCommandError("set_mode", `${this.spec.name} did not offer modes for this session`, "unsupported");
+    }
+    const requested = typeof command.modeId === "string" ? command.modeId : "";
+    const chosen = this.modes.options.find((option) => option.id === requested);
+    if (!chosen) {
+      throw new EngineCommandError("set_mode", `${this.spec.name} does not offer a mode called "${requested}" in this session`, "invalid_mode");
+    }
+    const connection = this.connection;
+    if (!connection || !this.acpSessionId) {
+      throw new EngineCommandError("set_mode", `${this.spec.name} session is not ready`, "session_dead");
+    }
+    await connection.agent.request("session/set_mode", { sessionId: this.acpSessionId, modeId: chosen.id });
+    this.modes = { ...this.modes, current: chosen.id };
+    this.emit({ type: "mode_changed", modeId: chosen.id });
+    return { modeId: chosen.id };
   }
 
   /**
@@ -1082,6 +1164,10 @@ export class AcpEngineSession implements EngineSession {
         }))
         : [],
       modelSelectable: this.models !== null,
+      // The agent's own permission postures, for a composer control that
+      // exists only when the agent offers one — nothing here is invented.
+      availableModes: this.modes ? this.modes.options.map((option) => ({ ...option })) : [],
+      currentModeId: this.modes?.current ?? null,
       isStreaming: running,
       isPromptRunning: running,
       isCompacting: false,

@@ -87,17 +87,19 @@ export async function POST(req: Request) {
     if (creator) setSessionOwner(realSessionId, creator.id);
 
     if (engineMode) {
-      // The sidebar lists engine sessions from the index, and the session
-      // itself only writes a row once a prompt reaches it. Seed the row now so
-      // a brand-new session (including `ensure_session`, which never prompts)
-      // appears immediately instead of after the first turn.
-      if (!getEngineSession(realSessionId)) {
+      // The sidebar lists engine sessions from the index. An ACP session
+      // writes its own row the moment `session/new` answers — engine id and
+      // cwd only, no title, because the transport never sees the prompt as a
+      // title — and that happens inside startRpcSession above, BEFORE this
+      // line. So the row usually exists already, and seeding only a missing
+      // row left every Claude, Codex and Hermes session labelled
+      // "(no messages)" in the sidebar for good. Seed the title whenever the
+      // row has none; an `ensure_session` (no prompt) still gets its row.
+      const existingRow = getEngineSession(realSessionId);
+      const title = engineSessionTitle(typeof command.message === "string" ? command.message : "");
+      if (!existingRow || (!existingRow.title && title)) {
         try {
-          upsertEngineSession(realSessionId, {
-            engine: harness.id,
-            cwd,
-            title: engineSessionTitle(typeof command.message === "string" ? command.message : ""),
-          });
+          upsertEngineSession(realSessionId, { engine: harness.id, cwd, title });
         } catch {
           // A sidecar write failure costs a sidebar row, never the session.
         }

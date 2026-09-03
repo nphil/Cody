@@ -1,8 +1,6 @@
 import fs from "fs";
-import os from "os";
 import path from "path";
-import { createJiti } from "jiti";
-import { resolveOmpBin } from "./omp-cli";
+import { findOmpPackageRoot, loadOmpPackageSource, ompPackageVersion } from "./package-source";
 import { isTerminalOnlySetting } from "./settings-surface";
 
 /**
@@ -14,12 +12,11 @@ import { isTerminalOnlySetting } from "./settings-surface";
  * union), so the schema is read from the installed package's source:
  * `<package>/src/config/settings-schema.ts`, which ships in the npm tarball.
  *
- * That file imports Bun-only siblings (@oh-my-pi/*, ../live/voices, …) which
- * cannot load under Node. Only the `ui` metadata matters here, so every import
- * is aliased to a permissive stub and the module is transpiled by jiti. Values
- * derived from those imports (some `default`s and `options`) come out as stub
- * objects and are discarded by normalization — labels, tabs and groups are
- * plain literals and survive intact.
+ * That file imports Bun-only siblings which cannot load under Node, so it is
+ * evaluated through ./package-source, which stubs every import. Only the `ui`
+ * metadata matters here: values derived from those imports (some `default`s and
+ * `options`) come out as stub objects and are discarded by normalization, while
+ * labels, tabs and groups are plain literals and survive intact.
  */
 
 /** Types Cody can render. OMP's `record` settings are structured maps with
@@ -75,30 +72,6 @@ export interface OmpSettingsSchema {
   source: { packagePath: string; version: string | null };
 }
 
-const STUB_FILENAME = "cody-omp-schema-stub.cjs";
-
-/** A module whose every export is callable, indexable and iterable — enough to
- * let the schema's top-level expressions evaluate. `then` must stay undefined:
- * a thenable here would make any await on the module hang forever. */
-const STUB_SOURCE = `
-function makeAny() {
-  const fn = function () { return makeAny(); };
-  return new Proxy(fn, {
-    get(_target, prop) {
-      if (prop === "then" || prop === "constructor" || prop === "__esModule") return undefined;
-      if (prop === Symbol.iterator) return function* () {};
-      if (prop === Symbol.toPrimitive || prop === "toString") return () => "";
-      if (prop === "length") return 0;
-      if (prop === "map" || prop === "filter" || prop === "slice") return () => [];
-      return makeAny();
-    },
-    apply() { return makeAny(); },
-  });
-}
-module.exports = makeAny();
-`;
-
-/** Walk up from the omp binary to the package root that owns it. */
 /** The installed omp package's CHANGELOG.md, when the package ships one
  * (it is in omp's npm `files` list; a future omp dropping it fails soft). */
 export function getOmpChangelogPath(): string | null {
@@ -107,44 +80,6 @@ export function getOmpChangelogPath(): string | null {
   const file = path.join(root, "CHANGELOG.md");
   try {
     return fs.existsSync(file) ? file : null;
-  } catch {
-    return null;
-  }
-}
-
-function findOmpPackageRoot(): string | null {
-  const bin = resolveOmpBin();
-  if (!bin) return null;
-  let current: string;
-  try {
-    current = fs.realpathSync(bin);
-  } catch {
-    current = bin;
-  }
-  for (let depth = 0; depth < 8; depth += 1) {
-    current = path.dirname(current);
-    if (current === path.dirname(current)) break;
-    const manifest = path.join(current, "package.json");
-    if (!fs.existsSync(manifest)) continue;
-    try {
-      const parsed = JSON.parse(fs.readFileSync(manifest, "utf8")) as { name?: unknown };
-      if (typeof parsed.name === "string" && parsed.name.includes("pi-coding-agent")) return current;
-    } catch {
-      // Unreadable manifest: keep walking.
-    }
-  }
-  return null;
-}
-
-function schemaFilePath(packageRoot: string): string | null {
-  const candidate = path.join(packageRoot, "src", "config", "settings-schema.ts");
-  return fs.existsSync(candidate) ? candidate : null;
-}
-
-function packageVersion(packageRoot: string): string | null {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8")) as { version?: unknown };
-    return typeof parsed.version === "string" ? parsed.version : null;
   } catch {
     return null;
   }
@@ -261,31 +196,17 @@ let cached: { key: string; schema: OmpSettingsSchema | null } | null = null;
 export function getOmpSettingsSchema(): OmpSettingsSchema | null {
   const packageRoot = findOmpPackageRoot();
   if (!packageRoot) return null;
-  const version = packageVersion(packageRoot);
+  const version = ompPackageVersion(packageRoot);
   const cacheKey = `${packageRoot}@${version ?? "unknown"}`;
   if (cached?.key === cacheKey) return cached.schema;
 
   let schema: OmpSettingsSchema | null = null;
   try {
-    const file = schemaFilePath(packageRoot);
-    if (file) {
-      const source = fs.readFileSync(file, "utf8");
-      const imports = [...source.matchAll(/^import\s+[\s\S]*?from\s+"([^"]+)";/gm)].map((match) => match[1]);
-      const stubPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "cody-omp-schema-")), STUB_FILENAME);
-      fs.writeFileSync(stubPath, STUB_SOURCE, "utf8");
-      const alias = Object.fromEntries(imports.map((specifier) => [specifier, stubPath]));
-      const jiti = createJiti(__filename, { alias, interopDefault: true, moduleCache: false });
-      const loaded = jiti(file) as Record<string, unknown>;
-      schema = normalize(loaded, { packagePath: packageRoot, version });
-      try {
-        fs.rmSync(path.dirname(stubPath), { recursive: true, force: true });
-      } catch {
-        // Temp dir cleanup is best effort.
-      }
-    }
-  } catch {
-    // Any failure (new upstream layout, transpile error, evaluation throw)
+    const loaded = loadOmpPackageSource(packageRoot, "src", "config", "settings-schema.ts");
+    // A failure here (new upstream layout, transpile error, evaluation throw)
     // leaves the hand-written controls in charge instead of an empty panel.
+    if (loaded) schema = normalize(loaded, { packagePath: packageRoot, version });
+  } catch {
     schema = null;
   }
 

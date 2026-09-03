@@ -1,10 +1,58 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { isMap, parseDocument, stringify } from "yaml";
+import { findOmpPackageRoot, loadOmpPackageSource, ompPackageVersion } from "./package-source";
 import { getAgentDir } from "./paths";
 import { isRecord } from "../type-guards";
 
 export type ModelRoles = Record<string, string>;
+
+/** OMP's built-in roles as of the release Cody was last audited against. Used
+ * only when the installed package cannot be read (omp absent, or a layout
+ * change upstream) — the live list comes from the engine itself. */
+export const FALLBACK_MODEL_ROLE_IDS: readonly string[] = [
+  "default",
+  "smol",
+  "slow",
+  "vision",
+  "plan",
+  "commit",
+  "tiny",
+  "task",
+  "advisor",
+];
+
+let cachedRoleIds: { key: string; ids: readonly string[] } | null = null;
+
+/**
+ * The roles the INSTALLED omp actually resolves, read from its own
+ * `src/config/model-roles.ts` (`MODEL_ROLE_IDS`) — the same
+ * read-it-from-the-engine rule the settings schema follows.
+ *
+ * Hand-listing them went wrong the moment upstream dropped one: omp removed
+ * `designer`, and Cody carried on writing `modelRoles.designer` into config.yml
+ * for a role the resolver no longer has and offering it in the plan editor. The
+ * engine owns the vocabulary; Cody reads it and assigns only what is there.
+ */
+export function getOmpModelRoleIds(): readonly string[] {
+  const packageRoot = findOmpPackageRoot();
+  if (!packageRoot) return FALLBACK_MODEL_ROLE_IDS;
+  const cacheKey = `${packageRoot}@${ompPackageVersion(packageRoot) ?? "unknown"}`;
+  if (cachedRoleIds?.key === cacheKey) return cachedRoleIds.ids;
+
+  const loaded = loadOmpPackageSource(packageRoot, "src", "config", "model-roles.ts");
+  const declared = loaded?.MODEL_ROLE_IDS;
+  const ids = Array.isArray(declared)
+    ? declared.filter((role): role is string => typeof role === "string" && role.length > 0)
+    : [];
+  cachedRoleIds = { key: cacheKey, ids: ids.length > 0 ? ids : FALLBACK_MODEL_ROLE_IDS };
+  return cachedRoleIds.ids;
+}
+
+/** Drop the memoized role list so the next read re-evaluates the package. */
+export function clearOmpModelRoleIdsCache(): void {
+  cachedRoleIds = null;
+}
 
 function configPath(): string {
   return join(getAgentDir(), "config.yml");

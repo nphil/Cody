@@ -172,10 +172,11 @@ export const claudeHarness: HarnessAdapter = {
   healthArgs: CLAUDE_CLI_VERSION_ARGS,
   // The ADAPTER's version, which is the package installSpec names — not the
   // CLI's 2.x, which moves on its own schedule and is a different package
-  // entirely. 0.70.0 is what Cody's ACP client has been exercised against;
+  // entirely. 0.73.0 is what Cody's ACP client has been exercised against
+  // (initialize, session/new, a prompt round trip, modes and set_mode);
   // `engineCli.adapterLabel` is what the notice names, so a 1.0 adapter reads
   // as a claim about the adapter and nothing else.
-  verifiedVersion: "0.70.0",
+  verifiedVersion: "0.73.0",
   capabilities: {
     // Verified end to end against the real adapter: initialize, session/new,
     // a prompt round trip, a tool call, an approval, and session/load of a

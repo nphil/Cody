@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { isRecord } from "../type-guards";
+import { engineChildEnv } from "../harness/provider-keys";
 
 /**
  * One prompt, one answer, run through the user's own omp binary in print mode.
@@ -118,7 +119,10 @@ function runOmpPrint(request: OneShotRequest, overlayPath: string, timeoutMs: nu
     // would pick up its MCP config and context files, which is both slower and
     // a way for repository content to reach a model the user did not point at
     // this project.
-  ], { cwd: tmpdir(), stdio: ["ignore", "pipe", "pipe"] });
+    // Same environment as every other engine spawn: a provider key saved in
+    // Settings must reach the session namer and the planner too, or both
+    // silently fall back (a truncated first-message name, the heuristic plan).
+  ], { cwd: tmpdir(), stdio: ["ignore", "pipe", "pipe"], env: engineChildEnv() });
 
   const answer: LastAnswer = { turn: null, message: null };
   let pending = "";

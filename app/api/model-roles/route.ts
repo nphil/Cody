@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireEngine } from "@/lib/engine-guard";
 import { invalidateModelsCache } from "@/lib/models-cache";
-import { clearModelRoles, readModelRoles, writeModelRoles } from "@/lib/omp/model-roles";
+import { clearModelRoles, getOmpModelRoleIds, readModelRoles, writeModelRoles } from "@/lib/omp/model-roles";
 import { restartIdleRpcSessions } from "@/lib/rpc-manager";
 
 export const dynamic = "force-dynamic";
@@ -19,7 +19,9 @@ export function GET() {
   try {
     const gate = requireEngine("omp", SURFACE);
     if ("response" in gate) return gate.response;
-    return NextResponse.json(readModelRoles());
+    // `roleNames` is the installed engine's own role vocabulary, so the panel
+    // offers exactly the roles omp will resolve rather than a list Cody froze.
+    return NextResponse.json({ ...readModelRoles(), roleNames: [...getOmpModelRoleIds()] });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 400 });
   }

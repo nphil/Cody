@@ -1,7 +1,8 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
-import { ChevronDown, ListChecks, Loader2, Paperclip, ShieldCheck, Sparkles, Target, TriangleAlert, Wrench } from "lucide-react";
+import { ChevronDown, ListChecks, Loader2, Paperclip, ShieldCheck, SlidersHorizontal, Sparkles, Target, TriangleAlert, Wrench } from "lucide-react";
+import type { SessionModeOption } from "@/hooks/useAgentSession";
 import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import { ALL_CAPABILITIES, OMP_ENGINE_ID, type ActiveEngineInfo, type EngineCapabilities } from "./SettingsTabs";
 import type { ToolPreset } from "@/lib/tool-presets";
@@ -62,6 +63,9 @@ interface ModelOption {
   name: string;
 }
 
+/** Stable empty list, so a composer without modes never re-renders for a fresh `[]`. */
+const NO_MODES: SessionModeOption[] = [];
+
 interface Props {
   onSend: (message: string, images?: AttachedImage[]) => void;
   onAbort: () => void;
@@ -110,6 +114,13 @@ interface Props {
   compactResult?: CompactResultInfo | null;
   thinkingLevel?: string;
   onThinkingLevelChange?: (level: string) => void;
+  /** The engine's own session modes (ACP `session/new` → `modes`): its
+   * permission posture — Manual / Accept edits / Plan / Auto on Claude,
+   * Default / Accept Edits / Don't Ask on Hermes. Empty for an engine without
+   * the surface, and an empty list renders nothing. */
+  availableModes?: SessionModeOption[];
+  currentModeId?: string | null;
+  onModeChange?: (modeId: string) => void;
   availableThinkingLevels?: string[] | null;
   thinkingLevelMap?: Record<string, string | null> | null;
   /** Display name for the current model when the catalog does not know it. */
@@ -1047,7 +1058,7 @@ function ComposerModeStatus({ goal, plan }: { goal?: ActiveGoal | null; plan?: A
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onAbort, onSteer, onFollowUp, isStreaming, capabilities = ALL_CAPABILITIES, engine = null, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, onModelChange, onSelectSmartModel, onSmartModelPinned, autoModelSwitch, fastModeEnabled, fastModeActive, fastModeSupported, onFastModeChange, toolPreset, onToolPresetChange,
   onAbortCompaction, isCompacting, compactResult,
-  thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap, modelNameOverride,
+  thinkingLevel, onThinkingLevelChange, availableModes = NO_MODES, currentModeId = null, onModeChange, availableThinkingLevels, thinkingLevelMap, modelNameOverride,
   retryInfo, queuedMessages, inputHistory = [], onAbortRetry,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
@@ -1090,6 +1101,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [modelDropdownRect, setModelDropdownRect] = useState<{ top: number; left: number; width: number } | null>(null);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
+  const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
   const [toolsDropdownOpen, setToolsDropdownOpen] = useState(false);
   // Where the tool-preset and reasoning panels hang from on a phone: the
   // button's top in viewport coordinates, captured when it opens. Icon-only
@@ -1097,6 +1109,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   // them to stay on screen, so it detaches to the viewport instead.
   const [toolsAnchorTop, setToolsAnchorTop] = useState<number | null>(null);
   const [thinkingAnchorTop, setThinkingAnchorTop] = useState<number | null>(null);
+  const [modeAnchorTop, setModeAnchorTop] = useState<number | null>(null);
   const [contextPopoverOpen, setContextPopoverOpen] = useState(false);
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
     draftKey ? draftImagesToAttachedImages(getDraft(draftKey)?.images) : []
@@ -1130,6 +1143,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const dropdownRef = useRef<HTMLDivElement>(null);
   const modelDropdownPanelRef = useRef<HTMLDivElement>(null);
   const thinkingDropdownRef = useRef<HTMLDivElement>(null);
+  const modeDropdownRef = useRef<HTMLDivElement>(null);
   const toolsDropdownRef = useRef<HTMLDivElement>(null);
   const historyMenuRef = useRef<HTMLDivElement>(null);
   const contextPopoverRef = useRef<HTMLDivElement>(null);
@@ -2237,6 +2251,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (isStreaming) setToolsDropdownOpen(false);
   }, [isStreaming]);
 
+  // The mode the engine reports, or its first offer while the report is
+  // still in flight — never nothing, so the button always has a name.
+  const currentMode = availableModes.find((mode) => mode.id === currentModeId) ?? availableModes[0] ?? null;
+
   // Close dropdowns on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -2248,6 +2266,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       }
       if (thinkingDropdownRef.current && !thinkingDropdownRef.current.contains(e.target as Node)) {
         setThinkingDropdownOpen(false);
+      }
+      if (modeDropdownRef.current && !modeDropdownRef.current.contains(e.target as Node)) {
+        setModeDropdownOpen(false);
       }
       if (toolsDropdownRef.current && !toolsDropdownRef.current.contains(e.target as Node)) {
         setToolsDropdownOpen(false);
@@ -3399,6 +3420,101 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                           {desc && (
                             <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11, color: "var(--text-dim)", marginLeft: 8 }}>
                               {desc}
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Agent-mode selector — the engine's own session modes, offered
+                only when it published a list for THIS session. Stays visible
+                while the agent runs (disabled) so the mode never looks reset. */}
+            {onModeChange && currentMode && (
+              <div ref={modeDropdownRef} style={{ position: "relative", flexShrink: isMobile ? 0 : undefined }}>
+                <button
+                  onClick={(e) => {
+                    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                    setModeAnchorTop(rect.top);
+                    setModeDropdownOpen((v) => !v);
+                  }}
+                  disabled={isStreaming}
+                  title={t("chatInput.changeModeTitle", { mode: currentMode.name })}
+                  aria-label={`${t("chatInput.changeMode")}: ${currentMode.name}`}
+                  data-testid="agent-mode-button"
+                  style={{
+                    display: "flex", alignItems: "center", gap: 5,
+                    justifyContent: isMobile ? "center" : undefined,
+                    height: isMobile ? 38 : 28,
+                    width: isMobile ? 38 : undefined,
+                    padding: isMobile ? 0 : "0 8px",
+                    background: modeDropdownOpen ? "var(--bg-hover)" : "none",
+                    border: "none",
+                    borderRadius: 7,
+                    color: "var(--text-muted)",
+                    cursor: isStreaming ? "not-allowed" : "pointer",
+                    opacity: isStreaming ? 0.5 : 1,
+                    fontSize: 12,
+                    transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
+                  }}
+                  onMouseEnter={(e) => {
+                    if (isStreaming) return;
+                    e.currentTarget.style.background = "var(--bg-hover)";
+                    e.currentTarget.style.color = "var(--text)";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = modeDropdownOpen ? "var(--bg-hover)" : "none";
+                    e.currentTarget.style.color = "var(--text-muted)";
+                  }}
+                >
+                  <SlidersHorizontal size={isMobile ? 16 : 11} strokeWidth={2} style={{ flexShrink: 0 }} aria-hidden="true" />
+                  {!isMobile && <span style={{ whiteSpace: "nowrap" }}>{currentMode.name}</span>}
+                  {!isMobile && <ChevronDown size={12} strokeWidth={1.8} style={{ flexShrink: 0, opacity: 0.7 }} aria-hidden="true" />}
+                </button>
+                {modeDropdownOpen && (
+                  <div className="dropdown-surface" role="menu" data-testid="agent-mode-menu" style={isMobile && modeAnchorTop != null ? {
+                    // Same reason as the tool-preset panel above.
+                    position: "fixed",
+                    bottom: (window.visualViewport?.height ?? window.innerHeight) - modeAnchorTop + 6,
+                    left: 8, right: 8,
+                    zIndex: 500,
+                    maxHeight: Math.max(120, modeAnchorTop - 8), overflowY: "auto",
+                  } : {
+                    position: "absolute", bottom: "calc(100% + 6px)", left: 0,
+                    zIndex: 100, minWidth: 250, maxWidth: "calc(100vw - 32px)",
+                  }}>
+                    {availableModes.map((mode) => {
+                      const isActive = mode.id === currentMode.id;
+                      return (
+                        <button
+                          className="dropdown-item"
+                          role="menuitemradio"
+                          aria-checked={isActive}
+                          key={mode.id}
+                          onClick={() => { setModeDropdownOpen(false); if (!isActive && !isStreaming) onModeChange(mode.id); }}
+                          style={{
+                            display: "flex", alignItems: "center", gap: 8,
+                            width: "100%", padding: "7px 12px",
+                            background: isActive ? "var(--bg-selected)" : "transparent",
+                            border: "none",
+                            color: isActive ? "var(--text)" : "var(--text-muted)",
+                            cursor: "pointer", fontSize: 12, textAlign: "left",
+                            fontWeight: isActive ? 600 : 400,
+                            whiteSpace: "nowrap",
+                          }}
+                          onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = "var(--bg-hover)"; }}
+                          onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = "transparent"; }}
+                        >
+                          {isActive
+                            ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
+                            : <span style={{ width: 10, flexShrink: 0 }} />}
+                          <span style={{ flexShrink: 0, whiteSpace: "nowrap" }}>{mode.name}</span>
+                          {mode.description && (
+                            <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11, color: "var(--text-dim)", marginLeft: 8 }}>
+                              {mode.description}
                             </span>
                           )}
                         </button>

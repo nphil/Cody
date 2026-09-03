@@ -91,6 +91,41 @@ export function readSchemaSettings(): OmpSettingsSnapshot {
   return { path, schema, values };
 }
 
+/**
+ * One value straight out of OMP's settings file, bypassing the schema view.
+ *
+ * `readSchemaSettings` above deliberately sees only the settings OMP gives `ui`
+ * metadata — those are the ones a settings panel may render. A handful of
+ * schema-declared settings carry no `ui` and are config-file-only upstream, yet
+ * still change what OMP does (which foreign tools' `~/` skill directories it
+ * loads, for one), and Cody has to mirror those decisions rather than render
+ * them. `undefined` means the key is absent, so OMP's own default applies — the
+ * caller owns that default, because the schema view never publishes it. A file
+ * that cannot be read or parsed reads as absent too: these are best-effort
+ * lookups feeding behaviour, not an editor that must report the failure.
+ */
+function readPersisted(key: string): unknown {
+  try {
+    const { doc } = readDocument();
+    const data = doc.toJS() as unknown;
+    if (typeof data !== "object" || data === null || Array.isArray(data)) return undefined;
+    return resolvePath(data as Record<string, unknown>, key);
+  } catch {
+    return undefined;
+  }
+}
+
+export function readPersistedBoolean(key: string): boolean | undefined {
+  const raw = readPersisted(key);
+  return typeof raw === "boolean" ? raw : undefined;
+}
+
+export function readPersistedStringList(key: string): string[] | undefined {
+  const raw = readPersisted(key);
+  if (!Array.isArray(raw)) return undefined;
+  return raw.filter((entry): entry is string => typeof entry === "string");
+}
+
 /** Validate one patch entry against its schema definition. `null` resets the
  * setting to OMP's default by removing the key. */
 function validate(setting: OmpSetting, value: unknown): OmpSettingValue | null {

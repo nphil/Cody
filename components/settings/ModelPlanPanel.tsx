@@ -62,7 +62,7 @@ const HEURISTIC = "heuristic";
  * only roles listed here get a description, the rest render bare. */
 const DESCRIBED_ROLES: Record<string, true> = {
   default: true, smol: true, slow: true, vision: true, plan: true,
-  designer: true, commit: true, tiny: true, task: true, advisor: true,
+  commit: true, tiny: true, task: true, advisor: true,
 };
 
 /** A live model call against a cold provider is slow; the bar is paced against

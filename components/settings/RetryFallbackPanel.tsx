@@ -25,7 +25,11 @@ export interface RuntimeModelEntry {
   thinkingLevels?: string[];
 }
 
-export const NATIVE_MODEL_ROLES = ["default", "smol", "slow", "vision", "plan", "designer", "commit", "tiny", "task", "advisor"];
+/** Shown until `/api/model-roles` answers with the installed engine's own list,
+ * and kept as the answer when it cannot (no omp, or the call fails). A chain
+ * keyed by a role omp dropped is still a chain the user may have configured, so
+ * a stale entry here only mislabels the chip — it never hides a chain. */
+const FALLBACK_MODEL_ROLES = ["default", "smol", "slow", "vision", "plan", "commit", "tiny", "task", "advisor"];
 
 type UsageReservePolicy = "confirm" | "auto" | "fail-closed";
 type FallbackRevertPolicy = "cooldown-expiry" | "never";
@@ -81,8 +85,8 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 
 type ChainKind = "Role" | "Provider" | "Model";
 
-function chainKeyKind(key: string): ChainKind {
-  if (NATIVE_MODEL_ROLES.includes(key)) return "Role";
+function chainKeyKind(key: string, roleNames: string[]): ChainKind {
+  if (roleNames.includes(key)) return "Role";
   if (key.endsWith("/*")) return "Provider";
   return "Model";
 }
@@ -97,8 +101,9 @@ function KindChip({ kind }: { kind: ChainKind }) {
   return <span style={{ fontSize: 10, padding: "2px 7px", borderRadius: 4, fontWeight: 600, flexShrink: 0, ...KIND_CHIP_STYLE[kind] }}>{kind}</span>;
 }
 
-function ChainCard({ chainKey, entries, modelOptions, candidate, onCandidateChange, onAdd, onMove, onRemoveEntry, onRemoveCard }: {
+function ChainCard({ chainKey, roleNames, entries, modelOptions, candidate, onCandidateChange, onAdd, onMove, onRemoveEntry, onRemoveCard }: {
   chainKey: string;
+  roleNames: string[];
   entries: string[];
   modelOptions: string[];
   candidate: string;
@@ -108,7 +113,7 @@ function ChainCard({ chainKey, entries, modelOptions, candidate, onCandidateChan
   onRemoveEntry: (index: number) => void;
   onRemoveCard: () => void;
 }) {
-  const kind = chainKeyKind(chainKey);
+  const kind = chainKeyKind(chainKey, roleNames);
   const unused = modelOptions.filter((value) => !entries.includes(value));
   return (
     <section style={sectionCardStyle}>
@@ -156,12 +161,24 @@ export function RetryFallbackPanel({ models, onOpenModelPlan }: { models: Runtim
   const [customChainKey, setCustomChainKey] = useState("");
   const [resetOpen, setResetOpen] = useState(false);
   const [resetting, setResetting] = useState(false);
+  const [roleNames, setRoleNames] = useState<string[]>(FALLBACK_MODEL_ROLES);
 
   useEffect(() => {
     fetch("/api/omp-settings")
       .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
       .then((data: { settings?: RetrySettings }) => setSettings(data.settings ?? {}))
       .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+  }, []);
+
+  // omp's role vocabulary changes between releases, so which chain keys are
+  // roles is the engine's answer, not a list frozen here.
+  useEffect(() => {
+    fetch("/api/model-roles")
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
+      .then((data: { roleNames?: string[] }) => { if (data.roleNames?.length) setRoleNames(data.roleNames); })
+      // Labelling and the "add a role chain" list are conveniences; a failure
+      // here must not block the panel.
+      .catch(() => {});
   }, []);
 
   // Serialize full-snapshot saves: each call writes the whole settings object,
@@ -240,11 +257,11 @@ export function RetryFallbackPanel({ models, onOpenModelPlan }: { models: Runtim
     setDraftChainKeys((prev) => [...prev, key]);
   };
 
-  const unconfiguredRoles = NATIVE_MODEL_ROLES.filter((role) => !visibleKeys.includes(role));
+  const unconfiguredRoles = roleNames.filter((role) => !visibleKeys.includes(role));
   const unconfiguredWildcards = providers.map((provider) => `${provider}/*`).filter((wildcard) => !visibleKeys.includes(wildcard));
 
   const defaultHasEntries = (chains["default"] ?? []).length > 0;
-  const otherRoleHasEntries = NATIVE_MODEL_ROLES.some((role) => role !== "default" && (chains[role] ?? []).length > 0);
+  const otherRoleHasEntries = roleNames.some((role) => role !== "default" && (chains[role] ?? []).length > 0);
   const showDefaultCaution = !defaultHasEntries && otherRoleHasEntries;
 
   const revertPolicy = REVERT_POLICIES.find((entry) => entry.value === (retry.fallbackRevertPolicy ?? "cooldown-expiry")) ?? REVERT_POLICIES[0];
@@ -332,6 +349,7 @@ export function RetryFallbackPanel({ models, onOpenModelPlan }: { models: Runtim
             <ChainCard
               key={key}
               chainKey={key}
+              roleNames={roleNames}
               entries={chains[key] ?? []}
               modelOptions={modelOptions}
               candidate={candidateByKey[key] ?? ""}

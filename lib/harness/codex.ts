@@ -3,6 +3,7 @@ import path from "path";
 import { AcpEngineSession, type AcpMcpServer } from "./acp-session";
 import { displayMcpAcpServer } from "../display/engine-tools";
 import { getEngineVersion, resolveEngineBin } from "./engine-bin";
+import { engineChildEnv } from "./provider-keys";
 import type { EngineSession, EngineSessionOptions, HarnessAdapter } from "./types";
 
 /**
@@ -84,7 +85,13 @@ function codexEngineEnv(): Record<string, string> {
     const cli = resolveEngineBin("codex", "CODEX_CLI");
     if (cli) env.CODEX_PATH = cli;
   }
-  const key = process.env.CODEX_API_KEY?.trim() || process.env.OPENAI_API_KEY?.trim();
+  // Read from the environment the CHILD will get, not this process's: a key
+  // saved in Settings → API Keys lives in Cody's store and only reaches the
+  // adapter through engineChildEnv(), and without this line such a key was
+  // handed over but never used — session/new still answered "Authentication
+  // required".
+  const merged = engineChildEnv();
+  const key = merged.CODEX_API_KEY?.trim() || merged.OPENAI_API_KEY?.trim();
   if (key) env.DEFAULT_AUTH_REQUEST = JSON.stringify({ methodId: "api-key" });
   return env;
 }
@@ -210,10 +217,11 @@ export const codexHarness: HarnessAdapter = {
   healthArgs: CODEX_CLI_VERSION_ARGS,
   // The ADAPTER's version, which is the package installSpec names — not the
   // CLI's 0.x, which moves on its own schedule and is a different package
-  // entirely. 1.7.0 is what Cody's ACP client has been exercised against;
+  // entirely. 1.8.0 is what Cody's ACP client has been exercised against
+  // (initialize, session/new, a prompt round trip, modes and set_mode);
   // `engineCli.adapterLabel` is what the notice names, so a 2.0 adapter reads
   // as a claim about the adapter and nothing else.
-  verifiedVersion: "1.7.0",
+  verifiedVersion: "1.8.0",
   capabilities: {
     // Verified end to end against the real adapter: initialize, session/new,
     // a prompt round trip, and session/load of a stored thread id.

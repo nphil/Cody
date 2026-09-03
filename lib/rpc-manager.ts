@@ -1436,7 +1436,10 @@ export class AgentSessionWrapper {
           if (type === "set_thinking_level") invalidateSessionListCache();
           return result ?? null;
         }
-        throw new Error(`Unsupported command: ${type}`);
+        // The same honest "unsupported" the restricted-vocabulary gate above
+        // gives: a command Cody never mapped for this dialect is not a server
+        // fault, and the UI already fails soft on the code.
+        throw new RpcCommandError(type, `${type} is not supported by this engine's RPC protocol`, "unsupported");
       }
     }
   }
