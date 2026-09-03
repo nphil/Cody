@@ -805,6 +805,7 @@
   "modelsConfig.notConnected": "not connected",
   "modelsConfig.ok": "OK",
   "modelsConfig.openaiAnthropicCompatible": "OpenAI / Anthropic compatible",
+  "modelsConfig.pasteCodeOrUrl": "Paste the code, or the full redirect URL, from the browser…",
   "modelsConfig.openingBrowser": "Opening browser…",
   "modelsConfig.parseErrorBody": "The file on disk contains invalid YAML, so it cannot be edited here. Fix it in a text editor and reload. Saving is disabled so your existing providers are not overwritten.",
   "modelsConfig.parseErrorTitle": "models.yml could not be parsed",

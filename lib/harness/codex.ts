@@ -3,6 +3,7 @@ import path from "path";
 import { AcpEngineSession, type AcpMcpServer } from "./acp-session";
 import { displayMcpAcpServer } from "../display/engine-tools";
 import { getEngineVersion, resolveEngineBin } from "./engine-bin";
+import { codexProviderLogins } from "./codex-login";
 import { engineChildEnv } from "./provider-keys";
 import type { EngineSession, EngineSessionOptions, HarnessAdapter } from "./types";
 
@@ -256,10 +257,15 @@ export const codexHarness: HarnessAdapter = {
     subagents: false,
     // Codex keeps memories, and exposes no way for Cody to read them back.
     memory: false,
+    // Provider sign-in with the engine's own login: `codex login --device-auth` in a pseudo-terminal — a ChatGPT subscription.
+    providerLogin: true,
   },
   resolveBinary: () => resolveEngineBin("codex-acp", "CODEX"),
   getVersion: () => getEngineVersion("codex-acp", "CODEX"),
   getAgentDir: () => codexHome(),
+  // `codex login --device-auth`/`login status`/`logout` in a pseudo-terminal
+  // (lib/harness/codex-login.ts) — a ChatGPT Plus/Pro/Team subscription.
+  providerLogins: codexProviderLogins,
   // Unchanged by the move to ACP: the adapter's sessions are Codex threads,
   // written to the same rollout files under the same directory.
   getSessionsDir: () => path.join(codexHome(), "sessions"),

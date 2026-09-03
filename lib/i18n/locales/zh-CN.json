@@ -805,6 +805,7 @@
   "modelsConfig.notConnected": "未连接",
   "modelsConfig.ok": "确定",
   "modelsConfig.openaiAnthropicCompatible": "OpenAI / Anthropic 兼容",
+  "modelsConfig.pasteCodeOrUrl": "粘贴浏览器中显示的授权码，或完整的重定向 URL…",
   "modelsConfig.openingBrowser": "正在打开浏览器…",
   "modelsConfig.parseErrorBody": "磁盘上的文件包含无效的 YAML，因此无法在此编辑。请用文本编辑器修复后重新加载。为避免覆盖现有的提供商配置，保存已被禁用。",
   "modelsConfig.parseErrorTitle": "无法解析 models.yml",

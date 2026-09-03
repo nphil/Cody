@@ -3,6 +3,7 @@ import { getOmpVersion, resolveOmpBin } from "../omp/omp-cli";
 import { getAgentDir } from "../omp/paths";
 import { readSchemaSettings, writeSchemaSettings } from "../omp/settings-values";
 import type { HarnessAdapter } from "./types";
+import { ompProviderLogins } from "../omp/provider-login";
 
 /** The founding harness: every capability is on because the surrounding app
  * was built against omp's feature set. */
@@ -36,10 +37,15 @@ export const ompHarness: HarnessAdapter = {
     // omp has memory (mnemopi, hindsight) but exposes no read-back Cody
     // can call, so the surface stays hidden rather than empty.
     memory: false,
+    // Provider sign-in with the engine's own login: omp's own OAuth flows (Claude Pro/Max, ChatGPT, GitHub Copilot, …), driven over rpc-ui.
+    providerLogin: true,
   },
   resolveBinary: () => resolveOmpBin(),
   getVersion: () => getOmpVersion(),
   getAgentDir: () => getAgentDir(),
+  // omp's own OAuth flows, driven over a dedicated rpc-ui child
+  // (lib/omp/provider-login.ts) and listed from its own /login roster.
+  providerLogins: ompProviderLogins,
   settings: {
     // omp's own settings pipeline (lib/omp/settings-schema + settings-values),
     // reached through the adapter so the route never has to know which engine

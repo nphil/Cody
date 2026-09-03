@@ -228,6 +228,22 @@ What pi serves is flagged per surface, not as one bundle:
   reads credentials from its environment, so one key works under all of
   them, and a spec's own entries still win (`CLAUDE_CODE_EXECUTABLE`,
   `CODEX_PATH`).
+- `cli-login.ts` + `claude-login.ts` / `codex-login.ts` / `hermes-login.ts` /
+  `pi-login.ts` (+ `bin/cody-pi-login.mjs`) and `lib/omp/provider-login.ts` —
+  provider SIGN-IN behind `HarnessAdapter.providerLogins`
+  (`ProviderLoginSurface`: `list()`, `login(id, ui)`, optional `logout(id)`),
+  gated by `capabilities.providerLogin`. Each engine runs its OWN login and
+  keeps the credential in its OWN store; Cody drives the flow — a URL out, a
+  pasted code or redirect URL in, or a device code to type — through one
+  `ui` contract, and `/api/auth/*` turns that into the SSE frames the
+  sign-in panel renders. omp: rpc-ui extension frames on a dedicated child.
+  pi: the pi-ai OAuth flows, imported from the INSTALLED pi package in a
+  child process. Claude Code: `claude auth login --claudeai` in a
+  pseudo-terminal ("Paste code here if prompted >"). Codex:
+  `codex login --device-auth` (URL + one-time code, the CLI polls). Hermes:
+  `hermes auth add <provider> --type oauth --no-browser` ("Authorization
+  code:"). The CLIs will not run these flows without a TTY, which is why
+  `cli-login.ts` is a node-pty driver and not a pipe.
 - `turn-session.ts` — `TurnEngineSession`, the shared one-process-per-turn
   base for CLIs that offer nothing better; `claude-stream.ts` translates the
   CLI's NDJSON into the pi event vocabulary (`agent_start`, `message_*`,

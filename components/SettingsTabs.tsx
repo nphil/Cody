@@ -39,6 +39,7 @@ export interface EngineCapabilities {
   advisor: boolean;
   subagents: boolean;
   memory: boolean;
+  providerLogin: boolean;
 }
 
 /** The active engine's identity, also from GET /api/info. */
@@ -71,6 +72,7 @@ export const ALL_CAPABILITIES: EngineCapabilities = {
   advisor: true,
   subagents: true,
   memory: false,
+  providerLogin: true,
 };
 
 /** Coerce whatever /api/info returned into a full flag set, defaulting every

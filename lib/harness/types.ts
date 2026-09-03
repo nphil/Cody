@@ -69,6 +69,15 @@ export interface HarnessCapabilities {
    * omp has memory too, but exposes no way to read it back, so it stays
    * false and the surface stays hidden rather than empty. */
   memory: boolean;
+  /**
+   * The engine can sign the user in to a provider with the provider's OWN
+   * login (a Claude Pro/Max or ChatGPT subscription, a device code, …) and
+   * keep the credential in its own store — as opposed to an API key, which
+   * Cody stores itself and hands to every engine. True exactly when the
+   * adapter carries `providerLogins`; the Sign in section on the API Keys &
+   * Providers tab renders only under this flag.
+   */
+  providerLogin: boolean;
 }
 
 /**
@@ -218,6 +227,73 @@ export interface EngineSettingsWrite {
 export interface EngineSettingsSurface {
   readSchema(): EngineSettingsRead;
   write(patch: Record<string, unknown>): EngineSettingsWrite;
+}
+
+/**
+ * ONE PROVIDER AN ENGINE CAN SIGN THE USER IN TO, with the engine's own login.
+ *
+ * Every engine keeps subscription credentials somewhere Cody must not write
+ * (omp's SQLite store, pi's auth.json, Claude Code's and Codex's own files,
+ * Hermes' auth.json), and every one of them has a login of its own that
+ * prints a URL and takes a code back: omp and pi through the pi-ai OAuth
+ * flows, Claude Code through `claude auth login`, Codex through
+ * `codex login --device-auth`, Hermes through `hermes auth add`. This seam
+ * is the one shape all five are driven through, so the sign-in UI is written
+ * once and the route never asks which engine it is talking to.
+ */
+export interface ProviderLoginOption {
+  /** The engine's own id for the provider ("anthropic", "openai-codex", "chatgpt"). */
+  id: string;
+  name: string;
+  /** Signed in right now, as far as the engine reports it. */
+  authenticated: boolean;
+  /**
+   * "oauth": a browser sign-in whose fallback is pasting the code or the
+   * final redirect URL back; "device": a short code the user types on the
+   * provider's site while the engine polls, nothing to paste.
+   */
+  kind: "oauth" | "device";
+  /** Whether `logout()` can remove this credential. */
+  canLogout: boolean;
+  /** One line of context for the row ("Claude Pro/Max subscription"). */
+  hint?: string;
+}
+
+/**
+ * What a login flow can ask of the person signing in. The route turns these
+ * into the SSE frames the sign-in panel already renders; a driver calls them
+ * in whatever order its engine's flow needs.
+ */
+export interface ProviderLoginUi {
+  /** A URL to open, with the engine's own instructions if it gave any. */
+  onUrl(url: string, instructions?: string | null): void;
+  /** A device code to type on the verification page. */
+  onDeviceCode(info: { userCode: string; verificationUri: string; expiresInSeconds?: number | null; intervalSeconds?: number | null }): void;
+  /** Ask for a value and wait for it. Rejects when the flow is cancelled. */
+  onPrompt(message: string, placeholder?: string | null): Promise<string>;
+  /**
+   * The next value the user pastes WITHOUT being asked — the paste box is on
+   * screen from the first URL, so a redirect URL can arrive before the
+   * engine asks for it. Resolves when one arrives; rejects on cancel.
+   */
+  onManualInput(): Promise<string>;
+  onProgress(message: string): void;
+  /** Fires when the user cancels or the connection drops; drivers kill their child on it. */
+  signal: AbortSignal;
+}
+
+export interface ProviderLoginList {
+  providers: ProviderLoginOption[];
+  /** Why the list is empty when it is — the engine is not installed, its login command failed — in the engine's own terms. */
+  reason?: string;
+}
+
+export interface ProviderLoginSurface {
+  list(): Promise<ProviderLoginList>;
+  /** Resolves when the credential is stored; rejects with the engine's own words otherwise. */
+  login(providerId: string, ui: ProviderLoginUi): Promise<void>;
+  /** Absent when the engine has no non-interactive logout; the row then offers none. */
+  logout?(providerId: string): Promise<void>;
 }
 
 /** One document of an engine's persistent memory. */
@@ -505,4 +581,10 @@ export interface HarnessAdapter {
    * rather than asking which engine it is talking to.
    */
   readonly settings?: EngineSettingsSurface;
+  /**
+   * Provider sign-in with the engine's own login flow. Present exactly when
+   * `capabilities.providerLogin` is true; `/api/auth/providers`, `/login`
+   * and `/logout` dispatch on it and refuse `unsupported` without it.
+   */
+  readonly providerLogins?: ProviderLoginSurface;
 }

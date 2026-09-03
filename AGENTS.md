@@ -184,6 +184,20 @@ lib/
                        every engine child process (rpc-ui, ACP, terminal) gets
                        its environment from, so a key entered once works under
                        every engine
+    cli-login.ts       runCliLogin(): drives an engine's OWN login command in a
+                       node-pty (URL out, pasted code in, device code shown) —
+                       the shared driver behind claude-login / codex-login /
+                       hermes-login
+    claude-login.ts    `claude auth login` / `auth status` / `auth logout`
+    codex-login.ts     `codex login --device-auth` / `login status` / `logout`
+    hermes-login.ts    `hermes auth add <provider> --type oauth` / `auth list`
+                       / `auth logout`
+    pi-login.ts        pi's pi-ai OAuth flows, run in bin/cody-pi-login.mjs (a
+                       child that imports the INSTALLED pi package) and bridged
+                       over JSON lines
+    login-channel.ts   the one FIFO channel a sign-in's pasted values travel
+                       through: a value pasted before the engine asks is held
+                       for the first asker; cancel rejects every waiter
   file-paths.ts        client/server path encoding helpers
   markdown.ts          shared markdown helpers
   npx.ts               npx runner used by skill install
@@ -261,6 +275,15 @@ components/
   McpConfig.tsx       project MCP server editor (Settings → MCP tab)
   MemoryPanel.tsx     Settings → Agent Memory: the engine's own memory documents,
                       read-only, each with its path (capability-gated)
+  ProviderSignInPanel.tsx Settings → API Keys & Providers, first block: the
+                      ACTIVE engine's provider sign-in rows (/api/auth/providers),
+                      Sign in / Re-login / Sign out, each expanding a
+                      ProviderLoginFlow; rendered for every engine with
+                      `providerLogin`, admin-only controls
+  ProviderLoginFlow.tsx the one sign-in state machine (SSE frames → URL + paste
+                      box, device code, prompt, progress, success/error), used
+                      by ProviderSignInPanel, ModelsConfig's registry tree and
+                      the setup wizard
   ProviderKeysPanel.tsx Settings → API Keys & Providers, top half: per-provider
                       key cards for the ACTIVE engine (masked input, Save /
                       Clear, "Saved in Cody" / "Set on the container" chips);
@@ -293,6 +316,10 @@ bin/
                            mints the display capability secret at boot
   cody-display-mcp.js      bundled stdio MCP server exposing open_preview to
                            Claude/Codex engines (posts to /api/internal/display)
+  cody-pi-login.mjs        pi's provider sign-in helper: imports the INSTALLED pi
+                           package's AuthStorage/OAuth flows and speaks JSON
+                           lines to lib/harness/pi-login.ts (list / login /
+                           logout), so pi's own auth.json holds the credential
   cody-session-tail.js     read-only live view of a chat session for the FIRST
                            web terminal of a workspace (spawned by
                            lib/terminal-manager.ts); renders + follows the
@@ -549,6 +576,30 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   with `stopReason: "error"` used to append an EMPTY bubble; it is now an
   error notice in the provider's words, with a pointer at the keys panel when
   the text smells like a 401.
+- **Provider SIGN-IN is each engine's own, behind one seam**
+  (`HarnessAdapter.providerLogins`: `ProviderLoginSurface` in
+  `lib/harness/types.ts`, gated by `capabilities.providerLogin`). A
+  subscription (Claude Pro/Max, ChatGPT, Nous Portal, GitHub Copilot, …) is a
+  credential only the engine's own store may hold, and every engine has a
+  login of its own that prints a URL and takes a code back — omp's rpc-ui
+  extension frames, pi's pi-ai flows, `claude auth login`,
+  `codex login --device-auth`, `hermes auth add`. The surface is
+  `list()` → rows `{id, name, authenticated, kind: oauth|device, canLogout}`,
+  `login(id, ui)` with `ui = {onUrl, onDeviceCode, onPrompt, onManualInput,
+  onProgress, signal}`, optional `logout(id)`. `/api/auth/providers`,
+  `/login/[provider]` (SSE + POST for the pasted value) and
+  `/logout/[provider]` dispatch on it and refuse `unsupported` without it;
+  the route turns the `ui` calls into the frames the panel already rendered
+  for omp (`auth`, `device_code`, `prompt_request`, `progress`, `success`,
+  `error`, `cancelled`) and holds a value pasted BEFORE the engine asks —
+  the paste box is on screen from the first URL, and a redirect URL usually
+  arrives first. `components/settings/ProviderSignInPanel.tsx` renders the
+  rows on the API Keys & Providers tab for every engine, above the key
+  cards; `ProviderLoginFlow.tsx` is the one state machine (extracted from
+  ModelsConfig's Subscription detail, which now reuses it). Credentials
+  never pass through Cody: a driver relays a URL out and a code in and reads
+  the engine's answer. `/api/auth/all-providers` stays omp-only (it reads
+  omp's model catalog to list configured API-key providers).
 - **The composer reads whichever catalog is real.** `useAgentSession` keeps
   `modelCatalogSource` from `/api/models` and, when it says `"session"`,
   serves the composer the list it adopted off `get_state` instead (measured:
