@@ -1,6 +1,7 @@
 import { homedir } from "os";
 import path from "path";
 import { getEngineVersion, resolveEngineBin } from "./engine-bin";
+import { createPiProviderLogins } from "./pi-login";
 import { readPiSettings, writePiSettings } from "./pi-settings";
 import type { HarnessAdapter } from "./types";
 
@@ -119,6 +120,15 @@ export const piHarness: HarnessAdapter = {
     readSchema: () => readPiSettings(resolveEngineBin("pi", "PI"), piAgentDir()),
     write: (patch) => writePiSettings(resolveEngineBin("pi", "PI"), piAgentDir(), patch),
   },
+  // Pi's own OAuth flows (the pi-ai providers its TUI drives), run out of
+  // process against the INSTALLED package so the credential lands in pi's own
+  // auth.json — see ./pi-login.ts and bin/cody-pi-login.mjs. Resolved per call
+  // for the same reason `settings` is: an engine installed after boot works
+  // without a restart.
+  providerLogins: createPiProviderLogins({
+    resolveBinary: () => resolveEngineBin("pi", "PI"),
+    agentDir: () => piAgentDir(),
+  }),
   getSessionsDir: () => process.env.PI_CODING_AGENT_SESSION_DIR || path.join(piAgentDir(), "sessions"),
   rpcUi: {
     mode: "rpc",
