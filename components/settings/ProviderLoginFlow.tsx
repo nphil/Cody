@@ -159,8 +159,12 @@ export function ProviderLoginFlow({ provider, onChanged }: { provider: ProviderL
     }
   }, [provider.id, onChanged]);
 
-  const submitCode = useCallback(async (token: string, code: string) => {
-    if (!code.trim()) return;
+  // `allowEmpty`: a prompt can be optional (pi's GitHub Copilot flow asks
+  // for an enterprise domain, blank meaning github.com), so an empty answer
+  // to a prompt is sent as-is; the paste box under a sign-in URL still
+  // needs a value.
+  const submitCode = useCallback(async (token: string, code: string, allowEmpty = false) => {
+    if (!code.trim() && !allowEmpty) return;
     setLoginState({ phase: "progress", message: t("modelsConfig.verifying") });
     try {
       const res = await fetch(`/api/auth/login/${encodeURIComponent(provider.id)}`, {
@@ -248,6 +252,9 @@ export function ProviderLoginFlow({ provider, onChanged }: { provider: ProviderL
                 ? t("modelsConfig.completeSignIn")
                 : loginState.message}
             </p>
+            {loginState.phase === "auth" && loginState.instructions && (
+              <p style={{ margin: 0, fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5 }}>{loginState.instructions}</p>
+            )}
             {loginState.phase === "auth" && (
               <p style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.5 }}>
                 <a href={loginState.url} target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)", wordBreak: "break-all" }}>
@@ -260,14 +267,14 @@ export function ProviderLoginFlow({ provider, onChanged }: { provider: ProviderL
                 ref={inputRef}
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") submitCode(loginState.token, inputValue); }}
-                placeholder={loginState.phase === "auth" ? "http://localhost:1455/auth/callback?code=…" : (loginState.placeholder ?? t("modelsConfig.enterValue"))}
+                onKeyDown={(e) => { if (e.key === "Enter") submitCode(loginState.token, inputValue, loginState.phase === "prompt"); }}
+                placeholder={loginState.phase === "auth" ? t("modelsConfig.pasteCodeOrUrl") : (loginState.placeholder ?? t("modelsConfig.enterValue"))}
                 style={{ flex: 1, padding: "6px 9px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text)", fontSize: 12, outline: "none", fontFamily: "var(--font-mono)", boxSizing: "border-box" }}
               />
               <button
-                onClick={() => submitCode(loginState.token, inputValue)}
-                disabled={!inputValue.trim()}
-                style={{ padding: "6px 12px", background: inputValue.trim() ? "var(--accent)" : "var(--bg-panel)", border: "none", borderRadius: 5, color: inputValue.trim() ? "var(--on-accent)" : "var(--text-dim)", cursor: inputValue.trim() ? "pointer" : "not-allowed", fontSize: 12, fontWeight: 600, flexShrink: 0 }}
+                onClick={() => submitCode(loginState.token, inputValue, loginState.phase === "prompt")}
+                disabled={!inputValue.trim() && loginState.phase !== "prompt"}
+                style={{ padding: "6px 12px", background: inputValue.trim() || loginState.phase === "prompt" ? "var(--accent)" : "var(--bg-panel)", border: "none", borderRadius: 5, color: inputValue.trim() || loginState.phase === "prompt" ? "var(--on-accent)" : "var(--text-dim)", cursor: inputValue.trim() || loginState.phase === "prompt" ? "pointer" : "not-allowed", fontSize: 12, fontWeight: 600, flexShrink: 0 }}
               >
                 {t("modelsConfig.submit")}
               </button>

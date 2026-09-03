@@ -805,6 +805,7 @@
   "modelsConfig.notConnected": "未接続",
   "modelsConfig.ok": "OK",
   "modelsConfig.openaiAnthropicCompatible": "OpenAI / Anthropic 互換",
+  "modelsConfig.pasteCodeOrUrl": "ブラウザーに表示されたコード、またはリダイレクト先の URL 全体を貼り付け…",
   "modelsConfig.openingBrowser": "ブラウザを開いています…",
   "modelsConfig.parseErrorBody": "ディスク上のファイルに無効な YAML が含まれているため、ここでは編集できません。テキストエディタで修正してから再読み込みしてください。既存のプロバイダー設定を上書きしないよう、保存は無効になっています。",
   "modelsConfig.parseErrorTitle": "models.yml を解析できませんでした",
