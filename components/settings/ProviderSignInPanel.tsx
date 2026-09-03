@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { AlertCircle, ChevronDown, ChevronRight, LogIn, LogOut, RefreshCw } from "lucide-react";
 import { formatApiError } from "@/lib/i18n/api-error";
-import { chipStyle } from "@/components/settings/primitives";
 import { ProviderLoginFlow, type ProviderLoginRow } from "@/components/settings/ProviderLoginFlow";
 
 /**
@@ -194,9 +193,6 @@ export function ProviderSignInPanel() {
               onToggle={() => toggle(provider.id)}
               onChanged={onRowChanged}
             />
-          ))}
-          {providers.map((provider) => (
-            <span key={`chip-${provider.id}`} style={{ display: "none" }}>{chipStyle && null}</span>
           ))}
         </div>
       )}
