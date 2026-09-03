@@ -3,7 +3,6 @@
 import { useState, useEffect, useCallback, useRef, type CSSProperties } from "react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useI18n } from "@/lib/i18n";
-import { isSafeExternalUrl } from "@/lib/safe-url";
 import { omitUntouchedModelDrafts } from "@/lib/models-config-drafts";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { allowListActive, replaceProviderSelection, seedAllowList, summarizeProviderCuration } from "@/lib/model-allow-list";
@@ -29,6 +28,7 @@ import { SettingsTabs, type SettingsTab } from "./SettingsTabs";
 import { ModelCatalogPicker } from "./ModelCatalogPicker";
 import { ModelPlanPanel } from "./settings/ModelPlanPanel";
 import { RetryFallbackPanel } from "./settings/RetryFallbackPanel";
+import { ProviderLoginFlow, type ProviderLoginRow } from "./settings/ProviderLoginFlow";
 // Color icons (have their own fill colors — no background needed)
 import AnthropicIcon from "@lobehub/icons/es/Anthropic/components/Mono";
 import OpenAIIcon from "@lobehub/icons/es/OpenAI/components/Mono";
@@ -122,30 +122,12 @@ const PROVIDER_ICONS: Record<string, { Icon: IconComponent; hasColor: boolean }>
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-export interface OAuthProvider {
-  id: string;
-  name: string;
-  usesCallbackServer: boolean;
-  loggedIn: boolean;
-}
-
 export interface ApiKeyProvider {
   id: string;
   displayName: string;
   configured: boolean;
   modelCount: number;
 }
-
-type OAuthLoginState =
-  | { phase: "idle" }
-  | { phase: "connecting" }
-  | { phase: "auth"; url: string; instructions: string | null; token: string }
-  | { phase: "device_code"; userCode: string; verificationUri: string; intervalSeconds: number | null; expiresInSeconds: number | null }
-  | { phase: "prompt"; message: string; placeholder: string | null; token: string }
-  | { phase: "select"; message: string; options: { id: string; label: string }[]; token: string }
-  | { phase: "progress"; message: string }
-  | { phase: "success" }
-  | { phase: "error"; message: string };
 
 // Mirrors the ModelThinkingSchema subset of omp's models.yml
 // (oh-my-pi/packages/coding-agent/src/config/models-config-schema.ts).
@@ -1479,280 +1461,6 @@ function ModelDetail({
   );
 }
 
-// ── OAuth detail ──────────────────────────────────────────────────────────────
-
-export function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefresh: () => void }) {
-  const { t, tn } = useI18n();
-  const [loginState, setLoginState] = useState<OAuthLoginState>({ phase: "idle" });
-  const [inputValue, setInputValue] = useState("");
-  const eventSourceRef = useRef<EventSource | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    if (loginState.phase === "auth" || loginState.phase === "prompt") {
-      setTimeout(() => inputRef.current?.focus(), 50);
-    }
-  }, [loginState.phase]);
-
-  // Reset state when provider changes
-  useEffect(() => {
-    setLoginState({ phase: "idle" });
-    setInputValue("");
-    eventSourceRef.current?.close();
-    eventSourceRef.current = null;
-  }, [provider.id]);
-
-  useEffect(() => {
-    return () => { eventSourceRef.current?.close(); };
-  }, []);
-
-  const handleLogin = useCallback(() => {
-    eventSourceRef.current?.close();
-    setLoginState({ phase: "connecting" });
-    setInputValue("");
-
-    const es = new EventSource(`/api/auth/login/${encodeURIComponent(provider.id)}`);
-    eventSourceRef.current = es;
-
-    es.onmessage = (e) => {
-      let data: {
-        type: string; url?: string; instructions?: string | null;
-        token?: string; message?: string; placeholder?: string | null;
-        userCode?: string; verificationUri?: string; intervalSeconds?: number | null; expiresInSeconds?: number | null;
-        options?: { id: string; label: string }[];
-      };
-      try {
-        data = JSON.parse(e.data) as typeof data;
-      } catch {
-        // Malformed frame: ignore rather than killing the handler.
-        return;
-      }
-      if (data.type === "auth") {
-        setLoginState({ phase: "auth", url: data.url!, instructions: data.instructions ?? null, token: data.token! });
-        if (isSafeExternalUrl(data.url)) window.open(data.url, "_blank", "noopener,noreferrer");
-      } else if (data.type === "device_code") {
-        setLoginState({
-          phase: "device_code",
-          userCode: data.userCode!,
-          verificationUri: data.verificationUri!,
-          intervalSeconds: data.intervalSeconds ?? null,
-          expiresInSeconds: data.expiresInSeconds ?? null,
-        });
-        if (isSafeExternalUrl(data.verificationUri)) window.open(data.verificationUri, "_blank", "noopener,noreferrer");
-      } else if (data.type === "prompt_request") {
-        setLoginState({ phase: "prompt", message: data.message!, placeholder: data.placeholder ?? null, token: data.token! });
-      } else if (data.type === "select_request") {
-        setLoginState({ phase: "select", message: data.message!, options: data.options ?? [], token: data.token! });
-      } else if (data.type === "progress") {
-        setLoginState({ phase: "progress", message: data.message! });
-      } else if (data.type === "success") {
-        es.close();
-        setLoginState({ phase: "success" });
-        onRefresh();
-      } else if (data.type === "error") {
-        es.close();
-        setLoginState({ phase: "error", message: data.message! });
-      } else if (data.type === "cancelled") {
-        es.close();
-        setLoginState({ phase: "idle" });
-      }
-    };
-    es.onerror = () => {
-      es.close();
-      setLoginState((prev) => prev.phase === "success" ? prev : { phase: "error", message: t("modelsConfig.connectionLost") });
-    };
-  }, [provider.id, onRefresh, t]);
-
-  const handleLogout = useCallback(async () => {
-    try {
-      const res = await fetch(`/api/auth/logout/${encodeURIComponent(provider.id)}`, { method: "POST" });
-      const d = await res.json().catch(() => ({})) as { error?: string; code?: string };
-      if (!res.ok || d.error) {
-        // omp has no logout RPC/CLI surface; the route returns 501 with guidance.
-        setLoginState({ phase: "error", message: d.error || d.code ? formatApiError(d) : `HTTP ${res.status}` });
-        return;
-      }
-      setLoginState({ phase: "idle" });
-      onRefresh();
-    } catch (e) {
-      setLoginState({ phase: "error", message: e instanceof Error ? e.message : String(e) });
-    }
-  }, [provider.id, onRefresh]);
-
-  const submitCode = useCallback(async (token: string, code: string) => {
-    if (!code.trim()) return;
-    setLoginState({ phase: "progress", message: t("modelsConfig.verifying") });
-    try {
-      const res = await fetch(`/api/auth/login/${encodeURIComponent(provider.id)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token, code: code.trim() }),
-      });
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({})) as { error?: string; code?: string };
-        setLoginState({ phase: "error", message: d.error || d.code ? formatApiError(d) : t("modelsConfig.serverError", { status: res.status }) });
-        return;
-      }
-      setInputValue("");
-      // Success path: SSE stream will emit "success" and update state
-    } catch (e) {
-      setLoginState({ phase: "error", message: e instanceof Error ? e.message : t("modelsConfig.networkError") });
-    }
-  }, [provider.id, t]);
-
-  const submitSelection = useCallback(async (token: string, value: string) => {
-    setLoginState({ phase: "progress", message: t("modelsConfig.continuing") });
-    try {
-      const res = await fetch(`/api/auth/login/${encodeURIComponent(provider.id)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ token, code: value }),
-      });
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({})) as { error?: string; code?: string };
-        setLoginState({ phase: "error", message: d.error || d.code ? formatApiError(d) : t("modelsConfig.serverError", { status: res.status }) });
-      }
-    } catch (e) {
-      setLoginState({ phase: "error", message: e instanceof Error ? e.message : t("modelsConfig.networkError") });
-    }
-  }, [provider.id, t]);
-
-  const isWorking = loginState.phase === "connecting" || loginState.phase === "progress" ||
-    loginState.phase === "auth" || loginState.phase === "device_code" ||
-    loginState.phase === "prompt" || loginState.phase === "select";
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <SectionTitle>{t("modelsConfig.subscription")}</SectionTitle>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ width: 7, height: 7, borderRadius: "50%", background: provider.loggedIn ? "var(--status-success)" : "var(--border)", display: "inline-block" }} />
-          <span style={{ fontSize: 11, color: provider.loggedIn ? "var(--status-success)" : "var(--text-dim)" }}>
-            {provider.loggedIn ? t("modelsConfig.connected") : t("modelsConfig.notConnected")}
-          </span>
-        </div>
-      </div>
-
-      {/* Status */}
-      <div style={{ minHeight: 48 }}>
-        {loginState.phase === "idle" && (
-          <p style={{ margin: 0, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
-            {provider.loggedIn ? t("modelsConfig.alreadyConnected") : t("modelsConfig.connectAccount", { name: provider.name })}
-          </p>
-        )}
-        {loginState.phase === "connecting" && (
-          <p style={{ margin: 0, fontSize: 12, color: "var(--text-muted)" }}>{t("modelsConfig.openingBrowser")}</p>
-        )}
-        {loginState.phase === "select" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            <p style={{ margin: 0, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
-              {loginState.message}
-            </p>
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              {loginState.options.map((option) => (
-                <button
-                  key={option.id}
-                  onClick={() => submitSelection(loginState.token, option.id)}
-                  style={{ padding: "6px 9px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text)", cursor: "pointer", fontSize: 12, textAlign: "left" }}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-        {(loginState.phase === "auth" || loginState.phase === "prompt") && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            <p style={{ margin: 0, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
-              {loginState.phase === "auth"
-                ? t("modelsConfig.completeSignIn")
-                : loginState.message}
-            </p>
-            {loginState.phase === "auth" && (
-              <p style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.5 }}>
-                <a href={loginState.url} target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)", wordBreak: "break-all" }}>
-                  {t("modelsConfig.browserNotOpened")}
-                </a>
-              </p>
-            )}
-            <div style={{ display: "flex", gap: 6 }}>
-              <input
-                ref={inputRef}
-                value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") submitCode(loginState.token, inputValue); }}
-                placeholder={loginState.phase === "auth" ? "http://localhost:1455/auth/callback?code=…" : (loginState.placeholder ?? t("modelsConfig.enterValue"))}
-                style={{ flex: 1, padding: "6px 9px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text)", fontSize: 12, outline: "none", fontFamily: "var(--font-mono)", boxSizing: "border-box" }}
-              />
-              <button
-                onClick={() => submitCode(loginState.token, inputValue)}
-                disabled={!inputValue.trim()}
-                style={{ padding: "6px 12px", background: inputValue.trim() ? "var(--accent)" : "var(--bg-panel)", border: "none", borderRadius: 5, color: inputValue.trim() ? "var(--on-accent)" : "var(--text-dim)", cursor: inputValue.trim() ? "pointer" : "not-allowed", fontSize: 12, fontWeight: 600, flexShrink: 0 }}
-              >
-                {t("modelsConfig.submit")}
-              </button>
-            </div>
-          </div>
-        )}
-        {loginState.phase === "device_code" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            <p style={{ margin: 0, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
-              {t("modelsConfig.deviceCodeInstructions")}
-            </p>
-            <div style={{ padding: "8px 10px", background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text)", fontSize: 16, fontWeight: 700, fontFamily: "var(--font-mono)", letterSpacing: 0 }}>
-              {loginState.userCode}
-            </div>
-            <p style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.5 }}>
-              <a href={loginState.verificationUri} target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)", wordBreak: "break-all" }}>
-                {loginState.verificationUri}
-              </a>
-              {loginState.expiresInSeconds ? " " + tn("modelsConfig.expiresInMinutes", Math.ceil(loginState.expiresInSeconds / 60)) : ""}
-            </p>
-          </div>
-        )}
-        {loginState.phase === "progress" && (
-          <p style={{ margin: 0, fontSize: 12, color: "var(--text-muted)" }}>{loginState.message}</p>
-        )}
-        {loginState.phase === "success" && (
-          <p style={{ margin: 0, fontSize: 12, color: "var(--status-success)" }}>{t("modelsConfig.connectedSuccessfully")}</p>
-        )}
-        {loginState.phase === "error" && (
-          <p style={{ margin: 0, fontSize: 12, color: "var(--status-error)" }}>{loginState.message}</p>
-        )}
-      </div>
-
-      {/* Actions */}
-      <div style={{ display: "flex", gap: 8 }}>
-        {isWorking ? (
-          <button
-            onClick={() => { eventSourceRef.current?.close(); setLoginState({ phase: "idle" }); }}
-            style={{ padding: "5px 12px", background: "none", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text-muted)", cursor: "pointer", fontSize: 12 }}
-          >
-            {t("modelsConfig.cancel")}
-          </button>
-        ) : (
-          <>
-            <button
-              onClick={handleLogin}
-              style={{ padding: "5px 14px", background: "var(--accent)", border: "none", borderRadius: 5, color: "var(--on-accent)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}
-            >
-              {provider.loggedIn ? t("modelsConfig.relogin") : t("modelsConfig.login")}
-            </button>
-            {provider.loggedIn && (
-              <button
-                onClick={handleLogout}
-                style={{ padding: "5px 12px", background: "none", border: "1px solid color-mix(in srgb, var(--status-error) 30%, transparent)", borderRadius: 5, color: "var(--status-error)", cursor: "pointer", fontSize: 12 }}
-              >
-                {t("modelsConfig.disconnect")}
-              </button>
-            )}
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
 // ── API Key detail ────────────────────────────────────────────────────────────
 // omp keeps API keys in its own encrypted credential store (agent.db), which
 // Cody never reads or writes — this panel is status-only.
@@ -1827,7 +1535,7 @@ function ProviderBrandTile({ id, size }: { id: string; size: number }) {
 // ── Add provider picker ───────────────────────────────────────────────────────
 
 interface AddProviderPickerProps {
-  oauthProviders: OAuthProvider[];
+  oauthProviders: ProviderLoginRow[];
   apiKeyProviders: ApiKeyProvider[];
   onSelectOAuth: (id: string) => void;
   onSelectApiKey: (id: string) => void;
@@ -1845,7 +1553,7 @@ export function AddProviderPicker({
 
   const q = search.trim().toLowerCase();
 
-  const availableOAuth = oauthProviders.filter((p) => !p.loggedIn && (!q || p.name.toLowerCase().includes(q)));
+  const availableOAuth = oauthProviders.filter((p) => !p.authenticated && (!q || p.name.toLowerCase().includes(q)));
   const availableApiKey = apiKeyProviders.filter((p) => !p.configured && (!q || p.displayName.toLowerCase().includes(q) || p.id.toLowerCase().includes(q)));
   const showCustom = !q || "custom".includes(q) || "openai-compatible".includes(q) || "anthropic-compatible".includes(q);
 
@@ -1994,7 +1702,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false, 
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savedOk, setSavedOk] = useState(false);
   const [selection, setSelection] = useState<Selection | null>(null);
-  const [oauthProviders, setOauthProviders] = useState<OAuthProvider[]>([]);
+  const [oauthProviders, setOauthProviders] = useState<ProviderLoginRow[]>([]);
   const [apiKeyProviders, setApiKeyProviders] = useState<ApiKeyProvider[]>([]);
   const [runtimeModels, setRuntimeModels] = useState<RuntimeModelEntry[]>([]);
   const [connectedProviders, setConnectedProviders] = useState<ConnectedProvider[]>([]);
@@ -2012,7 +1720,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false, 
   const loadOAuthProviders = useCallback(() => {
     fetch("/api/auth/providers")
       .then((r) => r.json())
-      .then((d: { providers: OAuthProvider[] }) => setOauthProviders(d.providers))
+      .then((d: { providers: ProviderLoginRow[] }) => setOauthProviders(d.providers))
       .catch(() => {});
   }, []);
 
@@ -2248,7 +1956,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false, 
   }, [config, loadApiKeyProviders, loadConfig, loadRuntimeModels, onSaved, parseError, t]);
 
   const providers = Object.entries(config.providers ?? {});
-  const activeOAuth = oauthProviders.filter((p) => p.loggedIn);
+  const activeOAuth = oauthProviders.filter((p) => p.authenticated);
   const activeApiKey = apiKeyProviders.filter((p) => p.configured);
   const runtimeModelsByProvider = runtimeModels.reduce<Record<string, RuntimeModelEntry[]>>((groups, model) => {
     (groups[model.provider] ??= []).push(model);
@@ -2261,7 +1969,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false, 
     if (selection.type === "oauth") {
       const p = oauthProviders.find((p) => p.id === selection.providerId);
       if (!p) return null;
-      return <OAuthDetail key={p.id} provider={p} onRefresh={() => { loadOAuthProviders(); loadApiKeyProviders(); void loadRuntimeModels(); }} />;
+      return <ProviderLoginFlow key={p.id} provider={p} onChanged={() => { loadOAuthProviders(); loadApiKeyProviders(); void loadRuntimeModels(); }} />;
     }
     if (selection.type === "apikey") {
       const p = apiKeyProviders.find((p) => p.id === selection.providerId);

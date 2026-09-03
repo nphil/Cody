@@ -3,7 +3,8 @@
 import { AlertCircle, ArrowLeft, Check, KeyRound, Loader2, Plus, Server } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useI18n } from "@/lib/i18n";
-import { AddProviderPicker, ApiKeyDetail, OAuthDetail, type ApiKeyProvider, type OAuthProvider } from "./ModelsConfig";
+import { AddProviderPicker, ApiKeyDetail, type ApiKeyProvider } from "./ModelsConfig";
+import { ProviderLoginFlow, type ProviderLoginRow } from "./settings/ProviderLoginFlow";
 
 /**
  * The wizard's providers step: a deliberately empty-first surface. A fresh
@@ -39,7 +40,7 @@ type View =
 export function WizardProvidersStep() {
   const { t } = useI18n();
   const [view, setView] = useState<View>({ kind: "list" });
-  const [oauthProviders, setOauthProviders] = useState<OAuthProvider[]>([]);
+  const [oauthProviders, setOauthProviders] = useState<ProviderLoginRow[]>([]);
   const [apiKeyProviders, setApiKeyProviders] = useState<ApiKeyProvider[]>([]);
   const [customProviders, setCustomProviders] = useState<CustomProviderRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -51,7 +52,7 @@ export function WizardProvidersStep() {
       fetch("/api/models-config").then((r) => (r.ok ? r.json() : null)),
     ])
       .then(([oauth, keys, config]: [
-        { providers?: OAuthProvider[] } | null,
+        { providers?: ProviderLoginRow[] } | null,
         { providers?: ApiKeyProvider[] } | null,
         { providers?: Record<string, { baseUrl?: string; models?: unknown[] }> } | null,
       ]) => {
@@ -71,7 +72,7 @@ export function WizardProvidersStep() {
     reload();
   }, [reload]);
 
-  const connectedOAuth = oauthProviders.filter((provider) => provider.loggedIn);
+  const connectedOAuth = oauthProviders.filter((provider) => provider.authenticated);
   const configuredKeys = apiKeyProviders.filter((provider) => provider.configured);
   const hasAny = connectedOAuth.length > 0 || configuredKeys.length > 0 || customProviders.length > 0;
 
@@ -107,7 +108,7 @@ export function WizardProvidersStep() {
       <div className="setup-wizard-card">
         <BackRow label={t("setupWizard.providersBack")} onBack={() => { setView({ kind: "list" }); reload(); }} />
         {provider
-          ? <OAuthDetail provider={provider} onRefresh={reload} />
+          ? <ProviderLoginFlow provider={provider} onChanged={reload} />
           : <p>{t("setupWizard.providersMissing")}</p>}
       </div>
     );

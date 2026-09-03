@@ -3,6 +3,7 @@ import path from "path";
 import { AcpEngineSession, type AcpMcpServer } from "./acp-session";
 import { displayMcpAcpServer } from "../display/engine-tools";
 import { getEngineVersion, resolveEngineBin } from "./engine-bin";
+import { claudeProviderLogins } from "./claude-login";
 import type { EngineSession, EngineSessionOptions, HarnessAdapter } from "./types";
 
 /**
@@ -221,6 +222,10 @@ export const claudeHarness: HarnessAdapter = {
   resolveBinary: () => resolveEngineBin("claude-agent-acp", "CLAUDE"),
   getVersion: () => getEngineVersion("claude-agent-acp", "CLAUDE"),
   getAgentDir: () => path.join(homedir(), ".claude"),
+  // `claude auth login/status/logout` in a pseudo-terminal
+  // (lib/harness/claude-login.ts) — a Claude Pro/Max subscription, or an
+  // Anthropic Console account billed by API usage.
+  providerLogins: claudeProviderLogins,
   getSessionsDir: () => path.join(homedir(), ".claude", "projects"),
   createSession: (options) => createClaudeSession(options),
 };

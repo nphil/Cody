@@ -272,6 +272,15 @@ components/
   McpConfig.tsx       project MCP server editor (Settings → MCP tab)
   MemoryPanel.tsx     Settings → Agent Memory: the engine's own memory documents,
                       read-only, each with its path (capability-gated)
+  ProviderSignInPanel.tsx Settings → API Keys & Providers, first block: the
+                      ACTIVE engine's provider sign-in rows (/api/auth/providers),
+                      Sign in / Re-login / Sign out, each expanding a
+                      ProviderLoginFlow; rendered for every engine with
+                      `providerLogin`, admin-only controls
+  ProviderLoginFlow.tsx the one sign-in state machine (SSE frames → URL + paste
+                      box, device code, prompt, progress, success/error), used
+                      by ProviderSignInPanel, ModelsConfig's registry tree and
+                      the setup wizard
   ProviderKeysPanel.tsx Settings → API Keys & Providers, top half: per-provider
                       key cards for the ACTIVE engine (masked input, Save /
                       Clear, "Saved in Cody" / "Set on the container" chips);

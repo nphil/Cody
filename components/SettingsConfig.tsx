@@ -12,6 +12,7 @@ import { LOCALES, useI18n, type Locale } from "@/lib/i18n";
 import { readTerminalSoftKeyIds, TERMINAL_SOFT_KEYS, writeTerminalSoftKeyIds, type TerminalSoftKeyId } from "@/lib/terminal-preferences";
 import { NativeSetting, SettingsHighlightContext, TERMINAL_ONLY_BADGE, ToggleSwitch, chipStyle, nativeOptionStyle, nativeSelectStyle, slugify } from "./settings/primitives";
 import { ProviderKeysPanel } from "./settings/ProviderKeysPanel";
+import { ProviderSignInPanel } from "./settings/ProviderSignInPanel";
 
 const SettingsTabLoading = () => <div role="status" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 12 }}>Loading settings…</div>;
 const ModelsConfig = dynamic(() => import("./ModelsConfig").then((module) => module.ModelsConfig), { loading: SettingsTabLoading });
@@ -727,13 +728,18 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
               </div>
             )}
 
-            {/* API KEYS & PROVIDERS TAB. Two halves: the engine-neutral
-                provider keys (every engine reads its credentials from the
-                environment, so this exists for all five), and omp's own
-                OAuth/registry editor, which only omp's file format serves. */}
+            {/* API KEYS & PROVIDERS TAB. Three parts: the engine's own
+                provider SIGN-IN (a subscription or device code, kept in the
+                engine's own store — gated on capabilities.providerLogin, so
+                it disappears for an engine with no login surface), the
+                engine-neutral provider keys (every engine reads its
+                credentials from the environment, so this exists for all
+                five), and omp's own OAuth/registry editor, which only omp's
+                file format serves. */}
             {(visitedTabs.has("providers") || visitedTabs.has("models")) && (
               <div role="tabpanel" id="settings-panel-providers" aria-labelledby="settings-tab-providers" className="settings-scroll-column" style={{ display: (currentTab === "providers" || activeTab === "providers") ? "flex" : "none", height: "100%", minHeight: 0, flexDirection: "column", overflowY: "auto" }}>
-                <div style={{ padding: 20, borderBottom: capabilities.models ? "1px solid var(--border)" : undefined }}>
+                <div style={{ padding: 20, borderBottom: capabilities.models ? "1px solid var(--border)" : undefined, display: "flex", flexDirection: "column", gap: 24 }}>
+                  {capabilities.providerLogin && <ProviderSignInPanel />}
                   <ProviderKeysPanel />
                 </div>
                 {capabilities.models && (
