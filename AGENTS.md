@@ -195,6 +195,9 @@ lib/
     pi-login.ts        pi's pi-ai OAuth flows, run in bin/cody-pi-login.mjs (a
                        child that imports the INSTALLED pi package) and bridged
                        over JSON lines
+    login-channel.ts   the one FIFO channel a sign-in's pasted values travel
+                       through: a value pasted before the engine asks is held
+                       for the first asker; cancel rejects every waiter
   file-paths.ts        client/server path encoding helpers
   markdown.ts          shared markdown helpers
   npx.ts               npx runner used by skill install
@@ -313,6 +316,10 @@ bin/
                            mints the display capability secret at boot
   cody-display-mcp.js      bundled stdio MCP server exposing open_preview to
                            Claude/Codex engines (posts to /api/internal/display)
+  cody-pi-login.mjs        pi's provider sign-in helper: imports the INSTALLED pi
+                           package's AuthStorage/OAuth flows and speaks JSON
+                           lines to lib/harness/pi-login.ts (list / login /
+                           logout), so pi's own auth.json holds the credential
   cody-session-tail.js     read-only live view of a chat session for the FIRST
                            web terminal of a workspace (spawned by
                            lib/terminal-manager.ts); renders + follows the

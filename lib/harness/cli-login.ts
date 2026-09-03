@@ -159,7 +159,13 @@ export function runCliLogin(spec: CliLoginSpec, ui: ProviderLoginUi): Promise<vo
       if (settled) return;
       if (exitCode === 0) finish();
       else {
-        const detail = tail.filter((line) => !/^\s*$/.test(line)).slice(-4).join(" · ").trim();
+        // The reason, not the scenery: a CLI that fails after the prompt has
+        // just printed the sign-in URL and its box art, and those lines say
+        // nothing about why. Prefer a line that names an error; fall back to
+        // the last plain lines with URLs and box drawing left out.
+        const plain = tail.filter((line) => line.trim() && !/https?:\/\//.test(line) && !/^[\s│╭╰╮╯─]+$/.test(line) && !/^\s*[│╭╰]/.test(line));
+        const named = plain.filter((line) => /error|fail|invalid|denied|expired|unauthori[sz]ed/i.test(line));
+        const detail = (named.length > 0 ? named : plain).slice(-3).join(" · ").trim();
         finish(new Error(detail || `${spec.bin} exited with code ${exitCode}`));
       }
     });
