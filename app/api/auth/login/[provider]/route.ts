@@ -45,7 +45,10 @@ export async function POST(
   const { provider } = await params;
   const { token, code } = (await req.json()) as { token?: string; code?: string };
 
-  if (!token || !code) {
+  // An EMPTY answer is a valid one: some prompts are optional (pi's GitHub
+  // Copilot flow asks for an enterprise domain, blank meaning github.com),
+  // so only a missing field is refused, never an empty string.
+  if (!token || typeof code !== "string") {
     return Response.json({ error: "token and code required", code: "login_token_code_required" }, { status: 400 });
   }
   const pending = getLoginRegistry().get(token);
