@@ -97,7 +97,9 @@ export function runCliLogin(spec: CliLoginSpec, ui: ProviderLoginUi): Promise<vo
     ui.signal.addEventListener("abort", onAbort);
     if (ui.signal.aborted) { onAbort(); return; }
 
+    const typedValues: string[] = [];
     const typeValue = (value: string) => {
+      typedValues.push(value.trim());
       child.write(`${value.trim()}\r`);
     };
 
@@ -157,17 +159,28 @@ export function runCliLogin(spec: CliLoginSpec, ui: ProviderLoginUi): Promise<vo
 
     child.onExit(({ exitCode }) => {
       if (settled) return;
-      if (exitCode === 0) finish();
-      else {
+      // The CLI's last line usually arrives AFTER the exit event — node-pty
+      // delivers the final chunk a beat later — and a failure's reason is
+      // exactly that line. Drain briefly, then fold whatever has no newline
+      // yet into the tail before judging.
+      setTimeout(() => {
+        if (settled) return;
+        if (unread.trim()) { scanLine(unread); unread = ""; }
+        if (exitCode === 0) { finish(); return; }
         // The reason, not the scenery: a CLI that fails after the prompt has
-        // just printed the sign-in URL and its box art, and those lines say
-        // nothing about why. Prefer a line that names an error; fall back to
-        // the last plain lines with URLs and box drawing left out.
-        const plain = tail.filter((line) => line.trim() && !/https?:\/\//.test(line) && !/^[\s│╭╰╮╯─]+$/.test(line) && !/^\s*[│╭╰]/.test(line));
-        const named = plain.filter((line) => /error|fail|invalid|denied|expired|unauthori[sz]ed/i.test(line));
-        const detail = (named.length > 0 ? named : plain).slice(-3).join(" · ").trim();
+        // just printed the sign-in URL, its box art and the echo of what was
+        // typed, and none of those lines says why. Prefer a line that names
+        // an error; fall back to the last plain lines with URLs, box drawing
+        // and the typed value left out.
+        const plain = tail.filter((line) => line.trim()
+          && !/https?:\/\//.test(line)
+          && !/^[\s│╭╰╮╯─]+$/.test(line)
+          && !/^\s*[│╭╰]/.test(line)
+          && !typedValues.some((value) => value && line.includes(value)));
+        const named = plain.filter((line) => /error|fail|invalid|denied|expired|unauthori[sz]ed|did not|could not|cannot/i.test(line));
+        const detail = (named.length > 0 ? named : plain).slice(-2).join(" · ").trim();
         finish(new Error(detail || `${spec.bin} exited with code ${exitCode}`));
-      }
+      }, 250);
     });
   });
 }

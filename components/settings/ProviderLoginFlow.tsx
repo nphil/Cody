@@ -60,7 +60,13 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
   return <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 2 }}>{children}</div>;
 }
 
-export function ProviderLoginFlow({ provider, onChanged }: { provider: ProviderLoginRow; onChanged: () => void }) {
+/**
+ * `autoStart`: begin the flow on mount — the panel row's own Sign in button
+ * already IS the click, so the expanded detail must not ask for a second one.
+ * `compact`: the row above already shows the name and the signed-in state,
+ * so the detail drops its own "Subscription · connected" header.
+ */
+export function ProviderLoginFlow({ provider, onChanged, autoStart = false, compact = false }: { provider: ProviderLoginRow; onChanged: () => void; autoStart?: boolean; compact?: boolean }) {
   const { t, tn } = useI18n();
   const [loginState, setLoginState] = useState<LoginFlowState>({ phase: "idle" });
   const [inputValue, setInputValue] = useState("");
@@ -84,6 +90,8 @@ export function ProviderLoginFlow({ provider, onChanged }: { provider: ProviderL
   useEffect(() => {
     return () => { eventSourceRef.current?.close(); };
   }, []);
+
+  const autoStartRef = useRef(autoStart);
 
   const handleLogin = useCallback(() => {
     eventSourceRef.current?.close();
@@ -201,21 +209,29 @@ export function ProviderLoginFlow({ provider, onChanged }: { provider: ProviderL
     }
   }, [provider.id, t]);
 
+  useEffect(() => {
+    if (!autoStartRef.current) return;
+    autoStartRef.current = false;
+    handleLogin();
+  }, [handleLogin]);
+
   const isWorking = loginState.phase === "connecting" || loginState.phase === "progress" ||
     loginState.phase === "auth" || loginState.phase === "device_code" ||
     loginState.phase === "prompt" || loginState.phase === "select";
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <SectionTitle>{t("modelsConfig.subscription")}</SectionTitle>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ width: 7, height: 7, borderRadius: "50%", background: provider.authenticated ? "var(--status-success)" : "var(--border)", display: "inline-block" }} />
-          <span style={{ fontSize: 11, color: provider.authenticated ? "var(--status-success)" : "var(--text-dim)" }}>
-            {provider.authenticated ? t("modelsConfig.connected") : t("modelsConfig.notConnected")}
-          </span>
+    <div style={{ display: "flex", flexDirection: "column", gap: compact ? 10 : 16 }}>
+      {!compact && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <SectionTitle>{t("modelsConfig.subscription")}</SectionTitle>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ width: 7, height: 7, borderRadius: "50%", background: provider.authenticated ? "var(--status-success)" : "var(--border)", display: "inline-block" }} />
+            <span style={{ fontSize: 11, color: provider.authenticated ? "var(--status-success)" : "var(--text-dim)" }}>
+              {provider.authenticated ? t("modelsConfig.connected") : t("modelsConfig.notConnected")}
+            </span>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Status */}
       <div style={{ minHeight: 48 }}>

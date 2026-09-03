@@ -29,10 +29,18 @@ interface ProvidersResponse {
   reason?: string;
 }
 
-function ProviderRow({ provider, canEdit, expanded, onToggle, onChanged }: {
+function ProviderRow({ provider, canEdit, expanded, onToggle, onStart, onLogout, autoStart, logoutError, onChanged }: {
   provider: ProviderLoginRow;
   canEdit: boolean;
   expanded: boolean;
+  /** Expand the row AND begin its login flow (the row's Sign in / Re-login). */
+  onStart: () => void;
+  /** Remove the credential through the engine's own logout. */
+  onLogout: () => Promise<void>;
+  /** Whether the expanded flow should begin immediately. */
+  autoStart: boolean;
+  /** The last logout failure for this row, in the route's words. */
+  logoutError: string | null;
   onToggle: () => void;
   onChanged: () => void;
 }) {
@@ -66,7 +74,7 @@ function ProviderRow({ provider, canEdit, expanded, onToggle, onChanged }: {
           <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0, flexWrap: "wrap" }}>
             <button
               type="button"
-              onClick={onToggle}
+              onClick={onStart}
               aria-expanded={expanded}
               style={provider.authenticated ? { ...toggleButtonStyle, color: "var(--text-muted)" } : { ...toggleButtonStyle, background: "var(--accent)", borderColor: "var(--accent)", color: "var(--on-accent)" }}
             >
@@ -76,8 +84,7 @@ function ProviderRow({ provider, canEdit, expanded, onToggle, onChanged }: {
             {provider.authenticated && provider.canLogout && (
               <button
                 type="button"
-                onClick={onToggle}
-                aria-expanded={expanded}
+                onClick={() => { void onLogout(); }}
                 style={{ ...toggleButtonStyle, color: "var(--status-error)", borderColor: "color-mix(in srgb, var(--status-error) 30%, transparent)" }}
               >
                 <LogOut size={12} aria-hidden="true" />
@@ -97,9 +104,12 @@ function ProviderRow({ provider, canEdit, expanded, onToggle, onChanged }: {
         )}
       </div>
 
+      {logoutError && (
+        <p role="alert" style={{ margin: 0, padding: "6px 12px 10px", fontSize: 12, color: "var(--status-error)" }}>{logoutError}</p>
+      )}
       {canEdit && expanded && (
         <div style={{ borderTop: "1px solid var(--border)", padding: 12 }}>
-          <ProviderLoginFlow provider={provider} onChanged={onChanged} />
+          <ProviderLoginFlow provider={provider} onChanged={onChanged} autoStart={autoStart} compact />
         </div>
       )}
     </div>
@@ -118,6 +128,11 @@ export function ProviderSignInPanel() {
   // Members still see whether a provider is connected.
   const [canEdit, setCanEdit] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  // The row whose flow should begin the moment it expands: set by the row's
+  // Sign in / Re-login button, cleared by the chevron, so a chevron-expanded
+  // row shows the idle detail and a button-expanded one starts at once.
+  const [autoStartId, setAutoStartId] = useState<string | null>(null);
+  const [logoutError, setLogoutError] = useState<{ id: string; message: string } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -149,6 +164,24 @@ export function ProviderSignInPanel() {
   const toggle = useCallback((id: string) => {
     setExpandedId((current) => (current === id ? null : id));
   }, []);
+
+  const startFlow = (id: string) => {
+    setLogoutError(null);
+    setAutoStartId(id);
+    setExpandedId(id);
+  };
+  const logout = async (id: string) => {
+    setLogoutError(null);
+    try {
+      const response = await fetch(`/api/auth/logout/${encodeURIComponent(id)}`, { method: "POST" });
+      const body = await response.json().catch(() => null) as { error?: string; code?: string } | null;
+      if (!response.ok) { setLogoutError({ id, message: body?.error || body?.code ? formatApiError(body ?? {}) : `HTTP ${response.status}` }); return; }
+      setExpandedId((current) => (current === id ? null : current));
+      void load();
+    } catch (failure) {
+      setLogoutError({ id, message: failure instanceof Error ? failure.message : String(failure) });
+    }
+  };
 
   const onRowChanged = useCallback(() => { void load(); }, [load]);
 
@@ -190,7 +223,11 @@ export function ProviderSignInPanel() {
               provider={provider}
               canEdit={canEdit}
               expanded={expandedId === provider.id}
-              onToggle={() => toggle(provider.id)}
+              onToggle={() => { setAutoStartId(null); toggle(provider.id); }}
+              onStart={() => startFlow(provider.id)}
+              onLogout={() => logout(provider.id)}
+              autoStart={autoStartId === provider.id}
+              logoutError={logoutError?.id === provider.id ? logoutError.message : null}
               onChanged={onRowChanged}
             />
           ))}
