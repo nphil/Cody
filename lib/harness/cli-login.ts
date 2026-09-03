@@ -101,6 +101,8 @@ export function runCliLogin(spec: CliLoginSpec, ui: ProviderLoginUi): Promise<vo
     const typeValue = (value: string) => {
       typedValues.push(value.trim());
       child.write(`${value.trim()}\r`);
+      // The CLI may ask again (a rejected code); the next prompt is a new one.
+      prompted = false;
     };
 
     // A value pasted before the CLI asks for it: keep it, and type it the

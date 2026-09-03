@@ -69,6 +69,6 @@ test("signed in without canLogout hides the Disconnect button", () => {
 // rows or empty-state copy that would imply a response already came back.
 test("ProviderSignInPanel renders its heading shell before data loads", () => {
   const html = renderToStaticMarkup(React.createElement(ProviderSignInPanel));
-  assert.match(html, /Sign in to the active engine/);
+  assert.match(html, /Provider sign-in for the active engine/);
   assert.doesNotMatch(html, /Signed in|Not signed in/);
 });

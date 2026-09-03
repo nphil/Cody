@@ -1,5 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
+import { requireAdmin } from "@/lib/auth/http";
 import { requireCapability } from "@/lib/engine-guard";
+import { invalidateModelsCache } from "@/lib/models-cache";
 import { getHarness } from "@/lib/harness";
 import { createLoginValueChannel } from "@/lib/harness/login-channel";
 import type { ProviderLoginUi } from "@/lib/harness/types";
@@ -43,6 +46,10 @@ export async function POST(
   { params }: { params: Promise<{ provider: string }> },
 ) {
   const { provider } = await params;
+  // The credential is shared by every user's sessions: signing the instance
+  // in or out is an administrator's act, like saving a key.
+  const auth = requireAdmin(req);
+  if ("response" in auth) return auth.response;
   const { token, code } = (await req.json()) as { token?: string; code?: string };
 
   // An EMPTY answer is a valid one: some prompts are optional (pi's GitHub
@@ -73,6 +80,8 @@ export async function GET(
   { params }: { params: Promise<{ provider: string }> },
 ) {
   const { provider } = await params;
+  const auth = requireAdmin(req);
+  if ("response" in auth) return auth.response;
   const gate = requireCapability("providerLogin", "Provider sign-in");
   if ("response" in gate) return gate.response;
   const engine = getHarness();
@@ -84,7 +93,7 @@ export async function GET(
     );
   }
 
-  const token = `${provider}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const token = `${provider}-${randomUUID()}`;
   const registry = getLoginRegistry();
   const encoder = new TextEncoder();
 
@@ -146,9 +155,19 @@ export async function GET(
         cancelWaiters();
       };
       req.signal.addEventListener("abort", cleanup);
+      // A request already gone when the stream starts never fires abort; do
+      // not run a fifteen-minute engine login for nobody.
+      if (req.signal.aborted) {
+        cleanup();
+        closed = true;
+        try { controller.close(); } catch { /* already closed */ }
+        return;
+      }
 
       try {
         await surface.login(provider, ui);
+        // A new credential changes which models resolve, whatever the engine.
+        invalidateModelsCache();
         send({ type: "success" });
       } catch (error) {
         if (req.signal.aborted) {

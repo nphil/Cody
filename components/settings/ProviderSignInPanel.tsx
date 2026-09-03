@@ -195,10 +195,10 @@ export function ProviderSignInPanel() {
       <div>
         <h3 id="provider-signin-heading" style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, fontWeight: 600, margin: 0 }}>
           <LogIn size={15} aria-hidden="true" />
-          Sign in to {engineName}&apos;s providers
+          Provider sign-in for {engineName}
         </h3>
         <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)", maxWidth: "62ch" }}>
-          Use {engineName}&apos;s own sign-in — a browser subscription or a device code — to connect a provider without pasting an API key below.
+          Connect a subscription with the engine&apos;s own sign-in — a browser login, or a device code — instead of pasting an API key below.
           {!canEdit && " Only an administrator can sign in or out."}
         </p>
       </div>

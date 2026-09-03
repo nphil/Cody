@@ -674,7 +674,9 @@ providers).
 Provider SIGN-IN with the active engine's own login (a Claude Pro/Max or
 ChatGPT subscription, Nous Portal, …) — unrelated to Cody accounts, do not
 confuse the two. Served for every engine whose `capabilities.providerLogin`
-is true; refused `400 unsupported` otherwise.
+is true; refused `400 unsupported` otherwise. The roster is readable by any
+signed-in user; starting a login and logging out are **admin-only**, since
+the credential is shared by every user's sessions.
 
 - `GET /api/auth/providers` → `{"engine":{"id","shortName"},
   "providers":[{"id","name","authenticated","kind":"oauth"|"device",
