@@ -1403,34 +1403,8 @@ pre, code {
 .chat-input-shell:focus-within {
   transform: none;
 }
-.composer-control-shelf {
-  animation: ui-slide-up var(--dur-fast) var(--ease-out-warm) both;
-}
-.composer-control-shelf > button {
-  transition: background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm), border-color var(--dur-fast) var(--ease-out-warm), transform var(--dur-fast) var(--ease-out-warm);
-}
-.composer-control-shelf > button:hover:not(:disabled) {
-  background: var(--bg-hover) !important;
-  color: var(--text) !important;
-  transform: none;
-}
-@media (min-width: 641px) {
-  .composer-control-shelf {
-    max-width: min(100%, 760px);
-    justify-content: flex-end;
-    gap: 4px !important;
-    padding-top: 4px;
-    border-top: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
-  }
-  .composer-control-shelf > button {
-    height: 28px !important;
-    padding-inline: 8px !important;
-    border-radius: 6px !important;
-    font-size: 11px !important;
-  }
-}
 @media (prefers-reduced-motion: reduce) {
-  .sidebar-project-sessions, .sidebar-project-worktree, .composer-control-shelf { animation: none; }
+  .sidebar-project-sessions, .sidebar-project-worktree { animation: none; }
 }
 
 @media (max-width: 640px) {
@@ -2991,13 +2965,6 @@ html.dark .dropdown-surface :is(select, option) {
   .directory-picker-back {
     min-width: 44px;
   }
-  /* The desktop (min-width: 641px) block shrinks composer controls to 28px
-     for pointer precision; touch keeps them at thumb size. */
-  .composer-control-shelf > button {
-    height: 38px !important;
-    padding-inline: 10px !important;
-    font-size: 12px !important;
-  }
   /* Below 16px iOS Safari zooms the page on focus and never zooms back. */
   .composer-textarea {
     font-size: 16px !important;
@@ -3005,7 +2972,7 @@ html.dark .dropdown-surface :is(select, option) {
   /* Kill the 300ms double-tap-to-zoom delay on every interactive control. */
   .shell-toolbar-btn, .ui-control, .ui-icon-button,
   .terminal-tab-close, .terminal-action, .terminal-soft-keys button,
-  .composer-control-shelf > button, .login-primary, .login-ghost,
+  .login-primary, .login-ghost,
   .engine-button, .engine-link {
     touch-action: manipulation;
   }

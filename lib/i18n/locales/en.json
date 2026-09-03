@@ -194,6 +194,7 @@
   "chatInput.noModels": "No models",
   "chatInput.placeholder": "Message… Type / for commands, @ for files",
   "chatInput.placeholderRunning": "Agent is running…",
+  "chatInput.placeholderShort": "Message…",
   "chatInput.placeholderSteer": "Steer now / queue follow-up...",
   "chatInput.planningInProgress": "Planning in progress",
   "chatInput.queuedCount": "Queued · {count}",

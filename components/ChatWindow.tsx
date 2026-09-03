@@ -1125,6 +1125,36 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
   const aboveEditorWidgets = extensionWidgets.filter((widget) => widget.placement !== "belowEditor");
   const belowEditorWidgets = extensionWidgets.filter((widget) => widget.placement === "belowEditor");
 
+  // Shared between both empty-chat layouts below so the brand row can't drift
+  // out of sync between the desktop version (composer inline, all centred
+  // together) and the mobile version (composer split out into its own bottom
+  // dock — see isEmptyNew rendering further down).
+  const emptyChatBrand = (
+      <div
+         className="mb-3 empty-chat-brand"
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 12,
+          marginLeft: 8,
+          marginRight: 8,
+          fontFamily: "var(--font-mono)",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "baseline", gap: 10, minWidth: 0, flex: 1, lineHeight: 1.4, overflow: "hidden" }}>
+          <span style={{ fontSize: 18, fontWeight: 600, letterSpacing: "0.04em", color: "var(--accent)", flexShrink: 0, whiteSpace: "nowrap" }}>⌥</span>
+          <span style={{ fontSize: 18, color: "var(--text)", fontWeight: 600, letterSpacing: "0.02em", flexShrink: 0, whiteSpace: "nowrap" }}>cody</span>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2, flexShrink: 0 }}>
+          <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+            cody <span style={{ color: "var(--text)" }}>v{process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0"}</span>
+          </span>
+          <EngineRuntimeVersion engine={engine} />
+        </div>
+      </div>
+  );
+
   if (loading) {
     return (
       <div role="status" className="flex h-full items-center justify-center" style={{ color: "var(--text-muted)" }}>
@@ -1204,35 +1234,40 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       )}
 
       {isEmptyNew ? (
-        <div className="flex flex-1 flex-col items-center justify-center overflow-y-auto px-4 py-8">
-          <div className="w-full" style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH }}>
-            <div
-               className="mb-3 empty-chat-brand"
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: 12,
-                marginLeft: 8,
-                marginRight: 8,
-                fontFamily: "var(--font-mono)",
-              }}
-            >
-              <div style={{ display: "flex", alignItems: "baseline", gap: 10, minWidth: 0, flex: 1, lineHeight: 1.4, overflow: "hidden" }}>
-                <span style={{ fontSize: 18, fontWeight: 600, letterSpacing: "0.04em", color: "var(--accent)", flexShrink: 0, whiteSpace: "nowrap" }}>⌥</span>
-                <span style={{ fontSize: 18, color: "var(--text)", fontWeight: 600, letterSpacing: "0.02em", flexShrink: 0, whiteSpace: "nowrap" }}>cody</span>
-              </div>
-              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2, flexShrink: 0 }}>
-                <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                  cody <span style={{ color: "var(--text)" }}>v{process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0"}</span>
-                </span>
-                <EngineRuntimeVersion engine={engine} />
+        isMobile ? (
+          // Mobile: the composer is pulled out of the centred column into its
+          // own bottom dock, matching the populated branch below, so it sits
+          // in the same place before and after the first message is sent
+          // instead of jumping from mid-screen down to the bottom, and so the
+          // keyboard opening doesn't drag a vertically-centred composer
+          // around with it.
+          <div className="flex flex-1 flex-col overflow-hidden">
+            <div className="flex flex-1 flex-col items-center justify-center overflow-y-auto px-4 py-8">
+              <div className="w-full" style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH }}>
+                {emptyChatBrand}
               </div>
             </div>
+            <div className="relative" style={{ flexShrink: 0, paddingBottom: "max(8px, env(safe-area-inset-bottom))" }}>
+              <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
+                <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
+                  {/* Notices ride with the composer, as they do once messages
+                      exist — a model error belongs next to the Send it blocks,
+                      not centred half a screen above it. */}
+                  <NoticeShelf notices={notices} align="right" />
+                  {chatInputElement}
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : (
+        <div className="flex flex-1 flex-col items-center justify-center overflow-y-auto px-4 py-8">
+          <div className="w-full" style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH }}>
+            {emptyChatBrand}
             <NoticeShelf notices={notices} align="right" />
             {chatInputElement}
           </div>
         </div>
+        )
       ) : (
       <>
       <div className="relative flex flex-1 overflow-hidden">
@@ -1425,7 +1460,16 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
         )}
       </div>
 
-      <div className="relative" style={{ flexShrink: 0 }}>
+      <div
+        className="relative"
+        style={{
+          flexShrink: 0,
+          // Keeps the composer clear of the home indicator on an iPhone
+          // home-screen (standalone) install, where env(safe-area-inset-bottom)
+          // is nonzero; the max() floor keeps normal-browser spacing unchanged.
+          paddingBottom: isMobile ? "max(8px, env(safe-area-inset-bottom))" : undefined,
+        }}
+      >
         <div
           style={{
             padding: `0 ${CHAT_COLUMN_PADDING}px`,

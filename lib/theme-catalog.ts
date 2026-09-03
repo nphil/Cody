@@ -84,6 +84,9 @@ export type ThemeId = (typeof THEMES)[number]["id"];
 
 export const DEFAULT_THEME_ID: ThemeId = "catppuccin-light";
 
+/** Where a first visit lands when the device itself prefers dark. */
+export const DEFAULT_DARK_THEME_ID: ThemeId = "catppuccin-dark";
+
 const byId = Object.fromEntries(THEMES.map((item) => [item.id, item])) as Record<ThemeId, ThemeDefinition>;
 
 export function isThemeId(value: string | null): value is ThemeId {
@@ -92,6 +95,23 @@ export function isThemeId(value: string | null): value is ThemeId {
 
 export function getTheme(id: string | null | undefined): ThemeDefinition {
   return (id ? byId[id as ThemeId] : undefined) ?? byId[DEFAULT_THEME_ID];
+}
+
+/**
+ * Which theme a page starts on, in precedence order: an explicit choice
+ * (the account's saved theme, then this browser's), else the device's own
+ * colour scheme.
+ *
+ * The last step is the one that was missing. The default was the light theme
+ * for everyone, so a phone set to dark mode opened Cody as a bright white page
+ * — exactly the situation that sends people to install a "dark mode" browser
+ * extension, which then recolours the page into something no theme in this
+ * catalog produces. The inline bootstrap in lib/theme-bootstrap.ts mirrors
+ * this function and is tested against it.
+ */
+export function resolveInitialThemeId(stored: string | null | undefined, prefersDark: boolean): ThemeId {
+  if (isThemeId(stored ?? null)) return stored as ThemeId;
+  return prefersDark ? DEFAULT_DARK_THEME_ID : DEFAULT_THEME_ID;
 }
 
 export function getAlternateTheme(id: ThemeId): (typeof THEMES)[number] {

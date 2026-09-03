@@ -41,7 +41,21 @@ export interface UserRecord {
   createdAt: string;
   /** Reserved seam for a future container-uid mapping; never populated today. */
   osUser?: { uid: number; gid: number; home: string };
+  /** Per-account UI choices that should follow the user across devices. */
+  preferences?: UserPreferences;
 }
+
+/**
+ * Kept deliberately small and untyped against the UI: the theme is a string
+ * here because the account store must not depend on the theme catalog. The
+ * /api/accounts/me route validates ids on the way in, and the layout
+ * re-validates on the way out, so an id from a removed theme reads as "none".
+ */
+export interface UserPreferences {
+  theme?: string;
+}
+
+const MAX_PREFERENCE_LENGTH = 64;
 
 /** The shape safe to hand to the browser. */
 export interface PublicUser {
@@ -55,6 +69,8 @@ export interface PublicUser {
    * clients append it as ?v= and the avatar response can be cached immutably. */
   avatarKey: string | null;
   createdAt: string;
+  /** The saved theme id, or null when never chosen. */
+  theme: string | null;
 }
 
 interface AccountsFile {
@@ -86,12 +102,16 @@ export function toPublicUser(user: UserRecord): PublicUser {
     hasAvatar: typeof user.avatar === "string",
     avatarKey: user.avatar ?? null,
     createdAt: user.createdAt,
+    theme: user.preferences?.theme ?? null,
   };
 }
 
 function parseUser(value: unknown): UserRecord | null {
   if (!isRecord(value)) return null;
-  const { id, username, fullName, role, passwordHash, envManaged, tokenVersion, avatar, createdAt } = value;
+  const { id, username, fullName, role, passwordHash, envManaged, tokenVersion, avatar, createdAt, preferences } = value;
+  const theme = isRecord(preferences) && typeof preferences.theme === "string" && preferences.theme.length <= MAX_PREFERENCE_LENGTH
+    ? preferences.theme
+    : null;
   if (typeof id !== "string" || typeof username !== "string" || typeof createdAt !== "string") return null;
   if (role !== "admin" && role !== "member") return null;
   return {
@@ -104,6 +124,7 @@ function parseUser(value: unknown): UserRecord | null {
     tokenVersion: typeof tokenVersion === "number" && Number.isInteger(tokenVersion) ? tokenVersion : 1,
     ...(typeof avatar === "string" && /^[a-f0-9-]+\.(png|jpe?g|webp)$/.test(avatar) ? { avatar } : {}),
     createdAt,
+    ...(theme !== null ? { preferences: { theme } } : {}),
   };
 }
 
