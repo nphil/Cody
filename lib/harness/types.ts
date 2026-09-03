@@ -111,6 +111,115 @@ export interface EngineUsage {
   cost?: number;
 }
 
+/**
+ * ONE ENGINE'S OWN SETTINGS, in the shape the schema-driven panel renders.
+ *
+ * Cody's settings tab is schema-DRIVEN: it draws whatever the active engine
+ * declares, so a setting added upstream appears without a Cody release. Three
+ * engines supply that declaration from three unrelated places — omp from a
+ * TypeScript schema in its package, Hermes from its Python DEFAULT_CONFIG, pi
+ * from the settings table in its shipped docs — and the panel neither knows
+ * nor cares which. This is the type that makes them interchangeable.
+ *
+ * It exists because the route used to switch on engine IDs
+ * (`active.id === "hermes" ? … : ompBranch`), which made "no branch of mine"
+ * mean "omp's branch": every engine without a case fell through and was
+ * handed omp's ~550-key schema and omp's config.yml, stamped with its own
+ * name. An adapter hook cannot do that — an engine either implements it or
+ * the route refuses.
+ */
+export type EngineSettingType = "boolean" | "enum" | "number" | "string" | "array";
+
+/** What one control can hold. A list is a real `string[]`: the panel's list
+ * editor renders `Array.isArray(value) ? value : []`, so JSON text arrives
+ * there as an empty list. */
+export type EngineSettingValue = boolean | number | string | string[];
+
+/** One row of the panel. The superset of what the three derivations produce,
+ * so `OmpSetting[]` and each engine's own setting type assign straight to it. */
+export interface EngineSetting {
+  /** Dotted config path, e.g. "compaction.enabled". */
+  key: string;
+  type: EngineSettingType;
+  tab: string;
+  /** Section within the tab; undefined renders above the first heading. */
+  group?: string;
+  label: string;
+  description?: string;
+  /** Enum choices declared as bare values. */
+  values?: string[];
+  /** Enum choices with their own labels. */
+  options?: Array<{ value: string; label: string; description?: string }>;
+  default?: EngineSettingValue;
+  /** The engine fills the choices from a runtime registry Cody cannot read,
+   * so the row renders as free text. */
+  runtimeOptions?: boolean;
+  /** Shown, never editable — a control whose save always fails is worse than
+   * an honest read-only row. */
+  readOnly?: boolean;
+  readOnlyReason?: string;
+  /** Array settings whose element order is meaningful upstream. */
+  ordered?: boolean;
+  /** Name of the engine predicate gating visibility. */
+  condition?: string;
+  /** Configures the engine's TERMINAL UI only, so changing it does nothing
+   * while working in a browser. Labelled rather than hidden: the same file
+   * still drives the CLI the user runs in a Cody terminal. */
+  terminalOnly?: boolean;
+}
+
+export interface EngineSettingsSchema {
+  /** Tabs in the engine's own declared order. */
+  tabs: Array<{ id: string; label: string }>;
+  /** Section order per tab. */
+  groups: Record<string, string[]>;
+  settings: EngineSetting[];
+  /** Where the declaration was read from, for diagnostics. */
+  source: { packagePath: string; version: string | null };
+}
+
+export interface EngineSettingsRead {
+  /** Absolute path of the file the values live in, shown in the panel. */
+  path: string;
+  /** Null when the declaration cannot be read — the engine is not installed,
+   * or ships a layout this Cody does not know. Null is honest; a fabricated
+   * schema would offer settings that write nowhere. */
+  schema: EngineSettingsSchema | null;
+  values: Record<string, EngineSettingValue>;
+  /** Why `schema` is null, in the engine's own terms. */
+  reason?: string;
+}
+
+export interface EngineSettingsWrite {
+  /** Keys that reached the engine's config. */
+  written: string[];
+  /**
+   * Keys that did not, each with why. A patch is not all-or-nothing: one key
+   * an engine refuses must neither abort the rest nor disappear silently, so
+   * it is NAMED here and the response reports the save as unsuccessful.
+   */
+  rejected: Array<{ key: string; reason: string }>;
+  /** Values as they stand after the write, so the panel re-syncs from the
+   * file rather than from what it hoped it saved. */
+  values: Record<string, EngineSettingValue>;
+}
+
+/**
+ * The engine's settings pipeline. Present exactly when
+ * `capabilities.nativeSettings` is true — the flag hides the tab, this hook
+ * is what the route dispatches on, and an engine that declares the flag
+ * without the hook gets the same 400 `unsupported` as one that declares
+ * neither.
+ *
+ * `write` reports per-key refusals through `rejected` and THROWS only when
+ * the whole patch is impossible (no binary, no readable schema): the route
+ * turns a throw into a 400 carrying the engine's own words.
+ */
+export interface EngineSettingsSurface {
+  readSchema(): EngineSettingsRead;
+  write(patch: Record<string, unknown>): EngineSettingsWrite;
+}
+
 /** One document of an engine's persistent memory. */
 export interface MemoryDocument {
   /** Stable id within the engine ("memory", "user"). */
@@ -385,4 +494,15 @@ export interface HarnessAdapter {
    * knows about me?" — without pretending Cody owns the file.
    */
   readMemory?(): MemoryDocument[];
+  /**
+   * The engine's own settings, read and written for the schema-driven panel.
+   * Present exactly when `capabilities.nativeSettings` is true.
+   *
+   * This is the seam that replaced an engine-id switch in the route. Each
+   * engine derives the same shape from a different place — omp from its
+   * TypeScript schema, Hermes from its Python DEFAULT_CONFIG, pi from the
+   * settings tables in its shipped docs — and the route asks the adapter
+   * rather than asking which engine it is talking to.
+   */
+  readonly settings?: EngineSettingsSurface;
 }

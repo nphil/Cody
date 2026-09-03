@@ -180,6 +180,12 @@ type AgentStateResponse = {
   // false and the picker stays hidden.
   availableModels?: { provider?: unknown; id?: unknown; name?: unknown }[];
   modelSelectable?: boolean;
+  // The session modes an ACP agent published at session/new — its own
+  // permission posture (Claude: Manual / Accept edits / Plan / Auto; Hermes:
+  // Default / Accept Edits / Don't Ask). Never sent by an rpc-dialect engine,
+  // and absent means "no picker" — there is no global fallback to consult.
+  availableModes?: { id?: unknown; name?: unknown; description?: unknown }[];
+  currentModeId?: string | null;
 };
 
 /** Read a session-scoped catalog off get_state, dropping anything malformed
@@ -192,6 +198,22 @@ function readSessionModels(state: AgentStateResponse | null | undefined): ModelE
     if (!provider || !id) return [];
     const name = typeof entry?.name === "string" && entry.name ? entry.name : id;
     return [{ provider, id, name }];
+  });
+}
+
+export type SessionModeOption = { id: string; name: string; description?: string };
+const NO_MODES: SessionModeOption[] = [];
+
+/** Read the session's mode list off get_state, dropping anything malformed
+ * rather than rendering a row that cannot be selected. */
+function readSessionModes(state: AgentStateResponse | null | undefined): SessionModeOption[] {
+  if (!state || !Array.isArray(state.availableModes)) return NO_MODES;
+  return state.availableModes.flatMap((entry) => {
+    const id = typeof entry?.id === "string" ? entry.id : "";
+    if (!id) return [];
+    const name = typeof entry?.name === "string" && entry.name ? entry.name : id;
+    const description = typeof entry?.description === "string" && entry.description ? entry.description : undefined;
+    return [description ? { id, name, description } : { id, name }];
   });
 }
 
@@ -728,6 +750,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [sessionModels, setSessionModels] = useState<{ list: ModelEntry[]; selectable: boolean }>(
     () => ({ list: [], selectable: false }),
   );
+  // Id-scoped like autoModelSwitch: a mode list adopted for one session is
+  // never offered on the next (a fresh chat, or a session under an engine
+  // that has no modes at all).
+  const [sessionModes, setSessionModes] = useState<{ forSession: string | null; options: SessionModeOption[]; current: string | null }>(
+    () => ({ forSession: null, options: NO_MODES, current: null }),
+  );
   const [liveModelMeta, setLiveModelMeta] = useState<ThinkingModelMeta | null>(null);
   const [modelThinkingLevels, setModelThinkingLevels] = useState<Record<string, string[]>>({});
   const [modelThinkingLevelMaps, setModelThinkingLevelMaps] = useState<Record<string, Record<string, string | null>>>({});
@@ -1201,14 +1229,39 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     });
   }, []);
 
+  /** Adopt the session's mode list off get_state. Unlike models there is no
+   * global registry to fall back on, so an absent field IS the answer: this
+   * session offers no modes, and whatever an earlier one published must go. */
+  // Bumped by every set_mode. A state fetch captures it BEFORE the request
+  // goes out and adopts nothing if it moved while the response was in
+  // flight: that snapshot predates the switch and would put the picker back
+  // to the old mode until the next fetch.
+  const modeSyncSeqRef = useRef(0);
+  const adoptSessionModes = useCallback((state: AgentStateResponse | null | undefined, sid: string, seq: number) => {
+    if (seq !== modeSyncSeqRef.current) return;
+    const options = readSessionModes(state);
+    const reported = typeof state?.currentModeId === "string" ? state.currentModeId : null;
+    const current = reported && options.some((option) => option.id === reported) ? reported : (options[0]?.id ?? null);
+    setSessionModes((held) => {
+      if (held.forSession === sid && held.current === current
+        && held.options.length === options.length
+        && held.options.every((option, index) => option.id === options[index].id && option.name === options[index].name && option.description === options[index].description)) {
+        return held;
+      }
+      return { forSession: sid, options, current };
+    });
+  }, []);
+
   const refreshLiveModelState = useCallback(async (sid: string) => {
     const token = beginAuthoritativeModelSync();
+    const modeSeq = modeSyncSeqRef.current;
     try {
       const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`);
       if (!res.ok) return;
       const agentState = await res.json() as { running: boolean; state?: AgentStateResponse };
       if (sessionIdRef.current !== sid) return;
       adoptSessionModels(agentState.state);
+      adoptSessionModes(agentState.state, sid, modeSeq);
       const applied = applyAuthoritativeModel(toThinkingModelMeta(agentState.state?.model), token);
       if (!applied) return; // stale snapshot — drop its thinking level too
       if (agentState.state?.thinkingLevel !== undefined) {
@@ -1229,7 +1282,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch {
       // Best effort; the next loadSession/reconcile re-syncs.
     }
-  }, [applyAuthoritativeModel, beginAuthoritativeModelSync, adoptSessionModels]);
+  }, [applyAuthoritativeModel, beginAuthoritativeModelSync, adoptSessionModels, adoptSessionModes]);
 
   /**
    * Adopt a `get_state.pendingPermissions` snapshot.
@@ -1318,6 +1371,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // earlier must not mint a fresh token on arrival and clobber a newer
         // sync that started while this request was in flight.
         const token = beginAuthoritativeModelSync();
+        const modeSeq = modeSyncSeqRef.current;
         const stateRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`);
         if (!stateRes.ok) throw new Error(`HTTP ${stateRes.status}`);
         const agentState = await stateRes.json() as { running: boolean; state?: AgentStateResponse };
@@ -1332,6 +1386,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
         const liveState = agentState.state;
         adoptSessionModels(liveState);
+        adoptSessionModes(liveState, sid, modeSeq);
         const modelApplied = applyAuthoritativeModel(toThinkingModelMeta(liveState?.model), token);
         if (liveState) {
           if (liveState.contextUsage !== undefined) setLiveContextUsage(readLiveContextUsage(liveState.contextUsage));
@@ -1376,7 +1431,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (showLoading && !messagesLoaded) setLoading(false);
     }
-  }, [refreshSubagentUsage, applyAuthoritativeModel, beginAuthoritativeModelSync, adoptPermissionRequests, adoptSessionModels]);
+  }, [refreshSubagentUsage, applyAuthoritativeModel, beginAuthoritativeModelSync, adoptPermissionRequests, adoptSessionModels, adoptSessionModes]);
 
   const loadContext = useCallback(async (sid: string, leafId: string | null) => {
     const seq = ++contextRequestSeqRef.current;
@@ -2322,6 +2377,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             : scrollContainerRef.current?.scrollTop ?? null;
           void loadSession(endedSid, false, false, endedRunId);
           const endToken = beginAuthoritativeModelSync();
+          const endModeSeq = modeSyncSeqRef.current;
           fetch(`/api/agent/${encodeURIComponent(endedSid)}`)
             .then((r) => (r.ok ? r.json() as Promise<{ state?: AgentStateResponse }> : null))
             .then((d) => {
@@ -2330,6 +2386,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               // the next run while this request was in flight — drop it.
               if (sessionIdRef.current !== endedSid || promptRunIdRef.current !== endedRunId) return;
               adoptSessionModels(d.state);
+              adoptSessionModes(d.state, endedSid, endModeSeq);
               const applied = applyAuthoritativeModel(toThinkingModelMeta(d.state.model), endToken);
               if (!applied) return; // stale snapshot — drop everything derived from it
               if (d.state?.contextUsage !== undefined) setLiveContextUsage(readLiveContextUsage(d.state.contextUsage));
@@ -2418,6 +2475,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "thinking_level_changed":
         setThinkingLevel(normalizeThinkingLevel(event.thinkingLevel as string | undefined));
         break;
+      case "mode_changed": {
+        // The agent moved itself (a command typed at it, an escalation after a
+        // refusal) or echoed our own set_mode — the picker follows either way.
+        // An id the list never offered is ignored: it cannot be shown selected.
+        const modeId = typeof (event as { modeId?: unknown }).modeId === "string" ? (event as unknown as { modeId: string }).modeId : null;
+        const sid = sessionIdRef.current;
+        if (!modeId || !sid) break;
+        setSessionModes((held) => (
+          held.forSession === sid && held.current !== modeId && held.options.some((option) => option.id === modeId)
+            ? { ...held, current: modeId }
+            : held
+        ));
+        break;
+      }
       case "model_changed": {
         // Bare event: omp switched the resolved model (explicit /model,
         // retry-fallback, prewalk hand-off). No payload — sync from state.
@@ -2522,6 +2593,26 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           });
         } else if (completed?.role === "custom" && (completed as CustomMessage).customType === "xdev-mount-notice") {
           toast.info("MCP tools updated", describeMcpMountNotice(completed as CustomMessage), { clamp: true });
+        } else if (completed?.role === "assistant" && completed.stopReason === "error") {
+          // The engine could not produce a reply at all — no credentials, an
+          // invalid key, a provider outage. Both rpc-dialect engines report it
+          // exactly like this: an assistant message with no content and the
+          // provider's own error text. Appending that as a bubble showed the
+          // user nothing, silently; the failure belongs in a notice, in the
+          // provider's words, so they know what to fix.
+          const detail = typeof completed.errorMessage === "string" && completed.errorMessage.trim()
+            ? completed.errorMessage.trim()
+            : translate("agentSession.commandFailed");
+          // A credentials failure gets the one hint that actually fixes it:
+          // the keys panel. Anything else (context overflow, a provider
+          // outage) is left in the provider's own words.
+          const looksLikeCredentials = /\b(401|403)\b|\b(unauthori[sz]ed|forbidden|api[ _-]?key|credential|authenticat|invalid[ _-]?(x-)?api|no (provider|api) key)/i.test(detail);
+          addNotice({
+            type: "error",
+            message: looksLikeCredentials ? `${detail.replace(/[.\s]+$/, "")}. ${translate("agentSession.providerKeysHint")}` : detail,
+          });
+          const hasContent = Array.isArray(completed.content) ? completed.content.length > 0 : Boolean(completed.content);
+          if (hasContent) setMessages((prev) => [...prev, normalizeToolCalls(completed)]);
         } else if (completed) {
           setMessages((prev) => [...prev, normalizeToolCalls(completed)]);
           if (completed.role === "assistant" && onPreviewUrlsSeen) {
@@ -2804,7 +2895,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as unknown as IncomingExtensionUiRequest);
         break;
     }
-  }, [addNotice, consumeQueuedMessage, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, maybeAutoNameSession, mergeSubagents, onAgentEnd, onPreviewUrlsSeen, reconcileAgentState, resetSubagentActivityState, applyAuthoritativeModel, beginAuthoritativeModelSync, adoptSessionModels]);
+  }, [addNotice, consumeQueuedMessage, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, loadSession, maybeAutoNameSession, mergeSubagents, onAgentEnd, onPreviewUrlsSeen, reconcileAgentState, resetSubagentActivityState, applyAuthoritativeModel, beginAuthoritativeModelSync, adoptSessionModels, adoptSessionModes]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]): Promise<boolean> => {
@@ -3542,6 +3633,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [refreshLiveModelState]);
 
+  const handleModeChange = useCallback(async (modeId: string) => {
+    const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
+    if (!sid) return;
+    // Optimistic: the picker shows the pick at once; the engine's mode_changed
+    // echo confirms it, and a refused switch is put back from live state.
+    modeSyncSeqRef.current += 1;
+    setSessionModes((held) => (
+      held.forSession === sid && held.options.some((option) => option.id === modeId) ? { ...held, current: modeId } : held
+    ));
+    try {
+      await sendAgentCommand(sid, { type: "set_mode", modeId });
+    } catch (e) {
+      addNotice({ type: "error", message: e instanceof Error ? e.message : translate("agentSession.commandFailed") });
+      void refreshLiveModelState(sid);
+    }
+  }, [refreshLiveModelState, addNotice]);
+
   const handleToolPresetChange = useCallback(async (preset: ToolPreset) => {
     setToolPresetState(preset);
     setPreferredToolPreset(preset);
@@ -3888,6 +3996,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     data, loading, error, activeLeafId, messages, entryIds, streamState,
     agentRunning, modelNames: effectiveModelNames, modelList: effectiveModelList, modelSelectable, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel, fastModeEnabled, fastModeActive, autoRetryEnabled, interruptMode, autoCompactionEnabled, steeringMode, followUpMode,
     liveModelMeta,
+    // Mode list and current mode, only while they belong to THIS session.
+    availableModes: sessionModes.forSession === (session?.id ?? sessionIdRef.current) ? sessionModes.options : NO_MODES,
+    currentModeId: sessionModes.forSession === (session?.id ?? sessionIdRef.current) ? sessionModes.current : null,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
@@ -3922,7 +4033,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleCompact, handleHandoff, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     removeQueuedMessage, promoteQueuedToSteer,
     handleBuiltinSlashCommand,
-    handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands, setActiveLeafId, setData, setMessages,
+    handleToolPresetChange, handleThinkingLevelChange, handleModeChange, loadSlashCommands, setActiveLeafId, setData, setMessages,
     dispatch, setAgentRunning, setForkingEntryId,
     bashRunning, pendingBash,
     // Subscriptions

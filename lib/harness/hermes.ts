@@ -3,6 +3,7 @@ import path from "path";
 import { AcpEngineSession } from "./acp-session";
 import { getEngineVersion, resolveEngineBin } from "./engine-bin";
 import { readHermesMemory } from "./hermes-memory";
+import { readHermesSchemaSettings, writeHermesSchemaSettings } from "./hermes-settings";
 import type { EngineSession, EngineSessionOptions, HarnessAdapter } from "./types";
 
 /**
@@ -115,6 +116,13 @@ export const hermesHarness: HarnessAdapter = {
   getVersion: () => getEngineVersion("hermes", "HERMES", ["acp", "--version"]),
   getAgentDir: () => hermesHome(),
   readMemory: () => readHermesMemory(hermesHome()),
+  settings: {
+    // Derived from Hermes' own DEFAULT_CONFIG and written through
+    // `hermes config` (lib/harness/hermes-settings.ts). Resolved per call so
+    // a Hermes installed after boot is found without a restart.
+    readSchema: () => readHermesSchemaSettings(resolveEngineBin("hermes", "HERMES"), hermesHome()),
+    write: (patch) => writeHermesSchemaSettings(resolveEngineBin("hermes", "HERMES"), hermesHome(), patch),
+  },
   // Hermes stores conversations in SQLite rather than a directory of
   // transcripts; this path exists so the adapter contract is satisfied, and
   // the session list comes from the engine-sessions sidecar instead.

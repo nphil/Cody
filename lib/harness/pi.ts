@@ -1,6 +1,7 @@
 import { homedir } from "os";
 import path from "path";
 import { getEngineVersion, resolveEngineBin } from "./engine-bin";
+import { readPiSettings, writePiSettings } from "./pi-settings";
 import type { HarnessAdapter } from "./types";
 
 /**
@@ -18,8 +19,10 @@ import type { HarnessAdapter } from "./types";
  *   never settle the pending request, so the command vocabulary below is a
  *   hard allowlist — anything else is rejected Cody-side as "unsupported".
  *
- * Every other omp surface (models registry, skills, plugins, MCP config,
- * native settings, updates) is capability-gated off.
+ * Every other omp surface (models registry, plugins, MCP config, updates) is
+ * capability-gated off. Skills and the schema-driven settings panel are not:
+ * pi has real discovery roots for the first and documents every setting it
+ * accepts for the second (see ./pi-settings.ts).
  */
 
 /** pi 0.73's RPC command cases (dist/modes/rpc/rpc-mode.js), plus
@@ -76,9 +79,9 @@ export const piHarness: HarnessAdapter = {
     "Run `pi` once in a Cody terminal to configure a provider, or set provider API keys (ANTHROPIC_API_KEY, OPENAI_API_KEY, …) on the container.",
   capabilities: {
     liveSessions: true,
-    // The models.yml/providers editor and native-settings schema are omp's
-    // own config pipelines; pi has no MCP, no plugin CLI Cody can drive, and
-    // updates ride the engine card's npm reinstall instead of a self-updater.
+    // The models.yml/providers editor is omp's own config pipeline; pi has no
+    // MCP, no plugin CLI Cody can drive, and updates ride the engine card's
+    // npm reinstall instead of a self-updater.
     models: false,
     // pi discovers skills from .pi/skills, .agents/skills (walk-up + home)
     // and <agent dir>/skills, and honors disable-model-invocation — the
@@ -86,7 +89,13 @@ export const piHarness: HarnessAdapter = {
     skills: true,
     plugins: false,
     mcp: false,
-    nativeSettings: false,
+    // The schema-driven settings panel, derived from the settings tables in
+    // the INSTALLED pi package's own docs/settings.md — so pi's global
+    // settings.json is editable here and a setting pi adds upstream appears
+    // when the user updates pi, with no Cody release (lib/harness/pi-settings.ts).
+    nativeSettings: true,
+    // Still false: this flag is Cody's HAND-BUILT editors for omp's
+    // config.yml, which pi neither has nor reads.
     configEditor: false,
     updates: false,
     // The full RPC-dialect chat surface: steer/follow-up, set_model,
@@ -102,6 +111,12 @@ export const piHarness: HarnessAdapter = {
   resolveBinary: () => resolveEngineBin("pi", "PI"),
   getVersion: () => getEngineVersion("pi", "PI"),
   getAgentDir: () => piAgentDir(),
+  settings: {
+    // Resolved per call rather than captured: pi installed (or updated) after
+    // the server booted must be picked up without a restart.
+    readSchema: () => readPiSettings(resolveEngineBin("pi", "PI"), piAgentDir()),
+    write: (patch) => writePiSettings(resolveEngineBin("pi", "PI"), piAgentDir(), patch),
+  },
   getSessionsDir: () => process.env.PI_CODING_AGENT_SESSION_DIR || path.join(piAgentDir(), "sessions"),
   rpcUi: {
     mode: "rpc",

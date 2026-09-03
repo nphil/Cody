@@ -11,6 +11,7 @@ import { STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
 import { LOCALES, useI18n, type Locale } from "@/lib/i18n";
 import { readTerminalSoftKeyIds, TERMINAL_SOFT_KEYS, writeTerminalSoftKeyIds, type TerminalSoftKeyId } from "@/lib/terminal-preferences";
 import { NativeSetting, SettingsHighlightContext, TERMINAL_ONLY_BADGE, ToggleSwitch, chipStyle, nativeOptionStyle, nativeSelectStyle, slugify } from "./settings/primitives";
+import { ProviderKeysPanel } from "./settings/ProviderKeysPanel";
 
 const SettingsTabLoading = () => <div role="status" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 12 }}>Loading settings…</div>;
 const ModelsConfig = dynamic(() => import("./ModelsConfig").then((module) => module.ModelsConfig), { loading: SettingsTabLoading });
@@ -726,10 +727,24 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
               </div>
             )}
 
-            {/* API KEYS & PROVIDERS TAB */}
+            {/* API KEYS & PROVIDERS TAB. Two halves: the engine-neutral
+                provider keys (every engine reads its credentials from the
+                environment, so this exists for all five), and omp's own
+                OAuth/registry editor, which only omp's file format serves. */}
             {(visitedTabs.has("providers") || visitedTabs.has("models")) && (
-              <div role="tabpanel" id="settings-panel-providers" aria-labelledby="settings-tab-providers" style={{ display: (currentTab === "providers" || activeTab === "providers") ? "flex" : "none", height: "100%", minHeight: 0, flexDirection: "column" }}>
-                <ModelsConfig embedded engineId={engine?.id ?? null} onClose={onClose} onSaved={onModelsSaved} />
+              <div role="tabpanel" id="settings-panel-providers" aria-labelledby="settings-tab-providers" className="settings-scroll-column" style={{ display: (currentTab === "providers" || activeTab === "providers") ? "flex" : "none", height: "100%", minHeight: 0, flexDirection: "column", overflowY: "auto" }}>
+                <div style={{ padding: 20, borderBottom: capabilities.models ? "1px solid var(--border)" : undefined }}>
+                  <ProviderKeysPanel />
+                </div>
+                {capabilities.models && (
+                  // A box of its own: ModelsConfig lays its body out as
+                  // `flex: 1` inside a column, and inside this scroll column
+                  // that would resolve to ZERO height under ~15 key cards.
+                  // A fixed tall box gives it room and scrolls as one unit.
+                  <div style={{ flex: "0 0 auto", height: 720, display: "flex", flexDirection: "column", minHeight: 0 }}>
+                    <ModelsConfig embedded engineId={engine?.id ?? null} onClose={onClose} onSaved={onModelsSaved} />
+                  </div>
+                )}
               </div>
             )}
 
@@ -909,9 +924,14 @@ export function SettingsConfig({ activeTab, advisorEnabled, onAdvisorChange, too
                 skills-only engine (pi, Hermes) has no MCP panel to fall back
                 on, so without a workspace this is the group's only content —
                 gating it on capabilities.mcp left the tab highlighted over a
-                blank pane. Only the MCP-specific controls stay gated. */}
+                blank pane. Only the MCP-specific controls stay gated.
+                The group pane and a sub-panel are never shown TOGETHER: once
+                a workspace lets the skills/plugins panel render, the group
+                pane yields to it. Both are 100% tall, so a group pane left
+                visible pushed the sub-panel below the fold — under pi and
+                Hermes the Extensions tab was a heading over nothing. */}
             {(visitedTabs.has("mcp") || visitedTabs.has("skills") || visitedTabs.has("plugins")) && (
-              <div role="tabpanel" id="settings-panel-mcp" aria-labelledby="settings-tab-mcp" className="settings-scroll-column" style={{ display: currentTab === "mcp" ? "flex" : "none", height: "100%", minHeight: 0, flexDirection: "column", overflowY: "auto", padding: 20, gap: 16 }}>
+              <div role="tabpanel" id="settings-panel-mcp" aria-labelledby="settings-tab-mcp" className="settings-scroll-column" style={{ display: currentTab === "mcp" && (activeTab === "mcp" || !cwd) ? "flex" : "none", height: "100%", minHeight: 0, flexDirection: "column", overflowY: "auto", padding: 20, gap: 16 }}>
                 <div>
                   <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>Extensions & Tools</h3>
                   <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)" }}>{extensionsGroupDescription(capabilities)}.</p>

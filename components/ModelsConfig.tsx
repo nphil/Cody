@@ -28,7 +28,7 @@ import { toast } from "@/components/ui/toast";
 import { SettingsTabs, type SettingsTab } from "./SettingsTabs";
 import { ModelCatalogPicker } from "./ModelCatalogPicker";
 import { ModelPlanPanel } from "./settings/ModelPlanPanel";
-import { RetryFallbackPanel, NATIVE_MODEL_ROLES } from "./settings/RetryFallbackPanel";
+import { RetryFallbackPanel } from "./settings/RetryFallbackPanel";
 // Color icons (have their own fill colors — no background needed)
 import AnthropicIcon from "@lobehub/icons/es/Anthropic/components/Mono";
 import OpenAIIcon from "@lobehub/icons/es/OpenAI/components/Mono";
@@ -546,6 +546,10 @@ function NativeRegistryDetail({ models, connectedProviders, defaultModelKey, onC
 
 function ModelRolesDetail({ models }: { models: RuntimeModelEntry[] }) {
   const [roles, setRoles] = useState<Record<string, string>>({});
+  // The roles OMP itself resolves, served alongside the assignments. Cody used
+  // to hand-list them and kept offering `designer` after OMP removed it, so a
+  // saved override landed in config.yml for a role nothing reads.
+  const [roleNames, setRoleNames] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -555,7 +559,10 @@ function ModelRolesDetail({ models }: { models: RuntimeModelEntry[] }) {
   useEffect(() => {
     fetch("/api/model-roles")
       .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
-      .then((data: { roles?: Record<string, string> }) => setRoles(data.roles ?? {}))
+      .then((data: { roles?: Record<string, string>; roleNames?: string[] }) => {
+        setRoles(data.roles ?? {});
+        setRoleNames(data.roleNames ?? []);
+      })
       .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
       .finally(() => setLoading(false));
   }, []);
@@ -621,7 +628,7 @@ function ModelRolesDetail({ models }: { models: RuntimeModelEntry[] }) {
       <SectionTitle>OMP Model Roles</SectionTitle>
       <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>Saved natively in <code>~/.omp/agent/config.yml</code>. Choose an OMP model and its supported reasoning level for each role.</p>
     </div>
-    {loading ? <div style={{ color: "var(--text-muted)", fontSize: 12 }}>Loading roles...</div> : NATIVE_MODEL_ROLES.map((role) => (
+    {loading ? <div style={{ color: "var(--text-muted)", fontSize: 12 }}>Loading roles...</div> : roleNames.map((role) => (
       <div key={role} className="model-role-row" style={{ display: "grid", gridTemplateColumns: "82px minmax(0, 1fr) minmax(110px, 0.35fr)", alignItems: "center", gap: 10, fontSize: 12 }}>
         <code style={{ color: "var(--text-muted)" }}>{role}</code>
         {(() => {
@@ -653,7 +660,7 @@ function ModelRolesDetail({ models }: { models: RuntimeModelEntry[] }) {
       open={resetOpen}
       onOpenChange={setResetOpen}
       title="Reset OMP model roles?"
-      description="This clears every role override — default, smol, slow, vision, plan, designer, commit, tiny, task, advisor — and lets OMP choose each one using its own built-in priorities, as on a fresh install."
+      description={`This clears every role override — ${roleNames.join(", ")} — and lets OMP choose each one using its own built-in priorities, as on a fresh install.`}
       confirmLabel="Reset to defaults"
       cancelLabel="Cancel"
       danger

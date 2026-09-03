@@ -3,6 +3,7 @@ import { homedir } from "os";
 import * as path from "path";
 import { parse as parseYaml } from "yaml";
 import { getHarness } from "@/lib/harness";
+import { readPersistedBoolean, readPersistedStringList } from "@/lib/omp/settings-values";
 import {
   canToggleHermesSkills,
   hermesPackageForIdentifier,
@@ -176,6 +177,29 @@ function buildHermesScanRoots(): SkillScanRoot[] {
   ];
 }
 
+/**
+ * Whether omp still reads another tool's USER-level skills directory.
+ *
+ * omp 18.1.5 made those an opt-in: `~/.claude/skills` and `~/.codex/skills` are
+ * loaded only when their flag is set, or when the provider was opted in through
+ * `enabledProviders`, or — for claude — when CLAUDE_CONFIG_DIR names the
+ * directory outright (omp's `isSourceEnabled`). Project-level `.claude`/`.codex`
+ * under the cwd are unaffected and always load. Listing a root omp no longer
+ * reads would offer skills the session cannot invoke.
+ *
+ * Only omp's own settings can answer this, so the gate applies only while omp
+ * is the engine: Claude Code reads `~/.claude/skills` whatever omp thinks, and
+ * Codex `~/.codex/skills`.
+ */
+function foreignUserSkillsEnabled(provider: "claude" | "codex"): boolean {
+  if (getHarness().id !== "omp") return true;
+  // Absent means omp's own default, and both default to off since 18.1.5.
+  if (readPersistedBoolean(provider === "claude" ? "skills.enableClaudeUser" : "skills.enableCodexUser") === true) return true;
+  const enabled = readPersistedStringList("enabledProviders") ?? [];
+  if (enabled.includes(provider) || enabled.includes("*") || enabled.includes("all")) return true;
+  return provider === "claude" && Boolean(process.env.CLAUDE_CONFIG_DIR?.trim());
+}
+
 /** Scan roots in omp's provider priority order (highest first): .omp (100),
  * .claude (80), .agent/.agents + .codex + .github (70), managed skills (5).
  * pi and Hermes each get their own narrower walk (above). */
@@ -200,7 +224,9 @@ function buildScanRoots(cwd: string): SkillScanRoot[] {
 
   // claude compat: user ~/.claude/skills + project .claude/skills walk-up.
   const claudeHome = process.env.CLAUDE_CONFIG_DIR || path.join(home, ".claude");
-  roots.push({ dir: path.join(claudeHome, "skills"), source: ".claude", scope: "user" });
+  if (foreignUserSkillsEnabled("claude")) {
+    roots.push({ dir: path.join(claudeHome, "skills"), source: ".claude", scope: "user" });
+  }
   for (const dir of projectAncestors) {
     roots.push({ dir: path.join(dir, ".claude", "skills"), source: ".claude", scope: "project" });
   }
@@ -214,7 +240,9 @@ function buildScanRoots(cwd: string): SkillScanRoot[] {
   roots.push({ dir: path.join(home, ".agents", "skills"), source: ".agents", scope: "user" });
 
   // codex compat: user ~/.codex/skills + project .codex/skills.
-  roots.push({ dir: path.join(home, ".codex", "skills"), source: ".codex", scope: "user" });
+  if (foreignUserSkillsEnabled("codex")) {
+    roots.push({ dir: path.join(home, ".codex", "skills"), source: ".codex", scope: "user" });
+  }
   roots.push({ dir: path.join(cwd, ".codex", "skills"), source: ".codex", scope: "project" });
 
   // github compat: <repoRoot>/.github/skills.

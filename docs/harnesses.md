@@ -145,9 +145,41 @@ What pi serves is flagged per surface, not as one bundle:
   own `/model` picker offers — and reasoning models get the dialect's global
   thinking levels, since pi's catalog carries no per-model efforts. Provider
   login state (`get_login_providers`) is omp-only and skipped.
-- **`mcp` / `plugins` / `nativeSettings` / `updates`: false** — pi has no
-  MCP, no plugin CLI Cody can drive, no schema-readable settings pipeline,
-  and updates ride the engine card's npm reinstall.
+- **`nativeSettings: true`** — pi's settings panel is derived from pi, like
+  every other engine's. It has no settings schema and no config CLI, but the
+  npm tarball ships `docs/settings.md`: every setting with its type, its
+  default and a sentence of description, in regular four-column markdown
+  tables under `###` headings. `lib/harness/pi-settings.ts` parses THAT at
+  runtime, out of the installed package (found by walking up from the
+  resolved `pi` binary to the `@mariozechner/pi-coding-agent` manifest — by
+  NAME, because omp is a fork of the same package name-stem installed into a
+  sibling directory), and writes back to `<pi agent dir>/settings.json`. So a
+  setting pi adds upstream appears in the panel the moment the user updates
+  pi, with no Cody release — the same property omp's schema and Hermes'
+  DEFAULT_CONFIG give, from the only place pi states its whole surface. The
+  alternative, `dist/core/settings-manager.js`, carries the same defaults in
+  imperative code with no types, descriptions or grouping, which would have
+  bought a hand-written key list dressed up as a pipeline.
+  Because the source is prose, every step fails soft: a row that yields no
+  renderable type is skipped, a missing docs file answers `schema: null` with
+  a reason the panel prints, and the two documented types Cody has no control
+  for — `object` (`thinkingBudgets`) and a bare `array` whose entries may be
+  objects (`packages`) — are left out rather than rendered as a control that
+  would destroy them on save. Writes are read → mutate → write the WHOLE
+  object, so those keys and anything a newer pi added survive; dotted keys
+  (`compaction.enabled`) persist nested, a `null` patch entry removes the
+  override and prunes the parent it emptied, and the file's existing mode and
+  trailing newline are preserved. Values are read from the GLOBAL file only —
+  pi also merges a project `.pi/settings.json` over it, and that belongs to
+  the repo, not the instance. Keys that only dress pi's TUI (`theme`,
+  `quietStartup`, `editorPaddingX`, `terminal.*`, …) carry the existing
+  `terminalOnly` chip rather than being hidden, because the same file drives
+  the `pi` a user runs in a Cody terminal.
+- **`configEditor: false`** — that flag is Cody's HAND-BUILT editors for
+  omp's `config.yml`, which pi neither has nor reads. pi is now the engine
+  that proves the two flags are different questions.
+- **`mcp` / `plugins` / `updates`: false** — pi has no MCP, no plugin CLI
+  Cody can drive, and updates ride the engine card's npm reinstall.
 
 ## The seam: `lib/harness/`
 
@@ -160,11 +192,21 @@ What pi serves is flagged per surface, not as one bundle:
   from — or `rpcUi`, the `RpcUiSpawn` descriptor for engines that speak the
   pi/omp RPC dialect.
   `EngineSession` is the session surface the app consumes; omp's
-  `AgentSessionWrapper` satisfies it structurally.
+  `AgentSessionWrapper` satisfies it structurally. `settings` is the
+  schema-driven settings pipeline (`EngineSettingsSurface`:
+  `readSchema()` → `{path, schema, values, reason?}`, `write(patch)` →
+  `{written, rejected, values}`), present exactly when `nativeSettings` is
+  true — see below.
 - `index.ts` — the registry and `getHarness()`: persisted selection →
   `CODY_HARNESS` → omp. `selectHarness()` persists a switch.
 - `state.ts` — `cody-engine.json` persistence (active engine + onboarded).
 - `omp.ts` / `pi.ts` / `claude.ts` / `codex.ts` / `hermes.ts` — the adapters.
+- `pi-settings.ts` / `hermes-settings.ts` — the two derived settings
+  pipelines behind `HarnessAdapter.settings` (pi from its shipped
+  `docs/settings.md`, Hermes from its Python `DEFAULT_CONFIG` written through
+  `hermes config`); omp's hangs off `lib/omp/settings-schema` +
+  `settings-values`, imported by `omp.ts`, which is the one adapter allowed
+  to reach into `lib/omp` (`lib/architecture.test.mjs`).
 - `acp-session.ts` — `AcpEngineSession`, the engine-neutral Agent Client
   Protocol client: one long-lived stdio JSON-RPC server per session, driven
   from an `AcpEngineSpec` (binary, argv, env, MCP servers, setup hint). It
@@ -173,6 +215,19 @@ What pi serves is flagged per surface, not as one bundle:
   speaks ACP natively; Claude Code and Codex ride it through the
   `@agentclientprotocol/claude-agent-acp` and `@agentclientprotocol/codex-acp`
   adapters, since neither CLI has an ACP mode of its own.
+  What a session can switch is captured at `session/new` and reported as
+  DATA on `get_state`: models (`availableModels`, `modelSelectable`) and
+  modes (`availableModes`, `currentModeId` — Claude's Manual / Accept edits /
+  Plan / Auto, Hermes' Default / Accept Edits / Don't Ask; Codex publishes
+  none). `set_model` and `set_mode` switch them; `config_update` and
+  `mode_changed` report the agent's own switches back.
+- `provider-catalog.ts` / `provider-keys.ts` — provider API keys as
+  Cody-level state: a 0600 JSON store in the instance data dir, entered once
+  in Settings → API Keys & Providers and handed to EVERY engine child process
+  through `engineChildEnv()` (rpc-ui spawn, ACP spawn, terminal). Every engine
+  reads credentials from its environment, so one key works under all of
+  them, and a spec's own entries still win (`CLAUDE_CODE_EXECUTABLE`,
+  `CODEX_PATH`).
 - `turn-session.ts` — `TurnEngineSession`, the shared one-process-per-turn
   base for CLIs that offer nothing better; `claude-stream.ts` translates the
   CLI's NDJSON into the pi event vocabulary (`agent_start`, `message_*`,
@@ -205,6 +260,49 @@ A capability that is `false` hides its UI surface — settings tabs, panel
 cards and composer affordances — rather than breaking it. Commands an engine
 cannot serve fail soft with the `unsupported` error code the UI already
 tolerates.
+
+### Proving a turn without credentials
+
+`scripts/mock-model-server.mjs` is a credential-free provider: OpenAI chat
+completions (streamed and not), the Responses API, Anthropic Messages, plus
+`/models` and `count_tokens`, answering every prompt with a reply that
+contains `MOCK-TURN-OK`. Point an engine at it and `scripts/engine-turn-check.mjs`
+drives a real turn through a running Cody instance's HTTP API — select the
+engine, `POST /api/agent/new`, follow the event stream, then check the marker
+reached the reply, the transcript and the session list. This is how every
+engine in the roster was proved end to end for the release that added it,
+and it is what to run after touching a transport. The per-engine wiring:
+
+- **omp** — a provider in `models.yml` (`baseUrl`, `api: openai-completions`,
+  any `apiKey`, one model); **pi** — the same shape in
+  `<pi agent dir>/models.json`.
+- **claude** — `ANTHROPIC_BASE_URL` in the environment.
+- **codex** — `[model_providers.mock]` in `$CODEX_HOME/config.toml` with
+  `wire_api = "responses"` (`"chat"` is gone since Codex 0.153) and any
+  `OPENAI_API_KEY`.
+- **hermes** — the `openai-api` provider with `OPENAI_BASE_URL`, and
+  `model.provider` / `model.default` set through `hermes config set`,
+  because Hermes with keys but no provider silently defaults to OpenRouter.
+
+### The settings route dispatches on the ADAPTER, never on an engine id
+
+`GET`/`PUT /api/omp-settings/schema` is engine-neutral by construction: it
+gates on `requireCapability("nativeSettings")`, then reads
+`harness.settings` and refuses `unsupported` when there is none. It used to
+switch on ids — `active.id === "hermes" ? hermesBranch : ompBranch` — which
+quietly made "no branch of mine" mean "omp's branch", and that default is
+what the id-switch always costs: an engine with no case got omp's ~550-key
+schema and omp's `config.yml` back under its own name, and its `PUT` wrote
+omp's `config.yml` while another engine was active, reporting success. An
+adapter hook cannot do that. Adding a settings pipeline to a new engine is
+now: implement `EngineSettingsSurface`, hang it off the adapter, flip
+`nativeSettings`. The JSON the route serves is fixed by the panel
+(`components/settings/OmpSchemaSettings.tsx`) and pinned by
+`lib/engine-route-guards.test.mjs`:
+`{path, harness:{id,shortName}, host:{platform}, schema, values}`, or
+`schema: null` plus a `reason` when the engine's declaration cannot be read —
+which is an answer, not an error, since it is also what an engine that is
+simply not installed yet looks like.
 
 ### omp's RPC framing is asymmetric — and images pay for it
 
@@ -264,7 +362,15 @@ format/size ladder (`lib/preview-screenshot.ts`).
    twenty releases behind reads as "up to date", forever, because the adapter
    it sits under was already current.
 4. Give it `installSpec`/`authHint` so the picker can install and explain it.
-5. Wire the display tool so the engine can open Cody's Preview panel.
+5. If the engine declares its own settings anywhere Cody can read at runtime
+   — a schema, a defaults table, a documented settings file — implement
+   `HarnessAdapter.settings` (`EngineSettingsSurface`) and flip
+   `nativeSettings`. That is the whole cost of the settings panel; the route
+   dispatches on the hook and names no engine. Derive it, never hand-list
+   it: the point is that a setting added upstream appears when the user
+   updates the engine. `hermes-settings.ts` and `pi-settings.ts` are the two
+   worked examples of deriving one from something that is not a schema.
+6. Wire the display tool so the engine can open Cody's Preview panel.
    Two existing shapes:
    - **Host tool** (omp): if the engine has a host-tool channel, register a
      Cody-owned `open_preview` tool at session start (omp uses
@@ -285,7 +391,7 @@ format/size ladder (`lib/preview-screenshot.ts`).
    (direct real-origin iframe, then the `CODY_PREVIEW_BASE_URL` gateway, then
    the raster stream as the guaranteed floor) and the client takes the best
    rung that works.
-6. Run the suite: `npm run typecheck && npm run lint && npm test`.
+7. Run the suite: `npm run typecheck && npm run lint && npm test`.
 
 Cursor, Kilo Code, Cline and friends are all candidates — anything with
 a headless mode and a session-resume story fits the same mold.

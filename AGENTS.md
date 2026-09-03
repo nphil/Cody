@@ -110,12 +110,22 @@ app/api/
                                    whose models live in the session's get_state
   models-config/route.ts          GET/PUT — read/write ~/.omp/agent/models.yml (omp only)
   models-config/test/route.ts     POST test a configured model/provider (omp only)
-  omp-settings/route.ts           GET/PUT omp's OWN config.yml (omp only — Hermes
-                                   declares nativeSettings and must not land here)
-  omp-settings/schema/route.ts    GET omp's own settings schema + values; PUT a dotted-path patch
+  omp-settings/route.ts           GET/PUT omp's OWN config.yml — `configEditor`,
+                                   not `nativeSettings`: Hermes and pi declare the
+                                   latter for their OWN schema panels and must not
+                                   land here
+  omp-settings/schema/route.ts    GET the ACTIVE engine's own settings schema +
+                                   values; PUT a dotted-path patch. Engine-NEUTRAL:
+                                   it dispatches on HarnessAdapter.settings and
+                                   refuses `unsupported` when an engine has none —
+                                   never on an engine id (omp/Hermes/pi today)
   mcp/route.ts                    GET/POST/PUT/DELETE project MCP servers
   memory/route.ts                 GET the active engine's persistent memory, read-only
                                    (400 `unsupported` unless capabilities.memory)
+  provider-keys/route.ts          GET the provider-key catalogue for the active
+                                   engine with stored/fromEnvironment flags (never
+                                   values); PUT {name,value} (admin) stores or clears
+                                   one — every engine, no capability gate
   plugins/route.ts                GET/POST plugin management (shells out to `omp plugin`)
   plugins/marketplace/route.ts    GET browse configured marketplaces + catalogs | POST
                                    add/remove/update marketplace, install/uninstall/upgrade
@@ -158,6 +168,22 @@ lib/
                        runtime selection state, three transports (rpc-ui, ACP,
                        per-turn), session index, binary probe + on-demand install
                        (docs/harnesses.md)
+    pi-settings.ts     pi's settings, derived from the settings TABLES in the
+                       installed pi package's own docs/settings.md (parsed at
+                       runtime, failing soft) and written back to
+                       <pi agent dir>/settings.json — the read/write half of
+                       pi's HarnessAdapter.settings
+    hermes-settings.ts the same for Hermes, from its Python DEFAULT_CONFIG,
+                       written through `hermes config`
+    provider-catalog.ts the provider → environment-variable catalogue
+                       (ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY,
+                       AWS_* for Bedrock, …) with the engines each provider is
+                       offered on; `providersForEngine()` picks the subset
+    provider-keys.ts   Cody-level provider credentials: a 0600 JSON store in the
+                       instance data dir and `engineChildEnv()`, the ONE place
+                       every engine child process (rpc-ui, ACP, terminal) gets
+                       its environment from, so a key entered once works under
+                       every engine
   file-paths.ts        client/server path encoding helpers
   markdown.ts          shared markdown helpers
   npx.ts               npx runner used by skill install
@@ -235,6 +261,10 @@ components/
   McpConfig.tsx       project MCP server editor (Settings → MCP tab)
   MemoryPanel.tsx     Settings → Agent Memory: the engine's own memory documents,
                       read-only, each with its path (capability-gated)
+  ProviderKeysPanel.tsx Settings → API Keys & Providers, top half: per-provider
+                      key cards for the ACTIVE engine (masked input, Save /
+                      Clear, "Saved in Cody" / "Set on the container" chips);
+                      rendered for every engine, above omp's registry editor
   PluginsConfig.tsx   modal for installed plugins; opens PluginMarketplace
   PluginMarketplace.tsx marketplace dialog: browse/search/install across
                       configured `omp` marketplaces, manage marketplaces
@@ -454,10 +484,14 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   rendered omp's `config.yml` panels with a Save that wrote to a file it
   never reads; pi has `chatExtras` and so offered omp's "Smart — OMP roles"
   row and an Export that shells `omp --export`. Every such route now either
-  DISPATCHES on `getHarness()` (`/api/models`, `/api/omp-version`,
-  `/api/omp-settings/schema`) or REFUSES with 400 `{code:"unsupported"}`,
-  which is the same answer `/api/memory` gives and the one the client hides
-  on. Pinned by `lib/engine-route-guards.test.mjs`.
+  DISPATCHES on `getHarness()` (`/api/models`, `/api/omp-version`) or on an
+  ADAPTER METHOD (`/api/omp-settings/schema` → `HarnessAdapter.settings`), or
+  REFUSES with 400 `{code:"unsupported"}`, which is the same answer
+  `/api/memory` gives and the one the client hides on. Prefer the adapter
+  method: a `getHarness()` dispatch is still a list of engine ids in
+  engine-neutral code, and the id whose branch is the `else` silently becomes
+  the default for every engine nobody thought about. Pinned by
+  `lib/engine-route-guards.test.mjs`.
 - **A launch that means "another engine" must never be spelled the same way
   as one that means "this engine".** `runUtilityCommand(cmd, ms, launch)`
   treats an absent `launch` as "spawn the installed omp", and
@@ -484,6 +518,37 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   engine. Whether an agent offers models is per SESSION — it depends on the
   account the session opened with — so it is reported as data, never as a
   static capability flag that could not tell the truth about it.
+- **ACP session MODES are session state the same way** (`AcpModeSurface`,
+  `session/new` → `modes: {availableModes, currentModeId}`). Claude publishes
+  Manual / Accept edits / Plan / Auto, Hermes Default / Accept Edits / Don't
+  Ask, Codex none — and "none" is the answer for every rpc-dialect engine
+  too, so the list rides `get_state` as `{availableModes, currentModeId}`
+  and the composer's mode button (`ChatInput`, `data-testid`
+  `agent-mode-button`) exists only while the list is non-empty. `set_mode`
+  → `session/set_mode`; the agent's own `current_mode_update` and the echo of
+  our call both surface as `mode_changed`. On the client the list is
+  id-scoped (`sessionModes.forSession`), like `autoModelSwitch`: a list
+  adopted for one session is never offered on the next, and a state fetch
+  WITHOUT the field clears it — unlike models there is no global catalog to
+  fall back on, so absence is the truth. `set_mode` on an engine without
+  modes answers `unsupported`, and rpc-manager's default branch now says the
+  same for any command Cody never mapped, instead of a bare "Unsupported
+  command" that reached the client without a code.
+- **Provider credentials are Cody-level state, delivered as environment**
+  (`lib/harness/provider-keys.ts`). Every engine already reads its keys from
+  the process environment (pi/omp env maps, Hermes `api_key_env_vars`,
+  Claude `ANTHROPIC_API_KEY`, Codex `OPENAI_API_KEY`), so the store is a
+  0600 JSON file in the instance data dir and `engineChildEnv()` is the one
+  function every child spawn (`lib/omp/rpc-process.ts`,
+  `lib/harness/acp-session.ts`, `lib/terminal-manager.ts`) builds its env
+  from: process env, then stored keys, then the spec's own entries (a spec
+  must be able to override — `CLAUDE_CODE_EXECUTABLE`, `CODEX_PATH`). Values
+  never reach the browser; the panel gets `stored` / `fromEnvironment`
+  flags. This is what the owner's "pi and Hermes didn't work" came down to:
+  no credentials, and Cody dropping the error — an assistant turn ending
+  with `stopReason: "error"` used to append an EMPTY bubble; it is now an
+  error notice in the provider's words, with a pointer at the keys panel when
+  the text smells like a 401.
 - **The composer reads whichever catalog is real.** `useAgentSession` keeps
   `modelCatalogSource` from `/api/models` and, when it says `"session"`,
   serves the composer the list it adopted off `get_state` instead (measured:
@@ -573,8 +638,8 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   every binary, because a cache HIT never expires and the companion CLI's bin
   name is not something the installer models.
 - **`HarnessAdapter.verifiedVersion`** is the exact engine version this Cody
-  build was last audited against — every adapter carries one (omp: 18.0.11,
-  claude-agent-acp: 0.70.0, codex-acp: 1.7.0, pi: 0.73.1, hermes: 0.19.0).
+  build was last audited against — every adapter carries one (omp: 18.1.6,
+  claude-agent-acp: 0.73.0, codex-acp: 1.8.0, pi: 0.73.1, hermes: 0.19.0).
   It is shown verbatim on the System & Updates engine card ("Built to
   vX.Y.Z", served through `/api/engines`), and its MAJOR drives the
   warnings: `checkEngineUpdates` compares it to the latest/installed
@@ -603,19 +668,71 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
 
 ## Settings: schema-driven, not hand-listed
 
-Cody renders OMP's settings from OMP's own schema, so a setting added upstream
-appears without a Cody change.
+Cody renders each engine's settings from the ENGINE's own declaration, so a
+setting added upstream appears without a Cody change.
 
-- `lib/omp/settings-schema.ts` — reads `<omp package>/src/config/settings-schema.ts`.
-  There is **no settings-schema RPC command**, so it goes through the installed
-  package's source. That file imports Bun-only siblings, so every import is
-  aliased to a permissive Proxy stub and jiti transpiles it. The stub must return
+- **The route is engine-neutral; the derivation is per engine.**
+  `HarnessAdapter.settings` (`EngineSettingsSurface` in `lib/harness/types.ts`)
+  is one pair of methods — `readSchema()` → `{path, schema, values, reason?}`
+  and `write(patch)` → `{written, rejected, values}` — implemented three ways:
+  omp from its TypeScript schema (`lib/harness/omp.ts`, the one adapter the
+  seam lets import `lib/omp`), Hermes from its Python `DEFAULT_CONFIG`
+  (`lib/harness/hermes-settings.ts`), and pi from the four-column settings
+  tables in its installed package's `docs/settings.md`
+  (`lib/harness/pi-settings.ts`, writing `<pi agent dir>/settings.json`).
+  `/api/omp-settings/schema` gates on `nativeSettings`, reads the hook, and
+  refuses `unsupported` when there is none. It used to switch on engine ids,
+  which made "no branch of mine" mean "omp's branch" — every other engine got
+  omp's ~550-key schema back under its own name, and its PUT wrote omp's
+  `config.yml` while another engine was active, reporting success. A hook
+  cannot do that. Adding the panel to an engine is now: implement the
+  surface, hang it off the adapter, flip the flag.
+- **Derived, never hand-listed — even when there is no schema to read.** That
+  is the whole property: Hermes has no schema but has DEFAULT_CONFIG; pi has
+  neither, but ships every setting's type, default and description in
+  `docs/settings.md`, which is regular enough to parse (pi's
+  `dist/core/settings-manager.js` carries the same defaults in imperative
+  code with no types, descriptions or grouping — a hand-written key list
+  dressed up as a pipeline). A prose source means failing soft at every step:
+  a row that yields no renderable control is skipped, a documented `object`
+  or object-bearing `array` is left out rather than rendered as a control
+  that would destroy it on save, and a missing file answers `schema: null`
+  plus a `reason` the panel prints — the same answer an engine that is not
+  installed yet gives, which is an answer and not an error.
+- **A write is read → mutate → write the WHOLE file.** pi's settings.json
+  holds keys the panel never lists (`thinkingBudgets`, `packages` object
+  entries, anything a newer pi added); a writer that rebuilt the file from
+  the schema would delete every one of them. Dotted keys persist nested, a
+  `null` patch entry is the panel's Reset and prunes the parent it empties,
+  and the file's existing mode and trailing newline survive.
+- `lib/omp/package-source.ts` — the shared way to read one of OMP's own source
+  files out of the installed package. Bun-only imports are aliased to a
+  permissive Proxy stub and jiti transpiles what is left. The stub must return
   `undefined` for `then`, or the module becomes thenable and the load hangs
-  forever on an unsettled top-level await. Credentials, `ui.secret` settings, and
-  settings without `ui` metadata never reach the browser.
+  forever on an unsettled top-level await.
+- `lib/omp/settings-schema.ts` — reads `<omp package>/src/config/settings-schema.ts`
+  through it. There is **no settings-schema RPC command**, so it goes through the
+  installed package's source. Credentials, `ui.secret` settings, and settings
+  without `ui` metadata never reach the browser.
+- **The model-role list is read the same way, not hand-listed**
+  (`lib/omp/model-roles.ts` `getOmpModelRoleIds`, from
+  `<omp package>/src/config/model-roles.ts` `MODEL_ROLE_IDS`). The vocabulary
+  changes between releases — omp removed `designer` in 18.1.5 — and a frozen
+  copy kept writing `modelRoles.designer` into `config.yml` for a role the
+  resolver no longer had, while the plan editor kept offering it. `/api/model-roles`
+  and `/api/model-plan` serve the live list as `roleNames`; the Models panels,
+  the fallback-chain editor and the planner prompt all render from that, and
+  `heuristicPlan`/`validatePlan` take it as an argument so a role the engine
+  dropped is never assigned. `FALLBACK_MODEL_ROLE_IDS` applies only when the
+  package cannot be read.
 - `lib/omp/settings-values.ts` — generic read/write for any schema-declared path.
   Dotted paths persist nested (`prewalk.enabled` → `prewalk: { enabled }`), the
   form OMP's own resolver reads. Unknown paths are rejected, not written.
+  `readPersistedBoolean`/`readPersistedStringList` are the side door for the
+  schema-declared settings that carry no `ui` metadata: the panel must not
+  render them, but their values still change what OMP does, and Cody has to
+  mirror those decisions (`skills.enableClaudeUser` / `skills.enableCodexUser`
+  gate which foreign user-level skill roots `lib/skills-service.ts` lists).
 - `lib/omp/settings-conditions.ts` — restates OMP's value-derived `ui.condition`
   predicates so Cody hides the same rows OMP hides.
 - `lib/omp/settings-surface.ts` — **the one hand-maintained list in this
@@ -634,6 +751,13 @@ appears without a Cody change.
 - The panel's tab is pinned to the foot of the settings sidebar and named from
   the active harness (`HarnessAdapter.shortName`, served by the schema route),
   so switching `CODY_HARNESS` renames it rather than requiring a UI edit.
+- **"Terminal only" is per engine, and deliberately not shared.**
+  `lib/omp/settings-surface.ts` lists omp's keys; `PI_TERMINAL_ONLY_KEYS` in
+  `lib/harness/pi-settings.ts` lists pi's. The two engines' key names only
+  partly overlap, so one shared list would mislabel whichever renamed a key
+  first. Both are conservative: a row is chipped only when it is clearly
+  terminal chrome, and it is chipped rather than hidden because the same file
+  drives the CLI the user runs in a Cody terminal.
 - There is no "Native OMP" chip: it labelled the majority of rows and named a
   harness. Only the exceptions carry a chip — "Cody only" for browser-local
   preferences, "Workspace", and "Terminal only" above.

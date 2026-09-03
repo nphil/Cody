@@ -8,15 +8,17 @@ import type { RosterModel } from "./roster";
  * below are testable without an omp process or a model call.
  */
 
-/** The roles Cody exposes, in the order the Models panel lists them
- * (components/ModelsConfig.tsx NATIVE_MODEL_ROLES). */
+/** The roles this module has an opinion about, in the order the Models panel
+ * lists them. omp owns the real list and it changes between releases, so every
+ * caller that can reach the engine passes it in (`lib/omp/model-roles`
+ * `getOmpModelRoleIds`); this stands in when omp is not installed. Assigning a
+ * role the engine dropped writes config.yml entries its resolver ignores. */
 export const ROLE_NAMES: readonly string[] = [
   "default",
   "smol",
   "slow",
   "vision",
   "plan",
-  "designer",
   "commit",
   "tiny",
   "task",
@@ -228,6 +230,7 @@ export function deriveChains(args: { roles: Record<string, string>; ladder: stri
 export function validatePlan(
   plan: { roles: Record<string, string>; chains: Record<string, string[]>; rationale?: PlanRationale[] },
   roster: RosterModel[],
+  roleNames: readonly string[] = ROLE_NAMES,
 ): { plan: ModelPlan; warnings: string[] } {
   const warnings: string[] = [];
   // Repairs land on the best model the user can actually reach.
@@ -235,7 +238,7 @@ export function validatePlan(
 
   const roles: Record<string, string> = {};
   for (const [role, selector] of Object.entries(plan.roles)) {
-    if (!ROLE_NAMES.includes(role)) {
+    if (!roleNames.includes(role)) {
       // An invented role name would survive all the way to the save, where the
       // PUT rejects it and the user sees a 400 instead of their plan.
       warnings.push(`Ignored "${role}": not a role Cody assigns.`);
@@ -291,7 +294,10 @@ export function validatePlan(
  * ordering is all it has — the catalog carries no per-role quality signal — so
  * it sorts the roster and places the tiers.
  */
-export function heuristicPlan(roster: RosterModel[], options: { preferredProvider?: string } = {}): PlanDraft {
+export function heuristicPlan(
+  roster: RosterModel[],
+  options: { preferredProvider?: string; roleNames?: readonly string[] } = {},
+): PlanDraft {
   const gateways = gatewayProviders(roster);
   const providerTier = (provider: string, isLocal: boolean): number => (isLocal ? 2 : gateways.has(provider) ? 1 : 0);
   const modelTier = (model: RosterModel): number => providerTier(model.provider, model.local);
@@ -319,8 +325,11 @@ export function heuristicPlan(roster: RosterModel[], options: { preferredProvide
   const fast = pool.filter((model) => !model.reasoning)[0] ?? pool.at(-1) ?? capable;
   const vision = pool.find((model) => model.vision) ?? byCapability.find((model) => model.vision);
 
+  // Roles the engine has dropped are skipped rather than assigned: the entry
+  // would be written to config.yml and resolve to nothing.
+  const known = new Set(options.roleNames ?? ROLE_NAMES);
   const assign = (role: string, model: RosterModel | undefined, text: string): void => {
-    if (!model) return;
+    if (!model || !known.has(role)) return;
     roles[role] = model.selector;
     rationale.push({ subject: role, text });
   };
@@ -329,7 +338,6 @@ export function heuristicPlan(roster: RosterModel[], options: { preferredProvide
   assign("task", capable, `Subagents do the same work as the main session, so they get ${capable.name} too.`);
   assign("plan", capable, `Planning is where reasoning pays off, so it stays on ${capable.name}.`);
   assign("slow", capable, `The deliberate role keeps ${capable.name} for problems worth the extra thinking.`);
-  assign("designer", capable, `Design work reads screenshots and layout code, so it keeps ${capable.name}.`);
   assign("smol", fast, `${fast.name} answers mechanical subagent work without paying for reasoning first.`);
   assign("commit", fast, `Commit messages are short and formulaic — ${fast.name} is enough.`);
   assign("advisor", fast, `The advisor reviews every single turn, so it runs on the cheaper ${fast.name}.`);

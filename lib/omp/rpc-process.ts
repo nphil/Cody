@@ -2,6 +2,7 @@ import { type ChildProcessWithoutNullStreams, spawn } from "child_process";
 import { createInterface } from "readline";
 import { resolveOmpBin } from "./omp-cli";
 import { encodeOutboundRpcFrame, RpcFrameDecoder, RpcFrameTooLargeError, type RpcFrameRecord, type RpcProtocolVersion } from "./rpc-frame";
+import { engineChildEnv } from "../harness/provider-keys";
 
 /**
  * Process + protocol layer for `omp --mode rpc-ui` (NDJSON over stdio).
@@ -132,7 +133,11 @@ export class RpcProcess {
 
     this.child = this.spawnProcess(bin, args, {
       cwd: options.cwd,
-      env: { ...process.env, ...options.env },
+      // Cody's environment plus the provider keys saved in Settings, then the
+      // caller's own additions (the adapter's engineEnv). The same merge every
+      // engine child gets, so a key typed into the panel works here exactly
+      // as it does over ACP or in a Cody terminal.
+      env: engineChildEnv(options.env),
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       // On POSIX, omp launches grandchildren (LSP servers, extension subprocesses). Run the

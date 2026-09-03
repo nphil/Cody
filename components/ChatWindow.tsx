@@ -712,7 +712,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
   const {
     loading, error, messages, entryIds, streamState,
     agentRunning, bashRunning, pendingBash, modelNames, modelList, modelSelectable, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, thinkingLevel, fastModeEnabled, fastModeActive, toolPreset,
-    liveModelMeta,
+    liveModelMeta, availableModes, currentModeId,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactResult, displayModel: displayModelValue, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
@@ -727,7 +727,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     removeQueuedMessage, promoteQueuedToSteer,
     handleBuiltinSlashCommand,
-    handleThinkingLevelChange, handleFastModeChange, handleToolPresetChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, loadSlashCommands,
+    handleThinkingLevelChange, handleModeChange, handleFastModeChange, handleToolPresetChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, loadSlashCommands,
   } = useAgentSession({
     session, newSessionCwd, advisorEnabled, subagentsCapable, engineName: engine?.shortName, thinkingDefaultExpanded, onAgentEnd: wrappedOnAgentEnd, onSessionNamed, onSessionCreated, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
@@ -1094,6 +1094,9 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       compactResult={compactResult}
       thinkingLevel={thinkingLevel}
       onThinkingLevelChange={chatExtras && (session || isNew) ? handleThinkingLevelChange : undefined}
+      availableModes={availableModes}
+      currentModeId={currentModeId}
+      onModeChange={availableModes.length > 0 ? handleModeChange : undefined}
       fastModeEnabled={fastModeEnabled}
       fastModeActive={fastModeActive}
       fastModeSupported={fastModeCapable && chatExtras && Boolean(displayModelValue && modelList.some((entry) => entry.provider === displayModelValue.provider && entry.id === displayModelValue.modelId && entry.supportsFastMode))}

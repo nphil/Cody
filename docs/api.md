@@ -669,6 +669,24 @@ Related, all admin-gated and all **Incidental**: `/api/model-roles`,
 `/api/providers/enable`, `/api/auth/*` (engine provider sign-in, unrelated to
 Cody accounts — do not confuse the two).
 
+## `GET|PUT /api/provider-keys` — Incidental
+
+Provider API keys Cody hands to every engine child process — the ACP agents,
+the omp/pi RPC processes and the terminal — as environment variables, so one
+key works the same under every engine. `GET` (any signed-in user) reports the
+catalogue for the active engine with `stored` / `fromEnvironment` flags and
+never a value; `PUT {"name","value"}` (admin) stores one variable from the
+catalogue, and an empty value clears it. Keys live in the instance data dir
+(`cody-provider-keys.json`, mode 0600) and therefore survive engine switches
+without touching any engine's own config.
+
+```json
+{"engine":{"id":"hermes","shortName":"Hermes"},
+ "providers":[{"id":"openai","name":"OpenAI",
+   "variables":[{"name":"OPENAI_API_KEY","label":"API key","secret":true,
+                 "stored":true,"fromEnvironment":false}]}]}
+```
+
 ## The display socket
 
 The streamed preview: a headless browser rendered server-side and delivered as

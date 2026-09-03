@@ -98,10 +98,13 @@ NVIDIA GPU is optional, for local models running inside the distro.
   each an **Update** button (omp also gets one-click "Update now" in the
   Updates panel and System tab, next to its version check). Updating the
   active engine restarts live sessions so nothing runs a stale binary.
-- **Credentials are the engine's own**: run `claude` or `codex login` once in
-  a Cody terminal (state persists in `/data/home`), or set
-  `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` on the container. omp's providers
-  are managed in Settings.
+- **One place for API keys**: Settings → API Keys & Providers takes a provider
+  key once (Anthropic, OpenAI, OpenRouter, Gemini, Bedrock, …) and hands it to
+  every engine as an environment variable, the same way a key set on the
+  container would reach it — so switching engines never means re-entering
+  credentials. An engine's own sign-in still works: run `claude` or
+  `codex login` once in a Cody terminal (state persists in `/data/home`).
+  omp's OAuth accounts and model registry live on the same tab.
 - **Local models stay reachable**: omp's model registry takes custom
   providers; Codex supports `--oss`/custom `model_provider` endpoints; the
   Claude engine honors `ANTHROPIC_BASE_URL`. Any OpenAI/Anthropic-compatible
@@ -201,7 +204,7 @@ Cody is a Node-hosted Next.js app that drives an installed engine binary — it 
 
 - **The engine seam** (`lib/harness/`): an adapter per engine — identity, capability flags, binary probing, install spec, and a live-session factory. Runtime selection is persisted in the instance data dir; capability flags gate every engine-specific surface.
 - **omp sessions**: spawns `omp --mode rpc-ui` (NDJSON over stdio), one child per active session, negotiating RPC v2 with bounded chunk reassembly when available. Session history is omp's native JSONL, read directly and maintained (title/archive/delete) without racing live writes.
-- **Claude Code / Codex / Hermes sessions**: one long-lived process per session speaking the [Agent Client Protocol](https://agentclientprotocol.com) over stdio, translated server-side into the same event stream the UI renders. ACP is the only transport here with a real approval channel, so these engines can stop mid-turn and ask; abort cancels the turn, and resume uses the engine's native session id.
+- **Claude Code / Codex / Hermes sessions**: one long-lived process per session speaking the [Agent Client Protocol](https://agentclientprotocol.com) over stdio, translated server-side into the same event stream the UI renders. ACP is the only transport here with a real approval channel, so these engines can stop mid-turn and ask; abort cancels the turn, and resume uses the engine's native session id. The agent's own permission mode (Claude's Manual / Accept edits / Plan / Auto, Codex's approval levels, Hermes' Default / Accept Edits / Don't Ask) is a picker in the composer, next to the model.
 - **Engine install/update**: npm against a persistent prefix the runtime resolves first — install and update are the same operation, and updating the active engine restarts its live sessions.
 - **omp configuration surfaces**: models/`models.yml`, allow-listed `config.yml` settings, skills discovery, `omp plugin`, and project MCP servers (`.omp/mcp.json`) — all through the binary or its native files, all capability-gated.
 - **Terminals**: a custom Node launcher serves Next.js and same-origin terminal WebSockets on one port; each tab owns a server-side `node-pty` shell that survives browser disconnects.

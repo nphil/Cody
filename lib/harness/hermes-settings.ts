@@ -2,6 +2,7 @@ import { execFileSync } from "child_process";
 import { existsSync, readFileSync, realpathSync, statSync } from "fs";
 import { dirname, join } from "path";
 import { parse as parseYaml } from "yaml";
+import type { EngineSettingsRead, EngineSettingsWrite } from "./types";
 
 /**
  * Hermes' settings, derived from Hermes.
@@ -341,4 +342,68 @@ export function resetHermesSetting(binaryPath: string, key: string): void {
     const message = error instanceof Error ? error.message : String(error);
     if (!/config key not set/i.test(message)) throw error;
   }
+}
+
+
+/**
+ * Hermes' schema plus its persisted values, in the shape the settings route
+ * serves — the read half of `HarnessAdapter.settings`.
+ *
+ * It lives here rather than in the route because the route used to switch on
+ * `active.id === "hermes"`, which quietly made omp the default for every
+ * engine that had no branch of its own. Owning both halves of its own
+ * pipeline is what lets the route ask the adapter instead of asking who it is
+ * talking to.
+ */
+export function readHermesSchemaSettings(binaryPath: string | null, hermesHome: string): EngineSettingsRead {
+  const schema = binaryPath ? getHermesSettingsSchema(binaryPath) : null;
+  return {
+    path: join(hermesHome, "config.yaml"),
+    schema,
+    values: schema ? readHermesSettingsValues(hermesHome, schema.settings) : {},
+  };
+}
+
+/** Why Hermes cannot take this patch entry, or null when it can. A `null`
+ * entry is the panel's Reset and goes to `hermes config unset`. */
+function unwritableReason(value: unknown): string | null {
+  if (value === null) return null;
+  if (Array.isArray(value)) return LIST_WRITE_UNSUPPORTED;
+  if (typeof value === "boolean" || typeof value === "number" || typeof value === "string") return null;
+  return `Cody has no config form for a ${value === undefined ? "missing" : typeof value} value`;
+}
+
+/**
+ * Apply a dotted-path patch through Hermes' own CLI — the write half of
+ * `HarnessAdapter.settings`.
+ *
+ * Never by editing its YAML: `hermes config set` owns validation, type
+ * coercion and config migration, and a file Cody wrote behind its back can be
+ * one Hermes then refuses to load. One key Hermes refuses is reported in
+ * `rejected` rather than aborting the patch or disappearing; the only throw
+ * is the case where nothing could be written at all.
+ */
+export function writeHermesSchemaSettings(
+  binaryPath: string | null,
+  hermesHome: string,
+  patch: Record<string, unknown>,
+): EngineSettingsWrite {
+  if (!binaryPath) throw new Error("hermes binary not found");
+  const written: string[] = [];
+  const rejected: Array<{ key: string; reason: string }> = [];
+  for (const [key, value] of Object.entries(patch)) {
+    const reason = unwritableReason(value);
+    if (reason) {
+      rejected.push({ key, reason });
+      continue;
+    }
+    try {
+      if (value === null) resetHermesSetting(binaryPath, key);
+      else writeHermesSetting(binaryPath, key, value as boolean | number | string);
+      written.push(key);
+    } catch (error) {
+      rejected.push({ key, reason: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return { written, rejected, values: readHermesSchemaSettings(binaryPath, hermesHome).values };
 }

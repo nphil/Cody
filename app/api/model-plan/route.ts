@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
 import { requireEngine } from "@/lib/engine-guard";
 import { invalidateModelsCache } from "@/lib/models-cache";
-import { bestAvailableModel, deriveChains, heuristicPlan, providerOf, resolveRosterModel, ROLE_NAMES, validatePlan } from "@/lib/model-plan/derive";
+import { bestAvailableModel, deriveChains, heuristicPlan, providerOf, resolveRosterModel, validatePlan } from "@/lib/model-plan/derive";
 import { planWithModel } from "@/lib/model-plan/planner";
 import { loadRoster, type RosterModel } from "@/lib/model-plan/roster";
-import { clearModelRoles, readModelRoles, writeModelRoles } from "@/lib/omp/model-roles";
+import { clearModelRoles, getOmpModelRoleIds, readModelRoles, writeModelRoles } from "@/lib/omp/model-roles";
 import { deleteNativeSettingsPaths, readNativeSettings, writeNativeSettings } from "@/lib/omp/settings-config";
 import { restartIdleRpcSessions } from "@/lib/rpc-manager";
 import { isRecord } from "@/lib/type-guards";
@@ -50,7 +50,7 @@ export async function GET() {
       roles,
       chains: settings.retry?.fallbackChains ?? {},
       usageAwareFallback: settings.retry?.usageAwareFallback ?? false,
-      roleNames: [...ROLE_NAMES],
+      roleNames: [...getOmpModelRoleIds()],
     });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
@@ -71,8 +71,10 @@ export async function POST(request: Request) {
     // The provider already driving main turns leads the heuristic ladder: it
     // is the provider the user trusted, so quality degrades away from it.
     const currentDefault = readModelRoles().roles.default;
+    const roleNames = getOmpModelRoleIds();
     const heuristic = heuristicPlan(roster.models, {
       preferredProvider: currentDefault ? providerOf(currentDefault) : undefined,
+      roleNames,
     });
     let draft = heuristic;
     let source: "llm" | "heuristic" = "heuristic";
@@ -83,7 +85,7 @@ export async function POST(request: Request) {
       if (!planner) {
         warnings.push("No model here can run the planner, so this is Cody's own suggestion.");
       } else {
-        const outcome = await planWithModel(planner, roster);
+        const outcome = await planWithModel(planner, roster, roleNames);
         if (outcome.ok) {
           draft = outcome.draft;
           source = "llm";
@@ -103,7 +105,7 @@ export async function POST(request: Request) {
       ladder: ladder.length > 0 ? ladder : heuristic.ladder,
       roster: roster.models,
     });
-    const validated = validatePlan({ roles: draft.roles, chains, rationale: draft.rationale }, roster.models);
+    const validated = validatePlan({ roles: draft.roles, chains, rationale: draft.rationale }, roster.models, roleNames);
 
     return NextResponse.json({ plan: validated.plan, source, warnings: [...warnings, ...validated.warnings] });
   } catch (error) {
@@ -122,9 +124,10 @@ export async function PUT(request: Request) {
       return NextResponse.json({ error: "usageAwareFallback must be a boolean" }, { status: 400 });
     }
 
+    const roleNames = getOmpModelRoleIds();
     const roles: Record<string, string> = {};
     for (const [role, selector] of Object.entries(body.roles)) {
-      if (!ROLE_NAMES.includes(role)) return NextResponse.json({ error: `Unknown role "${role}"` }, { status: 400 });
+      if (!roleNames.includes(role)) return NextResponse.json({ error: `Unknown role "${role}"` }, { status: 400 });
       if (typeof selector !== "string" || !selector.trim()) {
         return NextResponse.json({ error: `Role "${role}" needs a model selector` }, { status: 400 });
       }

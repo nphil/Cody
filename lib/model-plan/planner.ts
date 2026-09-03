@@ -29,21 +29,26 @@ const SYSTEM_PROMPT = [
 ].join(" ");
 
 // What each role actually drives. Without this the model guesses from the
-// names, and "smol"/"tiny"/"slow" are not guessable.
-const ROLE_BRIEF = [
-  "default - the main session: every ordinary turn the user drives.",
-  "task - general-purpose subagents doing delegated multi-step work.",
-  "smol - the deliberately mechanical subagent: bulk edits, data collection, no judgement.",
-  "tiny - constant cheap background work: session titles, classifiers, small extractions. It runs unattended, many times per session.",
-  "plan - planning and design turns, where reasoning depth pays off.",
-  "slow - the deliberate role for the hardest problems; quality over latency.",
-  "designer - UI and UX work: reads screenshots, writes interface code.",
-  "vision - anything with images attached; the model must accept image input.",
-  "commit - commit messages: short, formulaic, high volume.",
-  "advisor - a passive reviewer invoked on every single turn, so its cost is paid constantly.",
-].join("\n");
+// names, and "smol"/"tiny"/"slow" are not guessable. Teaching order, not the
+// engine's — and filtered against the roles the engine actually has, so a role
+// it has dropped is never described or offered.
+const ROLE_BRIEFS: ReadonlyArray<readonly [string, string]> = [
+  ["default", "the main session: every ordinary turn the user drives."],
+  ["task", "general-purpose subagents doing delegated multi-step work."],
+  ["smol", "the deliberately mechanical subagent: bulk edits, data collection, no judgement."],
+  ["tiny", "constant cheap background work: session titles, classifiers, small extractions. It runs unattended, many times per session."],
+  ["plan", "planning and design turns, where reasoning depth pays off."],
+  ["slow", "the deliberate role for the hardest problems; quality over latency."],
+  ["vision", "anything with images attached; the model must accept image input."],
+  ["commit", "commit messages: short, formulaic, high volume."],
+  ["advisor", "a passive reviewer invoked on every single turn, so its cost is paid constantly."],
+];
 
-function buildUserPrompt(roster: Roster): string {
+function buildUserPrompt(roster: Roster, roleNames: readonly string[]): string {
+  const wanted = new Set(roleNames);
+  // A role the engine gained since this list was written still appears in the
+  // rules line below; it simply goes undescribed rather than unassignable.
+  const brief = ROLE_BRIEFS.filter(([role]) => wanted.has(role)).map(([role, text]) => `${role} - ${text}`).join("\n");
   return [
     "Assign models to roles for this installation.",
     "",
@@ -53,12 +58,12 @@ function buildUserPrompt(roster: Roster): string {
     "`local: true` means the model is served on the user's own machine: free and private, but it competes with the user's own hardware and is usually weaker.",
     "",
     "The roles:",
-    ROLE_BRIEF,
+    brief,
     "",
     "Answer with exactly this JSON shape:",
     '{"roles":{"<role>":"<selector>"},"ladder":["<provider id>"],"rationale":[{"subject":"<role or topic>","text":"<one short sentence>"}]}',
     "",
-    `Rules. Role names must come from this list: ${ROLE_NAMES.join(", ")}. Omit any role you have no opinion on rather than guessing.`,
+    `Rules. Role names must come from this list: ${roleNames.join(", ")}. Omit any role you have no opinion on rather than guessing.`,
     "Every selector must be one of the `selector` values above, copied exactly.",
     "`ladder` is provider ids ordered best first: how quality should degrade when a provider is exhausted. Direct providers the user pays for or is signed in to come first, gateway aggregators that resell other vendors' models (OpenRouter and its kind) after them as the backup route, and local providers last.",
     "`rationale` explains the assignments, one short sentence per entry.",
@@ -110,7 +115,11 @@ function readDraft(raw: unknown): PlanDraft | null {
 }
 
 /** Plan with a model. `model` is a roster selector; the caller picks it. */
-export async function planWithModel(model: string, roster: Roster): Promise<PlannerOutcome> {
+export async function planWithModel(
+  model: string,
+  roster: Roster,
+  roleNames: readonly string[] = ROLE_NAMES,
+): Promise<PlannerOutcome> {
   const bin = resolveOmpBin();
   if (!bin) return { ok: false, reason: "omp binary not found" };
 
@@ -118,7 +127,7 @@ export async function planWithModel(model: string, roster: Roster): Promise<Plan
     bin,
     model,
     systemPrompt: SYSTEM_PROMPT,
-    prompt: buildUserPrompt(roster),
+    prompt: buildUserPrompt(roster, roleNames),
     timeoutMs: PLANNER_TIMEOUT_MS,
   });
   if (!answer.text) return { ok: false, reason: answer.error ?? "the planner returned no answer" };
