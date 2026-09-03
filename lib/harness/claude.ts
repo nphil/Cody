@@ -215,6 +215,8 @@ export const claudeHarness: HarnessAdapter = {
     // Claude Code's CLAUDE.md is project context the user writes, not memory
     // the agent maintains and can hand back.
     memory: false,
+    // Provider sign-in with the engine's own login: `claude auth login` in a pseudo-terminal — a Claude subscription.
+    providerLogin: true,
   },
   resolveBinary: () => resolveEngineBin("claude-agent-acp", "CLAUDE"),
   getVersion: () => getEngineVersion("claude-agent-acp", "CLAUDE"),

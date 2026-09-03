@@ -1,34 +1,32 @@
-import { requireEngine } from "@/lib/engine-guard";
-import { type OmpLoginProvider, runUtilityCommand } from "@/lib/omp/rpc-utility";
+import { NextResponse } from "next/server";
+import { requireCapability } from "@/lib/engine-guard";
+import { getHarness } from "@/lib/harness";
 
 export const dynamic = "force-dynamic";
 
-// Login-capable providers via the omp RPC get_login_providers command. This is
-// omp's own /login list (OAuth subscriptions plus key-creation flows), so no
-// hardcoded exclusions or display-name overrides are needed anymore.
+/**
+ * The providers the ACTIVE engine can sign the user in to with its own
+ * login — omp's /login roster, pi's OAuth providers, Claude Code's and
+ * Codex's subscriptions, Hermes' OAuth providers — read through the
+ * adapter's `providerLogins` surface, so this route never names an engine.
+ * An empty list carries the engine's own reason (not installed, its status
+ * command failed); an engine without the surface refuses `unsupported`,
+ * which is what hides the section.
+ */
 export async function GET() {
-  try {
-    // omp's own /login list, read from omp's encrypted credential store by an
-    // omp child. Left unguarded it spawned omp behind whatever engine was
-    // active — and, because the shared utility child is keyed by engine, that
-    // spawn also disposed a live pi child mid-flight.
-    const gate = requireEngine("omp", "Provider login state");
-    if ("response" in gate) return gate.response;
-    const { providers } = await runUtilityCommand<{ providers: OmpLoginProvider[] }>(
-      { type: "get_login_providers" },
-      30_000,
+  const gate = requireCapability("providerLogin", "Provider sign-in");
+  if ("response" in gate) return gate.response;
+  const engine = getHarness();
+  const surface = engine.providerLogins;
+  if (!surface) {
+    return NextResponse.json(
+      { error: `${engine.displayName} has no provider sign-in surface`, code: "unsupported" },
+      { status: 400 },
     );
-    const result = providers
-      .filter((p) => p.available !== false)
-      .map((p) => ({
-        id: p.id,
-        name: p.name,
-        usesCallbackServer: false,
-        loggedIn: p.authenticated,
-      }));
-    return Response.json({ providers: result });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return Response.json({ providers: [], error: message }, { status: 500 });
   }
+  const list = await surface.list();
+  return NextResponse.json(
+    { engine: { id: engine.id, shortName: engine.shortName }, providers: list.providers, ...(list.reason ? { reason: list.reason } : {}) },
+    { headers: { "Cache-Control": "no-store" } },
+  );
 }

@@ -1,24 +1,24 @@
-import { homedir } from "os";
-import { requireEngine } from "@/lib/engine-guard";
-import { invalidateModelsCache } from "@/lib/models-cache";
-import { enableProvider } from "@/lib/omp/model-roles";
-import { RpcProcess, type RpcFrame } from "@/lib/omp/rpc-process";
-import { disposeUtilityRpc } from "@/lib/omp/rpc-utility";
+import { NextResponse } from "next/server";
+import { requireCapability } from "@/lib/engine-guard";
+import { getHarness } from "@/lib/harness";
+import { createLoginValueChannel } from "@/lib/harness/login-channel";
+import type { ProviderLoginUi } from "@/lib/harness/types";
 
 export const dynamic = "force-dynamic";
 
 /**
- * Interactive login over a dedicated `omp --mode rpc-ui` process. omp drives
- * the flow with extension_ui_request frames: `open_url` carries the OAuth URL,
- * `input` asks for the pasted code/redirect URL, `notify` reports progress.
- * The SSE stream keeps pi-web's event names (auth, prompt_request, progress,
- * success, error, cancelled) so the client flow is unchanged; the POST handler
- * feeds the user's pasted value back as an extension_ui_response frame.
+ * Interactive provider sign-in, engine-neutral.
+ *
+ * GET opens an SSE stream and runs the ACTIVE engine's own login for the
+ * provider through its `providerLogins` surface; the driver's calls become
+ * the frames the sign-in panel renders (`auth`, `device_code`,
+ * `prompt_request`, `progress`, `success`, `error`, `cancelled`). POST feeds
+ * back what the user pasted — a code, a redirect URL, an answer — against the
+ * stream's token. A value pasted before the engine asks for it is held and
+ * handed over at the first request, because the paste box is on screen from
+ * the first URL and a redirect URL often arrives first.
  */
 
-const LOGIN_EXTRA_ARGS = ["--no-session", "--no-extensions", "--no-skills", "--no-lsp"];
-const READY_TIMEOUT_MS = 60_000;
-const LOGIN_TIMEOUT_MS = 15 * 60_000;
 const HEARTBEAT_MS = 30_000;
 
 interface PendingLogin {
@@ -29,18 +29,18 @@ interface PendingLogin {
 // Registry survives dev-server hot reload; the SSE stream registers its token,
 // the POST handler resolves it.
 declare global {
-  var __ompLoginRegistry: Map<string, PendingLogin> | undefined;
+  var __providerLoginRegistry: Map<string, PendingLogin> | undefined;
 }
 
 function getLoginRegistry(): Map<string, PendingLogin> {
-  if (!globalThis.__ompLoginRegistry) globalThis.__ompLoginRegistry = new Map();
-  return globalThis.__ompLoginRegistry;
+  if (!globalThis.__providerLoginRegistry) globalThis.__providerLoginRegistry = new Map();
+  return globalThis.__providerLoginRegistry;
 }
 
-// POST /api/auth/login/[provider] — frontend sends redirect URL or auth code
+// POST /api/auth/login/[provider] — the pasted code, redirect URL or answer
 export async function POST(
   req: Request,
-  { params }: { params: Promise<{ provider: string }> }
+  { params }: { params: Promise<{ provider: string }> },
 ) {
   const { provider } = await params;
   const { token, code } = (await req.json()) as { token?: string; code?: string };
@@ -67,14 +67,20 @@ export async function POST(
 // GET /api/auth/login/[provider] — SSE stream for the login flow
 export async function GET(
   req: Request,
-  { params }: { params: Promise<{ provider: string }> }
+  { params }: { params: Promise<{ provider: string }> },
 ) {
   const { provider } = await params;
-  // The flow IS an omp child (`omp --mode rpc-ui`) driving omp's own OAuth
-  // extension into omp's credential store. Running it under another engine
-  // would sign the user in to something the active engine never reads.
-  const gate = requireEngine("omp", "Provider login");
+  const gate = requireCapability("providerLogin", "Provider sign-in");
   if ("response" in gate) return gate.response;
+  const engine = getHarness();
+  const surface = engine.providerLogins;
+  if (!surface) {
+    return NextResponse.json(
+      { error: `${engine.displayName} has no provider sign-in surface`, code: "unsupported" },
+      { status: 400 },
+    );
+  }
+
   const token = `${provider}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const registry = getLoginRegistry();
   const encoder = new TextEncoder();
@@ -101,81 +107,45 @@ export async function GET(
         }
       }, HEARTBEAT_MS);
 
-      // The user may paste the code before omp's input request arrives (the
-      // auth event shows the paste box immediately) — buffer one value.
-      let pendingInputId: string | null = null;
-      let bufferedValue: string | null = null;
+      // ONE channel for the user's values (lib/harness/login-channel.ts):
+      // whoever is waiting — a prompt, or the driver's watch for an
+      // unprompted paste — gets the next submission; with nobody waiting it
+      // is held for the next asker.
+      const channel = createLoginValueChannel();
+      const nextValue = () => channel.next();
+      const submit = (value: string) => channel.submit(value);
+      const abort = new AbortController();
+      const cancelWaiters = () => channel.cancel();
 
-      let proc: RpcProcess | null = null;
-      const handleFrame = (frame: RpcFrame) => {
-        if (frame.type !== "extension_ui_request") return;
-        const method = frame.method;
-        if (method === "open_url") {
-          send({
-            type: "auth",
-            url: String(frame.url ?? ""),
-            instructions: typeof frame.instructions === "string" ? frame.instructions : null,
-            token,
-          });
-        } else if (method === "input") {
-          const id = String(frame.id);
-          if (bufferedValue !== null) {
-            const value = bufferedValue;
-            bufferedValue = null;
-            proc?.sendFrame({ type: "extension_ui_response", id, value });
-          } else {
-            pendingInputId = id;
-            send({
-              type: "prompt_request",
-              message: typeof frame.title === "string" ? frame.title : "Enter the authorization code",
-              placeholder: typeof frame.placeholder === "string" ? frame.placeholder : null,
-              token,
-            });
-          }
-        } else if (method === "notify") {
-          if (typeof frame.message === "string") send({ type: "progress", message: frame.message });
-        } else if (method === "cancel") {
-          if (pendingInputId !== null && frame.targetId === pendingInputId) pendingInputId = null;
-        }
+      const ui: ProviderLoginUi = {
+        onUrl: (url, instructions) => send({ type: "auth", url, instructions: instructions ?? null, token }),
+        onDeviceCode: (info) => send({
+          type: "device_code",
+          userCode: info.userCode,
+          verificationUri: info.verificationUri,
+          intervalSeconds: info.intervalSeconds ?? null,
+          expiresInSeconds: info.expiresInSeconds ?? null,
+        }),
+        onPrompt: (message, placeholder) => {
+          send({ type: "prompt_request", message, placeholder: placeholder ?? null, token });
+          return nextValue();
+        },
+        onManualInput: () => nextValue(),
+        onProgress: (message) => send({ type: "progress", message }),
+        signal: abort.signal,
       };
 
-      try {
-        proc = new RpcProcess({ cwd: homedir(), extraArgs: LOGIN_EXTRA_ARGS, onFrame: handleFrame });
-      } catch (error) {
-        send({ type: "error", message: error instanceof Error ? error.message : String(error) });
-        clearInterval(heartbeat);
-        closed = true;
-        try { controller.close(); } catch {}
-        return;
-      }
-      const child = proc;
-
-      registry.set(token, {
-        provider,
-        submit: (value: string) => {
-          if (pendingInputId !== null) {
-            const id = pendingInputId;
-            pendingInputId = null;
-            child.sendFrame({ type: "extension_ui_response", id, value });
-          } else {
-            bufferedValue = value;
-          }
-        },
-      });
-
+      registry.set(token, { provider, submit });
       const cleanup = () => {
         registry.delete(token);
         clearInterval(heartbeat);
-        void child.dispose();
+        abort.abort();
+        cancelWaiters();
       };
       req.signal.addEventListener("abort", cleanup);
 
       try {
-        await child.waitReady(READY_TIMEOUT_MS);
-        await child.sendCommand({ type: "login", providerId: provider }, LOGIN_TIMEOUT_MS);
-        enableProvider(provider);
-        invalidateModelsCache();
-        disposeUtilityRpc();
+        await surface.login(provider, ui);
         send({ type: "success" });
       } catch (error) {
         if (req.signal.aborted) {
@@ -186,7 +156,7 @@ export async function GET(
       } finally {
         cleanup();
         closed = true;
-        try { controller.close(); } catch {}
+        try { controller.close(); } catch { /* already closed */ }
       }
     },
   });

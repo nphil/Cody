@@ -666,8 +666,29 @@ is still usable). `thinkingLevels` always starts with `"off"`.
 
 Related, all admin-gated and all **Incidental**: `/api/model-roles`,
 `/api/models-config`, `/api/models-config/{catalog,discover,test}`,
-`/api/providers/enable`, `/api/auth/*` (engine provider sign-in, unrelated to
-Cody accounts — do not confuse the two).
+`/api/providers/enable`, `/api/auth/all-providers` (omp's configured API-key
+providers).
+
+## `/api/auth/providers`, `/api/auth/login/{provider}`, `/api/auth/logout/{provider}` — Incidental
+
+Provider SIGN-IN with the active engine's own login (a Claude Pro/Max or
+ChatGPT subscription, Nous Portal, …) — unrelated to Cody accounts, do not
+confuse the two. Served for every engine whose `capabilities.providerLogin`
+is true; refused `400 unsupported` otherwise.
+
+- `GET /api/auth/providers` → `{"engine":{"id","shortName"},
+  "providers":[{"id","name","authenticated","kind":"oauth"|"device",
+  "canLogout","hint"?}],"reason"?}`. `reason` explains an empty roster (the
+  engine is not installed).
+- `GET /api/auth/login/{provider}` is an SSE stream of the flow: `auth
+  {url, instructions, token}` (open the URL), `device_code {userCode,
+  verificationUri, expiresInSeconds}` (type the code there), `prompt_request
+  {message, placeholder, token}` (paste the code or redirect URL),
+  `progress {message}`, then `success`, `error {message}` or `cancelled`.
+  `POST /api/auth/login/{provider}` with `{"token","code"}` hands the pasted
+  value back; a value posted before the engine asks is held for it.
+- `POST /api/auth/logout/{provider}` → `{"ok":true}`; `400 unsupported` for
+  an engine whose only logout is interactive (omp).
 
 ## `GET|PUT /api/provider-keys` — Incidental
 

@@ -111,6 +111,8 @@ export const hermesHarness: HarnessAdapter = {
     // (MEMORY.md, USER.md) — the thing that makes it Hermes, and the one
     // question users have about it: what does it think it knows about me?
     memory: true,
+    // Provider sign-in with the engine's own login: `hermes auth add <provider> --type oauth` in a pseudo-terminal.
+    providerLogin: true,
   },
   resolveBinary: () => resolveEngineBin("hermes", "HERMES"),
   getVersion: () => getEngineVersion("hermes", "HERMES", ["acp", "--version"]),

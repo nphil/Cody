@@ -256,6 +256,8 @@ export const codexHarness: HarnessAdapter = {
     subagents: false,
     // Codex keeps memories, and exposes no way for Cody to read them back.
     memory: false,
+    // Provider sign-in with the engine's own login: `codex login --device-auth` in a pseudo-terminal — a ChatGPT subscription.
+    providerLogin: true,
   },
   resolveBinary: () => resolveEngineBin("codex-acp", "CODEX"),
   getVersion: () => getEngineVersion("codex-acp", "CODEX"),

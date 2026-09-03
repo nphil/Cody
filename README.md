@@ -89,9 +89,10 @@ NVIDIA GPU is optional, for local models running inside the distro.
 | Engine | Status | What you get |
 | --- | --- | --- |
 | **omp** (oh-my-pi) | Founding engine — every surface enabled | Full chat (thinking levels, forking, compaction, steering, subagents), models & providers, skills, plugins, MCP, native settings, updates |
-| **Pi** (pi.dev) | Experimental | Live chat over Pi's native RPC — streamed replies, tool activity, steering, aborts; settings surfaces fit to what Pi actually serves |
-| **Claude Code** | Experimental | Plain chat: prompt, streamed reply, tool activity, abort. Non-relevant settings hide automatically |
-| **Codex** | Experimental | Same plain-chat surface as Claude Code |
+| **Pi** (pi.dev) | Experimental | Live chat over Pi's native RPC — streamed replies, tool activity, steering, aborts; a settings panel read from Pi's own docs, skills, provider sign-in (Claude Pro/Max, ChatGPT, GitHub Copilot) and API keys |
+| **Claude Code** | Experimental | Chat over ACP: streamed replies, tool activity, approvals in chat, the agent's own permission modes (Manual / Accept edits / Plan / Auto), model picker, session resume; sign in with a Claude subscription or an API key |
+| **Codex** | Experimental | The same ACP surface: approvals, approval levels, model picker; sign in with ChatGPT (device code) or an API key |
+| **Hermes** | Experimental | ACP chat with approvals, modes and a model picker; memory browser, skills, a settings panel from Hermes' own defaults; sign in with Nous Portal, Claude Pro/Max, ChatGPT and more |
 
 - **Install & update from the UI**: the onboarding picker and
   Settings → User Accounts → Agent engine install engines on demand and give
@@ -102,9 +103,12 @@ NVIDIA GPU is optional, for local models running inside the distro.
   key once (Anthropic, OpenAI, OpenRouter, Gemini, Bedrock, …) and hands it to
   every engine as an environment variable, the same way a key set on the
   container would reach it — so switching engines never means re-entering
-  credentials. An engine's own sign-in still works: run `claude` or
-  `codex login` once in a Cody terminal (state persists in `/data/home`).
-  omp's OAuth accounts and model registry live on the same tab.
+  credentials. Subscriptions sign in on the same tab: a Claude Pro/Max
+  account, ChatGPT for Codex, Nous Portal for Hermes, GitHub Copilot and the
+  rest run the engine's OWN login headless — Cody shows the URL, and when the
+  browser cannot reach the container you paste the code or the final
+  redirect URL back (or type a device code where the provider uses one).
+  omp's model registry lives on the same tab.
 - **Local models stay reachable**: omp's model registry takes custom
   providers; Codex supports `--oss`/custom `model_provider` endpoints; the
   Claude engine honors `ANTHROPIC_BASE_URL`. Any OpenAI/Anthropic-compatible
