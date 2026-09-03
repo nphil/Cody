@@ -194,6 +194,7 @@
   "chatInput.noModels": "モデルなし",
   "chatInput.placeholder": "メッセージ… / でコマンド、@ でファイル",
   "chatInput.placeholderRunning": "エージェント実行中…",
+  "chatInput.placeholderShort": "メッセージ…",
   "chatInput.placeholderSteer": "今すぐステア / フォローアップをキュー...",
   "chatInput.planningInProgress": "計画を作成中",
   "chatInput.queuedCount": "キュー · {count}",

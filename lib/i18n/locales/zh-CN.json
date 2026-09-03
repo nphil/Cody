@@ -194,6 +194,7 @@
   "chatInput.noModels": "无模型",
   "chatInput.placeholder": "输入消息… 输入 / 使用命令，@ 引用文件",
   "chatInput.placeholderRunning": "智能体运行中…",
+  "chatInput.placeholderShort": "输入消息…",
   "chatInput.placeholderSteer": "立即引导 / 排队追加消息...",
   "chatInput.planningInProgress": "正在制定计划",
   "chatInput.queuedCount": "已排队 · {count}",

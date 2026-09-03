@@ -255,7 +255,7 @@ hooks/
   useIsMobile.ts           responsive breakpoint hook
   usePrefersReducedMotion.ts OS reduce-motion preference (SMIL-safe)
   useStreamTuning.tsx      live StreamTuning: playground context override, else the stored value
-  useTheme.ts              theme state (localStorage key "omp-theme")
+  useTheme.ts              theme state: saved per account (/api/accounts/me) and mirrored in localStorage "cody:theme"; first visit follows prefers-color-scheme
 
 bin/
   cody-server.js           custom server; also WS upgrade for /api/display/socket

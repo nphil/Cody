@@ -6,6 +6,7 @@ import {
   getAlternateTheme,
   getTheme,
   isThemeId,
+  resolveInitialThemeId,
   THEME_STORAGE_KEY,
   type ThemeId,
 } from "@/lib/theme-catalog";
@@ -19,12 +20,37 @@ function subscribe(cb: () => void): () => void {
 
 function storedThemeId(): ThemeId {
   if (typeof window === "undefined") return DEFAULT_THEME_ID;
+  // The page already decided before first paint — the server rendered the
+  // account's saved theme, or the bootstrap script chose from storage and the
+  // device's colour scheme. The DOM is the truth; re-deriving it here from
+  // storage alone is how a phone could show one theme and report another.
+  const applied = document.documentElement.dataset.theme;
+  if (isThemeId(applied ?? null)) return applied as ThemeId;
+  let stored: string | null = null;
   try {
-    const value = localStorage.getItem(THEME_STORAGE_KEY);
-    return isThemeId(value) ? value : DEFAULT_THEME_ID;
+    stored = localStorage.getItem(THEME_STORAGE_KEY);
   } catch {
-    return DEFAULT_THEME_ID;
+    // Storage is unavailable; the colour-scheme fallback below still applies.
   }
+  return resolveInitialThemeId(stored, window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false);
+}
+
+/**
+ * Save the choice to the account, so it follows the user to every other
+ * browser and device on the next load. Fire-and-forget: a signed-out page (the
+ * login screen has the picker too) answers 401, and a network blip loses
+ * nothing that the next pick will not resave. Only ever called from a user's
+ * own pick, never on boot, so a device merely applying the saved theme does
+ * not write it straight back.
+ */
+function persistAccountTheme(themeId: string): void {
+  if (typeof fetch !== "function") return;
+  void fetch("/api/accounts/me", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ theme: themeId }),
+    keepalive: true,
+  }).catch(() => {});
 }
 
 function applyTheme(themeId: ThemeId): void {
@@ -40,6 +66,7 @@ function applyTheme(themeId: ThemeId): void {
   } catch {
     // Theme selection remains usable when storage is unavailable.
   }
+  persistAccountTheme(theme.id);
   listeners.forEach((cb) => cb());
 }
 

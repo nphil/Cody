@@ -1,6 +1,9 @@
 import type { Metadata, Viewport } from "next";
 import { Noto_Sans_Mono, Noto_Serif_SC, Source_Serif_4 } from "next/font/google";
-import { DEFAULT_THEME_ID, THEMES } from "@/lib/theme-catalog";
+import { cookies } from "next/headers";
+import { SESSION_COOKIE_NAME, verifySessionToken } from "@/lib/auth/session";
+import { getTheme, isThemeId } from "@/lib/theme-catalog";
+import { themeBootstrapScript } from "@/lib/theme-bootstrap";
 import { LEGACY_STORAGE_KEYS, STORAGE_KEYS } from "@/lib/storage-keys";
 import "./globals.css";
 
@@ -27,8 +30,27 @@ const notoSerifSC = Noto_Serif_SC({
   variable: "--font-noto-serif",
   display: "swap",
 });
-const themeBootstrap = JSON.stringify(Object.fromEntries(THEMES.map(({ id, mode, preview }) => [id, { mode, background: preview.background }])));
 const legacyStorageKeys = JSON.stringify(LEGACY_STORAGE_KEYS);
+
+/**
+ * The signed-in account's saved theme, or null when signed out or never
+ * chosen. Read here, on the server, so the FIRST paint on any device is the
+ * user's own choice: theme selection used to live only in one browser's
+ * localStorage, so a theme picked on the desktop never reached the phone, and
+ * the phone (and the home-screen app, which has storage of its own) stayed on
+ * the default. A bad cookie or an unreadable account store simply means "no
+ * preference" — the bootstrap below falls back to the browser's choice.
+ */
+async function accountTheme(): Promise<string | null> {
+  try {
+    const store = await cookies();
+    const user = verifySessionToken(store.get(SESSION_COOKIE_NAME)?.value);
+    const theme = user?.preferences?.theme ?? null;
+    return isThemeId(theme) ? theme : null;
+  } catch {
+    return null;
+  }
+}
 
 export const metadata: Metadata = {
   title: "Cody",
@@ -60,13 +82,23 @@ export const viewport: Viewport = {
   ],
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
+  const savedTheme = await accountTheme();
+  // Rendered straight onto <html> so the server's HTML already carries the
+  // right palette; the bootstrap script then only confirms it.
+  const savedMode = savedTheme ? getTheme(savedTheme).mode : null;
   return (
-    <html lang="en" translate="no" className={`${notoSansMono.variable} ${sourceSerif.variable} ${notoSerifSC.variable} notranslate`} suppressHydrationWarning>
+    <html
+      lang="en"
+      translate="no"
+      data-theme={savedTheme ?? undefined}
+      className={`${notoSansMono.variable} ${sourceSerif.variable} ${notoSerifSC.variable} notranslate${savedMode === "dark" ? " dark" : ""}`}
+      suppressHydrationWarning
+    >
       <head>
         <meta name="google" content="notranslate" />
         {/* Move any pre-fork ompweb keys into the `cody:` namespace FIRST, so the
@@ -77,20 +109,20 @@ export default function RootLayout({
             __html: `(function(){try{var m=${legacyStorageKeys};for(var i=0;i<m.length;i++){try{var o=m[i][0],n=m[i][1];if(localStorage.getItem(n)!==null){localStorage.removeItem(o);continue}var v=localStorage.getItem(o);if(v===null)continue;localStorage.setItem(n,v);localStorage.removeItem(o)}catch(e){}}}catch(e){}})();`,
           }}
         />
-        {/* Apply the stored theme before first paint so both the UI and browser
-            chrome match the user's previous choice without a light-mode flash. */}
-        <script
-          dangerouslySetInnerHTML={{
-            __html: `(function(){try{var d=document,m=${themeBootstrap},t=localStorage.getItem(${JSON.stringify(STORAGE_KEYS.theme)});if(!m[t])t="${DEFAULT_THEME_ID}";d.documentElement.dataset.theme=t;d.documentElement.classList.toggle("dark",m[t].mode==="dark");d.querySelectorAll('meta[name="theme-color"]').forEach(function(e){e.setAttribute("content",m[t].background)})}catch(e){}})();`,
-          }}
-        />
+        {/* Apply the theme before first paint so neither the UI nor the browser
+            chrome flashes the wrong palette: the account's saved theme, then
+            this browser's, then the device's colour scheme (lib/theme-bootstrap.ts). */}
+        <script dangerouslySetInnerHTML={{ __html: themeBootstrapScript(savedTheme) }} />
         <script
           dangerouslySetInnerHTML={{
             __html: `(function(){try{var l=localStorage.getItem(${JSON.stringify(STORAGE_KEYS.lang)});if(l!=="en"&&l!=="zh-CN"&&l!=="ja"){var n=(navigator.language||"").toLowerCase();l=n.indexOf("zh")===0?"zh-CN":n.indexOf("ja")===0?"ja":"en"}document.documentElement.lang=l}catch(e){}})();`,
           }}
         />
       </head>
-      <body translate="no" className="notranslate" style={{ height: "100dvh", display: "flex", flexDirection: "column" }}>
+      {/* --app-height is set only while a phone's soft keyboard is up
+          (hooks/useVisualViewportHeight.ts); otherwise the dynamic viewport
+          unit already tracks the browser chrome. */}
+      <body translate="no" className="notranslate" style={{ height: "var(--app-height, 100dvh)", display: "flex", flexDirection: "column" }}>
         {children}
         {/* Register the no-op service worker after load: Chromium's PWA
             install prompt requires one; it caches nothing (see public/sw.js). */}

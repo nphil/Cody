@@ -19,6 +19,7 @@ import { formatApiCost, formatCompactNumber, formatPercent, usageToneColor } fro
 import { translate, useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useVisualViewportHeight } from "@/hooks/useVisualViewportHeight";
 import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
 import { useDisplayRequests } from "@/hooks/useDisplayRequests";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
@@ -185,6 +186,9 @@ export function AppShell() {
   const { t, tn, locale } = useI18n();
   const isMobile = useIsMobile();
   const isCoarsePointer = useIsCoarsePointer();
+  // Phones only: keep the top bar and the docked composer on screen while the
+  // soft keyboard is up (see the hook for why 100dvh alone cannot).
+  useVisualViewportHeight(isMobile);
   const { isDesktop } = useDesktopShell();
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
   // When user clicks +, we only store the cwd — no fake session id
@@ -1201,7 +1205,7 @@ export function AppShell() {
         }
       }
     `}</style>
-    <div style={{ display: "flex", flexDirection: "column", height: "100dvh" }}>
+    <div style={{ display: "flex", flexDirection: "column", height: "var(--app-height, 100dvh)" }}>
     <TitleBar workspaceName={activeCwdName} />
     <div style={{ display: "flex", flex: 1, minHeight: 0, overflow: "hidden", background: "var(--bg)" }}>
       {/* Mobile overlay backdrop */}

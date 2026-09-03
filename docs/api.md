@@ -218,7 +218,7 @@ Error: `500` with `code: "info_unavailable"`.
 | `/api/accounts/login` | POST | public | `{username, password}` → `Set-Cookie` |
 | `/api/accounts/signup` | POST | public | `{username, fullName?, password}`; first human account becomes admin |
 | `/api/accounts/logout` | POST | any | clears the cookie; not on the public list, so a signed-out call is `401` |
-| `/api/accounts/me` | GET, PATCH | any | read profile; `PATCH {fullName}` |
+| `/api/accounts/me` | GET, PATCH | any | read profile (includes `theme`); `PATCH {fullName?, theme?}` — the theme is a `lib/theme-catalog` id, saved per account so it follows the user to every device |
 | `/api/accounts/me/password` | POST | any | `{currentPassword, newPassword}`; bumps `tokenVersion` |
 | `/api/accounts/me/avatar` | POST, DELETE | any | upload / clear avatar image |
 | `/api/accounts/avatar/<id>` | GET | any | an account's avatar bytes |
