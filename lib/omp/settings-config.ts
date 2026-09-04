@@ -316,9 +316,25 @@ export function deleteNativeSettingsSections(sections: string[]): string[] {
   return deleteDocumentPaths(sections.map((section) => [section]));
 }
 
+/** The config-file-only keys the Behavior hub's Recommended cards edit — the
+ * ones omp's settings schema does not declare, so the schema route's per-key
+ * reset cannot reach them. Listed here so a card's Reset can drop exactly its
+ * own override, the way the schema tab's Reset does for a declared key. */
+export const CURATED_RESETTABLE_PATHS: readonly string[] = [
+  "tools.approval.bash",
+  "tools.approval.extension",
+  "defaultThinkingLevel",
+  "advisor.subagents",
+  "compaction.autoContinue",
+  "compaction.keepRecentTokens",
+  "autolearn.minToolCalls",
+  "retry.enabled",
+];
+
 /** Dotted config.yml paths Cody may reset individually — the keys the model
- * plan writes, so undoing a plan does not clobber unrelated retry tuning. */
-const RESETTABLE_PATHS = new Set(["retry.fallbackChains", "retry.usageAwareFallback"]);
+ * plan writes (so undoing a plan does not clobber unrelated retry tuning)
+ * and the curated-only Recommended cards. */
+const RESETTABLE_PATHS = new Set(["retry.fallbackChains", "retry.usageAwareFallback", ...CURATED_RESETTABLE_PATHS]);
 
 /** Remove individual nested keys (dotted paths) from config.yml. */
 export function deleteNativeSettingsPaths(paths: string[]): string[] {

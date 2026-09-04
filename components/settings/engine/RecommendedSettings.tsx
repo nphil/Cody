@@ -20,7 +20,7 @@
  */
 import { AlertCircle, ArrowDown, ArrowUp, RotateCcw, Sparkles, X } from "lucide-react";
 import { useCallback, type CSSProperties, type ReactNode } from "react";
-import { useNativeSettings, type CompactionMethod, type NativeSettings, type NativeSettingsHandle } from "@/hooks/useConfigWriter";
+import { useConfigWriter, useNativeSettings, type CompactionMethod, type NativeSettings, type NativeSettingsHandle } from "@/hooks/useConfigWriter";
 import { useSchemaIndex, type SchemaIndex, type SchemaRow, type SchemaValue } from "@/hooks/useSchemaIndex";
 import { NativeSetting, TERMINAL_ONLY_BADGE, ToggleSwitch, chipStyle, nativeOptionStyle, nativeSelectStyle } from "../primitives";
 import { useSaveStatus } from "../SaveStatus";
@@ -189,17 +189,35 @@ function writeCurated(native: NativeSettingsHandle, meta: CuratedOnlySetting, va
   return native.patchSection(meta.section, { [meta.field]: value });
 }
 
+/** Drop one curated-only override so omp's own default applies again. The
+ * section PUT can only set keys, so this goes through the DELETE route's
+ * per-path form; queued in the "delete" family so it lands after any write
+ * to the same file that is still in flight. */
+async function resetCurated(key: string): Promise<void> {
+  const response = await fetch("/api/omp-settings", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ paths: [key] }),
+  });
+  const data = await response.json().catch(() => ({})) as { error?: string };
+  if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+}
+
 /** A card whose key the engine keeps config-file only: copy from the table,
- * value from /api/omp-settings, written through the section writer. No
- * Reset: the section PUT can only set keys, and the DELETE route resets
- * whole sections, so there is no honest per-key reset to offer yet. */
+ * value from /api/omp-settings, written through the section writer, reset
+ * through the DELETE route's per-path form. */
 function CuratedCard({ card, meta, native, onAfterChange }: { card: RecommendedCard; meta: CuratedOnlySetting; native: NativeSettingsHandle; onAfterChange?: (value: boolean | number | string) => void }) {
   const { track } = useSaveStatus(ENGINE_PANEL_ID);
+  const { enqueue } = useConfigWriter();
   const stored = readCurated(native.settings, meta);
   const effective = stored ?? meta.default;
   const change = (value: boolean | number | string) => {
     onAfterChange?.(value);
     void track(() => writeCurated(native, meta, value));
+  };
+  const reset = () => {
+    if (typeof meta.default === "boolean") onAfterChange?.(meta.default);
+    void track(() => enqueue("delete", () => resetCurated(meta.key)));
   };
   let control: ReactNode;
   if (meta.type === "boolean") {
@@ -218,7 +236,7 @@ function CuratedCard({ card, meta, native, onAfterChange }: { card: RecommendedC
       label={meta.label}
       description={meta.description}
       searchId={searchIdForKey(meta.key)}
-      control={<CardFooter settingKey={meta.key} modified={stored !== undefined} hint={card.hint} />}
+      control={<CardFooter settingKey={meta.key} modified={stored !== undefined} hint={card.hint} onReset={reset} />}
     >
       {control}
     </NativeSetting>
