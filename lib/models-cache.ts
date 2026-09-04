@@ -71,6 +71,19 @@ export interface CatalogCacheOptions {
   refresh?: boolean;
 }
 
+/**
+ * The stored entry under `key` when one exists — fresh OR expired — without
+ * loading anything. The rail, the composer footer and the post-install toast
+ * paint from this: a status line must never start an engine child, so a cold
+ * cache is answered as "pending" by the caller rather than filled here. An
+ * expired entry is still returned because the stale-while-revalidate serving
+ * path treats it as the current answer too.
+ */
+export function peekCatalogCache<T>(key: string): T | undefined {
+  const entry = getModelsCacheState().entries.get(key);
+  return entry ? (entry.data as T) : undefined;
+}
+
 export function loadModelsWithCache(
   cwd: string,
   loader: () => Promise<ModelsData>,

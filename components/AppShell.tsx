@@ -211,6 +211,9 @@ export function AppShell() {
   }, []);
   const closeSettings = useCallback(() => setSettingsRequest(null), []);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
+  // The open session's model catalog under a session-scoped (ACP) engine,
+  // lifted out of ChatWindow so Settings › Models can list it.
+  const [sessionModels, setSessionModels] = useState<{ provider: string; id: string; name: string }[] | null>(null);
   const [advisorEnabled, setAdvisorEnabled] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileSidebarReady, setMobileSidebarReady] = useState(false);
@@ -1877,6 +1880,7 @@ export function AppShell() {
               onSessionStatsPanelOpen={openSessionStatsPanel}
               onContextUsageChange={handleContextUsageChange}
               onModelUsageChange={handleModelUsageChange}
+              onSessionModelsChange={setSessionModels}
               onOpenFile={handleOpenLinkedFile}
               onOpenPreview={handleAgentOpenPreview}
               onPreviewUrlsSeen={handlePreviewUrlsSeen}
@@ -2225,10 +2229,7 @@ export function AppShell() {
         sessionId={selectedSession?.id ?? null}
         capabilities={capabilities}
         engine={activeEngine}
-        // The open session's catalog lives inside ChatWindow's useAgentSession;
-        // AppShell has no copy, so ACP engines' Models hub reads null here
-        // until the models slice lifts it.
-        sessionModels={null}
+        sessionModels={sessionModels}
         prefs={{ toolCallsDefaultCollapsed, setToolCallsDefaultCollapsed: handleToolCallsDefaultCollapsedChange, thinkingDefaultExpanded, setThinkingDefaultExpanded: handleThinkingDefaultExpandedChange, advisorEnabled }}
         callbacks={settingsCallbacks}
       />

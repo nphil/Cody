@@ -67,6 +67,10 @@ interface Props {
   onOpenFile?: (filePath: string) => void;
   onOpenPreview?: (url: string, sessionId?: string) => void;
   onPreviewUrlsSeen?: (urls: string[], sessionId?: string) => void;
+  /** The open session's own model catalog, for engines that publish models
+   * per SESSION (ACP) rather than in a registry: what Settings › Models
+   * lists for them. Null under an engine with a global registry. */
+  onSessionModelsChange?: (models: { provider: string; id: string; name: string }[] | null) => void;
 }
 
 /** Token traffic one model produced in the loaded conversation. */
@@ -677,7 +681,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
 /** Memoized: AppShell holds ~60 state values (git badge polls, update checks,
  *  the context-usage tick ChatWindow itself pushes up), and each of those
  *  re-renders would otherwise rebuild this whole tree. */
-export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, advisorEnabled: advisorPreferred, capabilities = ALL_CAPABILITIES, engine = null, toolCallsDefaultCollapsed = true, thinkingDefaultExpanded = false, onAgentEnd, onSessionNamed, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onModelUsageChange, onOpenFile, onOpenPreview, onPreviewUrlsSeen }: Props) {
+export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, advisorEnabled: advisorPreferred, capabilities = ALL_CAPABILITIES, engine = null, toolCallsDefaultCollapsed = true, thinkingDefaultExpanded = false, onAgentEnd, onSessionNamed, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onModelUsageChange, onOpenFile, onOpenPreview, onPreviewUrlsSeen, onSessionModelsChange }: Props) {
   const { t, tn } = useI18n();
   // The three flags this file reasons about most, unpacked once. They are
   // derived from the prop rather than passed as separate props so that every
@@ -1053,6 +1057,15 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
   }, [modelUsageKey, onModelUsageChange]);
   useEffect(() => () => { onModelUsageChange?.(null); }, [onModelUsageChange]);
 
+  // `modelSelectable` is null exactly when the engine keeps a global
+  // registry (/api/models has the catalog); a boolean means the list came
+  // off the session's own get_state and is what the Models hub should show.
+  const sessionScopedModels = modelSelectable === null ? null : modelList;
+  useEffect(() => {
+    onSessionModelsChange?.(sessionScopedModels);
+  }, [sessionScopedModels, onSessionModelsChange]);
+  useEffect(() => () => { onSessionModelsChange?.(null); }, [onSessionModelsChange]);
+
   // Steering and the follow-up queue are omp-protocol commands; a turn-based
   // engine answers them "unsupported", so they are not offered at all — the
   // composer shows a waiting state for the duration of the turn instead.
@@ -1085,6 +1098,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       modelList={modelList}
       modelsLoading={modelsLoading}
       modelError={modelError}
+      modelsRefreshKey={modelsRefreshKey}
       onModelChange={canChangeModel ? handleModelChange : undefined}
       onSelectSmartModel={smartModelCapable && isNew ? selectSmartModel : undefined}
       onSmartModelPinned={smartModelCapable ? markSmartPinnedModel : undefined}
