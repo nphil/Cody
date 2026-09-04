@@ -25,8 +25,12 @@ export interface ModelsData {
 }
 
 interface ModelsCacheState {
-  entries: Map<string, { data: ModelsData; expiresAt: number }>;
-  inFlight: Map<string, Promise<ModelsData>>;
+  // One map serves every catalog shape (the effective ModelsData, the
+  // unrestricted omp catalog) so invalidateModelsCache() clears them all in
+  // one place — a login, set_model or models.yml write drops EVERY view of the
+  // registry, never just the one the caller remembered.
+  entries: Map<string, { data: unknown; expiresAt: number }>;
+  inFlight: Map<string, Promise<unknown>>;
   generation: number;
 }
 
@@ -59,12 +63,39 @@ export function withModelRuntimeError(data: ModelsData, modelError: string | und
   return modelError ? { ...data, modelError } : data;
 }
 
-export function loadModelsWithCache(cwd: string, loader: () => Promise<ModelsData>): Promise<ModelsData> {
-  const state = getModelsCacheState();
-  const cached = state.entries.get(cwd);
-  if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.data);
+export interface CatalogCacheOptions {
+  /** How long a fresh entry is served without a reload. Default 60 s. */
+  ttlMs?: number;
+  /** Skip the stored entry (fresh or stale) and load now. An in-flight load
+   * for the same key is joined rather than duplicated. */
+  refresh?: boolean;
+}
 
-  const load = state.inFlight.get(cwd) ?? startModelsLoad(state, cwd, loader);
+export function loadModelsWithCache(
+  cwd: string,
+  loader: () => Promise<ModelsData>,
+  options?: CatalogCacheOptions,
+): Promise<ModelsData> {
+  return loadCatalogWithCache<ModelsData>(cwd, loader, options);
+}
+
+/**
+ * The same cache for any other catalog shape — the unrestricted omp catalog
+ * (`full:omp`, 1 h TTL) lives beside the effective `global:<engine>` entries
+ * so one invalidation covers both. Keys are namespaced by the caller; a key is
+ * one shape, and reading it back as another is the caller's bug.
+ */
+export function loadCatalogWithCache<T>(
+  key: string,
+  loader: () => Promise<T>,
+  options: CatalogCacheOptions = {},
+): Promise<T> {
+  const state = getModelsCacheState();
+  const ttlMs = options.ttlMs ?? MODELS_CACHE_TTL_MS;
+  const cached = options.refresh ? undefined : state.entries.get(key);
+  if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.data as T);
+
+  const load = (state.inFlight.get(key) as Promise<T> | undefined) ?? startModelsLoad(state, key, loader, ttlMs);
 
   if (cached) {
     // Stale-while-revalidate: serve the expired entry immediately while the
@@ -75,37 +106,38 @@ export function loadModelsWithCache(cwd: string, loader: () => Promise<ModelsDat
       // A failed background refresh keeps serving the stale entry; the next
       // request retries.
     });
-    return Promise.resolve(cached.data);
+    return Promise.resolve(cached.data as T);
   }
   return load;
 }
 
-function startModelsLoad(
+function startModelsLoad<T>(
   state: ModelsCacheState,
-  cwd: string,
-  loader: () => Promise<ModelsData>,
-): Promise<ModelsData> {
+  key: string,
+  loader: () => Promise<T>,
+  ttlMs: number,
+): Promise<T> {
   const generation = state.generation;
-  const loadPromise: Promise<ModelsData> = Promise.resolve()
+  const loadPromise: Promise<T> = Promise.resolve()
     .then(loader)
     .then((data) => {
-      if (state.generation === generation && state.inFlight.get(cwd) === loadPromise) {
+      if (state.generation === generation && state.inFlight.get(key) === loadPromise) {
         // Expired entries are kept (they back stale-while-revalidate serving);
         // the entry cap alone bounds the map.
-        state.entries.delete(cwd);
+        state.entries.delete(key);
         while (state.entries.size >= MAX_MODELS_CACHE_ENTRIES) {
           const oldestKey = state.entries.keys().next().value;
           if (oldestKey === undefined) break;
           state.entries.delete(oldestKey);
         }
-        state.entries.set(cwd, { data, expiresAt: Date.now() + MODELS_CACHE_TTL_MS });
+        state.entries.set(key, { data, expiresAt: Date.now() + ttlMs });
       }
       return data;
     })
     .finally(() => {
-      if (state.inFlight.get(cwd) === loadPromise) state.inFlight.delete(cwd);
+      if (state.inFlight.get(key) === loadPromise) state.inFlight.delete(key);
     });
 
-  state.inFlight.set(cwd, loadPromise);
+  state.inFlight.set(key, loadPromise);
   return loadPromise;
 }

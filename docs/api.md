@@ -669,6 +669,62 @@ Related, all admin-gated and all **Incidental**: `/api/model-roles`,
 `/api/providers/enable`, `/api/auth/all-providers` (omp's configured API-key
 providers).
 
+### `GET /api/models?catalog=full[&refresh=1]` — Incidental
+
+omp only (`400 unsupported` elsewhere): the UNRESTRICTED catalog with the
+user's `enabledModels` curation lifted, `{"modelList":[{"id","name",
+"provider"}]}` — the list the curation editor and the new-models diff work
+from. It costs an isolated omp child, so the answer is cached for an hour;
+`refresh=1` bypasses the cache for a caller that knows the registry changed
+behind it (an engine update). Any sign-in, model switch or models.yml write
+clears it anyway.
+
+### `GET /api/models/new` — Incidental
+
+Models in the active engine's catalog that the user has never been shown,
+per the seen ledger below. Any signed-in user.
+
+```json
+{"newModels":[{"provider":"…","id":"…","name":"…"}],
+ "total":233,"seenAt":"2026-09-01T10:00:00.000Z","firstRun":false,
+ "catalogSource":"global"}
+```
+
+- Under omp the diff runs against the FULL catalog, so a model hidden by an
+  exact-id `enabledModels` allowlist still counts as new — that is the point:
+  curation is exactly what hides a model released after the user curated.
+  Under pi it runs against the effective list. `total` is the size of the
+  catalog compared.
+- `firstRun: true` means the ledger has never been seeded (`seenAt: null`),
+  and `newModels` is then `[]`: nothing is new retroactively. Seed the ledger
+  with `POST /api/models/seen` the first time you display the catalog.
+- `catalogSource: "session"` (any ACP engine) means there is no sessionless
+  catalog to diff; `newModels` is `[]`, `total` 0, `seenAt` null, and there
+  is no `modelError`, because nothing failed.
+- A loader failure (engine not installed, RPC error) is `200` with
+  `newModels: []`, `total: 0` and `modelError` — never a 500, exactly like
+  `GET /api/models`.
+
+### `GET|POST /api/models/seen` — Incidental
+
+The seen ledger for the active engine: which `provider/id` keys the user has
+been shown, and when. Cody-level state in the instance data dir
+(`cody-model-catalog-seen.json`, keyed by engine id), so it survives engine
+switches. `GET` is readable by any signed-in user; `POST` is **admin-only**
+(one member marking the catalog seen would silence the notice for everyone).
+
+```json
+{"engine":{"id":"omp"},
+ "seenKeys":["<provider>/<model-id>","…"],
+ "seenAt":"2026-09-01T10:00:00.000Z"}
+```
+
+`POST {"keys": ["<provider>/<id>", …]}` records a display and answers the
+same shape. The list REPLACES the engine's previous one — it is what was
+shown, not a union — and is stored deduplicated and sorted. A body without
+a string array under `keys` is `400 keys_required`; unparseable JSON is
+`400 invalid_body`. `seenAt` is `null` until the first POST.
+
 ## `/api/auth/providers`, `/api/auth/login/{provider}`, `/api/auth/logout/{provider}` — Incidental
 
 Provider SIGN-IN with the active engine's own login (a Claude Pro/Max or

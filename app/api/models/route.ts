@@ -1,11 +1,9 @@
-import { writeFile } from "fs/promises";
-import { tmpdir } from "os";
-import { join } from "path";
 import { loadModelsWithCache, withModelRuntimeError, type ModelsData } from "@/lib/models-cache";
 import { supportsPriorityFastMode } from "@/lib/fast-mode";
 import { requireEngine } from "@/lib/engine-guard";
 import { getHarness, type HarnessAdapter } from "@/lib/harness";
-import { type OmpModel, runIsolatedUtilityCommand, runUtilityCommand } from "@/lib/omp/rpc-utility";
+import { compareModelEntries, loadFullCatalog } from "@/lib/model-catalog-full";
+import { type OmpModel, runUtilityCommand } from "@/lib/omp/rpc-utility";
 import { readDisabledProviders } from "@/lib/omp/model-roles";
 import { utilityRpcLaunchFor } from "@/lib/rpc-manager";
 
@@ -14,17 +12,6 @@ export const dynamic = "force-dynamic";
 // The model registry (omp: auth + models.yml; pi: its own catalog) is global,
 // not per-cwd, so one cache entry serves every request — keyed by engine so a
 // switch never serves the previous engine's catalog for the TTL.
-
-const modelNameCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
-
-function compareModelEntries(
-  a: { id: string; name: string; provider: string },
-  b: { id: string; name: string; provider: string }
-): number {
-  return modelNameCollator.compare(a.name || a.id, b.name || b.id)
-    || modelNameCollator.compare(a.provider, b.provider)
-    || modelNameCollator.compare(a.id, b.id);
-}
 
 // "off" is always a valid selector; the concrete efforts come from the model's
 // baked thinking metadata (omp: getSupportedEfforts = reasoning ? efforts : []).
@@ -150,41 +137,22 @@ const EMPTY_MODELS: ModelsData = {
  */
 const SESSION_SCOPED_MODELS: ModelsData = { ...EMPTY_MODELS, catalogSource: "session" };
 
-/**
- * The UNRESTRICTED catalog, for the settings panel that edits
- * `enabledModels`. OMP filters `get_available_models` by that setting, so once
- * a restriction is in place the normal read can no longer see the models it
- * excluded — and curation would be a dead end: no way to find the other 464
- * OpenRouter models to add one back.
- *
- * A config overlay (`PI_CONFIG_FILES`, OMP's own `--config` mechanism) layers
- * `enabledModels: []` over the real config for this one read-only query. The
- * user's config.yml is never written, and the overlay applies only to this
- * throwaway process.
- */
-async function loadFullCatalog(): Promise<{ id: string; name: string; provider: string }[]> {
-  const overlay = join(tmpdir(), "cody-unrestricted-models.yml");
-  await writeFile(overlay, "enabledModels: []\n", "utf8");
-  const { models } = await runIsolatedUtilityCommand<{ models: OmpModel[] }>(
-    { type: "get_available_models" },
-    { env: { PI_CONFIG_FILES: overlay }, timeoutMs: 120_000 },
-  );
-  return models
-    .map((model) => ({ id: model.id, name: model.name || model.id, provider: model.provider }))
-    .sort(compareModelEntries);
-}
-
 export async function GET(req: Request) {
   try {
     // Curation asks for the full catalog explicitly. Nothing else does: the
     // main UI only ever needs the models a session can actually use.
-    if (new URL(req.url).searchParams.get("catalog") === "full") {
-      // Curation edits omp's `enabledModels`; the overlay trick below is omp's
-      // own --config mechanism. Nothing about it means anything on another
+    const searchParams = new URL(req.url).searchParams;
+    if (searchParams.get("catalog") === "full") {
+      // Curation edits omp's `enabledModels`; the UNRESTRICTED read behind
+      // loadFullCatalog (lib/model-catalog-full.ts) is omp's own --config
+      // overlay mechanism. Nothing about it means anything on another
       // engine, so it refuses rather than spawning omp behind one.
       const gate = requireEngine("omp", "The unrestricted model catalog");
       if ("response" in gate) return gate.response;
-      return Response.json({ modelList: await loadFullCatalog() });
+      // Cached for an hour (an isolated omp child per read is the expensive
+      // part); `refresh=1` is for the caller that knows the registry changed
+      // behind the cache — an engine update.
+      return Response.json({ modelList: await loadFullCatalog({ refresh: searchParams.get("refresh") === "1" }) });
     }
     const harness = getHarness();
     // Dispatch on the ACTIVE engine, before anything can spawn a child. An
