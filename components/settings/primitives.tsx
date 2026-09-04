@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useEffect, useRef, type ReactNode } from "react";
+import { createContext, isValidElement, useContext, useEffect, useRef, type ReactNode } from "react";
 
 /**
  * Shared building blocks for the settings dialog. Cody's curated panels and the
@@ -61,6 +61,11 @@ export const chipStyle = {
  * setting reads the same whichever surface shows it. */
 export const TERMINAL_ONLY_BADGE = "Terminal only";
 export const READ_ONLY_BADGE = "Read-only";
+/** Marks a setting whose control exists but cannot take effect right now
+ * because of STATE — a role assigned to a hidden model, a provider with no
+ * key — never because of a capability the engine lacks (those rows hide).
+ * Always paired with a reason sentence so the user knows what would unlock it. */
+export const UNAVAILABLE_BADGE = "Unavailable";
 
 export function slugify(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -107,7 +112,7 @@ export function ToggleSwitch({ checked, onChange, disabled }: { checked: boolean
   );
 }
 
-export function NativeSetting({ label, description, scope, badge, searchId, control, children }: {
+export function NativeSetting({ label, description, scope, badge, unavailable, searchId, control, children }: {
   label: string;
   description?: string;
   /** Where the value lives when it is not the harness's own config file. The
@@ -115,6 +120,10 @@ export function NativeSetting({ label, description, scope, badge, searchId, cont
   scope?: "Cody only" | "Workspace";
   /** Free-form chip for a caveat about this specific setting. */
   badge?: string;
+  /** Why this setting cannot take effect right now. Renders the UNAVAILABLE
+   * badge, the reason under the description, and dims the control — the row
+   * stays visible so the user can see what would unlock it. */
+  unavailable?: string;
   /** Overrides the label-derived search id, so two panels can carry the same
    * label without the search highlight landing on both. */
   searchId?: string;
@@ -122,7 +131,7 @@ export function NativeSetting({ label, description, scope, badge, searchId, cont
   control?: ReactNode;
   children?: ReactNode;
 }) {
-  const ref = useRef<HTMLDivElement>(null);
+  const ref = useRef<HTMLElement | null>(null);
   const highlightId = useContext(SettingsHighlightContext);
   const id = searchId ?? slugify(label);
   const highlighted = highlightId !== null && highlightId === id;
@@ -133,33 +142,52 @@ export function NativeSetting({ label, description, scope, badge, searchId, cont
     }
   }, [highlighted]);
 
+  // A toggle's card is its target: wrapping the whole card in a <label>
+  // makes the description text and the empty space around the 36px switch
+  // activate it, which is the difference between a tappable row and a
+  // fiddly one on a phone. Only a lone ToggleSwitch qualifies — a <label>
+  // around a select or text input would steal their focus semantics.
+  const isSwitch = isValidElement(children) && children.type === ToggleSwitch;
+  const Root: "label" | "div" = isSwitch ? "label" : "div";
+
   return (
-    <div
-      ref={ref}
+    <Root
+      ref={(element: HTMLElement | null) => { ref.current = element; }}
       data-search-id={id}
+      aria-disabled={unavailable ? true : undefined}
       style={{
         minWidth: 0,
         padding: "12px 14px",
-        border: "1px solid var(--border)",
+        // Longhands, not the `border` shorthand: the colour flips with the
+        // highlight, and React warns when a longhand and its shorthand fight
+        // across renders.
+        borderWidth: 1,
+        borderStyle: "solid",
+        borderColor: highlighted ? "var(--accent)" : "var(--border)",
         borderRadius: "var(--radius-card)",
         background: "var(--bg-panel)",
         display: "flex",
         flexDirection: "column",
         gap: 8,
+        cursor: isSwitch && !unavailable ? "pointer" : undefined,
         transition: "box-shadow var(--dur-fast), border-color var(--dur-fast)",
-        ...(highlighted ? { borderColor: "var(--accent)", boxShadow: "0 0 0 2px var(--accent)" } : {}),
+        boxShadow: highlighted ? "0 0 0 2px var(--accent)" : undefined,
       }}
     >
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)" }}>{label}</span>
           {scope && <span style={chipStyle}>{scope}</span>}
           {badge && <span style={chipStyle}>{badge}</span>}
+          {unavailable && <span style={{ ...chipStyle, color: "var(--status-warning)" }} title={unavailable}>{UNAVAILABLE_BADGE}</span>}
         </div>
-        {children !== undefined && <span style={{ flexShrink: 0 }}>{children}</span>}
+        {children !== undefined && (
+          <span style={{ flexShrink: 0, ...(unavailable ? { opacity: 0.5, pointerEvents: "none" } : {}) }}>{children}</span>
+        )}
       </div>
       <span style={{ color: "var(--text-muted)", fontSize: 11, lineHeight: 1.45 }}>{description}</span>
-      {control}
-    </div>
+      {unavailable && <span style={{ color: "var(--status-warning)", fontSize: 11, lineHeight: 1.45 }}>{unavailable}</span>}
+      {unavailable ? <div style={{ opacity: 0.5, pointerEvents: "none" }}>{control}</div> : control}
+    </Root>
   );
 }

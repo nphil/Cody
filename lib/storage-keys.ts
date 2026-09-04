@@ -28,8 +28,19 @@ export const STORAGE_KEYS = {
   toolPreset: "cody:tool-preset",
   /** Whether the native OMP advisor is enabled. */
   advisorEnabled: "cody:advisor-enabled",
-  /** Models pinned into the composer's model picker. */
+  /** Models pinned into the composer's model picker. Retired allowlist: the
+   * catalog migration reads it once and deletes it; nothing else may. */
   composerModels: "cody:composer-models",
+  /** Models this user hides from the composer (mirror of the account's hidden
+   * list under /api/models/visibility; the offline fallback without accounts). */
+  composerHiddenModels: "cody:composer-hidden-models",
+  /** Models this user pinned to the top of the composer picker. */
+  composerPinnedModels: "cody:composer-pinned-models",
+  /** The last few models picked in the composer, newest first. */
+  recentModels: "cody:recent-models",
+  /** The Settings section that was open last; reopened when Settings opens
+   * with no explicit target. A property of the human, so it stays global. */
+  settingsLastSection: "cody:settings-last-section",
   /** Whether the turn-completion sound plays. */
   soundEnabled: "cody:sound-enabled",
   /** Selected right-panel tool (files / git / terminal / preview / tasks / info). */
@@ -74,6 +85,11 @@ export const ENGINE_SCOPED_KEYS = [
   STORAGE_KEYS.composerModels,
   STORAGE_KEYS.unreadSessions,
   STORAGE_KEYS.lastOpenByProject,
+  // Model keys are `provider/id` in ONE engine's catalog: omp's hidden list
+  // would hide nothing on pi and a pinned omp model is not a pi model at all.
+  STORAGE_KEYS.composerHiddenModels,
+  STORAGE_KEYS.composerPinnedModels,
+  STORAGE_KEYS.recentModels,
 ] as const;
 
 /** Address one of ENGINE_SCOPED_KEYS for a given engine. Null while the
@@ -96,6 +112,11 @@ export const SESSION_STORAGE_PREFIXES = {
 /** Same-window notifications between components that share a stored value. */
 export const STORAGE_EVENTS = {
   composerModelsChange: "cody:composer-models-change",
+  /** The hidden / pinned model lists changed (Settings › Models, or a hide
+   * undo); the composer rebuilds its picker without a reload. */
+  composerVisibilityChange: "cody:composer-visibility-change",
+  /** The recent-models list changed (a pick in one composer instance). */
+  recentModelsChange: "cody:recent-models-change",
   soundPrefChange: "cody:sound-pref-change",
   terminalSoftKeysChange: "cody:terminal-soft-keys-change",
   streamTuningChange: "cody:stream-tuning-change",

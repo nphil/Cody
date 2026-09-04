@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
@@ -36,6 +36,8 @@ import { ProviderIcon } from "./ProviderIcon";
 import { providerBrand } from "@/lib/provider-brand";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import { ALL_CAPABILITIES, normalizeCapabilities, type ActiveEngineInfo, type EngineCapabilities, type SettingsTab } from "./SettingsTabs";
+import type { SettingsRequest } from "./SettingsConfig";
+import { SettingsOpenerContext, type SettingsOpenOptions } from "./settings/shell-context";
 import { loadEngineInfo } from "@/lib/engine-capabilities";
 import type { EnginesPayload } from "./EnginePicker";
 import { STORAGE_KEYS } from "@/lib/storage-keys";
@@ -200,7 +202,14 @@ export function AppShell() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [sessionKey, setSessionKey] = useState(0);
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
-  const [settingsTab, setSettingsTab] = useState<SettingsTab | null>(null);
+  // Settings is opened through ONE function (also provided to the whole tree
+  // via SettingsOpenerContext): a hub or legacy id, or nothing for the
+  // last-open hub. The seq makes a repeat target re-apply while it is open.
+  const [settingsRequest, setSettingsRequest] = useState<SettingsRequest | null>(null);
+  const openSettings = useCallback((tab?: SettingsTab, opts?: SettingsOpenOptions) => {
+    setSettingsRequest((current) => ({ section: tab ?? null, sub: opts?.sub, highlight: opts?.highlight, seq: (current?.seq ?? 0) + 1 }));
+  }, []);
+  const closeSettings = useCallback(() => setSettingsRequest(null), []);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   const [advisorEnabled, setAdvisorEnabled] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -365,12 +374,12 @@ export function AppShell() {
         if (!data?.updateAvailable || !data.availableVersion) return;
         toast.info(
           translate("updates.notice.engineTitle", { name: activeEngine?.shortName ?? "OMP" }),
-          <UpdateNoticeBody current={data.currentVersion ?? null} next={data.availableVersion} onOpen={() => setSettingsTab("system")} />
+          <UpdateNoticeBody current={data.currentVersion ?? null} next={data.availableVersion} onOpen={() => openSettings("system")} />
         );
       })
       .catch(() => {});
     return () => controller.abort();
-  }, [capabilitiesLoaded, capabilities.updates, activeEngine]);
+  }, [capabilitiesLoaded, capabilities.updates, activeEngine, openSettings]);
   useEffect(() => {
     const controller = new AbortController();
     void fetch("/api/app-update", { signal: controller.signal })
@@ -380,12 +389,19 @@ export function AppShell() {
         if (!data?.updateAvailable || !data.availableVersion) return;
         toast.info(
           translate("updates.notice.appTitle"),
-          <UpdateNoticeBody current={data.currentVersion ?? null} next={data.availableVersion} onOpen={() => setSettingsTab("system")} />
+          <UpdateNoticeBody current={data.currentVersion ?? null} next={data.availableVersion} onOpen={() => openSettings("system")} />
         );
       })
       .catch(() => {});
     return () => controller.abort();
-  }, []);
+  }, [openSettings]);
+  const settingsCallbacks = useMemo(() => ({
+    onAdvisorChange: handleAdvisorChange,
+    onModelsSaved: () => setModelsRefreshKey((k) => k + 1),
+    onPluginsReloaded: () => setSessionKey((k) => k + 1),
+    onOmpUpdateAvailabilityChange: setOmpUpdateAvailable,
+    onClose: closeSettings,
+  }), [handleAdvisorChange, closeSettings]);
   const chatInputRef = useRef<ChatInputHandle | null>(null);
   const topBarRef = useRef<HTMLDivElement>(null);
 
@@ -1145,6 +1161,7 @@ export function AppShell() {
 
   return (
     <>
+    <SettingsOpenerContext.Provider value={openSettings}>
     <ToastProvider>
     <style>{`
       @keyframes session-info-pop {
@@ -1336,7 +1353,7 @@ export function AppShell() {
         {/* Settings — deliberately the last icon in the top bar. */}
         <div className="shell-toolbar-divider" aria-hidden="true" />
         <button
-          onClick={() => setSettingsTab("general")}
+          onClick={() => openSettings()}
           title={t("appShell.settingsButton")}
           aria-label={t("appShell.settingsButton")}
           className="shell-toolbar-btn ui-focus-ring"
@@ -2201,7 +2218,21 @@ export function AppShell() {
         <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />
       </svg>
     </button>
-    {settingsTab && <SettingsConfig activeTab={settingsTab} advisorEnabled={advisorEnabled} onAdvisorChange={handleAdvisorChange} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} onToolCallsDefaultCollapsedChange={handleToolCallsDefaultCollapsedChange} thinkingDefaultExpanded={thinkingDefaultExpanded} onThinkingDefaultExpandedChange={handleThinkingDefaultExpandedChange} cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd} sessionId={selectedSession?.id ?? null} capabilities={capabilities} engine={activeEngine} onModelsSaved={() => setModelsRefreshKey((k) => k + 1)} onPluginsReloaded={() => setSessionKey((k) => k + 1)} onOmpUpdateAvailabilityChange={setOmpUpdateAvailable} onSelectTab={setSettingsTab} onClose={() => setSettingsTab(null)} />}
+    {settingsRequest && (
+      <SettingsConfig
+        request={settingsRequest}
+        cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd}
+        sessionId={selectedSession?.id ?? null}
+        capabilities={capabilities}
+        engine={activeEngine}
+        // The open session's catalog lives inside ChatWindow's useAgentSession;
+        // AppShell has no copy, so ACP engines' Models hub reads null here
+        // until the models slice lifts it.
+        sessionModels={null}
+        prefs={{ toolCallsDefaultCollapsed, setToolCallsDefaultCollapsed: handleToolCallsDefaultCollapsedChange, thinkingDefaultExpanded, setThinkingDefaultExpanded: handleThinkingDefaultExpandedChange, advisorEnabled }}
+        callbacks={settingsCallbacks}
+      />
+    )}
     {enginePickerOpen && <EnginePicker initial={engineRoster} onDone={handleEnginePickerDone} />}
     {setupWizardOpen && !enginePickerOpen && (
       <SetupWizard
@@ -2212,6 +2243,7 @@ export function AppShell() {
       />
     )}
     </ToastProvider>
+    </SettingsOpenerContext.Provider>
     </>
   );
 }

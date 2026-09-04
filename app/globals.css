@@ -2426,6 +2426,80 @@ html.dark .dropdown-surface :is(select, option) {
   flex-shrink: 0;
 }
 
+/* ============================== Settings shell ============================== */
+/* components/settings/SettingsShell.tsx and friends. Hover and focus states
+   need real pseudo-classes, and the phone sheet's motion must yield to
+   prefers-reduced-motion, so the shell's chrome lives here rather than in
+   inline objects. Everything is token-driven. */
+.settings-rail-row:hover:not([aria-selected="true"]) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.settings-mobile-row:hover,
+.settings-mobile-row:active {
+  background: var(--bg-hover);
+}
+.settings-directory-row:hover {
+  background: var(--bg-hover);
+}
+.settings-search-result:hover {
+  border-color: var(--accent);
+  background: var(--bg-panel);
+}
+/* The phone sheet slides up from the bottom edge (the desktop dialog keeps
+   dialog-pop-in). Keyframes carry the final transform because an animation
+   overrides the inline one for its whole (fill: both) lifetime. */
+@keyframes settings-sheet-in {
+  from { opacity: 0; transform: translateY(24px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes settings-drawer-in {
+  from { transform: translateX(24px); opacity: 0; }
+  to   { transform: none; opacity: 1; }
+}
+@keyframes settings-level-in {
+  from { transform: translateX(32px); opacity: 0; }
+  to   { transform: none; opacity: 1; }
+}
+.settings-drawer-panel {
+  animation: settings-drawer-in var(--dur-med) var(--ease-out-warm) both;
+}
+.settings-mobile-level {
+  animation: settings-level-in var(--dur-med) var(--ease-out-warm) both;
+}
+.settings-shell-mobile {
+  overscroll-behavior: contain;
+}
+@media (prefers-reduced-motion: reduce) {
+  .settings-mobile-sheet,
+  .settings-drawer-panel,
+  .settings-mobile-level {
+    animation: none !important;
+  }
+}
+/* Touch targets inside Settings. Below 16px iOS Safari zooms the page on
+   focus and never zooms back; controls grow to 44px so a row is a target,
+   not a hunt. Switches keep their own 36x20 body (the whole card is their
+   label). Desktop density is untouched. */
+@media (hover: none), (pointer: coarse) {
+  .settings-shell input:not([type="checkbox"]):not([type="radio"]),
+  .settings-shell select,
+  .settings-shell textarea {
+    font-size: 16px !important;
+  }
+  .settings-shell select,
+  .settings-shell button:not([role="switch"]) {
+    min-height: 44px;
+  }
+  .settings-rail-row,
+  .settings-mobile-row,
+  .settings-mobile-back,
+  .settings-directory-row,
+  .settings-search-result {
+    touch-action: manipulation;
+  }
+}
+
 /* ============================== Login screen ============================== */
 /* The sign-in surface renders before the app shell exists, so its styling
    lives here as classes rather than inline objects: focus rings and hover

@@ -2,7 +2,18 @@
 
 import { Brain, Cable, Cpu, KeyRound, RefreshCw, Server, Settings2, ShieldCheck, SlidersHorizontal, Sparkles, UserRound } from "lucide-react";
 import type { ComponentType, CSSProperties } from "react";
+import { normalizeSectionId } from "./settings/registry";
 
+/**
+ * Every id Settings can be opened with. The eight HUB ids (accounts, general,
+ * providers, models, engine, extensions, memory, system) are the sections
+ * `components/settings/registry.ts` renders; the rest are LEGACY ids that
+ * deep links, toasts and older callers still pass, kept for one release and
+ * normalised by `normalizeSectionId` (safety/intelligence/omp → engine,
+ * localai → providers, mcp/skills/plugins → extensions with a sub-view).
+ * `models` keeps its id but now means the Models hub, not "AI Model Defaults"
+ * (those moved into Behavior).
+ */
 export type SettingsTab =
   | "accounts"
   | "general"
@@ -11,6 +22,7 @@ export type SettingsTab =
   | "providers"
   | "intelligence"
   | "memory"
+  | "engine"
   | "extensions"
   | "mcp"
   | "omp"
@@ -214,11 +226,17 @@ export const SETTINGS_CATEGORIES: TabItem[] = [
   { id: "omp", label: `All ${DEFAULT_HARNESS_LABEL} Settings`, description: `Every setting ${DEFAULT_HARNESS_LABEL} declares, read from its own schema`, Icon: SlidersHorizontal, pinBottom: true, needsCapability: SCHEMA_TAB_CAPABILITY },
 ];
 
-export const getNormalizedActive = (tab: SettingsTab): SettingsTab => {
-  if (tab === "skills" || tab === "plugins" || tab === "extensions") return "mcp";
-  return tab;
-};
+/** Legacy id → the hub that now renders it. Delegates to the registry so the
+ * alias table is spelled once. */
+export const getNormalizedActive = (tab: SettingsTab): SettingsTab => normalizeSectionId(tab);
 
+/**
+ * @deprecated The settings dialog renders `components/settings/SettingsSidebar`
+ * (desktop rail) and `MobileStack` (phone) from the registry. This renderer
+ * survives only for the non-embedded branches of SkillsConfig, PluginsConfig
+ * and ModelsConfig, which nothing mounts any more; it goes when those
+ * branches do. Do not add callers.
+ */
 export function SettingsTabs({
   active,
   onSelect,
