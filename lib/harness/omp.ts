@@ -20,7 +20,7 @@ export const ompHarness: HarnessAdapter = {
   // the settings schema picks up the new keys on its own, the removed
   // `designer` model role is gone from every surface, and the skills walk now
   // follows omp's opt-in for foreign user-level directories.
-  verifiedVersion: "18.1.6",
+  verifiedVersion: "18.1.10",
   capabilities: {
     liveSessions: true,
     models: true,
