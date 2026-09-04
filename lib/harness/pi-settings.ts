@@ -90,6 +90,20 @@ const TERMINAL_ONLY_KEYS = new Set([
 export const PI_TERMINAL_ONLY_KEYS: readonly string[] = [...TERMINAL_ONLY_KEYS];
 
 /**
+ * Settings whose NAME says they hold a credential (an API key, a token, a
+ * secret, a password). pi documents none today, but a future row would
+ * otherwise be printed in clear: a matching STRING setting is flagged
+ * `secret`, the schema route sends only whether it is set, and the row
+ * renders write-only. The twin lives in ./hermes-settings.ts, deliberately
+ * not shared, for the same reason the terminal-only lists are not.
+ */
+const SECRET_KEY_PATTERN = /(api_?key|token|secret|password)$/i;
+
+export function isPiSecretKey(key: string, type: EngineSetting["type"]): boolean {
+  return type === "string" && SECRET_KEY_PATTERN.test(key);
+}
+
+/**
  * Documented types Cody has no single control for. `object` is a nested map
  * (`thinkingBudgets`), and a bare `array` is pi's own name for a list whose
  * entries may be objects (`packages` accepts both a string and a
@@ -201,6 +215,7 @@ function describeRow(key: string, documentedType: string, defaultCell: string, d
     ...(values ? { values } : {}),
     ...(parsedDefault !== undefined ? { default: parsedDefault } : {}),
     ...(TERMINAL_ONLY_KEYS.has(key) ? { terminalOnly: true } : {}),
+    ...(isPiSecretKey(key, resolvedType) ? { secret: true } : {}),
   };
 }
 
