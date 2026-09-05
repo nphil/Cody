@@ -85,17 +85,46 @@ let latestSettings: NativeSettings | null = null;
 /** The last body the SERVER confirmed (a GET or a PUT echo): what the cache
  * falls back to when an optimistic write is rejected. */
 let confirmedSettings: NativeSettings | null = null;
+/** True from the moment `patchWith`'s fast path shows an optimistic value
+ * until the PUT that actually carries it settles. `pendingCounts.settings`
+ * cannot cover that first write on its own: the fast path calls
+ * `setSettingsRouteData` (which notifies synchronously) BEFORE it enqueues
+ * the job that would bump the count, so without this flag the listener
+ * below mistakes the not-yet-sent value for a confirmed one — and a PUT
+ * that then fails "reverts" to that same unconfirmed value instead of the
+ * last real server body. */
+let settingsUnconfirmed = false;
 
-// A GET landing while no write is queued is the truth; while one is queued it
-// is stale by definition and must not replace the optimistic value.
+// A GET landing while no write is queued is the truth; while one is queued —
+// or shown optimistically but not yet confirmed — it must not replace the
+// optimistic value.
 subscribeSettingsRoutes(() => {
-  if (pendingCounts.settings > 0) return;
+  if (pendingCounts.settings > 0 || settingsUnconfirmed) return;
   const entry = readSettingsRouteEntry<SettingsBody>(SETTINGS_ROUTE);
   if (entry.data?.settings && !entry.stale) {
     latestSettings = entry.data.settings;
     confirmedSettings = entry.data.settings;
   }
 });
+
+/** A promise this module controls the settlement of, so a caller whose
+ * snapshot is superseded before its own turn can still be told the truth
+ * once some later PUT actually carries its change. */
+function createDeferred(): { promise: Promise<void>; resolve: () => void; reject: (error: unknown) => void } {
+  let resolve!: () => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<void>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+/** Shared by every `patchWith` fast-path call queued before the winner among
+ * them actually runs its PUT: whichever one settles the file resolves this
+ * for all of them. Cleared as soon as a job actually starts running (a call
+ * arriving after that point is a fresh batch, not part of this one). */
+let currentSettingsDeferred: ReturnType<typeof createDeferred> | null = null;
 
 let writeSeq = 0;
 const seqListeners = new Set<() => void>();
@@ -114,6 +143,8 @@ export function configWriterIdle(): Promise<void> {
 export function resetConfigWriter(): void {
   latestSettings = null;
   confirmedSettings = null;
+  settingsUnconfirmed = false;
+  currentSettingsDeferred = null;
   pendingSchemaPatch = {};
   if (schemaTimer) clearTimeout(schemaTimer);
   schemaTimer = null;
@@ -128,9 +159,22 @@ export function resetConfigWriter(): void {
  */
 export function enqueueConfigWrite(family: WriteFamily, fn: () => Promise<void>): Promise<void> {
   pendingCounts[family] += 1;
+  if (family === "delete") {
+    // writeNativeSettings only ever SETS keys, it never removes them: the
+    // freshest known settings object still carries whatever this delete is
+    // about to remove. Force the next settings-family patch to re-read the
+    // file rather than spread that stale snapshot back (which would
+    // silently undo the reset), and make it WAIT for this delete so the
+    // re-read happens after the delete has actually landed, not while the
+    // DELETE request is still in flight.
+    latestSettings = null;
+    invalidateSettingsRoutes(SETTINGS_ROUTE, { exact: true });
+  }
   const gate = family === "delete"
     ? Promise.all([tails.settings, tails.schema, tails.delete]).then(() => undefined)
-    : tails[family];
+    : family === "settings"
+      ? Promise.all([tails.settings, tails.delete]).then(() => undefined)
+      : tails[family];
   const run = gate.then(fn);
   tails[family] = run.catch(() => undefined).then(() => {
     pendingCounts[family] -= 1;
@@ -157,10 +201,12 @@ async function readCurrentSettings(): Promise<NativeSettings> {
   return latestSettings;
 }
 
-async function putSettings(snapshot: NativeSettings): Promise<void> {
-  // A newer snapshot is queued behind this one: it carries these changes
-  // too, so this PUT would only add a round trip.
-  if (latestSettings !== snapshot) return;
+/** PUTs `snapshot`, unless a newer one is already queued behind it (it
+ * carries these changes too, so this PUT would only add a round trip).
+ * Returns whether it actually ran — the fast path's caller uses that to
+ * know whose outcome should settle a skipped write's promise. */
+async function putSettings(snapshot: NativeSettings): Promise<boolean> {
+  if (latestSettings !== snapshot) return false;
   try {
     const response = await fetch(SETTINGS_ROUTE, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ settings: snapshot }) });
     const body = (await response.json().catch(() => ({}))) as SettingsBody;
@@ -170,6 +216,7 @@ async function putSettings(snapshot: NativeSettings): Promise<void> {
       latestSettings = body.settings;
       setSettingsRouteData(SETTINGS_ROUTE, { settings: body.settings });
     }
+    return true;
   } catch (error) {
     // The optimistic value is now a lie: show the last confirmed body again,
     // forget the optimistic chain so the next base is read from the file,
@@ -183,13 +230,41 @@ async function putSettings(snapshot: NativeSettings): Promise<void> {
 
 /** Apply `next(base)` to the freshest settings, show it immediately, and
  * queue the PUT. When nothing has read the file yet the read happens inside
- * the queue so the spread still sees the freshest base. */
+ * the queue so the spread still sees the freshest base.
+ *
+ * The fast path (below) can queue several snapshots before any of their
+ * jobs run — each later one builds on and supersedes the last, and
+ * `putSettings` skips the PUT for every snapshot but the one still current
+ * when its turn comes. A skipped write must not report "saved" on its own:
+ * its caller gets a shared, module-controlled promise that settles only
+ * once some job's PUT actually carries the change (or fails to). */
 function patchWith(next: (base: NativeSettings) => NativeSettings): Promise<void> {
   if (latestSettings) {
     const snapshot = next(latestSettings);
     latestSettings = snapshot;
+    settingsUnconfirmed = true;
     setSettingsRouteData(SETTINGS_ROUTE, { settings: snapshot });
-    return enqueueConfigWrite("settings", () => putSettings(snapshot));
+    const deferred = currentSettingsDeferred ?? createDeferred();
+    currentSettingsDeferred = deferred;
+    void enqueueConfigWrite("settings", async () => {
+      // From here on, a call that supersedes `latestSettings` again starts
+      // a fresh batch with its own deferred: this job's outcome (carry the
+      // change, or skip because something newer already has) is fixed now.
+      if (currentSettingsDeferred === deferred) currentSettingsDeferred = null;
+      try {
+        const didRun = await putSettings(snapshot);
+        if (didRun) {
+          settingsUnconfirmed = false;
+          deferred.resolve();
+        }
+        // A skip leaves `deferred` open for whichever later job actually
+        // carries the change to settle.
+      } catch (error) {
+        settingsUnconfirmed = false;
+        deferred.reject(error);
+      }
+    });
+    return deferred.promise;
   }
   return enqueueConfigWrite("settings", async () => {
     const base = await readCurrentSettings();

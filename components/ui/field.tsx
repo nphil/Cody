@@ -511,6 +511,7 @@ export function ConfirmDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
+        className="ui-dialog"
         ariaLabel={typeof title === "string" ? title : undefined}
         style={{ width: 420, maxWidth: "min(92vw, 420px)", padding: 22 }}
       >
@@ -654,6 +655,7 @@ export function PromptDialog({
   return (
     <Dialog open={open} onOpenChange={(next) => { if (!next) onCancel(); }}>
       <DialogContent
+        className="ui-dialog"
         ariaLabel={typeof title === "string" ? title : undefined}
         style={{ width: 420, maxWidth: "min(92vw, 420px)", padding: 22 }}
       >

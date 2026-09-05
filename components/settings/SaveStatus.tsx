@@ -80,6 +80,13 @@ export function reportSaveStatus(panelId: string, state: SaveState, message?: st
     const remaining = Math.max(0, (pending.get(panelId) ?? 1) - 1);
     pending.set(panelId, remaining);
     if (remaining > 0) return;
+    // An error already showing belongs to a DIFFERENT write than the one
+    // that just resolved (an overlapping write started before it failed):
+    // replacing it with a green "Saved" would hide the only failure surface
+    // for instant writes, and its Retry. It stays until this panel's next
+    // "saving" (a fresh write, whose own outcome then lands normally) or an
+    // explicit retry — never a success that isn't its own.
+    if (readSaveStatus(panelId).state === "error") return;
     set(panelId, { state: "saved", message });
     timers.set(panelId, setTimeout(() => {
       timers.delete(panelId);

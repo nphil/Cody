@@ -96,8 +96,14 @@ export const PI_TERMINAL_ONLY_KEYS: readonly string[] = [...TERMINAL_ONLY_KEYS];
  * `secret`, the schema route sends only whether it is set, and the row
  * renders write-only. The twin lives in ./hermes-settings.ts, deliberately
  * not shared, for the same reason the terminal-only lists are not.
+ *
+ * Widened alongside that twin: an optional-underscore `hash` (a password
+ * hash is offline-crackable even though it is not the plaintext),
+ * `session(_)key` and `cookie` (session/cookie-shaped secrets) join the
+ * original four. Bare `key` stays excluded so a non-secret leaf named e.g.
+ * `recordKey` stays editable.
  */
-const SECRET_KEY_PATTERN = /(api_?key|token|secret|password)$/i;
+const SECRET_KEY_PATTERN = /(api_?key|session_?key|cookie|token|secret|password|_?hash)$/i;
 
 export function isPiSecretKey(key: string, type: EngineSetting["type"]): boolean {
   return type === "string" && SECRET_KEY_PATTERN.test(key);

@@ -28,8 +28,10 @@ export type DrawerPresentation = "dialog" | "side" | "push";
 const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 /** Keep Tab inside `container` while `active`; focus the first control on
- * activation and hand focus back to where it came from afterwards. */
-function useFocusTrap(container: React.RefObject<HTMLElement | null>, active: boolean) {
+ * activation and hand focus back to where it came from afterwards. Exported
+ * so any other modal phone-stack surface (MobileStack's `openSub` levels)
+ * gets the same trap instead of a second implementation. */
+export function useFocusTrap(container: React.RefObject<HTMLElement | null>, active: boolean) {
   useEffect(() => {
     if (!active) return;
     const root = container.current;
@@ -96,12 +98,24 @@ export function Drawer({ open, title, presentation = "side", onClose, dirty = fa
 }) {
   const shell = useContext(ShellContext);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const [confirmBusyLeave, setConfirmBusyLeave] = useState(false);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const titleId = useId();
-  const requestClose = useCallback(() => {
+  // Whatever the shell's busy register holds (a login SSE, an install
+  // stream) must not be cut off any more easily from this drawer's own
+  // Back/×/Escape/scrim than from the shell's own pops — those already
+  // confirm through `requestPop`/`requestClose`, and this is the same guard.
+  const proceedClose = useCallback(() => {
     if (dirty) setConfirmDiscard(true);
     else onClose();
   }, [dirty, onClose]);
+  const requestClose = useCallback(() => {
+    if (shell?.busy.isBusy()) {
+      setConfirmBusyLeave(true);
+      return;
+    }
+    proceedClose();
+  }, [shell, proceedClose]);
   const onTrapKey = useFocusTrap(panelRef, open && presentation !== "dialog");
 
   // The phone stack tracks depth for the busy check and the history; the
@@ -149,11 +163,32 @@ export function Drawer({ open, title, presentation = "side", onClose, dirty = fa
     />
   );
 
+  // Same copy as SettingsShell's own busy guard, so a login SSE reads the
+  // same warning whether the cut-off comes from a shell pop or this drawer's
+  // own Back/×/Escape/scrim.
+  const busyReasons = shell?.busy.reasons() ?? [];
+  const signingIn = busyReasons.some((reason) => /sign[- ]?in|log[- ]?in/i.test(reason));
+  const busyLeaveGuard = (
+    <ConfirmDialog
+      open={confirmBusyLeave}
+      onOpenChange={(next) => { if (!next) setConfirmBusyLeave(false); }}
+      title={signingIn ? "Leave while sign-in is in progress?" : "Leave while work is in progress?"}
+      description={`${busyReasons.join(", ") || "Something"} is still running. Closing this now interrupts it.`}
+      confirmLabel="Leave"
+      cancelLabel="Stay"
+      danger
+      onConfirm={() => {
+        setConfirmBusyLeave(false);
+        proceedClose();
+      }}
+    />
+  );
+
   if (presentation === "dialog") {
     return (
       <>
         <Dialog open={open} onOpenChange={(next) => { if (!next) requestClose(); }}>
-          <DialogContent ariaLabel={ariaLabel ?? (typeof title === "string" ? title : undefined)} onClose={requestClose} style={{ width: 520, maxWidth: "min(92vw, 520px)", padding: 0, display: "flex", flexDirection: "column", overflow: "hidden", maxHeight: "85dvh" }}>
+          <DialogContent className="ui-dialog" ariaLabel={ariaLabel ?? (typeof title === "string" ? title : undefined)} onClose={requestClose} style={{ width: 520, maxWidth: "min(92vw, 520px)", padding: 0, display: "flex", flexDirection: "column", overflow: "hidden", maxHeight: "85dvh" }}>
             <div style={{ padding: "16px 48px 10px 20px", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
               <DialogTitle style={{ fontSize: 16, margin: 0 }}>{title}</DialogTitle>
             </div>
@@ -162,6 +197,7 @@ export function Drawer({ open, title, presentation = "side", onClose, dirty = fa
           </DialogContent>
         </Dialog>
         {discardGuard}
+        {busyLeaveGuard}
       </>
     );
   }
@@ -191,7 +227,11 @@ export function Drawer({ open, title, presentation = "side", onClose, dirty = fa
                 <ArrowLeft size={18} aria-hidden="true" />
               </button>
               <div id={titleId} style={{ flex: 1, minWidth: 0, fontSize: 15, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</div>
-              <button type="button" onClick={requestClose} aria-label="Close" className="ui-focus-ring" style={headerButton}>
+              {/* Parity with every non-Drawer level: × leaves Settings
+                  entirely (the shell's own busy-guarded requestClose), not a
+                  second Back. Only the ‹ above steps back into this drawer's
+                  own dirty-discard guard. */}
+              <button type="button" onClick={() => (shell ? shell.callbacks.onClose() : requestClose())} aria-label="Close settings" className="ui-focus-ring" style={headerButton}>
                 <X size={18} aria-hidden="true" />
               </button>
             </header>
@@ -201,6 +241,7 @@ export function Drawer({ open, title, presentation = "side", onClose, dirty = fa
           host,
         )}
         {discardGuard}
+        {busyLeaveGuard}
       </>
     );
   }
@@ -238,6 +279,7 @@ export function Drawer({ open, title, presentation = "side", onClose, dirty = fa
         host,
       )}
       {discardGuard}
+      {busyLeaveGuard}
     </>
   );
 }

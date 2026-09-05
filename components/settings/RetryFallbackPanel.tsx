@@ -1,6 +1,6 @@
 "use client";
 
-import { useContext, useState, type CSSProperties } from "react";
+import { useContext, useEffect, useState, type CSSProperties } from "react";
 import { AlertCircle, ArrowDown, ArrowUp, Plus, RotateCcw, Sparkles, Trash2 } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/field";
 import { toast } from "@/components/ui/toast";
@@ -172,6 +172,15 @@ export function RetryFallbackPanel({ models, onOpenModelPlan, panelId = "models"
   // Works inside the settings shell (the engine's short name, the save
   // corner) and outside it, where it falls back to the default label.
   const shell = useContext(ShellContext);
+  // The attempts select and the fallback checkbox are plain labels, not
+  // NativeSetting cards, so they scroll themselves into view when a search
+  // result or an "Also under" chip targets their schema id.
+  const highlight = shell?.highlight ?? null;
+  useEffect(() => {
+    if (highlight !== "schema-retry.maxRetries" && highlight !== "schema-retry.modelFallback") return;
+    const target = document.querySelector(`[data-search-id="${highlight}"]`);
+    if (target instanceof HTMLElement) target.scrollIntoView({ block: "center" });
+  }, [highlight]);
   const engineName = shell?.harnessLabel ?? DEFAULT_HARNESS_LABEL;
   const writer = useConfigWriter();
   const native = useNativeSettings(true);
@@ -296,7 +305,7 @@ export function RetryFallbackPanel({ models, onOpenModelPlan, panelId = "models"
         <ToggleSwitch checked={retry.enabled ?? true} onChange={(enabled) => setRetry({ enabled })} />
       </NativeSetting>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 9 }}>
-        <label style={cardStyle}>Retry attempts <select value={retry.maxRetries ?? 10} onChange={(event) => setRetry({ maxRetries: Number(event.target.value) })} style={selectStyle}>{RETRY_ATTEMPT_OPTIONS.map((count) => <option key={count} value={count}>{retryAttemptLabel(count, engineName)}</option>)}</select></label>
+        <label style={cardStyle} data-search-id="schema-retry.maxRetries">Retry attempts <select value={retry.maxRetries ?? 10} onChange={(event) => setRetry({ maxRetries: Number(event.target.value) })} style={selectStyle}>{RETRY_ATTEMPT_OPTIONS.map((count) => <option key={count} value={count}>{retryAttemptLabel(count, engineName)}</option>)}</select></label>
         <label style={{ ...cardStyle, gridColumn: "1 / -1" }}>
           Return to primary model <select value={retry.fallbackRevertPolicy ?? "cooldown-expiry"} onChange={(event) => setRetry({ fallbackRevertPolicy: event.target.value as FallbackRevertPolicy })} style={selectStyle}>{REVERT_POLICIES.map((entry) => <option key={entry.value} value={entry.value}>{entry.label}</option>)}</select>
           <p style={helpTextStyle}>{revertPolicy.description}</p>
@@ -307,7 +316,7 @@ export function RetryFallbackPanel({ models, onOpenModelPlan, panelId = "models"
     <section style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       <div style={groupLabelStyle}>Fallback</div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 9 }}>
-        <label style={cardStyle}><input type="checkbox" checked={retry.modelFallback ?? true} onChange={(event) => setRetry({ modelFallback: event.target.checked })} /> Allow model fallback</label>
+        <label style={cardStyle} data-search-id="schema-retry.modelFallback"><input type="checkbox" checked={retry.modelFallback ?? true} onChange={(event) => setRetry({ modelFallback: event.target.checked })} /> Allow model fallback</label>
         <label style={cardStyle}>
           <input type="checkbox" checked={retry.usageAwareFallback ?? false} onChange={(event) => setRetry({ usageAwareFallback: event.target.checked })} /> Usage-aware fallback
           <p style={helpTextStyle}>Moves off a provider before it hits a hard usage limit, using coding-plan quota reports.</p>

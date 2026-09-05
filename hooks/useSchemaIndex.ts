@@ -23,7 +23,7 @@ import { useCallback, useMemo } from "react";
 import type { EngineSetting, EngineSettingValue, EngineSettingsSchema } from "@/lib/harness/types";
 import { HOST_CONDITIONS, SETTING_CONDITIONS, isConditionSatisfied, type HostFacts } from "@/lib/omp/settings-conditions";
 import { SCHEMA_ROUTE, patchSettingsSchema } from "./useConfigWriter";
-import { readSettingsRoute, setSettingsRouteData, useSettingsRoute } from "./useSettingsData";
+import { readSettingsRoute, setSettingsRouteData, SHARED_ROUTE_TTL_MS, useSettingsRoute } from "./useSettingsData";
 
 export type { EngineSetting as SchemaSetting, EngineSettingValue as SchemaValue, EngineSettingsSchema as SchemaShape };
 
@@ -186,7 +186,7 @@ function applyOptimistic(key: string, value: EngineSettingValue | null): void {
 
 export function useSchemaIndex(opts?: { enabled?: boolean }): SchemaIndex {
   const enabled = opts?.enabled ?? true;
-  const route = useSettingsRoute<SchemaRouteBody>(SCHEMA_ROUTE, { enabled, ttlMs: 60_000 });
+  const route = useSettingsRoute<SchemaRouteBody>(SCHEMA_ROUTE, { enabled, ttlMs: SHARED_ROUTE_TTL_MS });
   const body = route.data;
   const schema = body?.schema ?? null;
   const values = body?.values ?? EMPTY_VALUES;

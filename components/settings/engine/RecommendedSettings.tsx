@@ -161,6 +161,7 @@ function SchemaCard({ card, row, index, onAfterChange }: { card: RecommendedCard
       description={description || undefined}
       badge={row.terminalOnly ? TERMINAL_ONLY_BADGE : undefined}
       searchId={searchIdForKey(row.key)}
+      switchControl={inline && row.type === "boolean"}
       control={(
         <>
           {!inline && control}

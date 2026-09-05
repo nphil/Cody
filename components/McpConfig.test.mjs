@@ -66,7 +66,9 @@ test("lists the inventory on Directory rows and the project file behind openable
   assert.match(html, /data-search-id="mcp-github"/, "every server is a search target");
   assert.match(html, /data-search-id="mcp-filesystem"/);
   assert.match(html, /1\/2 enabled · 1 invalid/, "the project header counts valid and invalid servers");
-  assert.match(html, /role="listitem"[^>]*tabindex="0"/, "a project server row opens its form");
+  // A project server row is a real <button> inside its `role="listitem"`
+  // wrapper (Directory.tsx), not a clickable div wearing tabindex="0".
+  assert.match(html, /<button[^>]*type="button"[^>]*class="settings-directory-row ui-focus-ring"/, "a project server row opens its form");
   assert.match(html, /Add server/);
   // The form and the remove confirmation are closed: no second dialog, no
   // drawer, until a row is opened.

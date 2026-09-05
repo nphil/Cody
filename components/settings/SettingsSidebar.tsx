@@ -11,7 +11,7 @@ import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import { useI18n, LOCALES } from "@/lib/i18n";
 import { STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
 import { useTheme } from "@/hooks/useTheme";
-import { useSettingsRoutes } from "@/hooks/useSettingsData";
+import { SHARED_ROUTE_TTL_MS, useSettingsRoutes } from "@/hooks/useSettingsData";
 import type { ActiveEngineInfo, EngineCapabilities } from "../SettingsTabs";
 import { groupLabel, groupSections, type SettingsSection, type SettingsSectionId, type ShellData, type StatusLine } from "./registry";
 
@@ -43,7 +43,11 @@ export function useLocalPrefsSummary(): ShellData["local"] {
 /** Status lines for a set of sections from cached reads only. */
 export function useSectionStatuses(sections: readonly SettingsSection[], capabilities: EngineCapabilities, engine: ActiveEngineInfo | null, harnessLabel: string): Map<SettingsSectionId, StatusLine | null> {
   const routes = useMemo(() => [...new Set(sections.flatMap((section) => section.statusRoutes ?? []))], [sections]);
-  const bodies = useSettingsRoutes(routes);
+  // Several of these routes (the schema summary, models visibility, the
+  // native settings echo) are also read by a hub at SHARED_ROUTE_TTL_MS; a
+  // shorter rail-only TTL would see the value as stale before the hub does
+  // and refetch mid-edit, racing an optimistic write there.
+  const bodies = useSettingsRoutes(routes, { ttlMs: SHARED_ROUTE_TTL_MS });
   const local = useLocalPrefsSummary();
   return useMemo(() => {
     const data: ShellData = { capabilities, engine, harnessLabel, routes: bodies, local };

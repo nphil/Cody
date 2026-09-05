@@ -10,7 +10,7 @@
  * layout.
  */
 import { ChevronRight } from "lucide-react";
-import type { KeyboardEvent, ReactNode } from "react";
+import type { ReactNode } from "react";
 
 export interface DirectoryStatus {
   tone: "ok" | "warn" | "muted" | "accent";
@@ -65,13 +65,6 @@ function RowBody({ row }: { row: DirectoryRow }) {
   );
 }
 
-function onRowKey(event: KeyboardEvent<HTMLDivElement>, open: () => void) {
-  if (event.key === "Enter" || event.key === " ") {
-    event.preventDefault();
-    open();
-  }
-}
-
 const rowBase = {
   display: "flex",
   alignItems: "center",
@@ -98,19 +91,21 @@ export function Directory({ sections, ariaLabel }: { sections: readonly Director
               {section.rows.map((row, index) => {
                 const divider = index > 0 ? { borderTop: "1px solid var(--border)" } : {};
                 if (row.onOpen) {
+                  // A real <button> inside the `role="listitem"` wrapper: AT
+                  // announces it as an interactive control (not a static list
+                  // item) and Enter/Space activation comes free, instead of a
+                  // clickable div with a hand-rolled key handler.
                   return (
-                    <div
-                      key={row.id}
-                      role="listitem"
-                      tabIndex={0}
-                      className="settings-directory-row ui-focus-ring"
-                      data-directory-row={row.id}
-                      onClick={row.onOpen}
-                      onKeyDown={(event) => onRowKey(event, row.onOpen!)}
-                      style={{ ...rowBase, ...divider, cursor: "pointer" }}
-                    >
-                      <RowBody row={row} />
-                      <ChevronRight size={14} aria-hidden="true" style={{ flexShrink: 0, color: "var(--text-dim)" }} />
+                    <div key={row.id} role="listitem" data-directory-row={row.id} style={divider}>
+                      <button
+                        type="button"
+                        onClick={row.onOpen}
+                        className="settings-directory-row ui-focus-ring"
+                        style={{ ...rowBase, border: "none", font: "inherit", cursor: "pointer" }}
+                      >
+                        <RowBody row={row} />
+                        <ChevronRight size={14} aria-hidden="true" style={{ flexShrink: 0, color: "var(--text-dim)" }} />
+                      </button>
                     </div>
                   );
                 }

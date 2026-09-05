@@ -111,8 +111,11 @@ export function ProviderDirectory() {
     if (target < 0 || target >= connected.length) return;
     const next = [...connected];
     [next[index], next[target]] = [next[target], next[index]];
-    // The engine's order names its own provider ids; a row's ids move as one.
-    const ordered = next.flatMap((row) => row.catalogIds);
+    // The engine's order names its own provider ids, never a login id from
+    // another engine's roster (`claude`, `chatgpt`, ...): orderIds is that
+    // narrower list, and a row with none (a bare sign-in) drops out rather
+    // than writing something the engine does not recognize.
+    const ordered = next.flatMap((row) => row.orderIds);
     void track(() => writer.patchTop({ modelProviderOrder: ordered }).then(reload));
   };
 
@@ -269,7 +272,12 @@ export function ProviderDirectory() {
             onSaved={(name) => {
               setEndpointForm(null);
               reload();
-              setDetail({ id: name });
+              // The new row is not in the body `rows` still holds, so opening
+              // the drawer now would trip the vanished-row guard below the
+              // instant it re-renders. Wait for a forced, awaited refetch
+              // (it spawns the engine, which can take seconds) to actually
+              // land before opening it, so the row is there from frame one.
+              void providers.reload().then(() => setDetail({ id: name }));
             }}
           />
         )}

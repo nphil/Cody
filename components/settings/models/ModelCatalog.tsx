@@ -445,14 +445,27 @@ export function ModelCatalog({ catalog, panelId }: { catalog: ModelCatalogHandle
           onCancel={closeCuration}
           onConfirm={(selected, options) => {
             setCurationSaving(true);
+            let nothingEnabled = false;
             void track(async () => {
-              await catalog.writeProviderCuration(curating, [...selected], { includeFuture: options.includeFuture });
-              // Curation hides only what a human has looked at: record the
-              // keys the dialog listed, never the whole catalog.
-              await catalog.markSeen([...new Set([...options.displayed, ...catalog.catalogKeys.filter((key) => !key.startsWith(`${curating}/`))])]).catch(() => undefined);
+              const result = await catalog.writeProviderCuration(curating, [...selected], { includeFuture: options.includeFuture });
+              nothingEnabled = result.nothingEnabled;
+              // Curation hides only what a human has looked at: mark exactly
+              // the keys the dialog listed, merged into the ledger's
+              // existing seen keys — never the whole catalog, which would
+              // also silence "new" for every other provider's models this
+              // dialog never showed.
+              await catalog.markSeen(options.displayed, { merge: true }).catch(() => undefined);
             }).then((ok) => {
               setCurationSaving(false);
-              if (ok) setCurating(null);
+              if (ok) {
+                setCurating(null);
+                if (nothingEnabled) {
+                  toast.info(
+                    "Nothing is enabled",
+                    `${harnessLabel}'s allow-list now matches no model anywhere — every provider is hidden until one is re-enabled.`,
+                  );
+                }
+              }
             });
           }}
         />

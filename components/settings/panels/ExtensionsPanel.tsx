@@ -83,7 +83,8 @@ function McpCard({ card, index }: { card: RecommendedCard; index: SchemaIndex })
   if (!row || !row.visible) return null;
   const write = (value: SchemaValue | null) => { void track(() => index.setValue(row.key, value)); };
   const description = [row.description, index.describeCondition(row.condition)].filter(Boolean).join(" ");
-  const inline = row.type === "boolean";
+  const isToggle = row.type === "boolean";
+  const inline = isToggle;
   const control = <SchemaControl setting={row} value={row.value} onChange={write} />;
   const footer = (
     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
@@ -104,6 +105,7 @@ function McpCard({ card, index }: { card: RecommendedCard; index: SchemaIndex })
       description={description || undefined}
       badge={row.terminalOnly ? TERMINAL_ONLY_BADGE : undefined}
       searchId={searchIdForKey(row.key)}
+      switchControl={isToggle}
       control={(
         <>
           {!inline && control}
@@ -135,7 +137,18 @@ export function ExtensionsPanel() {
   const mcpCards = cardSurfaceAvailable("mcp", capabilities);
   const index = useSchemaIndex({ enabled: mcpCards });
 
-  const subPanel = (id: string) => ({ role: "tabpanel" as const, id: `settings-subpanel-${id}`, "aria-labelledby": `settings-subtab-${id}` });
+  // The SegmentedControl (and its `settings-subtab-<id>` buttons) only
+  // renders when there is more than one segment to switch between; pointing
+  // aria-labelledby at an id that then never exists leaves the region an
+  // unnamed tabpanel with no tab, same bug ModelsPanel avoids for Catalog
+  // when Assignments does not exist. A single segment renders as a plain
+  // labelled region instead.
+  const subPanel = (id: string) => {
+    const view = views.find((entry) => entry.id === id);
+    return views.length > 1
+      ? { role: "tabpanel" as const, id: `settings-subpanel-${id}`, "aria-labelledby": `settings-subtab-${id}` }
+      : { id: `settings-subpanel-${id}`, "aria-label": view?.label };
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>

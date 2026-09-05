@@ -16,12 +16,15 @@
  * and a tap take the same path.
  */
 import { ArrowLeft, ChevronRight, Search, X } from "lucide-react";
-import type { KeyboardEvent, ReactNode } from "react";
+import { useContext, useId, useRef, type KeyboardEvent, type ReactNode } from "react";
 import type { ActiveEngineInfo, EngineCapabilities } from "../SettingsTabs";
+import { useFocusTrap } from "./Drawer";
+import { SettingsHighlightContext } from "./primitives";
 import { groupLabel, groupSections, type SettingsSection, type SettingsSectionId, type StatusLine } from "./registry";
 import type { SearchEntry, SearchFilter, SearchResult } from "./search-index";
 import { focusSearchResults, SearchResultsList } from "./SettingsSearch";
 import { useSectionStatuses } from "./SettingsSidebar";
+import { ShellContext } from "./shell-context";
 
 export interface MobileSubLevel {
   id: string;
@@ -73,6 +76,50 @@ export function MobileLevelHeader({ title, onBack, backLabel, backText, onClose 
   );
 }
 
+/** Level 3+: the same modal treatment a Drawer level gets (role="dialog",
+ * a focus trap that moves focus in on push and restores it on pop) — this
+ * is the other thing `openSub(node, title)` pushes, and it used to get none
+ * of that. Only the TOPMOST level of the whole stack (Drawer levels
+ * included — they portal past this component, so `isTop` is judged against
+ * the shell's full `levels` list, not just the ones rendered here) traps
+ * focus or excludes itself from `inert`.
+ *
+ * It also re-provides `SettingsHighlightContext`: `panels` gets it from
+ * `SettingsShell`, but a pushed level renders here, one React-tree hop away
+ * from that Provider, so without this every `NativeSetting` inside it would
+ * read the default `null` and never outline or scroll to a search target. */
+function LevelPanel({ level, isTop, backText, onCloseLevel, onClose }: {
+  level: MobileSubLevel;
+  isTop: boolean;
+  backText: string;
+  onCloseLevel: (id: string) => void;
+  onClose: () => void;
+}) {
+  const shell = useContext(ShellContext);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const onTrapKey = useFocusTrap(panelRef, isTop);
+  const titleId = useId();
+  const onBack = level.onBack ?? (() => onCloseLevel(level.id));
+  return (
+    <div
+      ref={panelRef}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
+      inert={isTop ? undefined : true}
+      tabIndex={-1}
+      onKeyDown={onTrapKey}
+      className="settings-mobile-level"
+      style={{ position: "absolute", inset: 0, zIndex: 20, background: "var(--bg)", display: "flex", flexDirection: "column" }}
+    >
+      <MobileLevelHeader title={<span id={titleId}>{level.title}</span>} onBack={onBack} backLabel="Back" backText={backText} onClose={onClose} />
+      <div className="settings-scroll-column" style={{ flex: 1, minHeight: 0, overflowY: "auto", overscrollBehavior: "contain", padding: 16, paddingBottom: "max(16px, env(safe-area-inset-bottom))", display: "flex", flexDirection: "column", gap: 14 }}>
+        <SettingsHighlightContext.Provider value={shell?.highlight ?? null}>{level.node}</SettingsHighlightContext.Provider>
+      </div>
+    </div>
+  );
+}
+
 export function MobileStack({ sections, active, view, onSelect, onBack, onClose, onCloseLevel, capabilities, engine, harnessLabel, searchQuery, onSearchQueryChange, searchFilter, onSearchFilterChange, searchEntries, searchResults, onSearchResult, onSearchDismiss, levels, children }: {
   sections: readonly SettingsSection[];
   active: SettingsSectionId;
@@ -117,11 +164,17 @@ export function MobileStack({ sections, active, view, onSelect, onBack, onClose,
     }
   };
 
+  // A pushed level (Drawer or openSub) covers the hub entirely; both of its
+  // views are inert while one is up, so a background Tab or a screen reader
+  // swipe cannot reach a row hidden underneath it.
+  const covered = levels.length > 0 ? true : undefined;
+  const topLevelId = levels.length > 0 ? levels[levels.length - 1].id : null;
+
   return (
     <div className="settings-mobile-stack" style={{ position: "relative", flex: 1, minHeight: 0, display: "flex", flexDirection: "column", background: "var(--bg)" }}>
       {/* Level 1: root list. Kept mounted under a panel so scroll position and
           the query survive a Back. */}
-      <div style={{ display: view === "root" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0 }}>
+      <div inert={covered} style={{ display: view === "root" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0 }}>
         <MobileLevelHeader title="Settings" onClose={onClose} />
         <div className="settings-mobile-search" style={{ position: "sticky", top: 0, zIndex: 1, height: 48, minHeight: 48, boxSizing: "border-box", padding: "4px 12px", background: "var(--bg)", borderBottom: "1px solid var(--border)", flexShrink: 0, display: "flex", alignItems: "center" }}>
           <div style={{ position: "relative", width: "100%" }}>
@@ -197,7 +250,7 @@ export function MobileStack({ sections, active, view, onSelect, onBack, onClose,
       </div>
 
       {/* Level 2: one hub. */}
-      <div style={{ display: view === "panel" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0 }}>
+      <div inert={covered} style={{ display: view === "panel" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0 }}>
         <MobileLevelHeader title={activeSection?.label ?? "Settings"} onBack={onBack} backLabel="Back to Settings" onClose={onClose} />
         <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden", paddingBottom: "env(safe-area-inset-bottom)" }}>
           {children}
@@ -205,14 +258,18 @@ export function MobileStack({ sections, active, view, onSelect, onBack, onClose,
       </div>
 
       {/* Level 3+: content pushed through openSub(node, title). Levels whose
-          owner renders its own surface (Drawer) have node === null. */}
+          owner renders its own surface (Drawer) have node === null — Drawer
+          gives those their own modal treatment and portals past this
+          component, but still contributes to `levels` for `isTop` below. */}
       {levels.filter((level) => level.node !== null).map((level) => (
-        <div key={level.id} className="settings-mobile-level" style={{ position: "absolute", inset: 0, zIndex: 20, background: "var(--bg)", display: "flex", flexDirection: "column" }}>
-          <MobileLevelHeader title={level.title} onBack={level.onBack ?? (() => onCloseLevel(level.id))} backLabel="Back" backText={activeSection?.label ?? "Back"} onClose={onClose} />
-          <div className="settings-scroll-column" style={{ flex: 1, minHeight: 0, overflowY: "auto", overscrollBehavior: "contain", padding: 16, paddingBottom: "max(16px, env(safe-area-inset-bottom))", display: "flex", flexDirection: "column", gap: 14 }}>
-            {level.node}
-          </div>
-        </div>
+        <LevelPanel
+          key={level.id}
+          level={level}
+          isTop={level.id === topLevelId}
+          backText={activeSection?.label ?? "Back"}
+          onCloseLevel={onCloseLevel}
+          onClose={onClose}
+        />
       ))}
     </div>
   );

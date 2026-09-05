@@ -73,9 +73,15 @@ export function readSettingsRouteEntry<T>(route: string): RouteEntry<T> {
 }
 
 /** Replace a route's body without a fetch — the optimistic value after a
- * write, so a toggle reads back what was just chosen. */
+ * write, so a toggle reads back what was just chosen. Authoritative over
+ * any read already in flight: bumping the route's request sequence makes a
+ * GET that started before this call get discarded by `settle` when it
+ * lands, instead of overwriting the optimistic value, and refreshing
+ * `fetchedAt` means a TTL check run right after this (a rail re-render, a
+ * cache-generation bump) does not treat the value as stale again. */
 export function setSettingsRouteData<T>(route: string, data: T): void {
-  update(route, { data, error: null, unsupported: false, stale: false });
+  requestSeq.set(route, (requestSeq.get(route) ?? 0) + 1);
+  update(route, { data, error: null, unsupported: false, stale: false, loading: false, fetchedAt: Date.now() });
 }
 
 function matches(route: string, prefix: string, exact: boolean): boolean {
@@ -152,6 +158,12 @@ export function fetchSettingsRoute<T = unknown>(route: string, opts?: { force?: 
 
 const DEFAULT_TTL_MS = 15_000;
 
+/** TTL for a route read by both a hub panel and the rail's status line. A
+ * shared route must use ONE policy: a rail poll shorter than the hub's own
+ * TTL would consider the value stale — and re-fetch, racing an optimistic
+ * write — sooner than the hub reading the same route ever would. */
+export const SHARED_ROUTE_TTL_MS = 60_000;
+
 /** True when the entry needs (re)fetching: never fetched, invalidated, or
  * older than the ttl. An `unsupported` answer only refetches after an
  * explicit invalidation: the engine said no, and asking again is noise. */
@@ -210,6 +222,27 @@ export function useSettingsRoute<T = unknown>(route: string | null, opts?: { ena
   };
 }
 
+/** Fetch every route in `routes` whose entry needs it. A plain function
+ * (not inlined in an effect) so the "refetch only on a real TTL expiry or
+ * an actual invalidation, never merely because some unrelated cache entry
+ * changed" contract is one thing, callable from more than one place. */
+export function refreshSettingsRoutes(routes: readonly string[], ttlMs: number = DEFAULT_TTL_MS): void {
+  for (const route of routes) {
+    if (needsFetch(entryOf(route), ttlMs)) void fetchSettingsRoute(route);
+  }
+}
+
+/** Sum of the given routes' own invalidation counters. Unlike `cacheGeneration`
+ * (bumped by ANY cache mutation — another route's optimistic write, an
+ * unrelated fetch settling) this changes only when one of THESE routes is
+ * actually invalidated, so it is safe to use as a fetch-effect dependency:
+ * it does not fire on every keystroke a hub writes into a different entry. */
+function routesVersion(routeList: readonly string[]): number {
+  let total = 0;
+  for (const route of routeList) total += entryOf(route).version;
+  return total;
+}
+
 /**
  * Read several routes at once (the rail's status lines): one subscription,
  * one fetch effect, bodies keyed by route. Routes that answered an error or
@@ -219,19 +252,29 @@ export function useSettingsRoutes(routes: readonly string[], opts?: { enabled?: 
   const enabled = opts?.enabled ?? true;
   const ttlMs = opts?.ttlMs ?? DEFAULT_TTL_MS;
   const key = routes.join(" ");
+  const routeList = useMemo(() => (key ? key.split(" ") : []), [key]);
   const generation = useSyncExternalStore(subscribeSettingsRoutes, () => cacheGeneration, () => 0);
+  const version = useSyncExternalStore(subscribeSettingsRoutes, () => routesVersion(routeList), () => 0);
 
   useEffect(() => {
     if (!enabled) return;
-    for (const route of key ? key.split(" ") : []) {
-      if (needsFetch(entryOf(route), ttlMs)) void fetchSettingsRoute(route);
-    }
-  }, [key, enabled, ttlMs, generation]);
+    refreshSettingsRoutes(routeList, ttlMs);
+    // `version` (these routes' own invalidation counters, not the cache-wide
+    // `generation`) is what re-runs this on a real invalidation; see
+    // `routesVersion`. A route that simply aged out with nothing invalidating
+    // it is caught by the periodic poll below instead.
+  }, [routeList, enabled, ttlMs, version]);
+
+  useEffect(() => {
+    if (!enabled || routeList.length === 0) return;
+    const id = setInterval(() => refreshSettingsRoutes(routeList, ttlMs), ttlMs);
+    return () => clearInterval(id);
+  }, [routeList, enabled, ttlMs]);
 
   return useMemo(() => {
     const bodies: Record<string, unknown> = {};
     if (!enabled) return bodies;
-    for (const route of key ? key.split(" ") : []) {
+    for (const route of routeList) {
       const entry = entryOf(route);
       if (entry.data !== null && !entry.error) bodies[route] = entry.data;
     }
@@ -239,5 +282,5 @@ export function useSettingsRoutes(routes: readonly string[], opts?: { enabled?: 
     // `generation` is the cache's change counter: it is what makes this memo
     // recompute when a body lands.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, enabled, generation]);
+  }, [routeList, enabled, generation]);
 }

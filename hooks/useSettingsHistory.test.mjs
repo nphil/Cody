@@ -185,6 +185,25 @@ test("a forward navigation onto the stack's top is ignored", () => {
   assert.equal(ui.depth, 1);
 });
 
+test("after an ignored forward navigation, the next back gesture is a real pop, not swallowed", () => {
+  // The bug this pins: an ignored forward navigation used to leave
+  // `historyDepth` at its stale (lower) value, so the very next back
+  // gesture landed on an entry whose depth was still `>= historyDepth` and
+  // was ALSO ignored — one dead back press before anything visible happens.
+  const history = fakeHistory(null);
+  const { ui, show } = harness(history);
+  show(2);
+  history.back();
+  assert.equal(ui.pops, 1);
+  assert.equal(ui.depth, 1, "back from the hub lands on the root");
+  history.forward();
+  assert.equal(ui.pops, 1, "the forward itself is not a pop");
+  assert.equal(ui.depth, 1, "the UI still shows the root");
+  history.back();
+  assert.equal(ui.pops, 2, "this back gesture must not be swallowed");
+  assert.equal(ui.depth, 0, "a back from the root closes");
+});
+
 test("the Escape key mirrors a back gesture through the same sync path", () => {
   // The shell handles Escape by lowering its depth; the controller must
   // treat that exactly like a Back button (go, swallow the popstate).

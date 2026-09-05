@@ -143,7 +143,17 @@ export function createSettingsHistory({ history, onPop, requestSync, token = Mat
         return;
       }
       const landed = isOurs(event.state, token) ? event.state.depth : 0;
-      if (landed >= historyDepth) return;
+      if (landed >= historyDepth) {
+        // A forward navigation back onto (or above) our own stack: the
+        // browser moved without a gesture we owe a pop for. Adopt its
+        // position so the comparison above is against where we actually
+        // are — otherwise the NEXT real back gesture lands on an entry
+        // whose depth is still `< historyDepth` by the stale count and gets
+        // swallowed too (`sync` unwinds any resulting surplus on the next
+        // commit, once the UI's own depth is behind this).
+        historyDepth = landed;
+        return;
+      }
       historyDepth = landed;
       onPop();
       requestSync?.();

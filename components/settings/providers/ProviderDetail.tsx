@@ -22,6 +22,7 @@ import { ModelCatalogPicker } from "@/components/ModelCatalogPicker";
 import { ModelEntryEditor, ProviderEntryEditor, type ModelEntry, type ModelsFileData, type ProviderEntry } from "@/components/ModelsConfig";
 import { ConfirmDialog } from "@/components/ui/field";
 import { toast } from "@/components/ui/toast";
+import { useNativeSettings } from "@/hooks/useConfigWriter";
 import { useModelCatalog } from "@/hooks/useModelCatalog";
 import { useSettingsRoute } from "@/hooks/useSettingsData";
 import { formatApiError } from "@/lib/i18n/api-error";
@@ -643,6 +644,14 @@ export function ProviderDetail({ row, response, open, onClose, initialLoginId = 
   const storedVariables = (keyMethod?.variables ?? []).filter((variable) => variable.stored);
   const showCuration = engine?.id === "omp" && capabilities.models && capabilities.configEditor && row.connected && !custom
     && ((row.modelCount ?? 0) > CURATION_THRESHOLD || row.group === "gateway" || row.group === "local");
+  // Disabling writes omp's own `disabledProviders`, the counterpart of the
+  // Enable action below — reachable only where that write makes sense: omp,
+  // an admin, a writable registry, a row not already disabled, and one with
+  // a real provider id to disable (never a login id — see `orderIds`).
+  const canDisable = engine?.id === "omp" && capabilities.configEditor && canEdit && !readOnly;
+  const nativeSettings = useNativeSettings(canDisable);
+  const showDisable = canDisable && !row.disabled && row.connected && row.orderIds.length > 0;
+  const [disabling, setDisabling] = useState(false);
 
   const changed = () => {
     invalidateProviderReads();
@@ -660,6 +669,21 @@ export function ProviderDetail({ row, response, open, onClose, initialLoginId = 
       changed();
     } catch (failure) {
       setActionError(failure instanceof Error ? failure.message : String(failure));
+    }
+  };
+
+  const disable = async () => {
+    setActionError(null);
+    setDisabling(true);
+    try {
+      const current = nativeSettings.settings?.disabledProviders ?? [];
+      const next = [...new Set([...current, ...row.orderIds])];
+      await nativeSettings.patchTop({ disabledProviders: next });
+      changed();
+    } catch (failure) {
+      setActionError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setDisabling(false);
     }
   };
 
@@ -687,19 +711,33 @@ export function ProviderDetail({ row, response, open, onClose, initialLoginId = 
     }
   };
 
-  const dangerRows = canEdit && (custom || storedVariables.length > 0)
-    ? [{
-      title: custom ? `Remove ${row.name}` : `Clear the saved ${storedVariables.length === 1 ? "key" : "keys"}`,
-      description: custom
-        ? `Deletes ${row.name} and its ${pluralModels(row.modelCount ?? 0)} from models.yml.`
-        : `Forgets ${storedVariables.map((variable) => variable.name).join(", ")} saved in Cody. A value set on the container stays.`,
-      action: (
-        <button type="button" className="ui-focus-ring" onClick={() => setRemoveOpen(true)} disabled={readOnly && custom} style={dangerButtonStyle}>
-          <Trash2 size={13} aria-hidden="true" /> {custom ? "Remove" : "Clear"}
-        </button>
-      ),
-    }]
-    : [];
+  const dangerRows = [
+    ...(showDisable
+      ? [{
+        title: `Disable in ${shortName}`,
+        description: `Switches ${row.name} off in ${shortName}'s own config: none of its models are offered until it is enabled again.`,
+        action: (
+          <button type="button" className="ui-focus-ring" onClick={() => void disable()} disabled={disabling || !nativeSettings.settings} style={dangerButtonStyle}>
+            {disabling ? <Loader2 size={13} aria-hidden="true" className="icon-spin" /> : null}
+            Disable
+          </button>
+        ),
+      }]
+      : []),
+    ...(canEdit && (custom || storedVariables.length > 0)
+      ? [{
+        title: custom ? `Remove ${row.name}` : `Clear the saved ${storedVariables.length === 1 ? "key" : "keys"}`,
+        description: custom
+          ? `Deletes ${row.name} and its ${pluralModels(row.modelCount ?? 0)} from models.yml.`
+          : `Forgets ${storedVariables.map((variable) => variable.name).join(", ")} saved in Cody. A value set on the container stays.`,
+        action: (
+          <button type="button" className="ui-focus-ring" onClick={() => setRemoveOpen(true)} disabled={readOnly && custom} style={dangerButtonStyle}>
+            <Trash2 size={13} aria-hidden="true" /> {custom ? "Remove" : "Clear"}
+          </button>
+        ),
+      }]
+      : []),
+  ];
 
   return (
     <Drawer open={open} title={row.name} presentation="side" onClose={onClose} dirty={advancedDirty} ariaLabel={`${row.name} provider`}>

@@ -29,7 +29,7 @@ import { useSettingsShell } from "@/components/settings/shell-context";
 import { useConfigWriter, useNativeSettings } from "@/hooks/useConfigWriter";
 import { fetchSettingsRoute, invalidateSettingsRoutes, setSettingsRouteData, useSettingsRoute } from "@/hooks/useSettingsData";
 import { mirrorServerVisibility, readComposerVisibility, writeComposerVisibility } from "@/lib/composer-model-visibility";
-import { allowListActive, curationModeFor, modelKey, providerGlob, seedAllowList, summarizeProviderCuration, writeProviderSelection, type ProviderCuration } from "@/lib/model-allow-list";
+import { allowListActive, applyInstanceHide, curationModeFor, keepAllowListActive, modelKey, NOTHING_ENABLED_ENTRY, providerOfEntry, seedAllowList, summarizeProviderCuration, writeProviderSelection, type ProviderCuration } from "@/lib/model-allow-list";
 import type { ModelsData } from "@/lib/models-cache";
 
 export type CatalogRowState = "visible" | "instanceHidden" | "myHidden" | "needsKey" | "new";
@@ -100,6 +100,13 @@ const PROVIDER_KEYS_ROUTE = "/api/provider-keys";
 const MODEL_ROLES_ROUTE = "/api/model-roles";
 const ACCOUNT_ROUTE = "/api/accounts/me";
 
+/** The exact message `lib/auth/http.ts`'s `requireCredential` answers for the
+ * `no_accounts` case — the settings-route cache keeps only `unsupported` as
+ * a structured code (`hooks/useSettingsData.ts`), so this is the one signal
+ * left to tell "no accounts exist" apart from every other account-route
+ * failure (signed out, a network blip, a 5xx). */
+const NO_ACCOUNTS_ERROR_MESSAGE = "No accounts exist yet";
+
 /** Providers whose models run on the user's own hardware, for the Local
  * chip. A best-effort list: a custom models.yml endpoint on a loopback URL
  * is also local, but the catalog does not carry base URLs. */
@@ -165,10 +172,17 @@ export interface ModelCatalogHandle {
   /** Admin: hide or show for the whole instance. On omp this edits
    * `enabledModels`; elsewhere the visibility file. */
   setInstanceHidden: (keys: readonly string[], hidden: boolean) => Promise<void>;
-  /** Admin, omp: replace one provider's selection (the curation dialog). */
-  writeProviderCuration: (provider: string, selected: readonly string[], options: { includeFuture: boolean }) => Promise<void>;
-  /** Admin: record that `keys` (default: the whole catalog) were shown. */
-  markSeen: (keys?: readonly string[]) => Promise<void>;
+  /** Admin, omp: replace one provider's selection (the curation dialog).
+   * `nothingEnabled` is true when the save left NO model reachable anywhere
+   * (this was the only curated, or only connected, provider) — the caller
+   * should tell the user, since the list is kept non-empty under the hood
+   * (see `keepAllowListActive`) rather than read back as "unrestricted". */
+  writeProviderCuration: (provider: string, selected: readonly string[], options: { includeFuture: boolean }) => Promise<{ nothingEnabled: boolean }>;
+  /** Admin: record that `keys` (default: the whole catalog) were shown.
+   * `merge: true` unions `keys` into the ledger's current list instead of
+   * replacing it — for a curation dialog that displayed only one provider's
+   * models, so every other provider's seen state survives the save. */
+  markSeen: (keys?: readonly string[], options?: { merge?: boolean }) => Promise<void>;
   /** Whether hiding `keys` for the instance would pin a whole-provider glob
    * (or an unrestricted provider) down to an exact list; the providers. */
   providersPinnedByHiding: (keys: readonly string[]) => string[];
@@ -183,7 +197,7 @@ async function putVisibility(patch: Partial<Pick<VisibilityBody, "instanceHidden
 }
 
 export function useModelCatalog(): ModelCatalogHandle {
-  const { capabilities, engine, sessionModels } = useSettingsShell();
+  const { capabilities, engine, sessionModels, callbacks } = useSettingsShell();
   const engineId = engine?.id ?? null;
   const writer = useConfigWriter();
 
@@ -203,9 +217,14 @@ export function useModelCatalog(): ModelCatalogHandle {
   // The browser mirror, re-read whenever the server answers or a write lands.
   const [mirrorVersion, setMirrorVersion] = useState(0);
 
-  // An open instance answers 409 to the account route: everyone is the
-  // administrator there, and the visibility store is the browser.
-  const openInstance = account.error !== null && !account.unsupported;
+  // An open instance answers 409 "No accounts exist yet" to the account
+  // route (lib/auth/http.ts's requireCredential, `no_accounts`): everyone is
+  // the administrator there, and the visibility store is the browser. Any
+  // OTHER failure — signed-out (401), a network blip, a 5xx — is NOT that
+  // case and must not grant admin: on omp a member wrongly treated as admin
+  // can write `enabledModels` for real, since that PUT has no server-side
+  // role gate of its own.
+  const openInstance = account.error === NO_ACCOUNTS_ERROR_MESSAGE && !account.unsupported;
   const isAdmin = openInstance || account.data?.user?.role === "admin";
   const savedIn: "account" | "browser" = visibility.data ? "account" : "browser";
 
@@ -322,23 +341,48 @@ export function useModelCatalog(): ModelCatalogHandle {
     return [...new Set(keys)];
   }, [roles.data, effective.data?.defaultModel]);
 
+  // Kept current every render so the writer callbacks below always compute
+  // against what is true NOW, not a snapshot from whichever render created
+  // the specific closure that ends up being invoked — an undo toast's
+  // onClick can fire seconds later, after further hides changed everything
+  // these callbacks read. A plain state variable closed over at creation
+  // time cannot do that; a ref that every render refreshes can.
+  const listsRef = useRef(lists);
+  listsRef.current = lists;
+  const enabledModelsRef = useRef(enabledModels);
+  enabledModelsRef.current = enabledModels;
+  const fullListRef = useRef(fullList);
+  fullListRef.current = fullList;
+  const effectiveListRef = useRef(effectiveList);
+  effectiveListRef.current = effectiveList;
+  const inUseKeysRef = useRef(inUseKeys);
+  inUseKeysRef.current = inUseKeys;
+
   // Seed the seen ledger the first time the catalog is shown: nothing is
-  // new retroactively, and the diff is meaningful only from then on.
+  // new retroactively, and the diff is meaningful only from then on. On omp
+  // the server diffs against the UNRESTRICTED catalog, so `catalogKeys` must
+  // come from `fullList`, not the (possibly still-loading) effective list —
+  // `/api/models/new` and `?catalog=full` can settle in either order, and
+  // seeding from the effective list here would record every model omp's own
+  // `enabledModels` curates away, so the diff reports them "new" forever.
   const seededRef = useRef(false);
   useEffect(() => {
     if (seededRef.current || !isAdmin || isSession || !fresh.data?.firstRun || catalogKeys.length === 0) return;
+    if (capabilities.models && fullList === null) return;
     seededRef.current = true;
     void fetch("/api/models/seen", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ keys: catalogKeys }) })
+      .then((response) => { if (!response.ok) throw new Error(`HTTP ${response.status}`); })
       .then(() => invalidateSettingsRoutes(NEW_MODELS_ROUTE))
       .catch(() => { seededRef.current = false; });
-  }, [isAdmin, isSession, fresh.data?.firstRun, catalogKeys]);
+  }, [isAdmin, isSession, fresh.data?.firstRun, catalogKeys, capabilities.models, fullList]);
 
   const applyVisibility = useCallback(async (patch: Partial<Pick<VisibilityBody, "instanceHidden" | "hidden" | "pinned">>) => {
+    const currentLists = listsRef.current;
     const optimistic: VisibilityBody = {
       engine: { id: engineId ?? "" },
-      instanceHidden: patch.instanceHidden ?? [...lists.instanceFromFile],
-      hidden: patch.hidden ?? [...lists.hidden],
-      pinned: patch.pinned ?? [...lists.pinned],
+      instanceHidden: patch.instanceHidden ?? [...currentLists.instanceFromFile],
+      hidden: patch.hidden ?? [...currentLists.hidden],
+      pinned: patch.pinned ?? [...currentLists.pinned],
       instanceSource: visibility.data?.instanceSource ?? "cody",
     };
     writeComposerVisibility(engineId, patch);
@@ -356,56 +400,77 @@ export function useModelCatalog(): ModelCatalogHandle {
       invalidateSettingsRoutes(VISIBILITY_ROUTE, { exact: true });
       throw error;
     }
-  }, [engineId, lists, visibility.data]);
+  }, [engineId, visibility.data]);
 
+  // setPinned/setMyHidden/setInstanceHidden all read `listsRef`/`enabledModelsRef`
+  // (etc.) rather than `lists`/`enabledModels` directly: a delta computed
+  // this way is correct even when the specific function INSTANCE invoking it
+  // was created on an earlier render — e.g. an undo toast's `onClick`, which
+  // can fire seconds after later hides moved the state on. Reading the plain
+  // state would replay that earlier render's snapshot instead of undoing
+  // just the one hide the toast belongs to.
   const setPinned = useCallback(async (keys: readonly string[], pinned: boolean) => {
-    const next = new Set(lists.pinned);
+    const next = new Set(listsRef.current.pinned);
     for (const key of keys) if (pinned) next.add(key); else next.delete(key);
     await applyVisibility({ pinned: [...next].sort() });
-  }, [applyVisibility, lists.pinned]);
+  }, [applyVisibility]);
 
   const setMyHidden = useCallback(async (keys: readonly string[], hidden: boolean) => {
-    const next = new Set(lists.hidden);
+    const next = new Set(listsRef.current.hidden);
     for (const key of keys) if (hidden) next.add(key); else next.delete(key);
     await applyVisibility({ hidden: [...next].sort() });
-  }, [applyVisibility, lists.hidden]);
+  }, [applyVisibility]);
 
   /** The allow-list to edit: the persisted one, or — while the restriction
    * is off — a seed that keeps every provider open as a glob and every
-   * in-use model explicit, so the first hide takes away nothing else. */
+   * in-use model explicit, so the first hide takes away nothing else. Reads
+   * refs so a stale-closure caller (see above) still starts from the
+   * current setting, not the one in force when it was created. */
   const baseAllowList = useCallback((): string[] => {
-    if (allowListActive(enabledModels)) return [...enabledModels];
-    const everyProvider = [...new Set((fullList ?? effectiveList).map((model) => model.provider))];
-    return seedAllowList(inUseKeys, effectiveList, { providerGlobs: everyProvider });
-  }, [enabledModels, fullList, effectiveList, inUseKeys]);
+    const currentEnabledModels = enabledModelsRef.current;
+    // Strip our own "nothing enabled" placeholder (`keepAllowListActive`) so
+    // it never lingers once a real entry is written back in — the moment
+    // this list gains an entry of its own, the sentinel that was only
+    // holding the restriction open has done its job.
+    if (allowListActive(currentEnabledModels)) return currentEnabledModels.filter((entry) => entry !== NOTHING_ENABLED_ENTRY);
+    const catalog = fullListRef.current ?? effectiveListRef.current;
+    const everyProvider = [...new Set(catalog.map((model) => model.provider))];
+    return seedAllowList(inUseKeysRef.current, effectiveListRef.current, { providerGlobs: everyProvider });
+  }, []);
 
   const providersPinnedByHiding = useCallback((keys: readonly string[]): string[] => {
     if (!capabilities.models) return [];
-    const list = enabledModels;
+    const list = enabledModelsRef.current;
     const active = allowListActive(list);
     const providers = new Set<string>();
     for (const key of keys) {
-      const provider = key.slice(0, key.indexOf("/"));
+      const provider = providerOfEntry(key);
       if (!provider) continue;
       if (!active || curationModeFor(list, provider) === "all") providers.add(provider);
     }
     return [...providers].sort();
-  }, [capabilities.models, enabledModels]);
+  }, [capabilities.models]);
 
   const setInstanceHidden = useCallback(async (keys: readonly string[], hidden: boolean) => {
     if (!capabilities.models) {
-      const next = new Set(lists.instanceFromFile);
+      const next = new Set(listsRef.current.instanceFromFile);
       for (const key of keys) if (hidden) next.add(key); else next.delete(key);
       await applyVisibility({ instanceHidden: [...next].sort() });
       return;
     }
-    // omp: per provider, the selection is what reaches sessions now minus
-    // (or plus) these keys; writeProviderSelection collapses a whole
-    // provider back to its glob on unhide and pins it to exact ids on hide.
-    const catalog = fullList ?? effectiveList;
+    // omp: per provider, the next selection is derived from the ALLOW-LIST
+    // ITSELF (`list`, seeded from the optimistic `enabledModels` and updated
+    // in this same loop as each provider is processed) — never from
+    // `effectiveList`/`instanceHidden`, both of which lag a just-landed
+    // write until `/api/models` refetches (on omp that spawns a fresh
+    // utility RPC, seconds away). `applyInstanceHide` (lib/model-allow-list)
+    // is what makes this a delta against current state rather than a
+    // replayed snapshot — see its doc comment for the exact failure this
+    // fixes (a second hide silently reverting the first).
+    const catalog = fullListRef.current ?? effectiveListRef.current;
     const byProvider = new Map<string, Set<string>>();
     for (const key of keys) {
-      const provider = key.slice(0, key.indexOf("/"));
+      const provider = providerOfEntry(key);
       if (!provider) continue;
       const set = byProvider.get(provider) ?? new Set<string>();
       set.add(key);
@@ -414,27 +479,33 @@ export function useModelCatalog(): ModelCatalogHandle {
     let list = baseAllowList();
     for (const [provider, providerKeysSet] of byProvider) {
       const catalogForProvider = catalog.filter((model) => model.provider === provider).map(modelKey);
-      const reaching = new Set(effectiveList.filter((model) => model.provider === provider).map(modelKey));
-      // While unrestricted, every catalog model reaches sessions.
-      if (!allowListActive(enabledModels)) for (const key of catalogForProvider) reaching.add(key);
-      for (const key of instanceHidden) if (key.startsWith(`${provider}/`)) reaching.delete(key);
-      for (const key of providerKeysSet) if (hidden) reaching.delete(key); else reaching.add(key);
-      list = writeProviderSelection(list, provider, [...reaching], catalogForProvider, { includeFuture: !hidden });
+      list = applyInstanceHide(list, provider, [...providerKeysSet], hidden, catalogForProvider);
     }
-    await writer.patchTop({ enabledModels: list });
-  }, [capabilities.models, lists.instanceFromFile, applyVisibility, fullList, effectiveList, baseAllowList, enabledModels, instanceHidden, writer]);
+    await writer.patchTop({ enabledModels: keepAllowListActive(list) });
+    // The composer's model list is its own fetch (useAgentSession.loadModels)
+    // that only re-runs on session change or this bump; without it an
+    // instance hide/unhide from the hub never reaches an open composer.
+    callbacks.onModelsSaved();
+  }, [capabilities.models, applyVisibility, baseAllowList, writer, callbacks]);
 
   const writeProviderCuration = useCallback(async (provider: string, selected: readonly string[], options: { includeFuture: boolean }) => {
-    const catalogForProvider = (fullList ?? effectiveList).filter((model) => model.provider === provider).map(modelKey);
+    const catalog = fullListRef.current ?? effectiveListRef.current;
+    const catalogForProvider = catalog.filter((model) => model.provider === provider).map(modelKey);
     const list = writeProviderSelection(baseAllowList(), provider, selected, catalogForProvider, options);
-    // A list that is nothing but whole-provider globs for every provider is
-    // the unrestricted state spelled out; keep it explicit — it is what the
-    // user chose, and it reads the same in config.yml.
-    await writer.patchTop({ enabledModels: list.length === 0 ? [providerGlob(provider)] : list });
-  }, [fullList, effectiveList, baseAllowList, writer]);
+    // An empty result means NOTHING is enabled anywhere — this was the only
+    // curated (or only connected) provider and the user chose "disable all".
+    // `keepAllowListActive` keeps the restriction on with an entry that
+    // matches no real model, instead of the previous bug's `provider/**`
+    // substitution, which silently turned "disable everything" into
+    // "enable everything" (omp reads `[]` as unrestricted).
+    const nothingEnabled = list.length === 0;
+    await writer.patchTop({ enabledModels: keepAllowListActive(list) });
+    callbacks.onModelsSaved();
+    return { nothingEnabled };
+  }, [baseAllowList, writer, callbacks]);
 
-  const markSeen = useCallback(async (keys?: readonly string[]) => {
-    const response = await fetch("/api/models/seen", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ keys: keys ?? catalogKeys }) });
+  const markSeen = useCallback(async (keys?: readonly string[], options?: { merge?: boolean }) => {
+    const response = await fetch("/api/models/seen", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ keys: keys ?? catalogKeys, merge: options?.merge === true }) });
     if (!response.ok) {
       const body = (await response.json().catch(() => ({}))) as { error?: string };
       throw new Error(body.error || `HTTP ${response.status}`);

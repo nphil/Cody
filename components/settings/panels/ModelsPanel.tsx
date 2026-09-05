@@ -14,7 +14,6 @@
  * segment; the default is the catalog.
  */
 import { Cpu } from "lucide-react";
-import { useEffect, useState } from "react";
 import { useModelCatalog } from "@/hooks/useModelCatalog";
 import { ModelAssignments } from "../models/ModelAssignments";
 import { ModelCatalog } from "../models/ModelCatalog";
@@ -40,15 +39,13 @@ export const SEARCH_ENTRIES: readonly SearchEntry[] = [
 ];
 
 export function ModelsPanel() {
-  const { capabilities, harnessLabel, sub, sessionModels } = useSettingsShell();
+  const { capabilities, harnessLabel, sub, sessionModels, callbacks } = useSettingsShell();
   const catalog = useModelCatalog();
   const hasAssignments = capabilities.models;
-  const [segment, setSegment] = useState<Segment>(() => (sub === "assignments" && hasAssignments ? "assignments" : "catalog"));
-
-  useEffect(() => {
-    if (sub === "assignments" && hasAssignments) setSegment("assignments");
-    else if (sub === "catalog") setSegment("catalog");
-  }, [sub, hasAssignments]);
+  // Derived from `sub`, not local state: a repeated jump to the same
+  // section (e.g. search landing on "assignments" twice) must still select
+  // it even though the shell's `sub` does not change on the second jump.
+  const segment: Segment = sub === "assignments" && hasAssignments ? "assignments" : "catalog";
 
   const sessionCount = catalog.catalogSource === "session" ? (sessionModels?.length ?? 0) : null;
   const visibleCount = catalog.rows.filter((row) => row.source !== "placeholder" && row.state !== "instanceHidden" && row.state !== "myHidden").length;
@@ -77,7 +74,7 @@ export function ModelsPanel() {
             label="Models sections"
             value={segment}
             options={[{ id: "catalog", label: "Catalog" }, { id: "assignments", label: "Assignments" }]}
-            onChange={(id) => setSegment(id as "catalog" | "assignments")}
+            onChange={(id) => callbacks.selectSection("models", id)}
           />
         )}
       </div>

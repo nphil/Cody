@@ -87,9 +87,19 @@ export interface ProviderRow {
   /** A regional / plan variant of another row (collapsed in the picker). */
   variantOf?: string;
   popular?: boolean;
-  /** The model-catalog provider ids this row sums its count over — also
-   * the ids curation and reordering address. */
+  /** The model-catalog provider ids this row sums its count over: the
+   * definition's own id, its `catalogIds`, AND every engine's login id for
+   * the vendor (the join key that folds a subscription and its API key into
+   * one row) — curation reads across all of them. */
   catalogIds: string[];
+  /** The ids that are genuinely the engine's OWN provider ids — never an
+   * engine's login/session id (`claude`, `anthropic-console`, `chatgpt`,
+   * `openai-codex-device`, ...), which name a DIFFERENT engine's sign-in
+   * roster, not an omp model-provider. Config keys that name providers
+   * (`modelProviderOrder`, `disabledProviders`) must be written from this
+   * list, never from `catalogIds`; a row with none (a login-only entry the
+   * catalogue never claimed) is skipped by those writes. */
+  orderIds: string[];
   /** A custom endpoint's facts, for the row's status line. */
   endpoint?: { api?: string; baseUrl?: string };
 }
@@ -260,6 +270,7 @@ export function buildProviderDirectory(input: BuildProviderDirectoryInput): Prov
     const stored = keyById.get(definition.id);
     if (stored) methods.push(keyMethod(definition, stored));
     const catalogIds = unique([definition.id, ...(definition.catalogIds ?? []), ...loginIds]);
+    const orderIds = unique([definition.id, ...(definition.catalogIds ?? [])]);
     awaitingLogins.add(definition.id);
     push({
       id: definition.id,
@@ -270,6 +281,7 @@ export function buildProviderDirectory(input: BuildProviderDirectoryInput): Prov
       connected: false,
       modelCount: sumCounts(input.counts, catalogIds),
       catalogIds,
+      orderIds,
     });
   }
 
@@ -285,6 +297,9 @@ export function buildProviderDirectory(input: BuildProviderDirectoryInput): Prov
       connected: false,
       modelCount: sumCounts(input.counts, [login.id]),
       catalogIds: [login.id],
+      // A pure sign-in the key catalogue never claimed has no confirmed
+      // model-provider identity — never write its id into a provider list.
+      orderIds: [],
     });
   }
   // Variants fold into a card only when the card itself is a row here; a
@@ -321,6 +336,7 @@ export function buildProviderDirectory(input: BuildProviderDirectoryInput): Prov
       connected: true,
       modelCount: live ?? custom.modelCount,
       catalogIds: [custom.name],
+      orderIds: [custom.name],
       endpoint,
     });
   }
@@ -341,6 +357,9 @@ export function buildProviderDirectory(input: BuildProviderDirectoryInput): Prov
         connected: true,
         modelCount: count,
         catalogIds: [id],
+        // Its id came straight out of the model catalog's own counts, so it
+        // is by construction a real provider id.
+        orderIds: [id],
       });
     }
   }

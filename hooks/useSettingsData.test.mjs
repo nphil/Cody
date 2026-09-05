@@ -8,6 +8,7 @@ const {
   invalidateSettingsRoutes,
   readSettingsRoute,
   readSettingsRouteEntry,
+  refreshSettingsRoutes,
   resetSettingsRouteCache,
   setSettingsRouteData,
   subscribeSettingsRoutes,
@@ -93,6 +94,53 @@ test("an optimistic write replaces the body without a fetch and clears staleness
   assert.deepEqual(entry.data, { settings: { a: 2 } });
   assert.equal(entry.stale, false);
   assert.equal(calls.length, 1);
+});
+
+test("an optimistic write is authoritative over a GET already in flight: the late response is discarded", async () => {
+  let resolveGet;
+  stubFetch({
+    "/api/omp-settings/schema": () => new Promise((resolve) => { resolveGet = () => resolve(new Response(JSON.stringify({ values: { "ui.theme": "dark" } }), { status: 200 })); }),
+  });
+  const pending = fetchSettingsRoute("/api/omp-settings/schema");
+  // The user's own edit lands while that GET is still in flight — a
+  // controlled input's write must win even though the fetch started first.
+  setSettingsRouteData("/api/omp-settings/schema", { values: { "ui.theme": "light" } });
+  resolveGet();
+  await pending;
+  assert.deepEqual(readSettingsRoute("/api/omp-settings/schema"), { values: { "ui.theme": "light" } }, "the stale GET landing after the optimistic write must not overwrite it");
+  assert.equal(readSettingsRouteEntry("/api/omp-settings/schema").loading, false, "the optimistic write also clears any loading flag the discarded request left behind");
+});
+
+test("an optimistic write refreshes fetchedAt, so an immediate TTL check does not treat it as stale, and never bumps version", async () => {
+  stubFetch({ "/api/omp-settings": { body: { settings: { a: 1 } } } });
+  await fetchSettingsRoute("/api/omp-settings");
+  const before = readSettingsRouteEntry("/api/omp-settings");
+  setSettingsRouteData("/api/omp-settings", { settings: { a: 2 } });
+  const after = readSettingsRouteEntry("/api/omp-settings");
+  assert.ok(after.fetchedAt >= before.fetchedAt, "fetchedAt is refreshed by the optimistic write");
+  assert.equal(after.stale, false);
+  assert.equal(after.version, before.version, "an optimistic write is not an invalidation: it must not bump version (that would re-trigger a rail poll keyed on version)");
+});
+
+test("refreshSettingsRoutes only fetches a route that actually needs it, and an optimistic write to it never counts as needing one", async () => {
+  const calls = stubFetch({
+    "/api/memory": { body: { documents: [] } },
+    "/api/models/visibility": { status: 400, body: { error: "no", code: "unsupported" } },
+  });
+  await fetchSettingsRoute("/api/memory");
+  await fetchSettingsRoute("/api/models/visibility");
+  calls.length = 0;
+
+  refreshSettingsRoutes(["/api/memory", "/api/models/visibility"], 15_000);
+  assert.deepEqual(calls, [], "a fresh entry and an unsupported one are left alone");
+
+  setSettingsRouteData("/api/memory", { documents: [1] });
+  refreshSettingsRoutes(["/api/memory"], 15_000);
+  assert.deepEqual(calls, [], "an optimistic write to a route does not itself make that route need a refetch");
+
+  invalidateSettingsRoutes("/api/memory", { exact: true });
+  refreshSettingsRoutes(["/api/memory"], 15_000);
+  assert.deepEqual(calls, ["/api/memory"], "only a real invalidation (or true TTL expiry) makes it refetch");
 });
 
 test("force re-fetches even while a request is in flight", async () => {

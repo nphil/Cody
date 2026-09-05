@@ -10,7 +10,8 @@
  * visible to this user; a role already on a hidden model is flagged in
  * `ModelRoles` rather than silently re-pointed.
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useSettingsShell } from "../shell-context";
 import type { ModelCatalogHandle } from "@/hooks/useModelCatalog";
 import { ModelPlanPanel } from "../ModelPlanPanel";
 import { RetryFallbackPanel, type RuntimeModelEntry } from "../RetryFallbackPanel";
@@ -24,8 +25,20 @@ const VIEWS: { id: View; label: string }[] = [
   { id: "plan", label: "Plan" },
 ];
 
+/** Search ids that live on the retry view: the retry keys' schema ids (the
+ * Behavior hub trails them here) and the panel's own toggle. */
+function retryViewOwns(highlight: string | null): boolean {
+  return highlight !== null && (highlight.startsWith("schema-retry.") || highlight === "retry-transient-errors");
+}
+
 export function ModelAssignments({ catalog, panelId, initialView = "roles" }: { catalog: ModelCatalogHandle; panelId: string; initialView?: View }) {
-  const [view, setView] = useState<View>(initialView);
+  const { highlight } = useSettingsShell();
+  const [view, setView] = useState<View>(retryViewOwns(highlight) ? "retry" : initialView);
+  // A jump to a retry setting (search result, "Also under" chip) must land
+  // on the view that renders it, whichever view was open before.
+  useEffect(() => {
+    if (retryViewOwns(highlight)) setView("retry");
+  }, [highlight]);
 
   const roleOptions: RoleModelOption[] = catalog.rows
     .filter((row) => row.source === "catalog")

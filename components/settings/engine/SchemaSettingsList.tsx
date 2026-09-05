@@ -330,6 +330,10 @@ export function SchemaSettingRow({ row, index }: { row: SchemaRow; index: Schema
       return;
     }
     if (surface === "mcp") callbacks.selectSection("extensions", "mcp");
+    // Retry's bound cards live in the retry panel under Models › Assignments,
+    // never Catalog — selectSection with no sub lands on the segment's
+    // default (Catalog), which has nothing to show for these keys.
+    else if (surface === "retry") callbacks.selectSection("models", "assignments");
     else callbacks.selectSection("models");
   };
 
@@ -337,6 +341,12 @@ export function SchemaSettingRow({ row, index }: { row: SchemaRow; index: Schema
     ? <SecretControl row={row} onSave={(value) => write(value)} onClear={() => { void write(null); }} />
     : <SchemaControl setting={row} value={row.value} onChange={(value) => { void write(value); }} />;
   const inline = !row.secret && isInlineControl(row);
+  // Structural, not by element type: `control` is a <SchemaControl> element
+  // whichever type it renders, so NativeSetting's own `children.type ===
+  // ToggleSwitch` check can never see the ToggleSwitch it renders for a
+  // boolean row. Told explicitly, every schema boolean gets the full-card
+  // label a hand-built toggle already gets.
+  const isToggle = !row.secret && row.type === "boolean";
 
   return (
     <NativeSetting
@@ -346,6 +356,7 @@ export function SchemaSettingRow({ row, index }: { row: SchemaRow; index: Schema
       description={description || undefined}
       badge={row.readOnly ? READ_ONLY_BADGE : (row.terminalOnly ? TERMINAL_ONLY_BADGE : undefined)}
       searchId={cardRendered ? rowSearchIdBesideCard(row.key) : searchIdForKey(row.key)}
+      switchControl={isToggle}
       control={(
         <>
           {!inline && control}
@@ -444,11 +455,23 @@ function TabSections({ tab, openState, setOpenState, defaultOpen, columns, index
 
 /** One tab (or one group of a single-tab engine) pushed as a phone level.
  * Self-contained on purpose: a pushed level is an element captured at push
- * time, so everything it shows must come from hooks it calls itself. */
+ * time, so everything it shows must come from hooks it calls itself —
+ * including the search highlight: MobileStack re-provides
+ * `SettingsHighlightContext` around pushed levels, so reading it here (now
+ * that it actually carries a value) is what lets the level open the
+ * highlighted row's own group instead of landing on an all-collapsed tab. */
 function SchemaLevel({ tabId, groupId }: { tabId: string; groupId?: string }) {
   const { capabilities } = useSettingsShell();
   const index = useSchemaIndex({ enabled: capabilities.nativeSettings });
-  const [openState, setOpenState] = useState<OpenState>({});
+  const highlightId = useContext(SettingsHighlightContext);
+  const [openState, setOpenState] = useState<OpenState>(() => {
+    if (!highlightId?.startsWith("schema-")) return {};
+    const key = highlightId.replace(/^schema-/, "").replace(/-row$/, "");
+    const row = index.byKey.get(key);
+    if (!row || row.tab !== tabId) return {};
+    const rowGroupId = row.group ?? (row.key.includes(".") ? row.key.slice(0, row.key.indexOf(".")) : "General");
+    return { [groupKey(tabId, rowGroupId)]: true };
+  });
   const tab = index.tabs.find((entry) => entry.id === tabId);
   if (!tab) return null;
   if (groupId !== undefined) {
@@ -486,12 +509,39 @@ export function SchemaSettingsList() {
   // Arriving from the dialog-wide search: land on the tab (and open the
   // group) that owns the match so NativeSetting has something to scroll to.
   // On a phone the row lives in a pushed level, so push it.
+  //
+  // Keyed on `highlightId` alone (index read through a ref): `index.byKey`
+  // and `index.tabs` get a new identity on every optimistic write and every
+  // refetch (useSchemaIndex.ts), and the highlight persists until the user
+  // dismisses search or picks a new target — so depending on them re-ran
+  // this on every toggle while a highlight was showing, clobbering the tab,
+  // the filter and the open groups the user had since changed. `index.status`
+  // stays put across writes and only flips loading→ready once, which is the
+  // one transition worth re-running for (the schema was not loaded yet when
+  // the highlight first arrived).
   const highlightId = useContext(SettingsHighlightContext);
   const pushedFor = useRef<string | null>(null);
+  const indexRef = useRef(index);
+  indexRef.current = index;
+
+  // `pushedFor` remembers the highlight a level was already pushed for, so a
+  // second tap of the SAME result while `highlightId` has not changed is a
+  // no-op (StrictMode double-invoke, an unrelated re-render) rather than a
+  // second level. But the shell clears `highlight` to null on every pop
+  // (Back, dismiss), and a later tap of that same result sets it right back
+  // to the same string — so the guard must reset once the highlight clears,
+  // or that re-tap finds `pushedFor.current` already equal and pushes
+  // nothing.
   useEffect(() => {
-    if (!highlightId?.startsWith("schema-") || index.rows.length === 0) return;
+    if (!highlightId) pushedFor.current = null;
+  }, [highlightId]);
+
+  useEffect(() => {
+    if (!highlightId?.startsWith("schema-")) return;
+    const idx = indexRef.current;
+    if (idx.rows.length === 0) return;
     const key = highlightId.replace(/^schema-/, "").replace(/-row$/, "");
-    const row = index.byKey.get(key);
+    const row = idx.byKey.get(key);
     if (!row) return;
     setActiveTab(row.tab);
     setFilter("");
@@ -499,10 +549,10 @@ export function SchemaSettingsList() {
     setOpenState((current) => ({ ...current, [groupKey(row.tab, groupId)]: true }));
     if (isMobile && pushedFor.current !== highlightId) {
       pushedFor.current = highlightId;
-      const tabLabel = index.tabs.find((entry) => entry.id === row.tab)?.label ?? row.tab;
+      const tabLabel = idx.tabs.find((entry) => entry.id === row.tab)?.label ?? row.tab;
       openSub(<SchemaLevel tabId={row.tab} groupId={singleTab ? groupId : undefined} />, singleTab ? groupId : tabLabel);
     }
-  }, [highlightId, index.rows.length, index.byKey, index.tabs, isMobile, openSub, singleTab]);
+  }, [highlightId, index.status, isMobile, openSub, singleTab]);
 
   const jumpToGroup = useCallback((groupId: string) => {
     if (!tab) return;

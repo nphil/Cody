@@ -2508,11 +2508,21 @@ html.dark .dropdown-surface :is(select, option) {
 /* Touch targets inside Settings. Below 16px iOS Safari zooms the page on
    focus and never zooms back; controls grow to 44px so a row is a target,
    not a hunt. Switches keep their own 36x20 body (the whole card is their
-   label). Desktop density is untouched. */
+   label). Desktop density is untouched.
+
+   `.ui-dialog` carries the same rules for a portaled Dialog that renders
+   OUTSIDE `.settings-shell` — ConfirmDialog, PromptDialog and a Drawer's
+   `presentation="dialog"` all sit in a base-ui portal at document.body, so
+   `.settings-shell input {...}` never reaches PromptDialog's masked input or
+   a destructive confirm's Cancel/Confirm buttons. Any caller of DialogContent
+   for a Settings-launched dialog should carry this class. */
 @media (hover: none), (pointer: coarse) {
   .settings-shell input:not([type="checkbox"]):not([type="radio"]),
   .settings-shell select,
-  .settings-shell textarea {
+  .settings-shell textarea,
+  .ui-dialog input:not([type="checkbox"]):not([type="radio"]),
+  .ui-dialog select,
+  .ui-dialog textarea {
     font-size: 16px !important;
   }
   /* `!important` on purpose, like the font size above: panels set their
@@ -2520,10 +2530,13 @@ html.dark .dropdown-surface :is(select, option) {
      the phone rule must win over every one of them without per-panel
      overrides. Icon buttons get the width too: a 17px arrow is not a target. */
   .settings-shell select,
-  .settings-shell button:not([role="switch"]) {
+  .settings-shell button:not([role="switch"]),
+  .ui-dialog select,
+  .ui-dialog button:not([role="switch"]) {
     min-height: 44px !important;
   }
-  .settings-shell button:not([role="switch"]) {
+  .settings-shell button:not([role="switch"]),
+  .ui-dialog button:not([role="switch"]) {
     min-width: 44px !important;
   }
   /* The root list's rows are taller than a bare target (label over a

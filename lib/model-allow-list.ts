@@ -224,6 +224,69 @@ export function writeProviderSelection(
 }
 
 /**
+ * The next allow-list after hiding or showing `keys` (all belonging to
+ * `provider`) for the whole instance — computed from `list` ITSELF, never
+ * from a separately-fetched "what reaches sessions now" snapshot.
+ *
+ * That distinction is the fix for a real defect: on omp, the effective
+ * catalog (and any instance-hidden set derived from it) lags a just-written
+ * `enabledModels` by a few seconds while a fresh utility RPC answers. A
+ * second hide made inside that window, if it started from that stale
+ * snapshot, silently undid the first — hiding B recomputed "what reaches
+ * sessions now" as though A's hide had never landed, so A came back. Reading
+ * `list` instead means every call — including one invoked long after the
+ * render that created its closure, like an undo toast's `onClick` fired
+ * after later hides moved the list on — builds on what the allow-list
+ * actually says right now, which is exactly a delta against current state
+ * rather than a replayed snapshot.
+ *
+ * `mode === "all"`: the provider's whole-provider glob is in `list`, so
+ * every catalog model (including ones released later) currently reaches
+ * sessions. Otherwise ("exact" or "none") `list`'s own exact entries for
+ * this provider already ARE the reaching set.
+ */
+export function applyInstanceHide(
+  list: readonly string[],
+  provider: string,
+  keys: readonly string[],
+  hidden: boolean,
+  catalogForProvider: readonly string[],
+): string[] {
+  const mode = curationModeFor(list, provider);
+  const reaching = new Set<string>(
+    mode === "all"
+      ? catalogForProvider
+      : list.filter((entry) => providerOfEntry(entry) === provider && !isProviderGlob(entry)),
+  );
+  for (const key of keys) if (hidden) reaching.delete(key); else reaching.add(key);
+  return writeProviderSelection(list, provider, [...reaching], catalogForProvider, { includeFuture: !hidden });
+}
+
+/**
+ * A bare (no-slash) entry that never matches a real model: no provider mints
+ * this literal id, and a bare entry with no wildcard is matched against every
+ * provider's ids verbatim (see the header), so it is inert everywhere.
+ *
+ * Used to keep an allow-list ACTIVE (`allowListActive`) when a save
+ * legitimately leaves nothing enabled anywhere — e.g. "Disable all" on the
+ * last curated (or last connected) provider. Persisting `[]` there would
+ * read back as "no restriction" and silently re-enable every model instead
+ * of the zero the user chose; substituting a whole-provider glob (the
+ * previous bug this replaces) inverted the choice the same way.
+ */
+export const NOTHING_ENABLED_ENTRY = "cody-nothing-enabled";
+
+/**
+ * `list`, or — if it is empty — a single-entry list that keeps the
+ * allow-list active while enabling nothing. Callers that can legitimately
+ * empty the whole setting (curation Save, instance hide) should run their
+ * result through this before writing `enabledModels`.
+ */
+export function keepAllowListActive(list: readonly string[]): string[] {
+  return list.length > 0 ? [...list] : [NOTHING_ENABLED_ENTRY];
+}
+
+/**
  * Providers pinned to an exact list — they have entries but no whole-provider
  * glob, so a model they release later stays hidden until someone re-curates.
  * Sorted, for the summary strip.

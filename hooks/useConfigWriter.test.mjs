@@ -156,6 +156,88 @@ test("schema patches coalesce into one PUT within the window", async () => {
   assert.ok(SCHEMA_COALESCE_MS >= 300);
 });
 
+test("a delete clears the cached settings snapshot so a patch queued behind it re-reads the file instead of resurrecting the deleted key", async () => {
+  // The server-side effect of a reset: a brand new object without the key,
+  // never a mutation of the object already referenced by `latestSettings`
+  // (a real DELETE goes over HTTP to a separate process, so it cannot
+  // alias the client's in-memory snapshot the way mutating one object in
+  // place would in this test).
+  let settings = { advisor: { enabled: true, subagents: true } };
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const method = init.method ?? "GET";
+    calls.push(method);
+    if (url === "/api/omp-settings" && method === "GET") return new Response(JSON.stringify({ settings }), { status: 200 });
+    if (url === "/api/omp-settings" && method === "PUT") {
+      settings = JSON.parse(init.body).settings;
+      return new Response(JSON.stringify({ success: true, settings }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ error: `no stub for ${method} ${url}` }), { status: 500 });
+  };
+  setSettingsRouteData("/api/omp-settings", { settings });
+
+  const reset = enqueueConfigWrite("delete", async () => {
+    settings = { advisor: { enabled: settings.advisor.enabled } };
+  });
+  // Queued in the same tick as the reset, before either has run.
+  const patch = patchSettingsSection("advisor", { enabled: false });
+  await Promise.all([reset, patch]);
+  await configWriterIdle();
+
+  assert.equal("subagents" in settings.advisor, false, "the reset key must not be resurrected by a patch built from the pre-delete snapshot");
+  assert.deepEqual(settings.advisor, { enabled: false });
+  assert.deepEqual(readSettingsRoute("/api/omp-settings").settings, settings);
+});
+
+test("a superseded settings PUT resolves with the outcome of the PUT that actually carried its change", async () => {
+  let settings = { advisor: { enabled: false }, compaction: { enabled: true } };
+  let releasePut;
+  let putCalls = 0;
+  let putBody = null;
+  globalThis.fetch = async (url, init = {}) => {
+    const method = init.method ?? "GET";
+    if (url === "/api/omp-settings" && method === "GET") return new Response(JSON.stringify({ settings }), { status: 200 });
+    if (url === "/api/omp-settings" && method === "PUT") {
+      putCalls += 1;
+      putBody = JSON.parse(init.body);
+      return new Promise((resolve) => {
+        releasePut = () => resolve(new Response(JSON.stringify({ success: true, settings: putBody.settings }), { status: 200 }));
+      });
+    }
+    return new Response(JSON.stringify({ error: `no stub for ${method} ${url}` }), { status: 500 });
+  };
+  setSettingsRouteData("/api/omp-settings", { settings });
+
+  const a = patchSettingsSection("advisor", { enabled: true }); // superseded before its own turn
+  const b = patchSettingsSection("compaction", { enabled: false }); // the snapshot that actually ships
+  let aSettled = false;
+  a.then(() => { aSettled = true; });
+  await sleep(10);
+  assert.equal(putCalls, 1, "only the snapshot still current when its turn came is PUT");
+  assert.equal(aSettled, false, "the superseded write must not report success before the PUT carrying its change lands");
+
+  releasePut();
+  await Promise.all([a, b]);
+  assert.equal(aSettled, true);
+  assert.deepEqual(putBody.settings, { advisor: { enabled: true }, compaction: { enabled: false } }, "the winning PUT carried both changes");
+});
+
+test("when the PUT carrying a superseded write's change fails, the superseded write's promise rejects with the same error", async () => {
+  const settings = { advisor: { enabled: false } };
+  globalThis.fetch = async (url, init = {}) => {
+    const method = init.method ?? "GET";
+    if (url === "/api/omp-settings" && method === "GET") return new Response(JSON.stringify({ settings }), { status: 200 });
+    if (url === "/api/omp-settings" && method === "PUT") return new Response(JSON.stringify({ error: "disk full" }), { status: 500 });
+    return new Response(JSON.stringify({ error: `no stub for ${method} ${url}` }), { status: 500 });
+  };
+  setSettingsRouteData("/api/omp-settings", { settings });
+
+  const a = patchSettingsSection("advisor", { enabled: true });
+  const b = patchSettingsSection("advisor", { enabled: false });
+  await assert.rejects(a, /disk full/, "a write superseded before it ran must still see the real PUT's failure, not a phantom success");
+  await assert.rejects(b, /disk full/);
+});
+
 test("every settled write invalidates the cached reads a config change can move", async () => {
   const server = stubServer({ advisor: { enabled: false } });
   setSettingsRouteData("/api/omp-settings", { settings: server.settings });

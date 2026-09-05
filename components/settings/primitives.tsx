@@ -112,7 +112,7 @@ export function ToggleSwitch({ checked, onChange, disabled }: { checked: boolean
   );
 }
 
-export function NativeSetting({ label, description, scope, badge, unavailable, searchId, control, children }: {
+export function NativeSetting({ label, description, scope, badge, unavailable, searchId, control, switchControl, children }: {
   label: string;
   description?: string;
   /** Where the value lives when it is not the harness's own config file. The
@@ -129,6 +129,12 @@ export function NativeSetting({ label, description, scope, badge, unavailable, s
   searchId?: string;
   /** Renders below the label instead of beside it — for wide inputs. */
   control?: ReactNode;
+  /** States explicitly that `children` renders a boolean toggle, for callers
+   * whose control is wrapped in another component (SchemaControl, etc.) so
+   * the `children.type === ToggleSwitch` check below cannot see through it.
+   * Undefined falls back to that structural check, so a caller passing
+   * `<ToggleSwitch>` directly still gets the label wrap without setting this. */
+  switchControl?: boolean;
   children?: ReactNode;
 }) {
   const ref = useRef<HTMLElement | null>(null);
@@ -145,9 +151,12 @@ export function NativeSetting({ label, description, scope, badge, unavailable, s
   // A toggle's card is its target: wrapping the whole card in a <label>
   // makes the description text and the empty space around the 36px switch
   // activate it, which is the difference between a tappable row and a
-  // fiddly one on a phone. Only a lone ToggleSwitch qualifies — a <label>
-  // around a select or text input would steal their focus semantics.
-  const isSwitch = isValidElement(children) && children.type === ToggleSwitch;
+  // fiddly one on a phone. A lone ToggleSwitch qualifies structurally; a
+  // wrapped one (SchemaControl, etc.) must say so via `switchControl`, since
+  // the element type check cannot see through the wrapper. A <label> around
+  // a select or text input would steal their focus semantics, so neither
+  // path fires for those.
+  const isSwitch = switchControl ?? (isValidElement(children) && children.type === ToggleSwitch);
   const Root: "label" | "div" = isSwitch ? "label" : "div";
 
   return (
