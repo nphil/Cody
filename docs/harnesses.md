@@ -15,7 +15,7 @@ terminals, git surface, files, checkpoints and themes all stay.
 - **Onboarding**: on a fresh instance, the first admin sees a full-screen
   engine picker right after signing in. Picking one persists the choice and
   the picker never returns.
-- **Settings → User Accounts → Agent engine** (admins): shows every known
+- **Settings → System → Engines** (admins): shows every known
   engine with its install state, lets you install missing ones, switch the
   active engine, and uninstall engines Cody itself installed. Switching
   restarts live agent sessions; chat history and workspace files are
@@ -223,7 +223,7 @@ What pi serves is flagged per surface, not as one bundle:
   `mode_changed` report the agent's own switches back.
 - `provider-catalog.ts` / `provider-keys.ts` — provider API keys as
   Cody-level state: a 0600 JSON store in the instance data dir, entered once
-  in Settings → API Keys & Providers and handed to EVERY engine child process
+  in Settings → Providers and handed to EVERY engine child process
   through `engineChildEnv()` (rpc-ui spawn, ACP spawn, terminal). Every engine
   reads credentials from its environment, so one key works under all of
   them, and a spec's own entries still win (`CLAUDE_CODE_EXECUTABLE`,
@@ -312,13 +312,13 @@ schema and omp's `config.yml` back under its own name, and its `PUT` wrote
 omp's `config.yml` while another engine was active, reporting success. An
 adapter hook cannot do that. Adding a settings pipeline to a new engine is
 now: implement `EngineSettingsSurface`, hang it off the adapter, flip
-`nativeSettings`. The JSON the route serves is fixed by the panel
-(`components/settings/OmpSchemaSettings.tsx`) and pinned by
-`lib/engine-route-guards.test.mjs`:
-`{path, harness:{id,shortName}, host:{platform}, schema, values}`, or
-`schema: null` plus a `reason` when the engine's declaration cannot be read —
-which is an answer, not an error, since it is also what an engine that is
-simply not installed yet looks like.
+`nativeSettings`. The JSON the route serves is fixed by the Behavior hub's
+list (`components/settings/engine/SchemaSettingsList.tsx`, indexed by
+`hooks/useSchemaIndex.ts`) and pinned by `lib/engine-route-guards.test.mjs`:
+`{path, harness:{id,shortName}, host:{platform}, schema, values, secretsSet}`,
+or `schema: null` plus a `reason` when the engine's declaration cannot be
+read — which is an answer, not an error, since it is also what an engine
+that is simply not installed yet looks like.
 
 ### omp's RPC framing is asymmetric — and images pay for it
 
@@ -386,7 +386,15 @@ format/size ladder (`lib/preview-screenshot.ts`).
    it: the point is that a setting added upstream appears when the user
    updates the engine. `hermes-settings.ts` and `pi-settings.ts` are the two
    worked examples of deriving one from something that is not a schema.
-6. Wire the display tool so the engine can open Cody's Preview panel.
+   Mark any credential-shaped leaf (an API key, a password) `secret: true` —
+   its value is then withheld from `values` entirely and reported only by
+   membership in `secretsSet`, and the Behavior hub renders it write-only.
+6. Any settings surface you add must be searchable too: a schema-driven row
+   is found automatically (`useSchemaIndex` feeds the dialog-wide search
+   directly), but a hand-built card belongs in that panel's own
+   `SEARCH_ENTRIES` export (`components/settings/search-index.ts` collects
+   every panel's) or the search box will not find it.
+7. Wire the display tool so the engine can open Cody's Preview panel.
    Two existing shapes:
    - **Host tool** (omp): if the engine has a host-tool channel, register a
      Cody-owned `open_preview` tool at session start (omp uses
@@ -407,7 +415,7 @@ format/size ladder (`lib/preview-screenshot.ts`).
    (direct real-origin iframe, then the `CODY_PREVIEW_BASE_URL` gateway, then
    the raster stream as the guaranteed floor) and the client takes the best
    rung that works.
-7. Run the suite: `npm run typecheck && npm run lint && npm test`.
+8. Run the suite: `npm run typecheck && npm run lint && npm test`.
 
 Cursor, Kilo Code, Cline and friends are all candidates — anything with
 a headless mode and a session-resume story fits the same mold.
@@ -416,7 +424,7 @@ a headless mode and a session-resume story fits the same mold.
 
 The Docker image under `docker/` ships **no engine at all** — bring your
 own. Every engine, omp included, installs at runtime from the onboarding
-picker (or Settings → User Accounts → Agent engine) into the persistent
+picker (or Settings → System → Engines) into the persistent
 tools prefix, and updates independently of the Cody image via the same
 card's Update action. The image only carries the runtimes engines need
 (Node, and Bun for omp).

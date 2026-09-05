@@ -39,6 +39,8 @@ export interface HermesSetting {
   tab: string;
   group?: string;
   label: string;
+  /** A credential-shaped string leaf; see isHermesSecretKey. */
+  secret?: boolean;
   /** Absent for a leaf Hermes declares as `None`. That declares no value and
    * no type, so a stand-in like `""` would invent both. */
   default?: HermesSettingValue;
@@ -70,6 +72,29 @@ const TAB_ID = "hermes";
  */
 export const LIST_WRITE_UNSUPPORTED =
   "Hermes' config CLI stores scalars only, so lists show here but cannot be saved from Cody";
+
+/**
+ * Leaves whose NAME says they hold a credential. Hermes keeps provider keys,
+ * bot tokens and the dashboard password inside DEFAULT_CONFIG beside every
+ * other setting, so the panel would otherwise print them. A matching STRING
+ * leaf is flagged `secret`: the schema route sends only whether it is set,
+ * and the row renders write-only. The twin of this pattern lives in
+ * ./pi-settings.ts, deliberately not shared: the two engines name their keys
+ * differently, so each adapter owns its own decision.
+ *
+ * `password` alone misses `dashboard.basic_auth.password_hash` — an
+ * offline-crackable scrypt hash, not plaintext, but still credential
+ * material nobody but an admin should read — and neither `api_?key` nor
+ * bare `key` catches `browser.camofox.session_key`, an externally managed
+ * browser identity. `(_?)hash` and `session_?key` / `cookie` cover those and
+ * the same shapes elsewhere in Hermes' config; bare `key` stays excluded so
+ * a genuinely non-secret leaf like `record_key: "ctrl+b"` stays editable.
+ */
+const SECRET_KEY_PATTERN = /(api_?key|session_?key|cookie|token|secret|password|_?hash)$/i;
+
+export function isHermesSecretKey(key: string, type: HermesSettingType): boolean {
+  return type === "string" && SECRET_KEY_PATTERN.test(key);
+}
 
 /** Sections that configure something other than the coding agent. They are
  * still rendered — hiding an engine's real settings would be a lie — but they
@@ -154,13 +179,15 @@ function asControlValue(type: HermesSettingType, raw: unknown): HermesSettingVal
 /** One leaf of DEFAULT_CONFIG as a setting the panel can render. */
 function describeLeaf(path: string[], group: string, value: unknown): HermesSetting {
   const type = settingTypeOf(value);
+  const key = path.join(".");
   return {
-    key: path.join("."),
+    key,
     type,
     tab: TAB_ID,
     group,
     label: humanizeKey(path[path.length - 1]),
     default: asControlValue(type, value),
+    ...(isHermesSecretKey(key, type) ? { secret: true } : {}),
     // A list is still worth SHOWING — the user needs to see what Hermes is
     // configured with — but its write would be refused, and an editable
     // control whose save always fails is a worse answer than an honest

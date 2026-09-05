@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { requireEngine } from "@/lib/engine-guard";
 import { invalidateModelsCache } from "@/lib/models-cache";
 import { disposeUtilityRpc } from "@/lib/omp/rpc-utility";
-import { deleteNativeSettingsSections, readNativeSettings, writeNativeSettings, type NativeSettings } from "@/lib/omp/settings-config";
+import { deleteNativeSettingsPaths, deleteNativeSettingsSections, readNativeSettings, writeNativeSettings, type NativeSettings } from "@/lib/omp/settings-config";
 import { restartIdleRpcSessions } from "@/lib/rpc-manager";
 
 export const dynamic = "force-dynamic";
@@ -50,18 +50,29 @@ export async function PUT(request: Request) {
   }
 }
 
-/** Reset whole config.yml sections (e.g. { sections: ["retry"] }) back to OMP
- * defaults by deleting the overrides. Idle sessions restart so the defaults
- * take effect immediately; running turns finish on the old values. */
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+/** Reset config.yml overrides back to OMP defaults by deleting them: whole
+ * sections (`{ sections: ["retry"] }`) and/or individual keys
+ * (`{ paths: ["defaultThinkingLevel"] }` — only the paths settings-config
+ * lists as resettable). Idle sessions restart so the defaults take effect
+ * immediately; running turns finish on the old values. */
 export async function DELETE(request: Request) {
   try {
     const gate = requireEngine("omp", SURFACE);
     if ("response" in gate) return gate.response;
-    const body = await request.json().catch(() => ({})) as { sections?: unknown };
-    if (!Array.isArray(body.sections) || body.sections.length === 0 || body.sections.some((section) => typeof section !== "string")) {
-      return NextResponse.json({ error: "sections must be a non-empty string array" }, { status: 400 });
+    const body = await request.json().catch(() => ({})) as { sections?: unknown; paths?: unknown };
+    const sections = body.sections === undefined ? [] : body.sections;
+    const paths = body.paths === undefined ? [] : body.paths;
+    if (!isStringArray(sections) || !isStringArray(paths) || sections.length + paths.length === 0) {
+      return NextResponse.json({ error: "sections and/or paths must be non-empty string arrays" }, { status: 400 });
     }
-    const removed = deleteNativeSettingsSections(body.sections as string[]);
+    const removed = [
+      ...(sections.length > 0 ? deleteNativeSettingsSections(sections) : []),
+      ...(paths.length > 0 ? deleteNativeSettingsPaths(paths) : []),
+    ];
     const { restarted, active } = await restartIdleRpcSessions();
     return NextResponse.json({ success: true, removed, restarted, active, settings: readNativeSettings().settings });
   } catch (error) {

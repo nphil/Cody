@@ -132,8 +132,10 @@ memoized against the venv's mtime, so a `--force` reinstall at the same path
 re-reads rather than serving the old version's settings.
 
 Panel reuse was total — `app/api/omp-settings/schema/route.ts` dispatches on
-the active harness and returns the same shape, so `OmpSchemaSettings.tsx`
-renders Hermes with no engine-specific code. It did expose one latent bug:
+the active harness and returns the same shape, so
+`components/settings/engine/SchemaSettingsList.tsx` (indexed by
+`hooks/useSchemaIndex.ts`) renders Hermes with no engine-specific code. It
+did expose one latent bug:
 the row fell back to printing the setting key as its description, harmless
 while every setting had one (omp's do) and duplicated on every row for
 Hermes, which declares none.
@@ -207,8 +209,9 @@ toggling in Cody flips the Status column of `hermes skills list`, and the
 When that interpreter is absent (a bare `pip install` onto PATH with no
 adjacent venv), `canToggle` comes back false and the switch renders read-only
 with an honest reason rather than writing a key Hermes ignores — the
-`readOnly`/`readOnlyReason` pattern `OmpSchemaSettings` already uses for
-unwritable list settings.
+`readOnly`/`readOnlyReason` pattern
+`components/settings/engine/SchemaSettingsList.tsx` (indexed by
+`hooks/useSchemaIndex.ts`) already uses for unwritable list settings.
 
 **`hermes skills install` exits 0 whether or not it installed.** This is the
 trap of this phase, and it is the same shape as the version-probe traps the

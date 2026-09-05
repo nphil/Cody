@@ -1,9 +1,10 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useContext, useRef } from "react";
 import { useI18n } from "@/lib/i18n";
 import { isSafeExternalUrl } from "@/lib/safe-url";
 import { formatApiError } from "@/lib/i18n/api-error";
+import { ShellContext } from "./shell-context";
 
 /**
  * One provider's sign-in state machine: an SSE stream over
@@ -13,8 +14,8 @@ import { formatApiError } from "@/lib/i18n/api-error";
  * `providerLogins` (lib/harness/types.ts — omp, pi, Claude Code, Codex,
  * Hermes, each running its OWN login and keeping the credential in its OWN
  * store) is driven through this exact wire shape, so this is the ONE sign-in
- * UI implementation in Cody: both the API Keys & Providers "Sign in" section
- * (ProviderSignInPanel) and OMP's own Models & Auth panel (ModelsConfig)
+ * UI implementation in Cody: the Providers hub's detail drawer
+ * (components/settings/providers/ProviderDetail.tsx) and the setup wizard
  * render it unchanged, just with a different `provider` row.
  *
  * Frames: `auth {url, instructions, token}` (browser sign-in; the paste box
@@ -65,6 +66,11 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
  * already IS the click, so the expanded detail must not ask for a second one.
  * `compact`: the row above already shows the name and the signed-in state,
  * so the detail drops its own "Subscription · connected" header.
+ *
+ * Inside the Settings shell a flow in progress registers with the busy
+ * context, so closing the dialog or popping the level asks first instead of
+ * cutting the SSE off mid sign-in. Outside the shell (the setup wizard)
+ * there is no context and nothing to register with.
  */
 export function ProviderLoginFlow({ provider, onChanged, autoStart = false, compact = false }: { provider: ProviderLoginRow; onChanged: () => void; autoStart?: boolean; compact?: boolean }) {
   const { t, tn } = useI18n();
@@ -72,6 +78,16 @@ export function ProviderLoginFlow({ provider, onChanged, autoStart = false, comp
   const [inputValue, setInputValue] = useState("");
   const eventSourceRef = useRef<EventSource | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const busy = useContext(ShellContext)?.busy;
+
+  const isWorking = loginState.phase === "connecting" || loginState.phase === "progress" ||
+    loginState.phase === "auth" || loginState.phase === "device_code" ||
+    loginState.phase === "prompt" || loginState.phase === "select";
+
+  useEffect(() => {
+    if (!busy || !isWorking) return;
+    return busy.hold(`Signing in to ${provider.name}`);
+  }, [busy, isWorking, provider.name]);
 
   useEffect(() => {
     if (loginState.phase === "auth" || loginState.phase === "prompt") {
@@ -90,8 +106,6 @@ export function ProviderLoginFlow({ provider, onChanged, autoStart = false, comp
   useEffect(() => {
     return () => { eventSourceRef.current?.close(); };
   }, []);
-
-  const autoStartRef = useRef(autoStart);
 
   const handleLogin = useCallback(() => {
     eventSourceRef.current?.close();
@@ -209,15 +223,20 @@ export function ProviderLoginFlow({ provider, onChanged, autoStart = false, comp
     }
   }, [provider.id, t]);
 
+  // `handleLogin` is re-created whenever the parent passes a new `onChanged`,
+  // so the start effect reads it through a ref and depends on `autoStart`
+  // alone: a parent re-render must not restart a sign-in in progress. The
+  // cleanup re-arms it so a development-mode simulated remount (which
+  // closes the stream in the unmount cleanup above) starts a fresh one.
+  const handleLoginRef = useRef(handleLogin);
+  handleLoginRef.current = handleLogin;
+  const startedRef = useRef(false);
   useEffect(() => {
-    if (!autoStartRef.current) return;
-    autoStartRef.current = false;
-    handleLogin();
-  }, [handleLogin]);
-
-  const isWorking = loginState.phase === "connecting" || loginState.phase === "progress" ||
-    loginState.phase === "auth" || loginState.phase === "device_code" ||
-    loginState.phase === "prompt" || loginState.phase === "select";
+    if (!autoStart || startedRef.current) return;
+    startedRef.current = true;
+    handleLoginRef.current();
+    return () => { startedRef.current = false; };
+  }, [autoStart]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: compact ? 10 : 16 }}>

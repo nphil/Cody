@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { invalidateModelsCache } from "@/lib/models-cache";
 import { disposeUtilityRpc } from "@/lib/omp/rpc-utility";
 import { requireCapability } from "@/lib/engine-guard";
+import type { EngineSettingValue, EngineSettingsSchema } from "@/lib/harness/types";
 
 /**
  * The ACTIVE engine's own settings schema plus the values currently persisted
@@ -25,6 +26,11 @@ import { requireCapability } from "@/lib/engine-guard";
  * the hook is the inner one, so an engine that declares `nativeSettings`
  * without implementing the surface refuses rather than borrowing someone
  * else's.
+ *
+ * Secret leaves (`EngineSetting.secret`, a credential-shaped string the
+ * engine keeps beside its other settings) never leave the server: their
+ * values are dropped from `values` here, and `secretsSet` names the ones
+ * that hold something, so the panel can say "Set" without knowing what.
  */
 
 export const dynamic = "force-dynamic";
@@ -41,12 +47,30 @@ function noSurface(shortName: string) {
   );
 }
 
+/** Strip every secret leaf's value, reporting only which are set. A secret
+ * counts as set when a non-empty string is persisted: Hermes declares its
+ * keys with `""` as the default, and an empty override is the same as none. */
+function redactSecrets(schema: EngineSettingsSchema | null, values: Record<string, EngineSettingValue>): { values: Record<string, EngineSettingValue>; secretsSet: string[] } {
+  const secretKeys = new Set((schema?.settings ?? []).filter((setting) => setting.secret).map((setting) => setting.key));
+  if (secretKeys.size === 0) return { values, secretsSet: [] };
+  const shown: Record<string, EngineSettingValue> = {};
+  const secretsSet: string[] = [];
+  for (const [key, value] of Object.entries(values)) {
+    if (!secretKeys.has(key)) {
+      shown[key] = value;
+      continue;
+    }
+    if (typeof value === "string" ? value.length > 0 : value !== undefined) secretsSet.push(key);
+  }
+  return { values: shown, secretsSet };
+}
+
 export function GET() {
   try {
     const gate = requireCapability("nativeSettings", SURFACE);
     if ("response" in gate) return gate.response;
     const active = gate.harness;
-    // The active harness names the panel ("All OMP Settings"), so the label
+    // The active harness names the hub ("OMP" eyebrow, "All OMP settings" list), so the label
     // follows the engine selection instead of being baked into the UI.
     const { id, shortName } = active;
     const harness = { id, shortName };
@@ -62,10 +86,12 @@ export function GET() {
         host,
         schema: null,
         values: {},
+        secretsSet: [],
         reason: reason ?? `${shortName}'s settings schema could not be read from the installed package`,
       });
     }
-    return NextResponse.json({ path, harness, host, schema, values });
+    const redacted = redactSecrets(schema, values);
+    return NextResponse.json({ path, harness, host, schema, values: redacted.values, secretsSet: redacted.secretsSet });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 });
   }
@@ -83,6 +109,10 @@ export async function PUT(request: Request) {
     const active = gate.harness;
     if (!active.settings) return noSurface(active.shortName);
 
+    // The schema is read BEFORE the write so the echoed values can be
+    // redacted by the same rule the GET uses; the read is memoized per
+    // installed package, so this costs a config-file parse at most.
+    const { schema } = active.settings.readSchema();
     const { written, rejected, values } = active.settings.write(patch as Record<string, unknown>);
     if (written.length > 0) {
       // Settings decide which models an engine offers and how its helper child
@@ -93,14 +123,16 @@ export async function PUT(request: Request) {
       invalidateModelsCache();
       disposeUtilityRpc();
     }
-    if (rejected.length === 0) return NextResponse.json({ success: true, written, values });
+    const redacted = redactSecrets(schema, values);
+    if (rejected.length === 0) return NextResponse.json({ success: true, written, values: redacted.values, secretsSet: redacted.secretsSet });
     // A save that did not happen is never reported as one. The panel shows
     // `error`, so the keys the engine would not take are named there.
     return NextResponse.json({
       success: false,
       written,
       rejected,
-      values,
+      values: redacted.values,
+      secretsSet: redacted.secretsSet,
       error: `Not saved — ${rejected.map((entry) => `${entry.key}: ${entry.reason}`).join("; ")}`,
     });
   } catch (error) {

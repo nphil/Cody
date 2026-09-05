@@ -50,7 +50,7 @@ function exporterMissingPage(engineName: string): string {
 </style></head><body>
 <h1>Full history is unavailable</h1>
 <p>Cody renders full history with omp's exporter, and omp is not installed on this instance.</p>
-<p>Active engine: ${escapeHtml(engineName)}. Install omp from Settings &rarr; Agent engine, or set <code>CODY_OMP_BIN</code>, to turn this panel on.</p>
+<p>Active engine: ${escapeHtml(engineName)}. Install omp from Settings &rarr; System &rarr; Engines, or set <code>CODY_OMP_BIN</code>, to turn this panel on.</p>
 </body></html>`;
 }
 

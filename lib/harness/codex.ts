@@ -87,7 +87,7 @@ function codexEngineEnv(): Record<string, string> {
     if (cli) env.CODEX_PATH = cli;
   }
   // Read from the environment the CHILD will get, not this process's: a key
-  // saved in Settings → API Keys lives in Cody's store and only reaches the
+  // saved in Settings → Providers lives in Cody's store and only reaches the
   // adapter through engineChildEnv(), and without this line such a key was
   // handed over but never used — session/new still answered "Authentication
   // required".

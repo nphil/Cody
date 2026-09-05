@@ -2426,6 +2426,148 @@ html.dark .dropdown-surface :is(select, option) {
   flex-shrink: 0;
 }
 
+/* ============================== Settings shell ============================== */
+/* components/settings/SettingsShell.tsx and friends. Hover and focus states
+   need real pseudo-classes, and the phone sheet's motion must yield to
+   prefers-reduced-motion, so the shell's chrome lives here rather than in
+   inline objects. Everything is token-driven. */
+.settings-rail-row:hover:not([aria-selected="true"]) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.settings-mobile-row:hover,
+.settings-mobile-row:active {
+  background: var(--bg-hover);
+}
+.settings-directory-row:hover {
+  background: var(--bg-hover);
+}
+.settings-search-result:hover {
+  border-color: var(--accent);
+  background: var(--bg-panel);
+}
+/* The results are one listbox with a roving active option: the outline
+   follows aria-activedescendant, not focus, so it must come from a class. */
+.settings-search-result[data-active="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.settings-search-chip:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.settings-segment:hover:not([aria-selected="true"]):not(:disabled) {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+/* The phone sheet is the whole viewport: no centring transform, no
+   rounded corners, and its own scroll regions contain overscroll so a
+   flick at the end of a list never rubber-bands the chat behind it. */
+.settings-mobile-sheet {
+  inset: 0;
+  width: 100vw;
+  height: 100dvh;
+  max-width: 100vw;
+  max-height: 100dvh;
+}
+.settings-mobile-stack,
+.settings-mobile-level {
+  overscroll-behavior: contain;
+}
+/* The phone sheet slides up from the bottom edge (the desktop dialog keeps
+   dialog-pop-in). Keyframes carry the final transform because an animation
+   overrides the inline one for its whole (fill: both) lifetime. */
+@keyframes settings-sheet-in {
+  from { opacity: 0; transform: translateY(24px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes settings-drawer-in {
+  from { transform: translateX(24px); opacity: 0; }
+  to   { transform: none; opacity: 1; }
+}
+@keyframes settings-level-in {
+  from { transform: translateX(32px); opacity: 0; }
+  to   { transform: none; opacity: 1; }
+}
+.settings-drawer-panel {
+  animation: settings-drawer-in var(--dur-med) var(--ease-out-warm) both;
+}
+.settings-mobile-level {
+  animation: settings-level-in var(--dur-med) var(--ease-out-warm) both;
+}
+.settings-shell-mobile {
+  overscroll-behavior: contain;
+}
+@media (prefers-reduced-motion: reduce) {
+  .settings-mobile-sheet,
+  .settings-drawer-panel,
+  .settings-mobile-level {
+    animation: none !important;
+  }
+}
+/* Touch targets inside Settings. Below 16px iOS Safari zooms the page on
+   focus and never zooms back; controls grow to 44px so a row is a target,
+   not a hunt. Switches keep their own 36x20 body (the whole card is their
+   label). Desktop density is untouched.
+
+   `.ui-dialog` carries the same rules for a portaled Dialog that renders
+   OUTSIDE `.settings-shell` — ConfirmDialog, PromptDialog and a Drawer's
+   `presentation="dialog"` all sit in a base-ui portal at document.body, so
+   `.settings-shell input {...}` never reaches PromptDialog's masked input or
+   a destructive confirm's Cancel/Confirm buttons. Any caller of DialogContent
+   for a Settings-launched dialog should carry this class. */
+@media (hover: none), (pointer: coarse) {
+  .settings-shell input:not([type="checkbox"]):not([type="radio"]),
+  .settings-shell select,
+  .settings-shell textarea,
+  .ui-dialog input:not([type="checkbox"]):not([type="radio"]),
+  .ui-dialog select,
+  .ui-dialog textarea {
+    font-size: 16px !important;
+  }
+  /* `!important` on purpose, like the font size above: panels set their
+     desktop density inline (minHeight: 30 on a segment, 28 on a chip), and
+     the phone rule must win over every one of them without per-panel
+     overrides. Icon buttons get the width too: a 17px arrow is not a target. */
+  .settings-shell select,
+  .settings-shell button:not([role="switch"]),
+  .ui-dialog select,
+  .ui-dialog button:not([role="switch"]) {
+    min-height: 44px !important;
+  }
+  .settings-shell button:not([role="switch"]),
+  .ui-dialog button:not([role="switch"]) {
+    min-width: 44px !important;
+  }
+  /* The root list's rows are taller than a bare target (label over a
+     status line); the rule above must not clamp them when the status line
+     is absent. */
+  .settings-shell .settings-mobile-row {
+    min-height: 52px !important;
+  }
+  .settings-rail-row,
+  .settings-mobile-row,
+  .settings-mobile-back,
+  .settings-directory-row,
+  .settings-search-result,
+  .settings-search-chip,
+  .settings-segment {
+    touch-action: manipulation;
+  }
+  /* At least 8px between neighbouring targets: the chip row, the segmented
+     control and the results list all pack buttons side by side. */
+  .settings-search-chips {
+    gap: 8px;
+  }
+  .settings-segmented {
+    gap: 8px;
+    padding: 4px;
+  }
+  .settings-search-column [role="listbox"] {
+    gap: 8px;
+  }
+}
+
 /* ============================== Login screen ============================== */
 /* The sign-in surface renders before the app shell exists, so its styling
    lives here as classes rather than inline objects: focus rings and hover

@@ -8,7 +8,7 @@ import { getToolsDir, invalidateEngineBinCache, probeEngineVersion, resolveEngin
 
 /**
  * On-demand engine installs. An engine the user picks in onboarding (or in
- * Settings → Agent engine) is installed with npm into Cody's own prefix —
+ * Settings → System → Engines) is installed with npm into Cody's own prefix —
  * `<toolsDir>` from lib/harness/engine-bin, which lives under the persistent
  * instance data dir rather than the image's global node_modules, so installed
  * engines survive a container image update. Binary resolution already prefers

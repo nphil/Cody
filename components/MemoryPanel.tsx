@@ -17,9 +17,9 @@ import { chipStyle } from "@/components/settings/primitives";
  * the user who wants to change one opens the file themselves, so the path is
  * surfaced in mono and selectable next to a copy button.
  *
- * Gated on `capabilities.memory` at the tab level (components/SettingsTabs.tsx
- * and the panel gate in SettingsConfig.tsx), so an engine that keeps memory it
- * cannot hand back — omp — never shows this tab at all. GET /api/memory's 400
+ * Gated on `capabilities.memory` at the hub level (`needsCapability` on the
+ * Memory section in components/settings/registry.ts), so an engine that keeps
+ * memory it cannot hand back — omp — never shows this hub at all. GET /api/memory's 400
  * `unsupported` is only the backstop for an engine switch under an open
  * dialog, and it is rendered as a sentence rather than an error.
  */

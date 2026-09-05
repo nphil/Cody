@@ -5,6 +5,7 @@ import { requireCapability } from "@/lib/engine-guard";
 import { invalidateModelsCache } from "@/lib/models-cache";
 import { getHarness } from "@/lib/harness";
 import { createLoginValueChannel } from "@/lib/harness/login-channel";
+import { invalidateProviderLoginsCache } from "@/lib/provider-directory-server";
 import type { ProviderLoginUi } from "@/lib/harness/types";
 
 export const dynamic = "force-dynamic";
@@ -168,6 +169,9 @@ export async function GET(
         await surface.login(provider, ui);
         // A new credential changes which models resolve, whatever the engine.
         invalidateModelsCache();
+        // ...and the rail's cached `?cached=1` roster, or it keeps answering
+        // the pre-sign-in status until the 15s peek window lapses.
+        invalidateProviderLoginsCache(engine.id);
         send({ type: "success" });
       } catch (error) {
         if (req.signal.aborted) {

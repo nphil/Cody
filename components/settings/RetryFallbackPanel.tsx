@@ -1,15 +1,31 @@
 "use client";
 
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useContext, useEffect, useState, type CSSProperties } from "react";
 import { AlertCircle, ArrowDown, ArrowUp, Plus, RotateCcw, Sparkles, Trash2 } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/field";
 import { toast } from "@/components/ui/toast";
+import { useConfigWriter, useNativeSettings, type NativeSettings } from "@/hooks/useConfigWriter";
+import { invalidateSettingsRoutes, useSettingsRoute } from "@/hooks/useSettingsData";
+import { DEFAULT_HARNESS_LABEL } from "../SettingsTabs";
+import { NativeSetting, ToggleSwitch } from "./primitives";
+import { useSaveStatus } from "./SaveStatus";
+import { ShellContext } from "./shell-context";
 
 /**
- * OMP's native retry/fallback config, redesigned so the fallback-chain list
- * reads as "here is every chain OMP will actually use" instead of a single
- * role dropdown hiding the rest. See lib/harness / docs/harnesses.md for how
- * omp resolves fallbackChains[role] ?? fallbackChains.default at runtime.
+ * The engine's native retry/fallback config, redesigned so the fallback-chain
+ * list reads as "here is every chain the engine will actually use" instead
+ * of a single role dropdown hiding the rest. See lib/harness /
+ * docs/harnesses.md for how omp resolves fallbackChains[role] ??
+ * fallbackChains.default at runtime.
+ *
+ * This is the ONE home of `retry.enabled`: the Behavior hub's recommended
+ * cards deliberately leave the retry group out so a setting is never edited
+ * in two places.
+ *
+ * Every write goes through the config writer (`patchSection("retry", …)`,
+ * the section spread) and reports to the hosting panel's save corner; the
+ * reset is a "delete" write, ordered after every pending patch, and the
+ * dialog names the session restart it causes.
  *
  * Persistence rule that matters: an empty array under a chain key means "no
  * fallback" to omp, which is a trap for a chain the user is mid-edit on. So a
@@ -45,25 +61,27 @@ interface RetryConfig {
   fallbackChains?: Record<string, string[]>;
 }
 
-type RetrySettings = { retry?: RetryConfig };
-
 const RETRY_ATTEMPT_OPTIONS = [0, 1, 2, 3, 5, 10, 15, 20];
 const RESERVE_PCT_OPTIONS = [5, 10, 15, 20, 25];
 
-function retryAttemptLabel(count: number) {
-  return count === 10 ? "10 (OMP default)" : String(count);
+function retryAttemptLabel(count: number, engineName: string) {
+  return count === 10 ? `10 (${engineName} default)` : String(count);
 }
 
-const REVERT_POLICIES: { value: FallbackRevertPolicy; label: string; description: string }[] = [
-  { value: "cooldown-expiry", label: "After cooldown expires (OMP default)", description: "OMP automatically switches back to the primary model once its rate-limit or error cooldown has passed." },
-  { value: "never", label: "Never — stay on fallback", description: "Once OMP falls back, it keeps using that model until you change it yourself." },
-];
+function revertPolicies(engineName: string): { value: FallbackRevertPolicy; label: string; description: string }[] {
+  return [
+    { value: "cooldown-expiry", label: `After cooldown expires (${engineName} default)`, description: `${engineName} automatically switches back to the primary model once its rate-limit or error cooldown has passed.` },
+    { value: "never", label: "Never — stay on fallback", description: `Once ${engineName} falls back, it keeps using that model until you change it yourself.` },
+  ];
+}
 
-const RESERVE_POLICIES: { value: UsageReservePolicy; label: string; description: string }[] = [
-  { value: "confirm", label: "Confirm interactively (OMP default)", description: "OMP asks before switching providers once the reserve margin is reached." },
-  { value: "auto", label: "Auto-fallback", description: "OMP switches providers on its own as soon as the reserve margin is reached." },
-  { value: "fail-closed", label: "Fail closed", description: "OMP stops the turn instead of switching providers once the reserve margin is reached." },
-];
+function reservePolicies(engineName: string): { value: UsageReservePolicy; label: string; description: string }[] {
+  return [
+    { value: "confirm", label: `Confirm interactively (${engineName} default)`, description: `${engineName} asks before switching providers once the reserve margin is reached.` },
+    { value: "auto", label: "Auto-fallback", description: `${engineName} switches providers on its own as soon as the reserve margin is reached.` },
+    { value: "fail-closed", label: "Fail closed", description: `${engineName} stops the turn instead of switching providers once the reserve margin is reached.` },
+  ];
+}
 
 // minWidth 0: a grid item's default min-width is its content, so without this
 // a card with wide content escapes its minmax(0,1fr) track instead of shrinking.
@@ -124,7 +142,7 @@ function ChainCard({ chainKey, roleNames, entries, modelOptions, candidate, onCa
       </div>
       {entries.length === 0 ? (
         <div style={{ padding: "8px 12px", color: "var(--text-dim)", fontSize: 11, lineHeight: 1.45, borderTop: "1px solid var(--border)" }}>
-          Not saved yet — add at least one model below. An empty chain would tell OMP to fall back to nothing.
+          Not saved yet — add at least one model below. An empty chain would tell the engine to fall back to nothing.
         </div>
       ) : (
         <div style={{ borderTop: "1px solid var(--border)" }}>
@@ -150,8 +168,24 @@ function ChainCard({ chainKey, roleNames, entries, modelOptions, candidate, onCa
   );
 }
 
-export function RetryFallbackPanel({ models, onOpenModelPlan }: { models: RuntimeModelEntry[]; onOpenModelPlan?: () => void }) {
-  const [settings, setSettings] = useState<RetrySettings | null>(null);
+export function RetryFallbackPanel({ models, onOpenModelPlan, panelId = "models" }: { models: RuntimeModelEntry[]; onOpenModelPlan?: () => void; panelId?: string }) {
+  // Works inside the settings shell (the engine's short name, the save
+  // corner) and outside it, where it falls back to the default label.
+  const shell = useContext(ShellContext);
+  // The attempts select and the fallback checkbox are plain labels, not
+  // NativeSetting cards, so they scroll themselves into view when a search
+  // result or an "Also under" chip targets their schema id.
+  const highlight = shell?.highlight ?? null;
+  useEffect(() => {
+    if (highlight !== "schema-retry.maxRetries" && highlight !== "schema-retry.modelFallback") return;
+    const target = document.querySelector(`[data-search-id="${highlight}"]`);
+    if (target instanceof HTMLElement) target.scrollIntoView({ block: "center" });
+  }, [highlight]);
+  const engineName = shell?.harnessLabel ?? DEFAULT_HARNESS_LABEL;
+  const writer = useConfigWriter();
+  const native = useNativeSettings(true);
+  const { track } = useSaveStatus(panelId);
+  const rolesRoute = useSettingsRoute<{ roleNames?: string[] }>("/api/model-roles");
   const [error, setError] = useState<string | null>(null);
   // Chain keys the user just added (or fully emptied out) that have no
   // persisted entries yet — see the module doc comment above.
@@ -161,62 +195,16 @@ export function RetryFallbackPanel({ models, onOpenModelPlan }: { models: Runtim
   const [customChainKey, setCustomChainKey] = useState("");
   const [resetOpen, setResetOpen] = useState(false);
   const [resetting, setResetting] = useState(false);
-  const [roleNames, setRoleNames] = useState<string[]>(FALLBACK_MODEL_ROLES);
-
-  useEffect(() => {
-    fetch("/api/omp-settings")
-      .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
-      .then((data: { settings?: RetrySettings }) => setSettings(data.settings ?? {}))
-      .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
-  }, []);
-
   // omp's role vocabulary changes between releases, so which chain keys are
   // roles is the engine's answer, not a list frozen here.
-  useEffect(() => {
-    fetch("/api/model-roles")
-      .then((response) => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
-      .then((data: { roleNames?: string[] }) => { if (data.roleNames?.length) setRoleNames(data.roleNames); })
-      // Labelling and the "add a role chain" list are conveniences; a failure
-      // here must not block the panel.
-      .catch(() => {});
-  }, []);
+  const roleNames = rolesRoute.data?.roleNames?.length ? rolesRoute.data.roleNames : FALLBACK_MODEL_ROLES;
 
-  // Serialize full-snapshot saves: each call writes the whole settings object,
-  // so overlapping PUTs can land out of order and clobber newer changes. Keep
-  // the latest snapshot and drain a single serialized save always writing the
-  // most recent state (fixes rapid fallback-chain edits scheduling stale writes).
-  const latestRef = useRef<RetrySettings | null>(null);
-  const drainingRef = useRef(false);
-  const save = (next: RetrySettings) => {
-    setSettings(next);
-    setError(null);
-    latestRef.current = next;
-    if (drainingRef.current) return;
-    drainingRef.current = true;
-    void (async () => {
-      try {
-        while (latestRef.current !== null) {
-          const snapshot = latestRef.current;
-          latestRef.current = null;
-          try {
-            const response = await fetch("/api/omp-settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ settings: snapshot }) });
-            const data = await response.json() as { settings?: RetrySettings; error?: string };
-            if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
-            if (latestRef.current === null) setSettings(data.settings ?? snapshot);
-          } catch (reason) {
-            setError(reason instanceof Error ? reason.message : String(reason));
-            break;
-          }
-        }
-      } finally {
-        drainingRef.current = false;
-      }
-    })();
-  };
+  const settings = native.settings;
+  if (!settings) {
+    return <div style={{ color: native.error ? "var(--status-error)" : "var(--text-muted)", fontSize: 12 }}>{native.error ?? `Loading ${engineName} retry settings…`}</div>;
+  }
 
-  if (!settings) return <div style={{ color: "var(--text-muted)", fontSize: 12 }}>Loading native OMP retry settings...</div>;
-
-  const retry = settings.retry ?? {};
+  const retry: RetryConfig = settings.retry ?? {};
   const chains = retry.fallbackChains ?? {};
   const modelOptions = models.map((model) => `${model.provider}/${model.id}`);
   const providers = [...new Set(models.map((model) => model.provider))].sort();
@@ -224,7 +212,14 @@ export function RetryFallbackPanel({ models, onOpenModelPlan }: { models: Runtim
   const persistedKeys = Object.keys(chains);
   const visibleKeys = [...persistedKeys, ...draftChainKeys.filter((key) => !persistedKeys.includes(key))];
 
-  const setRetry = (patch: Partial<RetryConfig>) => void save({ ...settings, retry: { ...retry, ...patch } });
+  // The section spread, never the whole settings object: `retry` is merged
+  // under its own key by the writer.
+  const setRetry = (patch: Partial<RetryConfig>) => {
+    setError(null);
+    void track(() => native.patchSection("retry", patch as Partial<NonNullable<NativeSettings["retry"]>>)).then((ok) => {
+      if (!ok) setError("Could not save — see the status above.");
+    });
+  };
 
   const setChainEntries = (key: string, entries: string[]) => {
     if (entries.length === 0) {
@@ -264,47 +259,53 @@ export function RetryFallbackPanel({ models, onOpenModelPlan }: { models: Runtim
   const otherRoleHasEntries = roleNames.some((role) => role !== "default" && (chains[role] ?? []).length > 0);
   const showDefaultCaution = !defaultHasEntries && otherRoleHasEntries;
 
+  const REVERT_POLICIES = revertPolicies(engineName);
+  const RESERVE_POLICIES = reservePolicies(engineName);
   const revertPolicy = REVERT_POLICIES.find((entry) => entry.value === (retry.fallbackRevertPolicy ?? "cooldown-expiry")) ?? REVERT_POLICIES[0];
   const reservePolicy = RESERVE_POLICIES.find((entry) => entry.value === (retry.usageReservePolicy ?? "confirm")) ?? RESERVE_POLICIES[0];
 
-  const runReset = async () => {
+  // A section reset is a "delete" write: it waits for every queued patch so
+  // it cannot erase a change the user made a moment ago.
+  const runReset = () => {
     setResetting(true);
-    try {
+    void track(() => writer.enqueue("delete", async () => {
       const response = await fetch("/api/omp-settings", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sections: ["retry"] }) });
-      const data = await response.json() as { settings?: RetrySettings; restarted?: number; active?: number; error?: string };
+      const data = (await response.json().catch(() => ({}))) as { restarted?: number; active?: number; error?: string };
       if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
-      setSettings(data.settings ?? {});
+      invalidateSettingsRoutes("/api/omp-settings", { exact: true });
       setDraftChainKeys([]);
       setCandidateByKey({});
       setResetOpen(false);
       const restarted = data.restarted ?? 0;
       const active = data.active ?? 0;
       toast.success(
-        "OMP retry & fallback defaults restored",
+        `${engineName} retry & fallback defaults restored`,
         `Applied to ${restarted} idle session${restarted === 1 ? "" : "s"}.${active > 0 ? ` ${active} running session${active === 1 ? "" : "s"} will keep the previous settings until it finishes.` : ""}`,
       );
-    } catch (reason) {
-      const message = reason instanceof Error ? reason.message : String(reason);
-      setError(message);
-      toast.error("Could not reset retry & fallback settings", message);
-    } finally {
-      setResetting(false);
-    }
+    })).then((ok) => {
+      if (!ok) toast.error("Could not reset retry & fallback settings");
+    }).finally(() => setResetting(false));
   };
 
   return <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
     <div>
       <SectionTitle>Retry &amp; Fallback</SectionTitle>
       <p style={{ margin: "4px 0 0", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>
-        When a model call fails, OMP retries it, then — if allowed — falls back to another model before giving up on the turn.
+        When a model call fails, {engineName} retries it, then — if allowed — falls back to another model before giving up on the turn.
       </p>
     </div>
 
     <section style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       <div style={groupLabelStyle}>Retry</div>
+      <NativeSetting
+        label="Retry transient errors"
+        description={`Retry a failed model call before ${engineName} gives up on the turn. Off means a single attempt.`}
+        searchId="retry-transient-errors"
+      >
+        <ToggleSwitch checked={retry.enabled ?? true} onChange={(enabled) => setRetry({ enabled })} />
+      </NativeSetting>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 9 }}>
-        <label style={cardStyle}><input type="checkbox" checked={retry.enabled ?? true} onChange={(event) => setRetry({ enabled: event.target.checked })} /> Retry transient errors</label>
-        <label style={cardStyle}>Retry attempts <select value={retry.maxRetries ?? 10} onChange={(event) => setRetry({ maxRetries: Number(event.target.value) })} style={selectStyle}>{RETRY_ATTEMPT_OPTIONS.map((count) => <option key={count} value={count}>{retryAttemptLabel(count)}</option>)}</select></label>
+        <label style={cardStyle} data-search-id="schema-retry.maxRetries">Retry attempts <select value={retry.maxRetries ?? 10} onChange={(event) => setRetry({ maxRetries: Number(event.target.value) })} style={selectStyle}>{RETRY_ATTEMPT_OPTIONS.map((count) => <option key={count} value={count}>{retryAttemptLabel(count, engineName)}</option>)}</select></label>
         <label style={{ ...cardStyle, gridColumn: "1 / -1" }}>
           Return to primary model <select value={retry.fallbackRevertPolicy ?? "cooldown-expiry"} onChange={(event) => setRetry({ fallbackRevertPolicy: event.target.value as FallbackRevertPolicy })} style={selectStyle}>{REVERT_POLICIES.map((entry) => <option key={entry.value} value={entry.value}>{entry.label}</option>)}</select>
           <p style={helpTextStyle}>{revertPolicy.description}</p>
@@ -315,7 +316,7 @@ export function RetryFallbackPanel({ models, onOpenModelPlan }: { models: Runtim
     <section style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       <div style={groupLabelStyle}>Fallback</div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 9 }}>
-        <label style={cardStyle}><input type="checkbox" checked={retry.modelFallback ?? true} onChange={(event) => setRetry({ modelFallback: event.target.checked })} /> Allow model fallback</label>
+        <label style={cardStyle} data-search-id="schema-retry.modelFallback"><input type="checkbox" checked={retry.modelFallback ?? true} onChange={(event) => setRetry({ modelFallback: event.target.checked })} /> Allow model fallback</label>
         <label style={cardStyle}>
           <input type="checkbox" checked={retry.usageAwareFallback ?? false} onChange={(event) => setRetry({ usageAwareFallback: event.target.checked })} /> Usage-aware fallback
           <p style={helpTextStyle}>Moves off a provider before it hits a hard usage limit, using coding-plan quota reports.</p>
@@ -323,7 +324,7 @@ export function RetryFallbackPanel({ models, onOpenModelPlan }: { models: Runtim
       </div>
       {(retry.usageAwareFallback ?? false) && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 9 }}>
-          <label style={cardStyle}>Reserve margin <select value={retry.usageReservePct ?? 10} onChange={(event) => setRetry({ usageReservePct: Number(event.target.value) })} style={selectStyle}>{RESERVE_PCT_OPTIONS.map((pct) => <option key={pct} value={pct}>{pct}%{pct === 10 ? " (OMP default)" : ""}</option>)}</select></label>
+          <label style={cardStyle}>Reserve margin <select value={retry.usageReservePct ?? 10} onChange={(event) => setRetry({ usageReservePct: Number(event.target.value) })} style={selectStyle}>{RESERVE_PCT_OPTIONS.map((pct) => <option key={pct} value={pct}>{pct}%{pct === 10 ? ` (${engineName} default)` : ""}</option>)}</select></label>
           <label style={cardStyle}>
             Reserve policy <select value={retry.usageReservePolicy ?? "confirm"} onChange={(event) => setRetry({ usageReservePolicy: event.target.value as UsageReservePolicy })} style={selectStyle}>{RESERVE_POLICIES.map((entry) => <option key={entry.value} value={entry.value}>{entry.label}</option>)}</select>
             <p style={helpTextStyle}>{reservePolicy.description}</p>
@@ -335,12 +336,12 @@ export function RetryFallbackPanel({ models, onOpenModelPlan }: { models: Runtim
     <section style={sectionCardStyle}>
       <div style={sectionHeaderStyle}>Fallback chains</div>
       <p style={{ margin: 0, padding: "8px 12px", color: "var(--text-muted)", fontSize: 11, lineHeight: 1.45, borderTop: "1px solid var(--border)" }}>
-        When a model fails, OMP tries these models in order. Each chain is keyed by a role, a specific model, or a provider wildcard. Roles without their own chain use the default chain.
+        When a model fails, {engineName} tries these models in order. Each chain is keyed by a role, a specific model, or a provider wildcard. Roles without their own chain use the default chain.
       </p>
 
       {visibleKeys.length === 0 ? (
         <div style={{ padding: "10px 12px", borderTop: "1px solid var(--border)", display: "flex", flexDirection: "column", gap: 8 }}>
-          <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>OMP has no fallback chains configured — a failed call simply retries the same model, with nowhere else to go.</p>
+          <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>{engineName} has no fallback chains configured — a failed call simply retries the same model, with nowhere else to go.</p>
           {onOpenModelPlan && <button type="button" onClick={onOpenModelPlan} style={{ alignSelf: "flex-start", padding: 0, border: "none", background: "none", color: "var(--accent)", fontSize: 12, fontWeight: 600, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 5 }}><Sparkles size={13} /> Generate chains with Plan roles &amp; fallbacks</button>}
         </div>
       ) : (
@@ -427,20 +428,20 @@ export function RetryFallbackPanel({ models, onOpenModelPlan }: { models: Runtim
         onClick={() => setResetOpen(true)}
         style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "7px 12px", border: "1px solid var(--status-error)", borderRadius: "var(--radius-control)", background: "none", color: "var(--status-error)", fontSize: 12, fontWeight: 500, cursor: "pointer" }}
       >
-        <RotateCcw size={13} /> Reset to OMP defaults
+        <RotateCcw size={13} /> Reset to {engineName} defaults
       </button>
     </div>
 
     <ConfirmDialog
       open={resetOpen}
       onOpenChange={setResetOpen}
-      title="Reset retry & fallback to OMP defaults?"
-      description="This deletes all retry and fallback customization — including every fallback chain you've configured — and lets OMP's built-in defaults take over. Idle sessions pick this up immediately; sessions mid-turn keep their current settings until they finish."
+      title={`Reset retry & fallback to ${engineName} defaults?`}
+      description={`This deletes all retry and fallback customization — including every fallback chain you've configured — and lets ${engineName}'s built-in defaults take over. Idle sessions restart to pick this up immediately; a session mid-turn keeps its current settings until it finishes.`}
       confirmLabel="Reset to defaults"
       cancelLabel="Cancel"
       danger
       busy={resetting}
-      onConfirm={() => void runReset()}
+      onConfirm={runReset}
     />
   </div>;
 }

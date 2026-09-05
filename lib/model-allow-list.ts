@@ -13,6 +13,15 @@
  * dialects of the same setting, and Cody's would be wrong for any pattern the
  * user wrote by hand. So every model-bearing response Cody receives is already
  * the effective set, and these helpers only describe and edit the setting.
+ *
+ * The one piece of that dialect Cody must know, because it writes patterns of
+ * its own: OMP matches with `Bun.Glob`, whose `*` stops at `/` while `**`
+ * crosses it. Many providers' ids contain a slash (OpenRouter's are all
+ * `vendor/model`, Workers AI's start with `@cf/`), so `provider/*` silently
+ * matches NONE of them while `provider/**` matches every model the provider
+ * offers now or later. Cody therefore writes the `**` form, and reads either
+ * form as "the whole provider" since that is plainly what a hand-written
+ * `provider/*` meant.
  */
 
 /** An empty allow-list means "no restriction" — OMP's own reading of the
@@ -27,12 +36,63 @@ export function modelKey(model: { provider: string; id: string }): string {
   return `${model.provider}/${model.id}`;
 }
 
+/**
+ * The pattern that keeps a provider fully open, including models it releases
+ * after the list was written. `**` rather than `*` — see the header: `*` would
+ * miss every id containing a slash.
+ */
+export function providerGlob(provider: string): string {
+  return `${provider}/**`;
+}
+
+// A whole-provider glob: one plain provider segment (no wildcards), then `/*`
+// or `/**`, nothing after. `provider/vendor/*` is a pattern that belongs to
+// `provider` but does not open the whole provider; `provider/*:high` carries a
+// thinking suffix Cody does not parse, so it is not recognised either.
+const PROVIDER_GLOB = /^[^/*?[]+\/\*{1,2}$/;
+
+/** True exactly for `<provider>/*` and `<provider>/**`. */
+export function isProviderGlob(entry: string): boolean {
+  return PROVIDER_GLOB.test(entry);
+}
+
+/**
+ * The provider an entry belongs to: the FIRST path segment only, matching the
+ * prefix check `replaceProviderSelection` has always used. `openrouter/vendor/m`
+ * belongs to `openrouter`, never to `vendor`. Null for a bare id (no slash),
+ * which OMP matches against every provider's ids.
+ */
+export function providerOfEntry(entry: string): string | null {
+  const slash = entry.indexOf("/");
+  return slash > 0 ? entry.slice(0, slash) : null;
+}
+
+export type CurationMode = "all" | "exact" | "none";
+
+/**
+ * How one provider is represented in an active allow-list: "all" when its
+ * whole-provider glob is present, "exact" when it is pinned to specific
+ * entries, "none" when nothing in the list belongs to it.
+ */
+export function curationModeFor(enabledModels: readonly string[], provider: string): CurationMode {
+  let mode: CurationMode = "none";
+  for (const entry of enabledModels) {
+    if (providerOfEntry(entry) !== provider) continue;
+    if (isProviderGlob(entry)) return "all";
+    mode = "exact";
+  }
+  return mode;
+}
+
 export interface ProviderCuration {
   provider: string;
   /** Models the provider offers when nothing is restricted. */
   total: number;
   /** Models actually reaching sessions right now. */
   enabled: number;
+  /** "unrestricted" while the allow-list is inactive; otherwise how the list
+   *  represents this provider (see `curationModeFor`). */
+  mode: CurationMode | "unrestricted";
 }
 
 /**
@@ -44,12 +104,17 @@ export interface ProviderCuration {
  * correct for glob entries without Cody matching a single pattern itself.
  * Providers appear if they exist in either list: one whose every model is
  * de-selected still needs a row, or it would silently vanish from the panel.
+ *
+ * `enabledModels` is the raw setting; it only decides each row's `mode`. The
+ * counts still come from the effective list, so a hand-written pattern that
+ * matches nothing shows up honestly as "all" with 0 enabled.
  */
 export function summarizeProviderCuration(
   fullCatalog: readonly { provider: string; id: string }[],
   allowed: readonly { provider: string; id: string }[],
+  enabledModels?: readonly string[],
 ): ProviderCuration[] {
-  const byProvider = new Map<string, ProviderCuration>();
+  const byProvider = new Map<string, { provider: string; total: number; enabled: number }>();
   for (const model of fullCatalog) {
     const entry = byProvider.get(model.provider) ?? { provider: model.provider, total: 0, enabled: 0 };
     entry.total += 1;
@@ -64,7 +129,19 @@ export function summarizeProviderCuration(
     if (entry.enabled > entry.total) entry.total = entry.enabled;
     byProvider.set(model.provider, entry);
   }
-  return [...byProvider.values()].sort((a, b) => b.total - a.total || a.provider.localeCompare(b.provider));
+  const active = allowListActive(enabledModels);
+  return [...byProvider.values()]
+    .sort((a, b) => b.total - a.total || a.provider.localeCompare(b.provider))
+    .map((row) => ({
+      ...row,
+      mode: active ? curationModeFor(enabledModels as readonly string[], row.provider) : "unrestricted",
+    }));
+}
+
+export interface SeedAllowListOptions {
+  /** Providers to seed as whole-provider globs rather than exact keys, so they
+   *  stay open to models released after the restriction was switched on. */
+  providerGlobs?: readonly string[];
 }
 
 /**
@@ -74,13 +151,26 @@ export function summarizeProviderCuration(
  * the restriction write hundreds of OpenRouter entries into config.yml and then
  * demand hundreds of un-checks. Seeding only what is already in use means
  * "restrict" starts from the working set and everything else is opt-in.
+ *
+ * With `providerGlobs`, those providers are seeded as globs (first, in the
+ * given order) and their in-use exact keys are dropped as redundant; in-use
+ * keys from every other provider are kept as exact entries. Without options the
+ * behaviour is the original exact-keys-only seed.
  */
 export function seedAllowList(
   inUse: readonly (string | null | undefined)[],
   fallback: readonly { provider: string; id: string }[] = [],
+  options: SeedAllowListOptions = {},
 ): string[] {
   const seeded = new Set<string>();
-  for (const key of inUse) if (key) seeded.add(key);
+  const globbed = new Set<string>(options.providerGlobs ?? []);
+  for (const provider of globbed) seeded.add(providerGlob(provider));
+  for (const key of inUse) {
+    if (!key) continue;
+    const provider = providerOfEntry(key);
+    if (provider !== null && globbed.has(provider)) continue;
+    seeded.add(key);
+  }
   // With no default and no roles this would persist `[]`, which OMP reads as
   // "no restriction" — the switch would appear to do nothing.
   if (seeded.size === 0 && fallback.length > 0) seeded.add(modelKey(fallback[0]));
@@ -98,4 +188,116 @@ export function replaceProviderSelection(
 ): string[] {
   const prefix = `${provider}/`;
   return [...enabledModels.filter((key) => !key.startsWith(prefix)), ...nextForProvider];
+}
+
+/**
+ * What the curation dialog persists on Save for one provider.
+ *
+ * Every existing entry for `provider` goes — exact keys, its whole-provider
+ * glob, and any hand-written pattern under it — then either the glob or the
+ * exact `selected` keys come back:
+ *
+ * - `includeFuture` with every catalog key selected writes `provider/**`, so a
+ *   model the provider adds next month is enabled without a revisit. This is
+ *   the fix for the original defect: exact entries froze the list at curation
+ *   time.
+ * - `includeFuture` with a strict subset still writes the exact keys. A glob
+ *   would un-hide the pruned models, which is the opposite of what the user
+ *   just did; the trade is documented in the dialog rather than made silently.
+ * - An empty `catalogForProvider` (the read failed or raced) cannot prove
+ *   anything is pruned, so `includeFuture` alone is honoured there.
+ *
+ * Entries of other providers are untouched even when they mention this one in
+ * a later segment (`openrouter/anthropic/*` belongs to `openrouter`).
+ */
+export function writeProviderSelection(
+  enabledModels: readonly string[],
+  provider: string,
+  selected: readonly string[],
+  catalogForProvider: readonly string[],
+  options: { includeFuture: boolean },
+): string[] {
+  const chosen = new Set(selected);
+  const wholeProvider = catalogForProvider.every((key) => chosen.has(key));
+  const next = options.includeFuture && wholeProvider ? [providerGlob(provider)] : selected;
+  return [...new Set(replaceProviderSelection(enabledModels, provider, next))];
+}
+
+/**
+ * The next allow-list after hiding or showing `keys` (all belonging to
+ * `provider`) for the whole instance — computed from `list` ITSELF, never
+ * from a separately-fetched "what reaches sessions now" snapshot.
+ *
+ * That distinction is the fix for a real defect: on omp, the effective
+ * catalog (and any instance-hidden set derived from it) lags a just-written
+ * `enabledModels` by a few seconds while a fresh utility RPC answers. A
+ * second hide made inside that window, if it started from that stale
+ * snapshot, silently undid the first — hiding B recomputed "what reaches
+ * sessions now" as though A's hide had never landed, so A came back. Reading
+ * `list` instead means every call — including one invoked long after the
+ * render that created its closure, like an undo toast's `onClick` fired
+ * after later hides moved the list on — builds on what the allow-list
+ * actually says right now, which is exactly a delta against current state
+ * rather than a replayed snapshot.
+ *
+ * `mode === "all"`: the provider's whole-provider glob is in `list`, so
+ * every catalog model (including ones released later) currently reaches
+ * sessions. Otherwise ("exact" or "none") `list`'s own exact entries for
+ * this provider already ARE the reaching set.
+ */
+export function applyInstanceHide(
+  list: readonly string[],
+  provider: string,
+  keys: readonly string[],
+  hidden: boolean,
+  catalogForProvider: readonly string[],
+): string[] {
+  const mode = curationModeFor(list, provider);
+  const reaching = new Set<string>(
+    mode === "all"
+      ? catalogForProvider
+      : list.filter((entry) => providerOfEntry(entry) === provider && !isProviderGlob(entry)),
+  );
+  for (const key of keys) if (hidden) reaching.delete(key); else reaching.add(key);
+  return writeProviderSelection(list, provider, [...reaching], catalogForProvider, { includeFuture: !hidden });
+}
+
+/**
+ * A bare (no-slash) entry that never matches a real model: no provider mints
+ * this literal id, and a bare entry with no wildcard is matched against every
+ * provider's ids verbatim (see the header), so it is inert everywhere.
+ *
+ * Used to keep an allow-list ACTIVE (`allowListActive`) when a save
+ * legitimately leaves nothing enabled anywhere — e.g. "Disable all" on the
+ * last curated (or last connected) provider. Persisting `[]` there would
+ * read back as "no restriction" and silently re-enable every model instead
+ * of the zero the user chose; substituting a whole-provider glob (the
+ * previous bug this replaces) inverted the choice the same way.
+ */
+export const NOTHING_ENABLED_ENTRY = "cody-nothing-enabled";
+
+/**
+ * `list`, or — if it is empty — a single-entry list that keeps the
+ * allow-list active while enabling nothing. Callers that can legitimately
+ * empty the whole setting (curation Save, instance hide) should run their
+ * result through this before writing `enabledModels`.
+ */
+export function keepAllowListActive(list: readonly string[]): string[] {
+  return list.length > 0 ? [...list] : [NOTHING_ENABLED_ENTRY];
+}
+
+/**
+ * Providers pinned to an exact list — they have entries but no whole-provider
+ * glob, so a model they release later stays hidden until someone re-curates.
+ * Sorted, for the summary strip.
+ */
+export function exactIdProviders(enabledModels: readonly string[]): string[] {
+  const providers = new Set<string>();
+  for (const entry of enabledModels) {
+    const provider = providerOfEntry(entry);
+    if (provider !== null) providers.add(provider);
+  }
+  return [...providers]
+    .filter((provider) => curationModeFor(enabledModels, provider) === "exact")
+    .sort((a, b) => a.localeCompare(b));
 }

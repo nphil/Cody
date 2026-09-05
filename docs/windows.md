@@ -152,9 +152,9 @@ service probes well-known local endpoints (Ollama `:11434`, LM Studio
 **and** — when `CODY_HOST_GATEWAY=<ip>` is set — the same ports on the
 Windows host across the WSL NAT boundary. The shell computes and passes
 `CODY_HOST_GATEWAY`. [VERIFY gateway discovery method.] Found endpoints are
-listed in Settings (model list via each runtime's API) and plug into the
-existing local-endpoint engine configuration. GPU presence from
-`desktop_info` is displayed alongside.
+listed under Settings → Providers, in its Discovered section (model list via
+each runtime's API) and plug into the existing local-endpoint engine
+configuration. GPU presence from `desktop_info` is displayed alongside.
 
 ## Updates
 

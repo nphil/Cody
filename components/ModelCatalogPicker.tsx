@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { useI18n } from "@/lib/i18n";
 import { formatCompactNumber } from "@/lib/format";
-import { Dialog, DialogContent, DialogTitle } from "@/components/ui/primitives";
+import { Drawer } from "@/components/settings/Drawer";
 
 /** One flattened models.dev entry as served by /api/models-config/catalog. */
 export interface CatalogModelEntry {
@@ -132,25 +132,13 @@ export function ModelCatalogPicker({ open, providerName, providerBaseUrl, existi
     minWidth: 0,
   };
 
+  // A nested surface of the Providers hub's detail drawer: a pushed level on
+  // a phone, a second side drawer on a desktop — never a second Dialog,
+  // which would stack a second portal and focus trap over the settings one.
   return (
-    <Dialog open onOpenChange={(o) => { if (!o) onClose(); }}>
-      <DialogContent
-        ariaLabel={t("modelsConfig.catalogTitle")}
-        onClose={onClose}
-        style={{
-          width: 720,
-          maxWidth: "min(92vw, 720px)",
-          maxHeight: "min(72dvh, calc(100dvh - 32px))",
-          padding: 0,
-          display: "flex",
-          flexDirection: "column",
-          overflow: "hidden",
-        }}
-      >
-        <DialogTitle style={{ margin: "14px 18px 8px", paddingRight: 36, fontSize: 18 }}>{t("modelsConfig.catalogTitle")}</DialogTitle>
-
+    <Drawer open={open} title={t("modelsConfig.catalogTitle")} presentation="push" onClose={onClose} width={520} ariaLabel={t("modelsConfig.catalogTitle")}>
         {/* Search */}
-        <div style={{ padding: "8px 14px 12px", flexShrink: 0 }}>
+        <div style={{ flexShrink: 0 }}>
           <div style={{
             display: "flex", alignItems: "center", gap: 8,
             padding: "6px 10px",
@@ -160,6 +148,7 @@ export function ModelCatalogPicker({ open, providerName, providerBaseUrl, existi
           }}>
             <input
               ref={inputRef}
+              data-drawer-autofocus
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder={t("modelsConfig.catalogSearchPlaceholder")}
@@ -172,7 +161,7 @@ export function ModelCatalogPicker({ open, providerName, providerBaseUrl, existi
         </div>
 
         {/* Results */}
-        <div style={{ flex: 1, overflowY: "auto", padding: "4px 14px 14px" }}>
+        <div style={{ flex: 1, minHeight: 0 }}>
           {error ? (
             <div style={{ padding: "20px 0", fontSize: 12, color: "var(--status-error)", textAlign: "center" }}>
               {t("modelsConfig.catalogError", { error })}
@@ -223,7 +212,6 @@ export function ModelCatalogPicker({ open, providerName, providerBaseUrl, existi
             })
           )}
         </div>
-      </DialogContent>
-    </Dialog>
+    </Drawer>
   );
 }

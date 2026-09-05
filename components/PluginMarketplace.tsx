@@ -152,10 +152,15 @@ export function PluginMarketplace({
   cwd,
   onChanged,
   onClose,
+  embedded = false,
 }: {
   cwd: string;
   onChanged?: () => void;
   onClose: () => void;
+  /** Render the marketplace's column without its own Dialog: the caller
+   * hosts it (Settings › Extensions puts it in a Drawer, which already has a
+   * close control and must never stack a second Dialog portal). */
+  embedded?: boolean;
 }) {
   const isMobile = useIsMobile();
   const { t } = useI18n();
@@ -336,22 +341,8 @@ export function PluginMarketplace({
   const showDetailPane = !isMobile || selectedId !== null;
   const showListPane = !isMobile || selectedId === null;
 
-  return (
-    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent
-        ariaLabel={t("pluginMarket.title")}
-        style={{
-          width: isMobile ? "calc(100vw - 16px)" : 1060,
-          maxWidth: "calc(100vw - 16px)",
-          height: isMobile ? "calc(100dvh - 16px)" : "84vh",
-          maxHeight: "calc(100dvh - 16px)",
-          padding: 0,
-          display: "flex",
-          flexDirection: "column",
-          overflow: "hidden",
-        }}
-      >
-        <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+  const column = (
+        <div style={{ display: "flex", flexDirection: "column", height: "100%", flex: 1, minHeight: 0 }}>
           {/* ── Header ── */}
           <div
             style={{
@@ -368,7 +359,7 @@ export function PluginMarketplace({
               {t("pluginMarket.title")}
             </span>
             <div style={{ flex: 1 }} />
-            <button
+            {!embedded && <button
               onClick={onClose}
               aria-label={t("pluginMarket.close")}
               className="ui-focus-ring"
@@ -387,7 +378,7 @@ export function PluginMarketplace({
               }}
             >
               ×
-            </button>
+            </button>}
           </div>
 
           {/* ── Marketplaces strip ── */}
@@ -935,7 +926,8 @@ export function PluginMarketplace({
             )}
           </div>
         </div>
-
+  );
+  const confirm = (
         <ConfirmDialog
           open={confirmRemove !== null}
           onOpenChange={(open) => { if (!open) setConfirmRemove(null); }}
@@ -950,6 +942,25 @@ export function PluginMarketplace({
             if (name) void removeMarketplace(name);
           }}
         />
+  );
+  if (embedded) return <>{column}{confirm}</>;
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent
+        ariaLabel={t("pluginMarket.title")}
+        style={{
+          width: isMobile ? "calc(100vw - 16px)" : 1060,
+          maxWidth: "calc(100vw - 16px)",
+          height: isMobile ? "calc(100dvh - 16px)" : "84vh",
+          maxHeight: "calc(100dvh - 16px)",
+          padding: 0,
+          display: "flex",
+          flexDirection: "column",
+          overflow: "hidden",
+        }}
+      >
+        {column}
+        {confirm}
       </DialogContent>
     </Dialog>
   );

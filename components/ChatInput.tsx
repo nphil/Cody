@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
-import { ChevronDown, ListChecks, Loader2, Paperclip, ShieldCheck, SlidersHorizontal, Sparkles, Target, TriangleAlert, Wrench } from "lucide-react";
+import { ChevronDown, Clock, Cpu, ListChecks, Loader2, Paperclip, Pin, Search, ShieldCheck, SlidersHorizontal, Sparkles, Target, TriangleAlert, Wrench } from "lucide-react";
 import type { SessionModeOption } from "@/hooks/useAgentSession";
 import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import { ALL_CAPABILITIES, OMP_ENGINE_ID, type ActiveEngineInfo, type EngineCapabilities } from "./SettingsTabs";
@@ -45,7 +45,10 @@ import { brandAccountLabel } from "@/lib/provider-brand";
 import { ModelIcon, ProviderIcon } from "./ProviderIcon";
 import { useI18n } from "@/lib/i18n";
 import { selectableThinkingLevels } from "@/lib/thinking-levels";
-import { engineScopedKey, STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
+import { STORAGE_EVENTS } from "@/lib/storage-keys";
+import { migrateComposerAllowlist, mirrorServerVisibility, modelVisibilityKey, pushRecentModel, readComposerVisibility, type ComposerVisibility } from "@/lib/composer-model-visibility";
+import { useSettingsRoute } from "@/hooks/useSettingsData";
+import { useSettingsOpener } from "./settings/shell-context";
 
 export interface AttachedImage {
   data: string;   // base64, no prefix (already compressed if it needed to be)
@@ -88,6 +91,9 @@ interface Props {
   modelList?: { id: string; name: string; provider: string; supportsFastMode?: boolean }[];
   modelError?: string | null;
   modelsLoading?: boolean;
+  /** Bumped when models.yml or the curation changed: the picker re-reads
+   * the new-models line and its visibility mirror. */
+  modelsRefreshKey?: number;
   onModelChange?: (provider: string, modelId: string) => void;
   /** Return a NEW session to auto ("Smart") model resolution. Present only
    * for a new, not-yet-spawned session — on a live session the Smart row
@@ -176,21 +182,30 @@ const RING_CIRCUMFERENCE = 2 * Math.PI * 9.5;
 const RING_ABSENT_DASH = "2.5 3.5";
 /** How often the popover re-renders so "updated 2 min ago" stays true. */
 const USAGE_FRESHNESS_TICK_MS = 30_000;
-/** The pinned-model list is a `provider:modelId` allowlist built against ONE
- * engine's catalog, so it is stored per engine (lib/storage-keys). Null means
- * "nothing pinned here" — which is also what an unknown engine reports, and
- * what shows the full catalog. Reading the unscoped key instead is how an
- * omp→pi switch produced a composer that said "No models" while /api/models
- * had returned pi's whole catalog. */
-function readVisibleModelKeys(engineId: string | null): Set<string> | null {
-  const storageKey = engineScopedKey(STORAGE_KEYS.composerModels, engineId);
-  if (!storageKey) return null;
-  try {
-    const value = JSON.parse(localStorage.getItem(storageKey) ?? "null");
-    return Array.isArray(value) ? new Set(value.filter((item): item is string => typeof item === "string")) : null;
-  } catch {
-    return null;
-  }
+/** The picker shows a search box once the list is longer than this. */
+const MODEL_SEARCH_ABOVE = 12;
+
+/** What /api/models/visibility answers; the composer only reads it to keep
+ * the browser mirror current. */
+interface VisibilityBody {
+  instanceHidden?: string[];
+  hidden?: string[];
+  pinned?: string[];
+}
+
+interface NewModelsPeek {
+  newModels?: { provider: string; id: string }[];
+  pending?: true;
+}
+
+/** Engines whose retired allowlist this page has already converted, so a
+ * re-render or a second composer instance cannot migrate twice. */
+const migratedEngines = new Set<string>();
+
+/** Coarse pointers (phones, tablets) zoom into any input under 16px and stay
+ * there; the picker's search box is sized against that. */
+function prefersCoarsePointer(): boolean {
+  return typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
 }
 
 function compareModelOptions(collator: Intl.Collator, a: ModelOption, b: ModelOption): number {
@@ -1056,7 +1071,7 @@ function ComposerModeStatus({ goal, plan }: { goal?: ActiveGoal | null; plan?: A
 }
 
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSteer, onFollowUp, isStreaming, capabilities = ALL_CAPABILITIES, engine = null, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, onModelChange, onSelectSmartModel, onSmartModelPinned, autoModelSwitch, fastModeEnabled, fastModeActive, fastModeSupported, onFastModeChange, toolPreset, onToolPresetChange,
+  onSend, onAbort, onSteer, onFollowUp, isStreaming, capabilities = ALL_CAPABILITIES, engine = null, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, modelsRefreshKey, onModelChange, onSelectSmartModel, onSmartModelPinned, autoModelSwitch, fastModeEnabled, fastModeActive, fastModeSupported, onFastModeChange, toolPreset, onToolPresetChange,
   onAbortCompaction, isCompacting, compactResult,
   thinkingLevel, onThinkingLevelChange, availableModes = NO_MODES, currentModeId = null, onModeChange, availableThinkingLevels, thinkingLevelMap, modelNameOverride,
   retryInfo, queuedMessages, inputHistory = [], onAbortRetry,
@@ -2069,20 +2084,80 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     slashItemRefs.current[slashActiveIndex]?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [slashActiveIndex, slashMenuOpen]);
 
-  // Build model options: prefer modelList (has provider info), fallback to modelNames
-  const [visibleModelKeys, setVisibleModelKeys] = useState<Set<string> | null>(null);
+  // Which models this user hides or pinned, and picked recently — the
+  // browser mirror of /api/models/visibility (lib/composer-model-visibility).
+  // The mirror paints on the first frame; the server's answer refreshes it.
   const engineId = engine?.id ?? null;
+  const [visibility, setVisibility] = useState<ComposerVisibility>(() => readComposerVisibility(engineId));
   useEffect(() => {
-    const refresh = () => setVisibleModelKeys(readVisibleModelKeys(engineId));
+    const refresh = () => setVisibility(readComposerVisibility(engineId));
     refresh();
-    window.addEventListener(STORAGE_EVENTS.composerModelsChange, refresh);
-    return () => window.removeEventListener(STORAGE_EVENTS.composerModelsChange, refresh);
+    window.addEventListener(STORAGE_EVENTS.composerVisibilityChange, refresh);
+    window.addEventListener(STORAGE_EVENTS.recentModelsChange, refresh);
+    window.addEventListener("storage", refresh);
+    return () => {
+      window.removeEventListener(STORAGE_EVENTS.composerVisibilityChange, refresh);
+      window.removeEventListener(STORAGE_EVENTS.recentModelsChange, refresh);
+      window.removeEventListener("storage", refresh);
+    };
   }, [engineId]);
+  const visibilityRoute = useSettingsRoute<VisibilityBody>("/api/models/visibility", { enabled: engineId !== null, ttlMs: 60_000 });
+  useEffect(() => {
+    if (visibilityRoute.data) mirrorServerVisibility(engineId, visibilityRoute.data);
+  }, [visibilityRoute.data, engineId]);
+  // The new-models line reads the CACHED diff only (`?cached=1` never starts
+  // an engine child); once per load, and again when the catalog changed.
+  const newModelsRoute = useSettingsRoute<NewModelsPeek>("/api/models/new?cached=1", { enabled: engineId !== null, ttlMs: 5 * 60_000 });
+  const reloadNewModels = newModelsRoute.reload;
+  const lastRefreshKeyRef = useRef(modelsRefreshKey);
+  useEffect(() => {
+    if (lastRefreshKeyRef.current === modelsRefreshKey) return;
+    lastRefreshKeyRef.current = modelsRefreshKey;
+    void reloadNewModels();
+  }, [modelsRefreshKey, reloadNewModels]);
+  const newModelCount = newModelsRoute.data?.newModels?.length ?? 0;
+  const openSettings = useSettingsOpener();
+  // The omp provider order, when the engine keeps one (config.yml); other
+  // engines have no such setting and the route refuses. `capabilities` is
+  // the all-on default until /api/info answers, so the read also waits for
+  // the engine identity — otherwise every engine asked once on first paint.
+  const ompSettingsRoute = useSettingsRoute<{ settings?: { modelProviderOrder?: string[] } }>("/api/omp-settings", { enabled: engineId !== null && capabilities.configEditor, ttlMs: 60_000 });
+  const providerOrder = ompSettingsRoute.data?.settings?.modelProviderOrder;
 
-  const modelOptions: ModelOption[] = React.useMemo(() => {
+  // The retired allowlist (`cody:composer-models`) becomes the account's
+  // hidden list the first time a catalog arrives, after the server's own
+  // lists are known so the union is complete. Once per page per engine.
+  const visibilitySettled = visibilityRoute.data !== null || visibilityRoute.error !== null || visibilityRoute.unsupported;
+  useEffect(() => {
+    if (!engineId || migratedEngines.has(engineId) || !modelList || modelList.length === 0 || !visibilitySettled) return;
+    migratedEngines.add(engineId);
+    void migrateComposerAllowlist(engineId, modelList.map(modelVisibilityKey), { serverHidden: visibilityRoute.data?.hidden })
+      .then((result) => {
+        if (!result.migrated) return;
+        toast.info(t("chatInput.allowlistMigrated"), t("chatInput.allowlistMigratedDetail", { count: result.hidden.length }), { durationMs: 10_000 });
+      })
+      .catch(() => { migratedEngines.delete(engineId); });
+    // `visibilityRoute.data` is read once at migration time; re-running on
+    // its later changes would be a second migration of nothing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [engineId, modelList, visibilitySettled, t]);
+
+  const [modelQuery, setModelQuery] = useState("");
+  useEffect(() => {
+    if (!modelDropdownOpen) setModelQuery("");
+  }, [modelDropdownOpen]);
+
+  // Every model the session may pick: the catalog minus what is hidden. The
+  // running model stays listed even when hidden, so the label always names
+  // something the list has.
+  const allModelOptions: ModelOption[] = React.useMemo(() => {
     if (modelList && modelList.length > 0) {
       return modelList.map((m) => ({ provider: m.provider, modelId: m.id, name: m.name }))
-        .filter((m) => visibleModelKeys === null || visibleModelKeys.has(`${m.provider}:${m.modelId}`))
+        .filter((m) => {
+          const key = `${m.provider}/${m.modelId}`;
+          const isActive = model?.provider === m.provider && model?.modelId === m.modelId;
+          return isActive || (!visibility.hidden.has(key) && !visibility.instanceHidden.has(key));
+        })
         .sort((a, b) => compareModelOptions(modelCollator, a, b));
     }
     return Object.entries(modelNames ?? {}).map(([modelId, name]) => ({
@@ -2090,18 +2165,56 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       modelId,
       name,
     })).sort((a, b) => compareModelOptions(modelCollator, a, b));
-  }, [modelList, modelNames, model?.provider, visibleModelKeys, modelCollator]);
+  }, [modelList, modelNames, model?.provider, model?.modelId, visibility, modelCollator]);
+  const modelOptions = allModelOptions;
+  const showModelSearch = allModelOptions.length > MODEL_SEARCH_ABOVE;
+  const modelNeedle = modelQuery.trim().toLowerCase();
+  const filteredModelOptions = React.useMemo(() => (
+    modelNeedle
+      ? allModelOptions.filter((opt) => opt.name.toLowerCase().includes(modelNeedle) || opt.modelId.toLowerCase().includes(modelNeedle) || opt.provider.toLowerCase().includes(modelNeedle))
+      : allModelOptions
+  ), [allModelOptions, modelNeedle]);
+  // Two providers serving a model under one display name (a vendor and a
+  // gateway rebadging it) get their provider appended so the rows can be
+  // told apart.
+  const duplicateModelNames = React.useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const opt of allModelOptions) counts.set(opt.name, (counts.get(opt.name) ?? 0) + 1);
+    return new Set([...counts].filter(([, count]) => count > 1).map(([name]) => name));
+  }, [allModelOptions]);
 
-  // Group options by provider, preserving insertion order
-  const modelsByProvider: { provider: string; options: ModelOption[] }[] = React.useMemo(() => {
-    const groups: { provider: string; options: ModelOption[] }[] = [];
-    for (const opt of modelOptions) {
-      const group = groups.find((g) => g.provider === opt.provider);
-      if (group) group.options.push(opt);
-      else groups.push({ provider: opt.provider, options: [opt] });
+  // Pinned → Recent → one group per provider (sticky headers). The pinned
+  // and recent groups are shortcuts; the provider groups stay complete.
+  const modelGroups: { id: string; kind: "pinned" | "recent" | "provider"; provider: string; options: ModelOption[] }[] = React.useMemo(() => {
+    const byKey = new Map(filteredModelOptions.map((opt) => [`${opt.provider}/${opt.modelId}`, opt]));
+    const groups: { id: string; kind: "pinned" | "recent" | "provider"; provider: string; options: ModelOption[] }[] = [];
+    const pinned = filteredModelOptions.filter((opt) => visibility.pinned.has(`${opt.provider}/${opt.modelId}`));
+    if (pinned.length > 0) groups.push({ id: "pinned", kind: "pinned", provider: "", options: pinned });
+    const recent = visibility.recent
+      .map((key) => byKey.get(key))
+      .filter((opt): opt is ModelOption => Boolean(opt) && !visibility.pinned.has(`${opt!.provider}/${opt!.modelId}`));
+    if (recent.length > 0) groups.push({ id: "recent", kind: "recent", provider: "", options: recent });
+    const providers = new Map<string, ModelOption[]>();
+    for (const opt of filteredModelOptions) {
+      const list = providers.get(opt.provider) ?? [];
+      list.push(opt);
+      providers.set(opt.provider, list);
     }
+    const names = [...providers.keys()].sort((a, b) => modelCollator.compare(a, b));
+    const ordered = providerOrder
+      ? [...providerOrder.filter((name) => providers.has(name)), ...names.filter((name) => !providerOrder.includes(name))]
+      : names;
+    for (const name of ordered) groups.push({ id: `provider:${name}`, kind: "provider", provider: name, options: providers.get(name) ?? [] });
     return groups;
-  }, [modelOptions]);
+  }, [filteredModelOptions, visibility, providerOrder, modelCollator]);
+  const modelsByProvider = modelGroups;
+  const activeModelHiddenByAdmin = Boolean(model && visibility.instanceHidden.has(`${model.provider}/${model.modelId}`));
+
+  const pickModel = useCallback((provider: string, modelId: string) => {
+    setModelDropdownOpen(false);
+    pushRecentModel(engineId, `${provider}/${modelId}`);
+    onModelChange?.(provider, modelId);
+  }, [engineId, onModelChange]);
 
   const displayModelName = model
     ? (modelOptions.find((o) => o.modelId === model.modelId && o.provider === model.provider)?.name
@@ -3110,34 +3223,59 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                       </span>
                     </button>
                     )}
+                    {showModelSearch && (
+                      <div style={{ position: "sticky", top: 0, zIndex: 2, padding: "6px 8px", background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 6 }}>
+                        <Search size={12} aria-hidden="true" style={{ flexShrink: 0, color: "var(--text-dim)" }} />
+                        <input
+                          type="search"
+                          value={modelQuery}
+                          onChange={(e) => setModelQuery(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); setModelDropdownOpen(false); } }}
+                          placeholder={t("chatInput.searchModels")}
+                          aria-label={t("chatInput.searchModels")}
+                          autoFocus={!isMobile}
+                          style={{ flex: 1, minWidth: 0, border: "none", background: "transparent", color: "var(--text)", fontSize: prefersCoarsePointer() ? 16 : 12, outline: "none", padding: "3px 0" }}
+                        />
+                      </div>
+                    )}
                     {modelsByProvider.length === 0 ? (
                       <div style={{ padding: "8px 12px", color: "var(--text-dim)", fontSize: 12, whiteSpace: "nowrap" }}>
-                        {showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noAvailableModels")}
+                        {showModelsLoading ? t("chatInput.loadingModels") : modelNeedle ? t("chatInput.noMatchingModels") : t("chatInput.noAvailableModels")}
                       </div>
                     ) : modelsByProvider.map((group, gi) => (
-                      <div key={group.provider}>
+                      <div key={group.id}>
                         {(modelsByProvider.length > 1) && (
                           <div style={{
                             display: "flex", alignItems: "center", gap: 6,
                             padding: "6px 12px 4px",
-                            fontSize: 10, fontWeight: 600, color: "var(--text-dim)",
+                            fontSize: 10, fontWeight: 600, color: group.kind === "provider" ? "var(--text-dim)" : "var(--accent)",
                             textTransform: "uppercase", letterSpacing: "0.07em",
                             borderTop: gi > 0 ? "1px solid var(--border)" : "none",
+                            // Sticky under the search box so a long provider
+                            // group still says whose models these are.
+                            position: "sticky", top: showModelSearch ? 37 : 0, zIndex: 1,
+                            background: "var(--bg-panel)",
                           }}>
-                            <ProviderIcon provider={group.provider} size={10} style={{ flexShrink: 0, color: "var(--text-dim)" }} />
-                            {group.provider}
+                            {group.kind === "pinned"
+                              ? <Pin size={10} aria-hidden="true" style={{ flexShrink: 0 }} />
+                              : group.kind === "recent"
+                                ? <Clock size={10} aria-hidden="true" style={{ flexShrink: 0 }} />
+                                : <ProviderIcon provider={group.provider} size={10} style={{ flexShrink: 0, color: "var(--text-dim)" }} />}
+                            {group.kind === "pinned" ? t("chatInput.pinnedGroup") : group.kind === "recent" ? t("chatInput.recentGroup") : group.provider}
                           </div>
                         )}
                         {group.options.map((opt) => {
                           const isActive = opt.modelId === model?.modelId && opt.provider === model?.provider;
+                          const showProvider = duplicateModelNames.has(opt.name) && group.kind !== "provider";
                           return (
                             <button
                               className="dropdown-item"
-                              key={`${opt.provider}:${opt.modelId}`}
-                              onClick={() => { setModelDropdownOpen(false); if (!isActive || isAutoModelSelection) onModelChange(opt.provider, opt.modelId); }}
+                              key={`${group.id}:${opt.provider}:${opt.modelId}`}
+                              onClick={() => { if (!isActive || isAutoModelSelection) pickModel(opt.provider, opt.modelId); else setModelDropdownOpen(false); }}
                               style={{
                                 display: "flex", alignItems: "center", gap: 8,
                                 width: "100%", padding: "7px 12px",
+                                minHeight: isMobile ? 44 : undefined,
                                 background: isActive ? "var(--bg-selected)" : "transparent",
                                 border: "none",
                                 color: isActive ? "var(--text)" : "var(--text-muted)",
@@ -3152,12 +3290,46 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                                 ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
                                 : <span style={{ width: 10, flexShrink: 0 }} />}
                               <ModelIcon provider={opt.provider} modelId={opt.modelId} size={13} style={{ flexShrink: 0, color: isActive ? "var(--accent)" : "var(--text-dim)" }} />
-                              {opt.name}
+                              <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{opt.name}</span>
+                              {showProvider && <span style={{ fontSize: 10.5, color: "var(--text-dim)" }}>· {opt.provider}</span>}
+                              {isActive && activeModelHiddenByAdmin && <span style={{ fontSize: 10.5, color: "var(--status-warning)" }}>· {t("chatInput.hiddenByAdmin")}</span>}
                             </button>
                           );
                         })}
                       </div>
                     ))}
+                    {/* The footer: what is new since the user last looked
+                        (the cached diff only), and the way into the hub. It
+                        shares one sticky slab with the Fast row below so both
+                        stay in view under a long list. */}
+                    <div style={{ position: "sticky", bottom: 0, background: "var(--bg-panel)" }}>
+                    <div style={{
+                      display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
+                      padding: "6px 8px 6px 12px",
+                      borderTop: "1px solid var(--border)",
+                      background: "var(--bg-panel)",
+                      fontSize: 11,
+                    }}>
+                      {newModelCount > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => { setModelDropdownOpen(false); openSettings("models"); }}
+                          style={{ display: "inline-flex", alignItems: "center", gap: 5, minHeight: isMobile ? 44 : 26, padding: "0 6px", border: "none", background: "transparent", color: "var(--accent)", fontSize: 11, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap" }}
+                        >
+                          <Sparkles size={11} aria-hidden="true" />
+                          {tn("chatInput.newModels", newModelCount, { count: newModelCount })} · {t("chatInput.reviewNewModels")}
+                        </button>
+                      )}
+                      <span style={{ flex: 1 }} />
+                      <button
+                        type="button"
+                        onClick={() => { setModelDropdownOpen(false); openSettings("models"); }}
+                        style={{ display: "inline-flex", alignItems: "center", gap: 5, minHeight: isMobile ? 44 : 26, padding: "0 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "transparent", color: "var(--text-muted)", fontSize: 11, cursor: "pointer", whiteSpace: "nowrap" }}
+                      >
+                        <Cpu size={11} aria-hidden="true" />
+                        {t("chatInput.manageModels")}
+                      </button>
+                    </div>
                     {/* Fast mode lives with the model it belongs to: the
                         footer only appears when the active model supports it. */}
                     {fastModeSupported && onFastModeChange && (
@@ -3187,6 +3359,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                         </span>
                       </label>
                     )}
+                    </div>
                   </div>
                   );
                 })()}

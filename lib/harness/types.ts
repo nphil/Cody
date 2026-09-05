@@ -40,8 +40,8 @@ export interface HarnessCapabilities {
   nativeSettings: boolean;
   /**
    * Cody has HAND-BUILT editors for this engine's own config file — the
-   * Safety, AI Model Defaults and Agent & Intelligence tabs, which read and
-   * write omp's config.yml through /api/omp-settings.
+   * Behavior hub's Recommended cards, which read and write omp's config.yml
+   * through /api/omp-settings.
    *
    * Distinct from `nativeSettings`, which is the schema-DRIVEN panel any
    * engine can have by declaring its settings. Hermes has the latter and not
@@ -74,8 +74,8 @@ export interface HarnessCapabilities {
    * login (a Claude Pro/Max or ChatGPT subscription, a device code, …) and
    * keep the credential in its own store — as opposed to an API key, which
    * Cody stores itself and hands to every engine. True exactly when the
-   * adapter carries `providerLogins`; the Sign in section on the API Keys &
-   * Providers tab renders only under this flag.
+   * adapter carries `providerLogins`; the Sign in / Sign out row in the
+   * Providers hub's detail drawer renders only under this flag.
    */
   providerLogin: boolean;
 }
@@ -175,6 +175,10 @@ export interface EngineSetting {
    * while working in a browser. Labelled rather than hidden: the same file
    * still drives the CLI the user runs in a Cody terminal. */
   terminalOnly?: boolean;
+  /** A credential-shaped leaf (api_key, token, secret, password). The schema
+   * route never sends its value — only whether one is set — and the panel
+   * renders it write-only, masked. Never echoed back to a browser. */
+  secret?: boolean;
 }
 
 export interface EngineSettingsSchema {
@@ -294,6 +298,27 @@ export interface ProviderLoginSurface {
   login(providerId: string, ui: ProviderLoginUi): Promise<void>;
   /** Absent when the engine has no non-interactive logout; the row then offers none. */
   logout?(providerId: string): Promise<void>;
+}
+
+/**
+ * What an engine's OWN provider registry adds to the Providers hub beyond
+ * sign-ins and Cody's keys: the custom endpoints declared in its model
+ * config file, and the registry-level state its config keeps about
+ * providers (disabled, ordered, or locked behind entries Cody must not
+ * rewrite). omp is the only engine with such a file today; the hub reads
+ * it through the adapter so `lib/provider-directory.ts` stays a pure join
+ * with no engine import.
+ */
+export interface ProviderDirectoryInfo {
+  /** Custom providers from the engine's model config (omp: models.yml). */
+  modelsYmlProviders: Array<{ name: string; api?: string; baseUrl?: string; modelCount: number }>;
+  /** Providers the engine's config switches off (omp: `disabledProviders`). */
+  disabledProviders: string[];
+  /** The engine's provider preference order (omp: `modelProviderOrder`). */
+  providerOrder: string[];
+  /** Set when the registry keys hold entries Cody cannot round-trip (omp's
+   * path-scoped entries): the hub renders read-only and says why. */
+  readOnlyReason?: string;
 }
 
 /** One document of an engine's persistent memory. */
@@ -521,11 +546,12 @@ export interface HarnessAdapter {
   engineEnv?(): Record<string, string>;
   /** Exact engine version this Cody build was last audited against — the
    * marker for "what version of the engine was Cody built to". Its MAJOR
-   * drives the System & Updates warnings: when the registry offers — or the
-   * user has installed — a later major, the card warns that new engine
-   * features may not surface in Cody yet (schema-driven surfaces keep
-   * working; bespoke ones lag). The full string is shown on the engine's
-   * update card. Bump it in the same commit as each compatibility audit.
+   * drives the System hub's engine roster warnings (Settings › System ›
+   * Engines): when the registry offers — or the user has installed — a
+   * later major, the card warns that new engine features may not surface
+   * in Cody yet (schema-driven surfaces keep working; bespoke ones lag).
+   * The full string is shown on the engine's update card. Bump it in the
+   * same commit as each compatibility audit.
    * Absent = never warn, nothing shown.
    *
    * It is a version of the package `installSpec` names, always. For a
@@ -587,4 +613,11 @@ export interface HarnessAdapter {
    * and `/logout` dispatch on it and refuse `unsupported` without it.
    */
   readonly providerLogins?: ProviderLoginSurface;
+  /**
+   * The engine's own provider registry for the Providers hub — see
+   * ProviderDirectoryInfo. Optional: an engine without a model config file
+   * of its own contributes nothing here, and the hub is built from its
+   * sign-ins and Cody's keys alone.
+   */
+  providerDirectory?(): ProviderDirectoryInfo;
 }

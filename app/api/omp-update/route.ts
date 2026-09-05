@@ -66,7 +66,7 @@ export async function POST(request: Request) {
         version: await adapter.getVersion(),
         sessionsRestarted,
         healthy,
-        ...(healthError ? { error: `The updated engine failed a health check: ${healthError}${previousVersion ? ` (revert to v${previousVersion} from Settings, System & Updates)` : ""}`, code: "unhealthy_after_update" } : {}),
+        ...(healthError ? { error: `The updated engine failed a health check: ${healthError}${previousVersion ? ` (revert to v${previousVersion} from Settings → System → Engines)` : ""}`, code: "unhealthy_after_update" } : {}),
       }, healthy ? undefined : { status: 502 });
     }
     if (body.action === "restart") {

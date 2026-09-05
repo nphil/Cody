@@ -511,6 +511,7 @@ export function ConfirmDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
+        className="ui-dialog"
         ariaLabel={typeof title === "string" ? title : undefined}
         style={{ width: 420, maxWidth: "min(92vw, 420px)", padding: 22 }}
       >
@@ -575,6 +576,149 @@ export function ConfirmDialog({
             {confirmLabel}
           </button>
         </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+/* ──────────────────── Prompt dialog ──────────────────── */
+
+interface PromptDialogProps {
+  open: boolean;
+  title: ReactNode;
+  /** Label above the input. */
+  label: ReactNode;
+  description?: ReactNode;
+  placeholder?: string;
+  /** Render a masked input (a password or token) instead of plain text. */
+  secret?: boolean;
+  confirmLabel: ReactNode;
+  cancelLabel?: ReactNode;
+  /** Pre-filled value when the dialog opens. */
+  initialValue?: string;
+  /** Returns an error message to block submission, or null to allow it.
+   * Runs on blur and on submit; the message clears as the user types. */
+  validate?: (value: string) => string | null;
+  busy?: boolean;
+  danger?: boolean;
+  onSubmit: (value: string) => void;
+  onCancel: () => void;
+}
+
+/**
+ * The typed-answer counterpart of ConfirmDialog: one labelled input, Cancel
+ * and a primary action. Replaces `window.prompt`, which a touch browser can
+ * dismiss without a value and which no theme can style. Enter submits, Escape
+ * cancels; the input is cleared whenever the dialog opens.
+ */
+export function PromptDialog({
+  open,
+  title,
+  label,
+  description,
+  placeholder,
+  secret,
+  confirmLabel,
+  cancelLabel,
+  initialValue,
+  validate,
+  busy,
+  danger,
+  onSubmit,
+  onCancel,
+}: PromptDialogProps) {
+  const [value, setValue] = useState(initialValue ?? "");
+  const validation = useFieldValidation(() => (validate ? validate(value) : null));
+  const { onChange: clearError, onSubmit: runValidation } = validation;
+
+  useEffect(() => {
+    if (open) setValue(initialValue ?? "");
+  }, [open, initialValue]);
+
+  const submit = () => {
+    if (busy) return;
+    if (runValidation() !== null) return;
+    onSubmit(value);
+  };
+
+  const inputProps = {
+    value,
+    onChange: (next: string) => {
+      setValue(next);
+      clearError();
+    },
+    placeholder,
+    error: validation.error,
+    onBlurValidate: validation.onBlur,
+    disabled: busy,
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(next) => { if (!next) onCancel(); }}>
+      <DialogContent
+        className="ui-dialog"
+        ariaLabel={typeof title === "string" ? title : undefined}
+        style={{ width: 420, maxWidth: "min(92vw, 420px)", padding: 22 }}
+      >
+        <DialogTitle>{title}</DialogTitle>
+        <div style={{ height: 8 }} />
+        {description && (
+          <p style={{ margin: "0 0 14px", fontSize: 13, lineHeight: 1.55, color: "var(--text-muted)" }}>
+            {description}
+          </p>
+        )}
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            submit();
+          }}
+          style={{ display: "flex", flexDirection: "column", gap: 16 }}
+        >
+          <Field label={label} error={validation.error}>
+            {secret ? (
+              <SecretInput {...inputProps} showLabel="Show" hideLabel="Hide" />
+            ) : (
+              <TextInput {...inputProps} autoComplete="off" spellCheck={false} />
+            )}
+          </Field>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <button
+              type="button"
+              onClick={onCancel}
+              style={{
+                padding: "6px 14px",
+                minHeight: 32,
+                background: "none",
+                border: "1px solid var(--border)",
+                borderRadius: "var(--radius-control)",
+                color: "var(--text-muted)",
+                cursor: "pointer",
+                fontSize: 13,
+                touchAction: "manipulation",
+              }}
+            >
+              {cancelLabel ?? "Cancel"}
+            </button>
+            <button
+              type="submit"
+              disabled={busy}
+              style={{
+                padding: "6px 14px",
+                minHeight: 32,
+                background: danger ? "var(--status-error)" : "var(--accent-strong)",
+                border: "none",
+                borderRadius: "var(--radius-control)",
+                color: "var(--on-accent)",
+                cursor: busy ? "wait" : "pointer",
+                fontSize: 13,
+                fontWeight: 600,
+                opacity: busy ? 0.7 : 1,
+                touchAction: "manipulation",
+              }}
+            >
+              {confirmLabel}
+            </button>
+          </div>
+        </form>
       </DialogContent>
     </Dialog>
   );

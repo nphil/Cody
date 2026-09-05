@@ -70,8 +70,8 @@ docker build -f docker/Dockerfile -t cody:latest .
 ```
 
 The image ships no engine, so there is nothing engine-related to pin at
-build time — engine versions are managed at runtime from Settings → User
-Accounts → Agent engine (Install/Update per engine).
+build time — engine versions are managed at runtime from Settings → System
+→ Engines (Install/Update per engine).
 
 ## Install on Unraid
 
@@ -108,7 +108,7 @@ The container is locked from its very first request: before any account
 exists, the only reachable page is the first-run setup, and the person who
 completes it becomes the administrator — so open the WebUI and claim the
 instance right after starting the container. Further accounts come from the
-login screen (unless signup is disabled) or from Settings → User Accounts.
+login screen (unless signup is disabled) or from Settings → Account.
 Each account has its own profile — name, picture, password — and sees only
 its own chat sessions; sessions from before accounts existed stay visible to
 everyone. Account data lives in `/data/agent/cody-accounts` (passwords are
@@ -125,13 +125,13 @@ behind an authenticating reverse proxy.
   `/workspace` — scope those mounts to what the agent should touch.
 - Updating splits cleanly in two: **Cody itself** updates the Unraid way
   (new image → Apply Update), while **engines** update in-app — Settings ›
-  System & Updates checks every installed engine and offers an Update action
+  System checks every installed engine and offers an Update action
   when a newer version is known (updating the active engine restarts its
   live sessions). Engine updates go to `/data/agent/tools`, so they stick
   across container recreates and never require a new image.
 - The agent **engine** is chosen in the UI: a one-time picker after the
-  first admin signs in, and later under Settings → User Accounts → Agent
-  engine (install and switch; updates live in System & Updates). No engine
+  first admin signs in, and later under Settings → System → Engines
+  (install, switch and update, all in one place). No engine
   ships in the image — omp, Claude Code and Codex all install on demand
   into `/data/agent/tools`, which survives image updates. Claude/Codex
   sign-in state lives under `/data/home` — run `claude` or `codex login`

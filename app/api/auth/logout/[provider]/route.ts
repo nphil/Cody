@@ -3,6 +3,7 @@ import { requireAdmin } from "@/lib/auth/http";
 import { requireCapability } from "@/lib/engine-guard";
 import { invalidateModelsCache } from "@/lib/models-cache";
 import { getHarness } from "@/lib/harness";
+import { invalidateProviderLoginsCache } from "@/lib/provider-directory-server";
 
 export const dynamic = "force-dynamic";
 
@@ -38,6 +39,9 @@ export async function POST(
   try {
     await surface.logout(provider);
     invalidateModelsCache();
+    // ...and the rail's cached `?cached=1` roster, or it keeps answering
+    // "signed in" until the 15s peek window lapses.
+    invalidateProviderLoginsCache(engine.id);
     return NextResponse.json({ ok: true, provider });
   } catch (error) {
     return NextResponse.json(

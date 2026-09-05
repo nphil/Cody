@@ -24,12 +24,20 @@ interface ToastData {
   clamp?: boolean;
 }
 
-interface ToastOptions {
+export interface ToastAction {
+  label: string;
+  onClick: () => void;
+}
+
+export interface ToastOptions {
   /** Clamp the description to 2 lines; click the description to expand it. */
   clamp?: boolean;
   /** Auto-dismiss after this long instead of the provider default (4s).
    * Use for toasts worth reading slowly (model switches: 10s). */
   durationMs?: number;
+  /** One button in the toast — the undo of a reversible action (hide, disable,
+   * unpin). Clicking it runs the handler and closes the toast. */
+  action?: ToastAction;
 }
 
 const manager = Toast.createToastManager<ToastData>();
@@ -40,6 +48,10 @@ function add(kind: ToastKind, title: React.ReactNode, description?: React.ReactN
     description,
     type: kind,
     ...(options?.durationMs !== undefined ? { timeout: options.durationMs } : {}),
+    // base-ui's Toast.Action reads `actionProps` off the toast object: the
+    // label becomes the button's children and the handler its onClick. The
+    // toast closes itself after the action so an undo cannot fire twice.
+    ...(options?.action ? { actionProps: { children: options.action.label, onClick: options.action.onClick } } : {}),
     data: { kind, clamp: options?.clamp },
   });
 }
@@ -178,6 +190,25 @@ function Toaster() {
                 // <div> inside <p> would throw a hydration error.
                 <Toast.Description render={<div />} style={descriptionBaseStyle} />
               )}
+              {t.actionProps?.children ? (
+                <Toast.Action
+                  className="ui-focus-ring"
+                  onClick={() => manager.close(t.id)}
+                  style={{
+                    marginTop: 6,
+                    padding: "3px 10px",
+                    minHeight: 26,
+                    border: "1px solid var(--border)",
+                    borderRadius: "var(--radius-control)",
+                    background: "var(--bg-subtle)",
+                    color: "var(--accent)",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                    touchAction: "manipulation",
+                  }}
+                />
+              ) : null}
             </Toast.Content>
             <Toast.Close
               aria-label="Dismiss"

@@ -26,6 +26,10 @@ export interface ProviderVariable {
   secret: boolean;
   /** Where to get one, when it is not obvious. */
   hint?: string;
+  /** The engine works without it (it has a default), so its absence is a
+   * hint on the provider's row ("Region not set"), not an unconfigured
+   * provider. */
+  optional?: boolean;
 }
 
 export interface ProviderDefinition {
@@ -34,26 +38,46 @@ export interface ProviderDefinition {
   /** Engine ids that read these variables. */
   engines: readonly string[];
   variables: readonly ProviderVariable[];
+  /**
+   * The ids the engines' OWN sign-in rosters use for the same vendor, so the
+   * Providers hub can fold a subscription and its API key into one row:
+   * omp's `anthropic` OAuth entry and `ANTHROPIC_API_KEY` are two ways of
+   * reaching one provider, not two providers. An id absent here stays a row
+   * of its own — the roster is the engine's, and an unmapped entry is still
+   * listed, just not merged.
+   */
+  loginIds?: readonly string[];
+  /**
+   * The ids an engine's MODEL catalog files models under for this provider,
+   * when they differ from `id` (omp serves Bedrock models as
+   * `amazon-bedrock`, the Kimi key's as `kimi-coding`). Model counts on the
+   * row sum over `id`, these, and `loginIds`.
+   */
+  catalogIds?: readonly string[];
 }
 
 const ALL = ["omp", "pi", "hermes"] as const;
 
+// `loginIds` name every engine's roster entry for the vendor: omp's and pi's
+// pi-ai ids, Claude Code's `claude` / `anthropic-console`, Codex's `chatgpt`,
+// Hermes' `*-oauth` ids. `catalogIds` name the model-catalog provider ids
+// that differ from the row id. Both are joins, never displayed as such.
 export const PROVIDER_CATALOG: readonly ProviderDefinition[] = [
-  { id: "anthropic", name: "Anthropic", engines: [...ALL, "claude"], variables: [{ name: "ANTHROPIC_API_KEY", label: "API key", secret: true }] },
-  { id: "openai", name: "OpenAI", engines: [...ALL, "codex"], variables: [{ name: "OPENAI_API_KEY", label: "API key", secret: true }] },
-  { id: "openrouter", name: "OpenRouter", engines: ALL, variables: [{ name: "OPENROUTER_API_KEY", label: "API key", secret: true }] },
-  { id: "google", name: "Google Gemini", engines: ALL, variables: [{ name: "GEMINI_API_KEY", label: "API key", secret: true }] },
-  { id: "xai", name: "xAI", engines: ALL, variables: [{ name: "XAI_API_KEY", label: "API key", secret: true }] },
-  { id: "deepseek", name: "DeepSeek", engines: ALL, variables: [{ name: "DEEPSEEK_API_KEY", label: "API key", secret: true }] },
+  { id: "anthropic", name: "Anthropic", engines: [...ALL, "claude"], variables: [{ name: "ANTHROPIC_API_KEY", label: "API key", secret: true }], loginIds: ["anthropic", "claude", "anthropic-console"] },
+  { id: "openai", name: "OpenAI", engines: [...ALL, "codex"], variables: [{ name: "OPENAI_API_KEY", label: "API key", secret: true }], loginIds: ["openai-codex", "openai-codex-device", "chatgpt"] },
+  { id: "openrouter", name: "OpenRouter", engines: ALL, variables: [{ name: "OPENROUTER_API_KEY", label: "API key", secret: true }], loginIds: ["openrouter"] },
+  { id: "google", name: "Google Gemini", engines: ALL, variables: [{ name: "GEMINI_API_KEY", label: "API key", secret: true }], loginIds: ["google-gemini-cli", "google-antigravity"] },
+  { id: "xai", name: "xAI", engines: ALL, variables: [{ name: "XAI_API_KEY", label: "API key", secret: true }], loginIds: ["xai", "xai-oauth"] },
+  { id: "deepseek", name: "DeepSeek", engines: ALL, variables: [{ name: "DEEPSEEK_API_KEY", label: "API key", secret: true }], loginIds: ["deepseek"] },
   { id: "groq", name: "Groq", engines: ["omp", "pi"], variables: [{ name: "GROQ_API_KEY", label: "API key", secret: true }] },
   { id: "mistral", name: "Mistral", engines: ["omp", "pi"], variables: [{ name: "MISTRAL_API_KEY", label: "API key", secret: true }] },
-  { id: "huggingface", name: "Hugging Face", engines: ["omp", "pi", "hermes"], variables: [{ name: "HF_TOKEN", label: "Access token", secret: true }] },
-  { id: "cerebras", name: "Cerebras", engines: ["omp", "pi"], variables: [{ name: "CEREBRAS_API_KEY", label: "API key", secret: true }] },
-  { id: "fireworks", name: "Fireworks", engines: ["omp", "pi"], variables: [{ name: "FIREWORKS_API_KEY", label: "API key", secret: true }] },
-  { id: "minimax", name: "MiniMax", engines: ["omp", "pi", "hermes"], variables: [{ name: "MINIMAX_API_KEY", label: "API key", secret: true }] },
-  { id: "kimi", name: "Kimi (Moonshot)", engines: ["omp", "pi", "hermes"], variables: [{ name: "KIMI_API_KEY", label: "API key", secret: true }] },
-  { id: "zai", name: "Z.AI", engines: ["omp", "pi", "hermes"], variables: [{ name: "ZAI_API_KEY", label: "API key", secret: true }] },
-  { id: "ollama-cloud", name: "Ollama Cloud", engines: ["hermes"], variables: [{ name: "OLLAMA_API_KEY", label: "API key", secret: true }] },
+  { id: "huggingface", name: "Hugging Face", engines: ["omp", "pi", "hermes"], variables: [{ name: "HF_TOKEN", label: "Access token", secret: true }], loginIds: ["huggingface"] },
+  { id: "cerebras", name: "Cerebras", engines: ["omp", "pi"], variables: [{ name: "CEREBRAS_API_KEY", label: "API key", secret: true }], loginIds: ["cerebras"] },
+  { id: "fireworks", name: "Fireworks", engines: ["omp", "pi"], variables: [{ name: "FIREWORKS_API_KEY", label: "API key", secret: true }], loginIds: ["fireworks"] },
+  { id: "minimax", name: "MiniMax", engines: ["omp", "pi", "hermes"], variables: [{ name: "MINIMAX_API_KEY", label: "API key", secret: true }], loginIds: ["minimax-code", "minimax-code-cn", "minimax-oauth"], catalogIds: ["minimax-cn"] },
+  { id: "kimi", name: "Kimi (Moonshot)", engines: ["omp", "pi", "hermes"], variables: [{ name: "KIMI_API_KEY", label: "API key", secret: true }], loginIds: ["kimi-code", "moonshot"], catalogIds: ["kimi-coding", "moonshotai"] },
+  { id: "zai", name: "Z.AI", engines: ["omp", "pi", "hermes"], variables: [{ name: "ZAI_API_KEY", label: "API key", secret: true }], loginIds: ["zai", "zai-coding-plan"], catalogIds: ["zai-coding-cn"] },
+  { id: "ollama-cloud", name: "Ollama Cloud", engines: ["hermes"], variables: [{ name: "OLLAMA_API_KEY", label: "API key", secret: true }], loginIds: ["ollama-cloud"] },
   {
     id: "bedrock",
     name: "Amazon Bedrock",
@@ -61,8 +85,11 @@ export const PROVIDER_CATALOG: readonly ProviderDefinition[] = [
     variables: [
       { name: "AWS_ACCESS_KEY_ID", label: "Access key ID", secret: false },
       { name: "AWS_SECRET_ACCESS_KEY", label: "Secret access key", secret: true },
-      { name: "AWS_REGION", label: "Region", secret: false, hint: "e.g. us-east-1" },
+      // The SDK falls back to its own default region, so a missing one is a
+      // row hint, not an unconfigured provider.
+      { name: "AWS_REGION", label: "Region", secret: false, hint: "e.g. us-east-1", optional: true },
     ],
+    catalogIds: ["amazon-bedrock"],
   },
 ];
 
