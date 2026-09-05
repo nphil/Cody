@@ -233,7 +233,8 @@ async function openPage(context, label) {
 async function openSettings(page, label) {
   const button = page.locator('button[aria-label="Settings"]').first();
   await button.click({ timeout: 15000 });
-  await page.waitForSelector(".settings-shell", { timeout: 15000 });
+  // The first open on a dev server compiles the shell and its hubs.
+  await page.waitForSelector(".settings-shell", { timeout: 60000 });
   await page.waitForTimeout(1200);
   if (!(await page.evaluate(SETTINGS_OPEN))) fail(`${label}: Settings did not open`);
 }

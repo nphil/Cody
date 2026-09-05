@@ -19,6 +19,7 @@
  * Opening is driven by a `request`: AppShell bumps its `seq` with a target
  * hub (or none, meaning the last-open hub from `cody:settings-last-section`).
  */
+import dynamic from "next/dynamic";
 import { Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -31,7 +32,7 @@ import { ALL_CAPABILITIES, DEFAULT_HARNESS_LABEL, type ActiveEngineInfo, type En
 import { MobileStack, type MobileSubLevel } from "./MobileStack";
 import { SettingsHighlightContext } from "./primitives";
 import { getVisibleSections, getVisibleSubViews, isSectionId, resolveSection, type SettingsSection, type SettingsSectionId } from "./registry";
-import { collectSearchEntries, currentStaticSearchIndex, loadStaticSearchEntries, resultHighlight, resultTarget, searchSettings, type SchemaSearchRow, type SearchFilter, type SearchResult, type StaticSearchIndex } from "./search-index";
+import { collectSearchEntries, currentStaticSearchIndex, loadStaticSearchEntries, resultHighlight, resultTarget, searchSettings, type SchemaSearchRow, type SearchEntry, type SearchFilter, type SearchResult, type StaticSearchIndex } from "./search-index";
 import { focusSearchResults, SearchResultsList } from "./SettingsSearch";
 import { SettingsSidebar } from "./SettingsSidebar";
 import { createSettingsBusy, ShellContext, type SessionModel, type SettingsShellCallbacks, type SettingsShellPrefs, type SettingsShellValue } from "./shell-context";
@@ -101,6 +102,10 @@ function PanelHost({ section, active, children }: { section: SettingsSection; ac
     </div>
   );
 }
+
+// The hubs' dynamic search hooks live in the hub modules; loading them
+// lazily keeps those modules out of this chunk until the dialog is open.
+const SearchSources = dynamic(() => import("./SearchSources"), { ssr: false });
 
 let levelSeq = 0;
 
@@ -257,9 +262,10 @@ export function SettingsShell({ request, cwd, sessionId, capabilities = ALL_CAPA
   }, [escapePops]);
 
   const staticIndex = useStaticSearchIndex();
+  const [sourceEntries, setSourceEntries] = useState<readonly SearchEntry[]>([]);
   const entries = useMemo(
-    () => collectSearchEntries({ capabilities, shortName: harnessLabel, dynamic: { schemaRows }, statics: staticIndex }),
-    [capabilities, harnessLabel, schemaRows, staticIndex],
+    () => collectSearchEntries({ capabilities, shortName: harnessLabel, dynamic: { schemaRows, entries: sourceEntries }, statics: staticIndex }),
+    [capabilities, harnessLabel, schemaRows, sourceEntries, staticIndex],
   );
   const trimmedQuery = searchQuery.trim();
   const searching = trimmedQuery.length > 0 || searchFilter !== null;
@@ -321,6 +327,7 @@ export function SettingsShell({ request, cwd, sessionId, capabilities = ALL_CAPA
 
   const panels = (
     <SettingsHighlightContext.Provider value={highlight}>
+      <SearchSources onChange={setSourceEntries} />
       {visibleSections.filter((entry) => visited.has(entry.id)).map((entry) => {
         const Panel = entry.panel;
         return (

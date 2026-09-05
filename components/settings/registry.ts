@@ -14,6 +14,7 @@
 import dynamic from "next/dynamic";
 import { createElement, type ComponentType, type CSSProperties } from "react";
 import { Brain, Cable, Cpu, KeyRound, RefreshCw, Settings2, SlidersHorizontal, UserRound } from "lucide-react";
+import { isSubscriptionLogin } from "@/lib/provider-directory";
 import type { ActiveEngineInfo, EngineCapabilities, SettingsTab } from "../SettingsTabs";
 
 export type SettingsSectionId = "accounts" | "general" | "providers" | "models" | "engine" | "extensions" | "memory" | "system";
@@ -135,12 +136,17 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
       const body = asRecord(routes["/api/providers?cached=1"]);
       const rows = Array.isArray(body?.providers) ? body.providers.map(asRecord) : null;
       if (!rows) return null;
-      if (rows.length === 0 && body?.pending === true) return null;
       const connected = rows.filter((row) => row?.connected === true).length;
+      // "Signed in" is a subscription login that WINS for its provider: omp's
+      // roster marks key vendors "authenticated" too, and a key is not a
+      // sign-in. A cold catalog cache (`pending`) with nothing connected is
+      // not yet a verdict, so no warning until the credentials are known.
       const signedIn = rows.filter((row) => Array.isArray(row?.methods) && row.methods.some((method) => {
         const entry = asRecord(method);
-        return entry?.state === "connected" && (entry.kind === "oauth" || entry.kind === "device");
+        return entry?.winning === true && entry.state === "connected"
+          && isSubscriptionLogin({ kind: entry.kind, loginId: entry.loginId } as Parameters<typeof isSubscriptionLogin>[0]);
       })).length;
+      if (connected === 0 && body?.pending === true) return null;
       if (connected === 0) return { text: `No credentials — ${engine?.shortName ?? harnessLabel} cannot answer`, tone: "warn" };
       const parts = [`${connected} connected`];
       if (signedIn > 0) parts.push(`${signedIn} signed in`);

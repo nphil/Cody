@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * What the dialog-wide search knows about. Three sources, one union:
+ * What the dialog-wide search knows about. Two sources, one union:
  *
  *   - STATIC entries: every panel module exports `SEARCH_ENTRIES`, derived
  *     FROM the table it renders (`PREFERENCE_CARDS`, the Behavior
@@ -11,22 +11,18 @@
  *     tolerates one that has no export yet (or fails to load):
  *     `components/settings-search-index.test.mjs` fails when a rendered
  *     `<NativeSetting label>` is missing from the union.
- *   - FALLBACK entries: TEMPORARY. Hubs whose module does not export
- *     `SEARCH_ENTRIES` yet are searched through `FALLBACK_ENTRIES` below,
- *     the hand-kept list the old SettingsConfig carried, re-mapped onto hub
- *     ids. Entries for a hub drop out automatically the moment its module
- *     exports the real table; delete the whole list when the last hub does.
  *   - DYNAMIC entries: rows built from the shared route cache at search time
- *     (`buildSchemaSearchEntries` for the engine's schema; providers,
- *     engines, MCP servers, skills and models follow with their hubs).
+ *     (`buildSchemaSearchEntries` for the engine's schema; the hubs' own
+ *     hooks, gathered by `SearchSources`, for engines and MCP servers;
+ *     providers, skills and models follow).
  *
  * Ids follow the jump contract (`data-search-id` + SettingsHighlightContext):
  * `schema-<key>` for schema rows and the curated cards bound to them,
  * `provider-<id>`, `engine-<id>`, `mcp-<name>`, else `slugify(label)`.
  */
-import type { EngineCapabilities, SettingsTab } from "../SettingsTabs";
-import { TERMINAL_ONLY_BADGE, UNAVAILABLE_BADGE, slugify } from "./primitives";
-import { capabilityAllows, getVisibleSections, groupLabel, normalizeSectionId, resolveSection, type CapabilityGate, type SettingsSectionId } from "./registry";
+import type { EngineCapabilities } from "../SettingsTabs";
+import { TERMINAL_ONLY_BADGE, UNAVAILABLE_BADGE } from "./primitives";
+import { capabilityAllows, getVisibleSections, groupLabel, normalizeSectionId, type CapabilityGate, type SettingsSectionId } from "./registry";
 import { cardOwner, cardSurfaceAvailable } from "./engine/recommended-cards";
 import { SEARCH_ENTRIES as PREFERENCE_ENTRIES } from "./panels/PreferencesPanel";
 
@@ -82,82 +78,8 @@ export const HUB_LABELS: Record<SettingsSectionId, string> = {
   system: "System",
 };
 
-interface FallbackEntry {
-  tab: SettingsTab;
-  section: string;
-  label: string;
-  description: string;
-  scope?: SearchEntry["scope"];
-  searchId?: string;
-  needsCapability?: keyof EngineCapabilities;
-}
-
-// TEMPORARY (see the module note): mirrors the <NativeSetting label=...>
-// cards the stub Account, Behavior and Extensions panels still render.
-// Search jumps via slugify(label), so a label edited in a stub panel must
-// be edited here too until that panel exports its own SEARCH_ENTRIES.
-const FALLBACK_INDEX: readonly FallbackEntry[] = [
-  // Account
-  { tab: "accounts", section: "Account", label: "Full name", description: "Shown on your profile and, for administrators, in the account roster.", scope: "Cody only" },
-  { tab: "accounts", section: "Account", label: "Profile picture", description: "PNG, JPEG or WebP. Cropped square and downscaled in your browser before upload.", scope: "Cody only" },
-  { tab: "accounts", section: "Account", label: "Change password", description: "Signs out your other devices and revokes this account's access tokens." },
-  // Behavior › Safety
-  { tab: "safety", section: "Tool Safety & Approvals", label: "Approval Mode", description: "Choose when the engine asks before tool calls.", needsCapability: "configEditor" },
-  { tab: "safety", section: "Tool Safety & Approvals", label: "Bash Override", description: "Override default approval policy specifically for terminal commands.", needsCapability: "configEditor" },
-  { tab: "safety", section: "Tool Safety & Approvals", label: "Extension Tool Requests", description: "Automatically approve extension tool authorization requests.", needsCapability: "configEditor" },
-  // Behavior › Model Defaults
-  { tab: "intelligence", section: "AI Model Defaults", label: "Reasoning", description: "Default effort level for thinking-capable models.", needsCapability: "configEditor" },
-  { tab: "intelligence", section: "AI Model Defaults", label: "Verbosity", description: "Response detail level for supporting providers.", needsCapability: "configEditor" },
-  { tab: "intelligence", section: "AI Model Defaults", label: "Personality", description: "Style included in the engine's system prompt.", needsCapability: "configEditor" },
-  { tab: "intelligence", section: "AI Model Defaults", label: "Hide thinking blocks", description: "Removes reasoning from the harness's own terminal transcript. Cody draws its own thinking blocks; use Expand thinking blocks under Preferences.", scope: TERMINAL_ONLY_BADGE, searchId: "hide-thinking-blocks-curated", needsCapability: "configEditor" },
-  { tab: "intelligence", section: "AI Model Defaults", label: "External Thinking", description: "Private scratchpad reasoning via think tool.", needsCapability: "configEditor" },
-  // Behavior › Advisor
-  { tab: "intelligence", section: "Advisor Review", label: "Enable Advisor", description: "Enable Advisor for new sessions with the advisor role.", needsCapability: "configEditor" },
-  { tab: "intelligence", section: "Advisor Review", label: "Advisor Backlog", description: "Wait briefly when advisor falls behind.", needsCapability: "configEditor" },
-  { tab: "intelligence", section: "Advisor Review", label: "Review Subagents", description: "Apply Advisor passive review to subagent tasks.", needsCapability: "configEditor" },
-  // Behavior › Compaction
-  { tab: "intelligence", section: "Context Compaction", label: "Automatic Compaction", description: "Compact context before model context limit is hit.", needsCapability: "configEditor" },
-  { tab: "intelligence", section: "Context Compaction", label: "Continue After Compaction", description: "Resume task execution after compaction completes.", needsCapability: "configEditor" },
-  { tab: "intelligence", section: "Context Compaction", label: "Method Order", description: "Preferred order of context-maintenance methods; unavailable methods fall through to the next.", needsCapability: "configEditor" },
-  { tab: "intelligence", section: "Context Compaction", label: "Compact Mid-Turn", description: "Check context limits between tool execution steps.", needsCapability: "configEditor" },
-  // Behavior › Memory & Auto-Learn
-  { tab: "intelligence", section: "Memory & Auto-Learn", label: "Memory Backend", description: "Where durable knowledge is stored across sessions.", needsCapability: "configEditor" },
-  { tab: "intelligence", section: "Memory & Auto-Learn", label: "Enable Auto-Learn", description: "Capture reusable lessons after completed runs.", needsCapability: "configEditor" },
-  { tab: "intelligence", section: "Memory & Auto-Learn", label: "Private Capture Turn", description: "Run private lesson-capture turn at completion.", needsCapability: "configEditor" },
-  { tab: "intelligence", section: "Memory & Auto-Learn", label: "Memory Scope", description: "Scoping for Mnemopi knowledge storage.", needsCapability: "configEditor" },
-  { tab: "intelligence", section: "Memory & Auto-Learn", label: "Recall on Session Start", description: "Load relevant memories into first turn.", needsCapability: "configEditor" },
-  { tab: "intelligence", section: "Memory & Auto-Learn", label: "Retain Completed Turns", description: "Store completed conversation turns in memory.", needsCapability: "configEditor" },
-  // Behavior › Retry
-  { tab: "intelligence", section: "Automatic Retry", label: "Automatic Retry", description: "Retry failed turns automatically.", needsCapability: "configEditor" },
-  { tab: "intelligence", section: "Automatic Retry", label: "Max Attempts", description: "Retry limit before giving up.", needsCapability: "configEditor" },
-  { tab: "intelligence", section: "Automatic Retry", label: "Model Fallback", description: "Fall back to alternative model when retries exhaust.", needsCapability: "configEditor" },
-  // Extensions › MCP
-  { tab: "mcp", section: "MCP", label: "Load Project MCP Servers", description: "Allow project-root MCP configuration to be discovered.", needsCapability: "mcp" },
-  { tab: "mcp", section: "MCP", label: "Render MCP Markdown", description: "Render non-JSON MCP results as Markdown in transcript.", needsCapability: "mcp" },
-  { tab: "mcp", section: "MCP", label: "MCP Resource Updates", description: "Inject server resource updates into conversation.", needsCapability: "mcp" },
-];
-
-function fromFallback(entry: FallbackEntry): SearchEntry {
-  const { id, sub } = resolveSection(entry.tab);
-  const owner = id === "accounts" || id === "general" || id === "system" ? "Cody" : "{engine}";
-  return {
-    id: entry.searchId ?? slugify(entry.label),
-    tab: id,
-    ...(sub ? { sub } : {}),
-    label: entry.label,
-    description: entry.description,
-    breadcrumb: [owner, HUB_LABELS[id], entry.section],
-    ...(entry.scope ? { scope: entry.scope } : {}),
-    ...(entry.needsCapability ? { needsCapability: entry.needsCapability } : {}),
-    action: "jump",
-  };
-}
-
-/** The temporary list, as search entries; exported for the drift test only. */
-export const FALLBACK_ENTRIES: readonly SearchEntry[] = FALLBACK_INDEX.map(fromFallback);
-
 /** The static union: every loaded panel's table plus which hubs those
- * tables cover (a covered hub needs no fallback). */
+ * tables cover (a hub whose module has not loaded yet is simply absent). */
 export interface StaticSearchIndex {
   entries: readonly SearchEntry[];
   coveredTabs: ReadonlySet<SettingsSectionId>;
@@ -197,7 +119,7 @@ let staticIndexPromise: Promise<StaticSearchIndex> | null = null;
 let staticIndexCache: StaticSearchIndex | null = null;
 
 /** Build the union from module results; a module with no export (or one
- * that failed to load) leaves its hub to the fallback list. */
+ * that failed to load) contributes nothing and its hub stays uncovered. */
 export function buildStaticSearchIndex(sources: ReadonlyArray<{ tab: SettingsSectionId; entries: readonly SearchEntry[] | null }>): StaticSearchIndex {
   const entries: SearchEntry[] = [];
   const coveredTabs = new Set<SettingsSectionId>();
@@ -334,6 +256,9 @@ export function buildSchemaSearchEntries(rows: readonly SchemaSearchRow[] | null
 export interface DynamicSearchSources {
   /** `useSchemaIndex().rows` mapped through the shell, or `schemaRowsFromBody`. */
   schemaRows?: readonly SchemaSearchRow[] | null;
+  /** Entries hubs derive from cached routes (`SearchSources`): engines
+   * (`engine-<id>`), MCP servers (`mcp-<name>`); providers and models follow. */
+  entries?: readonly SearchEntry[] | null;
 }
 
 /** One hub row per visible section, so "Providers" finds the hub itself. */
@@ -349,10 +274,10 @@ function hubEntries(capabilities: EngineCapabilities, shortName: string): Search
 }
 
 /**
- * The union search runs over: hub rows, the static tables, the temporary
- * fallback for hubs without a table, and the dynamic rows. Entries whose hub
- * is not visible or whose own gate fails are dropped, never dimmed; the
- * first entry with an id wins (a curated card over the schema row it binds).
+ * The union search runs over: hub rows, the static tables and the dynamic
+ * rows. Entries whose hub is not visible or whose own gate fails are
+ * dropped, never dimmed; the first entry with an id wins (a curated card
+ * over the schema row it binds).
  */
 export function collectSearchEntries({ capabilities, shortName, dynamic, statics }: {
   capabilities: EngineCapabilities;
@@ -363,11 +288,10 @@ export function collectSearchEntries({ capabilities, shortName, dynamic, statics
 }): SearchEntry[] {
   const index = statics ?? currentStaticSearchIndex();
   const visible = new Set<SettingsSectionId>(getVisibleSections(capabilities).map((section) => section.id));
-  const fallback = FALLBACK_ENTRIES.filter((entry) => !index.coveredTabs.has(entry.tab));
   const union = [
     ...hubEntries(capabilities, shortName),
     ...index.entries,
-    ...fallback,
+    ...(dynamic?.entries ?? []),
     ...buildSchemaSearchEntries(dynamic?.schemaRows, shortName, capabilities),
   ];
   const seen = new Set<string>();

@@ -2526,6 +2526,12 @@ html.dark .dropdown-surface :is(select, option) {
   .settings-shell button:not([role="switch"]) {
     min-width: 44px !important;
   }
+  /* The root list's rows are taller than a bare target (label over a
+     status line); the rule above must not clamp them when the status line
+     is absent. */
+  .settings-shell .settings-mobile-row {
+    min-height: 52px !important;
+  }
   .settings-rail-row,
   .settings-mobile-row,
   .settings-mobile-back,

@@ -15,13 +15,10 @@ const jiti = createJiti(import.meta.url, {
  * exports `SEARCH_ENTRIES` derived FROM that table, and this test scans the
  * rendered `<NativeSetting label=…>` cards to prove nothing drifted.
  *
- * Hubs another slice is still writing (no `SEARCH_ENTRIES` export yet, or a
- * module that does not load) are skipped and reported as diagnostics; the
- * temporary fallback list covers them in the meantime. Preferences is the
- * one hub that must always take part.
+ * A hub module that does not load, or has no export, is skipped and named
+ * in a diagnostic so the gap is visible; Preferences must always take part.
  */
 const {
-  FALLBACK_ENTRIES,
   PRELOADED_STATIC_INDEX,
   SEARCH_FILTERS,
   buildSchemaSearchEntries,
@@ -123,7 +120,7 @@ test("every rendered <NativeSetting label> in a hub that exports SEARCH_ENTRIES 
     assert.ok(tab, `${name} is a known hub module (add it to PANEL_TABS)`);
     sources.push({ name, path, tab, entries });
   }
-  if (skipped.length > 0) t.diagnostic(`hubs without SEARCH_ENTRIES yet (searched through the temporary fallback): ${skipped.join(", ")}`);
+  if (skipped.length > 0) t.diagnostic(`hubs without SEARCH_ENTRIES (not searchable): ${skipped.join(", ")}`);
 
   const index = buildStaticSearchIndex(sources.map((source) => ({ tab: source.tab, entries: source.entries })));
   const union = collectSearchEntries({ capabilities: ALL_CAPABILITIES, shortName: "OMP", statics: index });
@@ -135,38 +132,23 @@ test("every rendered <NativeSetting label> in a hub that exports SEARCH_ENTRIES 
     }
   }
 
-  // Ids must be unique across the whole static layer (tables + fallback):
-  // the highlight is one id for the whole dialog.
-  const staticIds = [...index.entries, ...FALLBACK_ENTRIES.filter((entry) => !index.coveredTabs.has(entry.tab))].map((entry) => entry.id);
+  // Ids must be unique across the whole static layer: the highlight is one
+  // id for the whole dialog.
+  const staticIds = index.entries.map((entry) => entry.id);
   const duplicates = staticIds.filter((id, position) => staticIds.indexOf(id) !== position);
   assert.deepEqual([...new Set(duplicates)], [], "static search ids collide");
+  assert.ok(index.coveredTabs.has("general"), "Preferences is covered");
 });
 
-test("the temporary fallback still mirrors the stub panels it stands in for", (t) => {
-  // Not a hard failure: those files belong to slices mid-rewrite. The
-  // diagnostic names any label the fallback would fail to find so the
-  // drift is visible until the hub exports its own table.
-  const fallbackIds = new Set(FALLBACK_ENTRIES.map((entry) => entry.id));
-  const drift = [];
-  for (const path of walk(PANELS_DIR)) {
-    const source = readFileSync(path, "utf8");
-    if (/export const SEARCH_ENTRIES\b/.test(source)) continue;
-    for (const card of renderedCards(source)) {
-      if (!fallbackIds.has(card.id)) drift.push(`${path.slice(SETTINGS_DIR.length)}: ${card.label}`);
-    }
-  }
-  if (drift.length > 0) t.diagnostic(`fallback drift: ${drift.join("; ")}`);
-  assert.equal(new Set(FALLBACK_ENTRIES.map((entry) => entry.id)).size, FALLBACK_ENTRIES.length, "fallback ids are unique");
-});
-
-test("the fallback drops out per hub as soon as that hub exports its table", () => {
-  const withoutEngine = collectSearchEntries({ capabilities: ALL_CAPABILITIES, shortName: "OMP", statics: { entries: [], coveredTabs: new Set() } });
-  assert.ok(withoutEngine.some((entry) => entry.id === "approval-mode"), "Behavior is searched through the fallback while its panel has no table");
+test("a hub's table joins the union as its module loads, with {engine} resolved to the active engine", () => {
+  const before = collectSearchEntries({ capabilities: ALL_CAPABILITIES, shortName: "OMP", statics: { entries: [], coveredTabs: new Set() } });
+  assert.ok(!before.some((entry) => entry.id === "schema-tools.approvalMode"), "nothing static for Behavior until its module has loaded");
+  assert.ok(before.some((entry) => entry.id === "tab-engine"), "the hub row itself is always there");
 
   const engineTable = [{ id: "schema-tools.approvalMode", tab: "engine", label: "Approval mode", breadcrumb: ["{engine}", "Behavior"], action: "jump" }];
-  const withEngine = collectSearchEntries({ capabilities: ALL_CAPABILITIES, shortName: "Pi", statics: buildStaticSearchIndex([{ tab: "engine", entries: engineTable }]) });
-  assert.ok(!withEngine.some((entry) => entry.id === "approval-mode"), "the fallback's Behavior rows are gone");
-  assert.ok(withEngine.some((entry) => entry.id === "full-name"), "other hubs keep their fallback");
+  const index = buildStaticSearchIndex([{ tab: "engine", entries: engineTable }, { tab: "memory", entries: null }]);
+  assert.deepEqual([...index.coveredTabs], ["engine"], "a module without an export covers nothing");
+  const withEngine = collectSearchEntries({ capabilities: ALL_CAPABILITIES, shortName: "Pi", statics: index });
   const card = withEngine.find((entry) => entry.id === "schema-tools.approvalMode");
   assert.deepEqual(card.breadcrumb, ["Pi", "Behavior"], "{engine} is the active engine's short name");
 });
@@ -177,9 +159,18 @@ test("hidden hubs and gated cards are dropped from the union, never dimmed", () 
   assert.ok(!union.some((entry) => entry.tab === "engine"), "no Behavior rows without the hub");
   assert.ok(!union.some((entry) => entry.tab === "extensions"));
   assert.ok(!union.some((entry) => entry.id === "message-during-active-run"), "a card gated on chatExtras is gone");
+  const gated = collectSearchEntries({ capabilities: noConfig, shortName: "Claude", statics: { entries: [{ id: "x", tab: "general", label: "X", breadcrumb: [], needsCapability: "configEditor", action: "jump" }], coveredTabs: new Set(["general"]) } });
+  assert.ok(!gated.some((entry) => entry.id === "x"), "an entry's own gate is honoured inside a visible hub");
   assert.ok(union.some((entry) => entry.id === "theme"));
   assert.ok(union.some((entry) => entry.id === "tab-providers"), "every visible hub has a row of its own");
   assert.ok(!union.some((entry) => entry.id === "tab-engine"));
+  // A hub's dynamic hook entries join the union under the same gates.
+  const sourced = collectSearchEntries({ capabilities: noConfig, shortName: "Claude", statics: { entries: [], coveredTabs: new Set() }, dynamic: { entries: [
+    { id: "engine-pi", tab: "system", label: "Pi", keywords: ["pi"], breadcrumb: ["Server", "System"], action: "jump" },
+    { id: "mcp-github", tab: "extensions", sub: "mcp", label: "github", breadcrumb: ["{engine}", "Extensions", "MCP"], needsCapability: "mcp", action: "jump" },
+  ] } });
+  assert.ok(sourced.some((entry) => entry.id === "engine-pi"), "a roster engine is searchable");
+  assert.ok(!sourced.some((entry) => entry.id === "mcp-github"), "an MCP server hides with the hub");
 });
 
 test("schema rows are searchable by label, description and key, deduped against a card with the same id", () => {
@@ -283,6 +274,4 @@ test("a result opens its hub (with the legacy sub-view) and highlights everythin
   assert.deepEqual(resultTarget({ id: "theme", tab: "general", label: "x", breadcrumb: [], action: "jump" }), { id: "general" });
   assert.equal(resultHighlight({ id: "tab-providers", tab: "providers", label: "x", breadcrumb: [], action: "jump" }), null);
   assert.equal(resultHighlight({ id: "schema-ui.theme", tab: "engine", label: "x", breadcrumb: [], action: "jump" }), "schema-ui.theme");
-  const mcp = FALLBACK_ENTRIES.find((entry) => entry.id === "load-project-mcp-servers");
-  assert.deepEqual({ tab: mcp.tab, sub: mcp.sub }, { tab: "extensions", sub: "mcp" }, "legacy ids resolve to hub + segment");
 });

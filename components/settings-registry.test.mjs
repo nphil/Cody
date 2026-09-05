@@ -179,9 +179,36 @@ test("status lines read cached bodies only and never throw on odd shapes", () =>
     getSection("engine").statusLine(data({ "/api/omp-settings/schema": { harness: { shortName: "OMP" }, schema: { source: { version: "18.1.10" }, settings: new Array(334).fill({}) }, values: { a: 1, b: 2 } } })),
     { text: "18.1.10 · 2 changed · 334 settings" },
   );
-  // Placeholders until their routes exist: never a call, never a throw.
+  // Nothing cached yet: never a call, never a throw.
   assert.equal(getSection("providers").statusLine(data({})), null);
   assert.equal(getSection("models").statusLine(data({})), null);
+  // Providers: connected rows, "signed in" only for a WINNING subscription
+  // login (a key vendor marked authenticated is not a sign-in), a warning
+  // with nothing connected — but not while the catalog cache is still cold.
+  const providers = (rows, extra = {}) => data({ "/api/providers?cached=1": { engine: { id: "omp", shortName: "OMP" }, providers: rows, ...extra } });
+  const subscription = { id: "anthropic", connected: true, methods: [{ kind: "oauth", state: "connected", loginId: "anthropic", winning: true }] };
+  const keyed = { id: "openai", connected: true, methods: [{ kind: "key", state: "connected", winning: true }, { kind: "oauth", state: "connected", loginId: "openai-codex", winning: false }] };
+  const unset = { id: "mistral", connected: false, methods: [{ kind: "key", state: "unset", winning: true }] };
+  assert.deepEqual(getSection("providers").statusLine(providers([subscription, keyed, unset])), { text: "2 connected · 1 signed in" });
+  assert.deepEqual(getSection("providers").statusLine(providers([keyed])), { text: "1 connected" });
+  assert.deepEqual(getSection("providers").statusLine(providers([unset])), { text: "No credentials — OMP cannot answer", tone: "warn" });
+  assert.equal(getSection("providers").statusLine(providers([unset], { pending: true })), null, "a cold cache is not a verdict");
+  assert.deepEqual(getSection("providers").statusLine(providers([subscription], { pending: true })), { text: "1 connected · 1 signed in" });
+  // Models: the cached catalog's total, hidden counts from the visibility
+  // file, "new" in accent; a cold cache shows nothing; ACP says so.
+  const models = (fresh, visibility) => data({ "/api/models/new?cached=1": fresh, ...(visibility ? { "/api/models/visibility": visibility } : {}) });
+  assert.deepEqual(getSection("models").statusLine(models({ total: 233, newModels: [], catalogSource: "global" })), { text: "233 models", tone: "muted" });
+  assert.deepEqual(
+    getSection("models").statusLine(models({ total: 233, newModels: [{}, {}, {}, {}], catalogSource: "global" }, { hidden: ["a", "b"], instanceHidden: ["c"] })),
+    { text: "233 models · 3 hidden · 4 new", tone: "accent" },
+  );
+  assert.equal(getSection("models").statusLine(models({ pending: true, newModels: [], catalogSource: "global" })), null, "never a spawn: a cold cache is silent");
+  assert.deepEqual(getSection("models").statusLine(models({ catalogSource: "session", newModels: [] })), { text: "From the session" });
+  // Behavior: secret leaves are redacted out of `values` and counted through `secretsSet`.
+  assert.deepEqual(
+    getSection("engine").statusLine(data({ "/api/omp-settings/schema": { schema: { source: { version: "0.9" }, settings: [{}, {}] }, values: { a: 1 }, secretsSet: ["api.key"] } })),
+    { text: "0.9 · 2 changed · 2 settings" },
+  );
   for (const section of SETTINGS_SECTIONS) {
     assert.doesNotThrow(() => section.statusLine?.(data({ "/api/accounts/me": "garbage", "/api/memory": 42, "/api/app-update": null })));
   }
