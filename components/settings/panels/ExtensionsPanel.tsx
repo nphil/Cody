@@ -7,26 +7,31 @@
  * segment stays mounted (display:none) so an install stream in Skills
  * survives a look at MCP.
  *
- *   - MCP: the four MCP keys of the engine's config as bound cards
- *     (`MCP_SETTING_CARDS`, written through the config writer) above
+ *   - MCP: the engine's four `mcp.*` keys as bound cards (`MCP_CARDS`, the
+ *     same table the Behavior hub's schema list chips as "Also under
+ *     Extensions › MCP"): label, description and control come from the
+ *     engine's schema row, writes go through the schema index. Below them
  *     `McpConfig`, whose user-level list renders without a workspace.
  *   - Skills / Plugins: `SkillsConfig` / `PluginsConfig` embedded, each with
  *     its store or marketplace in a Drawer. Both are workspace-scoped: with
  *     no workspace the segment says so instead of rendering a dead list.
  *
- * Search: `SEARCH_ENTRIES` are the static cards and lists this hub renders
- * (the MCP cards derive from `MCP_SETTING_CARDS`, so a label rendered and a
- * label searchable are one string); `useExtensionsSearchEntries` derives one
- * `mcp-<name>` row per server from the cached inventory.
+ * Search: `SEARCH_ENTRIES` are the static lists this hub renders; the MCP
+ * cards are schema rows (`schema-<key>`, trailed by `cardOwner`) and
+ * `useExtensionsSearchEntries` derives one `mcp-<name>` row per server from
+ * the cached inventory.
  */
 import dynamic from "next/dynamic";
 import { useEffect, useMemo, useState } from "react";
+import { RotateCcw } from "lucide-react";
 import { extensionsGroupDescription } from "../../SettingsTabs";
-import { useNativeSettings, type NativeSettings } from "@/hooks/useConfigWriter";
+import { useSchemaIndex, type SchemaIndex, type SchemaValue } from "@/hooks/useSchemaIndex";
 import { useSettingsRoute } from "@/hooks/useSettingsData";
 import { mcpInventoryOf, mcpRoute, type McpRouteBody } from "../../McpConfig";
+import { MCP_CARDS, cardSurfaceAvailable, searchIdForKey, type RecommendedCard } from "../engine/recommended-cards";
+import { SchemaControl } from "../engine/SchemaSettingsList";
 import { getSection, getVisibleSubViews } from "../registry";
-import { NativeSetting, ToggleSwitch, nativeInputStyle, slugify } from "../primitives";
+import { NativeSetting, TERMINAL_ONLY_BADGE, chipStyle } from "../primitives";
 import { SaveStatusCorner, useSaveStatus } from "../SaveStatus";
 import type { SearchEntry } from "../search-index";
 import { SegmentedControl } from "../SegmentedControl";
@@ -39,44 +44,9 @@ const McpConfig = dynamic(() => import("../../McpConfig").then((module) => modul
 
 export const EXTENSIONS_PANEL_ID = "extensions";
 
-type McpSettings = NonNullable<NativeSettings["mcp"]>;
-
-export interface McpSettingCard {
-  key: keyof McpSettings;
-  label: string;
-  description: string;
-  control: "toggle" | "number";
-  /** The engine's default, shown until the file says otherwise. */
-  fallback: boolean | number;
-  keywords?: readonly string[];
-}
-
-/** The four `mcp.*` keys of the engine's config, as the cards this segment
- * renders and the search index reads. Labels and descriptions mirror the
- * engine's own schema rows for these keys. */
-export const MCP_SETTING_CARDS: readonly McpSettingCard[] = [
-  { key: "enableProjectConfig", label: "Load Project MCP Servers", description: "Allow project-root MCP configuration to be discovered.", control: "toggle", fallback: true, keywords: ["mcp.json", "project"] },
-  { key: "renderMarkdownResults", label: "Render MCP Markdown", description: "Render non-JSON MCP results as Markdown in transcript.", control: "toggle", fallback: true },
-  { key: "notifications", label: "MCP Resource Updates", description: "Inject server resource updates into conversation.", control: "toggle", fallback: false, keywords: ["notifications"] },
-  { key: "notificationDebounceMs", label: "MCP Notification Debounce", description: "Milliseconds to wait before a burst of resource updates is injected as one notice (0–60,000).", control: "number", fallback: 500, keywords: ["debounce", "ms"] },
-];
-
 const ENGINE_TRAIL = ["{engine}", "Extensions"] as const;
 
 export const SEARCH_ENTRIES: readonly SearchEntry[] = [
-  ...MCP_SETTING_CARDS.map((card): SearchEntry => ({
-    id: slugify(card.label),
-    tab: "extensions",
-    sub: "mcp",
-    label: card.label,
-    description: card.description,
-    keywords: card.keywords,
-    breadcrumb: [...ENGINE_TRAIL, "MCP"],
-    // The cards write the engine's config file: only the engine with a
-    // config editor (which also serves MCP) renders them.
-    needsCapability: "configEditor",
-    action: "jump",
-  })),
   { id: "configured-mcp-servers", tab: "extensions", sub: "mcp", label: "Configured MCP servers", description: "Every MCP server the engine loads: user level, project level and discovered, with live status when a session is open.", keywords: ["mcp", "server", "user level"], breadcrumb: [...ENGINE_TRAIL, "MCP"], needsCapability: "mcp", action: "jump" },
   { id: "project-mcp-servers", tab: "extensions", sub: "mcp", label: "Project MCP servers", description: "The servers in this workspace's mcp.json: add, check, save or remove.", keywords: ["mcp.json", "add server"], breadcrumb: [...ENGINE_TRAIL, "MCP"], scope: "Workspace", needsCapability: "mcp", action: "jump" },
   { id: "skills", tab: "extensions", sub: "skills", label: "Skills", description: "The workspace's installed skills: enable, disable, check for updates.", keywords: ["skill", "update"], breadcrumb: [...ENGINE_TRAIL, "Skills"], scope: "Workspace", needsCapability: "skills", action: "jump" },
@@ -103,35 +73,46 @@ export function useExtensionsSearchEntries(cwd: string | null, enabled = true): 
   })), [route.data]);
 }
 
-function DebounceInput({ value, fallback, onCommit }: { value: number | undefined; fallback: number; onCommit: (next: number) => void }) {
-  const [draft, setDraft] = useState<string>(value === undefined ? "" : String(value));
-  useEffect(() => {
-    setDraft(value === undefined ? "" : String(value));
-  }, [value]);
-  const commit = () => {
-    const trimmed = draft.trim();
-    const next = trimmed === "" ? fallback : Number(trimmed);
-    if (!Number.isInteger(next) || next < 0 || next > 60_000) {
-      setDraft(value === undefined ? "" : String(value));
-      return;
-    }
-    if (next !== (value ?? fallback)) onCommit(next);
-  };
+/** One `mcp.*` card: the schema row's label, description and control, written
+ * through the schema index so the Behavior hub's row and this card never
+ * disagree. Absent until the schema has loaded, and while the row's own
+ * `ui.condition` hides it. */
+function McpCard({ card, index }: { card: RecommendedCard; index: SchemaIndex }) {
+  const { track } = useSaveStatus(EXTENSIONS_PANEL_ID);
+  const row = index.byKey.get(card.key);
+  if (!row || !row.visible) return null;
+  const write = (value: SchemaValue | null) => { void track(() => index.setValue(row.key, value)); };
+  const description = [row.description, index.describeCondition(row.condition)].filter(Boolean).join(" ");
+  const inline = row.type === "boolean";
+  const control = <SchemaControl setting={row} value={row.value} onChange={write} />;
+  const footer = (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0, flexWrap: "wrap" }}>
+        <code style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono, monospace)", overflowWrap: "anywhere" }}>{row.key}</code>
+        {row.modified && <span style={{ ...chipStyle, color: "var(--accent)" }}>Changed</span>}
+      </span>
+      {row.modified && (
+        <button type="button" className="ui-focus-ring" onClick={() => write(null)} title="Reset to the engine's default" style={{ display: "inline-flex", alignItems: "center", gap: 4, background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 10.5, padding: "2px 4px", borderRadius: "var(--radius-control)", flexShrink: 0 }}>
+          <RotateCcw size={11} aria-hidden="true" /> Reset
+        </button>
+      )}
+    </div>
+  );
   return (
-    <input
-      type="number"
-      min={0}
-      max={60000}
-      step={50}
-      inputMode="numeric"
-      value={draft}
-      placeholder={String(fallback)}
-      aria-label="MCP Notification Debounce"
-      onChange={(event) => setDraft(event.target.value)}
-      onBlur={commit}
-      onKeyDown={(event) => { if (event.key === "Enter") (event.target as HTMLInputElement).blur(); }}
-      style={{ ...nativeInputStyle, width: 120 }}
-    />
+    <NativeSetting
+      label={row.label}
+      description={description || undefined}
+      badge={row.terminalOnly ? TERMINAL_ONLY_BADGE : undefined}
+      searchId={searchIdForKey(row.key)}
+      control={(
+        <>
+          {!inline && control}
+          {footer}
+        </>
+      )}
+    >
+      {inline ? control : undefined}
+    </NativeSetting>
   );
 }
 
@@ -148,10 +129,11 @@ export function ExtensionsPanel() {
     if (active) setVisited((current) => (current.has(active) ? current : new Set([...current, active])));
   }, [active]);
 
-  const native = useNativeSettings(capabilities.configEditor && capabilities.mcp);
-  const { track } = useSaveStatus(EXTENSIONS_PANEL_ID);
-  const patchMcp = (patch: Partial<McpSettings>) => { void track(() => native.patchSection("mcp", patch)); };
-  const mcpValue = <K extends keyof McpSettings>(key: K): McpSettings[K] | undefined => native.settings?.mcp?.[key];
+  // The bound cards exist where their surface does: an engine with a config
+  // editor that also serves MCP. The schema is the same payload the
+  // Behavior hub reads, so the cache answers both from one request.
+  const mcpCards = cardSurfaceAvailable("mcp", capabilities);
+  const index = useSchemaIndex({ enabled: mcpCards });
 
   const subPanel = (id: string) => ({ role: "tabpanel" as const, id: `settings-subpanel-${id}`, "aria-labelledby": `settings-subtab-${id}` });
 
@@ -175,19 +157,9 @@ export function ExtensionsPanel() {
       {capabilities.mcp && visited.has("mcp") && (
         <div {...subPanel("mcp")} className="settings-scroll-column" style={{ display: active === "mcp" ? "flex" : "none", flex: 1, minHeight: 0, flexDirection: "column", overflowY: "auto", padding: 20, gap: 16 }}>
           <SaveStatusCorner panelId={EXTENSIONS_PANEL_ID} />
-          {capabilities.configEditor && (
+          {mcpCards && index.status === "ready" && (
             <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "repeat(2, minmax(0, 1fr))", gap: 10 }}>
-              {MCP_SETTING_CARDS.map((card) => (
-                card.control === "toggle" ? (
-                  <NativeSetting key={card.key} label={card.label} description={card.description}>
-                    <ToggleSwitch checked={(mcpValue(card.key) as boolean | undefined) ?? (card.fallback as boolean)} onChange={(checked) => patchMcp({ [card.key]: checked })} />
-                  </NativeSetting>
-                ) : (
-                  <NativeSetting key={card.key} label={card.label} description={card.description}>
-                    <DebounceInput value={mcpValue(card.key) as number | undefined} fallback={card.fallback as number} onCommit={(next) => patchMcp({ [card.key]: next })} />
-                  </NativeSetting>
-                )
-              ))}
+              {MCP_CARDS.map((card) => <McpCard key={card.key} card={card} index={index} />)}
             </div>
           )}
           <McpConfig cwd={cwd} sessionId={sessionId} />
