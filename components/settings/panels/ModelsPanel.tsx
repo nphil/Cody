@@ -19,6 +19,7 @@ import { useModelCatalog } from "@/hooks/useModelCatalog";
 import { ModelAssignments } from "../models/ModelAssignments";
 import { ModelCatalog } from "../models/ModelCatalog";
 import { SaveStatusCorner } from "../SaveStatus";
+import { SegmentedControl } from "../SegmentedControl";
 import type { SearchEntry } from "../search-index";
 import { useSettingsShell } from "../shell-context";
 
@@ -72,30 +73,23 @@ export function ModelsPanel() {
           </p>
         </div>
         {hasAssignments && (
-          <div role="tablist" aria-label="Models sections" style={{ display: "inline-flex", gap: 2, padding: 3, border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", flexShrink: 0 }}>
-            {([["catalog", "Catalog"], ["assignments", "Assignments"]] as const).map(([id, label]) => {
-              const active = segment === id;
-              return (
-                <button
-                  key={id}
-                  type="button"
-                  role="tab"
-                  id={`settings-subtab-${id}`}
-                  aria-selected={active}
-                  onClick={() => setSegment(id)}
-                  className="ui-focus-ring"
-                  style={{ padding: "5px 12px", minHeight: 30, border: "none", borderRadius: "calc(var(--radius-control) - 2px)", background: active ? "var(--bg-selected)" : "transparent", color: active ? "var(--text)" : "var(--text-muted)", fontSize: 12, fontWeight: active ? 600 : 500, cursor: "pointer" }}
-                >
-                  {label}
-                </button>
-              );
-            })}
-          </div>
+          <SegmentedControl
+            label="Models sections"
+            value={segment}
+            options={[{ id: "catalog", label: "Catalog" }, { id: "assignments", label: "Assignments" }]}
+            onChange={(id) => setSegment(id as "catalog" | "assignments")}
+          />
         )}
       </div>
-      {segment === "assignments" && hasAssignments
-        ? <ModelAssignments catalog={catalog} panelId={MODELS_PANEL_ID} />
-        : <ModelCatalog catalog={catalog} panelId={MODELS_PANEL_ID} />}
+      {segment === "assignments" && hasAssignments ? (
+        <div role="tabpanel" id="settings-subpanel-assignments" aria-labelledby="settings-subtab-assignments" style={{ display: "flex", flexDirection: "column", gap: 16, minWidth: 0 }}>
+          <ModelAssignments catalog={catalog} panelId={MODELS_PANEL_ID} />
+        </div>
+      ) : (
+        <div role="tabpanel" id="settings-subpanel-catalog" aria-labelledby={hasAssignments ? "settings-subtab-catalog" : undefined} style={{ display: "flex", flexDirection: "column", gap: 16, minWidth: 0 }}>
+          <ModelCatalog catalog={catalog} panelId={MODELS_PANEL_ID} />
+        </div>
+      )}
     </div>
   );
 }
