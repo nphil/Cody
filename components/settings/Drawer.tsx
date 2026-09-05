@@ -104,17 +104,23 @@ export function Drawer({ open, title, presentation = "side", onClose, dirty = fa
   }, [dirty, onClose]);
   const onTrapKey = useFocusTrap(panelRef, open && presentation !== "dialog");
 
-  // The phone stack tracks depth for the busy check and (next slice) history;
-  // the level itself renders here so its children stay in this React tree.
+  // The phone stack tracks depth for the busy check and the history; the
+  // level itself renders here so its children stay in this React tree. The
+  // level's Back reads the LATEST close handler through a ref: registering
+  // once per open, not once per render, so a caller passing an inline
+  // `onClose` does not re-register the level (and re-push history) on
+  // every render.
   const usesLevel = presentation !== "dialog" && Boolean(shell?.isMobile);
   const openSub = shell?.openSub;
   const closeSub = shell?.closeSub;
   const levelTitle = typeof title === "string" ? title : "";
+  const requestCloseRef = useRef(requestClose);
+  requestCloseRef.current = requestClose;
   useEffect(() => {
     if (!open || !usesLevel || !openSub || !closeSub) return;
-    const id = openSub(null, levelTitle, { onBack: requestClose });
+    const id = openSub(null, levelTitle, { onBack: () => requestCloseRef.current() });
     return () => closeSub(id);
-  }, [open, usesLevel, openSub, closeSub, levelTitle, requestClose]);
+  }, [open, usesLevel, openSub, closeSub, levelTitle]);
 
   const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (event.key === "Escape") {

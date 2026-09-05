@@ -5,27 +5,12 @@ import { sendAgentCommand } from "@/lib/agent-client";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { translate, translatePlural, useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
-import {
-  Dialog,
-  DialogContent,
-} from "@/components/ui/primitives";
 import { ConfirmDialog } from "@/components/ui/field";
 import { toast } from "@/components/ui/toast";
-import { Plus, Store } from "lucide-react";
+import { Plus, RefreshCw, Store } from "lucide-react";
 import { PluginMarketplace } from "@/components/PluginMarketplace";
-import { SettingsTabs, type SettingsTab } from "./SettingsTabs";
+import { Drawer } from "./settings/Drawer";
 import type { PluginPackageInfo, PluginsResponse } from "@/lib/api-types";
-
-function PluginsConfigSurface({ embedded, isMobile, onClose, children }: { embedded: boolean; isMobile: boolean; onClose: () => void; children: React.ReactNode }) {
-  if (embedded) return <>{children}</>;
-  return (
-    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent ariaLabel="Plugins" style={{ width: isMobile ? "calc(100vw - 16px)" : 860, maxWidth: "calc(100vw - 16px)", height: isMobile ? "calc(100dvh - 16px)" : "78vh", maxHeight: "calc(100dvh - 16px)", padding: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-        {children}
-      </DialogContent>
-    </Dialog>
-  );
-}
 
 type PluginScope = PluginPackageInfo["scope"];
 type PluginAction = "install" | "remove" | "update" | "disable" | "enable";
@@ -608,20 +593,21 @@ function PackageDetail({
   );
 }
 
+/**
+ * Settings › Extensions › Plugins: the engine's plugin packages, embedded
+ * under the Extensions segments. The header carries the resource totals (or
+ * the diagnostics count), Refresh and "Browse marketplace" (a Drawer, never
+ * a second Dialog); the package list and the detail pane sit below. Nothing
+ * here closes the settings dialog.
+ */
 export function PluginsConfig({
   cwd,
   sessionId,
-  onClose,
   onReloaded,
-  onSelectTab,
-  embedded = false,
 }: {
   cwd: string;
   sessionId: string | null;
-  onClose: () => void;
   onReloaded?: () => void;
-  onSelectTab?: (tab: SettingsTab) => void;
-  embedded?: boolean;
 }) {
   const isMobile = useIsMobile();
   const { t, tn } = useI18n();
@@ -754,61 +740,66 @@ export function PluginsConfig({
   }, [loadPlugins, onReloaded, sessionId]);
 
   const addBusy = busyKey?.startsWith("install:") ?? false;
+  // Stable: the Drawer registers a phone level in an effect keyed on its
+  // onClose, so an inline arrow here would re-register on every render.
+  const closeMarketplace = useCallback(() => setMarketplaceOpen(false), []);
 
   return (
-    <PluginsConfigSurface embedded={embedded} isMobile={isMobile} onClose={onClose}>
-        {!embedded && (<div
+    <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+        {/* Header: workspace, totals or diagnostics, Refresh, marketplace */}
+        <div
+          data-search-id="plugins"
           style={{
             display: "flex",
             alignItems: "center",
-            justifyContent: "space-between",
-            padding: "12px 18px",
+            gap: 8,
+            flexWrap: "wrap",
+            padding: "10px 18px",
             borderBottom: "1px solid var(--border)",
             flexShrink: 0,
           }}
         >
-          <div style={{ display: "flex", alignItems: "baseline", gap: 10, minWidth: 0 }}>
-            <span style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>
-              {t("pluginsConfig.title")}
-            </span>
-            <code
-              style={{
-                fontSize: 11,
-                color: "var(--text-muted)",
-                fontFamily: "var(--font-mono)",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {shortenPath(cwd)}
-            </code>
-          </div>
-          <button
-            onClick={onClose}
-            aria-label={t("pluginsConfig.close")}
-            className="ui-focus-ring"
+          <code
+            title={cwd}
             style={{
-              background: "none",
-              border: "none",
+              flex: "1 1 160px",
+              minWidth: 0,
+              fontSize: 11,
               color: "var(--text-muted)",
-              cursor: "pointer",
-              fontSize: 20,
-              lineHeight: 1,
-              width: 32,
-              height: 32,
-              minWidth: 32,
-              minHeight: 32,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              touchAction: "manipulation",
+              fontFamily: "var(--font-mono)",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
             }}
           >
-            ×
+            {shortenPath(cwd)}
+          </code>
+          <span style={{ fontSize: 11, color: "var(--text-dim)", whiteSpace: "nowrap" }}>
+            {data?.diagnostics.length ? (
+              <span
+                title={data.diagnostics.map((d) => `${d.type}: ${d.source ? `${d.source}: ` : ""}${d.message}`).join("\n")}
+                style={{ color: data.diagnostics.some((d) => d.type === "error") ? "var(--status-error)" : "var(--status-warning)" }}
+              >
+                {tn("pluginsConfig.diagnosticCount", data.diagnostics.length)}
+              </span>
+            ) : data ? (
+              t("pluginsConfig.totalsSummary", {
+                extensions: data.totals.extensions,
+                skills: data.totals.skills,
+                prompts: data.totals.prompts,
+                themes: data.totals.themes,
+              })
+            ) : null}
+          </span>
+          <button type="button" onClick={() => void loadPlugins()} disabled={loading || busyKey !== null} style={buttonStyle(loading || busyKey !== null)}>
+            <RefreshCw size={13} aria-hidden="true" />
+            {t("pluginsConfig.refresh")}
           </button>
-        </div>)}
-        {!embedded && onSelectTab && <SettingsTabs active="plugins" onSelect={onSelectTab} />}
+          <button type="button" data-search-id="plugin-marketplace" onClick={() => setMarketplaceOpen(true)} style={buttonStyle(false)}>
+            <Store size={13} aria-hidden="true" />
+            {t("pluginMarket.openButton")}
+          </button>
+        </div>
 
         <div style={{ flex: 1, display: "flex", flexDirection: isMobile ? "column" : "row", overflow: "hidden" }}>
           <div
@@ -971,28 +962,6 @@ export function PluginsConfig({
                 <Plus size={13} aria-hidden="true" />
                 {t("pluginsConfig.addPlugin")}
               </button>
-              <button
-                type="button"
-                onClick={() => setMarketplaceOpen(true)}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 6,
-                  padding: "7px 8px",
-                  borderRadius: 5,
-                  border: "none",
-                  width: "100%",
-                  cursor: "pointer",
-                  background: "none",
-                  color: "var(--text-dim)",
-                  fontSize: 12,
-                }}
-                onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
-              >
-                <Store size={13} aria-hidden="true" />
-                {t("pluginMarket.openButton")}
-              </button>
             </div>
           </div>
 
@@ -1044,52 +1013,18 @@ export function PluginsConfig({
           </div>
         </div>
 
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: 12,
-            padding: "10px 18px",
-            borderTop: "1px solid var(--border)",
-            flexShrink: 0,
-          }}
-        >
-          <div style={{ minWidth: 0, flex: 1, fontSize: 11, color: "var(--text-dim)", overflow: "hidden" }}>
-            {data?.diagnostics.length ? (
-              <span
-                title={data.diagnostics.map((d) => `${d.type}: ${d.source ? `${d.source}: ` : ""}${d.message}`).join("\n")}
-                style={{ color: data.diagnostics.some((d) => d.type === "error") ? "var(--status-error)" : "var(--status-warning)" }}
-              >
-                {tn("pluginsConfig.diagnosticCount", data.diagnostics.length)}
-              </span>
-            ) : (
-              <span>
-                {data
-                  ? t("pluginsConfig.totalsSummary", {
-                      extensions: data.totals.extensions,
-                      skills: data.totals.skills,
-                      prompts: data.totals.prompts,
-                      themes: data.totals.themes,
-                    })
-                  : ""}
-              </span>
-            )}
-          </div>
-          <button onClick={() => void loadPlugins()} disabled={loading || busyKey !== null} style={buttonStyle(loading || busyKey !== null)}>
-            {t("pluginsConfig.refresh")}
-          </button>
-          <button onClick={onClose} style={buttonStyle(false)}>
-            {t("pluginsConfig.close")}
-          </button>
-        </div>
-        {marketplaceOpen && (
-          <PluginMarketplace
-            cwd={cwd}
-            onChanged={() => void loadPlugins()}
-            onClose={() => setMarketplaceOpen(false)}
-          />
-        )}
-    </PluginsConfigSurface>
+        {/* The marketplace: a Drawer (side panel on desktop, pushed level on
+            a phone), never a second Dialog over the settings dialog. */}
+        <Drawer open={marketplaceOpen} title={t("pluginMarket.title")} presentation="side" width={760} onClose={closeMarketplace}>
+          {marketplaceOpen && (
+            <PluginMarketplace
+              embedded
+              cwd={cwd}
+              onChanged={() => void loadPlugins()}
+              onClose={closeMarketplace}
+            />
+          )}
+        </Drawer>
+    </div>
   );
 }

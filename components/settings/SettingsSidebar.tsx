@@ -4,8 +4,8 @@
  * The desktop rail: a 230px vertical tablist grouped under three eyebrows
  * (You / {engine} / Server), each row a hub label over a one-line status
  * read from the shared route cache. Arrow keys move between rows; Home and
- * End jump. `SearchResultsList` is what replaces this column while a query
- * is typed, on desktop and on the phone root alike.
+ * End jump. `SettingsSearch`'s results list is what replaces this column
+ * while a query is typed, on desktop and on the phone root alike.
  */
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import { useI18n, LOCALES } from "@/lib/i18n";
@@ -13,9 +13,7 @@ import { STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
 import { useTheme } from "@/hooks/useTheme";
 import { useSettingsRoutes } from "@/hooks/useSettingsData";
 import type { ActiveEngineInfo, EngineCapabilities } from "../SettingsTabs";
-import { chipStyle } from "./primitives";
 import { groupLabel, groupSections, type SettingsSection, type SettingsSectionId, type ShellData, type StatusLine } from "./registry";
-import type { SearchResult } from "./search-index";
 
 function readSoundEnabled(): boolean {
   if (typeof window === "undefined") return true;
@@ -158,48 +156,5 @@ export function SettingsSidebar({ sections, active, onSelect, capabilities, engi
         </div>
       ))}
     </nav>
-  );
-}
-
-export function SearchResultsList({ results, query, onSelect, width }: { results: readonly SearchResult[]; query: string; onSelect: (result: SearchResult) => void; width?: number | string }) {
-  return (
-    <div role="listbox" aria-label={`Settings matching ${query}`} className="settings-scroll-column" style={{ width, flexShrink: width === undefined ? 1 : 0, flex: width === undefined ? 1 : undefined, minHeight: 0, overflowY: "auto", background: "var(--bg-panel)", borderRight: width === undefined ? undefined : "1px solid var(--border)", padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
-      <div style={{ fontSize: 12, color: "var(--text-muted)", padding: "2px 2px 4px" }}>
-        {results.length === 0 ? `No settings match “${query}”.` : `${results.length} result${results.length === 1 ? "" : "s"} for “${query}”.`}
-      </div>
-      {results.map((result) => (
-        <button
-          key={`${result.tab}:${result.id}`}
-          type="button"
-          role="option"
-          aria-selected={false}
-          onClick={() => onSelect(result)}
-          className="settings-search-result ui-focus-ring"
-          style={{
-            textAlign: "left",
-            display: "flex",
-            flexDirection: "column",
-            gap: 3,
-            padding: "9px 11px",
-            minHeight: 44,
-            border: "1px solid var(--border)",
-            borderRadius: "var(--radius-card)",
-            background: "var(--bg)",
-            color: "var(--text)",
-            cursor: "pointer",
-            transition: "border-color var(--dur-fast), background var(--dur-fast)",
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-            <span style={{ fontSize: 12.5, fontWeight: 600 }}>{result.label}</span>
-            {result.id.startsWith("tab-") && <span style={chipStyle}>Section</span>}
-            {result.scope && <span style={chipStyle}>{result.scope}</span>}
-            {result.modified && <span style={{ ...chipStyle, color: "var(--accent)" }}>Changed</span>}
-          </div>
-          {result.description && <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.45 }}>{result.description}</div>}
-          <div style={{ fontSize: 10, color: "var(--text-dim)" }}>{result.breadcrumb.join(" › ")}</div>
-        </button>
-      ))}
-    </div>
   );
 }

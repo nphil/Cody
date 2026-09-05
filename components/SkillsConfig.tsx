@@ -1,33 +1,19 @@
 "use client";
 
-import { Fragment, useState, useEffect, useCallback } from "react";
+import { Fragment, useState, useEffect, useCallback, useRef } from "react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { translate, useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
-import {
-  Dialog,
-  DialogContent,
-} from "@/components/ui/primitives";
 import { toast } from "@/components/ui/toast";
-import { Store } from "lucide-react";
-import { SettingsTabs, type SettingsTab } from "./SettingsTabs";
+import { RefreshCw, Store } from "lucide-react";
+import { Drawer } from "./settings/Drawer";
+import { smallButtonStyle } from "./settings/account-controls";
 import { SkillsStore } from "./SkillsStore";
 import type {
   SkillInfo as Skill,
   SkillInstallScope,
   SkillUpdateResult,
 } from "@/lib/api-types";
-
-function SkillsConfigSurface({ embedded, isMobile, onClose, children }: { embedded: boolean; isMobile: boolean; onClose: () => void; children: React.ReactNode }) {
-  if (embedded) return <>{children}</>;
-  return (
-    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent ariaLabel="Skills" style={{ width: isMobile ? "calc(100vw - 16px)" : 860, maxWidth: "calc(100vw - 16px)", height: isMobile ? "calc(100dvh - 16px)" : "78vh", maxHeight: "calc(100dvh - 16px)", padding: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-        {children}
-      </DialogContent>
-    </Dialog>
-  );
-}
 
 function shortenPath(p: string): string {
   // Match common home dir patterns: /Users/xxx, /home/xxx
@@ -380,17 +366,14 @@ function SkillDetail({
   );
 }
 
-export function SkillsConfig({
-  cwd,
-  onClose,
-  onSelectTab,
-  embedded = false,
-}: {
-  cwd: string;
-  onClose: () => void;
-  onSelectTab?: (tab: SettingsTab) => void;
-  embedded?: boolean;
-}) {
+/**
+ * Settings › Extensions › Skills: the workspace's skills, embedded under the
+ * Extensions segments. The header carries the update count, "Check
+ * updates" and the Skill store (which opens in a Drawer, never a second
+ * Dialog); the list and the detail pane sit below. Nothing here closes the
+ * settings dialog.
+ */
+export function SkillsConfig({ cwd }: { cwd: string }) {
   const isMobile = useIsMobile();
   const { t, tn } = useI18n();
   const [skills, setSkills] = useState<Skill[]>([]);
@@ -532,6 +515,9 @@ export function SkillsConfig({
     }
   }, [cwd, loadSkills]);
 
+  // The undo action inside a toast runs after this render: it reads the
+  // latest toggle through a ref instead of closing over a stale one.
+  const toggleRef = useRef<(skill: Skill) => Promise<void>>(async () => {});
   const toggle = useCallback(async (skill: Skill) => {
     const next = !skill.disableModelInvocation;
     setToggling((s) => new Set(s).add(skill.filePath));
@@ -559,7 +545,15 @@ export function SkillsConfig({
             : s,
         ),
       );
-      toast.success(t("skillsConfig.toggleSuccessTitle"));
+      // Disabling is reversible, so the toast carries the undo: the same
+      // skill flips back through the same PATCH.
+      toast.success(
+        t("skillsConfig.toggleSuccessTitle"),
+        undefined,
+        next
+          ? { durationMs: 8000, action: { label: t("skillsConfig.undoDisable"), onClick: () => { void toggleRef.current({ ...skill, disableModelInvocation: true }); } } }
+          : undefined,
+      );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setSaveError(msg);
@@ -574,66 +568,71 @@ export function SkillsConfig({
   }, [t]);
 
   const selectedSkill = skills.find((s) => s.filePath === selected) ?? null;
+  toggleRef.current = toggle;
+  // Stable: the Drawer registers a phone level in an effect keyed on its
+  // onClose, so an inline arrow here would re-register on every render.
+  const closeStore = useCallback(() => setStoreOpen(false), []);
+  const availableCount = Object.values(updateStatuses).filter((status) => status.state === "update-available").length;
+  const canCheckAny = skills.some((skill) => skill.install?.canCheckForUpdates);
+  const installedPackages = {
+    global: new Set(skills.filter((skill) => skill.install?.scope === "global").map((skill) => skill.install!.package)),
+    project: new Set(skills.filter((skill) => skill.install?.scope === "project").map((skill) => skill.install!.package)),
+  };
 
   return (
-    <SkillsConfigSurface embedded={embedded} isMobile={isMobile} onClose={onClose}>
-        {/* Header */}
-        {!embedded && (<div
+    <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
+        {/* Header: workspace, update count, Check, Skill store */}
+        <div
+          data-search-id="skills"
           style={{
             display: "flex",
             alignItems: "center",
-            justifyContent: "space-between",
-            padding: "12px 18px",
+            gap: 8,
+            flexWrap: "wrap",
+            padding: "10px 18px",
             borderBottom: "1px solid var(--border)",
             flexShrink: 0,
           }}
         >
-          <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-            <span
-              id="skills-config-title"
-              style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}
-            >
-              {t("skillsConfig.title")}
-            </span>
-            <code
-              style={{
-                fontSize: 11,
-                color: "var(--text-muted)",
-                fontFamily: "var(--font-mono)",
-                maxWidth: 320,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {shortenPath(cwd)}
-            </code>
-          </div>
-          <button
-            onClick={onClose}
-            aria-label={t("skillsConfig.close")}
-            className="ui-focus-ring"
+          <code
+            title={cwd}
             style={{
-              background: "none",
-              border: "none",
+              flex: "1 1 160px",
+              minWidth: 0,
+              fontSize: 11,
               color: "var(--text-muted)",
-              cursor: "pointer",
-              fontSize: 20,
-              lineHeight: 1,
-              width: 32,
-              height: 32,
-              minWidth: 32,
-              minHeight: 32,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              touchAction: "manipulation",
+              fontFamily: "var(--font-mono)",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
             }}
           >
-            ×
+            {shortenPath(cwd)}
+          </code>
+          {availableCount > 0 && (
+            <span style={{ fontSize: 12, color: "var(--status-warning)", whiteSpace: "nowrap" }}>
+              {tn("skillsConfig.updateCount", availableCount)}
+            </span>
+          )}
+          {/* Only when a check would do something: an engine whose installs
+              carry no comparable version (Hermes tracks its own hashes and
+              checks them with `hermes skills check`) gets no dead button. */}
+          {canCheckAny && (
+            <button
+              type="button"
+              onClick={() => void checkForUpdates()}
+              disabled={checkingAll || updatingSkill !== null}
+              style={{ ...smallButtonStyle, opacity: checkingAll || updatingSkill !== null ? 0.5 : 1, cursor: checkingAll || updatingSkill !== null ? "not-allowed" : "pointer" }}
+            >
+              <RefreshCw size={13} aria-hidden="true" />
+              {checkingAll ? t("skillsConfig.checking") : t("skillsConfig.checkUpdates")}
+            </button>
+          )}
+          <button type="button" data-search-id="skill-store" onClick={() => setStoreOpen(true)} style={smallButtonStyle}>
+            <Store size={13} aria-hidden="true" />
+            {t("skillsConfig.store.open")}
           </button>
-        </div>)}
-        {!embedded && onSelectTab && <SettingsTabs active="skills" onSelect={onSelectTab} />}
+        </div>
 
         {/* Body */}
         <div style={{ flex: 1, display: "flex", flexDirection: isMobile ? "column" : "row", overflow: "hidden" }}>
@@ -835,41 +834,6 @@ export function SkillsConfig({
                 })()
               )}
             </div>
-            {/* Skill store button */}
-            <div
-              style={{
-                padding: "8px 6px",
-                borderTop: "1px solid var(--border)",
-                flexShrink: 0,
-              }}
-            >
-              <div
-                onClick={() => setStoreOpen(true)}
-                role="button"
-                tabIndex={0}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    setStoreOpen(true);
-                  }
-                }}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 6,
-                  padding: "7px 8px",
-                  borderRadius: 5,
-                  cursor: "pointer",
-                  color: "var(--text-dim)",
-                  fontSize: 12,
-                }}
-                onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-hover)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.background = "none"; }}
-              >
-                <Store size={13} aria-hidden="true" />
-                {t("skillsConfig.store.open")}
-              </div>
-            </div>
           </div>
 
           {/* Right: skill detail */}
@@ -922,91 +886,22 @@ export function SkillsConfig({
           </div>
         </div>
 
-        {/* Footer */}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            padding: "10px 18px",
-            borderTop: "1px solid var(--border)",
-            flexShrink: 0,
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            {/* Only when a check would do something: an engine whose installs
-                carry no comparable version (Hermes tracks its own hashes and
-                checks them with `hermes skills check`) gets no dead button. */}
-            {skills.some((skill) => skill.install?.canCheckForUpdates) && (
-              <button
-                onClick={() => void checkForUpdates()}
-                disabled={checkingAll || updatingSkill !== null}
-                style={{
-                  padding: "6px 12px",
-                  background: "none",
-                  border: "1px solid var(--border)",
-                  borderRadius: 6,
-                  color: "var(--text-muted)",
-                  cursor:
-                    checkingAll || updatingSkill !== null
-                      ? "not-allowed"
-                      : "pointer",
-                  opacity: checkingAll || updatingSkill !== null ? 0.5 : 1,
-                  fontSize: 12,
-                }}
-              >
-                {checkingAll ? t("skillsConfig.checking") : t("skillsConfig.checkUpdates")}
-              </button>
-            )}
-            {(() => {
-              const availableCount = Object.values(updateStatuses).filter(
-                (status) => status.state === "update-available",
-              ).length;
-              if (availableCount === 0) return null;
-              return (
-                <span style={{ fontSize: 12, color: "var(--status-warning)" }}>
-                  {tn("skillsConfig.updateCount", availableCount)}
-                </span>
-              );
-            })()}
-          </div>
-          <button
-            onClick={onClose}
-            style={{
-              padding: "6px 14px",
-              background: "none",
-              border: "1px solid var(--border)",
-              borderRadius: 6,
-              color: "var(--text-muted)",
-              cursor: "pointer",
-              fontSize: 13,
-            }}
-          >
-            {t("skillsConfig.close")}
-          </button>
-        </div>
-        {storeOpen && (
-          <SkillsStore
-            cwd={cwd}
-            scopes={installScopes}
-            installedPackages={{
-              global: new Set(
-                skills
-                  .filter((skill) => skill.install?.scope === "global")
-                  .map((skill) => skill.install!.package),
-              ),
-              project: new Set(
-                skills
-                  .filter((skill) => skill.install?.scope === "project")
-                  .map((skill) => skill.install!.package),
-              ),
-            }}
-            onInstalled={() => {
-              void loadSkills();
-            }}
-            onClose={() => setStoreOpen(false)}
-          />
-        )}
-    </SkillsConfigSurface>
+        {/* The store: a Drawer (side panel on desktop, pushed level on a
+            phone), never a second Dialog over the settings dialog. */}
+        <Drawer open={storeOpen} title={t("skillsConfig.store.title")} presentation="side" width={760} onClose={closeStore}>
+          {storeOpen && (
+            <SkillsStore
+              embedded
+              cwd={cwd}
+              scopes={installScopes}
+              installedPackages={installedPackages}
+              onInstalled={() => {
+                void loadSkills();
+              }}
+              onClose={closeStore}
+            />
+          )}
+        </Drawer>
+    </div>
   );
 }

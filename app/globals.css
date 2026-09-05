@@ -2446,6 +2446,34 @@ html.dark .dropdown-surface :is(select, option) {
   border-color: var(--accent);
   background: var(--bg-panel);
 }
+/* The results are one listbox with a roving active option: the outline
+   follows aria-activedescendant, not focus, so it must come from a class. */
+.settings-search-result[data-active="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.settings-search-chip:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.settings-segment:hover:not([aria-selected="true"]):not(:disabled) {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+/* The phone sheet is the whole viewport: no centring transform, no
+   rounded corners, and its own scroll regions contain overscroll so a
+   flick at the end of a list never rubber-bands the chat behind it. */
+.settings-mobile-sheet {
+  inset: 0;
+  width: 100vw;
+  height: 100dvh;
+  max-width: 100vw;
+  max-height: 100dvh;
+}
+.settings-mobile-stack,
+.settings-mobile-level {
+  overscroll-behavior: contain;
+}
 /* The phone sheet slides up from the bottom edge (the desktop dialog keeps
    dialog-pop-in). Keyframes carry the final transform because an animation
    overrides the inline one for its whole (fill: both) lifetime. */
@@ -2487,16 +2515,37 @@ html.dark .dropdown-surface :is(select, option) {
   .settings-shell textarea {
     font-size: 16px !important;
   }
+  /* `!important` on purpose, like the font size above: panels set their
+     desktop density inline (minHeight: 30 on a segment, 28 on a chip), and
+     the phone rule must win over every one of them without per-panel
+     overrides. Icon buttons get the width too: a 17px arrow is not a target. */
   .settings-shell select,
   .settings-shell button:not([role="switch"]) {
-    min-height: 44px;
+    min-height: 44px !important;
+  }
+  .settings-shell button:not([role="switch"]) {
+    min-width: 44px !important;
   }
   .settings-rail-row,
   .settings-mobile-row,
   .settings-mobile-back,
   .settings-directory-row,
-  .settings-search-result {
+  .settings-search-result,
+  .settings-search-chip,
+  .settings-segment {
     touch-action: manipulation;
+  }
+  /* At least 8px between neighbouring targets: the chip row, the segmented
+     control and the results list all pack buttons side by side. */
+  .settings-search-chips {
+    gap: 8px;
+  }
+  .settings-segmented {
+    gap: 8px;
+    padding: 4px;
+  }
+  .settings-search-column [role="listbox"] {
+    gap: 8px;
   }
 }
 

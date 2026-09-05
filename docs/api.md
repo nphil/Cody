@@ -679,7 +679,7 @@ from. It costs an isolated omp child, so the answer is cached for an hour;
 behind it (an engine update). Any sign-in, model switch or models.yml write
 clears it anyway.
 
-### `GET /api/models/new` — Incidental
+### `GET /api/models/new[?cached=1]` — Incidental
 
 Models in the active engine's catalog that the user has never been shown,
 per the seen ledger below. Any signed-in user.
@@ -704,6 +704,12 @@ per the seen ledger below. Any signed-in user.
 - A loader failure (engine not installed, RPC error) is `200` with
   `newModels: []`, `total: 0` and `modelError` — never a 500, exactly like
   `GET /api/models`.
+- `?cached=1` answers from the catalog cache ONLY and never starts an engine
+  child: a cold cache is `200` with `newModels: []`, `total: 0` and
+  `pending: true`; a warm one is the same diff the plain read gives. This is
+  what a status line, the composer footer and a post-install toast should
+  read — the plain read can cost an isolated omp process (tens of seconds
+  on a large registry) and belongs to the Models hub's open and Refresh.
 
 ### `GET|POST /api/models/seen` — Incidental
 
@@ -724,6 +730,42 @@ same shape. The list REPLACES the engine's previous one — it is what was
 shown, not a union — and is stored deduplicated and sorted. A body without
 a string array under `keys` is `400 keys_required`; unparseable JSON is
 `400 invalid_body`. `seenAt` is `null` until the first POST.
+
+### `GET|PUT /api/models/visibility` — Incidental
+
+Who hides and pins which models under the active engine. Any signed-in
+user reads their own view; `401 auth_required` signed out, `409
+no_accounts` on an open instance (clients keep the lists in the browser
+then). Cody-level state in the instance data dir
+(`cody-model-visibility.json`), per engine, so it survives engine switches.
+
+```json
+{"engine":{"id":"pi"},
+ "instanceHidden":["<provider>/<model-id>"],
+ "hidden":["<provider>/<model-id>"],
+ "pinned":["<provider>/<model-id>"],
+ "instanceSource":"cody"}
+```
+
+- `instanceHidden` is an administrator's hide for everyone; `hidden` and
+  `pinned` are the calling user's own. Visible = catalog − `instanceHidden`
+  − `hidden`; an instance hide beats a pin.
+- `instanceSource` says where the instance-wide hide LIVES: `"cody"` (this
+  file — every engine but omp), `"enabledModels"` (omp: its own allow-list
+  in config.yml, written through `/api/omp-settings`; `instanceHidden` is
+  then always `[]`, and the hidden set is `GET /api/models?catalog=full`
+  minus `GET /api/models`), or `"readonly"` (omp whose config.yml holds
+  path-scoped registry entries Cody must not rewrite).
+- Keys are `provider/id` — on an ACP engine the session's model ids in the
+  same shape.
+
+`PUT {"instanceHidden"?: [...], "hidden"?: [...], "pinned"?: [...]}`
+replaces each list it names and answers the same shape as `GET`.
+`instanceHidden` is admin-only (`403 admin_required`) and refused `400
+unsupported` when `instanceSource` is not `"cody"` (omp). A list that is
+not a string array is `400 keys_required`, as is a body naming none of the
+three; unparseable JSON is `400 invalid_body`. Lists are stored
+deduplicated and sorted.
 
 ## `/api/auth/providers`, `/api/auth/login/{provider}`, `/api/auth/logout/{provider}` — Incidental
 
@@ -765,6 +807,60 @@ without touching any engine's own config.
    "variables":[{"name":"OPENAI_API_KEY","label":"API key","secret":true,
                  "stored":true,"fromEnvironment":false}]}]}
 ```
+
+## `GET /api/providers` — Incidental
+
+The Providers hub's one list for the active engine: every provider it can
+reach, joined from its own sign-in roster (`/api/auth/providers`), Cody's
+key store (`/api/provider-keys`, flags only), its effective model catalog
+(counts per provider) and its own registry file (omp's models.yml custom
+endpoints, `disabledProviders`, `modelProviderOrder`). Any signed-in user;
+`canEdit` says whether this caller may change anything.
+
+```json
+{"engine":{"id":"omp","shortName":"OMP"},
+ "canEdit":true,"canVerify":true,
+ "instanceSource":"writable",
+ "providers":[{"id":"anthropic","name":"Anthropic","brand":"anthropic",
+   "group":"subscription",
+   "methods":[{"kind":"oauth","state":"connected","loginId":"anthropic",
+               "name":"Anthropic (Claude Pro/Max)","canLogout":false,"winning":true},
+              {"kind":"env","state":"connected","winning":false,
+               "variables":[{"name":"ANTHROPIC_API_KEY","label":"API key",
+                             "secret":true,"stored":false,"fromEnvironment":true}]}],
+   "connected":true,"modelCount":24,"catalogIds":["anthropic","claude","anthropic-console"],
+   "popular":true}]}
+```
+
+- `group` is one of `subscription`, `key`, `gateway`, `local`, `search`,
+  `custom`, `other`; `methods` list every way the engine reaches the vendor
+  in precedence order (`oauth`/`device` sign-ins, a `key` saved in Cody, an
+  `env` key from the container, a `custom` models.yml endpoint); the one
+  with `winning: true` is what the row's status describes. Key values never
+  appear — only `stored` / `fromEnvironment` flags.
+- `modelCount` is `null` when unknown: an ACP engine keeps its models in the
+  session (`reason` says so); an rpc-dialect engine whose binary is missing
+  puts the spawn failure in `reason`. Neither is a 500.
+- `?cached=1` (the settings rail) never starts an engine child: it serves the
+  last roster this process saw and peeks the models cache, marking what it
+  could not answer `pending: true` (top level and per row).
+- `instanceSource: "readonly"` plus `readonlyReason` means omp's config.yml
+  holds path-scoped registry entries Cody must not rewrite; curation,
+  removal and reordering are disabled in the hub.
+- Optional per-row fields: `disabled` (switched off in the engine's config),
+  `order` (position in its provider order), `variantOf` (a regional/plan
+  variant of another row), `endpoint` (`{api, baseUrl}` of a custom row).
+
+## `POST /api/providers/verify` — Incidental
+
+`{"providerId"}` → `{"ok","modelCount","error"?,"checkedAt"}`, admin-only.
+Drops the shared utility child (spawned before the key was saved) and the
+models cache, re-reads the effective catalog once, and counts the models the
+provider now serves. A registry read never contacts the vendor, so a wrong
+key still yields a catalog — the UI calls this "Check models" and reserves
+"Verify key" for custom endpoints. An engine with no sessionless catalog
+(any ACP engine) answers `400 unsupported`; a spawn failure is `200` with
+`ok: false` and the engine's own `error`.
 
 ## The display socket
 
@@ -852,11 +948,41 @@ A resize never downgrades the stream: the provider clamps and re-encodes rather
 than falling back to raster, so a viewport change does not silently cost you
 hardware video.
 
+## `GET|PUT /api/omp-settings/schema` — Incidental
+
+The ACTIVE engine's own settings, derived from the engine itself (omp's
+TypeScript schema, Hermes' `DEFAULT_CONFIG`, the settings tables in pi's
+shipped `docs/settings.md`) — never a hand-kept list. Gated on
+`capabilities.nativeSettings`; any other engine gets `400 {code:"unsupported"}`.
+
+`GET` → `{path, harness:{id,shortName}, host:{platform}, schema, values, secretsSet}`.
+`schema` is `{tabs, groups, settings, source:{packagePath,version}}` with one
+`settings` row per declared key
+(`{key, type, tab, group?, label, description?, values?, options?, default?,
+readOnly?, readOnlyReason?, ordered?, condition?, terminalOnly?, secret?}`), or
+`null` beside a `reason` when the installed engine cannot be read (not
+installed yet, a layout this Cody does not know) — an answer, not an error.
+`values` holds only the overrides persisted in `path`; an absent key means
+the engine's default applies.
+
+**Secret leaves.** A row with `secret: true` is a credential-shaped string
+key the engine keeps beside its other settings (Hermes' `auxiliary.*.api_key`,
+`dashboard.basic_auth.password`). Its value is **never** in `values`;
+`secretsSet` lists the secret keys that currently hold a non-empty value, so a
+client can say "Set" without knowing what. The web client renders these
+write-only.
+
+`PUT {patch: {"<key>": value | null}}` → `{success, written, rejected?, values,
+secretsSet, error?}`. `null` resets a key to the engine's default (and prunes
+the parent it empties). A key the engine refuses is named in `rejected` with
+its reason and `success` is false; nothing is reported saved that was not.
+The echoed `values` are redacted exactly as `GET`'s.
+
 ## Not covered here
 
 These exist and are reachable, but are **not** part of the contract this
 document offers: `/api/skills/*`, `/api/plugins`, `/api/mcp`,
-`/api/omp-settings*`, `/api/omp-update`, `/api/omp-version`, `/api/checkpoints`,
+`/api/omp-settings` (omp's hand-built config.yml editor), `/api/omp-update`, `/api/omp-version`, `/api/checkpoints`,
 `/api/worktrees`, `/api/projects`, `/api/cwd/*`, `/api/default-cwd`,
 `/api/home`, `/api/file-index`, `/api/local-ai`, `/api/app-update`,
 `/api/preview/screenshot`, and `/api/internal/display` (an internal

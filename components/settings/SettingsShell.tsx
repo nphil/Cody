@@ -1,32 +1,39 @@
 "use client";
 
 /**
- * The Settings dialog. Owns the open hub (and segment), the search query, the
- * highlight, the visited set (a hub stays mounted once opened so a login SSE
- * in Providers survives a look at System), the phone stack's levels and the
- * busy register, and provides all of it through `ShellContext`.
+ * The Settings dialog. Owns the open hub (and segment), the search query and
+ * chip, the highlight, the visited set (a hub stays mounted once opened so a
+ * login SSE in Providers survives a look at System), the phone stack's
+ * levels, the busy register and the phone history, and provides all of it
+ * through `ShellContext`.
  *
- * Desktop: header (title, search, close) over a 230px rail and a pane.
- * Phone (`useIsMobile`): a full-bleed `MobileStack`. Both render the same
- * hubs from `registry.ts` under the same ids, so `settings-tab-<id>` and
- * `settings-panel-<id>` hold on every width.
+ * Desktop: header (title, search, close) over a 230px rail and a pane; a
+ * query replaces the rail with the results, which stay until cleared.
+ * Phone (`useIsMobile`): a full-bleed `MobileStack` whose levels are
+ * mirrored in the browser history (`useSettingsHistory`): a back gesture,
+ * the Escape key and the ‹ button all pop exactly one level through
+ * `requestPop`, which asks first when the busy register holds a reason.
+ * Both widths render the same hubs from `registry.ts` under the same ids,
+ * so `settings-tab-<id>` and `settings-panel-<id>` hold everywhere.
  *
  * Opening is driven by a `request`: AppShell bumps its `seq` with a target
  * hub (or none, meaning the last-open hub from `cody:settings-last-section`).
  */
 import { Search } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import { useSettingsRoute } from "@/hooks/useSettingsData";
+import { useSchemaIndex } from "@/hooks/useSchemaIndex";
+import { useSettingsHistory } from "@/hooks/useSettingsHistory";
 import { ConfirmDialog } from "@/components/ui/field";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/primitives";
 import { STORAGE_KEYS } from "@/lib/storage-keys";
 import { ALL_CAPABILITIES, DEFAULT_HARNESS_LABEL, type ActiveEngineInfo, type EngineCapabilities, type PlatformInfo, type SettingsTab } from "../SettingsTabs";
 import { MobileStack, type MobileSubLevel } from "./MobileStack";
 import { SettingsHighlightContext } from "./primitives";
-import { getVisibleSections, getVisibleSubViews, groupLabel, isSectionId, normalizeSectionId, resolveSection, type SettingsSection, type SettingsSectionId } from "./registry";
-import { buildSchemaSearchEntries, SEARCH_ENTRIES, searchSettings, type SchemaRouteBody, type SearchEntry, type SearchResult } from "./search-index";
-import { SearchResultsList, SettingsSidebar } from "./SettingsSidebar";
+import { getVisibleSections, getVisibleSubViews, isSectionId, resolveSection, type SettingsSection, type SettingsSectionId } from "./registry";
+import { collectSearchEntries, currentStaticSearchIndex, loadStaticSearchEntries, resultHighlight, resultTarget, searchSettings, type SchemaSearchRow, type SearchFilter, type SearchResult, type StaticSearchIndex } from "./search-index";
+import { focusSearchResults, SearchResultsList } from "./SettingsSearch";
+import { SettingsSidebar } from "./SettingsSidebar";
 import { createSettingsBusy, ShellContext, type SessionModel, type SettingsShellCallbacks, type SettingsShellPrefs, type SettingsShellValue } from "./shell-context";
 
 export interface SettingsRequest {
@@ -68,6 +75,21 @@ function writeLastSection(id: SettingsSectionId): void {
   }
 }
 
+/** The static search union: what is loaded now, then the full one. */
+function useStaticSearchIndex(): StaticSearchIndex {
+  const [index, setIndex] = useState<StaticSearchIndex>(currentStaticSearchIndex);
+  useEffect(() => {
+    let live = true;
+    void loadStaticSearchEntries().then((loaded) => {
+      if (live) setIndex(loaded);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+  return index;
+}
+
 function PanelHost({ section, active, children }: { section: SettingsSection; active: boolean; children: ReactNode }) {
   const style = { display: active ? "flex" : "none", flexDirection: "column" as const, flex: 1, minHeight: 0, overflowY: "auto" as const, background: "var(--bg)" };
   if (section.ownsTabpanel) {
@@ -93,8 +115,10 @@ export function SettingsShell({ request, cwd, sessionId, capabilities = ALL_CAPA
   const [mobileView, setMobileView] = useState<"root" | "panel">(request.section ? "panel" : "root");
   const [visited, setVisited] = useState<Set<SettingsSectionId>>(() => new Set<SettingsSectionId>(["general"]));
   const [searchQuery, setSearchQuery] = useState("");
+  const [searchFilter, setSearchFilter] = useState<SearchFilter | null>(null);
   const [levels, setLevels] = useState<MobileSubLevel[]>([]);
-  const [confirmClose, setConfirmClose] = useState(false);
+  // What the leave dialog is guarding: the × button or a back gesture.
+  const [pendingLeave, setPendingLeave] = useState<"close" | "pop" | null>(null);
   const [portalTarget, setPortalTarget] = useState<HTMLElement | null>(null);
   const busy = useMemo(createSettingsBusy, []);
   const appliedSeq = useRef(request.seq);
@@ -105,8 +129,25 @@ export function SettingsShell({ request, cwd, sessionId, capabilities = ALL_CAPA
   // The engine's schema backs the dialog-wide search AND the harness label.
   // Gate on the SAME flag that decides whether the Behavior hub renders the
   // schema list; never configEditor, which means "omp, hand-built editors".
-  const schema = useSettingsRoute<SchemaRouteBody>("/api/omp-settings/schema", { enabled: capabilities.nativeSettings, ttlMs: 60_000 });
-  const harnessLabel = schema.data?.harness?.shortName ?? engine?.shortName ?? DEFAULT_HARNESS_LABEL;
+  // `useSchemaIndex` reads the same cached route the rail and the hub use
+  // and resolves each row's `ui.condition`, so search offers no jump to a
+  // row the hub hides.
+  const schemaIndex = useSchemaIndex({ enabled: capabilities.nativeSettings });
+  const harnessLabel = schemaIndex.shortName ?? engine?.shortName ?? DEFAULT_HARNESS_LABEL;
+  const schemaRows = useMemo<SchemaSearchRow[]>(() => {
+    const tabLabels = new Map((schemaIndex.schema?.tabs ?? []).map((tab) => [tab.id, tab.label]));
+    return schemaIndex.rows.map((row) => ({
+      key: row.key,
+      label: row.label,
+      description: row.description,
+      tab: row.tab,
+      tabLabel: tabLabels.get(row.tab),
+      group: row.group,
+      terminalOnly: row.terminalOnly,
+      visible: row.visible,
+      modified: row.modified,
+    }));
+  }, [schemaIndex.rows, schemaIndex.schema]);
 
   const applyTarget = useCallback((target: { id: SettingsSectionId; sub?: string }, opts?: { highlight?: string | null; toPanel?: boolean }) => {
     const id = visibleIds.has(target.id) ? target.id : "general";
@@ -124,6 +165,7 @@ export function SettingsShell({ request, cwd, sessionId, capabilities = ALL_CAPA
     applyTarget(target, { highlight: request.highlight ?? null, toPanel: Boolean(request.section) });
     if (!request.section) setMobileView("root");
     setSearchQuery("");
+    setSearchFilter(null);
   }, [request, applyTarget]);
 
   // A hub can go out of reach while it is open: the engine switched, or the
@@ -154,30 +196,100 @@ export function SettingsShell({ request, cwd, sessionId, capabilities = ALL_CAPA
   }, []);
 
   const requestClose = useCallback(() => {
-    if (busy.isBusy()) setConfirmClose(true);
+    if (busy.isBusy()) setPendingLeave("close");
     else callbacks.onClose();
   }, [busy, callbacks]);
 
-  const entries = useMemo<SearchEntry[]>(() => {
-    const hubs: SearchEntry[] = visibleSections.map((entry) => ({
-      id: `tab-${entry.id}`,
-      tab: entry.id,
-      label: entry.label,
-      description: `${groupLabel(entry.group, harnessLabel)} › ${entry.label}`,
-      breadcrumb: [groupLabel(entry.group, harnessLabel)],
-      action: "jump",
-    }));
-    return [...hubs, ...SEARCH_ENTRIES, ...buildSchemaSearchEntries(schema.data, harnessLabel)];
-  }, [visibleSections, harnessLabel, schema.data]);
-  const trimmedQuery = searchQuery.trim();
-  const searchResults = useMemo(() => searchSettings(trimmedQuery, entries, visibleIds, capabilities, harnessLabel), [trimmedQuery, entries, visibleIds, capabilities, harnessLabel]);
+  /** Pop exactly one level of the phone stack: level → hub → root → closed.
+   * A Drawer level closes through its own `onBack` so its dirty guard runs. */
+  const popOneLevel = useCallback(() => {
+    if (levels.length > 0) {
+      const top = levels[levels.length - 1];
+      if (top.onBack) top.onBack();
+      else closeSub(top.id);
+      return;
+    }
+    if (mobileView === "panel") {
+      setMobileView("root");
+      setHighlight(null);
+      return;
+    }
+    callbacks.onClose();
+  }, [levels, closeSub, mobileView, callbacks]);
 
+  /** What a back gesture, the Escape key and the ‹ button all call. */
+  const requestPop = useCallback(() => {
+    if (busy.isBusy()) setPendingLeave("pop");
+    else popOneLevel();
+  }, [busy, popOneLevel]);
+
+  // One history entry per level, phone only (spec §9).
+  const stackDepth = (mobileView === "panel" ? 2 : 1) + levels.length;
+  useSettingsHistory({ enabled: isMobile, depth: stackDepth, onPop: requestPop });
+
+  // Escape mirrors the back gesture above the root; at the root it reaches
+  // the Dialog, which closes as before. Listened for on the document in the
+  // CAPTURE phase: after a tap the focus is often on <body> (the tapped row
+  // is display:none once the hub opens), so a handler on the shell's own
+  // element would never see the key, while the Dialog's document listener
+  // would and close everything. A ConfirmDialog on top (busy or discard
+  // guard) keeps its own Escape: the key is left alone when it is aimed at
+  // any dialog but this one.
+  const shellRoot = useRef<HTMLDivElement | null>(null);
+  const requestPopRef = useRef(requestPop);
+  requestPopRef.current = requestPop;
+  const escapePops = isMobile && stackDepth > 1;
+  useEffect(() => {
+    if (!escapePops) return;
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      const target = event.target instanceof Element ? event.target : null;
+      const dialog = target?.closest('[role="dialog"]') ?? null;
+      const ownDialog = shellRoot.current?.closest('[role="dialog"]') ?? null;
+      if (dialog && dialog !== ownDialog && !ownDialog?.contains(dialog)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      requestPopRef.current();
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
+  }, [escapePops]);
+
+  const staticIndex = useStaticSearchIndex();
+  const entries = useMemo(
+    () => collectSearchEntries({ capabilities, shortName: harnessLabel, dynamic: { schemaRows }, statics: staticIndex }),
+    [capabilities, harnessLabel, schemaRows, staticIndex],
+  );
+  const trimmedQuery = searchQuery.trim();
+  const searching = trimmedQuery.length > 0 || searchFilter !== null;
+  const searchResults = useMemo(() => searchSettings(trimmedQuery, entries, { filter: searchFilter }), [trimmedQuery, entries, searchFilter]);
+
+  const dismissSearch = useCallback(() => {
+    setSearchQuery("");
+    setSearchFilter(null);
+    setHighlight(null);
+  }, []);
+
+  // The results persist on both widths: on desktop the rail stays replaced
+  // until the query is cleared, on the phone Back from the hub lands on them.
   const openSearchResult = useCallback((result: SearchResult) => {
-    applyTarget({ id: normalizeSectionId(result.tab), sub: result.sub }, { highlight: result.id.startsWith("tab-") ? null : result.id });
-    // Desktop clears the query (the rail comes back); the phone keeps it so
-    // Back returns to the same results.
-    if (!isMobile) setSearchQuery("");
-  }, [applyTarget, isMobile]);
+    applyTarget(resultTarget(result), { highlight: resultHighlight(result) });
+  }, [applyTarget]);
+
+  const onSearchKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Escape" && searching) {
+      // Escape clears a query first (and stops there); with nothing typed
+      // it falls through to the dialog, which closes on it as before.
+      event.preventDefault();
+      event.stopPropagation();
+      event.nativeEvent.stopImmediatePropagation();
+      dismissSearch();
+    } else if (event.key === "ArrowDown" && searchResults.length > 0) {
+      event.preventDefault();
+      focusSearchResults();
+    }
+  };
 
   const shellValue = useMemo<SettingsShellValue>(() => ({
     cwd,
@@ -220,18 +332,22 @@ export function SettingsShell({ request, cwd, sessionId, capabilities = ALL_CAPA
     </SettingsHighlightContext.Provider>
   );
 
+  const leaveReasons = busy.reasons();
+  const signingIn = leaveReasons.some((reason) => /sign[- ]?in|log[- ]?in/i.test(reason));
   const busyGuard = (
     <ConfirmDialog
-      open={confirmClose}
-      onOpenChange={setConfirmClose}
-      title="Leave while work is in progress?"
-      description={`${busy.reasons().join(", ") || "Something"} is still running. Closing Settings now interrupts it.`}
+      open={pendingLeave !== null}
+      onOpenChange={(open) => { if (!open) setPendingLeave(null); }}
+      title={signingIn ? "Leave while sign-in is in progress?" : "Leave while work is in progress?"}
+      description={`${leaveReasons.join(", ") || "Something"} is still running. ${pendingLeave === "pop" ? "Going back" : "Closing Settings"} now interrupts it.`}
       confirmLabel="Leave"
       cancelLabel="Stay"
       danger
       onConfirm={() => {
-        setConfirmClose(false);
-        callbacks.onClose();
+        const leaving = pendingLeave;
+        setPendingLeave(null);
+        if (leaving === "pop") popOneLevel();
+        else callbacks.onClose();
       }}
     />
   );
@@ -245,22 +361,27 @@ export function SettingsShell({ request, cwd, sessionId, capabilities = ALL_CAPA
           style={{ top: 0, left: 0, transform: "none", width: "100vw", maxWidth: "100vw", height: "100dvh", maxHeight: "100dvh", borderRadius: 0, border: "none", padding: 0, display: "flex", flexDirection: "column", overflow: "hidden", animation: "settings-sheet-in var(--dur-med) var(--ease-out-warm) both" }}
         >
           <ShellContext.Provider value={shellValue}>
-            <div ref={setPortalTarget} className="settings-shell settings-shell-mobile" style={{ position: "relative", flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+            <div ref={(element) => { shellRoot.current = element; setPortalTarget(element); }} className="settings-shell settings-shell-mobile" style={{ position: "relative", flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
               <DialogTitle style={{ position: "absolute", width: 1, height: 1, overflow: "hidden", clip: "rect(0 0 0 0)", margin: 0 }}>Settings</DialogTitle>
               <MobileStack
                 sections={visibleSections}
                 active={activeSection?.id ?? "general"}
                 view={mobileView}
                 onSelect={(id) => applyTarget({ id })}
-                onBack={() => { setMobileView("root"); setHighlight(null); }}
+                onBack={requestPop}
                 onClose={requestClose}
+                onCloseLevel={closeSub}
                 capabilities={capabilities}
                 engine={engine}
                 harnessLabel={harnessLabel}
                 searchQuery={searchQuery}
                 onSearchQueryChange={setSearchQuery}
+                searchFilter={searchFilter}
+                onSearchFilterChange={setSearchFilter}
+                searchEntries={entries}
                 searchResults={searchResults}
                 onSearchResult={openSearchResult}
+                onSearchDismiss={dismissSearch}
                 levels={levels}
               >
                 {panels}
@@ -287,18 +408,10 @@ export function SettingsShell({ request, cwd, sessionId, capabilities = ALL_CAPA
                     type="text"
                     aria-label="Search settings"
                     placeholder="Search settings..."
+                    autoComplete="off"
                     value={searchQuery}
                     onChange={(event) => setSearchQuery(event.target.value)}
-                    onKeyDown={(event) => {
-                      // Escape clears a query first (and stops there); with
-                      // nothing typed it falls through to the dialog, which
-                      // closes on it as before.
-                      if (event.key === "Escape" && searchQuery) {
-                        event.stopPropagation();
-                        setSearchQuery("");
-                        setHighlight(null);
-                      }
-                    }}
+                    onKeyDown={onSearchKeyDown}
                     style={{ width: "100%", height: 28, padding: "0 8px 0 28px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12, outline: "none" }}
                   />
                 </div>
@@ -306,8 +419,17 @@ export function SettingsShell({ request, cwd, sessionId, capabilities = ALL_CAPA
               </div>
             </header>
             <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "row", overflow: "hidden" }}>
-              {trimmedQuery ? (
-                <SearchResultsList results={searchResults} query={trimmedQuery} onSelect={openSearchResult} width={300} />
+              {searching ? (
+                <SearchResultsList
+                  results={searchResults}
+                  query={trimmedQuery}
+                  filter={searchFilter}
+                  onFilterChange={setSearchFilter}
+                  entries={entries}
+                  onSelect={openSearchResult}
+                  onDismiss={dismissSearch}
+                  width={300}
+                />
               ) : (
                 <SettingsSidebar sections={visibleSections} active={activeSection?.id ?? "general"} onSelect={(id) => applyTarget({ id })} capabilities={capabilities} engine={engine} harnessLabel={harnessLabel} />
               )}

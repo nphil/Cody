@@ -60,6 +60,7 @@ export function SkillsStore({
   installedPackages,
   onInstalled,
   onClose,
+  embedded = false,
 }: {
   cwd: string;
   /** Scopes the ACTIVE engine can actually install into, from GET /api/skills.
@@ -69,6 +70,10 @@ export function SkillsStore({
   installedPackages: Record<SkillInstallScope, ReadonlySet<string>>;
   onInstalled: () => void;
   onClose: () => void;
+  /** Render the store's column without its own Dialog: the caller hosts it
+   * (Settings › Extensions puts it in a Drawer, which already has a close
+   * control and must never stack a second Dialog portal). */
+  embedded?: boolean;
 }) {
   const isMobile = useIsMobile();
   const { t } = useI18n();
@@ -255,23 +260,9 @@ export function SkillsStore({
   const showDetailPane = !isMobile || selectedId !== null;
   const showListPane = !isMobile || selectedId === null;
 
-  return (
-    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent
-        ariaLabel={t("skillsConfig.store.title")}
-        style={{
-          width: isMobile ? "calc(100vw - 16px)" : 1040,
-          maxWidth: "calc(100vw - 16px)",
-          height: isMobile ? "calc(100dvh - 16px)" : "84vh",
-          maxHeight: "calc(100dvh - 16px)",
-          padding: 0,
-          display: "flex",
-          flexDirection: "column",
-          overflow: "hidden",
-        }}
-      >
+  const column = (
         <div
-          style={{ display: "flex", flexDirection: "column", height: "100%" }}
+          style={{ display: "flex", flexDirection: "column", height: "100%", flex: 1, minHeight: 0 }}
           onKeyDown={onDialogKeyDown}
         >
           {/* ── Header ── */}
@@ -298,7 +289,7 @@ export function SkillsStore({
               {t("skillsConfig.store.poweredBy")}
             </a>
             <div style={{ flex: 1 }} />
-            <button
+            {!embedded && <button
               onClick={onClose}
               aria-label={t("skillsConfig.close")}
               className="ui-focus-ring"
@@ -317,7 +308,7 @@ export function SkillsStore({
               }}
             >
               ×
-            </button>
+            </button>}
           </div>
 
           {/* ── Search + categories ── */}
@@ -784,6 +775,24 @@ export function SkillsStore({
             )}
           </div>
         </div>
+  );
+  if (embedded) return column;
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent
+        ariaLabel={t("skillsConfig.store.title")}
+        style={{
+          width: isMobile ? "calc(100vw - 16px)" : 1040,
+          maxWidth: "calc(100vw - 16px)",
+          height: isMobile ? "calc(100dvh - 16px)" : "84vh",
+          maxHeight: "calc(100dvh - 16px)",
+          padding: 0,
+          display: "flex",
+          flexDirection: "column",
+          overflow: "hidden",
+        }}
+      >
+        {column}
       </DialogContent>
     </Dialog>
   );

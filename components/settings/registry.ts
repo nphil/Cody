@@ -127,11 +127,25 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     group: "engine",
     Icon: KeyRound,
     phoneOrder: 2,
-    // TODO(providers slice): `3 connected · 1 signed in` / warn "No
-    // credentials — {shortName} cannot answer" from GET /api/providers?cached=1
-    // once that route exists. Until then the row carries no status rather
-    // than calling a route that is not there.
-    statusLine: () => null,
+    // `?cached=1` answers from the catalog cache only (`pending: true` when
+    // cold), so the rail never starts an engine child. Until the route lands
+    // it answers 404, the cache keeps no body, and the row carries no status.
+    statusRoutes: ["/api/providers?cached=1"],
+    statusLine: ({ routes, engine, harnessLabel }) => {
+      const body = asRecord(routes["/api/providers?cached=1"]);
+      const rows = Array.isArray(body?.providers) ? body.providers.map(asRecord) : null;
+      if (!rows) return null;
+      if (rows.length === 0 && body?.pending === true) return null;
+      const connected = rows.filter((row) => row?.connected === true).length;
+      const signedIn = rows.filter((row) => Array.isArray(row?.methods) && row.methods.some((method) => {
+        const entry = asRecord(method);
+        return entry?.state === "connected" && (entry.kind === "oauth" || entry.kind === "device");
+      })).length;
+      if (connected === 0) return { text: `No credentials — ${engine?.shortName ?? harnessLabel} cannot answer`, tone: "warn" };
+      const parts = [`${connected} connected`];
+      if (signedIn > 0) parts.push(`${signedIn} signed in`);
+      return { text: parts.join(" · ") };
+    },
     panel: ProvidersPanel,
   },
   {
@@ -140,11 +154,30 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     group: "engine",
     Icon: Cpu,
     phoneOrder: 3,
-    // TODO(models slice): `233 models · 41 hidden · 4 new` (accent) from
-    // /api/models, /api/models/new?cached=1 and /api/models/visibility; ACP
-    // engines say "From the session". Both the `?cached=1` peek and the
-    // visibility route land with that slice.
-    statusLine: () => null,
+    subViews: [
+      { id: "catalog", label: "Catalog" },
+      { id: "assignments", label: "Assignments", needsCapability: "models" },
+    ],
+    // Both reads are cache-only: `/api/models/new?cached=1` peeks the
+    // catalog cache (`pending: true` when cold, never a spawn) and carries
+    // the catalog's `total`; the visibility file is a local read. Not
+    // `/api/models`: on a cold cache it starts the engine's utility child,
+    // and a rail row must never do that. An ACP engine has no sessionless
+    // catalog (`catalogSource: "session"`) and says so instead of counting.
+    statusRoutes: ["/api/models/new?cached=1", "/api/models/visibility"],
+    statusLine: ({ routes }) => {
+      const fresh = asRecord(routes["/api/models/new?cached=1"]);
+      if (!fresh) return null;
+      if (fresh.catalogSource === "session") return { text: "From the session" };
+      if (fresh.pending === true || typeof fresh.total !== "number") return null;
+      const parts = [`${fresh.total} model${fresh.total === 1 ? "" : "s"}`];
+      const visibility = asRecord(routes["/api/models/visibility"]);
+      const hidden = (countOf(visibility?.hidden) ?? 0) + (countOf(visibility?.instanceHidden) ?? 0);
+      if (hidden > 0) parts.push(`${hidden} hidden`);
+      const added = countOf(fresh.newModels) ?? 0;
+      if (added > 0) parts.push(`${added} new`);
+      return { text: parts.join(" · "), tone: added > 0 ? "accent" : "muted" };
+    },
     panel: ModelsPanel,
   },
   {
@@ -159,8 +192,10 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
       const body = asRecord(routes["/api/omp-settings/schema"]);
       const settings = countOf(asRecord(body?.schema)?.settings);
       if (settings === null) return null;
+      // Secret leaves are redacted out of `values` and reported by key in
+      // `secretsSet`; both are changed settings.
       const values = asRecord(body?.values);
-      const changed = values ? Object.keys(values).length : 0;
+      const changed = (values ? Object.keys(values).length : 0) + (countOf(body?.secretsSet) ?? 0);
       const version = asRecord(asRecord(body?.schema)?.source)?.version;
       const parts = [typeof version === "string" ? version : null, `${changed} changed`, `${settings} settings`];
       return { text: parts.filter(Boolean).join(" · ") };

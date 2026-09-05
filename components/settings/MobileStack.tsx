@@ -2,22 +2,26 @@
 
 /**
  * The phone shell (<=640px): a full-bleed stack of levels. Level 1 is the
- * root list: a sticky search field over the same hubs and eyebrows the
+ * root list: a sticky 48px search field over the same hubs and eyebrows the
  * desktop rail shows, ordered by `phoneOrder`, rows at least 52px with a
- * chevron. Level 2 is one hub: a 48px header with a 44x44 Back, the hub's
- * label and a 44x44 Close, over the panel. Level 3 and deeper are pushed by
- * `Drawer` (which renders its own level) or by `openSub(node, title)`.
+ * chevron; a query (or a chip) replaces the list with the results, and Back
+ * from a hub returns to them. Level 2 is one hub: a 48px header with a 44x44
+ * "‹ Settings", the hub's label and a 44x44 Close, over the panel. Level 3
+ * and deeper are pushed by `Drawer` (which renders its own surface) or by
+ * `openSub(node, title)`, which renders here.
  *
- * MINIMAL on purpose: no history integration yet (pushState / popstate,
- * Escape mirroring, busy interception on a back gesture come with the next
- * slice); Back and Close are buttons.
+ * History (pushState per level, back gesture, Escape) and the busy check
+ * live in `SettingsShell`; this component is the surface, and every Back it
+ * renders goes through the shell's `onBack` / `onCloseLevel` so a gesture
+ * and a tap take the same path.
  */
 import { ArrowLeft, ChevronRight, Search, X } from "lucide-react";
-import type { ReactNode } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
 import type { ActiveEngineInfo, EngineCapabilities } from "../SettingsTabs";
 import { groupLabel, groupSections, type SettingsSection, type SettingsSectionId, type StatusLine } from "./registry";
-import type { SearchResult } from "./search-index";
-import { SearchResultsList, useSectionStatuses } from "./SettingsSidebar";
+import type { SearchEntry, SearchFilter, SearchResult } from "./search-index";
+import { focusSearchResults, SearchResultsList } from "./SettingsSearch";
+import { useSectionStatuses } from "./SettingsSidebar";
 
 export interface MobileSubLevel {
   id: string;
@@ -50,13 +54,13 @@ const TONE_COLOR: Record<NonNullable<StatusLine["tone"]>, string> = {
   warn: "var(--status-warning)",
 };
 
-export function MobileLevelHeader({ title, onBack, backLabel, onClose }: { title: ReactNode; onBack?: () => void; backLabel?: string; onClose: () => void }) {
+export function MobileLevelHeader({ title, onBack, backLabel, backText, onClose }: { title: ReactNode; onBack?: () => void; backLabel?: string; backText?: string; onClose: () => void }) {
   return (
     <header style={{ display: "flex", alignItems: "center", gap: 2, height: 48, minHeight: 48, padding: "0 2px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)", flexShrink: 0 }}>
       {onBack ? (
         <button type="button" onClick={onBack} aria-label={backLabel ?? "Back"} className="ui-focus-ring settings-mobile-back" style={{ ...headerButton, width: "auto", padding: "0 10px 0 6px", gap: 2, fontSize: 13, color: "var(--accent)" }}>
           <ArrowLeft size={18} aria-hidden="true" />
-          <span>Settings</span>
+          <span>{backText ?? "Settings"}</span>
         </button>
       ) : (
         <span style={{ width: 44, flexShrink: 0 }} aria-hidden="true" />
@@ -69,20 +73,28 @@ export function MobileLevelHeader({ title, onBack, backLabel, onClose }: { title
   );
 }
 
-export function MobileStack({ sections, active, view, onSelect, onBack, onClose, capabilities, engine, harnessLabel, searchQuery, onSearchQueryChange, searchResults, onSearchResult, levels, children }: {
+export function MobileStack({ sections, active, view, onSelect, onBack, onClose, onCloseLevel, capabilities, engine, harnessLabel, searchQuery, onSearchQueryChange, searchFilter, onSearchFilterChange, searchEntries, searchResults, onSearchResult, onSearchDismiss, levels, children }: {
   sections: readonly SettingsSection[];
   active: SettingsSectionId;
   view: "root" | "panel";
   onSelect: (id: SettingsSectionId) => void;
+  /** Back from a hub to the root list (the same path a back gesture takes). */
   onBack: () => void;
   onClose: () => void;
+  /** Back from an `openSub` level. */
+  onCloseLevel: (id: string) => void;
   capabilities: EngineCapabilities;
   engine: ActiveEngineInfo | null;
   harnessLabel: string;
   searchQuery: string;
   onSearchQueryChange: (query: string) => void;
+  searchFilter: SearchFilter | null;
+  onSearchFilterChange: (filter: SearchFilter | null) => void;
+  searchEntries: readonly SearchEntry[];
   searchResults: readonly SearchResult[];
   onSearchResult: (result: SearchResult) => void;
+  /** Clear the query and the chip: the root list returns. */
+  onSearchDismiss: () => void;
   levels: readonly MobileSubLevel[];
   /** The mounted panel hosts (every visited hub; the active one visible). */
   children: ReactNode;
@@ -90,7 +102,20 @@ export function MobileStack({ sections, active, view, onSelect, onBack, onClose,
   const statuses = useSectionStatuses(sections, capabilities, engine, harnessLabel);
   const groups = groupSections(sections, "phone");
   const activeSection = sections.find((section) => section.id === active) ?? null;
-  const searching = searchQuery.trim().length > 0;
+  const searching = searchQuery.trim().length > 0 || searchFilter !== null;
+
+  const onSearchKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Escape" && searching) {
+      // One Escape clears the search; the next reaches the dialog.
+      event.preventDefault();
+      event.stopPropagation();
+      event.nativeEvent.stopImmediatePropagation();
+      onSearchDismiss();
+    } else if (event.key === "ArrowDown" && searchResults.length > 0) {
+      event.preventDefault();
+      focusSearchResults();
+    }
+  };
 
   return (
     <div className="settings-mobile-stack" style={{ position: "relative", flex: 1, minHeight: 0, display: "flex", flexDirection: "column", background: "var(--bg)" }}>
@@ -98,21 +123,31 @@ export function MobileStack({ sections, active, view, onSelect, onBack, onClose,
           the query survive a Back. */}
       <div style={{ display: view === "root" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0 }}>
         <MobileLevelHeader title="Settings" onClose={onClose} />
-        <div style={{ position: "sticky", top: 0, zIndex: 1, padding: "8px 12px", background: "var(--bg)", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
-          <div style={{ position: "relative" }}>
+        <div className="settings-mobile-search" style={{ position: "sticky", top: 0, zIndex: 1, height: 48, minHeight: 48, boxSizing: "border-box", padding: "4px 12px", background: "var(--bg)", borderBottom: "1px solid var(--border)", flexShrink: 0, display: "flex", alignItems: "center" }}>
+          <div style={{ position: "relative", width: "100%" }}>
             <Search size={15} aria-hidden="true" style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)", pointerEvents: "none" }} />
             <input
               type="search"
               aria-label="Search settings"
               placeholder="Search settings"
+              autoComplete="off"
               value={searchQuery}
               onChange={(event) => onSearchQueryChange(event.target.value)}
+              onKeyDown={onSearchKeyDown}
               style={{ width: "100%", height: 40, padding: "0 12px 0 34px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", fontSize: 16, outline: "none", boxSizing: "border-box" }}
             />
           </div>
         </div>
         {searching ? (
-          <SearchResultsList results={searchResults} query={searchQuery.trim()} onSelect={onSearchResult} />
+          <SearchResultsList
+            results={searchResults}
+            query={searchQuery.trim()}
+            filter={searchFilter}
+            onFilterChange={onSearchFilterChange}
+            entries={searchEntries}
+            onSelect={onSearchResult}
+            onDismiss={onSearchDismiss}
+          />
         ) : (
           <div className="settings-scroll-column" style={{ flex: 1, minHeight: 0, overflowY: "auto", overscrollBehavior: "contain", padding: "8px 12px", paddingBottom: "max(16px, env(safe-area-inset-bottom))", display: "flex", flexDirection: "column", gap: 14 }}>
             {groups.map((group) => (
@@ -173,7 +208,7 @@ export function MobileStack({ sections, active, view, onSelect, onBack, onClose,
           owner renders its own surface (Drawer) have node === null. */}
       {levels.filter((level) => level.node !== null).map((level) => (
         <div key={level.id} className="settings-mobile-level" style={{ position: "absolute", inset: 0, zIndex: 20, background: "var(--bg)", display: "flex", flexDirection: "column" }}>
-          <MobileLevelHeader title={level.title} onBack={level.onBack ?? onBack} backLabel="Back" onClose={onClose} />
+          <MobileLevelHeader title={level.title} onBack={level.onBack ?? (() => onCloseLevel(level.id))} backLabel="Back" backText={activeSection?.label ?? "Back"} onClose={onClose} />
           <div className="settings-scroll-column" style={{ flex: 1, minHeight: 0, overflowY: "auto", overscrollBehavior: "contain", padding: 16, paddingBottom: "max(16px, env(safe-area-inset-bottom))", display: "flex", flexDirection: "column", gap: 14 }}>
             {level.node}
           </div>
