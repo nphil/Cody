@@ -191,10 +191,6 @@ function CodeText({ text }: { text: string }) {
   );
 }
 
-function SectionTitle({ children }: { children: React.ReactNode }) {
-  return <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 2 }}>{children}</div>;
-}
-
 // ── Provider detail ───────────────────────────────────────────────────────────
 
 type EndpointPreset = {
