@@ -2172,8 +2172,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       ? allModelOptions.filter((opt) => opt.name.toLowerCase().includes(modelNeedle) || opt.modelId.toLowerCase().includes(modelNeedle) || opt.provider.toLowerCase().includes(modelNeedle))
       : allModelOptions
   ), [allModelOptions, modelNeedle]);
-  // Two models with one display name (Bedrock's and Anthropic's "Claude
-  // Sonnet") get their provider appended so the rows can be told apart.
+  // Two providers serving a model under one display name (a vendor and a
+  // gateway rebadging it) get their provider appended so the rows can be
+  // told apart.
   const duplicateModelNames = React.useMemo(() => {
     const counts = new Map<string, number>();
     for (const opt of allModelOptions) counts.set(opt.name, (counts.get(opt.name) ?? 0) + 1);

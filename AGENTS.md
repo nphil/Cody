@@ -814,12 +814,13 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
 - **`HarnessAdapter.verifiedVersion`** is the exact engine version this Cody
   build was last audited against — every adapter carries one (omp: 18.1.10,
   claude-agent-acp: 0.73.0, codex-acp: 1.8.0, pi: 0.73.1, hermes: 0.19.0).
-  It is shown verbatim on the System & Updates engine card ("Built to
-  vX.Y.Z", served through `/api/engines`), and its MAJOR drives the
-  warnings: `checkEngineUpdates` compares it to the latest/installed
-  versions (`latestBeyondVerified` / `installedBeyondVerified`) and System &
-  Updates warns before — and marks after — a jump past it: core surfaces
-  keep working (settings are schema-driven, unknown RPC frames are
+  It is shown verbatim on the System hub's engine roster card (Settings ›
+  System › Engines) ("Built to vX.Y.Z", served through `/api/engines`), and
+  its MAJOR drives the warnings: `checkEngineUpdates` compares it to the
+  latest/installed versions (`latestBeyondVerified` /
+  `installedBeyondVerified`) and the System hub's engine roster warns
+  before — and marks after — a jump past it: core surfaces keep working
+  (settings are schema-driven, unknown RPC frames are
   tolerated), but brand-new engine features may not appear in Cody until
   Cody updates. Bump the marker in the same commit as each compatibility
   audit. It is always a version of the package `installSpec` names, so for a

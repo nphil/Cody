@@ -546,11 +546,12 @@ export interface HarnessAdapter {
   engineEnv?(): Record<string, string>;
   /** Exact engine version this Cody build was last audited against — the
    * marker for "what version of the engine was Cody built to". Its MAJOR
-   * drives the System & Updates warnings: when the registry offers — or the
-   * user has installed — a later major, the card warns that new engine
-   * features may not surface in Cody yet (schema-driven surfaces keep
-   * working; bespoke ones lag). The full string is shown on the engine's
-   * update card. Bump it in the same commit as each compatibility audit.
+   * drives the System hub's engine roster warnings (Settings › System ›
+   * Engines): when the registry offers — or the user has installed — a
+   * later major, the card warns that new engine features may not surface
+   * in Cody yet (schema-driven surfaces keep working; bespoke ones lag).
+   * The full string is shown on the engine's update card. Bump it in the
+   * same commit as each compatibility audit.
    * Absent = never warn, nothing shown.
    *
    * It is a version of the package `installSpec` names, always. For a
