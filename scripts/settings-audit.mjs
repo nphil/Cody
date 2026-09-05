@@ -210,7 +210,14 @@ async function openPage(context, label) {
   // by design: the rail renders nothing for it. Everything else is a failure.
   page.on("console", (message) => { if (message.type() === "error" && !/favicon|hot-update|fonts\.g|status of 404/.test(message.text())) fail(`[${label} console] ${message.text().slice(0, 200)}`); });
   page.on("pageerror", (error) => fail(`[${label} pageerror] ${error.message.slice(0, 200)}`));
-  page.on("response", (response) => { if (response.status() >= 500) fail(`[${label} http ${response.status()}] ${response.url().slice(-80)}`); });
+  // A 5xx is a failure outright. A 4xx is not (an engine answers 400
+  // `unsupported` for a surface it lacks, and the client hides on that), but
+  // the console line the browser prints for it carries no URL, so record the
+  // request here to make such a console error diagnosable.
+  page.on("response", (response) => {
+    if (response.status() >= 500) fail(`[${label} http ${response.status()}] ${response.url().slice(-80)}`);
+    else if (response.status() >= 400 && response.status() !== 404) note(`${label}: http ${response.status()} ${response.request().method()} ${response.url().slice(-100)}`);
+  });
   // `load`, not `networkidle`: the app polls its workspace tree, so the
   // network never idles. A dev server also full-reloads the page once its
   // first compile lands, which destroys the execution context under any

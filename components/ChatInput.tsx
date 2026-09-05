@@ -2118,8 +2118,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const newModelCount = newModelsRoute.data?.newModels?.length ?? 0;
   const openSettings = useSettingsOpener();
   // The omp provider order, when the engine keeps one (config.yml); other
-  // engines have no such setting and the route refuses, which is cached.
-  const ompSettingsRoute = useSettingsRoute<{ settings?: { modelProviderOrder?: string[] } }>("/api/omp-settings", { enabled: capabilities.configEditor, ttlMs: 60_000 });
+  // engines have no such setting and the route refuses. `capabilities` is
+  // the all-on default until /api/info answers, so the read also waits for
+  // the engine identity — otherwise every engine asked once on first paint.
+  const ompSettingsRoute = useSettingsRoute<{ settings?: { modelProviderOrder?: string[] } }>("/api/omp-settings", { enabled: engineId !== null && capabilities.configEditor, ttlMs: 60_000 });
   const providerOrder = ompSettingsRoute.data?.settings?.modelProviderOrder;
 
   // The retired allowlist (`cody:composer-models`) becomes the account's
