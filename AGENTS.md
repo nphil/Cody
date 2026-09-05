@@ -107,7 +107,23 @@ app/api/
                                    dispatches on the active engine: an rpc-dialect
                                    engine's own sessionless catalog, or an empty
                                    `catalogSource:"session"` answer for ACP engines,
-                                   whose models live in the session's get_state
+                                   whose models live in the session's get_state.
+                                   `?catalog=full[&refresh=1]` (omp only): the
+                                   UNRESTRICTED catalog behind an --config overlay,
+                                   an hour's cache, what curation and the new-models
+                                   diff read from
+  models/new/route.ts             GET models in the catalog never shown before (the
+                                   seen ledger); `?cached=1` answers from the catalog
+                                   cache only and never spawns an engine — for a
+                                   status line, never the hub's own open
+  models/seen/route.ts            GET/POST the seen ledger
+                                   (`cody-model-catalog-seen.json`) that makes "new"
+                                   a fact instead of a guess; POST is admin-only
+  models/visibility/route.ts      GET/PUT who hides and pins which models
+                                   (`cody-model-visibility.json`): an admin's
+                                   instance-wide hide plus each user's own hide/pin.
+                                   `instanceHidden` is refused `unsupported` on omp,
+                                   whose instance hide is its own `enabledModels`
   models-config/route.ts          GET/PUT — read/write ~/.omp/agent/models.yml (omp only)
   models-config/test/route.ts     POST test a configured model/provider (omp only)
   omp-settings/route.ts           GET/PUT omp's OWN config.yml — `configEditor`,
@@ -126,6 +142,16 @@ app/api/
                                    engine with stored/fromEnvironment flags (never
                                    values); PUT {name,value} (admin) stores or clears
                                    one — every engine, no capability gate
+  providers/route.ts              GET the Providers hub's one list for the active
+                                   engine: sign-in roster + key store + effective
+                                   catalog + registry file, joined per provider.
+                                   `?cached=1` never starts an engine child
+  providers/verify/route.ts       POST {providerId} — "Check models": drops the
+                                   shared utility child and re-reads the catalog to
+                                   count what a provider now serves (admin-only,
+                                   `unsupported` on an ACP engine)
+  providers/enable/route.ts       POST {provider} — omp only: clears a provider from
+                                   `disabledProviders`
   plugins/route.ts                GET/POST plugin management (shells out to `omp plugin`)
   plugins/marketplace/route.ts    GET browse configured marketplaces + catalogs | POST
                                    add/remove/update marketplace, install/uninstall/upgrade
@@ -213,6 +239,31 @@ lib/
   provider-brand.ts    provider id → product brand + which vendored mark to draw;
                        modelBrand() reads the VENDOR off a model id so gateway rows
                        (one OpenRouter key, many vendors) don't all wear one mark
+  provider-directory.ts / provider-directory-server.ts  the Providers hub's one
+                       list per engine: joins the sign-in roster, the key store,
+                       the effective catalog and the registry file into one row
+                       per provider (composeProviderDirectory, server-only —
+                       provider-directory.ts holds the pure/shared shapes and
+                       helpers, e.g. isSubscriptionLogin)
+  model-allow-list.ts  helpers for omp's native `enabledModels` glob allow-list
+                       (Cody edits it, never re-filters by it — see "Model
+                       curation" below); modelKey()/providerGlob() are the
+                       `provider/id` and whole-provider-glob dialects every
+                       models file below shares
+  model-catalog-full.ts the unrestricted omp catalog behind its --config overlay
+                       (`GET /api/models?catalog=full`), hour-long cache
+  model-catalog-seen.ts the "seen" ledger (`cody-model-catalog-seen.json`) that
+                       makes "new since you last looked" a fact, not a guess —
+                       see the design-decision note under Settings shell
+  model-visibility.ts  who hides/pins which models, instance-wide (admin) and
+                       per user (`cody-model-visibility.json`); the HIDE set is
+                       an inversion, not an allowlist, so a model neither list
+                       names stays visible — see the same note
+  models-effective.ts  the effective (already-curated) catalog loader shared by
+                       /api/models and /api/providers's per-provider counts
+  composer-model-visibility.ts  browser-side mirror of the visibility file so
+                       the composer repaints without a round trip, and the
+                       store of record on an open instance (no accounts)
   rpc-manager.ts       session registry + startRpcSession over RpcProcess
   session-namer.ts     3-4 word model-written session names: a one-shot run of the
                        ACTIVE rpc-dialect engine (omp's `tiny` role only when omp
@@ -271,36 +322,104 @@ components/
   ProviderIcon.tsx    vendored brand marks (models.dev logo set + simple-icons for
                       the few it stubs); ProviderIcon = a provider, ModelIcon = a
                       model's vendor. Never hotlinked — see the note below
-  ModelsConfig.tsx    modal for models/auth configuration
-  McpConfig.tsx       project MCP server editor (Settings → MCP tab)
-  MemoryPanel.tsx     Settings → Agent Memory: the engine's own memory documents,
+  ModelsConfig.tsx    omp's models.yml editors (provider/model entry forms, the
+                      thinking-level ladder) plus the coloured brand tiles
+                      Settings draws providers with; rendered inside
+                      settings/providers/ProviderDetail's "Advanced" form for a
+                      custom endpoint — the old tree-and-detail dialog that used
+                      to live here is gone, its registry/roles/composer-picker
+                      views having moved to the Models and Providers hubs
+  McpConfig.tsx       project MCP server editor (Settings › Extensions › MCP)
+  MemoryPanel.tsx     Settings › Memory: the engine's own memory documents,
                       read-only, each with its path (capability-gated)
-  ProviderSignInPanel.tsx Settings → API Keys & Providers, first block: the
-                      ACTIVE engine's provider sign-in rows (/api/auth/providers),
-                      Sign in / Re-login / Sign out, each expanding a
-                      ProviderLoginFlow; rendered for every engine with
-                      `providerLogin`, admin-only controls
-  ProviderLoginFlow.tsx the one sign-in state machine (SSE frames → URL + paste
-                      box, device code, prompt, progress, success/error), used
-                      by ProviderSignInPanel, ModelsConfig's registry tree and
-                      the setup wizard
-  ProviderKeysPanel.tsx Settings → API Keys & Providers, top half: per-provider
-                      key cards for the ACTIVE engine (masked input, Save /
-                      Clear, "Saved in Cody" / "Set on the container" chips);
-                      rendered for every engine, above omp's registry editor
-  PluginsConfig.tsx   modal for installed plugins; opens PluginMarketplace
+  PluginsConfig.tsx   embedded under Settings › Extensions › Plugins; opens
+                      PluginMarketplace
   PluginMarketplace.tsx marketplace dialog: browse/search/install across
                       configured `omp` marketplaces, manage marketplaces
-                      (opened from PluginsConfig and the System & Updates card)
-  SkillsConfig.tsx    modal for loaded/installable skills; opens SkillsStore
+                      (opened from PluginsConfig and the System hub's card)
+  SkillsConfig.tsx    embedded under Settings › Extensions › Skills; opens
+                      SkillsStore
   SkillsStore.tsx     skill store dialog: skills.sh browse/search/detail/install
-                      (opened from SkillsConfig and the System & Updates card)
+                      (opened from SkillsConfig and the System hub's card)
   FileExplorer.tsx    file tree inside sidebar
   FileViewer.tsx      file content in a tab
   TabBar.tsx          tab bar (Chat + open file tabs)
+  SettingsTabs.tsx    now just shared TYPES/constants (SettingsTab,
+                      EngineCapabilities, ALL_CAPABILITIES, PlatformInfo,
+                      DEFAULT_HARNESS_LABEL, OMP_ENGINE_ID,
+                      SCHEMA_TAB_CAPABILITY, extensionsGroupDescription,
+                      getNormalizedActive) — the tab-bar COMPONENT and its
+                      hand-listed category table are gone; see Settings shell
+  SettingsConfig.tsx  ~20-line entry point: hands AppShell's props to
+                      settings/SettingsShell and re-exports its request type
+  settings/           the Settings dialog itself — see "Settings shell" below
+                      for the registry/data-cache/writer contracts this
+                      directory is built on; file by file:
+    registry.ts         SETTINGS_SECTIONS, the hub table every rail reads, plus
+                        SECTION_ALIASES for legacy deep-link ids
+    shell-context.tsx   useSettingsShell() / useSettingsOpener() contracts
+    SettingsShell.tsx   the dialog: desktop rail+pane, phone MobileStack,
+                        dialog-wide search, the busy/leave-confirm guard
+    SettingsSidebar.tsx / MobileStack.tsx  desktop rail; phone root list + stack
+    SettingsSearch.tsx / search-index.ts  results list; the static ∪ dynamic
+                        search index (each panel's SEARCH_ENTRIES + schema rows)
+    Drawer.tsx          the one nested-surface primitive (side / push / dialog
+                        presentations; never a second Dialog)
+    Directory.tsx       the sectioned-row-list primitive (Connected/Discovered,
+                        the engine roster, MCP servers)
+    DangerZone.tsx      the confirmed-destructive-row block, one per hub
+    SaveStatus.tsx      per-hub save/error corner indicator
+    SegmentedControl.tsx the MCP/Skills/Plugins and Catalog/Assignments switch
+    primitives.tsx      NativeSetting row, chip styles, SettingsHighlightContext
+    EngineRoster.tsx    install/switch/update/reinstall/revert/uninstall for
+                        every known engine; shared by Settings › System ›
+                        Engines and the onboarding EnginePicker
+    AccountSettings.tsx / AccessTokensSection.tsx / account-controls.tsx
+                        Settings › Account: profile, password, tokens, roster
+    SystemUpdates.tsx    Settings › System: the Cody update card over the
+                        EngineRoster
+    RetryFallbackPanel.tsx / ModelPlanPanel.tsx  Behavior's retry/fallback
+                        chain editor and the plan-apply wizard
+    ProviderLoginFlow.tsx the one sign-in state machine (SSE frames → URL +
+                        paste box, device code, prompt, progress, success/
+                        error), used by providers/ProviderDetail and the
+                        setup wizard's provider step
+    panels/             one file per hub (Account, Preferences, Providers,
+                        Models, Engine [= Behavior], Extensions, Memory,
+                        System), each a thin composition of the pieces above
+                        plus that hub's own SEARCH_ENTRIES export
+    providers/          the Providers hub: ProviderDirectory (the Connected /
+                        Discovered list), ProviderDetail (the sign-in / keys /
+                        custom-endpoint drawer), AddProviderPicker,
+                        LocalEndpointForm, provider-groups.ts (the Add
+                        picker's sections), controls.tsx (shared row bits)
+    models/             the Models hub: ModelCatalog, ModelCurationDialog
+                        (omp's per-provider selection), ModelAssignments +
+                        ModelRoles (role → model), NewModelsNotice
+    engine/             the Behavior hub: RecommendedSettings +
+                        recommended-cards.ts (the curated-card table),
+                        SchemaSettingsList (the engine's complete schema,
+                        chip-grouped, secrets masked)
   ui/                 shared primitives: Dialog/Tooltip/Collapsible, fields, toast
 
 hooks/
+  useSettingsData.ts       the Settings dialog's route cache (useSettingsRoute/
+                           useSettingsRoutes): one in-flight request per route,
+                           an `unsupported` answer cached as a value, prefix
+                           invalidation for writers
+  useConfigWriter.ts       the one writer for omp's config.yml: per-family FIFO
+                           queues, coalesced schema patches, useNativeSettings
+                           for the curated cards
+  useSchemaIndex.ts        the active engine's settings schema, indexed with
+                           each row's effective value, `ui.condition` result and
+                           changed-from-default flag; backs Behavior AND the
+                           dialog-wide search
+  useModelCatalog.ts       Settings › Models' one row shape across omp/pi/ACP
+                           catalogs, with who hid/pinned what and what is new
+  useLocalAiScan.ts        client for `/api/local-ai`, feeding Providers ›
+                           Discovered
+  useSettingsHistory.ts    mirrors the phone stack's depth into browser history
+                           so a back gesture pops exactly one level
   useAgentSession.ts       messages + streaming + SSE + fork/navigate/reconciliation logic
   useAudio.ts              completion sound + browser AudioContext unlock
   useDragDrop.ts           shared drag/drop state
@@ -338,7 +457,7 @@ WSL2 distro flattened from this image. Own CI
 
 Cody has app-level user accounts: a login screen (`/login`,
 `components/LoginScreen.tsx`), signed-cookie sessions, per-account profiles
-(Settings → User Accounts, the first tab), and per-account chat sessions.
+(Settings → Account), and per-account chat sessions.
 Accounts are **identities, not OS users** — terminals and the harness run as
 the container's single user regardless of who is signed in; `UserRecord.osUser`
 is a reserved seam if per-uid isolation is ever wanted.
@@ -396,7 +515,10 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   select route then calls `restartAllRpcSessions()`.
 - **Cody-level state always lives in the instance data dir** (`lib/omp/paths`
   `getAgentDir()`): accounts, checkpoints, engine selection, session owners,
-  the engine session index, the tools prefix. Never route these through the
+  the engine session index, the tools prefix, per-engine provider keys
+  (`cody-provider-keys.json`), who hides/pins which models
+  (`cody-model-visibility.json`) and the model-catalog "seen" ledger
+  (`cody-model-catalog-seen.json`). Never route these through the
   active adapter's `getAgentDir()` — they must survive engine switches.
 - **Browser state that names an engine's things is scoped per engine.**
   `ENGINE_SCOPED_KEYS` / `engineScopedKey()` (lib/storage-keys.ts) address
@@ -593,10 +715,11 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   for omp (`auth`, `device_code`, `prompt_request`, `progress`, `success`,
   `error`, `cancelled`) and holds a value pasted BEFORE the engine asks —
   the paste box is on screen from the first URL, and a redirect URL usually
-  arrives first. `components/settings/ProviderSignInPanel.tsx` renders the
-  rows on the API Keys & Providers tab for every engine, above the key
-  cards; `ProviderLoginFlow.tsx` is the one state machine (extracted from
-  ModelsConfig's Subscription detail, which now reuses it). Credentials
+  arrives first. `components/settings/providers/ProviderDetail.tsx` renders
+  the Sign in / Re-login / Sign out row in every provider's detail drawer
+  (Settings › Providers), for every engine with `providerLogin`;
+  `ProviderLoginFlow.tsx` is the one state machine it shares with the setup
+  wizard's provider step. Credentials
   never pass through Cody: a driver relays a URL out and a code in and reads
   the engine's answer. `/api/auth/all-providers` stays omp-only (it reads
   omp's model catalog to list configured API-key providers).
@@ -662,7 +785,7 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   of that, and each one was a live bug before it was a rule:
   - **The displayed version is the ENGINE's.** Anything that labels a number
     with the engine's NAME goes through `engineOwnVersion()`
-    (`lib/harness/index.ts`): the picker card and the User Accounts engine
+    (`lib/harness/index.ts`): the picker card and the System › Engines
     list (`/api/engines` `version`, with the adapter's alongside as
     `adapterVersion`), the Info panel (`/api/info` `ompVersion`), and the
     update card's headline (`EngineUpdateStatus.engineVersion`). A card
@@ -716,6 +839,82 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   submodules. New engine-neutral code must NOT import `lib/omp` directly;
   route it through the harness (capabilities, adapter methods, or the engine
   dispatch pattern in `app/api/sessions/route.ts`).
+
+## Settings shell (`components/settings/`)
+
+Settings is one dialog built from a single table, not eight ad hoc panels.
+Eight hubs exist today: **Account**, **Preferences** (`you`); **Providers**,
+**Models**, **Behavior**, **Extensions**, **Memory** (the active engine, named
+by its short name); **System** (the server). Legacy ids from before the
+redesign (`safety`, `intelligence`, `omp`, `localai`, `mcp`, `skills`,
+`plugins`) still open Settings — they resolve to the hub that now holds their
+content and are kept for one release.
+
+- **`registry.ts`** is the source of truth: `SETTINGS_SECTIONS`, one entry per
+  hub with its label, `group`, icon, `needsCapability` gate (ANY-of over a
+  list — a hub whose sub-surfaces gate individually stays as long as one of
+  them can render), `phoneOrder`, optional `subViews` (Models ›
+  Catalog/Assignments; Extensions › MCP/Skills/Plugins) and the
+  dynamically-imported panel component. A hub not in this table does not
+  exist. `getVisibleSections`/`getVisibleSubViews` are the ONLY places
+  capability gating happens for the rail — a panel never re-decides its own
+  visibility. `SECTION_ALIASES` is the legacy-id table above.
+- **`SettingsShell.tsx`** owns the open hub/segment, the search query, the
+  highlight (a `data-search-id` to scroll to and outline once), the visited
+  set (a hub stays MOUNTED once opened — a Providers sign-in SSE survives a
+  look at System), the phone stack's levels and a `busy` register a login SSE
+  or a dirty form holds so a navigation confirms before cutting work off.
+  Desktop is a 230px rail (`SettingsSidebar.tsx`) over a pane; phone is a
+  full-bleed `MobileStack.tsx` whose levels mirror browser history through
+  `hooks/useSettingsHistory.ts`, so a back gesture, Escape and the ‹ button
+  all pop exactly one level (`requestPop`). Both widths render the same hubs
+  under the same ids (`settings-tab-<id>` / `settings-panel-<id>`).
+- **The dialog-wide search** (`SettingsSearch.tsx` + `search-index.ts`) unions
+  two kinds of entry: STATIC ones, each panel module's own `SEARCH_ENTRIES`
+  export (a card, a toggle, a whole hub as a fallback result), and DYNAMIC
+  ones, the active engine's schema rows from `hooks/useSchemaIndex.ts` — so
+  typing a setting's name jumps to it even when it has no hand-built card.
+  `components/settings-search-index.test.mjs` pins that a hidden hub or a
+  gated card DROPS from the union entirely (never shown dimmed) and that a
+  schema row a curated card already owns collapses into that one result
+  instead of appearing twice.
+- **The data layer.** `hooks/useSettingsData.ts` is the route cache every
+  panel and every rail status line reads through (`useSettingsRoute` /
+  `useSettingsRoutes`): one in-flight request serves every concurrent caller,
+  an `{code:"unsupported"}` answer is cached as a VALUE so the hub hides and
+  nothing retries a route the engine refused, and `invalidateSettingsRoutes`
+  marks a prefix stale so mounted hooks re-fetch while the stale body keeps
+  painting (no flash). `hooks/useConfigWriter.ts` is the one writer for omp's
+  config.yml — per-family FIFO queues (`settings`/`schema`/`roles`/`plan`/
+  `delete`) so a slow write in one family cannot starve another,
+  `patchSettingsSchema` coalesces rapid writes (a slider) into one PUT every
+  350 ms, and every settled write invalidates the same cached reads the
+  panels above read through. See the `patchSection` trap note under Model
+  orchestration below — it now lives here, not in `SettingsConfig.tsx`.
+- **Shared nested-surface primitives**, so no hub reaches for a second
+  `Dialog` (which would stack a second portal, backdrop and focus trap, and
+  break Escape): `Drawer.tsx` (side panel on desktop, a pushed phone-stack
+  level on narrow screens, or a centred dialog — the caller picks, the shell
+  overrides on phone), `Directory.tsx` (the sectioned-row-list every hub's
+  own list renders through — Providers' Connected/Discovered, the engine
+  roster, MCP servers), and `DangerZone.tsx` (the confirmed-destructive-row
+  block, always last in a hub).
+- **Design decision — a new model is never silently hidden.** Three
+  mechanisms work together so curation cannot make "new" invisible: (1) the
+  "seen" ledger (`lib/model-catalog-seen.ts`, `cody-model-catalog-seen.json`)
+  records what the catalog looked like last time it was SHOWN, not what is
+  currently allowed, so a model excluded by curation still diffs as new;
+  (2) omp's allow-list is written with whole-provider globs (`provider/**`,
+  `lib/model-allow-list.ts`) rather than frozen id lists whenever a provider
+  is left open, so a provider the user has not restricted keeps admitting
+  models it did not have yet; (3) personal and instance hides
+  (`lib/model-visibility.ts`) are a HIDE set, not an allowlist — the
+  inversion means a model neither list names stays visible by default,
+  instead of needing to be added to something before it can be seen. Losing
+  any one of the three turns curation into a trap: without the ledger,
+  "new" is a guess; without globs, curating a provider once freezes its
+  roster forever; without the inversion, every model would need an explicit
+  add.
 
 ## Settings: schema-driven, not hand-listed
 
@@ -793,15 +992,25 @@ setting added upstream appears without a Cody change.
   rather than being hidden — the same file still drives the CLI.
   `settings-surface.test.mjs` fails if a rule stops matching the installed
   schema, so an upstream rename surfaces as a test failure, not a vanished chip.
-- `components/settings/OmpSchemaSettings.tsx` — the "All OMP Settings" tab.
-- `lib/omp/settings-config.ts` stays: it backs the curated tabs (model registry,
-  approval matrix, retry fallback chains) that deserve bespoke controls. Both
-  write the same file; the dialog re-reads after each save so they stay in step.
+- `components/settings/engine/SchemaSettingsList.tsx` — the Behavior hub's
+  "All settings" list: the complete schema, chip-grouped, secrets masked.
+  Indexed for search by `hooks/useSchemaIndex.ts`, the one component-facing
+  module that reads `lib/omp/settings-conditions`, so a Recommended card and
+  its schema row can never disagree about visibility.
+- `lib/omp/settings-config.ts` stays: it backs the server-side reset paths
+  (`/api/omp-settings`'s section deletes, `/api/model-plan`) that
+  `RetryFallbackPanel`/`ModelPlanPanel` and the config writer's "Reset to
+  defaults" calls hit — see "Model orchestration" below for its
+  `RESETTABLE_SECTIONS`/`RESETTABLE_PATHS`. It writes the same config.yml the
+  schema route does; `useConfigWriteSeq` is what tells a panel holding its
+  own copy of the file (the schema list) to reload once a reset lands,
+  without bouncing on its own save.
 - `jiti` must remain in `serverExternalPackages` — bundling it breaks its
   runtime file resolution.
-- The panel's tab is pinned to the foot of the settings sidebar and named from
-  the active harness (`HarnessAdapter.shortName`, served by the schema route),
-  so switching `CODY_HARNESS` renames it rather than requiring a UI edit.
+- Behavior sits with the other engine-scoped hubs in the registry, named from
+  the active harness (`HarnessAdapter.shortName`, served by the schema
+  route), so switching `CODY_HARNESS` renames it rather than requiring a UI
+  edit — see "Settings shell" below for where it sits among the other hubs.
 - **"Terminal only" is per engine, and deliberately not shared.**
   `lib/omp/settings-surface.ts` lists omp's keys; `PI_TERMINAL_ONLY_KEYS` in
   `lib/harness/pi-settings.ts` lists pi's. The two engines' key names only
@@ -1448,8 +1657,9 @@ handled or safely ignored.
   exactly one of `command`/`url` is required and validated before any write.
 - Writes are atomic (temp file + rename), preserve unrelated top-level keys
   (`disabledServers`, `$schema`, ...), and support rename via `previousName`.
-- The MCP settings live in their own Settings tab (`SettingsTabs` id `"mcp"`,
-  workspace-gated). Server list rows show a config-derived status dot
+- The MCP settings live under Settings › Extensions › MCP (legacy id `"mcp"`
+  resolves there via `SECTION_ALIASES`; workspace-gated). Server list rows
+  show a config-derived status dot
   (valid+enabled / disabled / invalid) — no live-connectivity probe exists in
   the RPC protocol, so failures surface as toasts (`toast.error`) from the
   editor actions, not inline text.
@@ -1473,7 +1683,9 @@ handled or safely ignored.
 - `GET /api/app-update` returns `updateAvailable`, the exact terminal command, and `managedBy` naming the channel that ships to this deployment. A container install (detected via `/.dockerenv`) is compared against the latest `nphil/Cody` GitHub release and updated with `docker pull ghcr.io/nphil/cody:latest`; anything else queries the npm registry for `@nphil/cody` and uses the detected install manager (`bun` vs `npm` via `detectInstallMethod`), e.g. `npm install -g @nphil/cody` or `bun add -g @nphil/cody`.
 - `POST /api/omp-update` (`action: "check"`) runs `omp update --check` and returns `updateAvailable` plus `updateCommand: "omp update"`.
 - `POST /api/omp-update` (`action: "restart"`) restarts active OMP sessions after a manual CLI update.
-- Notifications in `AppShell` and settings cards in `SettingsConfig` present the update notification alongside copyable terminal update commands.
+- Notifications in `AppShell` and the Cody card in Settings › System
+  (`components/settings/SystemUpdates.tsx`) present the update notification
+  alongside copyable terminal update commands.
 
 ### Model orchestration: roles, plans, chains, resets
 - **omp's out-of-the-box behavior is the baseline.** With no `modelRoles` in
@@ -1506,9 +1718,12 @@ handled or safely ignored.
 - **Fallback switches announce themselves**: omp's `retry_fallback_applied`
   ({from, to, role}) and `retry_fallback_succeeded` ({model, role}) frames
   surface as toasts in `useAgentSession` (i18n `agentSession.fallback*`).
-- **Trap — `patchSection` in SettingsConfig.tsx** must spread the SECTION
-  (`base?.[key]`), never the whole settings object; the whole-object spread
-  filled config.yml sections with junk top-level keys after the first save.
+- **Trap — `patchSettingsSection` in `hooks/useConfigWriter.ts`** (formerly
+  SettingsConfig.tsx's `patchSection`) must spread the SECTION (`base?.[key]`),
+  never the whole settings object; the whole-object spread filled config.yml
+  sections with junk top-level keys after the first save. `patchSettingsTop`
+  is the one deliberate exception — top-level keys and arrays like
+  `enabledModels` genuinely need the whole object spread.
 - **omp 17.4 compaction**: `compaction.strategy`/`remoteEnabled` no longer
   exist upstream — `compaction.methodOrder` (ordered preference list)
   replaced them. `settings-config.ts` reads legacy keys through omp's own
@@ -1518,7 +1733,11 @@ handled or safely ignored.
 
 ### Auth and model config
 - Auth flows go through RPC commands (`get_login_providers`, `login`) against the omp child process; credentials live in omp's `agent.db` (SQLite) which Cody never touches directly.
-- The Models panel reads and writes `models.yml` in the omp agent directory (`~/.omp/agent/models.yml`, `.yaml` fallback).
+- `models.yml` in the omp agent directory (`~/.omp/agent/models.yml`, `.yaml`
+  fallback) is read and written from the Providers hub's detail drawer, in a
+  custom endpoint's "Advanced" form (`components/ModelsConfig.tsx`'s editors,
+  rendered by `settings/providers/ProviderDetail.tsx`) — not the Models hub,
+  which only reads the resulting catalog.
 - API-key status endpoints must never return the raw key.
 
 ### RPC transport limit — the utility process MUST negotiate v2
@@ -1552,11 +1771,13 @@ handled or safely ignored.
   cycling, while `getAvailableModels()` reads the setting directly.
 - Only the curation panel requests the full catalog, and only on mount. The
   main UI never carries it.
-- UI shape (`components/ModelsConfig.tsx`): one summary row per provider
-  (`openrouter — None of 466 enabled`) plus a per-provider dialog with search,
-  bulk enable/disable of the current matches, a rendered-row cap
-  (`CURATION_VISIBLE_LIMIT`, so DOM size is constant), and a single PUT on
-  confirm. Turning the restriction ON seeds only in-use models
+- UI shape (`components/settings/models/`): Models › Catalog shows a curation
+  strip, one summary row per curated provider (`openrouter — None of 466
+  enabled`, from `summarizeProviderCuration`), each opening
+  `ModelCurationDialog.tsx` — search, bulk enable/disable of the current
+  matches, a rendered-row cap (`CURATION_VISIBLE_LIMIT`, so DOM size is
+  constant), and a single PUT on confirm. Turning the restriction ON seeds
+  only in-use models
   (`seedAllowList`) — seeding the whole catalog is what wrote hundreds of
   entries into `config.yml` and then demanded hundreds of un-checks.
 - A provider whose every model is de-selected keeps its row and stays openable

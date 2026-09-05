@@ -74,8 +74,8 @@ npm start              # …在 127.0.0.1:30177 提供服务（0.0.0.0 用 start
 | **Codex** | 实验性 | 相同的 ACP 功能：审批、审批级别、模型选择；使用 ChatGPT（设备码）或 API 密钥登录 |
 | **Hermes** | 实验性 | 带审批、模式和模型选择的 ACP 对话；记忆浏览器、技能、基于 Hermes 自身默认值生成的设置面板；可使用 Nous Portal、Claude Pro/Max、ChatGPT 等登录 |
 
-- **在 UI 中安装与更新**：引导流程中的选择界面，以及 设置 → 用户账户 → Agent 引擎 都可以按需安装引擎，并为每个引擎提供**更新**按钮（omp 还在 Updates 面板和 System 标签页的版本检查旁提供一键“立即更新”）。更新当前活动的引擎会重启正在运行的会话，确保不会有会话继续使用过期的二进制文件。
-- **API 密钥只需填一次**：在 设置 → API Keys & Providers 中输入一次提供商密钥（Anthropic、OpenAI、OpenRouter、Gemini、Bedrock 等），Cody 会以环境变量的形式交给每个引擎，效果与在容器上设置环境变量相同，切换引擎时无需重新填写凭证。订阅登录也在同一个标签页完成：Claude Pro/Max、Codex 的 ChatGPT、Hermes 的 Nous Portal、GitHub Copilot 等都通过引擎自身的登录流程无头运行，Cody 会显示登录 URL；如果浏览器无法访问容器，把授权码或最终重定向 URL 粘贴回来即可（使用设备码的提供商则输入设备码）。omp 的模型注册表也在同一个标签页中。
+- **在 UI 中安装与更新**：引导流程中的选择界面，以及 设置 → 系统 › 引擎 都可以按需安装引擎，并为每个引擎提供**更新**按钮，就在版本检查旁边。更新当前活动的引擎会重启正在运行的会话，确保不会有会话继续使用过期的二进制文件。
+- **API 密钥只需填一次**：在 设置 → 提供商 中输入一次提供商密钥（Anthropic、OpenAI、OpenRouter、Gemini、Bedrock 等），Cody 会以环境变量的形式交给每个引擎，效果与在容器上设置环境变量相同，切换引擎时无需重新填写凭证。订阅登录也在同一处完成：Claude Pro/Max、Codex 的 ChatGPT、Hermes 的 Nous Portal、GitHub Copilot 等都通过引擎自身的登录流程无头运行，Cody 会显示登录 URL；如果浏览器无法访问容器，把授权码或最终重定向 URL 粘贴回来即可（使用设备码的提供商则输入设备码）。omp 的模型注册表也在同一处。
 - **本地模型同样可用**：omp 的模型注册表支持自定义提供方；Codex 支持 `--oss` 或自定义的 `model_provider` 端点；Claude 引擎遵循 `ANTHROPIC_BASE_URL`。任何 OpenAI/Anthropic 兼容的网关（vLLM、Ollama，或是 NVIDIA Switchyard 这类路由代理）都可以接入你所运行的任意引擎。
 - **按能力显示的 UI**：引擎无法提供的界面会被隐藏，而不是显示为损坏状态 —— 切换到 Claude/Codex 时，设置会收起为 Cody 自身的标签页，仅限 omp 的输入框控件也会消失。
 - **添加新引擎**：每个引擎对应一个适配器。所需实现的约定与检查清单（Cline、Cursor 等）见 [docs/harnesses.md](docs/harnesses.md)。

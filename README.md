@@ -95,20 +95,19 @@ NVIDIA GPU is optional, for local models running inside the distro.
 | **Hermes** | Experimental | ACP chat with approvals, modes and a model picker; memory browser, skills, a settings panel from Hermes' own defaults; sign in with Nous Portal, Claude Pro/Max, ChatGPT and more |
 
 - **Install & update from the UI**: the onboarding picker and
-  Settings → User Accounts → Agent engine install engines on demand and give
-  each an **Update** button (omp also gets one-click "Update now" in the
-  Updates panel and System tab, next to its version check). Updating the
+  Settings → System → Engines install engines on demand and give
+  each an **Update** button, next to its version check. Updating the
   active engine restarts live sessions so nothing runs a stale binary.
-- **One place for API keys**: Settings → API Keys & Providers takes a provider
+- **One place for API keys**: Settings → Providers takes a provider
   key once (Anthropic, OpenAI, OpenRouter, Gemini, Bedrock, …) and hands it to
   every engine as an environment variable, the same way a key set on the
   container would reach it — so switching engines never means re-entering
-  credentials. Subscriptions sign in on the same tab: a Claude Pro/Max
+  credentials. Subscriptions sign in from the same hub: a Claude Pro/Max
   account, ChatGPT for Codex, Nous Portal for Hermes, GitHub Copilot and the
   rest run the engine's OWN login headless — Cody shows the URL, and when the
   browser cannot reach the container you paste the code or the final
   redirect URL back (or type a device code where the provider uses one).
-  omp's model registry lives on the same tab.
+  omp's model registry lives in the same hub, in a provider's own detail view.
 - **Local models stay reachable**: omp's model registry takes custom
   providers; Codex supports `--oss`/custom `model_provider` endpoints; the
   Claude engine honors `ANTHROPIC_BASE_URL`. Any OpenAI/Anthropic-compatible

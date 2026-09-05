@@ -1,7 +1,5 @@
 "use client";
 
-import { Brain, Cable, Cpu, KeyRound, RefreshCw, Server, Settings2, ShieldCheck, SlidersHorizontal, Sparkles, UserRound } from "lucide-react";
-import type { ComponentType, CSSProperties } from "react";
 import { normalizeSectionId } from "./settings/registry";
 
 /**
@@ -120,22 +118,6 @@ export function normalizePlatform(value: unknown): PlatformInfo {
   return { desktop: source.desktop === true };
 }
 
-export interface TabItem {
-  id: SettingsTab;
-  label: string;
-  description: string;
-  Icon: ComponentType<{ size?: number; className?: string; "aria-hidden"?: boolean | "true" | "false"; style?: CSSProperties }>;
-  needsWorkspace?: boolean;
-  /** Hidden entirely when the active engine lacks this capability — an engine
-   * that cannot serve the surface should not advertise it as disabled. An
-   * array means ANY of the listed capabilities keeps the tab (a group tab
-   * whose sub-surfaces gate individually, like Extensions & Tools). */
-  needsCapability?: keyof EngineCapabilities | readonly (keyof EngineCapabilities)[];
-  /** Sits apart at the foot of the sidebar. The full harness settings dump is
-   * a reference surface, not part of the curated walk through the tabs above. */
-  pinBottom?: boolean;
-}
-
 /** Fallback brand for the harness-settings tab. The real one comes from the
  * active harness (CODY_HARNESS) and arrives with the schema fetch, so this is
  * only what renders before that lands. */
@@ -169,27 +151,6 @@ export function extensionsGroupDescription(capabilities: EngineCapabilities): st
     : "Extensions for the active engine";
 }
 
-export function getSettingsCategories(
-  harnessLabel: string = DEFAULT_HARNESS_LABEL,
-  capabilities: EngineCapabilities = ALL_CAPABILITIES,
-): TabItem[] {
-  return SETTINGS_CATEGORIES
-    .filter((tab) => {
-      if (!tab.needsCapability) return true;
-      const needs = typeof tab.needsCapability === "string" ? [tab.needsCapability] : tab.needsCapability;
-      return needs.some((key) => capabilities[key]);
-    })
-    .map((tab) => {
-      if (tab.id === "omp") {
-        return { ...tab, label: `All ${harnessLabel} Settings`, description: `Every setting ${harnessLabel} declares, read from its own schema` };
-      }
-      if (tab.id === "mcp") {
-        return { ...tab, description: extensionsGroupDescription(capabilities) };
-      }
-      return tab;
-    });
-}
-
 /**
  * The flag that decides whether the schema-driven "All <engine> Settings" tab
  * exists — and therefore whether its schema is worth fetching at all.
@@ -203,164 +164,6 @@ export function getSettingsCategories(
  */
 export const SCHEMA_TAB_CAPABILITY = "nativeSettings" satisfies keyof EngineCapabilities;
 
-export const SETTINGS_CATEGORIES: TabItem[] = [
-  { id: "accounts", label: "User Accounts", description: "Your profile, password, and who can sign in", Icon: UserRound },
-  { id: "general", label: "Interface & Behavior", description: "UI preferences, completion sound, submission mode", Icon: Settings2 },
-  { id: "safety", label: "Safety & Approvals", description: "Tool safety rules, YOLO mode, terminal permissions", Icon: ShieldCheck, needsCapability: "configEditor" },
-  { id: "models", label: "AI Model Defaults", description: "Reasoning budget, verbosity, personality, scratchpad", Icon: Cpu, needsCapability: "configEditor" },
-  // No needsCapability: every engine reads provider keys from its environment
-  // (lib/harness/provider-keys.ts), so the tab exists for all of them. omp's
-  // OAuth and registry editor inside it stays gated on `models`.
-  { id: "providers", label: "API Keys & Providers", description: "Provider API keys for the active engine, plus omp's OAuth accounts and model registry", Icon: KeyRound },
-  // No needsCapability: this scans the network Cody itself runs on, not
-  // anything the active engine serves, so it stays visible on every engine —
-  // and is just as useful on a headless Docker install as on desktop.
-  { id: "localai", label: "Local AI", description: "Detect Ollama, LM Studio, and llama.cpp running near this instance", Icon: Server },
-  { id: "intelligence", label: "Agent & Intelligence", description: "Advisor, memory, autolearn, compaction and retry", Icon: Sparkles, needsCapability: "configEditor" },
-  // Sits next to Agent & Intelligence — that tab CONFIGURES memory, this one
-  // shows what the engine actually wrote. Hidden unless the engine can hand
-  // its memory back (Hermes today; omp keeps memory but cannot read it out).
-  { id: "memory", label: "Agent Memory", description: "What the agent has written down and remembers between sessions", Icon: Brain, needsCapability: "memory" },
-  { id: "mcp", label: "Extensions & Tools", description: "MCP servers, managed skills, and plugins", Icon: Cable, needsCapability: ["mcp", "skills", "plugins"] },
-  { id: "system", label: "System & Updates", description: "Updates for the app, agent engines, and skills, plus session restart", Icon: RefreshCw },
-  { id: "omp", label: `All ${DEFAULT_HARNESS_LABEL} Settings`, description: `Every setting ${DEFAULT_HARNESS_LABEL} declares, read from its own schema`, Icon: SlidersHorizontal, pinBottom: true, needsCapability: SCHEMA_TAB_CAPABILITY },
-];
-
 /** Legacy id → the hub that now renders it. Delegates to the registry so the
  * alias table is spelled once. */
 export const getNormalizedActive = (tab: SettingsTab): SettingsTab => normalizeSectionId(tab);
-
-/**
- * @deprecated The settings dialog renders `components/settings/SettingsSidebar`
- * (desktop rail) and `MobileStack` (phone) from the registry. This renderer
- * survives only for the non-embedded branches of SkillsConfig, PluginsConfig
- * and ModelsConfig, which nothing mounts any more; it goes when those
- * branches do. Do not add callers.
- */
-export function SettingsTabs({
-  active,
-  onSelect,
-  workspaceReady = true,
-  layout = "vertical",
-  harnessLabel = DEFAULT_HARNESS_LABEL,
-  capabilities = ALL_CAPABILITIES,
-}: {
-  active: SettingsTab;
-  onSelect: (tab: SettingsTab) => void;
-  workspaceReady?: boolean;
-  layout?: "horizontal" | "vertical";
-  /** Brand of the active harness, used for the "All <harness> Settings" tab. */
-  harnessLabel?: string;
-  /** Active engine capabilities; tabs the engine cannot serve are hidden. */
-  capabilities?: EngineCapabilities;
-}) {
-  const currentActive = getNormalizedActive(active);
-  const categories = getSettingsCategories(harnessLabel, capabilities);
-
-  const onKeyDown = (event: React.KeyboardEvent, index: number) => {
-    const enabled = categories.filter((tab) => !(tab.needsWorkspace && !workspaceReady));
-    let nextIndex: number | null = null;
-    if (event.key === "ArrowRight" || event.key === "ArrowDown") nextIndex = index + 1;
-    if (event.key === "ArrowLeft" || event.key === "ArrowUp") nextIndex = index - 1;
-    if (event.key === "Home") nextIndex = 0;
-    if (event.key === "End") nextIndex = enabled.length - 1;
-    if (nextIndex !== null) {
-      event.preventDefault();
-      const next = enabled[nextIndex] ?? enabled[index];
-      if (next) onSelect(next.id);
-    }
-  };
-
-  if (layout === "vertical") {
-    return (
-      <nav
-        aria-label="Settings sections"
-        role="tablist"
-        aria-orientation="vertical"
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          gap: 4,
-          padding: "12px 8px",
-          width: 230,
-          flexShrink: 0,
-          borderRight: "1px solid var(--border)",
-          background: "var(--bg-panel)",
-          overflowY: "auto",
-        }}
-      >
-        {categories.map(({ id, label, description, Icon, needsWorkspace, pinBottom }, index) => {
-          const selected = id === currentActive;
-          const disabled = Boolean(needsWorkspace && !workspaceReady);
-          return (
-            <button
-              key={id}
-              type="button"
-              role="tab"
-              id={`settings-tab-${id}`}
-              aria-selected={selected}
-              aria-controls={`settings-panel-${id}`}
-              tabIndex={selected ? 0 : -1}
-              disabled={disabled}
-              onClick={() => onSelect(id)}
-              onKeyDown={(event) => onKeyDown(event, index)}
-              style={{
-                display: "flex",
-                alignItems: "flex-start",
-                gap: 10,
-                padding: "9px 10px",
-                border: "none",
-                borderRadius: "var(--radius-control)",
-                // Pinned entries fall to the foot of the nav, set off by a rule.
-                ...(pinBottom ? { marginTop: "auto", borderTop: "1px solid var(--border)", paddingTop: 13, borderTopLeftRadius: 0, borderTopRightRadius: 0 } : {}),
-                background: selected ? "var(--bg-selected)" : "transparent",
-                color: selected ? "var(--text)" : disabled ? "var(--text-dim)" : "var(--text-muted)",
-                cursor: disabled ? "not-allowed" : "pointer",
-                opacity: disabled ? 0.5 : 1,
-                textAlign: "left",
-                transition: "background var(--dur-fast), color var(--dur-fast)",
-                width: "100%",
-              }}
-            >
-              <Icon size={16} aria-hidden="true" style={{ marginTop: 2, flexShrink: 0, color: selected ? "var(--accent)" : "currentColor" }} />
-              <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
-                <div style={{ fontSize: 12.5, fontWeight: selected ? 600 : 500, lineHeight: 1.3, color: selected ? "var(--text)" : "inherit" }}>
-                  {label}
-                </div>
-                <div style={{ fontSize: 10.5, color: "var(--text-dim)", lineHeight: 1.3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                  {description}
-                </div>
-              </div>
-            </button>
-          );
-        })}
-      </nav>
-    );
-  }
-
-  return (
-    <nav aria-label="Settings sections" role="tablist" style={{ display: "flex", gap: 3, padding: "7px 12px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)", flexShrink: 0, overflowX: "auto" }}>
-      {categories.map(({ id, label, Icon, needsWorkspace }, index) => {
-        const selected = id === currentActive;
-        const disabled = Boolean(needsWorkspace && !workspaceReady);
-        return (
-          <button
-            key={id}
-            type="button"
-            role="tab"
-            id={`settings-tab-${id}`}
-            aria-selected={selected}
-            aria-controls={`settings-panel-${id}`}
-            tabIndex={selected ? 0 : -1}
-            disabled={disabled}
-            onClick={() => onSelect(id)}
-            onKeyDown={(event) => onKeyDown(event, index)}
-            style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "5px 9px", border: "none", borderRadius: "var(--radius-control)", background: selected ? "var(--bg-selected)" : "transparent", color: selected ? "var(--text)" : "var(--text-muted)", cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.45 : 1, fontSize: 12, whiteSpace: "nowrap" }}
-          >
-            <Icon size={13} aria-hidden="true" /> {label}
-          </button>
-        );
-      })}
-    </nav>
-  );
-}

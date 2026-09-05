@@ -40,8 +40,8 @@ export interface HarnessCapabilities {
   nativeSettings: boolean;
   /**
    * Cody has HAND-BUILT editors for this engine's own config file — the
-   * Safety, AI Model Defaults and Agent & Intelligence tabs, which read and
-   * write omp's config.yml through /api/omp-settings.
+   * Behavior hub's Recommended cards, which read and write omp's config.yml
+   * through /api/omp-settings.
    *
    * Distinct from `nativeSettings`, which is the schema-DRIVEN panel any
    * engine can have by declaring its settings. Hermes has the latter and not
@@ -74,8 +74,8 @@ export interface HarnessCapabilities {
    * login (a Claude Pro/Max or ChatGPT subscription, a device code, …) and
    * keep the credential in its own store — as opposed to an API key, which
    * Cody stores itself and hands to every engine. True exactly when the
-   * adapter carries `providerLogins`; the Sign in section on the API Keys &
-   * Providers tab renders only under this flag.
+   * adapter carries `providerLogins`; the Sign in / Sign out row in the
+   * Providers hub's detail drawer renders only under this flag.
    */
   providerLogin: boolean;
 }

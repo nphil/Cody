@@ -274,7 +274,7 @@ export function buildEngineRpcLaunch(
   const bin = harness.resolveBinary();
   if (!bin) {
     throw new WebRpcError(
-      `${harness.binaryName} binary not found. Install ${harness.displayName} from Settings → User Accounts → Agent engine, or set CODY_${harness.binaryName.toUpperCase()}_BIN.`,
+      `${harness.binaryName} binary not found. Install ${harness.displayName} from Settings → System → Engines, or set CODY_${harness.binaryName.toUpperCase()}_BIN.`,
       "engine_not_installed",
     );
   }
@@ -320,7 +320,7 @@ export function utilityRpcLaunchFor(harness: HarnessAdapter): RpcProcessLaunch |
   const bin = harness.resolveBinary();
   if (!bin) {
     throw new WebRpcError(
-      `${harness.binaryName} binary not found. Install ${harness.displayName} from Settings → User Accounts → Agent engine.`,
+      `${harness.binaryName} binary not found. Install ${harness.displayName} from Settings → System → Engines.`,
       "engine_not_installed",
     );
   }

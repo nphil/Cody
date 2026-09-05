@@ -74,7 +74,7 @@ const PreviewPanel = dynamic(() => import("./PreviewPanel").then((module) => mod
 
 /** The tools of the right workspace panel, in tab order (pi-web parity:
  * Files | Git | Terminal | Tasks | Info). Update status lives in Settings ›
- * System & Updates, not in a panel. */
+ * System, not in a panel. */
 type WorkspacePanelId = "file" | "git" | "terminal" | "preview" | "tasks" | "info";
 const WORKSPACE_PANEL_IDS: readonly WorkspacePanelId[] = ["file", "git", "terminal", "preview", "tasks", "info"];
 
@@ -83,7 +83,7 @@ function isWorkspacePanelId(value: string | null): value is WorkspacePanelId {
 }
 
 /** Body of the "update available" toasts: the version delta plus a deep link
- * into Settings › System & Updates, which owns every update action. */
+ * into Settings › System, which owns every update action. */
 function UpdateNoticeBody({ current, next, onOpen }: { current: string | null; next: string; onOpen: () => void }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4 }}>

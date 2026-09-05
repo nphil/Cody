@@ -50,7 +50,7 @@ export async function register(): Promise<void> {
       const bin = harness.resolveBinary();
       const detail = error instanceof Error ? error.message : String(error);
       const hint = bin
-        ? `resolved ${bin}; repair by reinstalling ${harness.displayName} from Settings → Agent engine`
+        ? `resolved ${bin}; repair by reinstalling ${harness.displayName} from Settings → System → Engines`
         : `${harness.binaryName} binary not found; install ${harness.displayName} from the engine picker or set CODY_${harness.binaryName.toUpperCase()}_BIN`;
       console.warn(`[Cody] ${harness.binaryName} utility warm-up failed (routes will retry on demand): ${detail} — ${hint}`);
     }

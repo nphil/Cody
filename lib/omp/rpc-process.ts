@@ -269,7 +269,7 @@ export class RpcProcess {
     if (supported.length > 0 && !supported.includes(1) && !supported.includes(2)) {
       throw new Error(
         `omp speaks RPC protocol versions [${supported.join(", ")}] but this Cody build understands 1 and 2. `
-        + "Update Cody, or revert the engine update from Settings → User Accounts → Agent engine.",
+        + "Update Cody, or revert the engine update from Settings → System → Engines.",
       );
     }
     if (!supported.includes(2)) return this.protocolVersion;

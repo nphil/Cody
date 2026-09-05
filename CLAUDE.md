@@ -66,8 +66,9 @@ tokens conserved deliberately:
   own copy is deliberately English-only. `lib/api-contract.test.mjs` pins
   some literal UI strings — check it before rewording.
 - All Cody-level state (accounts, engine selection, session owners, engine
-  session index, tools prefix, checkpoints) lives in the instance data dir
-  via `lib/omp/paths.getAgentDir()` — never under an engine's own dir.
+  session index, tools prefix, checkpoints, model visibility, the model
+  catalog's seen ledger) lives in the instance data dir via
+  `lib/omp/paths.getAgentDir()` — never under an engine's own dir.
 - The UI hides what an engine can't do (capability flags); the server fails
   soft with the `"unsupported"` error code. Keep both halves in sync.
 - READMEs exist ×3 (en/ja/zh-CN) and must stay in lockstep; Cody is NOT

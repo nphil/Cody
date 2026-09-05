@@ -699,7 +699,7 @@ States: `none` / `loading` / `missing` (with the config example) / `invalid`
 (field-level errors, rail badge `!`) / `loaded` / empty.
 
 **Updates** — no panel. Update status for the Cody app, agent engines, and
-skills lives in Settings › System & Updates
+skills lives in Settings › System
 (`components/settings/SystemUpdates.tsx`): one "Check for updates" control,
 with an update action (admin button or **copyable** command) only when a newer
 version is known. On Android the app row is different in kind: distribution is

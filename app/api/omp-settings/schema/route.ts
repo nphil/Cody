@@ -70,7 +70,7 @@ export function GET() {
     const gate = requireCapability("nativeSettings", SURFACE);
     if ("response" in gate) return gate.response;
     const active = gate.harness;
-    // The active harness names the panel ("All OMP Settings"), so the label
+    // The active harness names the hub ("OMP" eyebrow, "All OMP settings" list), so the label
     // follows the engine selection instead of being baked into the UI.
     const { id, shortName } = active;
     const harness = { id, shortName };
