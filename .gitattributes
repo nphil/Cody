@@ -1,0 +1,2 @@
+# POSIX shell scripts must stay LF so they execute in Linux containers.
+*.sh text eol=lf

@@ -7,6 +7,7 @@ use serde::Serialize;
 pub enum Phase {
     Starting,
     CheckingWsl,
+    CheckingRemote,
     Downloading,
     Importing,
     StartingServer,
@@ -26,6 +27,8 @@ pub enum FailureKind {
     Download,
     Import,
     ServerStart,
+    RemoteUrlInvalid,
+    RemoteConnection,
     Unknown,
 }
 

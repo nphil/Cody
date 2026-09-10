@@ -17,11 +17,13 @@ unsafe_code = "warn"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"
+url = "2"
 
 [target.'cfg(windows)'.dependencies]
-tauri = "2.11"
+tauri = { version = "2.11", features = ["tray-icon"] }
 tauri-plugin-opener = "2.5"
 tauri-plugin-single-instance = "2.4"
+tauri-plugin-notification = "2"
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 getrandom = "0.3"
 # native-tls resolves to schannel on windows-msvc: the OS trust store, no
@@ -33,8 +35,10 @@ reqwest = { version = "0.13", default-features = false, features = [
 ] }
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
+  "Win32_Media_Audio",
   "Win32_Security_Cryptography",
   "Win32_System_Memory",
+  "Win32_System_Registry",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
 ] }
@@ -42,6 +46,7 @@ windows-sys = { version = "0.61", features = [
 [build-dependencies]
 serde_json = "1"
 tauri-build = "2.6"
+url = "2"
 
 [profile.release]
 codegen-units = 1

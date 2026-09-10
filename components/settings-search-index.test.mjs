@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url, {
@@ -35,7 +36,7 @@ const { PREFERENCE_CARDS, SEARCH_ENTRIES: PREFERENCE_ENTRIES } = await jiti.impo
 const { ALL_CAPABILITIES } = await jiti.import("./SettingsTabs.tsx");
 const { slugify, TERMINAL_ONLY_BADGE, UNAVAILABLE_BADGE } = await jiti.import("./settings/primitives.tsx");
 
-const SETTINGS_DIR = new URL("./settings/", import.meta.url).pathname;
+const SETTINGS_DIR = fileURLToPath(new URL("./settings/", import.meta.url));
 const PANELS_DIR = join(SETTINGS_DIR, "panels");
 
 /** The hub each panel module renders, so a module that exports an empty

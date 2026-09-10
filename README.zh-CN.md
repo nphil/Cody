@@ -58,11 +58,13 @@ npm start              # …在 127.0.0.1:30177 提供服务（0.0.0.0 用 start
 
 ## Cody Desktop（Windows）
 
-一个原生 Windows 应用——轻量的 Tauri 壳层（壳层进程不内置 Chromium 或 Node）呈现与 Web 版完全相同的界面，Cody 服务器和引擎则运行在一个专用的 WSL2 发行版中，该发行版由与 Docker 部署相同的镜像构建而成。
+一个原生 Windows 应用——轻量的 Tauri 壳层（壳层进程不内置 Chromium 或 Node）呈现与 Web 版完全相同的界面。它支持两种模式：本地 WSL2 模式会从与 Docker 部署相同的镜像构建专用发行版，并在其中运行 Cody 服务器和引擎；远程模式是一个通过 HTTPS 连接到构建时配置的 Cody 地址的轻量壳层，不会启动 WSL。
 
-从 [`desktop-latest` 发行版](https://github.com/nphil/Cody/releases/tag/desktop-latest)（`cody-desktop-*-x64-setup.exe`）下载安装程序。需要 Windows 10（2004 及以上版本）或 Windows 11 的 x64 环境，以及 WSL2 —— 如果尚未启用 WSL2，安装程序会引导你完成启用步骤。NVIDIA GPU 为可选项，用于在发行版内运行本地模型时使用。
+从 [`desktop-latest` 发行版](https://github.com/nphil/Cody/releases/tag/desktop-latest)（`cody-desktop-*-x64-setup.exe`）下载安装程序。需要 Windows 10（2004 及以上版本）或 Windows 11 的 x64 环境。本地模式需要 WSL2；远程模式不会启动 WSL2。NVIDIA GPU 为可选项，用于在 WSL2 发行版内运行本地模型时使用。
 
-**状态：实验性。** 完整架构参见 [docs/windows.md](docs/windows.md)。
+从源码构建时，在被忽略的 `desktop/.env.local` 中设置 `CODY_DESKTOP_REMOTE_URL=https://your-cody.example`，然后在 `desktop/` 中执行 `npm install`，再执行 `npm run dev` 或 `npm run build`。未配置地址时，默认使用本地 WSL2 模式。详见 [desktop/README.md](desktop/README.md) 和 [docs/windows.md](docs/windows.md)。
+
+**状态：实验性。**
 
 ## 引擎
 

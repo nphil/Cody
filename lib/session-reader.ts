@@ -3,7 +3,9 @@ import { normalize as normalizePath, sep } from "path";
 import { getHarness } from "./harness";
 import { getAgentDir } from "./omp/paths";
 import {
+  invalidateAllSessionScanCaches,
   invalidateSessionFileListCache,
+  invalidateSessionScanCache,
   listAllSessionInfos,
   loadSessionFile,
   readSessionHeaderSync,
@@ -160,16 +162,28 @@ declare global {
 const SESSION_LIST_CACHE_TTL_MS = 30_000;
 
 export function invalidateSessionListCache(): void {
+  invalidateSessionListMeta();
+  // Unknown-source changes need a full entry and per-file scan flush so a
+  // same-size/same-mtime rewrite cannot leave stale title or parent metadata.
+  globalThis.__ompSessionEntriesCache?.clear();
+  invalidateAllSessionScanCaches();
+}
+
+/** Refresh list metadata while retaining parsed entries for sessions that did
+ * not change. Hot RPC events target the changed transcript separately. */
+export function invalidateSessionListMeta(): void {
   globalThis.__piSessionListGeneration = (globalThis.__piSessionListGeneration ?? 0) + 1;
   globalThis.__piSessionListCache = undefined;
   // The session-file walk cache keys on the sessions-root mtime, which does
   // not change when a file is added inside an existing project subdirectory
   // (Windows/NTFS). Clear it too so new sessions appear immediately.
   invalidateSessionFileListCache();
-  // Drop cached entry parses so a mutation preserving size+mtime (rare) can
-  // never serve stale entries; the (size, mtimeMs) key already invalidates
-  // the common case, this closes the remaining window.
-  globalThis.__ompSessionEntriesCache?.clear();
+}
+
+/** Invalidate only one transcript's parsed-entry and list-scan caches. */
+export function invalidateSessionEntriesCache(filePath: string): void {
+  globalThis.__ompSessionEntriesCache?.delete(sessionPathKey(filePath));
+  invalidateSessionScanCache(filePath);
 }
 
 /**
@@ -328,6 +342,8 @@ declare global {
 }
 
 const MAX_SESSION_ENTRIES_CACHE_ENTRIES = 32;
+/** Cap cached on-disk bytes; parsed JS objects are several times larger. */
+const MAX_SESSION_ENTRIES_CACHE_BYTES = 256 * 1024 * 1024;
 
 function getSessionEntriesCache(): Map<string, SessionEntriesCacheEntry> {
   if (!globalThis.__ompSessionEntriesCache) globalThis.__ompSessionEntriesCache = new Map();
@@ -346,17 +362,27 @@ function loadSessionEntriesCached(filePath: string): SessionEntry[] {
     return loadSessionFile(filePath).entries;
   }
   const cache = getSessionEntriesCache();
-  const cached = cache.get(filePath);
+  const key = sessionPathKey(filePath);
+  const cached = cache.get(key);
   if (cached && cached.size === size && cached.mtimeMs === mtimeMs) {
-    cache.delete(filePath);
-    cache.set(filePath, cached);
+    cache.delete(key);
+    cache.set(key, cached);
     return cached.entries;
   }
   const entries = loadSessionFile(filePath).entries;
-  cache.set(filePath, { size, mtimeMs, entries });
-  while (cache.size > MAX_SESSION_ENTRIES_CACHE_ENTRIES) {
+  // A single large transcript must not evict every smaller session. It is
+  // still available for this request, but will be parsed again next time.
+  if (size > MAX_SESSION_ENTRIES_CACHE_BYTES) {
+    cache.delete(key);
+    return entries;
+  }
+  cache.set(key, { size, mtimeMs, entries });
+  let totalBytes = 0;
+  for (const entry of cache.values()) totalBytes += entry.size;
+  while (cache.size > 1 && (cache.size > MAX_SESSION_ENTRIES_CACHE_ENTRIES || totalBytes > MAX_SESSION_ENTRIES_CACHE_BYTES)) {
     const oldestKey = cache.keys().next().value;
     if (oldestKey === undefined) break;
+    totalBytes -= cache.get(oldestKey)?.size ?? 0;
     cache.delete(oldestKey);
   }
   return entries;

@@ -37,6 +37,20 @@ declare global {
  */
 const ActiveEngineContext = createContext<ActiveEngineInfo | null>(null);
 
+export interface DesktopCompletion {
+  /** Stable for the lifetime of the engine session; never generated from time. */
+  completionId: string;
+  completionKind: "session" | "subagent";
+}
+
+export interface DesktopActivity {
+  activeSessionCount: number;
+  unreadSessionIds: string[];
+  ready: boolean;
+  /** Terminal transitions observed since the last activity report. */
+  completions: DesktopCompletion[];
+}
+
 interface Props {
   selectedSessionId: string | null;
   /** The active session can exist in memory before its JSONL file is flushed. */
@@ -48,6 +62,8 @@ interface Props {
   onInitialRestoreDone?: () => void;
   refreshKey?: number;
   onSessionDeleted?: (sessionId: string) => void;
+  /** Reports authoritative cross-session running/unread state to the desktop shell. */
+  onDesktopActivityChange?: (activity: DesktopActivity) => void;
   selectedCwd?: string | null;
   onCwdChange?: (cwd: string | null, projectRoot?: string | null) => void;
   onOpenFile?: (filePath: string, fileName: string) => void;
@@ -537,7 +553,7 @@ function CodyTitle() {
     </button>
   );
 }
-export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, onAtMentions, engine = null }: Props) {
+export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, onDesktopActivityChange, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, onAtMentions, engine = null }: Props) {
   const engineId = engine?.id ?? null;
   // Import writes an omp .jsonl into omp's sessions layout and Archive moves
   // one with omp's gc layout; both routes answer 400 "unsupported" under any
@@ -580,12 +596,17 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   const [explorerUploadBusy, setExplorerUploadBusy] = useState(false);
   const [sessionRefreshDone, setSessionRefreshDone] = useState(false);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
+  const [runningStateReady, setRunningStateReady] = useState(false);
   // Starts empty and hydrates once the engine identity arrives: the stored set
   // is addressed per engine, so before /api/info answers there is no honest
   // key to read. Hydration MERGES rather than replaces — a session that
   // finished during those few milliseconds must keep its badge.
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => new Set());
   const previousRunningSessionIdsRef = useRef<Set<string>>(new Set());
+  // Completion events are queued until the activity report effect publishes
+  // them. This keeps the regular snapshot completed=false while ensuring a
+  // completion that lands before desktop hydration is not lost.
+  const [desktopCompletions, setDesktopCompletions] = useState<DesktopCompletion[]>([]);
   // Relative session times must age while the sidebar stays open; one shared
   // minute clock avoids a timer per session row.
   const [relativeTimeNow, setRelativeTimeNow] = useState(() => Date.now());
@@ -620,6 +641,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
         const next = new Set([...prev].filter((id) => existingIds.has(id)));
         return next.size === prev.size ? prev : next;
       });
+      setRunningStateReady(true);
       setError(null);
       if (!showLoading) {
         setSessionRefreshDone(true);
@@ -685,6 +707,16 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   }, [engineId, unreadSessionIds]);
 
   useEffect(() => {
+    onDesktopActivityChange?.({
+      activeSessionCount: runningStateReady ? runningSessionIds.size : 0,
+      unreadSessionIds: runningStateReady ? [...unreadSessionIds] : [],
+      ready: runningStateReady,
+      completions: runningStateReady ? desktopCompletions : [],
+    });
+    if (runningStateReady && desktopCompletions.length > 0) setDesktopCompletions([]);
+  }, [onDesktopActivityChange, runningSessionIds, unreadSessionIds, runningStateReady, desktopCompletions]);
+
+  useEffect(() => {
     // Live running status and session-list invalidations arrive via SSE; the
     // sidebar never has to poll while an agent is working.
     const source = new EventSource("/api/agent/running/events");
@@ -719,6 +751,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
         if (data.type === "running") {
           sseAuthoritativeRef.current = true;
           setRunningSessionIds(new Set(data.runningSessionIds ?? []));
+          setRunningStateReady(true);
           if (data.refreshSessionList) void loadSessions(false);
         }
       } catch {
@@ -732,23 +765,42 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
 
   useEffect(() => {
     const previous = previousRunningSessionIdsRef.current;
-    const completedInBackground = [...previous].filter((id) => !runningSessionIds.has(id) && id !== selectedSessionId);
+    // Completion is unread until the user selects that session again. The
+    // selected session is included here deliberately: its final response can
+    // arrive after the user has moved away, and the native shell needs the
+    // same completion signal as the sidebar. The selected-session read effect
+    // below still clears a marker when selection changes.
+    const completedSessionIds = [...previous].filter((id) => !runningSessionIds.has(id));
     const newlyRunning = [...runningSessionIds];
 
-    if (completedInBackground.length > 0 || newlyRunning.length > 0) {
+    if (completedSessionIds.length > 0 || newlyRunning.length > 0) {
       setUnreadSessionIds((prev) => {
         const next = new Set(prev);
         newlyRunning.forEach((id) => next.delete(id));
-        completedInBackground.forEach((id) => next.add(id));
+        completedSessionIds.forEach((id) => next.add(id));
         return next;
       });
     }
-    if (completedInBackground.length > 0) {
+    if (completedSessionIds.length > 0) {
+      // The engine session id is the only stable identifier this cross-session
+      // stream exposes. Prefixing it with its kind prevents a future subagent
+      // id from colliding while remaining deterministic across reconnects.
+      setDesktopCompletions((previousCompletions) => {
+        const known = new Set(previousCompletions.map((completion) => completion.completionId));
+        const next = [...previousCompletions];
+        for (const sessionId of completedSessionIds) {
+          const completionId = `session:${sessionId}`;
+          if (known.has(completionId)) continue;
+          known.add(completionId);
+          next.push({ completionId, completionKind: "session" });
+        }
+        return next;
+      });
       loadSessions(false);
     }
 
     previousRunningSessionIdsRef.current = runningSessionIds;
-  }, [runningSessionIds, selectedSessionId, loadSessions]);
+  }, [runningSessionIds, loadSessions]);
 
   useEffect(() => {
     if (!selectedSessionId) return;

@@ -8,7 +8,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { MessageView, SafeMarkdownBody, TaskResultPanel, getStructuredActivityStatus } = await jiti.import("./MessageView.tsx");
+const { MessageView, SafeMarkdownBody, TaskResultPanel, getStructuredActivityStatus, isInterruptedMessage } = await jiti.import("./MessageView.tsx");
 const { CodeBlock } = await jiti.import("./MermaidBlock.tsx");
 
 test("large message content avoids the markdown pipeline until requested", () => {
@@ -94,6 +94,44 @@ test("thinking blocks render open when the interface preference is enabled", () 
 
   assert.match(html, /aria-expanded="true"/);
   assert.match(html, /weighing the options/);
+});
+
+test("assistant errors render as an alert even without response content", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    message: {
+      role: "assistant",
+      content: [],
+      model: "model",
+      provider: "provider",
+      stopReason: "error",
+      errorMessage: "provider failed",
+    },
+  }));
+
+  assert.match(html, /role="alert"/);
+  assert.match(html, /provider failed/);
+});
+
+test("user interruptions render a neutral status instead of an error", () => {
+  assert.equal(isInterruptedMessage("interrupted by user"), true);
+  assert.equal(isInterruptedMessage("request aborted"), true);
+  assert.equal(isInterruptedMessage("provider failed"), false);
+
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    activityDisplayMode: "hidden",
+    message: {
+      role: "assistant",
+      content: [],
+      model: "model",
+      provider: "provider",
+      stopReason: "aborted",
+      errorMessage: "aborted",
+    },
+  }));
+
+  assert.match(html, /role="status"/);
+  assert.match(html, /Generation stopped by user/);
+  assert.doesNotMatch(html, />aborted</);
 });
 
 

@@ -44,6 +44,19 @@ export class RpcCommandError extends Error {
   }
 }
 
+/** A command was written successfully but its response did not arrive in time. */
+export class RpcCommandTimeoutError extends Error {
+  readonly command: string;
+  readonly timeoutMs: number;
+
+  constructor(command: string, timeoutMs: number, message?: string) {
+    super(message ?? `RPC command ${command} timed out after ${timeoutMs}ms`);
+    this.name = "RpcCommandTimeoutError";
+    this.command = command;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
 interface PendingCommand {
   command: string;
   resolve: (data: unknown) => void;
@@ -308,7 +321,7 @@ export class RpcProcess {
           // not spuriously reject a different command.
           if (this.pending.get(id) === entry) {
             this.pending.delete(id);
-            reject(new Error(`RPC command ${command.type} timed out after ${timeoutMs}ms`));
+            reject(new RpcCommandTimeoutError(command.type, timeoutMs));
           }
         }, timeoutMs);
         // A pending command timer must never keep the event loop alive on its own

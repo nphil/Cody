@@ -4,9 +4,9 @@
   "private": true,
   "description": "Build tooling for the Cody Windows desktop shell. The shell itself is the Rust crate in src-tauri/; nothing here is published or consumed by the web app.",
   "scripts": {
-    "dev": "tauri dev",
-    "build": "tauri build",
-    "tauri": "tauri"
+    "dev": "node scripts/prepare-tauri.mjs dev",
+    "build": "node scripts/prepare-tauri.mjs build",
+    "tauri": "node scripts/prepare-tauri.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.11.4"

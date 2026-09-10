@@ -47,6 +47,10 @@ pub fn app_url(port: u16) -> String {
     format!("http://localhost:{port}/")
 }
 
+pub fn remote_health_url(remote_url: &str) -> String {
+    format!("{}/api/info", remote_url.trim_end_matches('/'))
+}
+
 #[cfg(windows)]
 pub use imp::*;
 
@@ -63,6 +67,8 @@ mod imp {
     const HEALTH_TIMEOUT: Duration = Duration::from_secs(180);
     const HEALTH_INTERVAL: Duration = Duration::from_millis(500);
     const MAX_RESTARTS: u32 = 3;
+    const REMOTE_HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
+    const REMOTE_HEALTH_WINDOW: Duration = Duration::from_secs(30);
 
     #[derive(Default)]
     pub struct Server {
@@ -158,6 +164,31 @@ mod imp {
             wsl::terminate();
         }
     }
+
+    /// Check a remote Cody endpoint without starting WSL. A 401/403 is a
+    /// healthy application response for an authenticated remote deployment;
+    /// only a server-side 5xx or a transport failure counts as unavailable.
+    pub fn wait_remote_healthy(remote_url: &str) -> Result<(), String> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(REMOTE_HEALTH_TIMEOUT)
+            .build()
+            .map_err(|e| e.to_string())?;
+        let url = remote_health_url(remote_url);
+        let deadline = Instant::now() + REMOTE_HEALTH_WINDOW;
+        loop {
+            let last_error = match client.get(&url).send() {
+                Ok(response) if response.status().as_u16() < 500 => return Ok(()),
+                Ok(response) => format!("HTTP {}", response.status()),
+                Err(error) => error.to_string(),
+            };
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "Remote Cody did not answer over HTTPS within 30 seconds ({last_error})."
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -208,11 +239,15 @@ mod tests {
     }
 
     #[test]
-    fn urls_are_loopback_only() {
+    fn urls_are_loopback_or_configured_remote() {
         assert_eq!(
             health_url(30179),
             "http://127.0.0.1:30179/api/accounts/state"
         );
         assert_eq!(app_url(30179), "http://localhost:30179/");
+        assert_eq!(
+            remote_health_url("https://example.invalid/"),
+            "https://example.invalid/api/info"
+        );
     }
 }

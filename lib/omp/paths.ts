@@ -57,9 +57,11 @@ export function getConfigDirName(): string {
   return process.env.PI_CONFIG_DIR || CONFIG_DIR_NAME;
 }
 
-/** Config root: ~/.omp, or ~/.omp/profiles/<name> for a named profile. */
+/** Config root: ~/.omp, or an absolute PI_CONFIG_DIR override, with an
+ * optional profile below either root. */
 export function getConfigRoot(): string {
-  const base = path.join(homedir(), getConfigDirName());
+  const configured = getConfigDirName();
+  const base = path.isAbsolute(configured) ? path.resolve(configured) : path.join(homedir(), configured);
   const profile = getActiveProfile();
   return profile ? path.join(base, "profiles", profile) : base;
 }

@@ -1,9 +1,9 @@
 import { execFile, execFileSync } from "child_process";
 import { existsSync, readFileSync } from "fs";
-import { join } from "path";
+import { join, resolve } from "path";
 import { promisify } from "util";
 import { parse as parseYaml } from "yaml";
-import { hermesPythonPath } from "./hermes-settings";
+import { hermesCommandOptions, hermesPythonPath } from "./hermes-settings";
 
 const execFileAsync = promisify(execFile);
 
@@ -100,9 +100,9 @@ export function hermesExternalSkillDirs(hermesHome: string, home: string): strin
       .replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, name: string) => process.env[name] ?? "")
       .replace(/^~(?=$|[/\\])/, home);
     if (!expanded) continue;
-    const resolved = expanded.startsWith("/") || /^[A-Za-z]:[/\\]/.test(expanded)
+    const resolved = resolve(expanded.startsWith("/") || /^[A-Za-z]:[/\\]/.test(expanded)
       ? expanded
-      : join(hermesHome, expanded);
+      : join(hermesHome, expanded));
     if (resolved === local || seen.has(resolved)) continue;
     seen.add(resolved);
     if (existsSync(resolved)) dirs.push(resolved);
@@ -287,6 +287,7 @@ export function setHermesSkillDisabled(binaryPath: string, name: string, disable
       encoding: "utf8",
       timeout: 30_000,
       stdio: ["ignore", "pipe", "pipe"],
+      ...hermesCommandOptions(python),
     });
   } catch (error) {
     // execFileSync forwards stderr to Cody's own stderr unless it is piped,
@@ -340,6 +341,7 @@ export async function installHermesSkill(
       timeout: INSTALL_TIMEOUT_MS,
       env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" },
       maxBuffer: 8 * 1024 * 1024,
+      ...hermesCommandOptions(binaryPath),
     }));
   } catch (error) {
     const failure = error as { stdout?: string; stderr?: string; message?: string };

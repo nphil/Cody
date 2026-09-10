@@ -84,9 +84,15 @@ function readJsonFile(filePath: string): unknown {
  * marketplaces registry may be written with `~` (e.g. a local-source
  * marketplace under the home dir). */
 export function expandHome(value: string): string {
-  if (value === "~") return homedir();
-  if (value.startsWith("~/") || value.startsWith("~\\")) return path.join(homedir(), value.slice(2));
-  return value;
+  const home = process.env.HOME?.trim() || homedir();
+  if (value === "~") return home;
+  if (!(value.startsWith("~/") || value.startsWith("~\\"))) return value;
+  const suffix = value.slice(2);
+  // Keep POSIX fixture paths POSIX even when the host is Windows; real Windows
+  // homes are drive-qualified and continue through the native path joiner.
+  return home.startsWith("/") && path.sep === "\\"
+    ? path.posix.join(home, suffix.replaceAll("\\", "/"))
+    : path.join(home, suffix);
 }
 
 function readSourceType(value: unknown): MarketplaceSourceType {

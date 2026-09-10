@@ -50,6 +50,17 @@ const COMMIT_PROMPT = (args: string) =>
     ? `Stage the relevant files and commit the current changes with this message: ${JSON.stringify(args)}. Run the project's checks first so the commit is green.`
     : `Stage the relevant files and commit the current changes with a clear conventional commit message. Run the project's checks first so the commit is green.`;
 
+const LOOP_MAX_ATTEMPTS = 10;
+const LOOP_DEFAULT_ATTEMPTS = 3;
+const LOOP_PROMPT = (args: string) => {
+  const match = args.match(/^(\d+)\s+([\s\S]+)$/);
+  const attempts = match
+    ? Math.min(Math.max(parseInt(match[1], 10) || LOOP_DEFAULT_ATTEMPTS, 1), LOOP_MAX_ATTEMPTS)
+    : LOOP_DEFAULT_ATTEMPTS;
+  const task = match ? match[2].trim() : args;
+  return `Attempt the following task, verifying the result concretely after each attempt (run the relevant checks or tests). If it is not fully done, try again from where it stands, building on what you learned — up to ${attempts} attempts in total. Stop early once it is done. Do not ask for confirmation between attempts.\n\nTask:\n\n${task}`;
+};
+
 export const WEB_SLASH_COMMANDS: readonly WebSlashCommandDef[] = [
   {
     name: "goal",
@@ -106,6 +117,13 @@ export const WEB_SLASH_COMMANDS: readonly WebSlashCommandDef[] = [
     argumentHintKey: "chatInput.cmdCommitArg",
     requiresArgs: false,
     buildPrompt: COMMIT_PROMPT,
+  },
+  {
+    name: "loop",
+    descriptionKey: "chatInput.cmdLoop",
+    argumentHintKey: "chatInput.cmdLoopArg",
+    requiresArgs: true,
+    buildPrompt: LOOP_PROMPT,
   },
 ];
 

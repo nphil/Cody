@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
+import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
 import { ChevronDown, Clock, ListChecks, Loader2, Paperclip, Pin, Search, ShieldCheck, SlidersHorizontal, Sparkles, Target, TriangleAlert, Zap, ZapOff } from "lucide-react";
 import type { SessionModeOption } from "@/hooks/useAgentSession";
 import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
@@ -187,6 +187,72 @@ export interface ChatInputHandle {
 
 
 const COMPOSITION_END_ENTER_GRACE_MS = 100;
+
+// The history / slash / @ menus are absolutely positioned relative to the
+// composer input. On the empty-session page the composer sits inside an
+// `overflow-y-auto` wrapper, so a menu that only opens upward can be clipped
+// when the composer is near the top of that wrapper. Measure the nearest
+// clipping ancestor before paint and use the side with enough room.
+const MENU_EDGE_PAD = 8;
+
+function getMenuBoundary(el: HTMLElement | null): { top: number; bottom: number } {
+  if (typeof window === "undefined" || !el) return { top: 0, bottom: 0 };
+  let node: HTMLElement | null = el.parentElement;
+  while (node && node !== document.body && node !== document.documentElement) {
+    if (getComputedStyle(node).overflowY !== "visible") {
+      const rect = node.getBoundingClientRect();
+      return { top: rect.top, bottom: rect.bottom };
+    }
+    node = node.parentElement;
+  }
+  return { top: 0, bottom: window.innerHeight };
+}
+
+type MenuPlacement = "up" | "down";
+
+function useDropdownFlip(
+  open: boolean,
+  menuRef: React.RefObject<HTMLDivElement | null>,
+  vhFraction: number,
+  capPx: number,
+) {
+  const [placement, setPlacement] = useState<MenuPlacement>("up");
+  const [maxHeight, setMaxHeight] = useState<number | null>(null);
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setPlacement("up");
+      setMaxHeight(null);
+      return;
+    }
+    const menu = menuRef.current;
+    const anchor = menu?.parentElement;
+    if (!menu || !anchor) return;
+    const boundary = getMenuBoundary(menu);
+    const rect = anchor.getBoundingClientRect();
+    const defaultPx = Math.min(window.innerHeight * vhFraction, capPx);
+    const upSpace = rect.top - 8 - boundary.top - MENU_EDGE_PAD;
+    const downSpace = boundary.bottom - (rect.bottom + 8) - MENU_EDGE_PAD;
+
+    if (upSpace >= defaultPx || upSpace >= downSpace) {
+      setPlacement("up");
+      setMaxHeight(Math.max(0, Math.min(defaultPx, upSpace)));
+    } else {
+      setPlacement("down");
+      setMaxHeight(Math.max(0, Math.min(defaultPx, downSpace)));
+    }
+  }, [open, menuRef, vhFraction, capPx]);
+
+  return { placement, maxHeight };
+}
+
+function menuDropStyle(placement: MenuPlacement, maxHeight: number | null): React.CSSProperties {
+  return {
+    ...(placement === "down" ? { top: "calc(100% + 8px)" } : { bottom: "calc(100% + 8px)" }),
+    maxHeight: maxHeight !== null ? `${maxHeight}px` : undefined,
+  };
+}
+
 /** Circumference of the composer ring (r = 9.5). */
 const RING_CIRCUMFERENCE = 2 * Math.PI * 9.5;
 /** Dashed track drawn when there is no quota to fill the ring with. */
@@ -1467,6 +1533,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const modeDropdownRef = useRef<HTMLDivElement>(null);
 
   const historyMenuRef = useRef<HTMLDivElement>(null);
+  const slashMenuRef = useRef<HTMLDivElement>(null);
+  const atMenuRef = useRef<HTMLDivElement>(null);
   const contextPopoverRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isComposingRef = useRef(false);
@@ -1881,6 +1949,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const slashQuery = value.startsWith("/") && !/\s/.test(value.slice(1))
     ? value.slice(1).toLowerCase()
     : null;
+  const historyFlip = useDropdownFlip(historyMenuOpen && inputHistory.length > 0, historyMenuRef, 0.44, 360);
+  const slashFlip = useDropdownFlip(slashMenuOpen && slashQuery !== null, slashMenuRef, 0.56, 460);
+  const atFlip = useDropdownFlip(atMenuOpen && atQuery !== null, atMenuRef, 0.48, 400);
   const [dormantSkillNames, setDormantSkillNames] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
@@ -2991,9 +3062,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 position: "absolute",
                 left: 0,
                 right: 0,
-                bottom: "calc(100% + 8px)",
                 zIndex: 120,
-                maxHeight: "min(44vh, 360px)",
+                display: "flex",
+                flexDirection: "column",
+                ...menuDropStyle(historyFlip.placement, historyFlip.maxHeight),
               }}
             >
               <div
@@ -3005,6 +3077,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   display: "flex",
                   alignItems: "center",
                   color: "var(--text-dim)",
+                  flexShrink: 0,
                 }}
               >
                 <svg
@@ -3023,7 +3096,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   <path d="M12 7v5l3 2" />
                 </svg>
               </div>
-              <div style={{ maxHeight: "calc(min(44vh, 360px) - 31px)", overflowY: "auto", padding: 4 }}>
+              <div style={{ flex: 1, minHeight: 0, maxHeight: historyFlip.maxHeight !== null ? `${Math.max(0, historyFlip.maxHeight - 31)}px` : "calc(min(44vh, 360px) - 31px)", overflowY: "auto", padding: 4 }}>
                 {inputHistory.map((item, index) => {
                   const active = index === historyActiveIndex;
                   return (
@@ -3068,14 +3141,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           )}
           {slashMenuOpen && slashQuery !== null && (
             <div
+              ref={slashMenuRef}
               className="dropdown-surface"
               style={{
                 position: "absolute",
                 left: 0,
                 right: 0,
-                bottom: "calc(100% + 8px)",
                 zIndex: 120,
-                maxHeight: "min(56vh, 460px)",
+                display: "flex",
+                flexDirection: "column",
+                ...menuDropStyle(slashFlip.placement, slashFlip.maxHeight),
               }}
             >
               <div
@@ -3088,12 +3163,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   gap: 8,
                   fontSize: 11,
                   color: "var(--text-dim)",
+                  flexShrink: 0,
                 }}
               >
                 <span>{slashCommandsLoading ? t("chatInput.loadingCommands") : t("chatInput.slashCommandsHeader", { countLabel: slashCommandCountLabel })}</span>
                 <span style={{ fontFamily: "var(--font-mono)" }}>{t("chatInput.tabEnterHint")}</span>
               </div>
-              <div style={{ maxHeight: "calc(min(56vh, 460px) - 34px)", overflowY: "auto", padding: 10 }}>
+              <div style={{ flex: 1, minHeight: 0, maxHeight: slashFlip.maxHeight !== null ? `${Math.max(0, slashFlip.maxHeight - 34)}px` : "calc(min(56vh, 460px) - 34px)", overflowY: "auto", padding: 10 }}>
                 {!slashCommandsLoading && filteredSlashCommands.length === 0 ? (
                   <div style={{ padding: "2px 2px 4px", fontSize: 12, color: "var(--text-dim)" }}>
                     {t("chatInput.noCommandsFound")}
@@ -3206,14 +3282,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               : "";
             return (
               <div
+                ref={atMenuRef}
                 className="dropdown-surface"
                 style={{
                   position: "absolute",
                   left: 0,
                   right: 0,
-                  bottom: "calc(100% + 8px)",
                   zIndex: 120,
-                  maxHeight: "min(48vh, 400px)",
+                  display: "flex",
+                  flexDirection: "column",
+                  ...menuDropStyle(atFlip.placement, atFlip.maxHeight),
                 }}
               >
                 <div
@@ -3226,6 +3304,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     gap: 8,
                     fontSize: 11,
                     color: "var(--text-dim)",
+                    flexShrink: 0,
                   }}
                 >
                   <span>
@@ -3235,7 +3314,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   </span>
                   <span style={{ fontFamily: "var(--font-mono)" }}>{t("chatInput.tabEnterHint")}</span>
                 </div>
-                <div style={{ maxHeight: "calc(min(48vh, 400px) - 34px)", overflowY: "auto", padding: 4 }}>
+                <div style={{ flex: 1, minHeight: 0, maxHeight: atFlip.maxHeight !== null ? `${Math.max(0, atFlip.maxHeight - 34)}px` : "calc(min(48vh, 400px) - 34px)", overflowY: "auto", padding: 4 }}>
                   {!indexLoading && atMatches.length === 0 ? (
                     <div style={{ padding: "6px 8px", fontSize: 12, color: "var(--text-dim)" }}>
                       {needsServerSearch && !serverResultInUse ? t("chatInput.searching") : t("chatInput.noMatchingFiles")}

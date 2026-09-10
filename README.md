@@ -71,18 +71,26 @@ npm start              # …served on 127.0.0.1:30177 (start:lan for 0.0.0.0)
 ## Cody Desktop (Windows)
 
 A native Windows app: a small Tauri shell (no bundled Chromium or Node in
-the shell process) hosting the exact same UI, with the Cody server and
-engines running inside a dedicated WSL2 distro built from the same image as
-the Docker deployment.
+the shell process) hosting the exact same UI. It supports two modes:
+Local WSL2 provisions the Cody server and engines inside a dedicated distro
+built from the same image as the Docker deployment; Remote is a thin shell
+that connects over HTTPS to an explicitly configured Cody origin without
+starting WSL.
 
 Download the installer from the
 [`desktop-latest` release](https://github.com/nphil/Cody/releases/tag/desktop-latest)
-(`cody-desktop-*-x64-setup.exe`). Requires Windows 10 (2004+) or 11, x64,
-and WSL2 — the installer guides you through enabling it if it's missing. An
-NVIDIA GPU is optional, for local models running inside the distro.
+(`cody-desktop-*-x64-setup.exe`). Windows 10 (2004+) or 11 and x64 are
+required. WSL2 is required for Local mode; Remote mode does not require or
+start WSL. An NVIDIA GPU is optional, for local models running inside WSL2.
 
-**Status: experimental.** Full architecture in
+For source builds, put `CODY_DESKTOP_REMOTE_URL=https://your-cody.example`
+in the ignored `desktop/.env.local` file to enable Remote mode, then run
+`npm install` and `npm run dev` or `npm run build` from `desktop/`. Without a
+configured origin, Local WSL2 mode remains the default. See
+[desktop/README.md](desktop/README.md) and the full architecture in
 [docs/windows.md](docs/windows.md).
+
+**Status: experimental.**
 
 ## Engines
 

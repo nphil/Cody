@@ -54,6 +54,9 @@ export async function GET(
   // Hoisted so the stream's cancel() (half-open disconnects that never fire
   // the abort signal) can release the heartbeat and the RpcProcess listener.
   let streamCleanup: (() => void) | null = null;
+  // Hoisted so pull() can flush the latest coalesced message update when a
+  // slow client resumes reading, without waiting for another event/heartbeat.
+  let streamFlush: (() => void) | null = null;
   const stream = new ReadableStream({
     start(controller) {
       let closed = false;
@@ -117,6 +120,10 @@ export async function GET(
         }
       };
       streamCleanup = cleanup;
+      streamFlush = () => {
+        if (closed) return;
+        flushPendingUpdate();
+      };
 
       // Detect client disconnect via abort signal
       req.signal?.addEventListener("abort", cleanup);
@@ -156,6 +163,9 @@ export async function GET(
         if (closed) return;
         unsubscribe = session.onEvent((event) => encode(event));
       })();
+    },
+    pull() {
+      streamFlush?.();
     },
     cancel() {
       streamCleanup?.();

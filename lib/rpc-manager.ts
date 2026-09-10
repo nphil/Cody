@@ -12,12 +12,17 @@ import { APP_LOG_SHADOW_NOTE, DEFAULT_LIMIT, MAX_LIMIT, appLogNotice, formatAppL
 import { APP_LOG_LEVELS, type AppLogQuery } from "./logs/types";
 import { invalidateModelsCache } from "./models-cache";
 import { MAX_RPC_FRAME_BYTES } from "./omp/rpc-frame";
-import { RpcCommandError, RpcProcess, type RpcFrame, type RpcProcessLaunch } from "./omp/rpc-process";
+import { RpcCommandError, RpcCommandTimeoutError, RpcProcess, type RpcFrame, type RpcProcessLaunch } from "./omp/rpc-process";
 import { readNativeSettings } from "./omp/settings-config";
 import { captureLoopbackScreenshot, ScreenshotError } from "./preview-screenshot";
 import { ProjectTodoError, type TodoDocument, formatTodoForAgent, mutateProjectTodo, parseTodoAgentAction, readProjectTodo, todoAgentActionOperation } from "./project-todo";
 import { resolveProject } from "./worktree";
-import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
+import {
+  cacheSessionPath,
+  invalidateSessionEntriesCache,
+  invalidateSessionListCache,
+  invalidateSessionListMeta,
+} from "./session-reader";
 import { PRESET_FULL } from "./tool-presets";
 import type {
   BashResultInfo,
@@ -119,6 +124,7 @@ const SERVER_HOST_TOOLS: HostToolDefinition[] = [{
 }, FORGE_HOST_TOOL];
 const SERVER_HOST_TOOL_NAMES = new Set(SERVER_HOST_TOOLS.map((tool) => tool.name));
 const MCP_LIST_TIMEOUT_MS = 15_000;
+const PROMPT_ACK_TIMEOUT_MS = 30_000;
 
 const RESTARTING_MESSAGE = "This session is restarting. Retry in a moment.";
 
@@ -550,7 +556,7 @@ export class AgentSessionWrapper {
         // The session file can appear just after the prompt acknowledgement.
         // Invalidate and signal the sidebar now rather than waiting for the
         // agent's first reply or terminal event.
-        invalidateSessionListCache();
+        this.invalidateSessionLists();
         refreshSessionList = true;
         // If the file is not on disk yet, the sidebar refresh above may walk
         // the sessions dir before it exists — and the mtime-keyed walk cache
@@ -566,7 +572,7 @@ export class AgentSessionWrapper {
         if (event.isTerminal !== false) {
           this.streaming = false;
           this.promptRunning = false;
-          invalidateSessionListCache();
+          this.invalidateSessionLists();
         }
         break;
       case "prompt_result":
@@ -581,19 +587,32 @@ export class AgentSessionWrapper {
         // Same patch the manual `compact` path applies — the client reads
         // event.result.estimatedTokensAfter for the banner.
         patchEstimatedTokensAfter(event.result);
-        invalidateSessionListCache();
+        this.invalidateSessionLists();
         break;
       case "session_info_update":
         if (typeof event.title === "string") this._sessionName = event.title;
-        invalidateSessionListCache();
+        this.invalidateSessionLists();
         refreshSessionList = true;
         break;
       case "response": {
         // Unsolicited failed responses surface async prompt failures (omp
-        // reuses the original command id after the immediate ack).
-        if (event.success === false && event.command === "prompt") {
+        // reuses the original command id after the immediate ack). Some omp
+        // versions omit `command` on that second response, so the active run
+        // is also a terminal-failure signal instead of an ignored frame.
+        if (event.success === false) {
+          const promptFailure = event.command === "prompt" || (!event.command && (this.promptRunning || this.streaming));
+          const detail = typeof event.error === "string"
+            ? event.error
+            : typeof event.message === "string"
+              ? event.message
+              : "RPC command failed";
+          if (!promptFailure) {
+            this.emit({ type: "error", error: event.error, message: detail, command: event.command });
+            notifyRunningChange();
+            return;
+          }
           this.promptRunning = false;
-          this.emit({ type: "prompt_error", errorMessage: (event.error as string) ?? "Prompt failed" });
+          this.emit({ type: "prompt_error", errorMessage: detail, error: event.error, command: event.command });
           notifyRunningChange();
           return;
         }
@@ -988,6 +1007,18 @@ export class AgentSessionWrapper {
 
   private sessionFileSignalTimer: NodeJS.Timeout | null = null;
 
+  /** Refresh list metadata and only this session's entry/scan caches when the
+   * path is known. A busy session should not force every other open session to
+   * re-parse its transcript. */
+  private invalidateSessionLists(): void {
+    if (this._sessionFile) {
+      invalidateSessionListMeta();
+      invalidateSessionEntriesCache(this._sessionFile);
+    } else {
+      invalidateSessionListCache();
+    }
+  }
+
   /** Poll briefly for the session file to appear after agent_start, then
    *  invalidate the session-list caches and re-signal the sidebar so the
    *  running session shows up even though the file landed after the first
@@ -1006,7 +1037,7 @@ export class AgentSessionWrapper {
         }
         return;
       }
-      invalidateSessionListCache();
+      this.invalidateSessionLists();
       notifyRunningChange({ refreshSessionList: true });
     };
     this.sessionFileSignalTimer = setTimeout(check, 250);
@@ -1098,13 +1129,30 @@ export class AgentSessionWrapper {
     this.mcpListWaiter = waiter;
 
     try {
-      await this.proc.sendCommand({ type: "prompt", message: "/mcp list" });
+      // Bound the transport acknowledgement separately from the command
+      // output timeout. A child can accept this prompt frame and then stop
+      // responding before it emits command_output; without this cap the
+      // wrapper remains busy forever and later MCP refreshes are blocked.
+      await this.proc.sendCommand({ type: "prompt", message: "/mcp list" }, PROMPT_ACK_TIMEOUT_MS);
       return await output;
     } catch (error) {
+      const expired = error instanceof RpcCommandTimeoutError;
       if (this.mcpListWaiter === waiter) {
         clearTimeout(waiter.timer);
         this.mcpListWaiter = null;
-        waiter.reject(error instanceof Error ? error : new Error(String(error)));
+        waiter.reject(
+          expired
+            ? new WebRpcError("The OMP session stopped responding and was reset.", "session_unresponsive")
+            : error instanceof Error
+              ? error
+              : new Error(String(error)),
+        );
+      }
+      if (expired) {
+        // No response can settle this child now; recycle it so the next
+        // request gets a fresh process instead of inheriting a busy wedge.
+        await this.destroyAndWait();
+        throw new WebRpcError("The OMP session stopped responding and was reset.", "session_unresponsive");
       }
       throw error;
     } finally {
@@ -1175,7 +1223,7 @@ export class AgentSessionWrapper {
     if (oldId && oldId !== this._sessionId) {
       this.onIdentityChangeCallback?.(oldId, this._sessionId);
     }
-    invalidateSessionListCache();
+    this.invalidateSessionLists();
     return this._sessionId;
   }
 
@@ -1223,6 +1271,13 @@ export class AgentSessionWrapper {
         }
         const state = await proc.sendCommand<RpcSessionState>({ type: "get_state" });
         this.applyIdentity(state);
+        // A sessionless OMP restart can still land on the cwd's latest
+        // transcript because OMP may auto-resume during startup. If that file
+        // already exists, force a new session before any prompt is accepted.
+        if (this.engine.label === "omp" && !resumable && this._sessionFile && existsSync(this._sessionFile)) {
+          await proc.sendCommand({ type: "new_session" });
+          this.applyIdentity(await proc.sendCommand<RpcSessionState>({ type: "get_state" }));
+        }
       } catch (error) {
         // Never leave the replacement running with nobody reading its frames.
         this.unsubscribeFrames?.();
@@ -1326,7 +1381,7 @@ export class AgentSessionWrapper {
         const { provider, modelId } = command as { provider: string; modelId: string };
         const model = await this.proc.sendCommand<OmpModel>({ type: "set_model", provider, modelId });
         invalidateModelsCache();
-        invalidateSessionListCache();
+        this.invalidateSessionLists();
         return { id: model.id, provider: model.provider };
       }
 
@@ -1380,7 +1435,7 @@ export class AgentSessionWrapper {
             }
           });
         } finally {
-          invalidateSessionListCache();
+          this.invalidateSessionLists();
         }
       }
 
@@ -1395,7 +1450,7 @@ export class AgentSessionWrapper {
         if (!name) throw new Error("Session name cannot be empty");
         await this.proc.sendCommand({ type: "set_session_name", name });
         this._sessionName = name;
-        invalidateSessionListCache();
+        this.invalidateSessionLists();
         return null;
       }
 
@@ -1446,7 +1501,7 @@ export class AgentSessionWrapper {
           return await this.proc.sendCommand<BashResultInfo>({ type: "bash", command: command.command as string });
         } finally {
           this.bashRunning = false;
-          invalidateSessionListCache();
+          this.invalidateSessionLists();
           notifyRunningChange();
         }
       }
@@ -1500,7 +1555,7 @@ export class AgentSessionWrapper {
       default: {
         if (PASSTHROUGH_COMMANDS.has(type)) {
           const result: unknown = await this.proc.sendCommand(command as { type: string });
-          if (type === "set_thinking_level") invalidateSessionListCache();
+          if (type === "set_thinking_level") this.invalidateSessionLists();
           return result ?? null;
         }
         // The same honest "unsupported" the restricted-vocabulary gate above
@@ -1776,6 +1831,12 @@ export async function startRpcSession(
     created.start();
     try {
       await created.waitUntilReady();
+      // The fresh-session path must not be allowed to inherit OMP's latest
+      // conversation when startup auto-resume is enabled. A newly-created
+      // session file is written lazily, so existence is the resume signal.
+      if (harness.id === "omp" && !sessionFile && created.sessionFile && existsSync(created.sessionFile)) {
+        await created.send({ type: "new_session" });
+      }
     } catch (error) {
       // Await the child's full exit before the `finally` releases the startup
       // lock: a fire-and-forget destroy() would let a retry spawn a second

@@ -207,7 +207,11 @@ COPY --from=build /app/lib ./lib
 COPY --from=build /app/scripts ./scripts
 
 COPY docker/entrypoint.sh /usr/local/bin/cody-entrypoint
-RUN chmod 0755 /usr/local/bin/cody-entrypoint
+# A Windows-created source archive can still carry CRLF bytes even when the
+# checked-out file is governed by .gitattributes. Normalize at the image
+# boundary so /bin/sh never receives a CRLF entrypoint.
+RUN sed -i 's/\r$//' /usr/local/bin/cody-entrypoint \
+  && chmod 0755 /usr/local/bin/cody-entrypoint
 
 # 30177 = WebUI (PORT env), 2222 = SSH (CODY_SSH_PORT env; the daemon only
 # starts when CODY_SSH_PASSWORD is set or authorized keys exist — see

@@ -44,6 +44,55 @@ function CloseGlyph() {
   );
 }
 
+function ActivitySummary({ activeSessions, activeSubagents }: { activeSessions: number; activeSubagents: number }) {
+  const { t, tn } = useI18n();
+  const runs = tn("titleBar.activeRuns", activeSessions);
+  const subagents = tn("titleBar.activeSubagents", activeSubagents);
+  const label = t("titleBar.activityTooltip", { runs, subagents });
+  const isActive = activeSessions > 0 || activeSubagents > 0;
+
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      aria-label={label}
+      title={label}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        height: 30,
+        maxWidth: "min(42vw, 260px)",
+        margin: "3px 8px 3px 0",
+        padding: "0 11px",
+        border: "1px solid var(--border)",
+        borderRadius: 999,
+        background: "var(--bg)",
+        color: "var(--text-muted)",
+        fontSize: 12,
+        whiteSpace: "nowrap",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        fontVariantNumeric: "tabular-nums",
+      }}
+    >
+      <span
+        aria-hidden="true"
+        style={{
+          width: 8,
+          height: 8,
+          flexShrink: 0,
+          borderRadius: "50%",
+          background: isActive ? "var(--status-success)" : "var(--text-dim)",
+        }}
+      />
+      <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{runs}</span>
+      <span aria-hidden="true" style={{ color: "var(--text-dim)" }}>·</span>
+      <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{subagents}</span>
+    </div>
+  );
+}
+
 /** One 46px-wide, full-bar-height window-control button. Deliberately a
  * plain `<button>` with no data-tauri-drag-region of its own — Tauri's own
  * drag-region walk already blocks dragging on any clickable element (see
@@ -109,7 +158,7 @@ function TitleBarButton({
  * Double-click-to-maximize is likewise handled natively by the same
  * drag-region script; no onDoubleClick handler is added here.
  */
-export function TitleBar({ workspaceName }: { workspaceName?: string | null }) {
+export function TitleBar({ workspaceName, activeSessions = 0, activeSubagents = 0 }: { workspaceName?: string | null; activeSessions?: number; activeSubagents?: number }) {
   const { isDesktop, isMaximized, minimize, toggleMaximize, close } = useDesktopShell();
   const { t } = useI18n();
 
@@ -162,6 +211,8 @@ export function TitleBar({ workspaceName }: { workspaceName?: string | null }) {
           (data-tauri-drag-region="deep" above); this just claims the space
           between the label and the window controls. */}
       <div style={{ flex: 1 }} />
+
+      <ActivitySummary activeSessions={activeSessions} activeSubagents={activeSubagents} />
 
       {/* Right: window controls */}
       <div style={{ display: "flex", alignItems: "stretch", height: "100%", flexShrink: 0 }}>

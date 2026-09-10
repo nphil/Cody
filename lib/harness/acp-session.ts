@@ -732,7 +732,10 @@ export class AcpEngineSession implements EngineSession {
     });
     this.child = child;
     this.childExit = new Promise<void>((resolve) => {
-      child.once("exit", () => {
+      // `close` follows `exit` after stdio handles are released. On Windows a
+      // test temp directory can remain locked between those events, so waiting
+      // for `exit` alone makes cleanup race the child process' final handles.
+      child.once("close", () => {
         if (this.killTimer) clearTimeout(this.killTimer);
         this.killTimer = null;
         this._alive = false;

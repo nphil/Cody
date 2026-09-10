@@ -35,6 +35,7 @@ import type {
   SessionTreeNode,
 } from "../types";
 import { getArchivedSessionsDir, getBlobsDir, getSessionsDir } from "./paths";
+import { sessionPathKey } from "../session-path";
 
 /**
  * Pure-Node reader/writer for oh-my-pi's session JSONL files (format v3).
@@ -327,7 +328,7 @@ function resolveBlobsInValue(value: unknown, key: string | undefined): void {
 }
 
 /** Cheap precheck so blob-free entries skip the resolution walk entirely. */
-function containsBlobRef(value: unknown): boolean {
+export function containsBlobRef(value: unknown): boolean {
   if (typeof value === "string") return isBlobRef(value);
   if (Array.isArray(value)) {
     for (const item of value) if (containsBlobRef(item)) return true;
@@ -944,9 +945,23 @@ declare global {
 
 const MAX_SESSION_SCAN_CACHE_ENTRIES = 2048;
 
+function scanCacheKey(filePath: string): string {
+  return sessionPathKey(filePath);
+}
+
 function getSessionScanCache(): Map<string, SessionScanCacheEntry> {
   if (!globalThis.__ompSessionScanCache) globalThis.__ompSessionScanCache = new Map();
   return globalThis.__ompSessionScanCache;
+}
+
+/** Invalidate one session's memoized title/mtime scan. */
+export function invalidateSessionScanCache(filePath: string): void {
+  globalThis.__ompSessionScanCache?.delete(scanCacheKey(filePath));
+}
+
+/** Invalidate every per-file scan memo when the changed path is unknown. */
+export function invalidateAllSessionScanCaches(): void {
+  globalThis.__ompSessionScanCache?.clear();
 }
 
 /** scanSessionInfo memoized on (path, size, mtimeMs). Callers must treat the
@@ -959,18 +974,19 @@ function scanSessionInfoCached(filePath: string): OmpSessionInfo | undefined {
     return undefined;
   }
   const cache = getSessionScanCache();
-  const cached = cache.get(filePath);
+  const key = scanCacheKey(filePath);
+  const cached = cache.get(key);
   if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
-    cache.delete(filePath);
-    cache.set(filePath, cached);
+    cache.delete(key);
+    cache.set(key, cached);
     return cached.info;
   }
-  if (cached) cache.delete(filePath);
+  if (cached) cache.delete(key);
   const info = scanSessionInfo(filePath, true);
   // Failed scans are not negatively cached: a transient read error must not
   // hide a session until its next mtime bump.
   if (info) {
-    cache.set(filePath, { size: stat.size, mtimeMs: stat.mtimeMs, info });
+    cache.set(key, { size: stat.size, mtimeMs: stat.mtimeMs, info });
     while (cache.size > MAX_SESSION_SCAN_CACHE_ENTRIES) {
       const oldestKey = cache.keys().next().value;
       if (oldestKey === undefined) break;

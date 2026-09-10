@@ -484,6 +484,11 @@ bin/
 a Tauri 2 Rust shell over WebView2, running the server inside a dedicated
 WSL2 distro flattened from this image. Own CI
 (`.github/workflows/desktop.yml`); full architecture in `docs/windows.md`.
+`desktop/scripts/prepare-tauri.mjs` loads the ignored `.env`/`.env.local`
+remote setting and emits an ignored exact-origin Tauri capability; no remote
+origin is granted when the setting is absent. The shell and web app share the
+metadata-only desktop activity bridge, whose terminal completion IDs drive
+native unread, sound, and toast state.
 
 ---
 

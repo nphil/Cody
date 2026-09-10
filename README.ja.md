@@ -58,11 +58,13 @@ npm start              # …127.0.0.1:30177 で提供（0.0.0.0 は start:lan）
 
 ## Cody Desktop（Windows）
 
-ネイティブの Windows アプリです。小さな Tauri シェル（シェルプロセスに Chromium や Node を同梱しません）が Web 版とまったく同じ UI を表示し、Cody サーバーとエンジンは Docker デプロイと同じイメージから構築された専用の WSL2 ディストロの中で動作します。
+ネイティブの Windows アプリです。小さな Tauri シェル（シェルプロセスに Chromium や Node を同梱しません）が Web 版とまったく同じ UI を表示します。2 つのモードに対応しています。ローカル WSL2 モードでは、Docker デプロイと同じイメージから構築された専用ディストロ内に Cody サーバーとエンジンを用意します。リモートモードは、ビルド時に指定した Cody の HTTPS オリジンへ接続する薄いシェルで、WSL を起動しません。
 
-インストーラーは [`desktop-latest` リリース](https://github.com/nphil/Cody/releases/tag/desktop-latest)（`cody-desktop-*-x64-setup.exe`）からダウンロードしてください。Windows 10（2004 以降）または Windows 11 の x64 環境、および WSL2 が必要です — WSL2 が未導入の場合はインストーラーが有効化の手順を案内します。NVIDIA GPU は任意で、ディストロ内でローカルモデルを実行する場合に利用します。
+インストーラーは [`desktop-latest` リリース](https://github.com/nphil/Cody/releases/tag/desktop-latest)（`cody-desktop-*-x64-setup.exe`）からダウンロードしてください。Windows 10（2004 以降）または Windows 11 の x64 環境が必要です。ローカルモードには WSL2 が必要ですが、リモートモードでは WSL2 は起動されません。NVIDIA GPU は任意で、WSL2 内でローカルモデルを実行する場合に利用します。
 
-**ステータス: 実験的。** 詳しいアーキテクチャは [docs/windows.md](docs/windows.md) を参照してください。
+ソースからビルドする場合は、無視対象の `desktop/.env.local` に `CODY_DESKTOP_REMOTE_URL=https://your-cody.example` を設定し、`desktop/` で `npm install` の後に `npm run dev` または `npm run build` を実行してください。オリジンを設定しなければ、ローカル WSL2 モードがデフォルトです。詳しくは [desktop/README.md](desktop/README.md) と [docs/windows.md](docs/windows.md) を参照してください。
+
+**ステータス: 実験的。**
 
 ## エンジン
 

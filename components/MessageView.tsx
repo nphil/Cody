@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useState, useRef, useEffect, useMemo, useCallback, type ComponentProps, type TransitionEvent } from "react";
-import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, Brain } from "lucide-react";
+import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, Brain, CircleAlert, CircleSlash } from "lucide-react";
 import { MarkdownBody } from "./MarkdownBody";
 import { ClickableImage } from "./ImageLightbox";
 import { translate, useI18n, type Locale } from "@/lib/i18n";
@@ -380,6 +380,21 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
   );
 }
 
+export function isInterruptedMessage(errorMessage?: string | null, stopReason?: string): boolean {
+  if (stopReason === "aborted") return true;
+  if (!errorMessage) return false;
+  const lower = errorMessage.toLowerCase().trim();
+  return (
+    lower === "interrupted by user" ||
+    lower === "interrupted" ||
+    lower === "generation stopped by user" ||
+    lower.startsWith("interrupted by user") ||
+    lower.startsWith("interrupted:") ||
+    lower === "aborted" ||
+    lower === "request aborted"
+  );
+}
+
 function AssistantMessageView({
   message,
   isStreaming,
@@ -418,6 +433,8 @@ function AssistantMessageView({
     || Boolean(toolResults?.get((block as ToolCallContent).toolCallId)?.isError)
   ));
   const blocks = visibleBlockItems.map(({ block }) => block);
+  const errorMessage = message.errorMessage?.trim() || null;
+  const isInterrupted = isInterruptedMessage(errorMessage, message.stopReason);
   // Only the last block of the live message is still growing; earlier blocks
   // became final the moment a successor appeared and must render (and flush)
   // as settled text, so pacing and word entrances apply to exactly one block.
@@ -529,7 +546,7 @@ function AssistantMessageView({
     return () => clearInterval(id);
   }, [isStreaming]);
 
-  if (blocks.length === 0) return null;
+  if (blocks.length === 0 && !isStreaming && !errorMessage) return null;
 
   // The --live bar is an unboxed-text affordance: boxed blocks (tool calls,
   // thinking) carry their own borders, and the full-height accent bar would
@@ -595,9 +612,52 @@ function AssistantMessageView({
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {visibleBlockItems.map(({ block, originalIndex }) => (
+        {visibleBlockItems.map(({ block, originalIndex }) => (
           <BlockView key={`${entryId ?? "stream"}-${originalIndex}`} block={block} toolResults={toolResults} isStreaming={isStreaming} isActiveStreamBlock={originalIndex === activeStreamIndex} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} thinkingDefaultExpanded={thinkingDefaultExpanded} activityDisplayMode={activityDisplayMode} />
         ))}
+        {errorMessage && (
+          isInterrupted ? (
+            <div
+              role="status"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "6px 9px",
+                border: "1px solid color-mix(in srgb, var(--text-muted) 25%, var(--border))",
+                borderRadius: "var(--radius-control)",
+                background: "color-mix(in srgb, var(--text-muted) 6%, var(--bg-panel))",
+                color: "var(--text-muted)",
+                fontSize: 12,
+                lineHeight: 1.45,
+              }}
+            >
+              <CircleSlash size={14} strokeWidth={1.8} aria-hidden="true" style={{ flexShrink: 0 }} />
+              <span>{t("messageView.interruptedByUser")}</span>
+            </div>
+          ) : (
+            <div
+              role="alert"
+              style={{
+                display: "flex",
+                alignItems: "flex-start",
+                gap: 6,
+                padding: "7px 9px",
+                border: "1px solid color-mix(in srgb, var(--status-error) 35%, var(--border))",
+                borderRadius: "var(--radius-control)",
+                background: "color-mix(in srgb, var(--status-error) 7%, var(--bg-panel))",
+                color: "var(--status-error)",
+                fontSize: 12,
+                lineHeight: 1.45,
+                whiteSpace: "pre-wrap",
+                overflowWrap: "anywhere",
+              }}
+            >
+              <CircleAlert size={14} strokeWidth={1.8} aria-hidden="true" style={{ flexShrink: 0, marginTop: 1 }} />
+              <span>{errorMessage}</span>
+            </div>
+          )
+        )}
       </div>
 
       <div style={{

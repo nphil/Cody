@@ -49,6 +49,9 @@ export async function POST(req: Request) {
 
     // Use a one-time key so startRpcSession's lock doesn't conflict with real session ids
     const { provider, modelId, toolNames, thinkingLevel, advisor, ...promptCommand } = command as { provider?: string; modelId?: string; toolNames?: string[]; thinkingLevel?: string; advisor?: boolean; [key: string]: unknown };
+    // A session id has no meaning for a fresh spawn. Never let a stale or
+    // forged id address an existing child session.
+    delete promptCommand.sessionId;
     if (typeof promptCommand.type !== "string" || !promptCommand.type.trim()) {
       return NextResponse.json({ error: "command type is required", code: "command_type_required" }, { status: 400 });
     }

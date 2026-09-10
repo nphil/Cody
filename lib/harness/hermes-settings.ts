@@ -105,14 +105,25 @@ const TRAILING_SECTIONS = new Set([
   "homeassistant", "dashboard", "portal", "irc", "bots",
 ]);
 
+/** Windows installs may expose a command shim beside the CLI in a test or
+ * package-manager wrapper, while uv's real venv uses python.exe. Keep both
+ * forms executable without weakening the normal native-binary path. */
+export function hermesCommandOptions(commandPath: string): { shell?: boolean } {
+  return process.platform === "win32" && /\.(?:cmd|bat)$/i.test(commandPath) ? { shell: true } : {};
+}
+
 /** The interpreter that can `import hermes_cli`. `uv tool install` places the
  * venv's bin dir as the symlink target of the installed executable, so the
  * python sits beside it. */
 export function hermesPythonPath(binaryPath: string): string | null {
   try {
     const real = realpathSync(binaryPath);
-    const candidate = join(dirname(real), process.platform === "win32" ? "python.exe" : "python");
-    return existsSync(candidate) ? candidate : null;
+    const names = process.platform === "win32" ? ["python.exe", "python.cmd", "python.bat"] : ["python"];
+    for (const name of names) {
+      const candidate = join(dirname(real), name);
+      if (existsSync(candidate)) return candidate;
+    }
+    return null;
   } catch {
     return null;
   }
@@ -268,7 +279,7 @@ export function getHermesSettingsSchema(binaryPath: string): HermesSettingsSchem
     const stdout = execFileSync(
       python,
       ["-c", "import json,hermes_cli.config as c; print(json.dumps(c.DEFAULT_CONFIG, default=str))"],
-      { encoding: "utf8", timeout: 30_000, maxBuffer: 8 * 1024 * 1024 },
+      { encoding: "utf8", timeout: 30_000, maxBuffer: 8 * 1024 * 1024, ...hermesCommandOptions(python) },
     );
     const defaults = JSON.parse(stdout) as Record<string, unknown>;
     const settings = flattenHermesDefaults(defaults);
@@ -336,6 +347,7 @@ function runHermesConfig(binaryPath: string, args: string[]): void {
       encoding: "utf8",
       timeout: 30_000,
       stdio: ["ignore", "pipe", "pipe"],
+      ...hermesCommandOptions(binaryPath),
     });
   } catch (error) {
     const stderr = (error as { stderr?: unknown }).stderr;
