@@ -107,6 +107,10 @@ export interface ToolResultMessage {
   isError?: boolean;
   details?: unknown;
   timestamp?: number;
+  /** Live snapshot of a tool that is still executing (`tool_execution_update`).
+   * It is held outside the committed transcript and rendered as running until
+   * the matching toolResult message arrives. */
+  partial?: boolean;
 }
 /** How transcript activity (tool calls/results and structured background work)
  * is presented. Ordinary user/assistant content and thinking are unaffected. */

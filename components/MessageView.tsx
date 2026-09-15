@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useState, useRef, useEffect, useMemo, useCallback, type ComponentProps, type TransitionEvent } from "react";
-import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, Brain } from "lucide-react";
+import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, Brain, CircleAlert, CircleSlash, LoaderCircle } from "lucide-react";
 import { MarkdownBody } from "./MarkdownBody";
 import { ClickableImage } from "./ImageLightbox";
 import { translate, useI18n, type Locale } from "@/lib/i18n";
@@ -229,6 +229,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
 
   return (
     <div
+      className="chat-user-message"
       style={{ marginBottom: 18, display: "flex", flexDirection: "column", alignItems: "flex-end", paddingRight: 6 }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
@@ -388,6 +389,21 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
   );
 }
 
+export function isInterruptedMessage(errorMessage?: string | null, stopReason?: string): boolean {
+  if (stopReason === "aborted") return true;
+  if (!errorMessage) return false;
+  const lower = errorMessage.toLowerCase().trim();
+  return (
+    lower === "interrupted by user" ||
+    lower === "interrupted" ||
+    lower === "generation stopped by user" ||
+    lower.startsWith("interrupted by user") ||
+    lower.startsWith("interrupted:") ||
+    lower === "aborted" ||
+    lower === "request aborted"
+  );
+}
+
 function AssistantMessageView({
   message,
   isStreaming,
@@ -426,6 +442,8 @@ function AssistantMessageView({
     || Boolean(toolResults?.get((block as ToolCallContent).toolCallId)?.isError)
   ));
   const blocks = visibleBlockItems.map(({ block }) => block);
+  const errorMessage = message.errorMessage?.trim() || null;
+  const isInterrupted = isInterruptedMessage(errorMessage, message.stopReason);
   // Only the last block of the live message is still growing; earlier blocks
   // became final the moment a successor appeared and must render (and flush)
   // as settled text, so live rendering (the streaming reveal, thinking auto-expand) applies to exactly one block.
@@ -570,7 +588,7 @@ function AssistantMessageView({
     return () => clearInterval(id);
   }, [isStreaming]);
 
-  if (blocks.length === 0) return null;
+  if (blocks.length === 0 && !isStreaming && !errorMessage) return null;
 
   // The --live bar is an unboxed-text affordance: boxed blocks (tool calls,
   // thinking) carry their own borders, and the full-height accent bar would
@@ -642,7 +660,7 @@ function AssistantMessageView({
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {visibleBlockItems.map(({ block, originalIndex }) => {
+        {visibleBlockItems.map(({ block, originalIndex }) => {
           // The distilled body stands in for the reply text only: thinking
           // and tool activity are not a reply and keep rendering as they do
           // today. Later text blocks fold into the one distilled view.
@@ -655,6 +673,49 @@ function AssistantMessageView({
             <BlockView key={`${entryId ?? "stream"}-${originalIndex}`} block={block} toolResults={toolResults} isStreaming={isStreaming} isActiveStreamBlock={originalIndex === activeStreamIndex} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} thinkingDefaultExpanded={thinkingDefaultExpanded} activityDisplayMode={activityDisplayMode} distillThinking={distillThinking} />
           );
         })}
+        {errorMessage && (
+          isInterrupted ? (
+            <div
+              role="status"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                padding: "6px 9px",
+                border: "1px solid color-mix(in srgb, var(--text-muted) 25%, var(--border))",
+                borderRadius: "var(--radius-control)",
+                background: "color-mix(in srgb, var(--text-muted) 6%, var(--bg-panel))",
+                color: "var(--text-muted)",
+                fontSize: 12,
+                lineHeight: 1.45,
+              }}
+            >
+              <CircleSlash size={14} strokeWidth={1.8} aria-hidden="true" style={{ flexShrink: 0 }} />
+              <span>{t("messageView.interruptedByUser")}</span>
+            </div>
+          ) : (
+            <div
+              role="alert"
+              style={{
+                display: "flex",
+                alignItems: "flex-start",
+                gap: 6,
+                padding: "7px 9px",
+                border: "1px solid color-mix(in srgb, var(--status-error) 35%, var(--border))",
+                borderRadius: "var(--radius-control)",
+                background: "color-mix(in srgb, var(--status-error) 7%, var(--bg-panel))",
+                color: "var(--status-error)",
+                fontSize: 12,
+                lineHeight: 1.45,
+                whiteSpace: "pre-wrap",
+                overflowWrap: "anywhere",
+              }}
+            >
+              <CircleAlert size={14} strokeWidth={1.8} aria-hidden="true" style={{ flexShrink: 0, marginTop: 1 }} />
+              <span>{errorMessage}</span>
+            </div>
+          )
+        )}
       </div>
 
       <div style={{
@@ -1064,11 +1125,103 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
 ));
 
 
+interface HubSendSummary {
+  to: string[];
+  message: string;
+  snippet: string;
+}
+
+interface HubJobRow {
+  id: string;
+  type: string;
+  status: string;
+  label: string;
+  durationMs?: number;
+  resolvedModel?: string;
+}
+
+function isHubToolName(toolName: string): boolean {
+  const name = toolName.toLowerCase();
+  return name === "hub" || name.endsWith(".hub") || name.endsWith("_hub");
+}
+
+/** Outgoing agent steering: `hub` with `op: "send"`. */
+function getHubSendSummary(input: unknown): HubSendSummary | null {
+  if (!isRecord(input) || input.op !== "send") return null;
+  const raw = Array.isArray(input.to) ? input.to : typeof input.to === "string" ? [input.to] : [];
+  const to = raw
+    .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+    .slice(0, 10);
+  if (to.length === 0) return null;
+  const message = typeof input.message === "string" ? input.message : "";
+  const firstLine = message.split("\n").map((line) => line.trim()).find((line) => line.length > 0) ?? "";
+  const snippet = firstLine.length > 120 ? `${firstLine.slice(0, 120)}…` : firstLine;
+  return { to, message, snippet };
+}
+
+/** Structured hub job roster returned by `hub` with `op: "jobs"`. */
+function getHubJobs(details: unknown): HubJobRow[] | null {
+  if (!isRecord(details) || details.op !== "jobs" || !Array.isArray(details.jobs)) return null;
+  const rows: HubJobRow[] = [];
+  for (const raw of details.jobs) {
+    if (!isRecord(raw)) continue;
+    const id = typeof raw.id === "string" && raw.id ? raw.id : null;
+    if (!id) continue;
+    rows.push({
+      id,
+      type: typeof raw.type === "string" ? raw.type : "task",
+      status: typeof raw.status === "string" ? raw.status : "running",
+      label: typeof raw.label === "string" && raw.label ? raw.label : id,
+      ...(typeof raw.durationMs === "number" && Number.isFinite(raw.durationMs) ? { durationMs: raw.durationMs } : {}),
+      ...(typeof raw.resolvedModel === "string" && raw.resolvedModel ? { resolvedModel: raw.resolvedModel } : {}),
+    });
+    if (rows.length >= 50) break;
+  }
+  return rows.length > 0 ? rows : null;
+}
+
+function getHubJobsHeader(jobs: HubJobRow[]): string {
+  const waiting = jobs.some((job) => job.status === "running" || job.status === "started" || job.status === "waiting");
+  return waiting ? `waiting on ${jobs.length} job${jobs.length === 1 ? "" : "s"}` : `${jobs.length} job${jobs.length === 1 ? "" : "s"}`;
+}
+
+function formatHubJobDuration(ms: number | undefined): string | null {
+  if (ms == null || !Number.isFinite(ms) || ms < 1000) return null;
+  const totalSeconds = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return minutes > 0 ? `${hours}h${minutes}m` : `${hours}h`;
+  if (minutes > 0) return seconds > 0 ? `${minutes}m${seconds}s` : `${minutes}m`;
+  return `${seconds}s`;
+}
+
+function getHubReceiptOutcome(details: unknown): string | null {
+  if (!isRecord(details) || !Array.isArray(details.receipts) || details.receipts.length === 0) return null;
+  const outcomes = details.receipts.map((receipt) => (
+    isRecord(receipt) && typeof receipt.outcome === "string" ? receipt.outcome : null
+  ));
+  if (outcomes.some((outcome) => outcome === null || outcome !== outcomes[0])) return null;
+  return outcomes[0];
+}
+
+function getHubReceipts(details: unknown): Array<{ to: string; outcome: string }> {
+  if (!isRecord(details) || !Array.isArray(details.receipts)) return [];
+  const out: Array<{ to: string; outcome: string }> = [];
+  for (const raw of details.receipts) {
+    if (!isRecord(raw) || typeof raw.to !== "string" || raw.to.length === 0) continue;
+    out.push({ to: raw.to, outcome: typeof raw.outcome === "string" ? raw.outcome : "sent" });
+    if (out.length >= 50) break;
+  }
+  return out;
+}
+
 const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isStreaming, isActiveStreamBlock, activityDisplayMode = "compact" }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number; isStreaming?: boolean; isActiveStreamBlock?: boolean; activityDisplayMode?: ActivityDisplayMode }) {
   const { t } = useI18n();
+  const isRunning = result?.partial === true;
   const isError = result?.isError ?? false;
   const hidden = activityDisplayMode === "hidden" && !isError;
-  const [expanded, setExpanded] = useState(activityDisplayMode === "full" || isError);
+  const [expanded, setExpanded] = useState(activityDisplayMode === "full" || isError || isRunning);
   useEffect(() => {
     if (activityDisplayMode === "full" || isError) setExpanded(true);
     else if (activityDisplayMode === "compact") setExpanded(false);
@@ -1079,7 +1232,26 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
   const displayedPreview = getToolPreview(block);
   const isEditTool = isEditToolName(block.toolName);
   const resultDiff = result && !result.isError ? getResultDiff(result) : null;
-  const activityStatus = getStructuredActivityStatus(result);
+  const activityStatus = isRunning ? t("chatWindow.runningTool") : getStructuredActivityStatus(result);
+  // Hub steering and job-roster calls use the same semantic row language as
+  // OMP's TUI while retaining the generic renderer as a safe fallback.
+  const hubSend = isHubToolName(block.toolName) ? getHubSendSummary(block.input) : null;
+  const hubJobs = isHubToolName(block.toolName) ? getHubJobs(result?.details) : null;
+  const hubReceiptOutcome = hubSend ? getHubReceiptOutcome(result?.details) : null;
+  const hubToolLabel = hubSend
+    ? `IRC → ${hubSend.to.join(", ")}${hubReceiptOutcome ? ` ${hubReceiptOutcome}` : ""}`
+    : hubJobs
+      ? getHubJobsHeader(hubJobs)
+      : null;
+  const hubPreview = hubSend
+    ? (hubSend.snippet || hubSend.to.join(", "))
+    : hubJobs
+      ? hubJobs.map((job) => job.label).join(" · ")
+      : null;
+  const hasStructuredHubResult = Boolean(
+    hubJobs ||
+    (hubSend && result && !isError && isRecord(result.details) && result.details.op === "send"),
+  );
 
   // Result display
   const resultText = result
@@ -1102,6 +1274,8 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
   return (
     <div
       className="collapse-box chat-block-in"
+      data-tool-state={isRunning ? "running" : result ? "complete" : undefined}
+      aria-busy={isRunning || undefined}
       data-expanded={expanded ? "" : undefined}
       style={{
         borderRadius: 7,
@@ -1133,13 +1307,14 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
             minWidth: 0,
           }}
         >
+          {isRunning && <LoaderCircle size={12} strokeWidth={1.8} className="icon-spin" aria-hidden="true" style={{ flexShrink: 0, color: "var(--status-success)" }} />}
           <span style={{ color: isError ? "var(--status-error)" : "var(--status-success)", fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 11, flexShrink: 0 }}>
-            {block.toolName}
+            {hubToolLabel ?? block.toolName}
           </span>
           <span style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0, maxWidth: "64ch", marginRight: "auto" }}>
-            {displayedPreview}
+            {hubPreview ?? displayedPreview}
           </span>
-          {activityStatus && <span style={{ color: activityStatus === "error" ? "var(--status-error)" : "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11, flexShrink: 0 }}>{activityStatus}</span>}
+          {activityStatus && <span aria-live={isRunning ? "polite" : undefined} style={{ display: "inline-flex", alignItems: "center", gap: 4, color: activityStatus === "error" ? "var(--status-error)" : "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11, flexShrink: 0 }}>{activityStatus}</span>}
           {duration !== undefined && (
             <span style={{ fontSize: 11, color: "var(--text-dim)", flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{t("messageView.durationSeconds", { seconds: duration })}</span>
           )}
@@ -1182,20 +1357,33 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
               </pre>
             )}
             {result && (
-              resultDiff ? (
-                <PairedDiffResult
-                  diff={resultDiff}
-                />
-              ) : (
-                <>
-                  <TaskResultPanel details={result.details} />
-                  <PairedResult
-                    text={resultText ?? ""}
-                    isEmpty={resultIsEmpty}
-                    isError={isError}
+              <div data-tool-output={isRunning && !resultIsEmpty ? "true" : undefined}>
+                {isRunning && resultIsEmpty ? (
+                  <>
+                    <TaskResultPanel details={result.details} />
+                    <HubResultPanel input={block.input} result={result} />
+                    <div data-tool-running="true" style={{ padding: "8px 10px", borderTop: "1px solid color-mix(in srgb, var(--status-success) 15%, transparent)", color: "var(--text-dim)", fontSize: 12 }}>
+                      {t("chatWindow.runningTool")}
+                    </div>
+                  </>
+                ) : resultDiff ? (
+                  <PairedDiffResult
+                    diff={resultDiff}
                   />
-                </>
-              )
+                ) : (
+                  <>
+                    <TaskResultPanel details={result.details} />
+                    <HubResultPanel input={block.input} result={result} />
+                    {!hasStructuredHubResult && (
+                      <PairedResult
+                        text={resultText ?? ""}
+                        isEmpty={resultIsEmpty}
+                        isError={isError}
+                      />
+                    )}
+                  </>
+                )}
+              </div>
             )}
           </div>
         </CollapsiblePanel>
@@ -1339,6 +1527,90 @@ export function TaskResultPanel({ details }: { details: unknown }) {
       })}
     </div>
   );
+}
+
+/**
+ * Structured semantic body for `hub` tool calls. Outgoing steering renders
+ * the target and message; the jobs operation renders the bounded roster.
+ * Unknown or malformed hub operations deliberately fall back to the generic
+ * tool-result renderer.
+ */
+export function HubResultPanel({ input, result }: { input: unknown; result?: ToolResultMessage }) {
+  if (!isRecord(input) || typeof input.op !== "string") return null;
+
+  if (input.op === "send") {
+    const send = getHubSendSummary(input);
+    if (!send) return null;
+    const receipts = getHubReceipts(result?.details);
+    return (
+      <div
+        data-hub-result="send"
+        style={{
+          borderTop: "1px solid var(--border)",
+          background: "var(--bg-subtle)",
+          padding: "8px 10px",
+          display: "grid",
+          gap: 6,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: "var(--text-muted)" }}>
+          <span style={{ fontWeight: 600, color: "var(--text)" }}>{`IRC → ${send.to.join(", ")}`}</span>
+          {receipts.length > 0 && (
+            <span style={{ marginLeft: "auto", fontFamily: "var(--font-mono)", color: "var(--text-dim)", fontSize: 10.5 }}>
+              {receipts.map((receipt) => receipt.outcome).join(" · ")}
+            </span>
+          )}
+        </div>
+        {send.message ? <MarkdownBody className="markdown-hub-message">{send.message}</MarkdownBody> : null}
+      </div>
+    );
+  }
+
+  if (input.op === "jobs") {
+    const jobs = getHubJobs(result?.details);
+    if (!jobs) return null;
+    return (
+      <div
+        data-hub-result="jobs"
+        style={{
+          borderTop: "1px solid var(--border)",
+          background: "var(--bg-subtle)",
+          padding: "8px 10px",
+          display: "grid",
+          gap: 4,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: "var(--text-muted)" }}>
+          <span style={{ fontWeight: 600, color: "var(--text)" }}>{getHubJobsHeader(jobs)}</span>
+        </div>
+        {jobs.map((job) => {
+          const duration = formatHubJobDuration(job.durationMs);
+          const status = job.status === "completed" ? "completed" : job.status === "failed" ? "failed" : "started";
+          return (
+            <div
+              key={job.id}
+              style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, fontSize: 11.5 }}
+            >
+              <SubagentStatusIcon status={status} />
+              <span style={{ fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 10.5, color: "var(--accent)", flexShrink: 0 }}>
+                {`[${job.type}]`}
+              </span>
+              <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, color: "var(--text)" }}>
+                {job.label}
+              </span>
+              {duration && (
+                <span style={{ flexShrink: 0, fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--text-dim)" }}>
+                  {duration}
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  return null;
 }
 
 function PairedDiffResult({ diff }: {
@@ -1973,6 +2245,17 @@ function previewText(text: string): string {
 function getToolPreview(block: ToolCallContent): string {
   const input = block.input;
   if (!input || typeof input !== "object") return "";
+
+  if (isHubToolName(block.toolName) && isRecord(input)) {
+    if (input.op === "send") {
+      const send = getHubSendSummary(input);
+      if (send) return send.snippet;
+      return "send";
+    }
+    if (input.op === "jobs") return "jobs";
+    if (typeof input.op === "string") return input.op;
+  }
+
   const keys = Object.keys(input);
   if (keys.length === 0) return "";
 

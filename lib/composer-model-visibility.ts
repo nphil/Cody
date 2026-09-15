@@ -104,6 +104,14 @@ export function readComposerVisibility(engineId: string | null, storage: Storage
   };
 }
 
+/** Remove selected models from a user's hidden list without changing any
+ * other hidden preference. Curation uses this when an administrator enables
+ * models the current user had previously hidden in the composer. */
+export function unhideModels(hidden: readonly string[], selected: readonly string[]): string[] {
+  const selectedKeys = new Set(selected);
+  return [...new Set(hidden)].filter((key) => !selectedKeys.has(key)).sort();
+}
+
 /**
  * Replace one or more of the mirrored lists and tell the composer. Used by
  * the Models hub after a successful PUT (and as the whole store on an open

@@ -4,7 +4,7 @@ import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
-import { SessionSidebar } from "./SessionSidebar";
+import { SessionSidebar, type DesktopActivity, type DesktopCompletion } from "./SessionSidebar";
 import { ToastProvider } from "./ui/toast";
 import { toast } from "./ui/toast";
 import { ChatWindow, type SessionModelUsage } from "./ChatWindow";
@@ -13,7 +13,7 @@ import { TabBar, type Tab } from "./TabBar";
 import { BranchNavigator } from "./BranchNavigator";
 import { ThemePicker } from "./ThemePicker";
 import { TitleBar } from "./TitleBar";
-import { useDesktopShell } from "@/hooks/useDesktopShell";
+import { useDesktopShell, type DesktopStatusUpdate } from "@/hooks/useDesktopShell";
 import { AppWindow, Check, Copy, ExternalLink, Files, GitBranch, History, Info, ListTodo, Menu, MessageCircle, PanelLeft, ScrollText, Settings, Terminal, TriangleAlert } from "lucide-react";
 import { formatApiCost, formatCompactNumber, formatPercent, usageToneColor } from "@/lib/format";
 import { translate, useI18n } from "@/lib/i18n";
@@ -115,6 +115,32 @@ const THINKING_EXPANDED_STORAGE_KEY = STORAGE_KEYS.thinkingExpanded;
 const SIDEBAR_MIN_WIDTH = 200;
 const SIDEBAR_MAX_WIDTH = 520;
 const SIDEBAR_DEFAULT_WIDTH = 260;
+const DISMISSED_OMP_UPDATE_STORAGE_KEY = "cody:dismissed-omp-update";
+const DISMISSED_APP_UPDATE_STORAGE_KEY = "cody:dismissed-app-update";
+
+/**
+ * Update probes can run again after the shell changes state. Keep only the
+ * version the user last dismissed, and treat storage as an optional
+ * best-effort enhancement so private mode or Tauri storage failures cannot
+ * break the shell.
+ */
+export function readDismissedUpdateVersion(storageKey: string): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage.getItem(storageKey);
+  } catch {
+    return null;
+  }
+}
+
+export function rememberDismissedUpdateVersion(storageKey: string, version: string): void {
+  if (typeof window === "undefined" || !version) return;
+  try {
+    window.localStorage.setItem(storageKey, version);
+  } catch {
+    // The toast still closes for this page load when storage is unavailable.
+  }
+}
 
 function clampSidebarWidth(width: number): number {
   return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(width)));
@@ -199,7 +225,7 @@ export function AppShell() {
   // Phones only: keep the top bar and the docked composer on screen while the
   // soft keyboard is up (see the hook for why 100dvh alone cannot).
   useVisualViewportHeight(isMobile);
-  const { isDesktop } = useDesktopShell();
+  const { isDesktop, updateDesktopStatus } = useDesktopShell();
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
   // When user clicks +, we only store the cwd — no fake session id
   const [newSessionCwd, setNewSessionCwd] = useState<string | null>(null);
@@ -368,9 +394,15 @@ export function AppShell() {
       .then((data: { currentVersion?: string | null; availableVersion?: string | null; updateAvailable?: boolean } | null) => {
         setOmpUpdateAvailable(Boolean(data?.updateAvailable));
         if (!data?.updateAvailable || !data.availableVersion) return;
+        // Base UI invokes onClose for both the close button and a timeout.
+        // Cody keeps its existing 4s toast timing, so auto-expiry intentionally
+        // counts as dismissal; a newer version will still be announced.
+        const version = data.availableVersion;
+        if (readDismissedUpdateVersion(DISMISSED_OMP_UPDATE_STORAGE_KEY) === version) return;
         toast.info(
           translate("updates.notice.engineTitle", { name: activeEngine?.shortName ?? "OMP" }),
-          <UpdateNoticeBody current={data.currentVersion ?? null} next={data.availableVersion} onOpen={() => openSettings("system")} />
+          <UpdateNoticeBody current={data.currentVersion ?? null} next={version} onOpen={() => openSettings("system")} />,
+          { onClose: () => rememberDismissedUpdateVersion(DISMISSED_OMP_UPDATE_STORAGE_KEY, version) }
         );
       })
       .catch(() => {});
@@ -383,9 +415,12 @@ export function AppShell() {
       .then((data: { currentVersion?: string; availableVersion?: string | null; updateAvailable?: boolean } | null) => {
         setAppUpdateAvailable(Boolean(data?.updateAvailable));
         if (!data?.updateAvailable || !data.availableVersion) return;
+        const version = data.availableVersion;
+        if (readDismissedUpdateVersion(DISMISSED_APP_UPDATE_STORAGE_KEY) === version) return;
         toast.info(
           translate("updates.notice.appTitle"),
-          <UpdateNoticeBody current={data.currentVersion ?? null} next={data.availableVersion} onOpen={() => openSettings("system")} />
+          <UpdateNoticeBody current={data.currentVersion ?? null} next={version} onOpen={() => openSettings("system")} />,
+          { onClose: () => rememberDismissedUpdateVersion(DISMISSED_APP_UPDATE_STORAGE_KEY, version) }
         );
       })
       .catch(() => {});
@@ -430,6 +465,69 @@ export function AppShell() {
   const handleSessionStatsChange = useCallback((stats: SessionStatsInfo | null) => {
     setSessionStats(stats);
   }, []);
+  const [activeSessionCount, setActiveSessionCount] = useState(0);
+  const [desktopUnreadSessionIds, setDesktopUnreadSessionIds] = useState<string[]>([]);
+  const [desktopActivityReady, setDesktopActivityReady] = useState(false);
+  const [desktopCompletions, setDesktopCompletions] = useState<DesktopCompletion[]>([]);
+  const handleDesktopActivityChange = useCallback((activity: DesktopActivity) => {
+    setDesktopActivityReady(activity.ready);
+    if (!activity.ready) {
+      setActiveSessionCount(0);
+      setDesktopUnreadSessionIds([]);
+      return;
+    }
+    setActiveSessionCount(activity.activeSessionCount);
+    setDesktopUnreadSessionIds(activity.unreadSessionIds);
+    if (activity.completions.length > 0) {
+      setDesktopCompletions((previous) => {
+        const known = new Set(previous.map((completion) => completion.completionId));
+        const next = [...previous];
+        for (const completion of activity.completions) {
+          if (known.has(completion.completionId)) continue;
+          known.add(completion.completionId);
+          next.push(completion);
+        }
+        return next;
+      });
+    }
+  }, []);
+  const [activeSubagentCount, setActiveSubagentCount] = useState(0);
+  const handleActiveSubagentCountChange = useCallback((count: number) => {
+    setActiveSubagentCount(count);
+  }, []);
+
+  useEffect(() => {
+    if (!isDesktop || !desktopActivityReady) return;
+    const status: DesktopStatusUpdate = {
+      activeSessions: activeSessionCount,
+      activeSubagents: activeSubagentCount,
+      unread: desktopUnreadSessionIds.length,
+      completed: false,
+      unreadIds: desktopUnreadSessionIds,
+      completionId: null,
+      completionKind: null,
+    };
+    // Keep ordinary snapshots explicitly non-terminal. Native sound/toast
+    // paths are driven only by the queued terminal events below.
+    updateDesktopStatus(status);
+    for (const completion of desktopCompletions) {
+      updateDesktopStatus({
+        ...status,
+        completed: true,
+        completionId: completion.completionId,
+        completionKind: completion.completionKind,
+      });
+    }
+    if (desktopCompletions.length > 0) setDesktopCompletions([]);
+  }, [
+    isDesktop,
+    desktopActivityReady,
+    activeSessionCount,
+    activeSubagentCount,
+    desktopUnreadSessionIds,
+    desktopCompletions,
+    updateDesktopStatus,
+  ]);
   const [copiedSessionField, setCopiedSessionField] = useState<SessionCopyField | null>(null);
   const sessionCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleCopySessionField = useCallback((field: SessionCopyField, value: string) => {
@@ -508,9 +606,15 @@ export function AppShell() {
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* capture is best-effort */ }
     const startX = e.clientX;
     const startWidth = sidebarWidth;
+    let uiScale = 1;
+    try {
+      const raw = getComputedStyle(document.documentElement).getPropertyValue("--ui-scale");
+      const value = parseFloat(raw);
+      if (Number.isFinite(value) && value > 0) uiScale = value;
+    } catch { /* computed styles may be unavailable during teardown */ }
     setSidebarResizing(true);
     const onMove = (ev: PointerEvent) => {
-      const next = clampSidebarWidth(startWidth + (ev.clientX - startX));
+      const next = clampSidebarWidth(startWidth + (ev.clientX - startX) / uiScale);
       // Write the CSS variable straight to the DOM: the flex row follows the
       // pointer without re-rendering the whole AppShell on every move.
       sidebarContainerRef.current?.style.setProperty("--sidebar-width", `${next}px`);
@@ -1148,6 +1252,8 @@ export function AppShell() {
         onInitialRestoreDone={handleInitialRestoreDone}
         refreshKey={refreshKey}
         onSessionDeleted={handleSessionDeleted}
+        onDesktopActivityChange={handleDesktopActivityChange}
+        isDesktop={isDesktop}
         selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? null}
         onCwdChange={handleCwdChange}
         onOpenFile={handleOpenFile}
@@ -1223,7 +1329,7 @@ export function AppShell() {
       }
     `}</style>
     <div style={{ display: "flex", flexDirection: "column", height: "var(--app-height, 100dvh)" }}>
-    <TitleBar workspaceName={activeCwdName} />
+    <TitleBar workspaceName={activeCwdName} activeSessions={activeSessionCount} activeSubagents={activeSubagentCount} />
     <div style={{ display: "flex", flex: 1, minHeight: 0, overflow: "hidden", background: "var(--bg)" }}>
       {/* Mobile overlay backdrop */}
       <div
@@ -1900,6 +2006,7 @@ export function AppShell() {
               onBranchDataChange={handleBranchDataChange}
               onSystemPromptChange={handleSystemPromptChange}
               onSessionStatsChange={handleSessionStatsChange}
+              onActiveSubagentCountChange={handleActiveSubagentCountChange}
               onSessionStatsPanelOpen={openSessionStatsPanel}
               onContextUsageChange={handleContextUsageChange}
               onModelUsageChange={handleModelUsageChange}

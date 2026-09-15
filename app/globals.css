@@ -1667,6 +1667,36 @@ span.linenumber {
   50% { opacity: 0.3; }
 }
 
+/* ── Chat/timeline split ────────────────────────────────────────────────────
+   Keep the minimap in its own grid track. The old flex row let a message's
+   min-content width influence the scroll column at narrow desktop widths,
+   which could make the transcript paint underneath the timeline. Every chat
+   surface reads the same rail variable so the notice shelf and composer stay
+   on the same right edge as the transcript. */
+.chat-window-shell {
+  --chat-minimap-width: 0px;
+}
+.chat-window-shell--with-minimap {
+  --chat-minimap-width: 36px;
+}
+.chat-transcript-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--chat-minimap-width);
+  min-width: 0;
+  min-height: 0;
+}
+.chat-transcript-scroll,
+.chat-transcript-gutter,
+.chat-column-frame,
+.chat-notice-overlay {
+  box-sizing: border-box;
+  min-width: 0;
+  width: 100%;
+}
+.chat-column-frame,
+.chat-column-frame > * {
+  max-width: 100%;
+}
 /* ── Transcript scrolling ──────────────────────────────────────────────────
    `scroll-behavior` is inherited, so the chat scroller picks up
    `html { scroll-behavior: smooth }` and turns every imperative `scrollTop`
@@ -1675,6 +1705,18 @@ span.linenumber {
    Deliberate smooth scrolls pass `behavior: "smooth"` explicitly instead. */
 .chat-scroll-region {
   scroll-behavior: auto;
+}
+
+/* Message roots are flex/grid descendants of the bounded transcript column.
+   Explicitly resetting their automatic minimum prevents long streamed text,
+   code, or tool output from widening the column beneath the timeline rail. */
+.chat-turn,
+.chat-message,
+.chat-user-message {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 /* Per-turn containment. The transcript stays fully in the DOM — find-in-page,

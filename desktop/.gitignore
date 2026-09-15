@@ -1,3 +1,6 @@
 target/
 node_modules/
 gen/
+.env
+.env.local
+src-tauri/capabilities/remote-server.json

@@ -60,6 +60,8 @@ interface Props {
   onBranchDataChange?: (tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void) => void;
   onSystemPromptChange?: (prompt: string | null) => void;
   onSessionStatsChange?: (stats: SessionStatsInfo | null) => void;
+  /** Live subagent count for the desktop titlebar activity summary. */
+  onActiveSubagentCountChange?: (count: number) => void;
   onSessionStatsPanelOpen?: () => void;
   onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
   /** Per-model token usage of the loaded conversation, for the top bar's
@@ -141,9 +143,8 @@ function phaseElapsed(phase: AgentPhase, now: number): string | null {
   return elapsed >= LONG_TOOL_THRESHOLD_MS ? formatToolElapsed(elapsed) : null;
 }
 
-const CHAT_MINIMAP_WIDTH = 36;
 const CHAT_COLUMN_PADDING = 16;
-const CHAT_INPUT_RIGHT_PADDING = CHAT_COLUMN_PADDING + CHAT_MINIMAP_WIDTH;// Trigger the next history page while the sentinel is still this far below
+// Trigger the next history page while the sentinel is still this far below
 // the top edge, so a normal upward scroll seamlessly continues into the newly
 // loaded messages. Triggering only at the very top made the load invisible:
 // the restore anchored the viewport to the old content, so the user parked on
@@ -707,7 +708,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
     </>
   );
 });
-export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, advisorEnabled: advisorPreferred, capabilities = ALL_CAPABILITIES, engine = null, activityDisplayMode = "compact", thinkingDefaultExpanded = false, onAgentEnd, onSessionNamed, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onModelUsageChange, onOpenFile, onOpenPreview, onPreviewUrlsSeen, onSessionModelsChange }: Props) {
+export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, advisorEnabled: advisorPreferred, capabilities = ALL_CAPABILITIES, engine = null, activityDisplayMode = "compact", thinkingDefaultExpanded = false, onAgentEnd, onSessionNamed, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onActiveSubagentCountChange, onSessionStatsPanelOpen, onContextUsageChange, onModelUsageChange, onOpenFile, onOpenPreview, onPreviewUrlsSeen, onSessionModelsChange }: Props) {
 /** Memoized: AppShell holds ~60 state values (git badge polls, update checks,
  *  the context-usage tick ChatWindow itself pushes up), and each of those
  *  re-renders would otherwise rebuild this whole tree. */
@@ -747,10 +748,10 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactResult, compactionStatus, displayModel: displayModelValue, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
-    notices, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
+    notices, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     permissionRequests, respondToPermission,
     isAutoModelSelection, autoModelSwitch, modelSwitchPending, localOnly, selectLocalOnly,
-    agentPhase, streamDegraded, streamAlert, dismissStreamAlert, retryEventStream, activeGoal, activePlan,
+    agentPhase, liveToolResults, streamDegraded, streamAlert, dismissStreamAlert, retryEventStream, activeGoal, activePlan,
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases, planOverlay,
     isNew,
     sessionIdRef, messagesEndRef, scrollContainerRef,
@@ -765,6 +766,16 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     onOpenFile, onOpenPreview, onPreviewUrlsSeen,
   });
   const sessionBusy = agentRunning || bashRunning;
+
+  useEffect(() => {
+    onActiveSubagentCountChange?.(activeSubagentCount);
+    return () => onActiveSubagentCountChange?.(0);
+  }, [activeSubagentCount, onActiveSubagentCountChange]);
+
+  useEffect(() => {
+    onActiveSubagentCountChange?.(activeSubagentCount);
+    return () => onActiveSubagentCountChange?.(0);
+  }, [activeSubagentCount, onActiveSubagentCountChange]);
 
   // Register the abort handler for the global Esc shortcut. The cleanup
   // matters: unmounting mid-run must not leave the module-global handler
@@ -969,6 +980,22 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
 
     return { toolResultsMap, lastAnchorIdx, visibleRefIndexByMessage };
   }, [messages]);
+  // Runtime tool results cover the gap between `tool_execution_start` and the
+  // committed toolResult message. A committed result is authoritative, so it
+  // wins when both maps contain the same call; the live map only supplies
+  // output for calls that have not reached the transcript yet.
+  const toolResultsWithLive = useMemo<Map<string, ToolResultMessage>>(() => {
+    if (liveToolResults.size === 0) return conversationMeta.toolResultsMap;
+    const merged = new Map(liveToolResults);
+    for (const [toolCallId, result] of conversationMeta.toolResultsMap) merged.set(toolCallId, result);
+    return merged;
+  }, [conversationMeta, liveToolResults]);
+  const conversationMetaWithLive = useMemo(
+    () => (toolResultsWithLive === conversationMeta.toolResultsMap
+      ? conversationMeta
+      : { ...conversationMeta, toolResultsMap: toolResultsWithLive }),
+    [conversationMeta, toolResultsWithLive],
+  );
   // The minimap needs one ref slot per user/assistant message — the same set
   // conversationMeta already indexed, so re-filtering `messages` per render
   // (an O(N) pass plus an array allocation on every streaming frame) is waste.
@@ -1246,7 +1273,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
 
   return (
     <div
-      className="relative flex h-full flex-col overflow-hidden"
+      className={`chat-window-shell relative flex h-full min-w-0 flex-col overflow-hidden${isEmptyNew ? "" : " chat-window-shell--with-minimap"}`}
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
@@ -1329,7 +1356,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
                   {/* Notices ride with the composer, as they do once messages
                       exist — a model error belongs next to the Send it blocks,
                       not centred half a screen above it. */}
-                  <NoticeShelf notices={notices} align="right" />
+                  <NoticeShelf notices={notices} onDismiss={dismissNotice} align="right" />
                 </div>
               </div>
               {/* Outside that gutter, exactly as in the populated dock below:
@@ -1343,42 +1370,42 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
         <div className="flex flex-1 flex-col items-center justify-center overflow-y-auto px-4 py-8">
           <div className="w-full" style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH }}>
             {emptyChatBrand}
-            <NoticeShelf notices={notices} align="right" />
+            <NoticeShelf notices={notices} onDismiss={dismissNotice} align="right" />
             {chatInputElement}
           </div>
         </div>
         )
       ) : (
       <>
-      <div className="relative flex flex-1 overflow-hidden">
+      <div className="chat-transcript-layout relative min-w-0 flex-1 overflow-hidden">
         <div
+          className="chat-notice-overlay"
           style={{
             position: "absolute",
             top: 12,
             left: 0,
-            right: isMobile ? 0 : CHAT_MINIMAP_WIDTH,
+            right: "var(--chat-minimap-width)",
             zIndex: 40,
             padding: `0 ${CHAT_COLUMN_PADDING}px`,
             pointerEvents: "none",
           }}
         >
-          <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
-            <NoticeShelf notices={notices} floating align="right" />
+          <div style={{ width: "100%", maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
+            <NoticeShelf notices={notices} onDismiss={dismissNotice} floating align="right" />
           </div>
         </div>
-        {/* Hide the Firefox scrollbar on desktop only: ChatMinimap provides the
-            position indicator there, but on mobile there is no minimap and
-            users need the scrollbar (Chrome's overlay scrollbar still shows). */}
-        <div ref={scrollContainerRef} className={`chat-scroll-region flex-1 overflow-y-auto pt-6` + (isMobile ? "" : " [scrollbar-width:none]")}>
-          <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
-            <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
+        {/* Keep the native scrollbar on touch layouts for direct scrolling;
+            ChatMinimap remains visible as the compact position overview. */}
+        <div ref={scrollContainerRef} className={`chat-scroll-region chat-transcript-scroll min-w-0 flex-1 overflow-y-auto pt-6` + (isMobile ? "" : " [scrollbar-width:none]")}>
+          <div className="chat-transcript-gutter" style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
+            <div className="chat-column-frame" style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
               <ExtensionStatusBar statuses={extensionStatuses} />
               <ExtensionWidgets widgets={aboveEditorWidgets} />
 
             <CommittedTranscript
               messages={messages}
               entryIds={entryIds}
-              conversationMeta={conversationMeta}
+              conversationMeta={conversationMetaWithLive}
               messageRefs={messageRefs}
               isStreaming={streamState.isStreaming}
               sessionBusy={sessionBusy}
@@ -1400,7 +1427,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
               handleLoadMoreClick={handleLoadMoreClick}
             />
             {streamState.isStreaming && streamState.streamingMessage && (
-              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} sessionId={session?.id ?? sessionIdRef.current ?? undefined} thinkingDefaultExpanded={thinkingDefaultExpanded} activityDisplayMode={activityDisplayMode} />
+              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} toolResults={toolResultsWithLive} thinkingDefaultExpanded={thinkingDefaultExpanded} activityDisplayMode={activityDisplayMode} />
             )}
 
             {activityDisplayMode === "compact" && pendingToolHeaders.map((tool) => (
@@ -1531,13 +1558,11 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
             </div>
           </div>
         </div>
-        {isMobile ? null : (
-          <ChatMinimap
-            messages={messages}
-            scrollContainer={scrollContainerRef}
-            messageRefs={messageRefs}
-          />
-        )}
+        <ChatMinimap
+          messages={messages}
+          scrollContainer={scrollContainerRef}
+          messageRefs={messageRefs}
+        />
       </div>
 
       <div
@@ -1554,7 +1579,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
         <div
           style={{
             padding: `0 ${CHAT_COLUMN_PADDING}px`,
-            paddingRight: isMobile ? CHAT_COLUMN_PADDING : CHAT_INPUT_RIGHT_PADDING,
+            paddingRight: `calc(${CHAT_COLUMN_PADDING}px + var(--chat-minimap-width))`,
           }}
         >
           <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
@@ -1719,7 +1744,7 @@ function StreamAlertBanner({
   );
 }
 
-function NoticeShelf({ notices, floating = false, align = "left" }: { notices: NoticeItem[]; floating?: boolean; align?: "left" | "right" }) {
+function NoticeShelf({ notices, onDismiss, floating = false, align = "left" }: { notices: NoticeItem[]; onDismiss?: (id: string) => void; floating?: boolean; align?: "left" | "right" }) {
   if (notices.length === 0) return null;
   return (
     <div
@@ -1730,6 +1755,7 @@ function NoticeShelf({ notices, floating = false, align = "left" }: { notices: N
         flexDirection: "column",
         alignItems: align === "right" ? "flex-end" : "stretch",
         marginBottom: floating ? 0 : 10,
+        pointerEvents: floating ? "auto" : undefined,
       }}
     >
       {notices.map((notice, index) => {
@@ -1737,36 +1763,37 @@ function NoticeShelf({ notices, floating = false, align = "left" }: { notices: N
           ? "var(--status-error)"
           : notice.type === "warning"
             ? "var(--status-warning)"
-            : notice.type === "success"
-              ? "var(--status-success)"
-              : "var(--accent)";
+              : notice.type === "success"
+                ? "var(--status-success)"
+                : "var(--accent)";
+        const isError = notice.type === "error";
         return (
           <div
             key={notice.id}
             className="notice-shelf-item"
             style={{
               display: "flex",
-              alignItems: "center",
+              alignItems: isError ? "flex-start" : "center",
               gap: 8,
               minHeight: 36,
-              height: 36,
-              maxHeight: 48,
+              height: isError ? "auto" : 36,
+              maxHeight: isError ? 96 : 48,
               marginBottom: index === notices.length - 1 ? 0 : 4,
               overflow: "hidden",
               borderRadius: "var(--radius-control)",
-              border: "1px solid color-mix(in srgb, var(--border) 70%, transparent)",
-              background: "var(--bg)",
-              color: "var(--text-muted)",
+              border: `1px solid ${isError ? "color-mix(in srgb, var(--status-error) 35%, var(--border))" : "color-mix(in srgb, var(--border) 70%, transparent)"}`,
+              background: isError ? "color-mix(in srgb, var(--status-error) 7%, var(--bg))" : "var(--bg)",
+              color: isError ? "var(--text)" : "var(--text-muted)",
               width: "fit-content",
-              maxWidth: "min(100%, 620px)",
+              maxWidth: "min(100%, 640px)",
               boxShadow: floating ? "var(--shadow-pop)" : "var(--shadow-card)",
               fontSize: 12,
-              lineHeight: 1.35,
+              lineHeight: 1.4,
               transformOrigin: "top center",
               animation: notice.exiting
                 ? "notice-shelf-out var(--dur-med) ease-in forwards"
                 : "notice-shelf-in var(--dur-med) var(--ease-out-warm) both",
-              padding: "0 10px",
+              padding: isError ? "8px 8px 8px 10px" : "0 10px",
             }}
           >
             <span
@@ -1776,11 +1803,52 @@ function NoticeShelf({ notices, floating = false, align = "left" }: { notices: N
                 borderRadius: "50%",
                 background: color,
                 flexShrink: 0,
+                marginTop: isError ? 6 : 0,
               }}
             />
-            <span style={{ padding: "8px 0", minWidth: 0, maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            <span
+              style={{
+                padding: isError ? 0 : "8px 0",
+                minWidth: 0,
+                maxWidth: "100%",
+                overflow: "hidden",
+                display: isError ? "-webkit-box" : "block",
+                WebkitLineClamp: isError ? 3 : undefined,
+                WebkitBoxOrient: isError ? "vertical" as const : undefined,
+                overflowWrap: "anywhere",
+                whiteSpace: isError ? "normal" : "nowrap",
+                textOverflow: isError ? "clip" : "ellipsis",
+                flex: 1,
+              }}
+              title={notice.message}
+            >
               {notice.message}
             </span>
+            {onDismiss && (
+              <button
+                type="button"
+                onClick={() => onDismiss(notice.id)}
+                aria-label={translate("agentStream.dismiss")}
+                title={translate("agentStream.dismiss")}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  width: 18,
+                  height: 18,
+                  padding: 0,
+                  border: 0,
+                  borderRadius: "var(--radius-control)",
+                  background: "transparent",
+                  color: "var(--text-dim)",
+                  cursor: "pointer",
+                  flexShrink: 0,
+                  marginTop: isError ? 1 : 0,
+                }}
+              >
+                <span aria-hidden style={{ fontSize: 12, lineHeight: 1 }}>×</span>
+              </button>
+            )}
           </div>
         );
       })}

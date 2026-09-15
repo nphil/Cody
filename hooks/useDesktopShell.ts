@@ -21,10 +21,15 @@ interface TauriWindowHandle {
   onResized(handler: () => void): Promise<() => void>;
 }
 
+interface TauriCore {
+  invoke<T = unknown>(command: string, args?: Record<string, unknown>): Promise<T>;
+}
+
 interface TauriGlobal {
   window: {
     getCurrentWindow(): TauriWindowHandle;
   };
+  core?: TauriCore;
 }
 
 declare global {
@@ -42,6 +47,18 @@ export interface DesktopShellControls {
   minimize: () => void;
   toggleMaximize: () => void;
   close: () => void;
+  /** Sends metadata-only activity state to the native taskbar/tray bridge. */
+  updateDesktopStatus: (status: DesktopStatusUpdate) => void;
+}
+
+export interface DesktopStatusUpdate {
+  activeSessions: number;
+  activeSubagents: number;
+  unread: number;
+  completed: boolean;
+  unreadIds: string[];
+  completionId: string | null;
+  completionKind: string | null;
 }
 
 function hasTauriShell(): boolean {
@@ -147,5 +164,12 @@ export function useDesktopShell(): DesktopShellControls {
     void getTauriWindow()?.close().catch(() => {});
   }, []);
 
-  return { isDesktop, isMaximized, minimize, toggleMaximize, close };
+  const updateDesktopStatus = useCallback((status: DesktopStatusUpdate) => {
+    if (typeof window === "undefined") return;
+    const tauri = window.__TAURI__;
+    if (!tauri?.core || typeof tauri.core.invoke !== "function") return;
+    void tauri.core.invoke("desktop_status_update", { update: status }).catch(() => {});
+  }, []);
+
+  return { isDesktop, isMaximized, minimize, toggleMaximize, close, updateDesktopStatus };
 }
