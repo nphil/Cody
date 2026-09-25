@@ -83,6 +83,10 @@ function droppedEntry(input: ChainBindingInput, entry: string): DroppedChainEntr
 	const { provider } = parsed;
 	const availability = resolveModelAvailability(input.snapshot, provider, parsed.modelId);
 	if (availability.state !== "exhausted" || availability.allAccountsExhausted !== true) return null;
+	const providerAccounts = (input.snapshot?.accounts ?? []).filter((account) => account.provider.toLowerCase() === provider.toLowerCase());
+	if (providerAccounts.length > 0 && providerAccounts.every((account) => Boolean(account.disabled))) {
+		return { entry, provider, reason: "all accounts disabled", until: null, source: "disabled" };
+	}
 
 	const credits = input.blackouts?.find((blackout) => blackout.provider === provider && blackout.kind === "credits");
 	if (credits) return { entry, provider, reason: credits.reason || "out of credits", until: null, source: "credits" };

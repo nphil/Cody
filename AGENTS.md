@@ -575,6 +575,11 @@ bin/
 a Tauri 2 Rust shell over WebView2, running the server inside a dedicated
 WSL2 distro flattened from this image. Own CI
 (`.github/workflows/desktop.yml`); full architecture in `docs/windows.md`.
+`desktop/scripts/prepare-tauri.mjs` loads the ignored `.env`/`.env.local`
+remote setting and emits an ignored exact-origin Tauri capability; no remote
+origin is granted when the setting is absent. The shell and web app share the
+metadata-only desktop activity bridge, whose terminal completion IDs drive
+native unread, sound, and toast state.
 
 ---
 
@@ -1698,43 +1703,6 @@ must name the panel that fixes it.
   multi-process deployment (multiple Next.js workers or replicas) would need a
   shared store for both before display requests survive crossing processes.
 
-### The shared browser (`lib/display/shared-browser.ts`)
-
-A browser the agent drives and the human watches at the same time. The
-streamed rung already renders a URL in a server-side Chromium and carries
-real pointer/keyboard input back; `shared_browser` hands the agent the
-DevTools endpoint of THAT Chromium, so automation acts on the exact surface
-on screen. The alternative it replaces — the agent launching its own headless
-browser and posting screenshots afterwards — means the human watches a copy
-that never moves, which was the complaint that produced this.
-
-- **Streamed, never auto.** The ladder's higher rungs frame the dev server in
-  the human's OWN browser, which by construction cannot show them anything
-  the agent's browser does. A shared request is published with
-  `mode: "stream"`, so there is exactly one candidate and it is the one Cody
-  renders.
-- **Raster, never H.264.** The H.264 rung degrades into a *different*
-  Chromium when a client turns out to have no decoder — which would strand
-  the agent on a browser nobody streams any more, with a CDP endpoint that
-  still answers. An endpoint handed to automation has to stay valid for the
-  whole run, and JPEG stills are plenty for watching a test drive itself.
-- **Handing out the endpoint IS the share**, and it lengthens the idle window
-  (`SHARED_IDLE_DISPOSE_MS`, 10 min, vs `IDLE_DISPOSE_MS`, 30 s). A human
-  closing the panel or switching tabs is not a reason to kill a browser an
-  agent is mid-run on; it would fail the automation with a dead endpoint and
-  no explanation.
-- **Discoverability is the whole feature.** A capability nothing reaches for
-  does not exist, so the instruction rides three places: the tool
-  DESCRIPTION (always in the schema, for every engine), the MCP declaration
-  in `bin/cody-display-mcp.js` (so an ACP engine gets the same tool through
-  `POST /api/internal/display` with `shared: true`), and a standing rule in
-  the operator's user-level `RULES.md`, which reaches every session and
-  subagent rather than only sessions that happen to read this file.
-- **The automation adopts the open tab.** `browser.open({app:{cdp_url}})`
-  connects to the provider's Chromium and takes over the page it is already
-  streaming; a second tab is fine too, since the provider streams the browser
-  the human is watching either way.
-
 ### Cross-session awareness (`lib/session-tools.ts`)
 
 One conversation regularly needs to know what another is doing, and Cody is
@@ -1783,148 +1751,6 @@ paged).
   `capability.sid` alone — a body may name any session id, but it must match
   the token, and the caller's identity is derived server-side from it.
 
-### Browser-hosted hardware (`lib/devices/`)
-
-The hardware is connected to the machine running Cody in the browser, not to the
-server. The page owns the real `SerialPort`, `USBDevice`, or BLE
-characteristic; the server only relays frames within that Cody session. Browser
-grants are user-selected, secure-context capabilities. Do not claim, widen, or
-re-use a grant across sessions.
-
-- **Discover first.** `device_list` reports the current browser's secure-context
-  and Serial/USB/Bluetooth capabilities plus its granted device IDs. If it has
-  no device, ask the user to use the Devices panel's browser picker. Web Serial
-  is unavailable on Android, where the WebUSB serial polyfill is used when
-  available; browser/OS/driver support is reported rather than assumed.
-- **Grants, identity, and leases are strict.** A device is owned by one session;
-  raw requests and a high-level operation hold mutually exclusive leases.
-  Re-adoption is limited to the same full USB VID/PID/serial identity. A device
-  which re-enumerates into another identity or mode needs a fresh user grant,
-  then a new operation and confirmation. Do not retry or replay a write across
-  disconnect, cancellation, or mode change. Raw USB IN/control-IN calls are
-  bounded (five seconds by default); an expired connection is invalidated.
-- **Use the raw tools only for discovery or a protocol Cody does not implement.**
-  `device_open`, `device_read`, `device_write`, `device_close`,
-  `usb_transfer`, and `ble_gatt` are available after a grant. Opening USB
-  reports claimed interfaces, descriptors, and endpoints; a requested
-  unclaimable interface fails rather than becoming a partial success. On
-  Windows an interface held by another driver cannot be claimed; this is a host
-  driver issue, not a retryable device error. Do not hand-roll packet loops in
-  `eval` for an implemented protocol (ESP, ADB, fastboot, DFU, Gecko, STM32,
-  or STK500).
-
-#### Operations, artifacts, and progress
-
-Use high-level operation tools for supported work:
-`device_detect`, `device_dump`, `device_flash`, `device_exec`,
-`device_push`, `device_pull`, `device_monitor`,
-`device_monitor_send`, `device_operation_status`, and
-`device_operation_cancel`. Start requests name the exact browser `device`,
-`protocol`, and where relevant target, offset, interface, and artifact
-`fileId` with its displayed SHA-256. The operation runs independently in the
-page. Read progress/status or cancel it; never translate approval into a tool
-argument. Phase/state/confirmation/terminal events are immediate; live
-progress and output are coalesced at 200 ms. Status deliberately retains only
-128 terminal records, each bounded to 256 events, 512 output lines, and 64 KiB
-of output.
-
-Input uploads (picker, drop, or an authorized local-path import) and device
-outputs are browser-owned session artifacts. `DeviceArtifactStore` hashes each
-Blob and waits for its IndexedDB commit in `cody-device-artifacts`; hydrate
-restores that session's escrow after reload. Artifacts never become server files
-or cross another session. Use the Devices panel's explicit download to retain an
-important backup outside browser storage. An output backup is selectable as a new input without download/re-upload; selecting it does not itself restore anything, and there is no generic or automatic restore. The panel displays artifact hashes, output,
-progress, cancellation, and the exact confirmation footprint.
-
-#### Verified flashing is intrinsic, never caller-designed
-
-A caller cannot supply a layout, geometry, protections, or approval in
-`options`. The selected protocol must first detect the device and produce its
-own intrinsic plan. Unknown geometry, a mismatched target/offset/chip, missing
-exact readback, or a partial/unknown destructive footprint refuses before a
-write. For an accepted flash, Cody hashes the original payload, expands to the
-complete erase/program footprint, backs up that complete footprint to committed
-artifact escrow, presents exactly one direct browser confirmation, writes once,
-and exact-reads the complete footprint back for SHA-256 verification. The
-confirmation distinguishes the payload digest/range from the actual program
-digest/erase range and names an exact protected-region override when one is
-allowed. ACKs, progress, CRCs, or a successful command are not verification.
-
-Protected region matching is classifier-enforced; only the exact named override
-for the matched protected class is accepted. A lost acknowledgement is unknown
-completion, never permission to retry. This applies to every supported flashing
-protocol and is intentionally stricter than vendor command-line behavior.
-
-#### Supported protocol boundaries
-
-- **ESP serial/SPI:** `detect`, `dump`, and verified `flash` are supported
-  through esptool. Detected ESP targets accept exact caller offsets within detected capacity and
-  `firmware`, `flash`, `factory`, or `spi-boot` targets; a 4 KiB
-  leading/trailing read-modify-write plan preserves the whole erase footprint.
-  ESP32 factory spans the intrinsic prefix/spi-boot/firmware range, and the
-  ESP8266 offset-zero `0..0x10000` range is conservatively spi-boot
-  protected; either needs exact `allow-spi-boot` when intersected. The flasher writes
-  once, uses esptool device MD5, then reads the full footprint back and
-  SHA-256-verifies it. Erase and eFuse actions are refused; detect does not
-  promise secure-boot or encryption discovery.
-- **Fastboot:** `detect`, `dump`, `flash`, and narrowly bounded `exec`
-  are supported. Flash has no inferred eMMC topology: it accepts only a whole
-  named partition at offset zero after exact partition/fetch size discovery,
-  full fetched backup, and full fetch readback hash verification. Every
-  partition is conservatively protected and needs the exact shown override.
-  Erase and partial/unknown-readback flashes refuse. `exec` supports volatile
-  `download` (unverified), readback-verified `set_active`, and reboot/reboot-
-  bootloader (unverified); it is not vendor CLI parity.
-- **USB DFU:** `detect`, `dump`, verified `flash`, and confirmed
-  `abort`/`clear_status` maintenance are descriptor-bound. Flash is allowed
-  only for bcdDFU `0x011a` on the actual selected `@Internal Flash` DfuSe
-  map, with contiguous readable/erasable/writable g-sectors inside the STM32
-  program range; it requires target `internal-flash`, an explicit absolute
-  offset, and raw binary (not a `.dfu` container). All internal flash is
-  conservatively protected and needs exact `allow-bootloader`. Cody escrows,
-  merges, writes, and exact-reads every touched sector without manifestation or
-  reset before proof. Generic bcdDFU `0x0110` remains detect/dump/exec only;
-  flash rejects. No caller descriptor option creates a capability.
-- **ADB:** `detect`, `push`, `pull`/`dump`, typed reboot, and a narrow
-  `exec` surface are authenticated with Cody's persistent browser IndexedDB
-  RSA credential. CNXN validates framing; only a bounded legacy existing-stream
-  OPEN/OKAY/CLSE probe is the fallback, not modern feature negotiation. Push
-  hashes and escrows the old target, confirms the exact target/digest, transfers
-  content-addressed 4 MiB staged chunks, validates its prefix after reconnect,
-  verifies the stage, and atomically replaces only then; a final disconnect
-  hashes the target before any rebuild/move. Exec permits literal `id`,
-  `uname -a`, `df -h`, and `getprop ro.*`; TWRP ORS queues only literal
-  backup/print lines in confirmation details and never executes them. New ADB
-  authorization or a different USB mode needs user re-grant; raw partition,
-  fuse, mount, and shell bypasses refuse.
-- **Serial bootloaders:** Gecko provides detection/XMODEM framing only until a
-  verified readback-capable flash profile exists. STM32 flash is limited to ROM
-  PID `0x0410` (STM32F103 medium-density), factory-size discovery, and 1 KiB
-  page-aligned backup/program/readback; unknown geometry refuses and every
-  program-flash write needs exact `allow-bootloader`. STK500 is limited to
-  ATmega328P signature `1e950f`, 32 KiB flash, 128-byte pages, application
-  `[0,0x7000)`, and its protected top 4 KiB bootloader; bootloader writes need
-  `allow-bootloader`. Both retain full physical-footprint escrow/readback.
-- **CMSIS-DAP/DAPLink and generic UF2 are not shipped.** WebUSB transport is
-  assessed feasible for a future target-specific CMSIS-DAP profile, but there
-  is no DAP dependency, generic memory-write/flash operation, or host helper
-  here. Generic UF2 copy does not prove programming or retention and has no
-  flash capability.
-
-#### Evidence and the optional helper
-
-Browser and fake-transport tests exercise the software guards only. No real browser
-grants or physical hardware operations were performed; hardware behavior is **unverified on real hardware**. Follow
-`docs/hardware-checklist.md` for the manual, recoverable-device evidence
-before treating any protocol as field-verified; it authorizes no destructive
-operation and each real action still needs an exact point-of-risk approval.
-
-`docs/hardware-host-helper.md` is a design, not a shipped component. A future
-optional local helper would be per-user and local-only, signed and bound to one
-origin/session/device/protocol, use typed allowlisted vendor invocations (never
-shell/PATH passthrough), require native point-of-risk confirmation and
-revocation, and enforce the same backup/readback rule. It supplies no current
-vendor CLI parity, elevated capability, CMSIS-DAP, or generic UF2 flashing.
 ### Disk exhaustion is a first-class failure (`lib/disk-space.ts`)
 - The instance data dir is finite and often quota-capped (a ZFS dataset on
   Unraid appdata). When it fills, npm dies with `errno -122` — EDQUOT, which

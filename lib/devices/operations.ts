@@ -30,10 +30,10 @@ export interface OperationArtifacts {
    transport: HardwareTransport;
   /** Stable grant identity captured before an ADB transport reconnect. */
   identity?: string;
-   release(): Promise<void>;
- }
- 
- export interface HardwareTransportProvider {
+  release(): Promise<void>;
+}
+
+export interface HardwareTransportProvider {
    borrowHardwareTransport(
      deviceId: string,
      options?: { interfaceNumber?: number; alternateSetting?: number },

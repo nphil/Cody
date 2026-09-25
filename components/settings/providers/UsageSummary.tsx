@@ -10,14 +10,15 @@
  * windows — a prepaid balance takes the bar's place. A provider Cody could
  * not read at all gets one muted footer line, never a row of its own.
  *
- * Pure and fetch-free: `buildUsageRows` / `buildOpenRouterRow` do the
- * grouping and window-picking, `UsageSummary` only renders what they return.
- * The container (ProviderDirectory) owns the two polling hooks and the
- * "provider id → open this row's drawer" lookup.
+ * Fetch-free: `buildUsageRows` / `buildOpenRouterRow` do the grouping and
+ * window-picking. This component renders those rows and owns the inline
+ * rename editor; ProviderDirectory owns the polling hooks and PATCH request.
  */
-import { AlertCircle, Loader2, RefreshCw } from "lucide-react";
+import { AlertCircle, Loader2, Pencil, RefreshCw } from "lucide-react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { OpenRouterAccountSnapshot } from "@/lib/openrouter/account";
 import { providerBrand } from "@/lib/provider-brand";
+import type { ProviderMethod } from "@/lib/provider-directory";
 import { selectBindingWindow } from "@/lib/usage/select";
 import type { UsageAccount, UsageWindow } from "@/lib/usage/types";
 import { clampQuotaPercent, QuotaBar, usageToneColor } from "@/components/QuotaBar";
@@ -26,6 +27,7 @@ import { ProviderTile, quietButtonStyle } from "./controls";
 /** A window earns a second line only when it is itself binding enough to be
  * worth the extra row — otherwise one bar per account is the whole point. */
 const SECOND_WINDOW_THRESHOLD = 70;
+const MAX_CONNECTION_NAME_LENGTH = 80;
 
 function fallbackProviderName(provider: string): string {
   return provider
@@ -104,11 +106,41 @@ export interface UsageAccountRow {
   key: string;
   provider: string;
   title: string;
+  /** Cody's saved connection name, when the usage API resolved one. */
+  customName: string | null;
+  /** Present only when this exact usage credential is in a renameable login roster. */
+  renameTarget: UsageRenameTarget | null;
   primary: WindowView;
   secondary: WindowView | null;
   /** Every window is a block: nothing measured this account, so the only
    * way to learn whether it recovered is to lift the block and try again. */
   blockedOnly: boolean;
+}
+
+export interface UsageRenameTarget {
+  /** Provider login id used by PATCH /api/auth/account/[provider]. */
+  loginId: string;
+  /** Exact provider credential row id, stringified without coercion or guessing. */
+  accountId: string;
+}
+
+export interface RenameUsageAccountInput extends UsageRenameTarget {
+  name: string;
+}
+
+function storedCustomName(account: UsageAccount): string | null {
+  const value = account.customName;
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function exactLoginMethod(account: UsageAccount, methods: readonly ProviderMethod[]): ProviderMethod | null {
+  if (account.credentialId === null) return null;
+  const exactId = String(account.credentialId);
+  return methods.find((method) =>
+    method.loginId === account.provider &&
+    method.canRenameAccount === true &&
+    method.accounts?.some((credential) => credential.id === exactId),
+  ) ?? null;
 }
 
 /**
@@ -119,7 +151,11 @@ export interface UsageAccountRow {
  * report (no windows, or one omp has disabled outright) renders no row —
  * silence is the correct answer for "no data", not a bar frozen at 0%.
  */
-export function buildUsageRows(accounts: readonly UsageAccount[]): UsageAccountRow[] {
+export function buildUsageRows(
+  accounts: readonly UsageAccount[],
+  providerMethods: readonly ProviderMethod[] = [],
+  canRenameAccounts = false,
+): UsageAccountRow[] {
   const order: string[] = [];
   const byProvider = new Map<string, UsageAccount[]>();
   for (const account of accounts) {
@@ -146,10 +182,15 @@ export function buildUsageRows(accounts: readonly UsageAccount[]): UsageAccountR
       const title = ordered.length > 1
         ? `${name} · ${index === 0 ? "Primary" : index === 1 ? "Secondary" : `Account ${index + 1}`}`
         : name;
+      const loginMethod = exactLoginMethod(account, providerMethods);
       rows.push({
         key: account.id,
         provider,
         title,
+        customName: storedCustomName(account),
+        renameTarget: canRenameAccounts && loginMethod?.loginId
+          ? { loginId: loginMethod.loginId, accountId: String(account.credentialId) }
+          : null,
         primary: toWindowView(binding.window),
         secondary: second ? toWindowView(second) : null,
         blockedOnly: account.windows.every((window) => window.source === "block"),
@@ -231,6 +272,73 @@ function WindowLine({ view, muted = false }: { view: WindowView; muted?: boolean
   );
 }
 
+function RenameUsageForm({
+  id,
+  title,
+  value,
+  currentName,
+  hasCustomName,
+  busy,
+  error,
+  onChange,
+  onSubmit,
+  onClear,
+  onCancel,
+}: {
+  id: string;
+  title: string;
+  value: string;
+  currentName: string | null;
+  hasCustomName: boolean;
+  busy: boolean;
+  error: string | null;
+  onChange: (value: string) => void;
+  onSubmit: () => void;
+  onClear: () => void;
+  onCancel: () => void;
+}) {
+  const inputId = useId();
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => inputRef.current?.focus(), []);
+
+  return (
+    <form
+      id={id}
+      className="usage-summary-rename-form"
+      aria-label={`Rename connection for ${title}`}
+      aria-busy={busy}
+      onSubmit={(event) => { event.preventDefault(); onSubmit(); }}
+      style={{ display: "flex", flex: "1 0 100%", width: "100%", boxSizing: "border-box", alignItems: "end", gap: 6, flexWrap: "wrap", padding: "0 12px 10px", minWidth: 0 }}
+    >
+      <div style={{ display: "flex", flex: "1 1 220px", flexDirection: "column", gap: 4, minWidth: 0 }}>
+        <label htmlFor={inputId} style={{ fontSize: 11, color: "var(--text-muted)" }}>Connection name</label>
+        <input
+          ref={inputRef}
+          id={inputId}
+          type="text"
+          autoComplete="off"
+          maxLength={MAX_CONNECTION_NAME_LENGTH}
+          value={value}
+          aria-describedby={`${inputId}-hint`}
+          onChange={(event) => onChange(event.currentTarget.value)}
+          disabled={busy}
+          className="ui-focus-ring"
+          style={{ minWidth: 0, width: "100%", boxSizing: "border-box", minHeight: 30, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", font: "inherit", fontSize: 12 }}
+        />
+        <span id={`${inputId}-hint`} style={{ fontSize: 10, color: "var(--text-dim)" }}>Leave empty and save to use the provider&apos;s default name.</span>
+        {error && <span role="alert" style={{ fontSize: 11, color: "var(--status-error)" }}>{error}</span>}
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+        <button type="submit" className="ui-focus-ring" disabled={busy || value.replace(/\s+/g, " ").trim() === (currentName ?? "")} style={{ ...quietButtonStyle, minHeight: 30, padding: "4px 9px", fontSize: 11 }}>
+          <span aria-live="polite">{busy ? "Saving…" : "Save name"}</span>
+        </button>
+        {hasCustomName && <button type="button" className="ui-focus-ring" onClick={onClear} disabled={busy} style={{ ...quietButtonStyle, minHeight: 30, padding: "4px 9px", fontSize: 11 }}>Clear name</button>}
+        <button type="button" className="ui-focus-ring" onClick={onCancel} disabled={busy} style={{ ...quietButtonStyle, minHeight: 30, padding: "4px 9px", fontSize: 11 }}>Cancel</button>
+      </div>
+    </form>
+  );
+}
+
 export interface UsageSummaryProps {
   accounts: readonly UsageAccount[];
   openRouter?: OpenRouterAccountSnapshot | null;
@@ -244,9 +352,14 @@ export interface UsageSummaryProps {
   onRetryBlock?: (provider: string, accountId: string) => void;
   /** Account id whose block is being lifted right now. */
   retryingAccountId?: string | null;
+  /** Login roster used only for exact provider + credential id matching. */
+  providerMethods?: readonly ProviderMethod[];
+  /** Admin permission from the provider directory response. */
+  canRenameAccounts?: boolean;
+  onRenameAccount?: (input: RenameUsageAccountInput) => Promise<void>;
 }
 
-/** Pure: takes already-fetched data as props, never fetches itself. Renders
+/** Takes already-fetched data as props and never fetches itself. Renders
  * nothing at all when there is nothing to say — no empty "Usage" header. */
 export function UsageSummary({
   accounts,
@@ -258,8 +371,37 @@ export function UsageSummary({
   onOpenAccount,
   onRetryBlock,
   retryingAccountId = null,
+  providerMethods = [],
+  canRenameAccounts = false,
+  onRenameAccount,
 }: UsageSummaryProps) {
-  const rows = buildUsageRows(accounts);
+  const rows = buildUsageRows(accounts, providerMethods, canRenameAccounts);
+  const editorIdPrefix = useId();
+  const [editingCredentialKey, setEditingCredentialKey] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [savingCredentialKey, setSavingCredentialKey] = useState<string | null>(null);
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [nameOverrides, setNameOverrides] = useState<Record<string, string | null>>({});
+  const renameTriggerRef = useRef<HTMLButtonElement>(null);
+  const connectionKey = (target: UsageRenameTarget) => `${target.loginId}\u0000${target.accountId}`;
+  const saveName = async (target: UsageRenameTarget, name: string) => {
+    if (!onRenameAccount) return;
+    const key = connectionKey(target);
+    setSavingCredentialKey(key);
+    setRenameError(null);
+    try {
+      await onRenameAccount({ ...target, name });
+      const normalizedName = name.replace(/\s+/g, " ").trim();
+      setNameOverrides((current) => ({ ...current, [key]: normalizedName || null }));
+      setEditingCredentialKey(null);
+      setRenameDraft("");
+      renameTriggerRef.current?.focus();
+    } catch (failure) {
+      setRenameError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      setSavingCredentialKey(null);
+    }
+  };
   const balance = buildOpenRouterRow(openRouter);
   const reportedProviders = new Set(rows.map((row) => row.provider));
   if (balance) reportedProviders.add(balance.provider);
@@ -283,39 +425,92 @@ export function UsageSummary({
 
       {(rows.length > 0 || balance) && (
         <div role="list" style={{ display: "flex", flexDirection: "column", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden", background: "var(--bg-panel)" }}>
-          {rows.map((row, index) => (
-            <div key={row.key} role="listitem" style={{ display: "flex", alignItems: "center", minWidth: 0, borderTop: index > 0 ? "1px solid var(--border)" : undefined }}>
-            <button
-              type="button"
-              className="usage-summary-row ui-focus-ring"
-              onClick={() => onOpenAccount?.(row.provider)}
-              style={{ ...rowStyle(false), flex: 1, minWidth: 0 }}
-            >
-              <span aria-hidden="true" className="usage-row-icon" style={{ display: "inline-flex", flexShrink: 0 }}>
-                <ProviderTile brand={row.provider} size={18} />
-              </span>
-              <span className="usage-row-title" style={{ width: 140, flexShrink: 0, fontSize: 12, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {row.title}
-              </span>
-              <span style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 4 }}>
-                <WindowLine view={row.primary} />
-                {row.secondary && <WindowLine view={row.secondary} muted />}
-              </span>
-            </button>
-            {row.blockedOnly && onRetryBlock && (
-              <button
-                type="button"
-                className="ui-focus-ring"
-                onClick={() => onRetryBlock(row.provider, row.key)}
-                disabled={retryingAccountId === row.key}
-                title="Lift the block so the next request tries this account again"
-                style={{ ...quietButtonStyle, minHeight: 24, padding: "3px 8px", margin: "0 8px", fontSize: 11, whiteSpace: "nowrap" }}
-              >
-                {retryingAccountId === row.key ? "Retrying…" : "Retry now"}
-              </button>
-            )}
-            </div>
-          ))}
+          {rows.map((row, index) => {
+            const target = row.renameTarget;
+            const targetKey = target ? connectionKey(target) : null;
+            const hasNameOverride = targetKey !== null && Object.hasOwn(nameOverrides, targetKey);
+            const customName = hasNameOverride && targetKey !== null ? nameOverrides[targetKey] : row.customName;
+            const isEditing = targetKey !== null && editingCredentialKey === targetKey;
+            const busy = targetKey !== null && savingCredentialKey === targetKey;
+            const editorId = `${editorIdPrefix}-rename-${index}`;
+
+            return (
+              <div key={row.key} role="listitem" className="usage-summary-item" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", minWidth: 0, borderTop: index > 0 ? "1px solid var(--border)" : undefined }}>
+                <button
+                  type="button"
+                  className="usage-summary-row ui-focus-ring"
+                  onClick={() => onOpenAccount?.(row.provider)}
+                  style={{ ...rowStyle(false), flex: 1, minWidth: 0 }}
+                >
+                  <span aria-hidden="true" className="usage-row-icon" style={{ display: "inline-flex", flexShrink: 0 }}>
+                    <ProviderTile brand={row.provider} size={18} />
+                  </span>
+                  <span className="usage-row-title" style={{ width: 140, flexShrink: 0, display: "flex", flexDirection: "column", gap: 1, minWidth: 0, fontSize: 12, fontWeight: 600 }}>
+                    {customName ? <>
+                      <span title={customName} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{customName}</span>
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 10, fontWeight: 400, color: "var(--text-muted)" }}>{row.title}</span>
+                    </> : <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{row.title}</span>}
+                  </span>
+                  <span style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 4 }}>
+                    <WindowLine view={row.primary} />
+                    {row.secondary && <WindowLine view={row.secondary} muted />}
+                  </span>
+                </button>
+                <div className="usage-summary-actions" style={{ display: "flex", alignItems: "center", gap: 5, paddingRight: 8, flexShrink: 0 }}>
+                  {row.blockedOnly && onRetryBlock && (
+                    <button
+                      type="button"
+                      className="ui-focus-ring"
+                      onClick={() => onRetryBlock(row.provider, row.key)}
+                      disabled={retryingAccountId === row.key}
+                      title="Lift the block so the next request tries this account again"
+                      style={{ ...quietButtonStyle, minHeight: 24, padding: "3px 8px", margin: "0 8px", fontSize: 11, whiteSpace: "nowrap" }}
+                    >
+                      {retryingAccountId === row.key ? "Retrying…" : "Retry now"}
+                    </button>
+                  )}
+                  {target && onRenameAccount && (
+                    <button
+                      type="button"
+                      className="usage-summary-rename ui-focus-ring"
+                      onClick={(event) => {
+                        renameTriggerRef.current = event.currentTarget;
+                        setEditingCredentialKey(isEditing ? null : targetKey);
+                        setRenameDraft(customName ?? "");
+                        setRenameError(null);
+                      }}
+                      disabled={savingCredentialKey !== null}
+                      aria-expanded={isEditing}
+                      aria-controls={isEditing ? editorId : undefined}
+                      aria-label={`Rename connection${customName ? ` ${customName}` : ` for ${row.title}`}`}
+                      style={{ ...quietButtonStyle, minHeight: 32, padding: "5px 8px", fontSize: 11, whiteSpace: "nowrap" }}
+                    >
+                      <Pencil size={11} aria-hidden="true" /> Rename connection
+                    </button>
+                  )}
+                </div>
+                {target && onRenameAccount && isEditing && (
+                  <RenameUsageForm
+                    id={editorId}
+                    title={row.title}
+                    value={renameDraft}
+                    currentName={customName ?? null}
+                    hasCustomName={Boolean(customName)}
+                    busy={busy}
+                    error={renameError}
+                    onChange={setRenameDraft}
+                    onSubmit={() => void saveName(target, renameDraft)}
+                    onClear={() => void saveName(target, "")}
+                    onCancel={() => {
+                      setEditingCredentialKey(null);
+                      setRenameError(null);
+                      renameTriggerRef.current?.focus();
+                    }}
+                  />
+                )}
+              </div>
+            );
+          })}
           {balance && (
             <button
               type="button"
@@ -352,6 +547,22 @@ export function UsageSummary({
           }
           .usage-summary-row .usage-row-title {
             width: auto !important;
+          }
+          .usage-summary-item {
+            flex-wrap: wrap;
+            align-items: stretch !important;
+          }
+          .usage-summary-item > .usage-summary-row {
+            flex: 1 1 100% !important;
+          }
+          .usage-summary-actions {
+            width: 100%;
+            box-sizing: border-box;
+            justify-content: flex-end;
+            padding-bottom: 7px;
+          }
+          .usage-summary-rename-form {
+            flex: 1 1 100%;
           }
         }
       `}</style>

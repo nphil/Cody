@@ -28,9 +28,12 @@
  * Rendered through `Drawer`: a side drawer on desktop, a pushed level on a
  * phone — never a second Dialog inside the settings dialog.
  */
-import { useMemo, useState } from "react";
+import { ChevronDown } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import { Drawer } from "../Drawer";
-import { ToggleSwitch } from "../primitives";
+import { chipStyle, ToggleSwitch } from "../primitives";
+import { getModelPageWindow } from "@/lib/model-catalog-pagination";
+import { MODEL_CATEGORY_OPTIONS, modelCategories, modelCategoryBucket, modelMatchesCategories, type ModelCategory } from "@/lib/model-categories";
 import { formatModelDisplayName } from "@/lib/model-display";
 
 export interface CurationModel {
@@ -39,7 +42,7 @@ export interface CurationModel {
   provider: string;
 }
 
-/** Rows rendered at once; the bulk buttons still apply to every match. */
+/** Rows shown on each page; the bulk buttons still apply to every match. */
 export const CURATION_VISIBLE_LIMIT = 60;
 
 const buttonStyle = {
@@ -53,13 +56,15 @@ const buttonStyle = {
   cursor: "pointer",
 } as const;
 
-export function ModelCurationDialog({ open, provider, catalog, enabled, saving, onCancel, onConfirm }: {
+export function ModelCurationDialog({ open, provider, catalog, enabled, hiddenForMe, saving, onCancel, onConfirm }: {
   open: boolean;
   provider: string;
   /** This provider's models from the UNRESTRICTED catalog. */
   catalog: CurationModel[];
   /** `provider/id` keys reaching sessions now. */
   enabled: Set<string>;
+  /** Models this user has hidden in the composer. */
+  hiddenForMe?: ReadonlySet<string>;
   saving: boolean;
   onCancel: () => void;
   /** `displayed` is every key the dialog listed — what "seen" records. */
@@ -67,6 +72,9 @@ export function ModelCurationDialog({ open, provider, catalog, enabled, saving, 
 }) {
   const [query, setQuery] = useState("");
   const [enabledOnly, setEnabledOnly] = useState(false);
+  const [selectedCategories, setSelectedCategories] = useState<Set<ModelCategory>>(() => new Set());
+  const [categoryMenuOpen, setCategoryMenuOpen] = useState(false);
+  const [pageIndex, setPageIndex] = useState(0);
   const [draft, setDraft] = useState<Set<string>>(() => new Set(enabled));
   const [includeFutureChoice, setIncludeFutureChoice] = useState<boolean | null>(null);
   const total = catalog.length;
@@ -77,15 +85,36 @@ export function ModelCurationDialog({ open, provider, catalog, enabled, saving, 
   // case where the glob is what the user means.
   const includeFuture = includeFutureChoice ?? wholeProvider;
 
+  const categoryOptions = useMemo(() => {
+    const counts = new Map<ModelCategory, number>();
+    for (const model of catalog) {
+      const modelCategory = modelCategoryBucket(model);
+      counts.set(modelCategory, (counts.get(modelCategory) ?? 0) + 1);
+    }
+    return MODEL_CATEGORY_OPTIONS
+      .filter((modelCategory) => counts.has(modelCategory))
+      .map((modelCategory) => ({ category: modelCategory, count: counts.get(modelCategory) ?? 0 }));
+  }, [catalog]);
+
   const needle = query.trim().toLowerCase();
+  const selectedCategoryKey = MODEL_CATEGORY_OPTIONS.filter((modelCategory) => selectedCategories.has(modelCategory)).join("|");
+  const selectedCategoryLabel = selectedCategoryKey.replace(/\|/g, " + ");
+  useEffect(() => {
+    setPageIndex(0);
+  }, [needle, enabledOnly, selectedCategoryKey]);
+
   const matches = catalog.filter((model) => {
     if (enabledOnly && !draft.has(`${model.provider}/${model.id}`)) return false;
+    if (!modelMatchesCategories(model, selectedCategories)) return false;
     if (!needle) return true;
     return model.id.toLowerCase().includes(needle) || (model.name ?? "").toLowerCase().includes(needle);
   });
-  const visible = matches.slice(0, CURATION_VISIBLE_LIMIT);
-  const hiddenCount = matches.length - visible.length;
-  const dirty = draft.size !== enabled.size || [...draft].some((key) => !enabled.has(key)) || (includeFutureChoice !== null && includeFutureChoice !== wholeProvider);
+  const page = getModelPageWindow(matches.length, pageIndex, CURATION_VISIBLE_LIMIT);
+  const visible = matches.slice(page.start, page.end);
+  const hasCategoryFilter = selectedCategories.size > 0;
+  const hasFilter = Boolean(needle || enabledOnly || hasCategoryFilter);
+  const selectedHiddenCount = hiddenForMe ? [...draft].filter((key) => hiddenForMe.has(key)).length : 0;
+  const dirty = draft.size !== enabled.size || [...draft].some((key) => !enabled.has(key)) || (includeFutureChoice !== null && includeFutureChoice !== wholeProvider) || selectedHiddenCount > 0;
 
   const bulk = (bulkKeys: string[], on: boolean) => {
     setDraft((previous) => {
@@ -114,6 +143,14 @@ export function ModelCurationDialog({ open, provider, catalog, enabled, saving, 
       <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>
         {draft.size} of {total} enabled. Only enabled models reach the composer, model roles and fallback chains.
       </p>
+      <p style={{ margin: "-6px 0 0", color: "var(--text-dim)", fontSize: 11, lineHeight: 1.45 }}>
+        Saving also makes selected models visible in your composer if you had hidden them personally. It does not pin them.
+      </p>
+      {selectedHiddenCount > 0 && (
+        <p style={{ margin: "-6px 0 0", color: "var(--accent)", fontSize: 11, lineHeight: 1.45 }}>
+          {selectedHiddenCount} selected model{selectedHiddenCount === 1 ? " is" : "s are"} currently hidden for you and will be shown when you save.
+        </p>
+      )}
 
       <label style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12, padding: "10px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", cursor: "pointer" }}>
         <span style={{ display: "flex", flexDirection: "column", gap: 3, minWidth: 0 }}>
@@ -139,6 +176,47 @@ export function ModelCurationDialog({ open, provider, catalog, enabled, saving, 
           data-drawer-autofocus
           style={{ flex: "1 1 200px", minWidth: 0, padding: "7px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12 }}
         />
+        {categoryOptions.length > 1 && (
+          <details
+            open={categoryMenuOpen}
+            onToggle={(event) => setCategoryMenuOpen(event.currentTarget.open)}
+            style={{ position: "relative", flex: "0 1 190px", minWidth: 160 }}
+          >
+            <summary
+              aria-label="Model categories"
+              className="ui-focus-ring"
+              style={{ display: "flex", alignItems: "center", gap: 8, minHeight: 32, padding: "4px 10px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12, cursor: "pointer", listStyle: "none" }}
+            >
+              <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {hasCategoryFilter ? selectedCategoryLabel : "All categories"}
+              </span>
+              <ChevronDown
+                aria-hidden="true"
+                size={16}
+                style={{ color: "var(--text-muted)", flexShrink: 0, transform: categoryMenuOpen ? "rotate(180deg)" : "rotate(0deg)", transition: "transform var(--dur-fast)" }}
+              />
+            </summary>
+            <div role="group" aria-label="Model categories" style={{ position: "absolute", zIndex: 4, top: "calc(100% + 4px)", left: 0, right: 0, padding: 4, border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", boxShadow: "var(--shadow-modal)", maxHeight: 240, overflowY: "auto" }}>
+              <div style={{ padding: "5px 8px 6px", color: "var(--text-dim)", fontSize: 10 }}>Select any categories</div>
+              {categoryOptions.map(({ category: modelCategory, count }) => (
+                <label key={modelCategory} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 8px", borderRadius: "var(--radius-control)", color: "var(--text)", fontSize: 12, cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={selectedCategories.has(modelCategory)}
+                    onChange={() => setSelectedCategories((previous) => {
+                      const next = new Set(previous);
+                      if (next.has(modelCategory)) next.delete(modelCategory);
+                      else next.add(modelCategory);
+                      return next;
+                    })}
+                  />
+                  <span style={{ flex: 1 }}>{modelCategory}</span>
+                  <span style={{ color: "var(--text-muted)", fontSize: 11 }}>{count}</span>
+                </label>
+              ))}
+            </div>
+          </details>
+        )}
         <label style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--text-muted)", fontSize: 12, minHeight: 30 }}>
           <input type="checkbox" checked={enabledOnly} onChange={(event) => setEnabledOnly(event.target.checked)} /> Enabled only
         </label>
@@ -146,10 +224,10 @@ export function ModelCurationDialog({ open, provider, catalog, enabled, saving, 
 
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
         <button type="button" disabled={matches.length === 0} onClick={() => bulk(matches.map((model) => `${model.provider}/${model.id}`), true)} style={{ ...buttonStyle, cursor: matches.length === 0 ? "default" : "pointer" }}>
-          Enable {needle || enabledOnly ? `these ${matches.length}` : "all"}
+          Enable {hasFilter ? `these ${matches.length}` : "all"}
         </button>
         <button type="button" disabled={matches.length === 0} onClick={() => bulk(matches.map((model) => `${model.provider}/${model.id}`), false)} style={{ ...buttonStyle, cursor: matches.length === 0 ? "default" : "pointer" }}>
-          Disable {needle || enabledOnly ? `these ${matches.length}` : "all"}
+          Disable {hasFilter ? `these ${matches.length}` : "all"}
         </button>
       </div>
 
@@ -164,21 +242,29 @@ export function ModelCurationDialog({ open, provider, catalog, enabled, saving, 
             </div>
           : visible.map((model) => {
             const key = `${model.provider}/${model.id}`;
+            const displayName = formatModelDisplayName(model.id, model.name);
+            const categories = modelCategories(model).filter((modelCategory) => modelCategory !== "Other");
             return (
               <label key={key} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", minHeight: 36, color: "var(--text-muted)", fontSize: 12, borderBottom: "1px solid var(--border)", cursor: "pointer" }}>
                 <input type="checkbox" checked={draft.has(key)} onChange={(event) => bulk([key], event.target.checked)} />
                 <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {formatModelDisplayName(model.id, model.name) !== model.id ? <>{formatModelDisplayName(model.id, model.name)} <code style={{ color: "var(--text-dim)" }}>{model.id}</code></> : <code>{model.id}</code>}
+                  {displayName !== model.id ? <>{displayName} <code style={{ color: "var(--text-dim)" }}>{model.id}</code></> : <code>{model.id}</code>}
                 </span>
+                {categories.map((modelCategory) => <span key={modelCategory} style={{ ...chipStyle, flexShrink: 0, color: "var(--accent)" }}>{modelCategory}</span>)}
               </label>
             );
           })}
-        {hiddenCount > 0 && (
-          <div style={{ padding: "8px 10px", color: "var(--text-dim)", fontSize: 11 }}>
-            {hiddenCount} more match — refine the search to see them, or use the bulk buttons above (they apply to all {matches.length}).
-          </div>
-        )}
       </div>
+
+      {page.pageCount > 1 && (
+        <nav aria-label={`${provider} model pages`} style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", color: "var(--text-dim)", fontSize: 11 }}>
+          <span aria-live="polite">Showing {page.start + 1}–{page.end} of {matches.length}</span>
+          <span style={{ flex: 1, minWidth: 12 }} />
+          <button type="button" disabled={page.pageIndex === 0} onClick={() => setPageIndex((current) => Math.max(0, current - 1))} style={{ ...buttonStyle, opacity: page.pageIndex === 0 ? 0.45 : 1, cursor: page.pageIndex === 0 ? "default" : "pointer" }}>Previous</button>
+          <span aria-label={`Page ${page.pageIndex + 1} of ${page.pageCount}`}>Page {page.pageIndex + 1} of {page.pageCount}</span>
+          <button type="button" disabled={page.pageIndex === page.pageCount - 1} onClick={() => setPageIndex((current) => current + 1)} style={{ ...buttonStyle, opacity: page.pageIndex === page.pageCount - 1 ? 0.45 : 1, cursor: page.pageIndex === page.pageCount - 1 ? "default" : "pointer" }}>Next</button>
+        </nav>
+      )}
     </Drawer>
   );
 }

@@ -125,7 +125,7 @@ export function SettingsShell({ request, cwd, sessionId, capabilities = ALL_CAPA
   // What the leave dialog is guarding: the × button or a back gesture.
   const [pendingLeave, setPendingLeave] = useState<"close" | "pop" | null>(null);
   const [portalTarget, setPortalTarget] = useState<HTMLElement | null>(null);
-  const busy = useMemo(createSettingsBusy, []);
+  const busy = useMemo(() => createSettingsBusy(), []);
   const appliedSeq = useRef(request.seq);
 
   const visibleSections = useMemo(() => getVisibleSections(capabilities), [capabilities]);

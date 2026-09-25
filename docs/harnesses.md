@@ -245,12 +245,18 @@ What pi serves is flagged per surface, not as one bundle:
 - `cli-login.ts` + `claude-login.ts` / `codex-login.ts` /
   `pi-login.ts` (+ `bin/cody-pi-login.mjs`) and `lib/omp/provider-login.ts` —
   provider SIGN-IN behind `HarnessAdapter.providerLogins`
-  (`ProviderLoginSurface`: `list()`, `login(id, ui)`, optional `logout(id)`),
+  (`ProviderLoginSurface`: `list()`, `login(id, ui)`, optional `logout(id)`,
+  `removeAccount(id, accountId)`, and `renameAccount(id, accountId, name)`),
   gated by `capabilities.providerLogin`. Each engine runs its OWN login and
   keeps the credential in its OWN store; Cody drives the flow — a URL out, a
   pasted code or redirect URL in, or a device code to type — through one
   `ui` contract, and `/api/auth/*` turns that into the SSE frames the
   sign-in panel renders. omp: rpc-ui extension frames on a dedicated child.
+  omp account rows keep disabled history separate from active accounts; its
+  individual Cody Remove action permanently purges the selected local OMP
+  credential and dependent block state, while provider-wide logout retains
+  OMP's existing behavior. Cody-local account names are stored separately
+  from the engine credential store and never contain credential material.
   pi: the pi-ai OAuth flows, imported from the INSTALLED pi package in a
   child process. Claude Code: `claude auth login --claudeai` in a
   pseudo-terminal ("Paste code here if prompted >"). Codex:

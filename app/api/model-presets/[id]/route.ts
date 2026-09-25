@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { jsonError, requireAdminOrOpenInstance } from "@/lib/auth/http";
 import { requireEngine } from "@/lib/engine-guard";
+import { loadRoster } from "@/lib/model-plan/roster";
+import { unavailablePresetSelection } from "@/lib/model-presets/availability";
 import { presetOverlayEquals, sessionsOnPreset, unbindPreset } from "@/lib/model-presets/overlay";
 import { deletePreset, getPreset, PresetValidationError, updatePreset } from "@/lib/model-presets/store";
 import type { ModelPresetUpdate } from "@/lib/model-presets/types";
@@ -47,6 +49,16 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
     return jsonError("Invalid JSON body", 400, "invalid_json");
   }
   if (!isRecord(body)) return jsonError("Body must be an object", 400, "invalid_preset");
+  if (body.roles !== undefined || body.chains !== undefined) {
+    let roster;
+    try {
+      roster = await loadRoster();
+    } catch {
+      return jsonError("The current model roster is unavailable; retry after the provider catalog loads.", 503, "roster_unavailable");
+    }
+    const unavailable = unavailablePresetSelection({ roles: body.roles, chains: body.chains }, roster.models);
+    if (unavailable) return jsonError(unavailable, 400, "model_unavailable");
+  }
   const before = getPreset(id);
   let preset;
   try {

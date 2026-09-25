@@ -13,9 +13,10 @@ export const dynamic = "force-dynamic";
  * logout — `claude auth logout`, `codex logout`, pi's auth store. omp instead
  * lets several accounts serve the same provider (lib/omp/provider-login.ts,
  * backed by lib/harness/omp-credentials.ts): a JSON body naming `accountId`
- * removes just that one stored credential (`surface.removeAccount`) instead of
- * every credential for the provider (`surface.logout`, the no-body path below,
- * unchanged).
+ * permanently removes just that one stored credential (`surface.removeAccount`)
+ * instead of every credential for the provider (`surface.logout`, the no-body
+ * path below, unchanged). OMP-disabled history is not silently promoted into
+ * this action; only the selected row is purged.
  */
 export async function POST(
   req: Request,
@@ -59,7 +60,7 @@ export async function POST(
       // ...and the rail's cached `?cached=1` roster, or it keeps answering
       // "signed in" until the 15s peek window lapses.
       invalidateProviderLoginsCache(engine.id);
-      return NextResponse.json({ ok: true, provider, accountId, providerRemoved });
+      return NextResponse.json({ ok: true, provider, accountId, providerRemoved, permanent: true });
     } catch (error) {
       return NextResponse.json(
         { error: error instanceof Error ? error.message : String(error), code: "logout_failed" },

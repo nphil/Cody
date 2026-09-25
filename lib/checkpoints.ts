@@ -36,7 +36,11 @@ export function checkpointGitDir(cwd: string): string {
 }
 
 async function shadowGit(cwd: string, args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("git", args, {
+  const { stdout } = await execFileAsync("git", [
+    "-c", "core.autocrlf=false",
+    "-c", "core.eol=lf",
+    ...args,
+  ], {
     // Run FROM the work tree so relative pathspecs ("." in checkout/clean)
     // resolve against the workspace, not the server's own cwd.
     cwd: path.resolve(cwd),

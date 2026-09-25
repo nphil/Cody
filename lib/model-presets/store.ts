@@ -2,6 +2,8 @@ import { randomBytes, randomUUID } from "crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
 import path from "path";
 import { getAgentDir } from "../omp/paths";
+import { resolveRosterModel } from "../model-plan/derive";
+import type { RosterModel } from "../model-plan/roster";
 import { getOmpModelRoleIds, readModelRoles } from "../omp/model-roles";
 import { isRecord } from "../type-guards";
 import { parsePresetSelector } from "./selector";
@@ -347,7 +349,17 @@ export function deletePreset(id: string): void {
 
 /** What Smart resolves to for a conversation on `preset` (or base settings):
  *  the preset's `default` role, else the base config's. */
-export function resolveSmartDefault(preset: ModelPreset | null): SmartDefault | null {
+export function resolveSmartDefault(preset: ModelPreset | null, roster?: RosterModel[]): SmartDefault | null {
   const selector = preset?.roles.default ?? readModelRoles().roles.default;
-  return selector && isValidSelector(selector) ? parsePresetSelector(selector) : null;
+  if (!selector || !isValidSelector(selector)) return null;
+  if (!roster) return parsePresetSelector(selector);
+  // The effective OMP roster is authoritative after provider curation. An
+  // exact id ending in :high must also win over the thinking-suffix parser.
+  const model = resolveRosterModel(selector, roster);
+  if (!model) return null;
+  return {
+    provider: model.provider,
+    modelId: model.id,
+    thinkingLevel: selector === model.selector ? null : selector.slice(model.selector.length + 1),
+  };
 }

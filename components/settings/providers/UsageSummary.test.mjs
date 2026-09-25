@@ -154,6 +154,78 @@ test("a provider already shown as a row is not repeated in the unavailable foote
   assert.doesNotMatch(html, /Usage unavailable/);
 });
 
+function loginCredential(id, position, label = `Account ${position + 1}`) {
+  return {
+    id: String(id),
+    label,
+    position,
+    state: "standby",
+    planType: null,
+    resetsAt: null,
+    canRemove: true,
+  };
+}
+
+function loginMethod(overrides = {}) {
+  return {
+    kind: "oauth",
+    state: "connected",
+    loginId: "anthropic",
+    canRenameAccount: true,
+    accounts: [loginCredential(1, 0), loginCredential(2, 1)],
+    winning: true,
+    ...overrides,
+  };
+}
+
+test("custom connection names keep provider and account-position context, with exact rename targets", () => {
+  const accounts = [
+    account({ id: "acct-primary", provider: "anthropic", credentialId: 1, customName: "Work account" }),
+    account({ id: "acct-secondary", provider: "anthropic", credentialId: 2, customName: null }),
+  ];
+  const rows = buildUsageRows(accounts, [loginMethod()], true);
+  assert.equal(rows[0].customName, "Work account");
+  assert.deepEqual(rows[0].renameTarget, { loginId: "anthropic", accountId: "1" });
+  assert.equal(rows[0].title, "Claude · Primary");
+  assert.equal(rows[1].title, "Claude · Secondary");
+
+  const html = renderToStaticMarkup(React.createElement(UsageSummary, {
+    accounts,
+    providerMethods: [loginMethod()],
+    canRenameAccounts: true,
+    onRenameAccount: async () => {},
+  }));
+  assert.match(html, /Work account/);
+  assert.match(html, /Claude · Primary/);
+  assert.match(html, /Claude · Secondary/);
+  assert.match(html, /Rename connection/);
+});
+
+test("a custom name still displays without a roster, but cannot expose rename", () => {
+  const html = renderToStaticMarkup(React.createElement(UsageSummary, {
+    accounts: [account({ customName: "Work account" })],
+  }));
+  assert.match(html, /Work account/);
+  assert.doesNotMatch(html, /Rename connection/);
+});
+
+test("rename requires admin access and exact provider login plus credential row id", () => {
+  const base = account({ provider: "anthropic", credentialId: 1 });
+  const cases = [
+    { name: "non-admin", accounts: [base], methods: [loginMethod()], canEdit: false },
+    { name: "missing credential id", accounts: [account({ provider: "anthropic", credentialId: null })], methods: [loginMethod()], canEdit: true },
+    { name: "different login id", accounts: [base], methods: [loginMethod({ loginId: "anthropic-console" })], canEdit: true },
+    { name: "different credential id", accounts: [base], methods: [loginMethod({ accounts: [loginCredential("01", 0)] })], canEdit: true },
+    { name: "rename not supported", accounts: [base], methods: [loginMethod({ canRenameAccount: false })], canEdit: true },
+    { name: "roster unavailable", accounts: [base], methods: [loginMethod({ accounts: undefined })], canEdit: true },
+  ];
+
+  for (const scenario of cases) {
+    const row = buildUsageRows(scenario.accounts, scenario.methods, scenario.canEdit)[0];
+    assert.equal(row.renameTarget, null, scenario.name);
+  }
+});
+
 test("an account that only a block speaks for says so and offers Retry now; a measured one does not", () => {
   const blocked = {
     provider: "alibaba-token-plan", id: "alibaba-4", identity: null, credentialId: 4, label: "Alibaba", planType: null, unlimited: false,

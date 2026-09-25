@@ -35,6 +35,8 @@ export interface ToastOptions {
   /** Auto-dismiss after this long instead of the provider default (4s).
    * Use for toasts worth reading slowly (model switches: 10s). */
   durationMs?: number;
+  /** Called when Base UI closes the toast, including automatic expiry. */
+  onClose?: () => void;
   /** One button in the toast — the undo of a reversible action (hide, disable,
    * unpin). Clicking it runs the handler and closes the toast. */
   action?: ToastAction;
@@ -48,6 +50,7 @@ function add(kind: ToastKind, title: React.ReactNode, description?: React.ReactN
     description,
     type: kind,
     ...(options?.durationMs !== undefined ? { timeout: options.durationMs } : {}),
+    ...(options?.onClose ? { onClose: options.onClose } : {}),
     // base-ui's Toast.Action reads `actionProps` off the toast object: the
     // label becomes the button's children and the handler its onClick. The
     // toast closes itself after the action so an undo cannot fire twice.

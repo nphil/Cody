@@ -34,7 +34,7 @@ desktop/
   src-tauri/
     Cargo.toml
     tauri.conf.json     # frameless window, NSIS bundle, withGlobalTauri
-    capabilities/       # remote-URL IPC grants for http://localhost:PORT
+    capabilities/       # loopback grant + ignored exact-origin remote grant
     src/
       main.rs           # window + lifecycle wiring
       commands.rs       # IPC surface (see contract below)
@@ -54,9 +54,13 @@ only desktop awareness is runtime feature detection (below).
 
 1. Shell launches → shows the bundled **bootstrap page** (bundled asset, not
    the server) with status.
-2. Checks, in order: WSL2 present → `cody` distro registered → runtime
-   version marker matches → server healthy.
-3. Missing WSL → guided enable (link + elevated command, reboot notice);
+2. If `CODY_DESKTOP_REMOTE_URL` is configured, Remote mode validates that exact
+   HTTPS origin and waits for its health endpoint without starting WSL. Without
+   that setting, the build is local-only and a fresh config defaults to Local
+   WSL2 mode. The bootstrap page can switch between the available modes.
+3. Local mode checks, in order: WSL2 present → `cody` distro registered →
+   runtime version marker matches → server healthy.
+4. Missing WSL → guided enable (link + elevated command, reboot notice);
    detection is probe-based (`WSL_UTF8=1`, hex HRESULTs like `0x8007019e`
    feature-off / `0x80370102` no-virtualization — wsl.exe has no exit-code
    contract). Missing distro → download `rootfs.tar.gz` (progress UI, sha256
@@ -66,23 +70,29 @@ only desktop awareness is runtime feature detection (below).
    multi-GB temp file). Before importing, clear NTFS compress/encrypt
    attributes on the install dir (they corrupt WSL VHDs) and keep it on the
    system drive.
-4. Starts the server: a held `wsl -d cody -- env <ENV BLOCK> sh -lc
+5. Starts the server: a held `wsl -d cody -- env <ENV BLOCK> sh -lc
    '/usr/local/bin/cody-entrypoint'` child (hidden window). The shell owns
    this child; app exit terminates it (`wsl --terminate cody` as cleanup).
    `docker export` strips image ENV, so **the shell owns the env block**,
    mirroring the Dockerfile: `HOME=/data/home`, `PI_CODING_AGENT_DIR=/data/agent`,
    `CODY_HARNESS=omp`, `CODY_CHROMIUM_BIN=/usr/bin/chromium`, `PORT=<port>`,
    `NODE_ENV=production`, `TERM=xterm-256color`, plus desktop-only vars below.
-5. Polls `http://localhost:<port>/api/accounts/state` until healthy, then
+6. Polls `http://localhost:<port>/api/accounts/state` until healthy, then
    navigates the main window to `http://localhost:<port>/`.
-6. Crash/exit of the server child → bootstrap page returns with the error and
+7. Crash/exit of the server child → bootstrap page returns with the error and
    a retry action.
 
 **Port**: default `30179`, persisted in the shell's config
-(`%APPDATA%\Cody\config.json`); collision → next free port. The remote
-capability grants `http://localhost:*` / `http://127.0.0.1:*` (port and
+(`%APPDATA%\Cody\config.json`); collision → next free port. The local
+capability grants only `http://localhost:*` / `http://127.0.0.1:*` (port and
 path wildcards are supported — an omitted `:*` would match only port 80),
-so the port is free to move.
+so the local port is free to move. Remote capability generation is separate:
+`desktop/.env.local` overrides `desktop/.env`, while a non-empty process-level
+`CODY_DESKTOP_REMOTE_URL` overrides both. `.env.example` is never loaded, and
+without a configured URL no remote capability is emitted. An explicitly empty
+value disables remote mode; a non-empty invalid value fails the build. The URL
+must be HTTPS on the default port, without credentials, query strings, or
+fragments; the generated grant uses that exact origin only.
 
 **Networking contract** (verified): the server binds `127.0.0.1` inside
 WSL. Default-NAT `localhostForwarding` covers localhost-bound listeners, so
@@ -112,21 +122,34 @@ injection misbehaves: plain first-run setup in the WebView.
   min/max/close buttons calling the IPC surface, maximize-state reactive via
   window events, double-click maximizes. i18n for tooltips (en/ja/zh-CN).
 - Snap Layouts: ship without a plugin (decorum is abandoned; the
-  alternatives add surface for one hover flyout). Win+Z and edge-drag snap
-  still work — Discord-level behavior, accepted. Undecorated windows keep
-  native resize borders and Win11 rounded corners (`shadow: true`).
+  alternatives add surface for one hover flyout). The shell keeps the native
+  maximize/restore controls but currently disables edge-drag resizing so the
+  frameless WebView is not covered by a system-colored resize overlay.
 
 ## IPC surface (shell ⇄ web app)
 
-Tauri commands, granted to the remote origin `http://localhost:<port>` only:
+Tauri commands are granted to the two loopback patterns for Local mode and,
+only when configured at build time, to the exact HTTPS origin for Remote mode:
 
 | Command | Purpose |
 | --- | --- |
 | `window_minimize` / `window_toggle_maximize` / `window_close` | titlebar buttons |
 | `window_is_maximized` | initial titlebar state (then event-driven) |
 | `desktop_info` | `{ shellVersion, runtimeVersion, port, gpu: {vendor, name} \| null }` |
+| `desktop_status` | Read the current taskbar/tray activity metadata |
+| `desktop_status_update` | Update active-session, active-subagent, and unread completion metadata |
+| `desktop_mark_read` | Clear the native unread completion marker |
 | `open_external` | open a URL in the default browser |
 | `runtime_update_check` / `runtime_update_apply` | rootfs update flow |
+
+The desktop activity bridge reports the authoritative cross-session running set
+and the persisted unread-completion set. Regular snapshots are metadata-only
+and carry `completed: false`; a session transition to idle also sends one
+`completed: true` event with a stable session-derived completion ID and
+`completionKind: "session"`. Native indicators stay green while any session or
+subagent is active; once all work is idle, a completion that has not been
+selected again is shown as the pink/number unread marker. Streamed messages do
+not create completion markers individually.
 
 Plus core window events for maximize/unmaximize. Exact capability JSON per
 Tauri research report. External navigation is confined: non-app origins open

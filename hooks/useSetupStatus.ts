@@ -9,11 +9,11 @@ import { deriveReadiness, type SetupReadiness, UNKNOWN_READINESS } from "@/lib/s
  * `/api/providers?cached=1` (what is connected, and how many models each
  * provider serves).
  *
- * `?cached=1` matters: the uncached provider list and `/api/models` both start
- * the engine's utility child. Onboarding status is ambient — it is consulted
- * on every page load and after every wizard step — so it must never be the
- * thing that spawns a process. A cold cache answers `pending`, which the
- * readiness model already treats as "do not judge yet".
+ * `?cached=1` is the cheap first read: the uncached provider list and
+ * `/api/models` can start the engine's utility child. If that cached read is
+ * cold, this hook performs one authoritative provider read so an established
+ * install is not mistaken for a missing provider. Onboarding status is
+ * ambient, so it never retries in a loop.
  *
  * Deliberately not a `useSettingsData` route hook: that cache belongs to the
  * Settings dialog's lifecycle, while this is read by the app shell before any
@@ -51,7 +51,14 @@ export function useSetupStatus(enabled = true): SetupStatus {
 				return null;
 			}
 		};
-		void Promise.all([read("/api/engines"), read("/api/providers?cached=1")]).then(([enginesBody, providersBody]) => {
+		const readProviders = async (): Promise<Record<string, unknown> | null> => {
+			const cached = await read("/api/providers?cached=1");
+			if (cached?.pending !== true) return cached;
+			// A cold cache is not an answer. Read once through the normal route so
+			// existing credentials are reflected before readiness is judged.
+			return (await read("/api/providers")) ?? cached;
+		};
+		void Promise.all([read("/api/engines"), readProviders()]).then(([enginesBody, providersBody]) => {
 			if (controller.signal.aborted || generation !== latest.current) return;
 			setEngines(enginesBody);
 			setReadiness(deriveReadiness({

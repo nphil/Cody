@@ -28,7 +28,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSettingsShell } from "@/components/settings/shell-context";
 import { useConfigWriter, useNativeSettings } from "@/hooks/useConfigWriter";
 import { fetchSettingsRoute, invalidateSettingsRoutes, setSettingsRouteData, useSettingsRoute } from "@/hooks/useSettingsData";
-import { mirrorServerVisibility, readComposerVisibility, writeComposerVisibility } from "@/lib/composer-model-visibility";
+import { mirrorServerVisibility, readComposerVisibility, unhideModels, writeComposerVisibility } from "@/lib/composer-model-visibility";
 import { allowListActive, applyInstanceHide, curationModeFor, keepAllowListActive, modelKey, NOTHING_ENABLED_ENTRY, providerOfEntry, seedAllowList, summarizeProviderCuration, writeProviderSelection, type ProviderCuration } from "@/lib/model-allow-list";
 import type { ModelsData } from "@/lib/models-cache";
 
@@ -172,12 +172,13 @@ export interface ModelCatalogHandle {
   /** Admin: hide or show for the whole instance. On omp this edits
    * `enabledModels`; elsewhere the visibility file. */
   setInstanceHidden: (keys: readonly string[], hidden: boolean) => Promise<void>;
-  /** Admin, omp: replace one provider's selection (the curation dialog).
+  /** Admin, omp: replace one provider's selection (the curation dialog) and
+   * make those selected models visible to this user's composer.
    * `nothingEnabled` is true when the save left NO model reachable anywhere
    * (this was the only curated, or only connected, provider) — the caller
    * should tell the user, since the list is kept non-empty under the hood
    * (see `keepAllowListActive`) rather than read back as "unrestricted". */
-  writeProviderCuration: (provider: string, selected: readonly string[], options: { includeFuture: boolean }) => Promise<{ nothingEnabled: boolean }>;
+  writeProviderCuration: (provider: string, selected: readonly string[], options: { includeFuture: boolean }) => Promise<{ nothingEnabled: boolean; unhiddenCount: number }>;
   /** Admin: record that `keys` (default: the whole catalog) were shown.
    * `merge: true` unions `keys` into the ledger's current list instead of
    * replacing it — for a curation dialog that displayed only one provider's
@@ -499,10 +500,18 @@ export function useModelCatalog(): ModelCatalogHandle {
     // substitution, which silently turned "disable everything" into
     // "enable everything" (omp reads `[]` as unrestricted).
     const nothingEnabled = list.length === 0;
+    const hiddenBefore = listsRef.current.hidden;
+    const nextHidden = unhideModels([...hiddenBefore], selected);
+    const unhiddenCount = hiddenBefore.size - nextHidden.length;
     await writer.patchTop({ enabledModels: keepAllowListActive(list) });
+    // Curation is the administrator's answer to "which models can I use".
+    // If this user had separately hidden one of the selected models, make it
+    // available in their composer too. Do not touch pins or any other hidden
+    // model; the user can still hide a selected model again afterwards.
+    if (unhiddenCount > 0) await applyVisibility({ hidden: nextHidden });
     callbacks.onModelsSaved();
-    return { nothingEnabled };
-  }, [baseAllowList, writer, callbacks]);
+    return { nothingEnabled, unhiddenCount };
+  }, [applyVisibility, baseAllowList, writer, callbacks]);
 
   const markSeen = useCallback(async (keys?: readonly string[], options?: { merge?: boolean }) => {
     const response = await fetch("/api/models/seen", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ keys: keys ?? catalogKeys, merge: options?.merge === true }) });

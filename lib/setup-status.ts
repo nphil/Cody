@@ -62,12 +62,15 @@ export function isSetupComplete(readiness: SetupReadiness): boolean {
  * The inputs, each shaped as the route that carries it actually answers, so
  * the caller does no interpretation of its own.
  *
- * `engines`/`providers` are null while unread. A provider list that is present
- * but empty is a real answer (no providers connected), not an unread one.
+ * `engines`/`providers` are null while unread. The providers route also marks
+ * a cached response `pending` when its in-process login/model caches are cold;
+ * that is still unread, even if the response contains a partial row list. A
+ * provider list that is present, not pending, but empty is a real answer (no
+ * providers connected).
  */
 export interface SetupInputs {
 	engines: { engines?: ReadonlyArray<{ id?: string; installed?: boolean }>; active?: string | null } | null;
-	providers: { providers?: ReadonlyArray<{ connected?: boolean; modelCount?: number | null }>; pending?: { counts?: boolean } } | null;
+	providers: { providers?: ReadonlyArray<{ connected?: boolean; modelCount?: number | null }>; pending?: boolean } | null;
 }
 
 export function deriveReadiness(inputs: SetupInputs): SetupReadiness {
@@ -82,13 +85,13 @@ export function deriveReadiness(inputs: SetupInputs): SetupReadiness {
 	// FROM, so both stay unknown rather than false: an empty provider list
 	// under no engine is an artefact, not a finding.
 	if (!engine) return { engine: false, provider: false, models: false, pending: false };
-	if (!providers) return { engine, provider: false, models: false, pending: true };
+	// `/api/providers?cached=1` answers with `pending: true` when either its
+	// login roster or model-count cache is cold. A partial row list alongside
+	// that flag is not authoritative: treating it as empty is the false
+	// "no provider connected" banner seen after a Cody restart.
+	if (!providers || providers.pending === true) return { engine, provider: false, models: false, pending: true };
 	const rows = providers.providers ?? [];
 	const provider = rows.some((row) => row.connected === true);
-	// A cached provider read may not have counted models yet. Connected with an
-	// uncounted catalog is "pending", not "no models".
 	const counted = rows.reduce((total, row) => total + (typeof row.modelCount === "number" ? row.modelCount : 0), 0);
-	const countsPending = providers.pending?.counts === true;
-	if (provider && counted === 0 && countsPending) return { engine, provider, models: false, pending: true };
 	return { engine, provider, models: counted > 0, pending: false };
 }

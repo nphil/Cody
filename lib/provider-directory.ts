@@ -53,6 +53,10 @@ export interface ProviderMethod {
    * when a row carries several. */
   name?: string;
   canLogout?: boolean;
+  canRenameAccount?: boolean;
+  /** Safe diagnostic shown when a subscription is signed in but Cody cannot
+   * enumerate the credential rows needed for per-account management. */
+  accountDetailsReason?: string;
   hint?: string;
   /** The key method's variables; `key` and `env` carry the same list. */
   variables?: ProviderMethodVariable[];
@@ -175,12 +179,15 @@ function unique(ids: readonly string[]): string[] {
 }
 
 function loginMethod(login: ProviderLoginOption): ProviderMethod {
+  const accountDetailsReason = (login as ProviderLoginOption & { accountDetailsReason?: string }).accountDetailsReason;
   return {
     kind: login.kind,
     state: login.authenticated ? "connected" : "available",
     loginId: login.id,
     name: login.name,
     canLogout: login.canLogout,
+    ...(login.canRenameAccount !== undefined ? { canRenameAccount: login.canRenameAccount } : {}),
+    ...(accountDetailsReason ? { accountDetailsReason } : {}),
     ...(login.hint ? { hint: login.hint } : {}),
     ...(login.accounts ? { accounts: login.accounts } : {}),
     ...(login.multiAccount !== undefined ? { multiAccount: login.multiAccount } : {}),

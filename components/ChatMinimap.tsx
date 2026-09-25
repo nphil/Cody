@@ -9,6 +9,11 @@ interface Props {
   messageRefs: RefObject<(HTMLDivElement | null)[]>;
 }
 
+// Read mutable targets when callbacks run; their identity depends on the ref object.
+function readRef<T>(ref: RefObject<T>): T {
+  return ref.current;
+}
+
 export const MINIMAP_WIDTH = 36;
 
 function getMessagePreview(msg: AgentMessage | Partial<AgentMessage>): string {
@@ -115,7 +120,7 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
 
   // --- 仅更新视口比例，不读取消息 DOM ---
   const updateScroll = useCallback(() => {
-    const scrollEl = scrollContainer.current;
+    const scrollEl = readRef(scrollContainer);
     if (!scrollEl) return;
     const totalH = scrollEl.scrollHeight;
     const clientH = scrollEl.clientHeight;
@@ -142,12 +147,12 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
     if (measureThrottleRef.current) return;
     measureThrottleRef.current = setTimeout(() => {
       measureThrottleRef.current = null;
-      const scrollEl = scrollContainer.current;
+      const scrollEl = readRef(scrollContainer);
       if (!scrollEl) return;
       const totalH = scrollEl.scrollHeight;
       if (totalH <= 0) return;
 
-      const refs = messageRefs.current;
+      const refs = readRef(messageRefs);
       const newNodes: NodeInfo[] = [];
       let refIndex = 0;
       const allMessages = allMessagesRef.current;
@@ -247,7 +252,7 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
   }, []);
 
   const scrollToMinimapRatio = useCallback((viewportTopRatio: number) => {
-    const el = scrollContainer.current;
+    const el = readRef(scrollContainer);
     if (!el) return;
     const scrollable = el.scrollHeight - el.clientHeight;
     if (scrollable <= 0) return;

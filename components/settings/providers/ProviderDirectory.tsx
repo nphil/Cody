@@ -21,6 +21,7 @@ import { useOpenRouterAccount } from "@/hooks/useOpenRouterAccount";
 import { useSettingsRoute } from "@/hooks/useSettingsData";
 import { useUsage } from "@/hooks/useUsage";
 import { formatRelativeTime } from "@/lib/format";
+import { formatApiError } from "@/lib/i18n/api-error";
 import { sortConnectedRows, type ProviderRow, type ProvidersResponse } from "@/lib/provider-directory";
 import { Directory, type DirectoryRow, type DirectorySection } from "../Directory";
 import { Drawer } from "../Drawer";
@@ -31,7 +32,7 @@ import { AddProviderPicker, type PickChoice } from "./AddProviderPicker";
 import { buttonStyle, describeModels, describeWinning, invalidateProviderReads, missingOptionalHint, primaryButtonStyle, ProviderTile, quietButtonStyle } from "./controls";
 import { LocalEndpointForm } from "./LocalEndpointForm";
 import { PROVIDERS_PANEL_ID, ProviderDetail } from "./ProviderDetail";
-import { UsageSummary } from "./UsageSummary";
+import { UsageSummary, type RenameUsageAccountInput } from "./UsageSummary";
 
 export const PROVIDERS_ROUTE = "/api/providers";
 
@@ -79,6 +80,7 @@ export function ProviderDirectory() {
   const shortName = response?.engine.shortName ?? engine?.shortName ?? harnessLabel;
   const rows = useMemo(() => response?.providers ?? [], [response]);
   const connected = useMemo(() => sortConnectedRows(rows), [rows]);
+  const loginMethods = useMemo(() => rows.flatMap((row) => row.methods), [rows]);
   const canEdit = response?.canEdit ?? false;
   const readOnly = response?.instanceSource === "readonly";
   const canAddCustom = capabilities.models;
@@ -131,7 +133,37 @@ export function ProviderDirectory() {
     usage.refresh();
     openRouterAccount.refresh();
   }, [usage, openRouterAccount]);
-  const usageAge = usage.snapshot?.fetchedAt ? formatRelativeTime(usage.snapshot.fetchedAt, "en-US", Date.now()) : null;
+  const renameUsageAccount = useCallback(async ({ loginId, accountId, name }: RenameUsageAccountInput) => {
+    if (!canEdit) throw new Error("Only an administrator can rename provider accounts.");
+    const response = await fetch(`/api/auth/account/${encodeURIComponent(loginId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accountId, name }),
+    });
+    const body = await response.json().catch(() => null) as { error?: string; code?: string } | null;
+    if (!response.ok) {
+      throw new Error(body?.error || body?.code ? formatApiError(body ?? {}) : `HTTP ${response.status}`);
+    }
+    invalidateProviderReads();
+    // UsageSummary applies the saved name optimistically, so an in-flight
+    // poll cannot leave the visible row stale until the next timer tick.
+    usage.refresh();
+  }, [canEdit, usage]);
+  const usageFetchedAt = usage.snapshot?.fetchedAt;
+  const [usageNow, setUsageNow] = useState<number | null>(null);
+  useEffect(() => {
+    if (!usageFetchedAt) return;
+    const updateNow = () => setUsageNow(Date.now());
+    const initialTimer = window.setTimeout(updateNow, 0);
+    const interval = window.setInterval(updateNow, 60_000);
+    return () => {
+      window.clearTimeout(initialTimer);
+      window.clearInterval(interval);
+    };
+  }, [usageFetchedAt]);
+  const usageAge = usageFetchedAt && usageNow !== null
+    ? formatRelativeTime(usageFetchedAt, "en-US", usageNow)
+    : null;
   const usageUpdatedText = usageAge ? `Updated ${usageAge}` : null;
   // Stable closers: on a phone a Drawer registers a level with the shell in
   // an effect keyed on its `onClose`, and a fresh arrow per render would
@@ -240,6 +272,9 @@ export function ProviderDirectory() {
         onOpenAccount={openAccountProvider}
         onRetryBlock={canEdit ? (provider, accountId) => void retryBlock(provider, accountId) : undefined}
         retryingAccountId={retryingAccountId}
+        providerMethods={loginMethods}
+        canRenameAccounts={canEdit}
+        onRenameAccount={canEdit ? renameUsageAccount : undefined}
       />
       {retryMessage && (
         <div role="status" style={{ fontSize: 12, marginTop: -10, color: retryMessage.tone === "ok" ? "var(--text-muted)" : "var(--status-error)" }}>{retryMessage.text}</div>

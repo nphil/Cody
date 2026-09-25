@@ -68,6 +68,7 @@ export function isVisibleTranscriptMessage(message: AgentMessage, mode: Activity
   if (message.role === "custom" && message.customType === "xdev-mount-notice") return false;
   if (mode !== "hidden" || message.role === "user") return true;
   if (message.role === "assistant") {
+    if (message.errorMessage || message.stopReason === "aborted" || message.stopReason === "error") return true;
     return message.content.some(block => block.type === "toolCall"
       ? Boolean(results?.get(block.toolCallId)?.isError)
       : !isEmptyThinkingBlock(block));

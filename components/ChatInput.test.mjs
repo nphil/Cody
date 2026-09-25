@@ -106,6 +106,32 @@ test("renders goal, planning, and advisor indicators at the composer", () => {
   assert.match(html, /(Advisor enabled|chatInput\.advisorEnabled)/);
 });
 
+test("labels the queued bar by its first kind and only offers Steer for follow-ups", () => {
+  const renderQueued = (queuedMessages) => renderToStaticMarkup(
+    React.createElement(ChatInput, {
+      onSend() {},
+      onAbort() {},
+      onPromoteQueuedToSteer() {},
+      isStreaming: true,
+      queuedMessages,
+    }),
+  );
+
+  const followUpHtml = renderQueued({
+    followUp: ["Follow-up task"],
+    steering: [],
+  });
+  assert.match(followUpHtml, />(Queued follow-up|chatInput\.queuedFollowUp)</);
+  assert.match(followUpHtml, />(Steer|chatInput\.queuedSteerAction)</);
+
+  const steerHtml = renderQueued({
+    followUp: [],
+    steering: ["Already prioritized task"],
+  });
+  assert.match(steerHtml, />(Queued steer|chatInput\.queuedSteer)</);
+  assert.doesNotMatch(steerHtml, />(Steer|chatInput\.queuedSteerAction)</);
+});
+
 const ompEngine = { id: "omp", displayName: "OMP", shortName: "omp", experimental: false };
 
 test("renders the composer ring as an absence before the first usage read lands", () => {
@@ -605,6 +631,25 @@ test("the ring's tooltip names the model it is answering for", () => {
  */
 const composerSource = await readFile(new URL("./ChatInput.tsx", import.meta.url), "utf8");
 
+test("queued message deletion requires the shared accessible confirmation", () => {
+  const deleteHandler = composerSource.slice(
+    composerSource.indexOf("const handleQueuedDelete"),
+    composerSource.indexOf("const handleQueuedSteer"),
+  );
+  assert.match(deleteHandler, /setQueuedDeleteTarget\(\{ text: firstQueued\.text, draftKey, queue: queuedMessages \}\)/);
+  assert.doesNotMatch(deleteHandler, /onRemoveQueuedMessage\?\.\(firstQueued\.text\)/);
+
+  const dialog = composerSource.slice(
+    composerSource.indexOf("<ConfirmDialog"),
+    composerSource.indexOf("{/* Hidden file input */}"),
+  );
+  assert.match(dialog, /open=\{activeDeleteTarget !== null\}/);
+  assert.match(dialog, /chatInput\.queuedDeleteConfirmBody/);
+  assert.match(dialog, /cancelLabel=\{t\("chatInput\.cancel"\)\}/);
+  assert.match(dialog, /danger/);
+  assert.match(dialog, /onRemoveQueuedMessage\?\.\(activeDeleteTarget\.text\)/);
+});
+
 test("every attached image goes through the compressor, and failures are named", () => {
   const attach = composerSource.slice(
     composerSource.indexOf("const processImageFiles = useCallback"),
@@ -633,6 +678,25 @@ test("the over-budget message names the attachment to remove", () => {
   assert.match(budget, /chatInput\.attachmentsTooLarge/);
   // A text-only overflow has no attachment to blame and must not claim one.
   assert.match(budget, /if \(!verdict\.largest\) return t\("chatInput\.messageTooLarge"/);
+});
+
+test("text attachment admission shares byte and slot accounting with draft restore", () => {
+  const draftRestore = composerSource.slice(
+    composerSource.indexOf("function draftFilesToAttachedFiles"),
+    composerSource.indexOf("function revokeImagePreview"),
+  );
+  assert.match(draftRestore, /selectTextAttachments\(candidates, \{ usedBytes: 0, usedSlots: 0 \}\)/);
+
+  const freshDrop = composerSource.slice(
+    composerSource.indexOf("const processTextFiles = useCallback"),
+    composerSource.indexOf("const processFiles = useCallback"),
+  );
+  assert.match(freshDrop, /selectTextAttachments\(files, \{/);
+  assert.match(freshDrop, /attachedTextFilesRef\.current\.reduce\(\(total, file\) => total \+ file\.size, 0\)/);
+  assert.match(freshDrop, /pendingTextFileBytesRef\.current/);
+  assert.match(freshDrop, /usedSlots: attachedTextFilesRef\.current\.length \+ pendingTextFileCountRef\.current/);
+  assert.match(freshDrop, /pendingTextFileBytesRef\.current \+= textFiles\.reduce/);
+  assert.match(freshDrop, /pendingTextFileBytesRef\.current -= textFiles\.reduce/);
 });
 
 
@@ -908,6 +972,15 @@ test("the rpc-dialect slash builtins are offered only where the engine answers t
   assert.match(composerSource, /\{capabilities\.models && \(\s*<button/);
 });
 
+test("slash completion is token-aware and preserves prompt text", () => {
+  assert.match(composerSource, /extractSlashQuery\(value, slashCursor\)/);
+  assert.match(composerSource, /const slashQuery = slashMatch\?\.query \?\? null/);
+  assert.match(composerSource, /const before = match \? value\.slice\(0, match\.start\) : ""/);
+  assert.match(composerSource, /const after = match \? value\.slice\(match\.end\) : ""/);
+  assert.match(composerSource, /onClick=\{\(e\) => updateInputCursor\(e\.currentTarget\)\}/);
+  assert.match(composerSource, /slashCompletionApplyingRef/);
+});
+
 // ── OpenRouter's prepaid balance ────────────────────────────────────────────
 
 /** The account snapshot GET /api/openrouter/account answers with. */
@@ -1173,4 +1246,32 @@ test("keeps rpc model switches available at a turn boundary and marks session-sc
   assert.match(sessionScopedPicker, /\sdisabled(?:=|\s|>)/);
 });
 
-;
+test("renders pending switch, target reasoning, and attributed fallback detail", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(ChatInput, {
+      onSend() {},
+      onAbort() {},
+      onModelChange() {},
+      onThinkingLevelChange() {},
+      isStreaming: true,
+      modelChangeWhileStreaming: true,
+      model: { provider: "test", modelId: "test-model" },
+      modelList: [{ provider: "test", id: "test-model", modelId: "test-model", name: "Test model" }],
+      modelSwitchPending: { provider: "test", modelId: "next-model", name: "Next model", phase: "waiting" },
+      thinkingLevel: "low",
+      thinkingLevelPending: true,
+      thinkingLevelTarget: "high",
+      autoModelSwitch: {
+        from: "Primary",
+        to: "Fallback",
+        reason: "rate limit",
+        job: { kind: "main", roleLabelKey: "agentSession.job.default" },
+      },
+    }),
+  );
+
+  assert.match(html, /data-testid="model-switch-pending"/);
+  assert.match(html, /title="The current step finishes first\. Your conversation context is kept\."/);
+  assert.match(html, />Applying High</);
+  assert.match(html, /title="This conversation requested Primary; failed: rate limit; using Fallback."/);
+});

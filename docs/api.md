@@ -840,7 +840,7 @@ the credential is shared by every user's sessions.
 
 - `GET /api/auth/providers` → `{"engine":{"id","shortName"},
   "providers":[{"id","name","authenticated","kind":"oauth"|"device",
-  "canLogout","hint"?,"accounts"?,"multiAccount"?}],"reason"?}`. `reason`
+  "canLogout","canRenameAccount"?,"hint"?,"accounts"?,"multiAccount"?}],"reason"?}`. `reason`
   explains an empty roster (the engine is not installed). `accounts` (an
   engine that can enumerate its own stored credentials, e.g. omp) is
   `[{"id","label","position","state":"serving"|"standby"|"limited"|"disabled","planType","resetsAt","canRemove"}]`;
@@ -854,10 +854,18 @@ the credential is shared by every user's sessions.
   value back; a value posted before the engine asks is held for it.
 - `POST /api/auth/logout/{provider}` → `{"ok":true}`; `400 unsupported` for
   an engine whose only logout is interactive. With a JSON body
-  `{"accountId"}` it removes just that one stored credential instead of
-  every credential for the provider → `{"ok":true,"provider","accountId",
-  "providerRemoved"}`; `404 not_found` when that id no longer exists, `400
-  unsupported` for an engine with no per-account removal (only omp has one).
+  `{"accountId"}` it permanently removes just that one stored credential and
+  its dependent block state instead of disabling it or removing every
+  credential for the provider → `{"ok":true,"provider","accountId",
+  "providerRemoved","permanent":true}`; `404 not_found` when that id no
+  longer exists, `400 unsupported` for an engine with no per-account removal
+  (only omp has one). Provider-wide sign-out keeps the engine's existing
+  behavior.
+- `PATCH /api/auth/account/{provider}` with `{"accountId","name"}` saves a
+  Cody-only display name for one active account; an empty name clears it.
+  The response is `{"ok":true,"provider","accountId","label"}`. The
+  route is admin-only, rejects disabled history, and never reads or returns
+  credential material.
 
 ## `GET|PUT /api/provider-keys` — Incidental
 

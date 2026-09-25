@@ -28,7 +28,9 @@ import { isRecord } from "./type-guards";
  *   decision (a prepaid plan, a free tier) and is left alone;
  * - only an EXACT models.dev match on the same provider and model id — or a
  *   declared alias (`PRICE_PROVIDER_ALIASES`) — with a real, nonzero rate;
- * - never over a price already in models.yml. Every value Cody writes is
+ * - never over a price, custom model definition, or non-price model override
+ *   already in models.yml. An explicit free models.dev listing also wins over
+ *   an aliased paid rate. Every value Cody writes is
  *   recorded in a ledger (`cody-price-fill.json` in the instance data dir);
  *   if the file no longer holds exactly that value, the user changed it and
  *   Cody lets that model go for good;
@@ -46,9 +48,11 @@ export interface FlatCost { input: number; output: number; cacheRead?: number; c
  *  when omp reports every rate as zero or absent. */
 export interface CatalogModel { provider?: string; id?: string; unpriced?: boolean }
 
-/** `released`: the user changed or removed what Cody wrote. Kept as a
- *  tombstone so Cody never writes a price for that model again. */
-export interface PriceFillLedgerEntry { provider: string; modelId: string; cost: FlatCost; source: string; writtenAt: string; released?: boolean }
+/** `released`: the user changed Cody's cost or added manual model configuration.
+ *  Kept as a tombstone so Cody never writes a price for that model again.
+ *  `freeListed`: models.dev explicitly lists the model as free; Cody removed its
+ *  old automatic cost, but keeps watching the direct listing in case it changes. */
+export interface PriceFillLedgerEntry { provider: string; modelId: string; cost: FlatCost; source: string; writtenAt: string; released?: boolean; freeListed?: true }
 export type PriceFillLedger = Record<string, PriceFillLedgerEntry>;
 
 /**
@@ -67,7 +71,7 @@ export interface PriceFillWrite { provider: string; modelId: string; cost: FlatC
 export interface PriceFillPlan {
   /** Set these costs in models.yml (new models, or a models.dev price that moved). */
   set: PriceFillWrite[];
-  /** Remove Cody's cost from these overrides: omp now prices the model itself. */
+  /** Remove Cody's cost: omp now prices it, models.dev says free, or the user configured it. */
   remove: { provider: string; modelId: string }[];
   ledger: PriceFillLedger;
 }
@@ -78,8 +82,10 @@ export interface PriceFillInputs {
   isBundled: (provider: string, modelId: string) => boolean;
   /** models.dev's entry for this exact provider + model id, if any. */
   modelsDev: (provider: string, modelId: string) => ModelCatalogEntry | undefined;
-  /** The cost object currently in models.yml for this model, if any. */
+  /** The cost in modelOverrides, or null for an override entry without cost. */
   currentOverride: (provider: string, modelId: string) => unknown;
+  /** A user-defined model or non-price override that Cody must leave alone. */
+  hasManualModelConfig: (provider: string, modelId: string) => boolean;
   ledger: PriceFillLedger;
   now: Date;
 }
@@ -111,12 +117,24 @@ function priceFrom(entry: ModelCatalogEntry | undefined): FlatCost | undefined {
 export function sameCost(value: unknown, cost: FlatCost): boolean {
   if (!isRecord(value)) return false;
   const keys: (keyof FlatCost)[] = ["input", "output", "cacheRead", "cacheWrite"];
-  return keys.every((key) => value[key] === cost[key]);
+  return Object.keys(value).length === Object.keys(cost).length
+    && keys.every((key) => value[key] === cost[key]);
 }
 
-function lookup(inputs: PriceFillInputs, provider: string, modelId: string): { cost: FlatCost; source: string } | undefined {
-  const direct = priceFrom(inputs.modelsDev(provider, modelId));
-  if (direct) return { cost: direct, source: `models.dev:${provider}/${modelId}` };
+function explicitlyFree(entry: ModelCatalogEntry): boolean {
+  const { input, output, cacheRead, cacheWrite } = entry.cost;
+  return input === 0 && output === 0 && (cacheRead === undefined || cacheRead === 0) && (cacheWrite === undefined || cacheWrite === 0);
+}
+
+function lookup(inputs: PriceFillInputs, provider: string, modelId: string): { cost: FlatCost; source: string } | "free" | undefined {
+  const directEntry = inputs.modelsDev(provider, modelId);
+  if (directEntry) {
+    if (explicitlyFree(directEntry)) return "free";
+    const direct = priceFrom(directEntry);
+    // A provider's own listing takes precedence over an aliased API price,
+    // even when the listing has no usable rate yet.
+    return direct ? { cost: direct, source: `models.dev:${provider}/${modelId}` } : undefined;
+  }
   const alias = PRICE_PROVIDER_ALIASES[provider];
   const aliased = alias ? priceFrom(inputs.modelsDev(alias, modelId)) : undefined;
   return aliased ? { cost: aliased, source: `models.dev:${alias}/${modelId}` } : undefined;
@@ -136,9 +154,35 @@ export function planPriceFill(inputs: PriceFillInputs): PriceFillPlan {
       ledger[key] = entry;
       continue;
     }
+    if (entry.freeListed) {
+      // A free listing removed Cody's prior cost. Do not mistake that expected
+      // absence for a user deletion, but do honor any config the user added
+      // after the removal. Only the direct provider listing may re-enable a
+      // cost; an alias must not override a provider's explicit-free decision.
+      if (inputs.currentOverride(provider, modelId) !== undefined || inputs.hasManualModelConfig(provider, modelId)) {
+        ledger[key] = { ...entry, released: true };
+        continue;
+      }
+      const direct = inputs.modelsDev(provider, modelId);
+      const directCost = direct && !explicitlyFree(direct) ? priceFrom(direct) : undefined;
+      if (!directCost || inputs.isBundled(provider, modelId)) {
+        ledger[key] = entry;
+        continue;
+      }
+      set.push({ provider, modelId, cost: directCost, source: `models.dev:${provider}/${modelId}` });
+      ledger[key] = { provider, modelId, cost: directCost, source: `models.dev:${provider}/${modelId}`, writtenAt };
+      continue;
+    }
     // The file no longer holds exactly what Cody wrote: the user edited or
     // removed it. Their choice stands; Cody never touches this model again.
     if (!sameCost(inputs.currentOverride(provider, modelId), entry.cost)) {
+      ledger[key] = { ...entry, released: true };
+      continue;
+    }
+    if (inputs.hasManualModelConfig(provider, modelId)) {
+      // The user added a definition or other override fields after Cody's
+      // price. Remove only Cody's cost; their model configuration stays.
+      remove.push({ provider, modelId });
       ledger[key] = { ...entry, released: true };
       continue;
     }
@@ -147,7 +191,10 @@ export function planPriceFill(inputs: PriceFillInputs): PriceFillPlan {
       continue;
     }
     const latest = lookup(inputs, provider, modelId);
-    if (latest && !sameCost(latest.cost, entry.cost)) {
+    if (latest === "free") {
+      remove.push({ provider, modelId });
+      ledger[key] = { ...entry, freeListed: true };
+    } else if (latest && !sameCost(latest.cost, entry.cost)) {
       set.push({ provider, modelId, ...latest });
       ledger[key] = { provider, modelId, ...latest, writtenAt };
     } else {
@@ -165,9 +212,10 @@ export function planPriceFill(inputs: PriceFillInputs): PriceFillPlan {
     if (key in inputs.ledger || key in ledger) continue;
     if (model.unpriced !== true) continue;
     if (inputs.isBundled(provider, modelId)) continue;
+    if (inputs.hasManualModelConfig(provider, modelId)) continue;
     if (inputs.currentOverride(provider, modelId) !== undefined) continue;
     const found = lookup(inputs, provider, modelId);
-    if (!found) continue;
+    if (!found || found === "free") continue;
     set.push({ provider, modelId, ...found });
     ledger[key] = { provider, modelId, ...found, writtenAt };
   }
@@ -244,6 +292,7 @@ export function readPriceFillLedger(path = ledgerPath()): PriceFillLedger {
         source: typeof value.source === "string" ? value.source : "models.dev",
         writtenAt: typeof value.writtenAt === "string" ? value.writtenAt : "",
         ...(value.released === true ? { released: true } : {}),
+        ...(value.freeListed === true ? { freeListed: true } : {}),
       };
     }
     return ledger;
@@ -267,8 +316,20 @@ function writePriceFillLedger(ledger: PriceFillLedger, path = ledgerPath()): voi
 function overrideCost(config: ModelsFileConfig, provider: string, modelId: string): unknown {
   const providerConfig = config.providers?.[provider];
   if (!isRecord(providerConfig) || !isRecord(providerConfig.modelOverrides)) return undefined;
+  if (!Object.hasOwn(providerConfig.modelOverrides, modelId)) return undefined;
   const model = providerConfig.modelOverrides[modelId];
-  return isRecord(model) ? model.cost : undefined;
+  return isRecord(model) ? (model.cost === undefined ? null : model.cost) : null;
+}
+
+/** Manual models and non-price override fields are never price-fill targets. */
+export function hasManualModelConfig(config: ModelsFileConfig, provider: string, modelId: string): boolean {
+  const providerConfig = config.providers?.[provider];
+  if (!isRecord(providerConfig)) return false;
+  if (Array.isArray(providerConfig.models)
+    && providerConfig.models.some((model) => isRecord(model) && model.id === modelId)) return true;
+  if (!isRecord(providerConfig.modelOverrides) || !Object.hasOwn(providerConfig.modelOverrides, modelId)) return false;
+  const override = providerConfig.modelOverrides[modelId];
+  return !isRecord(override) || Object.keys(override).some((key) => key !== "cost");
 }
 
 export interface PriceFillResult {
@@ -286,9 +347,11 @@ export async function fillMissingModelPrices(catalog: readonly CatalogModel[]): 
   // price, so it does nothing rather than guess.
   const bundled = readBundledModelKeys();
   if (!bundled) return { ...empty, reason: "omp's bundled catalog could not be read" };
+  const entries = await loadModelsDevCatalog();
+  // The fetch can take seconds. Read models.yml after it completes so a
+  // manual edit made while waiting is part of the plan and is not overwritten.
   const file = readModelsConfigFile();
   if (file.parseError) return { ...empty, reason: file.parseError };
-  const entries = await loadModelsDevCatalog();
   const byKey = new Map<string, ModelCatalogEntry>();
   for (const entry of entries) byKey.set(`${entry.providerId}\u0000${entry.id}`, entry);
 
@@ -298,6 +361,7 @@ export async function fillMissingModelPrices(catalog: readonly CatalogModel[]): 
     isBundled: (provider, modelId) => bundled.has(bundledModelKey(provider, modelId)),
     modelsDev: (provider, modelId) => byKey.get(`${provider}\u0000${modelId}`),
     currentOverride: (provider, modelId) => overrideCost(file.config, provider, modelId),
+    hasManualModelConfig: (provider, modelId) => hasManualModelConfig(file.config, provider, modelId),
     ledger,
     now: new Date(),
   });

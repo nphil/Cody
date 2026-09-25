@@ -18,15 +18,24 @@ export interface OmpCredentialRow {
   disabledCause: string | null;
   /** ISO timestamp of the latest UNEXPIRED rate-limit block, or null. */
   blockedUntil: string | null;
-  /** omp's `credential_pin` digest for this OAuth account (sha256 hex), the
-   *  value a session file records for the account that served it; null for
-   *  API keys, disabled rows, or an OMP build that cannot compute it. */
+  /** omp's session `credential_pin` digest (sha256 hex); null for API keys,
+   * disabled rows, or OAuth credentials without the required identity. */
   pinHash: string | null;
 }
 export interface OmpCredentialsSnapshot { available: boolean; credentials: OmpCredentialRow[]; reason?: string; }
-export interface OmpCredentialRemoval { removed: boolean; providerRemoved: boolean; code?: string; message?: string; }
+export interface OmpCredentialRemoval {
+  removed: boolean;
+  providerRemoved: boolean;
+  /** Redacted identity returned only to Cody so its local label can be
+   * removed even when the account list has gone stale. Never credential data. */
+  identity?: string;
+  code?: string;
+  message?: string;
+}
 
 interface ListRequest { operation: "list"; packageRoot: string; agentDir: string }
+/** `remove` is the explicit per-account permanent path. It is intentionally
+ * separate from OMP's provider-wide soft logout exposed by `remove_provider`. */
 interface RemoveRequest { operation: "remove"; packageRoot: string; agentDir: string; provider: string; credentialId: number }
 interface RemoveProviderRequest { operation: "remove_provider"; packageRoot: string; agentDir: string; provider: string }
 interface UnblockRequest { operation: "unblock"; packageRoot: string; agentDir: string; credentialId: number }
@@ -81,6 +90,24 @@ function invoke(request: HelperRequest, deps: OmpCredentialBridgeDeps = {}): Pro
   return promise;
 }
 function safeString(value: unknown): string | null { return typeof value === "string" && value.trim() ? value.trim() : null; }
+export function sanitizeOmpCredentialReason(value: unknown): string {
+  const raw = value instanceof Error ? value.message : safeString(value);
+  if (!raw) return "Credential details are unavailable.";
+  const sanitized = raw
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, "Bearer [redacted]")
+    .replace(/\b(?:(?:access|refresh|id)[_-]?)?token\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, "token=[redacted]")
+    .replace(/\b(?:api[_ -]?key|password|secret)\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi, "credential=[redacted]")
+    .replace(/\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,})\b/gi, "[redacted]")
+    .replace(/\b[A-Za-z0-9._~-]{48,}\b/g, "[redacted]")
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[account]")
+    .replace(/\b[A-Za-z]:\\(?:[^\s"'<>|]+\\?)+/g, "[path]")
+    .replace(/\/(?:home|data|opt|tmp|var|Users|mnt)\/(?:[^\s"'<>|,;)]*)/g, "[path]")
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim()
+    .slice(0, 240);
+  return sanitized || "Credential details are unavailable.";
+}
 function safeCredentialRow(value: unknown): OmpCredentialRow | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const raw = value as Record<string, unknown>;
@@ -101,7 +128,11 @@ function safeCredentialRow(value: unknown): OmpCredentialRow | null {
 }
 function normalizeList(frame: Record<string, unknown> | null): OmpCredentialsSnapshot {
   if (!frame || frame.type !== "list") return unavailableOmpCredentials("Credential helper did not return a valid response.");
-  if (frame.ok !== true) return unavailableOmpCredentials(safeString(frame.message) ?? "Account list is unavailable.");
+  if (frame.ok !== true) {
+    const code = safeString(frame.code);
+    const message = safeString(frame.message) ?? "Account list is unavailable.";
+    return unavailableOmpCredentials(sanitizeOmpCredentialReason(code ? `${code}: ${message}` : message));
+  }
   const credentials = Array.isArray(frame.credentials) ? frame.credentials.flatMap((row): OmpCredentialRow[] => { const normalized = safeCredentialRow(row); return normalized ? [normalized] : []; }) : [];
   return { available: true, credentials };
 }
@@ -110,7 +141,8 @@ function normalizeRemoval(frame: Record<string, unknown> | null, expectedType: "
   if (frame.ok !== true) return { removed: false, providerRemoved: false, code: safeString(frame.code) ?? "unsupported", message: safeString(frame.message) ?? "Account removal is unavailable." };
   const removed = frame.removed === true;
   const providerRemoved = expectedType === "remove_provider" ? removed : frame.providerRemoved === true;
-  return { removed, providerRemoved };
+  const identity = safeString(frame.identity);
+  return { removed, providerRemoved, ...(identity ? { identity } : {}) };
 }
 
 export async function listOmpCredentials(deps: OmpCredentialBridgeDeps = {}): Promise<OmpCredentialsSnapshot> {

@@ -4,6 +4,8 @@ import { getRequestUser } from "@/lib/auth/guard";
 import { jsonError } from "@/lib/auth/http";
 import { canAccessSession } from "@/lib/auth/session-owners";
 import { requireEngine } from "@/lib/engine-guard";
+import { loadRoster } from "@/lib/model-plan/roster";
+import { unavailablePresetSelection } from "@/lib/model-presets/availability";
 import { readSessionPresetId, setSessionPreset } from "@/lib/model-presets/overlay";
 import { getPreset, resolveSmartDefault, setLastUsedPreset } from "@/lib/model-presets/store";
 import type { SessionPresetResponse } from "@/lib/model-presets/types";
@@ -25,13 +27,14 @@ async function assertSessionAccess(id: string, request: Request): Promise<NextRe
   return null;
 }
 
-function describe(id: string): SessionPresetResponse {
+async function describe(id: string): Promise<SessionPresetResponse> {
   const presetId = readSessionPresetId(id);
   let smartDefault = null;
   try {
-    smartDefault = resolveSmartDefault(presetId ? getPreset(presetId) : null);
+    const roster = await loadRoster();
+    smartDefault = resolveSmartDefault(presetId ? getPreset(presetId) : null, roster.models);
   } catch {
-    // An unreadable config.yml leaves Smart unresolved rather than failing.
+    // An unreadable config or unavailable roster leaves Smart unresolved.
   }
   return { presetId, smartDefault };
 }
@@ -42,7 +45,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
   const { id } = await params;
   const access = await assertSessionAccess(id, request);
   if (access) return access;
-  return NextResponse.json(describe(id), { headers: { "Cache-Control": "no-store" } });
+  return NextResponse.json(await describe(id), { headers: { "Cache-Control": "no-store" } });
 }
 
 /**
@@ -68,7 +71,18 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
     return jsonError("presetId must be a preset id or null", 400, "invalid_preset");
   }
   const presetId = body.presetId as string | null;
-  if (presetId !== null && !getPreset(presetId)) return jsonError("That preset no longer exists.", 404, "not_found");
+  const preset = presetId === null ? null : getPreset(presetId);
+  if (presetId !== null && !preset) return jsonError("That preset no longer exists.", 404, "not_found");
+  if (preset) {
+    let roster;
+    try {
+      roster = await loadRoster();
+    } catch {
+      return jsonError("The current model roster is unavailable; retry after the provider catalog loads.", 503, "roster_unavailable");
+    }
+    const unavailable = unavailablePresetSelection(preset, roster.models);
+    if (unavailable) return jsonError(unavailable, 400, "model_unavailable");
+  }
   if (getRpcSession(id)?.isRunning()) {
     return jsonError("Finish the current turn before switching presets.", 409, "session_busy");
   }
@@ -99,5 +113,5 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
     return jsonError(error instanceof Error ? error.message : String(error), 500, "restart_failed");
   }
   setLastUsedPreset(presetId);
-  return NextResponse.json({ ...describe(id), restarted } satisfies SessionPresetResponse);
+  return NextResponse.json({ ...(await describe(id)), restarted } satisfies SessionPresetResponse);
 }

@@ -102,6 +102,8 @@ export interface UsageAccount {
   credentialId: number | null;
   /** Short human-facing name, e.g. "Anthropic" or "Openai Codex (work)". */
   label: string;
+  /** Cody's optional name for this exact credential, resolved for display only. */
+  customName?: string;
   /** Subscription tier when the provider reports one, else null. */
   planType: string | null;
   /** True when every limit on the account is reported as unmetered. */

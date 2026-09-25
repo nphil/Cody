@@ -259,6 +259,8 @@ export interface ProviderLoginOption {
   kind: "oauth" | "device";
   /** Whether `logout()` can remove this credential. */
   canLogout: boolean;
+  /** Whether Cody can assign a local display name to individual accounts. */
+  canRenameAccount?: boolean;
   /** One line of context for the row ("Claude Pro/Max subscription"). */
   hint?: string;
   /**
@@ -278,8 +280,8 @@ export interface ProviderLoginOption {
 export interface ProviderLoginAccount {
   /** Opaque, stable: omp uses `String(credential row id)`. */
   id: string;
-  /** Identity for display — email or org, whichever the credential carries;
-   * a neutral fallback when the engine reports neither. */
+  /** Cody's local display label when one exists; otherwise the engine's
+   * identity (email/org) or a neutral fallback when it reports neither. */
   label: string;
   /** 0-based index among this provider's credentials, ordered by the
    * engine's own stable ordering (omp: credential row id ascending,
@@ -329,13 +331,13 @@ export interface ProviderLoginSurface {
   login(providerId: string, ui: ProviderLoginUi): Promise<void>;
   /** Absent when the engine has no non-interactive logout; the row then offers none. */
   logout?(providerId: string): Promise<void>;
-  /**
-   * Removes exactly one stored credential (an `accounts[].id` from `list()`).
-   * Absent when the engine cannot enumerate/remove individual accounts.
-   * `providerRemoved` is true when that was the account, so the caller knows
-   * the provider itself just went back to signed-out.
-   */
+  /** Removes exactly one stored credential (an `accounts[].id` from `list()`).
+   * Implementations must keep this distinct from an engine's disabled state:
+   * a successful result means the row is permanently gone. Absent when the
+   * engine cannot enumerate/remove individual accounts. */
   removeAccount?(providerId: string, accountId: string): Promise<{ removed: boolean; providerRemoved: boolean }>;
+  /** Saves a Cody-only label for one enumerated account. */
+  renameAccount?(providerId: string, accountId: string, name: string): Promise<{ accountId: string; label: string }>;
 }
 
 /**

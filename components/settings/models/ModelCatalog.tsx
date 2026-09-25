@@ -148,6 +148,10 @@ function StateChip({ row }: { row: CatalogRow }) {
   return null;
 }
 
+function isHiddenRow(row: CatalogRow): boolean {
+  return row.state === "instanceHidden" || row.state === "myHidden";
+}
+
 export function ModelCatalog({ catalog, panelId }: { catalog: ModelCatalogHandle; panelId: string }) {
   const { capabilities, harnessLabel, isMobile, callbacks, sessionModels } = useSettingsShell();
   const { track } = useSaveStatus(panelId);
@@ -173,17 +177,25 @@ export function ModelCatalog({ catalog, panelId }: { catalog: ModelCatalogHandle
   });
 
   const needle = query.trim().toLowerCase();
-  const filtered = useMemo(() => catalog.rows.filter((row) => {
+  // The catalog remains the complete inventory so an administrator can
+  // inspect and restore a curated-away model, but hidden rows should not
+  // dominate the normal search view. The Hidden chip intentionally switches
+  // the list to those rows.
+  const rowsBeforeSearch = useMemo(() => catalog.rows.filter((row) => {
     if (provider && row.provider !== provider) return false;
     if (chips.has("connected") && !row.connected) return false;
     if (chips.has("reasoning") && !row.reasoning) return false;
     if (chips.has("local") && !row.local) return false;
-    if (chips.has("hidden") && row.state !== "instanceHidden" && row.state !== "myHidden") return false;
+    if (chips.has("hidden") ? !isHiddenRow(row) : isHiddenRow(row)) return false;
     if (chips.has("pinned") && !row.pinned) return false;
     if (chips.has("new") && !row.isNew) return false;
+    return true;
+  }), [catalog.rows, provider, chips]);
+
+  const filtered = useMemo(() => rowsBeforeSearch.filter((row) => {
     if (!needle) return true;
     return row.name.toLowerCase().includes(needle) || row.id.toLowerCase().includes(needle) || row.provider.toLowerCase().includes(needle) || row.key.toLowerCase().includes(needle);
-  }), [catalog.rows, provider, chips, needle]);
+  }), [rowsBeforeSearch, needle]);
 
   const windowed = filtered.length > WINDOW_ABOVE;
   useEffect(() => {
@@ -319,7 +331,7 @@ export function ModelCatalog({ catalog, panelId }: { catalog: ModelCatalogHandle
             type="search"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder={`Search ${catalog.rows.length} models…`}
+            placeholder={`Search ${rowsBeforeSearch.length} models…`}
             aria-label="Search models"
             data-search-id="model-search"
             style={{ flex: "1 1 220px", minWidth: 0, padding: "7px 10px", minHeight: 32, border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 12 }}
@@ -446,14 +458,17 @@ export function ModelCatalog({ catalog, panelId }: { catalog: ModelCatalogHandle
           provider={curating}
           catalog={curatingCatalog.map((row) => ({ id: row.id, name: row.name, provider: row.provider }))}
           enabled={curatingEnabled}
+          hiddenForMe={catalog.myHidden}
           saving={curationSaving}
           onCancel={closeCuration}
           onConfirm={(selected, options) => {
             setCurationSaving(true);
             let nothingEnabled = false;
+            let unhiddenCount = 0;
             void track(async () => {
               const result = await catalog.writeProviderCuration(curating, [...selected], { includeFuture: options.includeFuture });
               nothingEnabled = result.nothingEnabled;
+              unhiddenCount = result.unhiddenCount;
               // Curation hides only what a human has looked at: mark exactly
               // the keys the dialog listed, merged into the ledger's
               // existing seen keys — never the whole catalog, which would
@@ -464,6 +479,12 @@ export function ModelCatalog({ catalog, panelId }: { catalog: ModelCatalogHandle
               setCurationSaving(false);
               if (ok) {
                 setCurating(null);
+                if (unhiddenCount > 0) {
+                  toast.info(
+                    "Composer updated",
+                    `${unhiddenCount} selected model${unhiddenCount === 1 ? " is" : "s are"} now available in your composer. They were not pinned.`,
+                  );
+                }
                 if (nothingEnabled) {
                   toast.info(
                     "Nothing is enabled",

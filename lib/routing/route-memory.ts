@@ -85,8 +85,8 @@ export interface DroppedChainEntry {
 	until: string | null;
 	/** `credits` = prepaid balance; `quota` = measured windows on every
 	 * account; `block` = omp refused every credential after a rejected
-	 * request, which is a deadline, not a measurement. */
-	source: "credits" | "quota" | "block";
+	 * request; `disabled` = every saved credential is disabled. */
+	source: "credits" | "quota" | "block" | "disabled";
 }
 
 export interface ChainBinding {
@@ -188,7 +188,7 @@ function normalizeChainBinding(key: string, value: unknown): ChainBinding | null
 	const dropped = Array.isArray(value.dropped)
 		? value.dropped.flatMap((item): DroppedChainEntry[] => {
 			if (!isRecord(item) || typeof item.entry !== "string" || typeof item.provider !== "string") return [];
-			const source = item.source === "credits" || item.source === "block" ? item.source : "quota";
+			const source = item.source === "credits" || item.source === "block" || item.source === "disabled" ? item.source : "quota";
 			return [{
 				entry: item.entry,
 				provider: item.provider,

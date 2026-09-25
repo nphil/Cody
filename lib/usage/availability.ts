@@ -90,6 +90,12 @@ export function resolveModelAvailability(
 	const accounts = snapshot?.available ? (snapshot.accounts ?? []) : [];
 	const match = selectWindowsForModel(accounts, { provider, modelId });
 	if (!match) return { provider, modelId, state: "unknown" };
+	// OMP deliberately omits live quota windows for disabled credentials. If
+	// every saved account is disabled, that is positive evidence this provider
+	// cannot serve the model, not the ordinary "no quota telemetry" case.
+	if (match.account.disabled) {
+		return { provider, modelId, state: "exhausted", accountId: match.account.id, allAccountsExhausted: true };
+	}
 
 	const binding = match.windows ?? [];
 	if (binding.length === 0) {

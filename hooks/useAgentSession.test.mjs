@@ -224,33 +224,61 @@ test("todo_auto_update's ungated refresh still fences on the current session", (
   assert.match(cases, /case "todo_auto_update":\s*\n\s*if \(sessionIdRef\.current\) refreshTodoState\(sessionIdRef\.current\);/);
 });
 
+test("live tool results stay separate until committed and merge into the transcript", () => {
+  assert.match(hook, /const \[liveToolResults, setLiveToolResults\] = useState<Map<string, ToolResultMessage>>/);
+  assert.match(hook, /setLiveToolResult\(id, \{ role: "toolResult"[\s\S]*partial: true/);
+  assert.match(hook, /const partial = isRecord\(event\.partialResult\) \? event\.partialResult : null/);
+  assert.match(hook, /completed\?\.role === "toolResult"[\s\S]*setLiveToolResult\(completed\.toolCallId, null\)/);
+  assert.match(hook, /case "tool_execution_end":/);
+  assert.match(hook, /clearLiveToolResults\(\)/);
+  assert.match(hook, /liveToolResults,\s*\/\/ Subscriptions/);
+  assert.match(chatWindow, /const toolResultsWithLive = useMemo/);
+  assert.match(chatWindow, /const conversationMetaWithLive = useMemo/);
+  assert.match(chatWindow, /conversationMeta=\{conversationMetaWithLive\}/);
+  assert.match(chatWindow, /toolResults=\{toolResultsWithLive\}/);
+});
+
+test("quota failures stay visible without treating every streamed message as completion", () => {
+  assert.match(hook, /const NOTICE_ERROR_VISIBLE_MS = 30000;/);
+  assert.match(hook, /function isQuotaLikeError\(text: string\)/);
+  assert.match(hook, /const lastQuotaErrorRef = useRef<string \| null>\(null\)/);
+  assert.match(hook, /const runHadContentRef = useRef\(false\)/);
+  assert.match(hook, /runHadContentRef\.current = true/);
+  assert.match(hook, /toast\.error\("Quota reached"/);
+  assert.match(hook, /const timeout = oldest\.type === "error" \? NOTICE_ERROR_VISIBLE_MS : NOTICE_VISIBLE_MS/);
+  assert.match(hook, /notices: noticeState\.visible, dismissNotice/);
+  assert.match(chatWindow, /<NoticeShelf notices=\{notices\} onDismiss=\{dismissNotice\}/);
+  assert.match(chatWindow, /WebkitLineClamp: isError \? 3/);
+});
+
+test("abandoned new-session sends finish without promoting a dead chat instance", () => {
+  const send = hook.slice(hook.indexOf("const handleSend = useCallback"), hook.indexOf("const handleInterruptAndReply"));
+  assert.match(send, /const ownerGone = !hookAliveRef\.current/);
+  assert.match(send, /if \(!ownerGone\) promoteNewSession\(1, message\)/);
+  assert.match(send, /if \(!ownerGone\) \{\s*await ensureEventsConnected\(sid\)/);
+
+  const bash = hook.slice(hook.indexOf("const executeBash = useCallback"), hook.indexOf("const handleAbort = useCallback"));
+  assert.match(bash, /if \(hookAliveRef\.current\) \{\s*await loadSession\(sid\)/);
+});
+
 test("engine/provider errors are cleaned and classified through lib/error-text before they reach a notice", () => {
-  // message_end (assistant stopReason "error"), notice (level error/warning),
-  // prompt_error and the retry banner all funnel through describeEngineError/
-  // engineErrorNotice, per lib/error-text.ts's module doc — one choke point
-  // for omp's own events AND every ACP engine's raw notice text
-  // (lib/harness/acp-session.ts's "{name}: {error}" strings), not one path
-  // per event type.
+  // Raw provider errors from the prompt, notice, and retry paths share the
+  // same classifier so auth/quota/refusal details stay readable.
   assert.match(hook, /import \{ describeEngineError, errorDedupeKey, type ErrorKind \} from "@\/lib\/error-text";/);
-  assert.match(hook, /addEngineErrorNotice\(raw, engineNameRef\.current\);/, "prompt_error");
-  assert.match(hook, /addEngineErrorNotice\(message, engineNameRef\.current\);/, "the notice case");
+  assert.match(hook, /addEngineErrorNotice\(raw, engineNameRef\.current\);/);
+  assert.match(hook, /addEngineErrorNotice\(message, engineNameRef\.current\);/);
+  assert.match(hook, /const errorMessage = rawErrorMessage \? describeEngineError\(rawErrorMessage\)\.detail : undefined;/);
+  // Every terminal-message/provider error path uses the same classifier.
   assert.match(hook, /addEngineErrorNotice\(detail, engineNameRef\.current\);/, "message_end's stopReason \"error\" branch");
-  // engineErrorNotice returns null (no notice at all) for an "aborted" kind,
-  // i.e. "Interrupted by user" / "Request was aborted" stay quiet.
   assert.match(hook, /if \(described\.kind === "aborted"\) return null;/);
 });
 
 test("the notice reducer deduplicates repeats and caps visible errors at two", () => {
   assert.match(hook, /const MAX_VISIBLE_ERROR_NOTICES = 2;/);
-  // A repeat of the same (dedupeKey-matching) notice bumps `count` and clears
-  // `exiting` in place instead of appending a second copy.
   const bump = hook.slice(hook.indexOf("function bumpDuplicate"), hook.indexOf("function fillPendingNotices"));
   assert.match(bump, /count: \(next\[index\]\.count \?\? 1\) \+ 1, exiting: false/);
   const reducer = hook.slice(hook.indexOf("export function noticeReducer"), hook.indexOf("export function useAgentSession"));
   assert.match(reducer, /bumpDuplicate\(state\.visible, action\.notice\)/);
   assert.match(reducer, /bumpDuplicate\(state\.pending, action\.notice\)/);
-  // The error cap evicts the oldest ERROR notice specifically (not just the
-  // oldest of any type), or a full info/success shelf would never actually
-  // free an error slot.
   assert.match(reducer, /errorCapHit \? \(notice\) => notice\.type === "error" : undefined/);
 });

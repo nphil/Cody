@@ -44,6 +44,7 @@ export class RpcCommandError extends Error {
   }
 }
 
+/** A command was written successfully but its response did not arrive in time. */
 export class RpcCommandTimeoutError extends Error {
   readonly command: string;
   readonly timeoutMs: number;

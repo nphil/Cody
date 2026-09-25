@@ -1,7 +1,10 @@
 import { NextResponse } from "next/server";
 import { requireUser } from "@/lib/auth/http";
 import { canAccessSession } from "@/lib/auth/session-owners";
+import { getAgentDir } from "@/lib/omp/paths";
+import { readProviderAccountNames } from "@/lib/provider-account-names";
 import { resolveSessionPath } from "@/lib/session-reader";
+import { withUsageAccountNames } from "@/lib/usage/account-names";
 import { usageReaderInstalled } from "@/lib/usage/omp-usage";
 import { credentialForPin, getUsageSnapshot } from "@/lib/usage/cache";
 import { readSessionCredentialPins } from "@/lib/usage/session-pins";
@@ -79,12 +82,18 @@ export async function GET(request: Request) {
     // Observation runs for every engine; writes to omp's config only when
     // omp is the active engine (reconcile.ts owns that gate).
     const routing = await reconcileRoutingForRequest(snapshot);
+    // A bad or temporarily unreadable Cody name file cannot make quota
+    // unavailable. Names only affect the response, never routing decisions.
+    let displaySnapshot = routing.snapshot;
+    try {
+      displaySnapshot = withUsageAccountNames(routing.snapshot, readProviderAccountNames(getAgentDir()));
+    } catch { /* Keep the measured snapshot and its quota windows. */ }
     const sessionId = new URL(request.url).searchParams.get("session");
-    const scoped = sessionId && routing.snapshot.available
-      ? { sessionAccounts: await sessionAccounts(sessionId, resolved.user, routing.snapshot) }
+    const scoped = sessionId && displaySnapshot.available
+      ? { sessionAccounts: await sessionAccounts(sessionId, resolved.user, displaySnapshot) }
       : {};
     return NextResponse.json(
-      { ...routing.snapshot, ...scoped, routing: { autoBind: routing.autoBind, blackouts: routing.blackouts, roleChanges: routing.roleChanges, chainChanges: routing.chainChanges, agentChanges: routing.agentChanges } },
+      { ...displaySnapshot, ...scoped, routing: { autoBind: routing.autoBind, blackouts: routing.blackouts, roleChanges: routing.roleChanges, chainChanges: routing.chainChanges, agentChanges: routing.agentChanges } },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (error) {

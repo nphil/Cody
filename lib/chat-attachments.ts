@@ -1,3 +1,12 @@
+/**
+ * Cody sends prompts to omp as one outbound NDJSON frame. That direction does
+ * not reassemble chunks, and the composer keeps the complete frame under its
+ * 900 KiB safety budget (including images). Keep text attachments below that
+ * ceiling with room for the user's message and attachment delimiters; the
+ * final prompt-frame preflight remains authoritative for mixed attachments.
+ */
+export const MAX_TOTAL_ATTACHED_TEXT_BYTES = 768 * 1024;
+/** Preserve Cody's existing per-file text attachment behavior. */
 export const MAX_ATTACHED_TEXT_BYTES = 256 * 1024;
 export const MAX_ATTACHED_TEXT_FILES = 10;
 
@@ -12,6 +21,76 @@ export interface AttachedTextFileData {
   mimeType: string;
   content: string;
   size: number;
+}
+
+/** Human-readable limit for composer attachment banners. */
+export function formatAttachmentBytes(bytes: number): string {
+  return bytes >= 1024 * 1024
+    ? `${Math.round(bytes / (1024 * 1024))} MB`
+    : `${Math.round(bytes / 1024)} KB`;
+}
+
+/** What the composer already holds (or has reserved while a read is in flight). */
+export interface TextAttachmentBudget {
+  usedBytes: number;
+  usedSlots: number;
+}
+
+export interface TextAttachmentSelection<T> {
+  accepted: T[];
+  /** Candidates dropped for exceeding Cody's per-file cap. */
+  tooLarge: number;
+  /** Candidates dropped because the aggregate text budget was spent. */
+  overBudget: number;
+}
+
+/**
+ * Apply the shared per-file, aggregate-byte, and slot limits. Keeping this
+ * selection pure lets fresh browser drops and persisted draft restoration use
+ * exactly the same policy.
+ *
+ * Candidates beyond the available slots are intentionally not classified:
+ * the caller already has a separate, stable count-limit message for that
+ * condition.
+ */
+export function selectTextAttachments<T extends { size: number }>(
+  candidates: readonly T[],
+  budget: TextAttachmentBudget,
+): TextAttachmentSelection<T> {
+  const accepted: T[] = [];
+  const remainingSlots = Math.max(0, MAX_ATTACHED_TEXT_FILES - budget.usedSlots);
+  let totalBytes = budget.usedBytes;
+  let tooLarge = 0;
+  let overBudget = 0;
+
+  for (const candidate of candidates) {
+    if (accepted.length >= remainingSlots) break;
+    if (!Number.isFinite(candidate.size) || candidate.size < 0 || candidate.size > MAX_ATTACHED_TEXT_BYTES) {
+      tooLarge++;
+      continue;
+    }
+    if (totalBytes + candidate.size > MAX_TOTAL_ATTACHED_TEXT_BYTES) {
+      overBudget++;
+      continue;
+    }
+    totalBytes += candidate.size;
+    accepted.push(candidate);
+  }
+
+  return { accepted, tooLarge, overBudget };
+}
+
+/** Banner text for a batch that produced no usable attachments. */
+export function describeTextAttachmentSkip(
+  selection: Pick<TextAttachmentSelection<unknown>, "tooLarge" | "overBudget">,
+): string | null {
+  if (selection.tooLarge > 0) {
+    return `${selection.tooLarge} file(s) skipped: files up to ${formatAttachmentBytes(MAX_ATTACHED_TEXT_BYTES)} are supported.`;
+  }
+  if (selection.overBudget > 0) {
+    return `${selection.overBudget} file(s) skipped: attachments are limited to ${formatAttachmentBytes(MAX_TOTAL_ATTACHED_TEXT_BYTES)} per message.`;
+  }
+  return null;
 }
 
 function getFileExtension(name: string): string {

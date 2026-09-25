@@ -135,8 +135,7 @@ export const RESEARCH_SYSTEM_PROMPT = [
 /** Every serious search budget this run's prompt asks the model to keep to. */
 export const SEARCH_BUDGET_HINT = 30;
 
-export function buildResearchPrompt(roster: Roster, presets: readonly PresetBrief[]): string {
-  const roles = presetRoleNames();
+export function buildResearchPrompt(roster: Roster, presets: readonly PresetBrief[], roles: readonly string[] = presetRoleNames()): string {
   const roleBrief = roles.map(roleBriefFor).join("\n");
   const presetBrief = presets.map((preset) => `- id "${preset.id}": "${preset.name}" — ${preset.intent}`).join("\n");
 
@@ -349,6 +348,8 @@ function buildProposal(raw: unknown, rosterModels: RosterModel[], liveRoles: Rea
 export interface ParseResearchInput {
   presetIds: readonly string[];
   roster: Roster;
+  /** Inject OMP's role list for a deterministic offline test. */
+  roleNames?: readonly string[];
 }
 
 export type ParseResearchOutcome =
@@ -377,7 +378,7 @@ export function parseResearchAnswer(rawText: string, input: ParseResearchInput):
     : [];
 
   const rawProposals = isRecord(parsed.proposals) ? parsed.proposals : {};
-  const liveRoles = new Set(presetRoleNames());
+  const liveRoles = new Set(input.roleNames ?? presetRoleNames());
   const proposals: Record<string, PresetProposal> = {};
   for (const presetId of input.presetIds) {
     proposals[presetId] = buildProposal(rawProposals[presetId], input.roster.models, liveRoles);
@@ -592,6 +593,9 @@ export function startResearchRun(input: StartResearchInput, runner: ResearchRunn
   const presetIds = [...new Set(input.presetIds.map((id) => id.trim()).filter(Boolean))];
   if (!plannerModel) return { ok: false, code: "invalid_request", message: "plannerModel is required." };
   if (presetIds.length === 0) return { ok: false, code: "invalid_request", message: "presetIds must include at least one preset." };
+  if (!resolveRosterModel(plannerModel, input.roster.models)) {
+    return { ok: false, code: "invalid_request", message: "The planner model is not in the current curated roster." };
+  }
 
   const run: ResearchRunSnapshot = {
     id: randomBytes(16).toString("hex"),

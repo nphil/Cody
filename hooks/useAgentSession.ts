@@ -9,6 +9,7 @@ import type {
   ExtensionWidgetItem,
   SessionInfo,
   SessionTreeNode,
+  ToolResultMessage,
 } from "@/lib/types";
 import { normalizeToolCalls } from "@/lib/normalize";
 import {
@@ -26,6 +27,7 @@ import { describeEngineError, errorDedupeKey, type ErrorKind } from "@/lib/error
 import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { createMessageUpdateCoalescer, type MessageUpdateCoalescer } from "@/lib/message-update-coalescer";
+import { createReconcileGuard, type ReconcileGuard } from "@/lib/reconcile-guard";
 import {
   evaluateStreamHealth,
   reconnectDelayMs,
@@ -130,6 +132,46 @@ function streamReducer(state: StreamingState, action: StreamAction): StreamingSt
 interface AgentEvent {
   type: string;
   [key: string]: unknown;
+}
+
+/** Read provider/runtime errors without ever rendering an object as
+ * "[object Object]". Error payloads vary across OMP versions and may be
+ * nested inside assistant, turn_end, or response frames. */
+function readAgentError(value: unknown): string | null {
+  if (typeof value === "string") {
+    const text = value.trim();
+    return text || null;
+  }
+  if (!isRecord(value)) return null;
+  for (const key of ["errorMessage", "error", "message", "detail"]) {
+    const text = readAgentError(value[key]);
+    if (text) return text;
+  }
+  return value.stopReason === "error" ? translate("agentSession.responseFailed") : null;
+}
+
+function readTerminalAgentError(event: AgentEvent): string | null {
+  for (const value of [event.errorMessage, event.error, event.message]) {
+    const text = readAgentError(value);
+    if (text) return text;
+  }
+  if (Array.isArray(event.messages)) {
+    for (let index = event.messages.length - 1; index >= 0; index -= 1) {
+      const text = readAgentError(event.messages[index]);
+      if (text) return text;
+    }
+  }
+  return null;
+}
+
+function hasVisibleAssistantContent(value: unknown): boolean {
+  if (!isRecord(value) || value.role !== "assistant") return false;
+  if (!Array.isArray(value.content)) return typeof value.content === "string" && value.content.trim().length > 0;
+  return value.content.some((block) => {
+    if (!isRecord(block)) return false;
+    if (block.type === "text") return typeof block.text === "string" && block.text.trim().length > 0;
+    return block.type === "image";
+  });
 }
 
 const SUBAGENT_ACTIVITY_BUFFER_MAX = 50;
@@ -614,6 +656,17 @@ export function toolUpdateStatusText(partialResult: unknown): string | undefined
   return undefined;
 }
 
+/** Keep only tool-result blocks the transcript renderer understands. Engine
+ * event payloads are untrusted, and a malformed live frame must not poison the
+ * committed-message shape or make a render throw. */
+function toolResultContent(value: unknown): ToolResultMessage["content"] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((block): block is Record<string, unknown> => (
+    isRecord(block)
+    && (block.type === "image" || (block.type === "text" && typeof block.text === "string"))
+  )) as unknown as ToolResultMessage["content"];
+}
+
 /**
  * A stream problem the user must be told about, rather than left to infer from
  * a spinner that never stops.
@@ -755,14 +808,17 @@ const PROMPT_SEND_TIMEOUT_MS = 30_000;
 // reads two refs and sets a boolean React bails out of when unchanged.
 const STREAM_HEALTH_POLL_MS = 2_000;
 const MAX_NOTICES = 5;
-// However many other notices are queued, a burst of failures (a retry storm,
-// several subagents erroring together) must not fill the whole shelf with
-// red: at most two error-toned notices are ever visible at once, so an
-// unrelated info/success notice always has room.
+// Keep a burst of errors from crowding every other useful notice off the
+// shelf; at most two error-toned notices are visible at the same time.
 const MAX_VISIBLE_ERROR_NOTICES = 2;
 const NOTICE_VISIBLE_MS = 5000;
+const NOTICE_ERROR_VISIBLE_MS = 30000;
 const NOTICE_EXIT_ANIMATION_MS = 180;
 const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " ", "Space", "Spacebar"]);
+
+function isQuotaLikeError(text: string): boolean {
+  return /429|quota|RESOURCE_EXHAUSTED|Cloud Code Assist/i.test(text);
+}
 
 type EventStreamConnectionStatus = "connected" | "timeout" | "closed";
 
@@ -1146,6 +1202,26 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return () => window.clearTimeout(timer);
   }, [compactionStatus]);
   const [agentPhase, setAgentPhase] = useState<AgentPhase>(null);
+  // In-flight tool results live outside the committed transcript. omp sends
+  // the complete accumulated snapshot in each update, so the coalesced map
+  // can replace a tool's prior output until its committed toolResult arrives.
+  const [liveToolResults, setLiveToolResults] = useState<Map<string, ToolResultMessage>>(() => new Map());
+  const setLiveToolResult = useCallback((toolCallId: string, result: ToolResultMessage | null) => {
+    setLiveToolResults((prev) => {
+      if (result === null) {
+        if (!prev.has(toolCallId)) return prev;
+        const next = new Map(prev);
+        next.delete(toolCallId);
+        return next;
+      }
+      const next = new Map(prev);
+      next.set(toolCallId, result);
+      return next;
+    });
+  }, []);
+  const clearLiveToolResults = useCallback(() => {
+    setLiveToolResults((prev) => (prev.size === 0 ? prev : new Map()));
+  }, []);
   // Event-stream health, surfaced so a believed-running turn is never rendered
   // as a healthy "Waiting for model…" against a stream that is not delivering.
   const [streamDegraded, setStreamDegraded] = useState(false);
@@ -1338,6 +1414,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // so a stale get_subagents cannot target a session that was switched away.
   const rosterRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const promptRunIdRef = useRef(0);
+  // Reconciliation can be triggered by several independent browser events.
+  // Keep one authoritative poll in flight and retry once when another trigger
+  // arrived while it was running; a stalled request expires after 30 seconds.
+  const reconcileGuardRef = useRef<ReconcileGuard | null>(null);
+  if (reconcileGuardRef.current === null) reconcileGuardRef.current = createReconcileGuard({ timeoutMs: 30_000 });
+  // Last quota-like error seen during the current run, and whether the run
+  // produced any assistant content. Used to surface a persistent error when
+  // the agent stops without a visible failure.
+  const lastQuotaErrorRef = useRef<string | null>(null);
+  const lastRunErrorRef = useRef<string | null>(null);
+  const slashCommandRunRef = useRef(false);
+  const runHadContentRef = useRef(false);
   // Bumped on every roster clear (run end): in-flight get_subagents/history
   // responses from the finished run must not merge into the cleared (or next
   // run's) roster. The prompt runId alone is not enough — it is not
@@ -2617,6 +2705,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     queueRoutingNotice(fallbackSucceededMessage(attribution, model), "success", attribution.job.kind !== "main");
   }, [queueRoutingNotice]);
 
+  const dismissNotice = useCallback((id: string) => {
+    dispatchNotice({ type: "remove", id });
+  }, []);
+
   // Declared after addNotice: the dependency array below is evaluated during
   // render, so addNotice must already be initialized.
   const ensureEventsConnected = useCallback(async (sid: string) => {
@@ -2715,6 +2807,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // Bail out before loadSession too: a stale finish for a previous run
     // must not overwrite the messages of the run currently streaming.
     if (runId !== undefined && promptRunIdRef.current !== runId) return;
+    const hadContent = runHadContentRef.current;
+    const quotaMessage = lastQuotaErrorRef.current;
+    const runError = lastRunErrorRef.current;
+    const allowEmptyResponse = slashCommandRunRef.current;
     try {
       // The reload below replaces `messages` wholesale. A follower is
       // re-pinned instantly through the reflow (the terminal re-pin effect);
@@ -2730,12 +2826,28 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (runId !== undefined && promptRunIdRef.current !== runId) return;
       optimisticUserMessageKeyRef.current = null;
       if (!agentRunningRef.current) return;
+      if (runError) {
+        addEngineErrorNotice(runError, engineNameRef.current);
+        if (isQuotaLikeError(runError)) {
+          toast.error("Quota reached", runError, { durationMs: 12000 });
+        } else {
+          toast.error("Request failed", runError, { durationMs: 12000 });
+        }
+      } else if (!hadContent && quotaMessage && isQuotaLikeError(quotaMessage)) {
+        addNotice({ type: "error", message: quotaMessage });
+        toast.error("Quota reached", quotaMessage, { durationMs: 12000 });
+      } else if (!hadContent && !allowEmptyResponse) {
+        const message = translate("agentSession.responseFailed");
+        addNotice({ type: "error", message });
+        toast.error("Request failed", message, { durationMs: 10000 });
+      }
       agentRunningRef.current = false;
       assistantProviderCallRef.current = false;
       if (modelSwitchAwaitingIdleRef.current === sid) modelSwitchAwaitingIdleRef.current = null;
       void dispatchPendingModelSwitch();
       setAgentRunning(false);
       setAgentPhase(null);
+      clearLiveToolResults();
       setRetryInfo(null);
       retryErrorByJobRef.current.clear();
       setSubagents([]);
@@ -2748,9 +2860,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // usage headline is refreshed from the settled child transcripts.
       if (sid) void refreshSubagentUsage(sid);
       dispatch({ type: "end" });
+      runHadContentRef.current = false;
+      lastQuotaErrorRef.current = null;
+      lastRunErrorRef.current = null;
+      slashCommandRunRef.current = false;
       onAgentEnd?.();
     }
-  }, [dispatchPendingModelSwitch, holdTailForReader, loadSession, onAgentEnd, refreshSubagentUsage, resetSubagentActivityState]);
+  }, [addNotice, addEngineErrorNotice, clearLiveToolResults, dispatchPendingModelSwitch, holdTailForReader, loadSession, onAgentEnd, refreshSubagentUsage, resetSubagentActivityState]);
 
   // The engine restarted (container restart, crash) while this client was
   // waiting for a turn: the resumed engine is idle and no agent_end will ever
@@ -2829,6 +2945,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const reconcileAgentState = useCallback(async (sid: string) => {
     if (!agentRunningRef.current) return;
     const runId = promptRunIdRef.current;
+    const guard = reconcileGuardRef.current;
+    if (!guard) return;
+    const token = guard.tryAcquire();
+    if (token === null) return;
     try {
       const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
       if (!res.ok) return;
@@ -2870,6 +2990,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       await finishPromptWithoutStream(sid, runId);
     } catch {
       // Network still down — the next poll / visibility / online tick retries.
+    } finally {
+      const reissue = guard.release(token);
+      if (reissue && agentRunningRef.current && promptRunIdRef.current === runId && sessionIdRef.current === sid) {
+        void reconcileAgentState(sid);
+      }
     }
   }, [finishPromptWithoutStream, refreshSubagentRoster, adoptPermissionRequests, adoptSessionPromptCapabilities]);
 
@@ -2999,6 +3124,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   useEffect(() => {
     setStreamAlert(null);
     setStreamDegraded(false);
+    reconcileGuardRef.current?.reset();
     streamAttachedRef.current = false;
     streamUnhealthySinceRef.current = null;
     reconnectAttemptRef.current = 0;
@@ -3067,6 +3193,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     switch (event.type) {
       case "agent_start":
         interruptReplyPendingRef.current = false;
+        reconcileGuardRef.current?.reset();
         agentRunningRef.current = true;
         assistantProviderCallRef.current = true;
         retryErrorByJobRef.current.clear();
@@ -3077,9 +3204,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setStreamAlert(null);
         setAgentRunning(true);
         setAgentPhase({ kind: "waiting_model" });
+        clearLiveToolResults();
         dispatch({ type: "start" });
+        runHadContentRef.current = false;
+        lastQuotaErrorRef.current = null;
+        lastRunErrorRef.current = null;
         break;
-      case "agent_end":
+      case "agent_end": {
         // isTerminal === false means an async delivery resumes this run soon.
         if (event.isTerminal === false) break;
         // An interrupt-and-reply aborts the current turn: its terminal
@@ -3092,6 +3223,36 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // A late agent_end can arrive over SSE after reconcileAgentState
         // already finished this run — don't re-trigger completion.
         if (!agentRunningRef.current) break;
+        // Capture fallback before clearing: if the run produced no visible
+        // assistant content and we saw a quota error, surface it persistently
+        // even when the engine sent no terminal notice.
+        const hadContent = runHadContentRef.current;
+        const previousQuotaMessage = lastQuotaErrorRef.current;
+        const terminalError = readTerminalAgentError(event) ?? lastRunErrorRef.current;
+        if (terminalError && isQuotaLikeError(terminalError)) {
+          lastQuotaErrorRef.current = terminalError;
+        }
+        const quotaMessage = terminalError && isQuotaLikeError(terminalError)
+          ? terminalError
+          : previousQuotaMessage;
+        if (!hadContent) {
+          if (quotaMessage && isQuotaLikeError(quotaMessage)) {
+            addNotice({ type: "error", message: quotaMessage });
+            toast.error("Quota reached", quotaMessage, { durationMs: 12000 });
+          } else if (terminalError) {
+            addNotice({ type: "error", message: terminalError });
+            toast.error("Request failed", terminalError, { durationMs: 12000 });
+          } else if (!slashCommandRunRef.current) {
+            const message = translate("agentSession.responseFailed");
+            addNotice({ type: "error", message });
+            toast.error("Request failed", message, { durationMs: 10000 });
+          }
+        } else if (terminalError && isQuotaLikeError(terminalError)) {
+          // The provider can exhaust quota after a partial response; keep that
+          // fact visible even though the run did produce content.
+          addNotice({ type: "error", message: terminalError });
+          toast.error("Quota reached", terminalError, { durationMs: 12000 });
+        }
         // Capture sid + runId BEFORE clearing: the terminal reload below is
         // async, and a next prompt (or session switch) that starts while it is
         // in flight must not be overwritten by this finished run's snapshot.
@@ -3103,12 +3264,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         void dispatchPendingModelSwitch();
         setAgentRunning(false);
         setAgentPhase(null);
+        clearLiveToolResults();
         setRetryInfo(null);
         retryErrorByJobRef.current.clear();
         setSubagents([]);
         subagentRosterGenerationRef.current += 1;
         resetSubagentActivityState();
         dispatch({ type: "end" });
+        runHadContentRef.current = false;
+        lastQuotaErrorRef.current = null;
+        lastRunErrorRef.current = null;
+        slashCommandRunRef.current = false;
         if (endedSid) {
           // Same contract as finishPromptWithoutStream: re-pin a follower,
           // hold the tail unfolded for a reader.
@@ -3145,6 +3311,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
         onAgentEnd?.();
         break;
+      }
       case "prompt_result":
         // A prompt handled entirely by a builtin/extension slash command:
         // no agent_start/agent_end pair will follow.
@@ -3156,26 +3323,46 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         void finishPromptWithoutStream(sessionIdRef.current, promptRunIdRef.current);
         break;
       case "prompt_error": {
-        const raw = (event.errorMessage as string | undefined) ?? translate("agentSession.commandFailed");
-        addEngineErrorNotice(raw, engineNameRef.current);
+        const raw = readAgentError(event.errorMessage)
+          ?? readAgentError(event.error)
+          ?? readAgentError(event.message)
+          ?? translate("agentSession.commandFailed");
+        lastRunErrorRef.current = raw;
         // A failed prompt is terminal: no agent_end follows it. Without this the
         // spinner and the locked input wait for the 15s reconcile poll. Fenced
         // with the run id for the same reason as prompt_result above.
         if (agentRunningRef.current) void finishPromptWithoutStream(sessionIdRef.current, promptRunIdRef.current);
+        else addEngineErrorNotice(raw, engineNameRef.current);
+        break;
+      }
+      case "error":
+      case "agent_error":
+      case "turn_error":
+      case "model_error":
+      case "server_error":
+      case "internal_error":
+      case "rpc_frame_error": {
+        const message = readTerminalAgentError(event) ?? translate("agentSession.responseFailed");
+        lastRunErrorRef.current = message;
+        if (!agentRunningRef.current) addNotice({ type: "error", message });
         break;
       }
       case "notice": {
         const level = event.level as string | undefined;
-        const message = (event.message as string | undefined)?.trim() ?? "";
+        const message = readAgentError(event.message)
+          ?? readAgentError(event.errorMessage)
+          ?? readAgentError(event.error)
+          ?? "";
         if (/^xd:\/\/:\s*mounted\s+mcp__/i.test(message)) {
           toast.info("MCP tools updated", message, { clamp: true });
-        } else if (level === "error" || level === "warning") {
-          // This is the one choke point every ACP engine's raw notice text
-          // (`lib/harness/acp-session.ts`, e.g. "Claude Code: Error: 429
-          // {...}") passes through, same as omp's own events — so a refusal,
-          // an outdated engine build or a rate limit reads identically no
-          // matter which engine said it.
+        } else if ((level === "error" || level === "warning") && message) {
+          // Normalize engine/provider failures through the shared classifier,
+          // while retaining Cody's quota retry bookkeeping and toast.
           addEngineErrorNotice(message, engineNameRef.current);
+          if (isQuotaLikeError(message)) {
+            lastQuotaErrorRef.current = message;
+            toast.error("Quota reached", message, { durationMs: 12000 });
+          }
         } else {
           addNotice({ type: "info", message });
         }
@@ -3211,9 +3398,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "command_output": {
-        const text = (event.text as string | undefined)?.trim() ?? "";
+        const text = readAgentError(event.text) ?? "";
         if (/^xd:\/\/:\s*mounted\s+mcp__/i.test(text)) toast.info("MCP tools updated", text, { clamp: true });
-        else if (text) addNotice({ type: "info", message: text });
+        else if (text) {
+          addNotice({ type: "info", message: text });
+          if (isQuotaLikeError(text)) {
+            lastQuotaErrorRef.current = text;
+            toast.error("Quota reached", text, { durationMs: 12000 });
+          }
+        }
         break;
       }
       case "thinking_level_changed":
@@ -3300,11 +3493,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // reconcile) — they would resurrect a ghost streaming bubble.
         if (!agentRunningRef.current) break;
         const msg = event.message as Partial<AgentMessage> | undefined;
+        const messageError = readAgentError(msg);
+        if (messageError) lastRunErrorRef.current = messageError;
         if (msg?.role === "user") {
           break;
         }
         assistantProviderCallRef.current = true;
         if (msg) {
+          if (hasVisibleAssistantContent(msg)) runHadContentRef.current = true;
+          const text = extractMessageText(msg);
+          if (text && isQuotaLikeError(text)) lastQuotaErrorRef.current = text.slice(0, 800);
           dispatch({ type: "update", message: normalizeToolCalls(msg as AgentMessage) });
         }
         setAgentPhase(null);
@@ -3316,6 +3514,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // appending it again would duplicate it.
         if (!agentRunningRef.current) break;
         const completed = event.message as AgentMessage | undefined;
+        const messageError = readAgentError(completed);
+        if (messageError) lastRunErrorRef.current = messageError;
+        if (completed) {
+          if (hasVisibleAssistantContent(completed)) runHadContentRef.current = true;
+          const text = extractMessageText(completed as Partial<AgentMessage>);
+          if (text && isQuotaLikeError(text)) lastQuotaErrorRef.current = text.slice(0, 800);
+        }
+        if (completed?.role === "toolResult" && typeof completed.toolCallId === "string") {
+          // The durable result is authoritative; remove the ephemeral entry
+          // before appending so committed and live snapshots cannot race.
+          setLiveToolResult(completed.toolCallId, null);
+        }
         if (completed && completed.role === "user") {
           // Delivered steering/follow-up messages surface here as user
           // messages. The run's initial prompt also emits one, but handleSend
@@ -3376,8 +3586,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "tool_execution_start": {
         assistantProviderCallRef.current = false;
         void dispatchPendingModelSwitch();
-        const id = event.toolCallId as string;
-        const name = event.toolName as string;
+        const id = typeof event.toolCallId === "string" ? event.toolCallId : "";
+        if (!id) break;
+        const name = typeof event.toolName === "string" && event.toolName ? event.toolName : "tool";
+        setLiveToolResult(id, { role: "toolResult", toolCallId: id, toolName: name, content: [], partial: true });
         setAgentPhase((prev) => {
           const tools = prev?.kind === "running_tools" ? [...prev.tools] : [];
           if (!tools.some((t) => t.id === id)) tools.push({ id, name, startedAt: Date.now() });
@@ -3390,7 +3602,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // run_watch reports every CI poll this way). Keep only the newest
         // line per tool — without it a long `write xd://github` watch is
         // indistinguishable from a hang.
-        const id = event.toolCallId as string;
+        const id = typeof event.toolCallId === "string" ? event.toolCallId : "";
+        if (!id) break;
+        const partial = isRecord(event.partialResult) ? event.partialResult : null;
+        const content = toolResultContent(partial?.content);
+        const toolName = typeof event.toolName === "string" && event.toolName ? event.toolName : undefined;
+        setLiveToolResults((prev) => {
+          const existing = prev.get(id);
+          const next = new Map(prev);
+          next.set(id, {
+            role: "toolResult",
+            toolCallId: id,
+            ...(toolName ?? existing?.toolName ? { toolName: toolName ?? existing?.toolName } : {}),
+            content,
+            ...(partial?.isError === true ? { isError: true } : existing?.isError ? { isError: true } : {}),
+            ...(partial?.details !== undefined ? { details: partial.details } : existing?.details !== undefined ? { details: existing.details } : {}),
+            partial: true,
+          });
+          return next;
+        });
         const statusText = toolUpdateStatusText(event.partialResult);
         if (!statusText) break;
         setAgentPhase((prev) => {
@@ -3405,7 +3635,28 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       case "tool_execution_end": {
         assistantProviderCallRef.current = true;
-        const id = event.toolCallId as string;
+        const id = typeof event.toolCallId === "string" ? event.toolCallId : "";
+        if (!id) break;
+        const finalResult = isRecord(event.result) ? event.result : null;
+        // Keep the last live snapshot visible, but mark it settled, until the
+        // durable toolResult message arrives on the stream.
+        setLiveToolResults((prev) => {
+          const existing = prev.get(id);
+          const next = new Map(prev);
+          next.set(id, {
+            role: "toolResult",
+            toolCallId: id,
+            ...(typeof event.toolName === "string" && event.toolName
+              ? { toolName: event.toolName }
+              : existing?.toolName ? { toolName: existing.toolName } : {}),
+            content: finalResult && Array.isArray(finalResult.content)
+              ? toolResultContent(finalResult.content)
+              : existing?.content ?? [],
+            ...(finalResult?.isError === true || event.isError === true || existing?.isError === true ? { isError: true } : {}),
+            ...(finalResult?.details !== undefined ? { details: finalResult.details } : existing?.details !== undefined ? { details: existing.details } : {}),
+          });
+          return next;
+        });
         if (event.toolName === "todo" && sessionIdRef.current) {
           void reconcileAgentState(sessionIdRef.current);
         }
@@ -3438,12 +3689,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // the provider's text the same way (no JSON, no request id, no
         // trailing URL) but keep it as the bare detail rather than wrapping
         // it in a refusal/usage sentence, which would not fit next to
-        // "Retrying 2/5".
+        // "Retrying 2/5". Retain the raw text for quota retry bookkeeping.
         const errorMessage = rawErrorMessage ? describeEngineError(rawErrorMessage).detail : undefined;
         if (attribution.job.kind === "main") {
           setRetryInfo({ attempt: event.attempt as number, maxAttempts: event.maxAttempts as number, errorMessage });
         }
-        if (rawErrorMessage) retryErrorByJobRef.current.set(fallbackJobKey(attribution.job), rawErrorMessage);
+        if (rawErrorMessage) {
+          retryErrorByJobRef.current.set(fallbackJobKey(attribution.job), rawErrorMessage);
+          if (isQuotaLikeError(rawErrorMessage)) lastQuotaErrorRef.current = rawErrorMessage;
+        }
         break;
       }
       case "auto_retry_end": {
@@ -3470,6 +3724,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // 15s reconcile poll, so items check off as they complete instead of
       // arriving in poll-sized batches.
       case "turn_end":
+        {
+          const messageError = readTerminalAgentError(event);
+          if (messageError) lastRunErrorRef.current = messageError;
+        }
         assistantProviderCallRef.current = false;
         void dispatchPendingModelSwitch();
         if (sessionIdRef.current) {
@@ -3696,7 +3954,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as unknown as IncomingExtensionUiRequest);
         break;
     }
-  }, [addNotice, addEngineErrorNotice, announceFallbackApplied, announceFallbackSucceeded, applyAuthoritativeModel, adoptFastModeState, adoptThinkingLevel, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities, beginAuthoritativeModelSync, consumeQueuedMessage, dispatchPendingModelSwitch, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, holdTailForReader, loadSession, maybeAutoNameSession, mergeSubagents, onAgentEnd, onPreviewUrlsSeen, reconcileAgentState, refreshTodoState, resetSubagentActivityState]);
+  }, [addNotice, addEngineErrorNotice, announceFallbackApplied, announceFallbackSucceeded, applyAuthoritativeModel, adoptFastModeState, adoptThinkingLevel, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities, beginAuthoritativeModelSync, clearLiveToolResults, consumeQueuedMessage, dispatchPendingModelSwitch, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, holdTailForReader, loadSession, maybeAutoNameSession, mergeSubagents, onAgentEnd, onPreviewUrlsSeen, reconcileAgentState, refreshTodoState, resetSubagentActivityState, setLiveToolResult]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]): Promise<boolean> => {
@@ -3734,11 +3992,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setMessages((prev) => [...prev, userMsg]);
     optimisticUserMessageKeyRef.current = userMessageKey(userMsg);
     promptRunIdRef.current = promptRunId;
+    slashCommandRunRef.current = isSlashCommandPrompt;
     agentRunningRef.current = true;
     assistantProviderCallRef.current = true;
     // Optimistic: the stream is opened and the prompt posted below, so the
     // server has not acknowledged this run yet (see runConfirmedRef).
     runConfirmedRef.current = false;
+    clearLiveToolResults();
     setStreamAlert(null);
     setAgentRunning(true);
     setAgentPhase(isSlashCommandPrompt ? { kind: "running_command" } : { kind: "waiting_model" });
@@ -3757,25 +4017,32 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const selectedModel = newSessionModel;
         const existingSid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
         const sid = existingSid ?? await ensureNewSession();
+        // Spawning takes seconds: the user may have opened another chat while
+        // it was in flight (this instance is unmounted). Deliver the prompt in
+        // the background, but do not promote or attach UI listeners from this
+        // abandoned instance.
+        const ownerGone = !hookAliveRef.current;
 
         if (sid) {
           sentSessionId = sid;
           // omp assigns the real id before the first prompt finishes. Promote
           // now so the sidebar can show this active session during streaming.
-          promoteNewSession(1, message);
+          if (!ownerGone) promoteNewSession(1, message);
           if (selectedModel) {
             setPendingModel(selectedModel);
             if (existingSid) {
               await sendAgentCommand(sid, { type: "set_model", provider: selectedModel.provider, modelId: selectedModel.modelId });
-              // set_model re-applies the model's own default thinking level, so
-              // a reasoning pick made before the first prompt goes back on top.
+              // set_model re-applies the model default, so restore the
+              // reasoning level the user chose before the first prompt.
               if (thinkingLevel !== "auto") {
                 await sendAgentCommand(sid, { type: "set_thinking_level", level: thinkingLevel });
               }
             }
           }
-          await ensureEventsConnected(sid);
-          void refreshSubagentRoster(sid);
+          if (!ownerGone) {
+            await ensureEventsConnected(sid);
+            void refreshSubagentRoster(sid);
+          }
           await sendAgentCommand(sid, {
             type: "prompt",
             message,
@@ -3830,12 +4097,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       optimisticUserMessageKeyRef.current = null;
       agentRunningRef.current = false;
       assistantProviderCallRef.current = false;
+      lastRunErrorRef.current = null;
+      slashCommandRunRef.current = false;
       setAgentRunning(false);
       setAgentPhase(null);
+      clearLiveToolResults();
       dispatch({ type: "end" });
       return false;
     }
-  }, [isNew, newSessionCwd, newSessionModel, session, thinkingLevel, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, opts.chatInputRef, refreshSubagentRoster, registerHostTools, registerHostUriSchemes]);
+  }, [isNew, newSessionCwd, newSessionModel, session, thinkingLevel, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, opts.chatInputRef, refreshSubagentRoster, registerHostTools, registerHostUriSchemes, clearLiveToolResults]);
 
   /** Abort the running agent and send the message as a fresh prompt
    * (abort_and_prompt). Only valid mid-run; the old turn's agent_end is
@@ -3870,6 +4140,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         message: trimmedMessage,
         ...(piImages?.length ? { images: piImages } : {}),
       }, { timeoutMs: PROMPT_SEND_TIMEOUT_MS });
+      clearLiveToolResults();
       return true;
     } catch (e) {
       console.error("Failed to interrupt and reply:", e);
@@ -3891,7 +4162,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setStreamAlert({ kind: "send_failed", detail });
       return false;
     }
-  }, [addNotice, ensureEventsConnected, refreshSubagentRoster]);
+  }, [addNotice, clearLiveToolResults, ensureEventsConnected, refreshSubagentRoster]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (agentRunningRef.current || bashRunningRef.current) return;
@@ -3907,8 +4178,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         command,
         excludeFromContext,
       });
-      await loadSession(sid);
-      promoteNewSession(1, inputText);
+      // Same abandonment rule as handleSend: navigating away mid-spawn must
+      // not pull the fresh chat into this session's history.
+      if (hookAliveRef.current) {
+        await loadSession(sid);
+        promoteNewSession(1, inputText);
+      }
     } catch (e) {
       console.error("Failed to execute shell command:", e);
       addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
@@ -5040,9 +5315,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     const oldest = noticeState.visible[0];
     if (!oldest) return;
+    const timeout = oldest.type === "error" ? NOTICE_ERROR_VISIBLE_MS : NOTICE_VISIBLE_MS;
     const t = setTimeout(() => {
       dispatchNotice({ type: "mark_oldest_exiting" });
-    }, NOTICE_VISIBLE_MS);
+    }, timeout);
     return () => clearTimeout(t);
   }, [noticeState.visible]);
 
@@ -5082,7 +5358,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, compactionStatus, currentModel, displayModel, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
-    notices: noticeState.visible, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
+    notices: noticeState.visible, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     permissionRequests, respondToPermission,
     // Smart is on for an unpinned new session, and stays on after the pin —
     // whether Smart resolved it (live pick) or the engine did (Smart spawn) —
@@ -5126,6 +5402,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleThinkingLevelChange, handleModeChange, loadSlashCommands, setActiveLeafId, setData, setMessages,
     dispatch, setAgentRunning, setForkingEntryId,
     bashRunning, pendingBash,
+    liveToolResults,
     // Subscriptions
     handleAgentEventRef,
   };

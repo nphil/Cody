@@ -9,8 +9,9 @@ import { autoBindEnabled, readRouteMemory, setAutoBind } from "@/lib/routing/rou
  * has re-pointed together with the baselines it will restore, and the
  * fallback chains it has filtered: per chain key, the user's `baseline`, the
  * chain actually `written`, and each `dropped` entry with its reason and
- * source (`credits`, `quota`, or `block` for a deadline set after a rejected
- * request rather than a measured quota).
+ * source (`credits`, `quota`, `block` for a deadline set after a rejected
+ * request rather than measured quota, or `disabled` when every saved
+ * credential is disabled).
  *
  * PUT /api/routing {autoBind} — the one switch. ON lets the usage-poll
  * reconciler write `modelRoles` / `retry.fallbackChains` /

@@ -12,6 +12,20 @@ function fail(type, code, message) { emit({ type, ok: false, code, message }); p
 function opaqueId(value) { return createHash("sha256").update(value).digest("base64url"); }
 function asRecord(value) { return value && typeof value === "object" && !Array.isArray(value) ? value : null; }
 function date(value) { const time = typeof value === "string" || typeof value === "number" ? Date.parse(String(value)) : NaN; return Number.isFinite(time) ? new Date(time).toISOString() : null; }
+// OMP 18.3 moved AuthStorage operations under namespaces. Prefer the public
+// namespaced methods when available, while keeping compatibility with older
+// builds that exposed the same methods directly on AuthStorage.
+function storageMethod(storage, namespaceName, methodName, legacyName) {
+  const namespace = asRecord(storage?.[namespaceName]);
+  if (typeof namespace?.[methodName] === "function") return namespace[methodName].bind(namespace);
+  if (typeof storage?.[legacyName] === "function") return storage[legacyName].bind(storage);
+  return null;
+}
+async function callStorageMethod(storage, namespaceName, methodName, legacyName, options) {
+  const method = storageMethod(storage, namespaceName, methodName, legacyName);
+  if (!method) throw new Error("Installed OMP does not expose reset-credit storage support.");
+  return method(options);
+}
 // OMP lists saved resets per provider: Codex since 17.x, Claude (Cedar and
 // Juniper grants) since 18.2.9. An older OMP answers [] for "anthropic".
 const PROVIDERS = [
@@ -77,11 +91,13 @@ async function loadStorage(packageRoot, agentDir) {
   try { aiPath = require.resolve("@oh-my-pi/pi-ai/auth-storage.js"); utilsPath = require.resolve("@oh-my-pi/pi-utils/dirs.js"); } catch { throw new Error("OMP's installed reset-credit modules are unavailable."); }
   const ai = await import(pathToFileURL(aiPath).href); const utils = await import(pathToFileURL(utilsPath).href);
   if (typeof ai.AuthStorage?.create !== "function" || typeof utils.getAgentDbPath !== "function") throw new Error("Installed OMP does not expose AuthStorage reset-credit support.");
-  const storage = await ai.AuthStorage.create(utils.getAgentDbPath()); await storage.reload(); return storage;
+  const storage = await ai.AuthStorage.create(utils.getAgentDbPath());
+  await callStorageMethod(storage, "credentials", "reload", "reload");
+  return storage;
 }
 async function list(storage) {
   const lists = await Promise.all(PROVIDERS.map(async (provider) => {
-    try { return normalizeAccounts(provider, await storage.listResetCredits({ provider: provider.id })); }
+    try { return normalizeAccounts(provider, await callStorageMethod(storage, "resets", "list", "listResetCredits", { provider: provider.id })); }
     catch (error) { return { failed: error instanceof Error ? error.message : String(error), provider }; }
   }));
   // One provider failing must not hide the other's balance; only a total
@@ -124,7 +140,7 @@ async function main() {
       // AuthStorage owns native request UUID generation and all provider cache/block cleanup.
       // 18.2.9 reads provider and grant from `target`; older builds read them
       // beside it, so both spellings are sent.
-      const result = await storage.redeemResetCredit({
+      const result = await callStorageMethod(storage, "resets", "redeem", "redeemResetCredit", {
         target: { ...chosen._target, provider: chosen.provider, creditId: request.creditId },
         provider: chosen.provider,
         creditId: request.creditId,

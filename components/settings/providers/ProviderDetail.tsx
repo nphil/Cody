@@ -16,12 +16,12 @@
  * `KeyMethodCard` is exported for the setup wizard, which renders it in
  * its own card for the key providers the picker offers.
  */
-import { AlertCircle, AlertTriangle, Check, ChevronDown, ChevronRight, KeyRound, Loader2, LogIn, LogOut, Plus, RefreshCw, Trash2, UserPlus } from "lucide-react";
+import { AlertCircle, AlertTriangle, Check, ChevronDown, ChevronRight, KeyRound, Loader2, LogIn, LogOut, Pencil, Plus, RefreshCw, Trash2, UserPlus } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { ModelCatalogPicker } from "@/components/ModelCatalogPicker";
 import { ModelEntryEditor, ProviderEntryEditor, type ModelEntry, type ModelsFileData, type ProviderEntry } from "@/components/ModelsConfig";
 import { Select, type SelectOption } from "@/components/ui/Select";
-import { ConfirmDialog } from "@/components/ui/field";
+import { ConfirmDialog, PromptDialog } from "@/components/ui/field";
 import { toast } from "@/components/ui/toast";
 import { useNativeSettings } from "@/hooks/useConfigWriter";
 import { useModelCatalog } from "@/hooks/useModelCatalog";
@@ -102,31 +102,31 @@ function AccountStateChip({ state, resetsAt }: { state: ProviderLoginAccount["st
   return <span style={{ ...chipStyle, color: "var(--status-warning)" }}>{reset ? `Limited · resets ${reset}` : "Limited"}</span>;
 }
 
-/** The account's own most-binding usage window, as a compact bar — the same
- * shared primitive and colour rule the composer and the Providers directory's
- * Usage block both draw with. */
+/** The account's most-binding usage window, using the same quota treatment as
+ * the composer and provider directory. */
 function AccountUsageBar({ account }: { account: UsageAccount }) {
   const binding = selectBindingWindow([account]);
   if (!binding) return null;
   const percent = clampQuotaPercent(binding.window.utilization);
   const color = usageToneColor(percent, binding.window.state);
   return (
-    <span style={{ width: 48, flexShrink: 0 }} aria-label={`${Math.round(percent)}% of ${binding.window.label} used`}>
+    <div style={{ width: 48, flexShrink: 0 }} aria-label={`${Math.round(percent)}% of ${binding.window.label} used`}>
       <QuotaBar percent={percent} color={color} />
-    </span>
+    </div>
   );
 }
 
 /** One account under a multi-account sign-in: identity, plan, the state omp
- * ranked it at, and — when it is not the credential's only remaining copy —
- * removal. */
-function AccountRow({ account, canEdit, busy, onRemove, usageAccount }: {
+ * ranked it at, an optional Cody-only rename, and explicit permanent removal. */
+function AccountRow({ account, canEdit, canRename, busy, onRemove, onRename, usageAccount }: {
   account: ProviderLoginAccount;
   canEdit: boolean;
+  canRename: boolean;
   busy: boolean;
   onRemove: () => void;
+  onRename: () => void;
   /** The matching usage-snapshot account (by credential id), when the engine
-   * reports one; absent renders no bar at all rather than an empty one. */
+   * reports one; when absent, no empty bar is rendered. */
   usageAccount?: UsageAccount | null;
 }) {
   const title = account.position === 0 ? "Primary" : account.position === 1 ? "Secondary" : `Account ${account.position + 1}`;
@@ -142,9 +142,16 @@ function AccountRow({ account, canEdit, busy, onRemove, usageAccount }: {
       {usageAccount && <AccountUsageBar account={usageAccount} />}
       <AccountStateChip state={account.state} resetsAt={account.resetsAt} />
       {account.canRemove && canEdit && (
-        <button type="button" className="ui-focus-ring" onClick={onRemove} disabled={busy} aria-label={`Remove ${account.label}`} style={{ ...quietButtonStyle, padding: "6px 8px" }}>
-          {busy ? <Loader2 size={12} aria-hidden="true" className="icon-spin" /> : <Trash2 size={12} aria-hidden="true" />}
-        </button>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+          {canRename && account.state !== "disabled" && (
+            <button type="button" className="ui-focus-ring" onClick={onRename} disabled={busy} aria-label={`Rename ${account.label}`} title="Rename connection" style={{ ...quietButtonStyle, padding: "6px 8px" }}>
+              <Pencil size={12} aria-hidden="true" />
+            </button>
+          )}
+          <button type="button" className="ui-focus-ring" onClick={onRemove} disabled={busy} aria-label={`Remove ${account.label} permanently`} title="Remove permanently" style={{ ...quietButtonStyle, padding: "6px 8px" }}>
+            {busy ? <Loader2 size={12} aria-hidden="true" className="icon-spin" /> : <Trash2 size={12} aria-hidden="true" />}
+          </button>
+        </span>
       )}
     </div>
   );
@@ -170,12 +177,19 @@ export function LoginMethodCard({ row, method, canEdit, shortName, autoStart, on
   const [removeTarget, setRemoveTarget] = useState<ProviderLoginAccount | null>(null);
   const [removingId, setRemovingId] = useState<string | null>(null);
   const [removeError, setRemoveError] = useState<string | null>(null);
+  const [renameTarget, setRenameTarget] = useState<ProviderLoginAccount | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameError, setRenameError] = useState<string | null>(null);
   const removingRef = useRef(false);
+  const renamingRef = useRef(false);
   const provider = loginRowOf(row, method);
   const connected = method.state === "connected";
   const accounts = method.accounts;
   const hasAccounts = (accounts?.length ?? 0) > 0;
-  const showAddAccount = hasAccounts;
+  const activeAccounts = accounts?.filter((account) => account.state !== "disabled") ?? [];
+  const disabledAccounts = accounts?.filter((account) => account.state === "disabled") ?? [];
+  const hasActiveAccounts = activeAccounts.length > 0;
+  const showAddAccount = hasActiveAccounts;
 
   const logout = async () => {
     setLogoutError(null);
@@ -222,6 +236,32 @@ export function LoginMethodCard({ row, method, canEdit, shortName, autoStart, on
     }
   };
 
+  const renameAccount = async (account: ProviderLoginAccount, name: string) => {
+    if (renamingRef.current) return;
+    renamingRef.current = true;
+    setRenamingId(account.id);
+    setRenameError(null);
+    try {
+      const response = await fetch(`/api/auth/account/${encodeURIComponent(provider.id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountId: account.id, name }),
+      });
+      const body = await response.json().catch(() => null) as { error?: string; code?: string } | null;
+      if (!response.ok) {
+        setRenameError(body?.error || body?.code ? formatApiError(body ?? {}) : `HTTP ${response.status}`);
+        return;
+      }
+      setRenameTarget(null);
+      onChanged();
+    } catch (failure) {
+      setRenameError(failure instanceof Error ? failure.message : String(failure));
+    } finally {
+      renamingRef.current = false;
+      setRenamingId(null);
+    }
+  };
+
   return (
     <div style={cardStyle}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -231,6 +271,11 @@ export function LoginMethodCard({ row, method, canEdit, shortName, autoStart, on
         </span>
         <StateChip ok={connected}>{connected ? (isSubscriptionLogin(method) ? "Signed in" : `Key stored in ${shortName}`) : "Not signed in"}</StateChip>
       </div>
+      {connected && isSubscriptionLogin(method) && method.accounts === undefined && method.accountDetailsReason && (
+        <p role="status" aria-live="polite" style={{ margin: 0, fontSize: 11, color: "var(--text-muted)", lineHeight: 1.45, overflowWrap: "anywhere" }}>
+          <span style={{ fontWeight: 600 }}>Account details unavailable.</span> {method.accountDetailsReason}
+        </p>
+      )}
       {canEdit && (
         <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
           <button type="button" className="ui-focus-ring" onClick={() => { setLogoutError(null); setRemoveError(null); setStarting(true); setExpanded(true); }} aria-expanded={expanded} style={connected ? buttonStyle : primaryButtonStyle}>
@@ -257,20 +302,42 @@ export function LoginMethodCard({ row, method, canEdit, shortName, autoStart, on
       )}
       {hasAccounts && (
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          {accounts?.map((account) => (
+          {activeAccounts.map((account) => (
             <AccountRow
               key={account.id}
               account={account}
               canEdit={canEdit}
+              canRename={method.canRenameAccount === true}
               busy={removingId === account.id}
               onRemove={() => { setRemoveError(null); setRemoveTarget(account); }}
-              usageAccount={usageAccounts?.find((entry) => String(entry.credentialId) === account.id) ?? null}
+              onRename={() => { setRenameError(null); setRenameTarget(account); }}
+              usageAccount={usageAccounts?.find((entry) => entry.credentialId !== null && String(entry.credentialId) === account.id) ?? null}
             />
           ))}
+          {disabledAccounts.length > 0 && (
+            <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8, marginTop: 2, display: "flex", flexDirection: "column", gap: 6 }}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>Disabled history</div>
+              <p style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.45 }}>
+                These accounts are disabled by {shortName} and are not active connections. Remove one permanently if you no longer want its stored record.
+              </p>
+              {disabledAccounts.map((account) => (
+                <AccountRow
+                  key={account.id}
+                  account={account}
+                  canEdit={canEdit}
+                  canRename={false}
+                  busy={removingId === account.id}
+                  onRemove={() => { setRemoveError(null); setRemoveTarget(account); }}
+                  onRename={() => { /* disabled history is intentionally not renameable */ }}
+                  usageAccount={usageAccounts?.find((entry) => entry.credentialId !== null && String(entry.credentialId) === account.id) ?? null}
+                />
+              ))}
+            </div>
+          )}
         </div>
       )}
       {accounts === undefined ? (
-        connected && !method.canLogout && (
+        connected && !method.canLogout && !method.accountDetailsReason && (
           <p style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.45 }}>
             Sign out from the {shortName} TUI (<code style={{ fontFamily: "var(--font-mono)" }}>/logout</code> in a Cody terminal); {shortName} keeps this credential in its own store.
           </p>
@@ -291,12 +358,27 @@ export function LoginMethodCard({ row, method, canEdit, shortName, autoStart, on
         <ConfirmDialog
           open
           onOpenChange={(open) => { if (!open) setRemoveTarget(null); }}
-          title={`Remove ${removeTarget.label}?`}
-          description={`Sessions stop using this ${removeTarget.label} account.${accounts?.length === 1 ? ` This is the last account, so ${row.name} is disconnected.` : ""}`}
-          confirmLabel="Remove"
+          title={`Remove ${removeTarget.label} permanently?`}
+          description={`${removeTarget.state === "disabled" ? "This disabled history entry will be permanently deleted." : `Sessions stop using this ${removeTarget.label} account.`}${removeTarget.state !== "disabled" && activeAccounts.length === 1 ? ` This is the last active account, so ${row.name} is disconnected.` : ""} This cannot be undone, and signing in again creates a new connection.`}
+          confirmLabel="Remove permanently"
           danger
           busy={removingId === removeTarget.id}
           onConfirm={() => { void removeAccount(removeTarget); }}
+        />
+      )}
+      {renameTarget && (
+        <PromptDialog
+          open
+          title={`Name ${renameTarget.label}`}
+          label="Connection name"
+          description={<>Stored in Cody only. Leave it empty to clear the custom name.{renameError && <><br /><span style={{ color: "var(--status-error)" }}>{renameError}</span></>}</>}
+          placeholder="e.g. Work account"
+          initialValue={renameTarget.label}
+          confirmLabel="Save name"
+          busy={renamingId === renameTarget.id}
+          validate={(value) => value.replace(/\s+/g, " ").trim().length > 80 ? "Connection names must be 80 characters or fewer." : null}
+          onSubmit={(value) => { void renameAccount(renameTarget, value); }}
+          onCancel={() => { setRenameTarget(null); setRenameError(null); }}
         />
       )}
     </div>

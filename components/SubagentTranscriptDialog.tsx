@@ -529,23 +529,25 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
   const open = subagent !== null;
   const fromDisk = subagent?.source === "history";
   const live = !fromDisk;
+  const subagentId = subagent?.id;
+  const subagentSessionFile = subagent?.sessionFile;
 
   const fetchCompletion = useCallback(async (): Promise<{ completion: string | null; truncated: boolean }> => {
-    if (!sessionId || !subagent?.id) throw new Error("No session");
-    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(subagent.id)}?mode=completion`);
+    if (!sessionId || !subagentId) throw new Error("No session");
+    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(subagentId)}?mode=completion`);
     if (res.status === 404) return { completion: null, truncated: false };
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json() as { completion: string | null; truncated: boolean };
-  }, [sessionId, subagent?.id]);
+  }, [sessionId, subagentId]);
 
   // Full transcript page (RPC registry first, disk fallback) — mirrors the
   // get_subagent_messages response shape so both sources are interchangeable.
   const fetchTranscriptPage = useCallback(async (startByte: number, preferDisk: boolean, direction: "forward" | "before", tail = false): Promise<SubagentMessagesPage> => {
-    if (!sessionId || !subagent?.id) throw new Error("No session");
+    if (!sessionId || !subagentId) throw new Error("No session");
     if (preferDisk) {
       const params = new URLSearchParams(direction === "before" ? { beforeByte: String(startByte) } : { fromByte: String(startByte) });
       if (tail) params.set("tail", "1");
-      const url = "/api/sessions/" + encodeURIComponent(sessionId) + "/subagents/" + encodeURIComponent(subagent.id) + "?" + params.toString();
+      const url = "/api/sessions/" + encodeURIComponent(sessionId) + "/subagents/" + encodeURIComponent(subagentId) + "?" + params.toString();
       const res = await fetch(url);
       if (!res.ok) throw new Error("HTTP " + res.status);
       return await res.json() as SubagentMessagesPage;
@@ -553,11 +555,11 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
     if (direction === "before") throw new Error("Earlier transcript pages require the disk reader");
     return await sendAgentCommand<SubagentMessagesPage>(sessionId, {
       type: "get_subagent_messages",
-      subagentId: subagent.id,
-      sessionFile: subagent.sessionFile,
+      subagentId,
+      sessionFile: subagentSessionFile,
       fromByte: startByte,
     });
-  }, [sessionId, subagent?.id, subagent?.sessionFile]);
+  }, [sessionId, subagentId, subagentSessionFile]);
 
   const loadTranscriptPage = useCallback(async (startByte: number, direction: "forward" | "before" = "forward", tail = false) => {
     if (!sessionId || !subagent?.id) return;

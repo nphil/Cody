@@ -208,6 +208,48 @@
         margin-top: 22px;
       }
 
+      .connection {
+        width: min(440px, 100%);
+        margin-top: 22px;
+        padding: 12px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--bg-raised);
+        text-align: left;
+      }
+
+      .connection label {
+        display: block;
+        margin-bottom: 5px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .connection select,
+      .connection input {
+        width: 100%;
+        min-height: 32px;
+        padding: 5px 8px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: var(--bg);
+        color: var(--text);
+        font: inherit;
+      }
+
+      .connection input {
+        margin-top: 8px;
+        font-family: "Cascadia Mono", "Consolas", ui-monospace, monospace;
+        font-size: 12px;
+      }
+
+      .connection .hint {
+        margin: 7px 0 0;
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.4;
+      }
+
       button.action {
         padding: 8px 18px;
         border: 1px solid var(--line);
@@ -261,10 +303,24 @@
       <div class="track indeterminate" id="track"><div class="fill" id="fill"></div></div>
 
       <div class="steps" id="steps">
+        <span data-step="checking-remote">Remote</span>
         <span data-step="checking-wsl">WSL</span>
         <span data-step="downloading">Download</span>
         <span data-step="importing">Install</span>
         <span data-step="starting-server">Start</span>
+      </div>
+
+      <div class="connection" id="connection">
+        <label for="mode">Runtime mode</label>
+        <select id="mode">
+          <option value="remote">Remote Cody</option>
+          <option value="local">Local WSL2 runtime</option>
+        </select>
+        <input id="remote-url" type="url" spellcheck="false" autocomplete="url" />
+        <p class="hint" id="connection-hint">Remote mode uses the HTTPS origin configured for this desktop build and does not start WSL or Docker on this PC.</p>
+        <div class="row" style="margin-top:10px">
+          <button class="action primary" id="save-mode">Save and connect</button>
+        </div>
       </div>
 
       <div class="command hidden" id="command">
@@ -300,8 +356,13 @@
       const actions = el("actions");
       const retry = el("retry");
       const docs = el("docs");
+      const mode = el("mode");
+      const remoteUrl = el("remote-url");
+      const connectionHint = el("connection-hint");
+      const saveMode = el("save-mode");
 
-      const ORDER = ["checking-wsl", "downloading", "importing", "starting-server"];
+      const ORDER = ["checking-remote", "checking-wsl", "downloading", "importing", "starting-server"];
+      let currentConfig = null;
 
       el("win-min").addEventListener("click", () => win.minimize());
       el("win-max").addEventListener("click", () => win.toggleMaximize());
@@ -330,6 +391,37 @@
       let docsUrl = null;
       docs.addEventListener("click", () => {
         if (docsUrl) invoke("open_external", { url: docsUrl });
+      });
+
+      mode.addEventListener("change", () => {
+        const remote = mode.value === "remote";
+        remoteUrl.classList.toggle("hidden", !remote);
+        connectionHint.textContent = remote
+          ? "Remote mode uses the HTTPS origin configured for this desktop build and does not start WSL or Docker on this PC."
+          : "Local mode provisions and runs Cody inside a dedicated WSL2 distro on this PC.";
+        saveMode.textContent = remote ? "Save and connect" : "Save and start local Cody";
+      });
+
+      saveMode.addEventListener("click", async () => {
+        if (!currentConfig) return;
+        saveMode.disabled = true;
+        try {
+          const saved = await invoke("desktop_config_save", {
+            next: {
+              ...currentConfig,
+              mode: mode.value,
+              remoteUrl: remoteUrl.value.trim(),
+            },
+          });
+          currentConfig = saved;
+          actions.classList.add("hidden");
+          commandBox.classList.add("hidden");
+          invoke("bootstrap_retry");
+        } catch (error) {
+          connectionHint.textContent = error instanceof Error ? error.message : String(error);
+        } finally {
+          saveMode.disabled = false;
+        }
       });
 
       function bytes(n) {
@@ -393,6 +485,18 @@
       }
 
       tauri.event.listen("cody://setup-status", (event) => render(event.payload));
+      invoke("desktop_config").then((config) => {
+        currentConfig = config;
+        const remoteOption = mode.querySelector('option[value="remote"]');
+        remoteUrl.value = config.remoteUrl || "";
+        if (!config.remoteUrl && remoteOption) {
+          remoteOption.disabled = true;
+          mode.value = "local";
+        } else {
+          mode.value = config.mode;
+        }
+        mode.dispatchEvent(new Event("change"));
+      }).catch(() => {});
       invoke("bootstrap_status").then(render);
     </script>
   </body>
