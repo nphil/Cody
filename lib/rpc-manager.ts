@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import path from "path";
 import { getSessionOwner, renameSessionOwner, setSessionOwner } from "./auth/session-owners";
@@ -16,7 +16,8 @@ import { invalidateModelsCache } from "./models-cache";
 import { MAX_RPC_FRAME_BYTES } from "./omp/rpc-frame";
 import { RpcCommandError, RpcCommandTimeoutError, RpcProcess, type RpcFrame, type RpcProcessLaunch } from "./omp/rpc-process";
 import { readNativeSettings } from "./omp/settings-config";
-import { getAgentDir, getSidebarChatsDir, getSessionDirNameForCwd } from "./omp/paths";
+import { getSidebarChatsDir, getSessionDirNameForCwd } from "./omp/paths";
+import { linkIsolatedAgentDir } from "./omp/isolated-agent-dir";
 import { captureLoopbackScreenshot, ScreenshotError } from "./preview-screenshot";
 import { ProjectTodoError, type TodoDocument, formatTodoForAgent, mutateProjectTodo, parseTodoAgentAction, readProjectTodo, todoAgentActionOperation } from "./project-todo";
 import { resolveProject } from "./worktree";
@@ -126,42 +127,18 @@ export function sidebarBareCwd(): string {
  * omp reads them from `<agent dir>/mcp.json` and has NO flag or setting to
  * suppress it — `--no-tools`/`--no-extensions` cover its own builtins and
  * extension discovery, not this. Measured on the owner's install that file
- * contributed 111 tool schemas, 89,303 tokens, to every sidebar turn. So the
- * sidebar child runs against its own agent dir whose `mcp.json` is explicitly
- * empty, with what it genuinely needs SYMLINKED to the real ones:
- *
- *   agent.db   — credentials; omp already opens it from concurrent processes,
- *                and SQLite puts `-wal`/`-shm` beside the symlink TARGET, so
- *                the live database is untouched (verified).
- *   models.yml — providers and custom endpoints, including the local
- *                llama-swap models the sidebar is meant to run on.
- *   config.yml — model roles and provider order; the overlay applies on top.
- *   blobs      — externalized image payloads, so attachments still resolve.
- *
- * A target that does not exist yet is skipped rather than linked dangling: a
- * fresh install has no agent.db until its first credential.
+ * contributed 111 tool schemas, 89,303 tokens, to every sidebar turn.
+ * `linkIsolatedAgentDir` (lib/omp/isolated-agent-dir.ts) is the shared
+ * symlink logic — empty `mcp.json`, `agent.db`/`models.yml`/`config.yml`/
+ * `blobs` SYMLINKED to the real ones so credentials, providers (including
+ * the local llama-swap models the sidebar is meant to run on) and image
+ * blobs still work; this just picks WHERE the sidebar's own copy lives,
+ * inside the sidebar-chats dir so it is obviously Cody-owned state and
+ * never a user workspace.
  */
-const SIDEBAR_AGENT_LINKS = ["agent.db", "models.yml", "models.yaml", "config.yml", "config.yaml", "blobs"] as const;
-const SIDEBAR_EMPTY_MCP = '{"mcpServers":{}}\n';
-
 export function sidebarAgentDir(): string {
   const dir = path.join(getSidebarChatsDir(), "agent");
-  mkdirSync(dir, { recursive: true });
-  const mcpPath = path.join(dir, "mcp.json");
-  let currentMcp: string | null = null;
-  try { currentMcp = readFileSync(mcpPath, "utf8"); } catch { /* absent */ }
-  if (currentMcp !== SIDEBAR_EMPTY_MCP) writeFileSync(mcpPath, SIDEBAR_EMPTY_MCP, { mode: 0o600 });
-  const real = getAgentDir();
-  for (const name of SIDEBAR_AGENT_LINKS) {
-    const target = path.join(real, name);
-    const link = path.join(dir, name);
-    if (!existsSync(target)) continue;
-    try {
-      if (readlinkSync(link) === target) continue;
-      rmSync(link);
-    } catch { /* not a link, or absent */ }
-    try { symlinkSync(target, link); } catch { /* raced with another spawn */ }
-  }
+  linkIsolatedAgentDir(dir);
   return dir;
 }
 

@@ -1,5 +1,6 @@
 import { getHarness } from "./harness";
 import { runOneShotModel } from "./model-plan/one-shot";
+import { getOneShotAgentDir } from "./omp/isolated-agent-dir";
 import { readModelRoles } from "./omp/model-roles";
 import { sanitizeSessionTitle } from "./session-title";
 
@@ -219,6 +220,10 @@ export async function generateSessionName(firstMessage: string | undefined): Pro
       Array.from(message).slice(0, MAX_PROMPT_CHARS).join(""),
     ].join("\n"),
     timeoutMs: NAMER_TIMEOUT_MS,
+    // Isolated, never the real agent dir directly: see
+    // lib/omp/isolated-agent-dir.ts — a real agent dir's user-scope MCP
+    // servers otherwise make every naming call connect to them first.
+    extraEnv: { PI_CODING_AGENT_DIR: getOneShotAgentDir() },
   });
   if (!answer.text) return null;
   return normalizeSessionName(answer.text);

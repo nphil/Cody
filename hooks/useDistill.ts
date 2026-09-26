@@ -11,19 +11,28 @@
  * consumer here treats `done.text` as a replace and never depends on having
  * seen a delta.
  *
- * Everything is dormant-by-default and dormant-on-failure. Nothing is
- * requested unless the user asked for it AND `/api/distill/config` says the
- * active engine can serve it; any failure (an ACP engine, no model in the
- * chain, a dead child, a dropped stream) leaves the caller rendering the full
- * original text exactly as it does today. A distill is an addition to the
- * transcript, never a dependency of it.
+ * Nothing is requested unless the user asked for it AND `/api/distill/config`
+ * says the active engine can serve it; any failure (an ACP engine, no model
+ * in the chain, a dead child, a dropped stream) leaves the caller rendering
+ * the full original text exactly as it does today. A distill is an addition
+ * to the transcript, never a dependency of it.
+ *
+ * Two kinds of "not available" are NOT the same and are tracked separately.
+ * `unsupported` (an ACP engine, no binary) is a structural fact about the
+ * whole page and latches permanently. A 401/403 is a transient auth hiccup
+ * (clock skew, an expired credential cache, a proxy needing re-auth) and
+ * only pauses every request for `AUTH_BACKOFF_MS`, then tries again on its
+ * own — see the "Process-wide availability" section below.
  *
  * Two concurrency limits matter and both live here: the server runs at most
  * two distills, and the browser must not answer a scroll through a long
  * history by opening a dozen streams at once (HTTP/1.1 would starve the rest
  * of the app), so requests queue FIFO behind two in-flight fetches. A newer
- * request for a key supersedes an older one — aborting it if it started,
- * replacing it if it is still queued.
+ * request for a key that is still QUEUED replaces it outright; one already
+ * DISPATCHED is left to finish rather than aborted, and the newer text gets
+ * its own turn the moment that slot frees up — killing an in-flight request
+ * every time newer text arrives, when the model answers slower than the
+ * text regrows, would mean none of them ever lands at all.
  */
 
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
@@ -63,8 +72,11 @@ export interface DistillState {
 }
 
 export interface DistillRequest {
-  /** Store key. `${sessionId}:${entryId ?? "live"}:${blockIndex}` for
-   *  thinking, `${sessionId}:${entryId}:reply:${verbosity}` for replies. */
+  /** Store key. `${sessionId}:${entryId ?? "live"}:${blockIndex}:${plain}`
+   *  for thinking, `${sessionId}:${entryId}:reply:${verbosity}:${plain}` for
+   *  replies — `plain` is its own segment (thinkingSummaryKeys below builds
+   *  it), so switching the preference never reuses the other phrasing's
+   *  in-memory entry. */
   key: string;
   sessionId: string;
   entryId?: string;
@@ -72,7 +84,35 @@ export interface DistillRequest {
   kind: DistillKind;
   text: string;
   verbosity?: DistillVerbosity;
+  /** Everyday language instead of developer shorthand; see
+   *  lib/distill-preferences.ts's `plainLanguage`. */
+  plain: boolean;
   final: boolean;
+}
+
+/**
+ * Which store keys a thinking block's summaries live under, decoupled from
+ * whether the box happens to be open right now: the FINAL request is asked
+ * once Distill is on, regardless of expansion, so it is ready the moment the
+ * reader collapses the block later. Only the LIVE (streaming) request is
+ * gated on the block being collapsed — nobody can see a running one-line
+ * summary while the full reasoning is already on screen, so there is
+ * nothing to show it in until it is.
+ */
+export function thinkingSummaryKeys(args: {
+  distillOn: boolean;
+  collapsed: boolean;
+  plain: boolean;
+  sessionId: string | undefined;
+  entryId: string | undefined;
+  blockIndex: number;
+}): { liveKey: string | null; finalKey: string | null } {
+  const { distillOn, collapsed, plain, sessionId, entryId, blockIndex } = args;
+  const plainSuffix = plain ? "plain" : "normal";
+  return {
+    liveKey: distillOn && collapsed && sessionId !== undefined ? `${sessionId}:live:${blockIndex}:${plainSuffix}` : null,
+    finalKey: distillOn && sessionId !== undefined && entryId !== undefined ? `${sessionId}:${entryId}:${blockIndex}:${plainSuffix}` : null,
+  };
 }
 
 const IDLE_DISTILL: DistillState = {
@@ -111,26 +151,50 @@ const entries = new Map<string, Entry>();
 const waiting: string[] = [];
 let running = 0;
 
-// ── Process-wide dormancy ─────────────────────────────────────────────────
-// The engine answering `unsupported` (or the session no longer being ours)
-// is a fact about the whole page, not about one message: latch it once so a
-// transcript full of blocks stops asking.
+// ── Process-wide availability: permanent latch vs temporary backoff ───────
+// `unsupported` is a structural fact about the whole page — the engine
+// literally cannot serve Distill (an ACP engine, no binary) — so it latches
+// once, permanently, like before. A 401/403 is a transient auth hiccup
+// (clock skew, an expired credential cache, a proxy that needs re-auth): it
+// backs off for a while and tries again on its own, instead of disabling
+// Distill until the page reloads.
 
 let dormant = false;
-const dormantListeners = new Set<() => void>();
+/** How long a 401/403 pauses Distill before it tries again on its own. */
+export const AUTH_BACKOFF_MS = 60_000;
+let paused = false;
+let pauseTimer: NodeJS.Timeout | null = null;
+const availabilityListeners = new Set<() => void>();
 
-const readDormant = () => dormant;
-const readNotDormant = () => false;
+const readUnavailable = () => dormant || paused;
+const readAvailable = () => false;
+
+function notifyAvailability(): void {
+  availabilityListeners.forEach((listener) => listener());
+}
 
 function markDormant(): void {
   if (dormant) return;
   dormant = true;
-  dormantListeners.forEach((listener) => listener());
+  notifyAvailability();
 }
 
-function subscribeDormant(onChange: () => void): () => void {
-  dormantListeners.add(onChange);
-  return () => { dormantListeners.delete(onChange); };
+/** A 401/403: pause every request for AUTH_BACKOFF_MS, then clear on its
+ *  own. A second 401 while already paused just restarts the same window. */
+function pauseForAuth(): void {
+  paused = true;
+  clearTimeout(pauseTimer ?? undefined);
+  pauseTimer = setTimeout(() => {
+    pauseTimer = null;
+    paused = false;
+    notifyAvailability();
+  }, AUTH_BACKOFF_MS);
+  notifyAvailability();
+}
+
+function subscribeAvailability(onChange: () => void): () => void {
+  availabilityListeners.add(onChange);
+  return () => { availabilityListeners.delete(onChange); };
 }
 
 /** Tests only: drop every distilled answer, queue entry and the latch. */
@@ -140,6 +204,8 @@ export function resetDistillStore(): void {
   waiting.length = 0;
   running = 0;
   dormant = false;
+  paused = false;
+  if (pauseTimer !== null) { clearTimeout(pauseTimer); pauseTimer = null; }
 }
 
 // ── Store ─────────────────────────────────────────────────────────────────
@@ -192,7 +258,7 @@ function subscribeDistillState(key: string | null, onChange: () => void): () => 
  * Anything else supersedes what is in flight or queued for that key.
  */
 export function requestDistill(request: DistillRequest): void {
-  if (dormant) return;
+  if (dormant || paused) return;
   const entry = ensureEntry(request.key);
   const last = entry.last;
   if (last !== null
@@ -202,11 +268,13 @@ export function requestDistill(request: DistillRequest): void {
     && last.verbosity === request.verbosity) return;
   entry.last = request;
   entry.pending = request;
-  if (entry.controller !== null) {
-    entry.runId += 1;
-    entry.controller.abort();
-    entry.controller = null;
-  }
+  // A request already dispatched to the server is left to run to
+  // completion, not aborted: killing it to start over on every newer tick,
+  // when a real model answers slower than the text regrows, would mean NONE
+  // of them ever lands — the running summary would never update at all. The
+  // newest text still wins: `entry.pending` above is what `runDistill`'s
+  // `finally` dispatches next, the moment this run's slot frees up.
+  if (entry.controller !== null) return;
   if (!waiting.includes(request.key)) waiting.push(request.key);
   pump();
 }
@@ -270,6 +338,7 @@ async function runDistill(entry: Entry, request: DistillRequest): Promise<void> 
         kind: request.kind,
         text: request.text,
         verbosity: request.verbosity,
+        plain: request.plain,
         final: request.final,
       }),
       signal: controller.signal,
@@ -280,10 +349,13 @@ async function runDistill(entry: Entry, request: DistillRequest): Promise<void> 
       // A 4xx is about THIS request — a body the route rejected, a session it
       // will not read, an expired sign-in — and a Retry click cannot fix any
       // of them, so it stays silent (`unsupported` is the code consumers
-      // render nothing for). 401/403 additionally settles the whole page:
-      // asking again for every other block would be noise. A 5xx IS
-      // transient, so it earns the retry footer.
-      if (response.status === 401 || response.status === 403) markDormant();
+      // render nothing for). A 5xx IS transient, so it earns the retry
+      // footer. 401/403 additionally pauses the whole page for a while
+      // (pauseForAuth): asking again for every other block right now would
+      // be noise, but a clock-skew or expired-cache hiccup is transient, so
+      // Distill tries again on its own once the backoff clears rather than
+      // staying off until the page reloads.
+      if (response.status === 401 || response.status === 403) pauseForAuth();
       setState(entry, { status: "error", errorCode: response.status >= 500 ? "failed" : "unsupported" });
       return;
     }
@@ -333,6 +405,20 @@ async function runDistill(entry: Entry, request: DistillRequest): Promise<void> 
             setState(entry, { status: entry.state.text === "" ? "idle" : "done", errorCode: null });
             continue;
           }
+          // The server's waitlist was full and dropped this request before
+          // it ever ran (lib/distill/runner.ts's DistillQueueOverflowError)
+          // — almost always because it was off-screen when a fast scroll
+          // queued many at once. Also not a real failure, but unlike a
+          // supersede nothing else is coming for it, so `entry.last` is
+          // cleared too: otherwise a later identical request (the reader
+          // scrolling back to a block that never got its summary) would be
+          // deduped into silence forever. useOnScreen's live tracking is
+          // what actually re-asks once the block is visible again.
+          if (event.message === "queue_overflow") {
+            entry.last = null;
+            setState(entry, { status: entry.state.text === "" ? "idle" : "done", errorCode: null });
+            continue;
+          }
           const code = typeof event.code === "string" ? ERROR_CODES[event.code] : undefined;
           if (code === "unsupported") markDormant();
           setState(entry, { status: "error", errorCode: code ?? "failed" });
@@ -350,6 +436,10 @@ async function runDistill(entry: Entry, request: DistillRequest): Promise<void> 
       entry.controller = null;
       if (!terminal) setState(entry, { status: "error", errorCode: "failed" });
     }
+    // A newer request for this key arrived while this run was in flight and
+    // was left to finish rather than aborted (requestDistill): the newer
+    // text is still queued in `entry.pending`, so give it its own turn now.
+    if (entry.pending !== null && !waiting.includes(request.key)) waiting.push(request.key);
     pump();
   }
 }
@@ -373,43 +463,51 @@ export interface DistillChatSettings {
   supported: boolean;
   replies: DistillReplyMode;
   thinking: boolean;
+  plainLanguage: boolean;
 }
 
 /**
- * What the transcript needs to know: the user's two preferences, and whether
- * the instance can serve them at all. The config route is only consulted once
- * a preference is on, so a user who never enables Distill never pays for it.
+ * What the transcript needs to know: the user's preferences, and whether the
+ * instance can serve them at all. The config route is only consulted once a
+ * preference is on, so a user who never enables Distill never pays for it.
  */
 export function useDistillChatSettings(): DistillChatSettings {
   const prefs = useDistillPreferences();
   const wanted = prefs.replies !== "off" || prefs.thinking;
   const config = useSettingsRoute<DistillConfigPayload>(DISTILL_CONFIG_ROUTE, { enabled: wanted, ttlMs: SHARED_ROUTE_TTL_MS });
-  const gone = useSyncExternalStore(subscribeDormant, readDormant, readNotDormant);
+  const gone = useSyncExternalStore(subscribeAvailability, readUnavailable, readAvailable);
   const supported = wanted && !gone && config.data?.supported === true;
-  return useMemo(() => ({ supported, replies: prefs.replies, thinking: prefs.thinking }), [supported, prefs.replies, prefs.thinking]);
+  return useMemo(
+    () => ({ supported, replies: prefs.replies, thinking: prefs.thinking, plainLanguage: prefs.plainLanguage }),
+    [supported, prefs.replies, prefs.thinking, prefs.plainLanguage],
+  );
 }
 
 /**
- * A ref callback plus "this element has been on screen at least once".
- * History distills are driven by it, so opening a long session distills
- * nothing until the reader actually scrolls to a block.
+ * A ref callback plus "this element is on screen right now" — LIVE, not
+ * merely "ever seen": the observer never disconnects, so a block that
+ * scrolls back into view reports true again. That is what lets a thinking
+ * block whose summary was dropped by the server's queue while off-screen
+ * (never a real chain failure — runDistill's `queue_overflow` handling
+ * above) get a fresh attempt on a later visit; a block that already has an
+ * answer, or a genuinely exhausted chain, stays quiet on repeat visibility
+ * because `requestDistill`'s own de-dup against `entry.last` — not this
+ * hook — is what decides whether to ask again.
  */
-export function useSeenOnScreen(enabled: boolean): [(node: HTMLElement | null) => void, boolean] {
+export function useOnScreen(enabled: boolean): [(node: HTMLElement | null) => void, boolean] {
   const [node, setNode] = useState<HTMLElement | null>(null);
-  const [seen, setSeen] = useState(false);
+  const [onScreen, setOnScreen] = useState(false);
   useEffect(() => {
-    if (!enabled || seen || node === null) return;
+    if (!enabled || node === null) return;
     if (typeof IntersectionObserver === "undefined") {
-      setSeen(true);
+      setOnScreen(true);
       return;
     }
     const observer = new IntersectionObserver((records) => {
-      if (!records.some((record) => record.isIntersecting)) return;
-      setSeen(true);
-      observer.disconnect();
+      setOnScreen(records.some((record) => record.isIntersecting));
     }, { rootMargin: "200px 0px" });
     observer.observe(node);
     return () => observer.disconnect();
-  }, [enabled, seen, node]);
-  return [setNode, seen];
+  }, [enabled, node]);
+  return [setNode, onScreen];
 }

@@ -29,11 +29,17 @@ export interface DistillPreferences {
   replies: DistillReplyMode;
   /** Summarize a thinking block while it is collapsed. */
   thinking: boolean;
+  /** Everyday language instead of developer shorthand: names the goal for a
+   *  thinking summary rather than a code identifier, and explains jargon
+   *  instead of assuming it for a reply. Applies to whichever of the two
+   *  above is already on; it starts nothing by itself. */
+  plainLanguage: boolean;
 }
 
 export const DEFAULT_DISTILL_PREFERENCES: DistillPreferences = {
   replies: "off",
   thinking: false,
+  plainLanguage: false,
 };
 
 /** Values come from storage, so the mode is an allowlist, not free text. */
@@ -49,12 +55,14 @@ export function normalizeDistillPreferences(raw: unknown): DistillPreferences {
   return {
     replies,
     thinking: typeof source.thinking === "boolean" ? source.thinking : DEFAULT_DISTILL_PREFERENCES.thinking,
+    plainLanguage: typeof source.plainLanguage === "boolean" ? source.plainLanguage : DEFAULT_DISTILL_PREFERENCES.plainLanguage,
   };
 }
 
 export function isDefaultDistillPreferences(prefs: DistillPreferences): boolean {
   return prefs.replies === DEFAULT_DISTILL_PREFERENCES.replies
-    && prefs.thinking === DEFAULT_DISTILL_PREFERENCES.thinking;
+    && prefs.thinking === DEFAULT_DISTILL_PREFERENCES.thinking
+    && prefs.plainLanguage === DEFAULT_DISTILL_PREFERENCES.plainLanguage;
 }
 
 // ── Persistence + live subscription (browser only; SSR sees defaults) ──────

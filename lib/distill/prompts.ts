@@ -100,6 +100,19 @@ const THINKING_RULES = [
   "Example: Checking how the session namer picks its model before wiring the fallback chain.",
 ].join(" ");
 
+/** Same job, for a reader who does not read code: the GOAL is the concrete
+ *  subject now, never a bare identifier. See lib/distill-preferences.ts. */
+const THINKING_RULES_PLAIN = [
+  "You compress a coding assistant's in-progress reasoning into a single status line for a collapsed panel,",
+  "for a reader who does not read code and does not know its file, function or variable names.",
+  `Write ONE sentence in the present tense, at most ${MAX_THINKING_CHARS} characters, plain text:`,
+  "no markdown, no quotation marks, no trailing full stop is required.",
+  "Say what is being done and why, in everyday words: name the GOAL — what changes for the user,",
+  "or what problem is being solved — never a file, function, class or variable name,",
+  "unless that exact name is itself the point the reader needs.",
+  "Example: Figuring out why a message sent while the reply is still arriving can get lost.",
+].join(" ");
+
 const REPLY_RULES: Record<DistillVerbosity, string> = {
   low: [
     "Give the shortest faithful account: 1 to 3 sentences.",
@@ -117,6 +130,18 @@ const REPLY_RULES: Record<DistillVerbosity, string> = {
   ].join(" "),
 };
 
+/** For a reader who does not read code: still every decision and outcome —
+ *  none dropped — but jargon and identifiers are explained instead of
+ *  assumed. A command the reader must actually run is the one thing that
+ *  never gets paraphrased: a "simplified" command is a broken command. */
+const REPLY_RULES_PLAIN = [
+  "The reader is not a programmer. Keep every decision and outcome from the original — drop none of them —",
+  "but replace or briefly explain jargon, technical terms and code identifiers in everyday words",
+  "the first time each appears.",
+  "A command the reader must actually type or run stays EXACTLY as written, verbatim, in its code fence:",
+  "never paraphrase, simplify or translate a command.",
+].join(" ");
+
 const REPLY_FORMAT = [
   "Answer in Markdown, in the same language as the material.",
   "Reproduce short code blocks and commands verbatim inside fences;",
@@ -128,23 +153,76 @@ export interface DistillPrompt {
   prompt: string;
 }
 
+/** The tag the material is fenced in, per kind — distinct, XML-style
+ *  delimiters (the format Anthropic models are explicitly tuned to respect)
+ *  that the material itself is vanishingly unlikely to contain, closed
+ *  BEFORE the task is restated below. */
+const MATERIAL_TAGS: Record<DistillKind, string> = {
+  thinking: "assistant_reasoning",
+  reply: "assistant_reply",
+};
+
+/**
+ * A thinking summary must describe another assistant in the third person
+ * (SHARED_RULES: never refer to yourself). A model that instead answers the
+ * reader — treating the material as a request made TO IT — almost always
+ * opens by talking about itself: "I don't have...", "Sure, I can...", "Let
+ * me...". This catches the unambiguous cases only, the same trade-off
+ * session-namer's REFUSAL_RE already makes for the same class of failure: a
+ * miss ships the bad line exactly as before (no regression versus today),
+ * and a false positive falls through to the next chain entry, already a
+ * safe, existing path for any other empty or failed attempt.
+ *
+ * Not a general "is this a reply" classifier: it is English-only and
+ * leading-pronoun-based, so a model that answers in a language with no
+ * subject pronoun slips past it. That is a real, known gap, not a hidden
+ * one — a fully robust version would need a second model call to judge the
+ * first one, which is a worse trade for a one-line status summary.
+ */
+const SELF_REFERENTIAL_OPENING_RE = /^(?:i|i'm|i am|i've|i have|i'll|i will|i'd|my|myself|we|we're|we'll|sure|certainly|of course|let me)\b/i;
+
+export function looksLikeReplyNotDescription(text: string): boolean {
+  return SELF_REFERENTIAL_OPENING_RE.test(text.trim());
+}
+
 /** The system prompt and the user prompt for one distill. `text` is clamped
- * here, so callers cannot forget to. */
+ * here, so callers cannot forget to. `plain` asks for everyday language
+ * instead of developer shorthand (lib/distill-preferences.ts's
+ * `plainLanguage`); the material is fenced and the task restated after it
+ * either way — repeated AFTER the material, not only in the system prompt
+ * above it, because the material can run to hundreds of lines and, since
+ * the OTHER assistant wrote it as its own first-person monologue ("I need
+ * to find...", "I'll check..."), is exactly the voice a model that follows
+ * instructions weakly continues instead of describing — measured against a
+ * real chain entry, which answered the material as if it were a request
+ * made to it. Putting the instruction where generation actually starts,
+ * right after the closing tag, fixed that for every model tried. */
 export function buildDistillPrompt(
   kind: DistillKind,
   verbosity: DistillVerbosity | undefined,
   text: string,
+  plain = false,
 ): DistillPrompt {
   const clamped = clampText(text);
+  const tag = MATERIAL_TAGS[kind];
+  const taskReminder = kind === "thinking"
+    ? "Task: describe, from outside and in the third person, what the assistant above is doing — ONE present-tense sentence, plain text. This is a summary OF the text above, never a reply TO it and never a continuation of it."
+    : "Task: shorten the assistant's answer above to the requested length and format. This is a summary OF the text above, never a reply TO it and never a continuation of it.";
+  const prompt = [`<${tag}>`, clamped, `</${tag}>`, "", taskReminder].join("\n");
   if (kind === "thinking") {
     return {
-      systemPrompt: `${THINKING_RULES} ${SHARED_RULES}`,
-      prompt: ["The assistant's reasoning so far:", "", clamped].join("\n"),
+      systemPrompt: `${plain ? THINKING_RULES_PLAIN : THINKING_RULES} ${SHARED_RULES}`,
+      prompt,
     };
   }
   const rules = REPLY_RULES[verbosity ?? "medium"];
-  return {
-    systemPrompt: `You shorten a coding assistant's finished answer for a reader who wants less of it. ${rules} ${REPLY_FORMAT} ${SHARED_RULES}`,
-    prompt: ["The assistant's answer:", "", clamped].join("\n"),
-  };
+  const systemParts = [
+    "You shorten a coding assistant's finished answer for a reader who wants less of it.",
+    rules,
+    ...(plain ? [REPLY_RULES_PLAIN] : []),
+    REPLY_FORMAT,
+    SHARED_RULES,
+  ];
+  return { systemPrompt: systemParts.join(" "), prompt };
 }
+

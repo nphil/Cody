@@ -1311,6 +1311,7 @@
   "preferences.distillMedium": "Medium",
   "preferences.distillModelNote": "The model and its fallbacks are chosen under Models › Assignments › Distill.",
   "preferences.distillOff": "Off",
+  "preferences.distillPlainLanguageLabel": "Use plain language, not developer jargon",
   "preferences.distillRepliesLabel": "Replies",
   "preferences.distillThinkingLabel": "Summarize thinking while collapsed",
   "preferences.planKeeperAdminOnly": "Only an administrator can turn the plan keeper on or off.",

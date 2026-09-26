@@ -52,7 +52,7 @@ export const PREFERENCE_CARDS: readonly PreferenceCard[] = [
   { id: "submit", label: "Message during active run", description: "What composer does on submit while agent runs. Steer interrupts; Queue follow-up delivers after finish.", scope: "Cody only", needsCapability: "chatExtras", keywords: ["steer", "queue"] },
   { id: "agent-tools", label: "Agent tools", description: "Choose the built-in tools given to new sessions. Core keeps read, bash, edit and write; No tools starts with none. Changes affect new sessions only.", scope: "Cody only", needsCapability: "chatExtras", keywords: ["tools", "core", "subagents", "tasks", "github", "web search", "new sessions"] },
   { id: "soft-keys", label: "Terminal soft keys", description: "Choose the buttons shown below the terminal on touch devices. Shift Tab moves backward through terminal UI modes.", scope: "Cody only", keywords: ["touch", "keyboard"] },
-  { id: "distill", label: "Distill", description: "Shorten finished assistant replies, and summarize the model's thinking while its box is collapsed. The full text is always one click away.", scope: "Cody only", keywords: ["summary", "summarize", "shorten", "condense", "verbosity", "thinking", "reply"] },
+  { id: "distill", label: "Distill", description: "Shorten finished assistant replies, and summarize the model's thinking while its box is collapsed. The full text is always one click away.", scope: "Cody only", keywords: ["summary", "summarize", "shorten", "condense", "verbosity", "thinking", "reply", "plain language", "jargon", "non-technical"] },
   { id: "plan-keeper", label: "Live plan keeper", description: "A small background model watches this session and checks off finished tasks and subtasks automatically, so the plan stays current without the agent pausing to update it.", scope: "Cody only", keywords: ["auto", "automatic", "subtasks", "todo", "keeper"] },
 ];
 
@@ -319,6 +319,10 @@ export function PreferencesPanel() {
               <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
                 <ToggleSwitch checked={distillPrefs.thinking} onChange={(next) => saved(() => saveDistillPreferences({ ...distillPrefs, thinking: next }))} />
                 <span style={{ fontSize: 11.5, color: "var(--text-muted)" }}>{t("preferences.distillThinkingLabel")}</span>
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                <ToggleSwitch checked={distillPrefs.plainLanguage} onChange={(next) => saved(() => saveDistillPreferences({ ...distillPrefs, plainLanguage: next }))} />
+                <span style={{ fontSize: 11.5, color: "var(--text-muted)" }}>{t("preferences.distillPlainLanguageLabel")}</span>
               </label>
               <span style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.45 }}>{t("preferences.distillModelNote")}</span>
             </div>

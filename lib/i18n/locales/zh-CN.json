@@ -1311,6 +1311,7 @@
   "preferences.distillMedium": "中",
   "preferences.distillModelNote": "模型及其回退在 模型 › 分配 › Distill 中选择。",
   "preferences.distillOff": "关闭",
+  "preferences.distillPlainLanguageLabel": "使用通俗易懂的语言，而非开发者行话",
   "preferences.distillRepliesLabel": "回复",
   "preferences.distillThinkingLabel": "折叠时总结思考内容",
   "preferences.planKeeperAdminOnly": "只有管理员可以开启或关闭计划管家。",

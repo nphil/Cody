@@ -5,6 +5,7 @@ import { distillCacheKey, readDistillCache, writeDistillCache } from "@/lib/dist
 import { readDistillChain } from "@/lib/distill/config";
 import { DISTILL_KINDS, DISTILL_VERBOSITIES, type DistillKind, type DistillVerbosity } from "@/lib/distill/prompts";
 import {
+  DistillQueueOverflowError,
   DistillSupersededError,
   distillEngine,
   engineAttempt,
@@ -71,6 +72,9 @@ interface DistillBody {
   kind: DistillKind;
   text: string;
   verbosity?: DistillVerbosity;
+  /** Everyday language instead of developer shorthand — see
+   * lib/distill-preferences.ts's `plainLanguage`. */
+  plain: boolean;
   final: boolean;
 }
 
@@ -95,6 +99,7 @@ function readBody(value: unknown): DistillBody | null {
     kind: resolvedKind,
     text,
     verbosity: resolvedKind === "reply" ? resolvedVerbosity : undefined,
+    plain: value.plain === true,
     final: value.final === true,
   };
 }
@@ -134,7 +139,7 @@ export async function POST(request: Request) {
   // Only a FINISHED summary of an identified entry is worth storing: a live
   // thinking block is rewritten every few hundred milliseconds.
   const cacheKey = body.final && body.entryId
-    ? distillCacheKey(body.entryId, body.blockIndex, body.kind, body.verbosity)
+    ? distillCacheKey(body.entryId, body.blockIndex, body.kind, body.verbosity, body.plain)
     : null;
   if (cacheKey) {
     const hit = readDistillCache(body.sessionId, cacheKey);
@@ -200,6 +205,7 @@ export async function POST(request: Request) {
             kind: body.kind,
             verbosity: body.verbosity,
             text: body.text,
+            plain: body.plain,
             attempt,
             signal: abort.signal,
             onDelta: (delta) => send({ type: "delta", text: delta }),
@@ -217,14 +223,21 @@ export async function POST(request: Request) {
           }
           send({ type: "done", text: result.text, model: result.model, cached: false });
         } catch (error) {
-          // "superseded" is not a failure the reader should see, but every
-          // stream still has to end with exactly one terminal event and the
-          // code vocabulary is fixed, so it goes out as `failed` carrying
-          // that word: the client (agreed with DistillChat) ignores this one
-          // message silently and keeps the summary already on screen. Real
-          // chain exhaustion is the same code with the model's own reason.
+          // "superseded" and queue overflow are not failures the reader
+          // should see, but every stream still has to end with exactly one
+          // terminal event and the code vocabulary is fixed, so both go out
+          // as `failed` carrying a distinct word the client recognizes and
+          // silently absorbs, keeping whatever summary is already on
+          // screen. Queue overflow additionally tells the client to forget
+          // this request ever happened, so an off-screen block that was
+          // evicted (never a genuine chain failure) gets a fresh attempt the
+          // next time it is actually visible, instead of staying latched at
+          // "Could not distill". Real chain exhaustion is the same code with
+          // the model's own reason.
           const message = error instanceof DistillSupersededError
             ? "superseded"
+            : error instanceof DistillQueueOverflowError
+            ? "queue_overflow"
             : error instanceof Error ? error.message : String(error);
           send({ type: "error", message, code: "failed" satisfies DistillErrorCode });
         } finally {

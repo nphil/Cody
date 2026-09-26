@@ -1311,6 +1311,7 @@
   "preferences.distillMedium": "中",
   "preferences.distillModelNote": "モデルとフォールバックは モデル › 割り当て › Distill で選びます。",
   "preferences.distillOff": "オフ",
+  "preferences.distillPlainLanguageLabel": "専門用語を避け、平易な言葉を使う",
   "preferences.distillRepliesLabel": "返信",
   "preferences.distillThinkingLabel": "折りたたみ中の思考を要約する",
   "preferences.planKeeperAdminOnly": "プランキーパーのオン/オフは管理者のみが変更できます。",

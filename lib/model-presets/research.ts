@@ -1,5 +1,5 @@
 import { randomBytes } from "crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "fs";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { dirname, join } from "path";
 import {
@@ -10,6 +10,7 @@ import {
 import { extractJsonObject, ROLE_BRIEF_LINES } from "../model-plan/planner";
 import { OMP_BIN_MISSING, resolveOmpBin } from "../omp/omp-cli";
 import { getAgentDir } from "../omp/paths";
+import { linkIsolatedAgentDir } from "../omp/isolated-agent-dir";
 import {
   runOneShotModelStreaming,
   type ToolEndEvent,
@@ -444,23 +445,10 @@ export const RESEARCH_TOOLS: readonly string[] = ["web_search"];
  * tight, since the alternative is truncating real research mid-run. */
 export const RESEARCH_TIMEOUT_MS = 30 * 60_000;
 
-/** What the isolated child may see of the real agent dir. See the module doc
- * for why these are linked rather than copied. */
-const LINKED_AGENT_FILES = ["agent.db", "models.yml", "models.yaml", "config.yml", "config.yaml"] as const;
-const EMPTY_MCP_CONFIG = '{"mcpServers":{}}\n';
-
-/** Build the throwaway agent dir: an explicitly empty `mcp.json`, and links to
- * the files the child needs to authenticate and reach the user's providers.
- * A file the real agent dir does not have (a fresh install) is skipped rather
- * than linked dangling. */
-function linkIsolatedAgentDir(targetDir: string): void {
-  writeFileSync(join(targetDir, "mcp.json"), EMPTY_MCP_CONFIG, { mode: 0o600 });
-  const sourceDir = getAgentDir();
-  for (const name of LINKED_AGENT_FILES) {
-    const source = join(sourceDir, name);
-    if (existsSync(source)) symlinkSync(source, join(targetDir, name));
-  }
-}
+/** What the isolated child may see of the real agent dir — everything
+ * lib/omp/isolated-agent-dir.ts's default set covers except `blobs`: this
+ * child is text-only web research, never a Cody attachment. */
+const RESEARCH_LINKED_FILES = ["agent.db", "models.yml", "models.yaml", "config.yml", "config.yaml"] as const;
 
 export interface ResearchRunnerArgs {
   plannerModel: string;
@@ -482,7 +470,7 @@ export const realResearchRunner: ResearchRunner = async ({ plannerModel, prompt,
   const isoAgentDir = mkdtempSync(join(tmpdir(), "cody-research-agent-"));
   const cwd = mkdtempSync(join(tmpdir(), "cody-research-cwd-"));
   try {
-    linkIsolatedAgentDir(isoAgentDir);
+    linkIsolatedAgentDir(isoAgentDir, RESEARCH_LINKED_FILES);
     return await runOneShotModelStreaming({
       bin,
       model: plannerModel,

@@ -36,14 +36,18 @@ export const MAX_CACHE_ENTRIES = 400;
  * path separator in one, and refusing beats sanitizing into a collision. */
 const SAFE_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
 
-/** The cache key, exactly as the API contract spells it. */
+/** The cache key, exactly as the API contract spells it. `plain` is its own
+ * segment (not folded into `verbosity`) so a plain-language summary and a
+ * technical one for the same block never collide — see
+ * lib/distill-preferences.ts's `plainLanguage`. */
 export function distillCacheKey(
   entryId: string,
   blockIndex: number | undefined,
   kind: DistillKind,
   verbosity: DistillVerbosity | undefined,
+  plain: boolean,
 ): string {
-  return `${entryId}:${blockIndex ?? "-"}:${kind}:${verbosity ?? "-"}`;
+  return `${entryId}:${blockIndex ?? "-"}:${kind}:${verbosity ?? "-"}:${plain ? "plain" : "-"}`;
 }
 
 function cachePath(sessionId: string): string | null {
