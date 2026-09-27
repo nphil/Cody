@@ -119,10 +119,19 @@ export interface RpcSessionState {
  * The state shape Cody's own API returns to the browser
  * (AgentSessionWrapper adapts RpcSessionState and adds process-side flags).
  */
+export interface RefusalDecision {
+  id: string;
+  fromModel: string;
+  toModel: string | null;
+  canContinue: boolean;
+  createdAt: number;
+}
+
 export interface WebSessionState {
   sessionId: string;
   sessionFile: string;
   sessionName?: string;
+  pendingRefusalDecision: RefusalDecision | null;
   isStreaming: boolean;
   isPromptRunning: boolean;
   isBashRunning: boolean;

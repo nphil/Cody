@@ -14,7 +14,7 @@ import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { clearLastOpenSession, setLastOpenSession, workspaceKeyOf } from "@/lib/workspace-memory";
 import { groupSessionsByProject, projectActivityCounts, retainPendingSessions, sortManagedProjects } from "@/lib/project-ordering";
 import { comparableProjectPath } from "@/lib/comparable-path";
-import { Check, ChevronDown, ChevronRight, FilePlus, FileUp, Folder, FolderPlus, GitBranch, MoreHorizontal, Plus, RefreshCw, Search, SlidersHorizontal, Trash2, Upload } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, CircleHelp, FilePlus, FileUp, Folder, FolderPlus, GitBranch, MoreHorizontal, Plus, RefreshCw, Search, SlidersHorizontal, Trash2, Upload } from "lucide-react";
 import { engineScopedKey, STORAGE_KEYS } from "@/lib/storage-keys";
 import { OMP_ENGINE_ID, type ActiveEngineInfo } from "./SettingsTabs";
 
@@ -60,6 +60,7 @@ interface Props {
    * engine's identity rather than being offered everywhere. Null until
    * /api/info answers. */
   engine?: ActiveEngineInfo | null;
+  onAwaitingInputChange?: (awaiting: boolean) => void;
 }
 
 interface WorktreeEntry {
@@ -537,7 +538,7 @@ function CodyTitle() {
     </button>
   );
 }
-export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, onAtMentions, engine = null }: Props) {
+export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, onAtMentions, onAwaitingInputChange, engine = null }: Props) {
   const engineId = engine?.id ?? null;
   // Import writes an omp .jsonl into omp's sessions layout and Archive moves
   // one with omp's gc layout; both routes answer 400 "unsupported" under any
@@ -580,6 +581,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   const [explorerUploadBusy, setExplorerUploadBusy] = useState(false);
   const [sessionRefreshDone, setSessionRefreshDone] = useState(false);
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(() => new Set());
+  const [awaitingInputSessionIds, setAwaitingInputSessionIds] = useState<Set<string>>(() => new Set());
   // Starts empty and hydrates once the engine identity arrives: the stored set
   // is addressed per engine, so before /api/info answers there is no honest
   // key to read. Hydration MERGES rather than replaces — a session that
@@ -695,6 +697,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
           type?: string;
           engine?: string | null;
           runningSessionIds?: string[];
+          runningSessions?: Array<{ id: string; awaitingInput: boolean }>;
           refreshSessionList?: boolean;
         };
         // An engine switch is instance-wide, but only the browser that clicked
@@ -719,6 +722,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
         if (data.type === "running") {
           sseAuthoritativeRef.current = true;
           setRunningSessionIds(new Set(data.runningSessionIds ?? []));
+          setAwaitingInputSessionIds(new Set((data.runningSessions ?? []).filter((session) => session.awaitingInput).map((session) => session.id)));
           if (data.refreshSessionList) void loadSessions(false);
         }
       } catch {
@@ -729,6 +733,10 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
     // On error EventSource auto-reconnects; keep the last known state meanwhile.
     return () => source.close();
   }, [loadSessions, engineId]);
+
+  useEffect(() => {
+    onAwaitingInputChange?.(awaitingInputSessionIds.size > 0);
+  }, [onAwaitingInputChange, awaitingInputSessionIds]);
 
   useEffect(() => {
     const previous = previousRunningSessionIdsRef.current;
@@ -953,8 +961,8 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
     [sortedProjects, visibleSessions],
   );
   const projectActivity = useMemo(
-    () => projectActivityCounts(visibleSessions, runningSessionIds, unreadSessionIds),
-    [visibleSessions, runningSessionIds, unreadSessionIds],
+    () => projectActivityCounts(visibleSessions, runningSessionIds, unreadSessionIds, awaitingInputSessionIds),
+    [visibleSessions, runningSessionIds, unreadSessionIds, awaitingInputSessionIds],
   );
 
   // Client-side filtering (Workspaces header: search + "running only").
@@ -1593,6 +1601,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
                 selectedSessionId={selectedSessionId}
                 runningSessionIds={runningSessionIds}
                 unreadSessionIds={unreadSessionIds}
+                awaitingInputSessionIds={awaitingInputSessionIds}
                 relativeTimeNow={relativeTimeNow}
                 onActivate={activateProject}
                 onToggleExpand={toggleProjectExpanded}
@@ -1699,13 +1708,14 @@ interface ProjectRowProps {
   project: ManagedProject;
   isActive: boolean;
   isExpanded: boolean;
-  activity: { running: number; unread: number } | undefined;
+  activity: { running: number; unread: number; awaitingInput: number } | undefined;
   tree: SessionTreeNode[];
   /** Sessions beyond the cap (0 when a filter is active — show all matches). */
   hiddenCount: number;
   selectedSessionId: string | null;
   runningSessionIds: Set<string>;
   unreadSessionIds: Set<string>;
+  awaitingInputSessionIds: Set<string>;
   relativeTimeNow: number;
   onActivate: (path: string) => void;
   onToggleExpand: (path: string) => void;
@@ -1737,6 +1747,7 @@ function ProjectRow({
   selectedSessionId,
   runningSessionIds,
   unreadSessionIds,
+  awaitingInputSessionIds,
   relativeTimeNow,
   onActivate,
   onToggleExpand,
@@ -1758,10 +1769,21 @@ function ProjectRow({
   const [actionMenuOpen, setActionMenuOpen] = useState(false);
   const actionButtonRef = useRef<HTMLButtonElement>(null);
   const label = projectLabel(project.path);
-  const hasActivity = Boolean(activity && (activity.running > 0 || activity.unread > 0));
+  const hasActivity = Boolean(activity && (activity.running > 0 || activity.unread > 0 || activity.awaitingInput > 0));
   const visibleRoots = hiddenCount > 0 && !showAllSessions
     ? tree.slice(0, MAX_PROJECT_SESSIONS)
     : tree;
+  const awaitingInputTreeIds = useMemo(() => {
+    const ids = new Set<string>();
+    const visit = (node: SessionTreeNode): boolean => {
+      let hasAwaitingInput = awaitingInputSessionIds.has(node.session.id);
+      for (const child of node.children) hasAwaitingInput = visit(child) || hasAwaitingInput;
+      if (hasAwaitingInput) ids.add(node.session.id);
+      return hasAwaitingInput;
+    };
+    tree.forEach(visit);
+    return ids;
+  }, [tree, awaitingInputSessionIds]);
   const showActions = hovered || focusWithin || actionMenuOpen;
 
   return (
@@ -1868,8 +1890,8 @@ function ProjectRow({
         <div style={{ flex: 1 }} />
         {hasActivity && (
           <span
-            aria-label={t("projects.activity", { running: activity?.running ?? 0, unread: activity?.unread ?? 0 })}
-            title={t("projects.activity", { running: activity?.running ?? 0, unread: activity?.unread ?? 0 })}
+            aria-label={activity?.awaitingInput ? t("sessionSidebar.needsYou") : t("projects.activity", { running: activity?.running ?? 0, unread: activity?.unread ?? 0 })}
+            title={activity?.awaitingInput ? t("sessionSidebar.needsYou") : t("projects.activity", { running: activity?.running ?? 0, unread: activity?.unread ?? 0 })}
             className="sidebar-project-activity"
             role="status"
             aria-live="polite"
@@ -1881,8 +1903,8 @@ function ProjectRow({
                 width: 7,
                 height: 7,
                 borderRadius: "50%",
-                background: "var(--accent)",
-                boxShadow: (activity?.running ?? 0) > 0 ? "0 0 0 3px color-mix(in srgb, var(--accent) 13%, transparent)" : "none",
+                background: activity?.awaitingInput ? "var(--status-warning)" : "var(--accent)",
+                boxShadow: activity?.awaitingInput ? "0 0 0 3px color-mix(in srgb, var(--status-warning) 18%, transparent)" : (activity?.running ?? 0) > 0 ? "0 0 0 3px color-mix(in srgb, var(--accent) 13%, transparent)" : "none",
               }}
             />
           </span>
@@ -1960,6 +1982,7 @@ function ProjectRow({
                   selectedSessionId={selectedSessionId}
                   runningSessionIds={runningSessionIds}
                   unreadSessionIds={unreadSessionIds}
+                  awaitingInputTreeIds={awaitingInputTreeIds}
                   relativeTimeNow={relativeTimeNow}
                   onSelectSession={onSelectSession}
                   onRenamed={onRenamed}
@@ -2264,6 +2287,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
   selectedSessionId,
   runningSessionIds,
   unreadSessionIds,
+  awaitingInputTreeIds,
   relativeTimeNow,
   onSelectSession,
   onRenamed,
@@ -2274,6 +2298,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
   selectedSessionId: string | null;
   runningSessionIds: Set<string>;
   unreadSessionIds: Set<string>;
+  awaitingInputTreeIds: Set<string>;
   relativeTimeNow: number;
   onSelectSession: (s: SessionInfo) => void;
   onRenamed?: () => void;
@@ -2289,7 +2314,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
   const isSelected = sessionId === selectedSessionId;
   const isRunning = runningSessionIds.has(sessionId);
   const isUnread = unreadSessionIds.has(sessionId);
-
+  const isAwaitingInput = awaitingInputTreeIds.has(sessionId);
   // Stable callbacks: depend only on primitives / stable parent callbacks so
   // SessionItem's React.memo stays effective across re-renders.
   const handleClick = useCallback(() => {
@@ -2321,6 +2346,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
           isSelected={isSelected}
           isRunning={isRunning}
           isUnread={isUnread}
+          isAwaitingInput={isAwaitingInput}
           relativeTimeNow={relativeTimeNow}
           onClick={handleClick}
           onRenamed={onRenamed}
@@ -2340,6 +2366,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
               selectedSessionId={selectedSessionId}
               runningSessionIds={runningSessionIds}
               unreadSessionIds={unreadSessionIds}
+              awaitingInputTreeIds={awaitingInputTreeIds}
               relativeTimeNow={relativeTimeNow}
               onSelectSession={onSelectSession}
               onRenamed={onRenamed}
@@ -2366,6 +2393,10 @@ const SessionTreeItem = memo(function SessionTreeItem({
   if (prev.unreadSessionIds !== next.unreadSessionIds) {
     const id = prev.node.session.id;
     if (prev.unreadSessionIds.has(id) !== next.unreadSessionIds.has(id)) return false;
+  }
+  if (prev.awaitingInputTreeIds !== next.awaitingInputTreeIds) {
+    const id = prev.node.session.id;
+    if (prev.awaitingInputTreeIds.has(id) !== next.awaitingInputTreeIds.has(id)) return false;
   }
   if (prev.relativeTimeNow !== next.relativeTimeNow) return false;
   if (prev.onSelectSession !== next.onSelectSession
@@ -2414,6 +2445,18 @@ function RunningSessionIndicator({ size = 14 }: { size?: number }) {
     </span>
   );
 }
+function NeedsYouSessionIndicator({ size = 13 }: { size?: number }) {
+  const { t } = useI18n();
+  return (
+    <span
+      title={t("sessionSidebar.needsYou")}
+      aria-label={t("sessionSidebar.needsYou")}
+      style={{ width: size, height: size, display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0, color: "var(--status-warning)" }}
+    >
+      <CircleHelp size={size} strokeWidth={2.2} aria-hidden="true" />
+    </span>
+  );
+}
 
 function UnreadSessionIndicator({ size = 14 }: { size?: number }) {
   const { t } = useI18n();
@@ -2450,6 +2493,7 @@ const SessionItem = memo(function SessionItem({
   isSelected,
   isRunning,
   isUnread,
+  isAwaitingInput,
   onClick,
   onRenamed,
   onDeleted,
@@ -2463,6 +2507,7 @@ const SessionItem = memo(function SessionItem({
   isSelected: boolean;
   isRunning?: boolean;
   isUnread?: boolean;
+  isAwaitingInput?: boolean;
   onClick: () => void;
   onRenamed?: () => void;
   onDeleted?: (id: string) => void;
@@ -2632,8 +2677,9 @@ const SessionItem = memo(function SessionItem({
             </span>
           </button>
           {session.worktreeBranch && <span title={t("sessionSidebar.worktreeTitle", { path: session.cwd })} style={{ display: "flex", alignItems: "center", gap: 3, maxWidth: 56, minWidth: 0, overflow: "hidden", color: "var(--text-dim)", fontSize: 10, flexShrink: 1 }}><GitBranch size={10} strokeWidth={2.4} aria-hidden="true" /><span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{session.worktreeBranch}</span></span>}
-          {isRunning && <RunningSessionIndicator size={12} />}
-          {!isRunning && isUnread && <UnreadSessionIndicator size={11} />}
+          {isAwaitingInput && <NeedsYouSessionIndicator size={13} />}
+          {!isAwaitingInput && isRunning && <RunningSessionIndicator size={12} />}
+          {!isAwaitingInput && !isRunning && isUnread && <UnreadSessionIndicator size={11} />}
           {relativeTime && <span title={new Date(session.modified).toLocaleString(locale)} style={{ flexShrink: 0, minWidth: 30, textAlign: "right", color: isSelected ? "var(--accent)" : "var(--text-dim)", fontSize: 10, fontVariantNumeric: "tabular-nums" }}>{relativeTime}</span>}
           {hasChildren && <button className="session-item-icon-button" onClick={(event) => { event.stopPropagation(); onToggleCollapse?.(); }} title={collapsed ? t("sessionSidebar.expandForks") : t("sessionSidebar.collapseForks")} aria-label={collapsed ? t("sessionSidebar.expandForks") : t("sessionSidebar.collapseForks")} aria-expanded={!collapsed} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 20, height: 20, padding: 0, flexShrink: 0, border: "none", background: "none", color: "var(--text-dim)", cursor: "pointer", transform: collapsed ? "rotate(-90deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }}><ChevronDown size={12} strokeWidth={1.8} aria-hidden="true" /></button>}
           {/* Reserved overflow-menu slot: invisible (but space-preserving) until

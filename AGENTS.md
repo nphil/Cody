@@ -434,8 +434,10 @@ components/
   InfoPanel.tsx       right-panel Info tool: versions + workspace diagnostics
   ChatMinimap.tsx     scroll minimap alongside the message list
   MarkdownBody.tsx    markdown renderer
-  PermissionRequestCard.tsx one approval an ACP engine is blocked on, rendered
-                      inline at the live tail of the transcript (never a modal)
+  InputDock.tsx       non-modal composer panel for extension, permission, and
+                      refusal questions; keeps the transcript visible
+  PermissionRequestCard.tsx one approval an ACP engine is blocked on, shown
+                      inside InputDock with the transcript still in view
   ProviderIcon.tsx    vendored brand marks (models.dev logo set + simple-icons for
                       the few it stubs); ProviderIcon = a provider, ModelIcon = a
                       model's vendor. Never hotlinked — see the note below
@@ -1014,25 +1016,24 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   (`lib/harness/engine-bin.ts`), and an install drops every argv's answer for
   every binary, because a cache HIT never expires and the companion CLI's bin
   name is not something the installer models.
-- **`HarnessAdapter.verifiedVersion`** is the exact engine version this Cody
-  build was last audited against — every adapter carries one (omp: 18.1.21,
+- **HarnessAdapter.verifiedVersion** is the exact engine version this Cody
+  build was last audited against — every adapter carries one (omp: 18.3.2,
   claude-agent-acp: 0.73.0, codex-acp: 1.8.0, pi: 0.73.1).
   It is shown verbatim on the System hub's engine roster card (Settings ›
-  System › Engines) ("Built to vX.Y.Z", served through `/api/engines`), and
-  its MAJOR drives the warnings: `checkEngineUpdates` compares it to the
-  latest/installed versions (`latestBeyondVerified` /
-  `installedBeyondVerified`) and the System hub's engine roster warns
-  before — and marks after — a jump past it: core surfaces keep working
-  (settings are schema-driven, unknown RPC frames are
-  tolerated), but brand-new engine features may not appear in Cody until
-  Cody updates. Bump the marker in the same commit as each compatibility
-  audit. It is always a version of the package `installSpec` names, so for a
-  two-package engine it is the ADAPTER's — which is why the notice names
-  `engineCli.adapterLabel` rather than the engine's brand ("Claude Code ACP
-  adapter v1.0.0", never "Claude Code v1.0.0" while Claude Code is on
-  2.1.x). The CLI half crossing a major raises no notice today: Cody speaks
-  to the adapter, and an ACP engine's Cody surfaces are capability-gated
-  almost entirely off.
+  System › Engines) ("Built to vX.Y.Z", served through /api/engines), and
+  the full semver drives warnings: checkEngineUpdates compares patch, minor,
+  and major releases to the verified version (latestBeyondVerified /
+  installedBeyondVerified). The System hub warns before an update and marks
+  an installed version past that exact marker: core surfaces keep working
+  (settings are schema-driven, unknown RPC frames are tolerated), but brand-new
+  engine features may not appear in Cody until Cody updates. Bump the marker
+  in the same commit as each compatibility audit. It is always a version of
+  the package installSpec names, so for a two-package engine it is the
+  ADAPTER's — which is why the notice names engineCli.adapterLabel rather than
+  the engine's brand ("Claude Code ACP adapter v1.0.0", never "Claude Code
+  v1.0.0" while Claude Code is on 2.1.x). The CLI half becoming newer still
+  raises no notice: Cody speaks to the adapter, and an ACP engine's Cody
+  surfaces are capability-gated almost entirely off.
 - **The seam is CI-enforced** (`lib/architecture.test.mjs`): outside
   `lib/omp/` and `lib/harness/`, importing `lib/omp/*` fails the test unless
   the file is on the in-test allowlist with a written reason, stale allowlist
@@ -2229,31 +2230,60 @@ second Enter was silently ignored while the first was in flight.
   `streamingBehavior` sent while omp is streaming is ACKED and then fails
   asynchronously with AgentBusyError on an already-settled id, so the message
   vanishes. Never send one to an existing session.
-- **Every send carries a `clientMessageId`**, and the wrapper memoizes its
-  outcome (10 min). A repeat id rejoins the first promise and never re-sends
-  to omp, so client retries are safe by construction.
-- **The route waits a bounded time for the ack** and otherwise answers 202
-  `pending` while the command stays in flight; the client re-POSTs the same
-  id to learn the outcome. A steer, follow-up or queued-prompt ack timeout
-  never recycles the child: only the idle plain-prompt no-ack path may,
-  because only there is nothing running to lose.
-- **omp serializes ordinary RPC commands** (`RpcInputDispatcher`), so one
-  slow command delays every later one, get_state included. GET routes
-  therefore bound `get_state` and fall back to the wrapper's last known state
-  plus the live flags it tracks itself, marked `stale`, instead of hanging a
-  session switch behind someone else's command.
-- **Client outbox** (`lib/outbox.ts`, sessionStorage per session). The
-  composer clears immediately; each message moves sending → queued/started →
-  delivered, or ends failed with Retry and Edit (Edit restores text and
-  images). Retries on network error, 202, 409 `session_restarting` and 503
-  back off up to 2 minutes, then stop at failed. Nothing is ever dropped
-  without a visible row, and unfinished entries resume after reload or
-  switching back.
-- **A delivered user message always renders.** `message_end` with role
-  `user` is appended even when the client believes no run is active (the
-  old `agentRunningRef` guard dropped steers that landed after a missed
-  `agent_start`). It is deduped against the transcript and resolves the
-  first matching outbox and queue entry.
+- **Every send carries a `clientMessageId`**, and the session wrapper keeps a
+  bounded delivery ledger for at least 30 minutes. Status moves monotonically
+  through `queued`/`started` to `delivered` or `failed`; repeat POSTs with the
+  same ID join the original delivery instead of sending a duplicate.
+  An ack is `{ delivery: "queued" | "started", clientMessageId, status?: "delivered" }`;
+  the optional status prevents a late ack from re-adding a delivered message.
+- **Resume checks the server before retrying.** The browser asks
+  `GET /api/agent/<sessionId>?clientMessageId=<id>` for each unfinished outbox
+  entry. The response is `{ deliveries: [...] }`; known entries adopt their
+  ledger status. Only unknown IDs are checked against the loaded transcript
+  (timestamp, text, and image count); a match settles the entry, otherwise the
+  browser retries with the same ID. A failed ledger lookup never triggers a
+  blind resend.
+- **Manual Retry checks before resending.** A known queued/started/delivered
+   result is adopted. A known server failure or an unknown ID absent from the
+   loaded transcript starts a new delivery with a fresh ID; an unknown ID that
+   matches the transcript is already delivered. Resume retries absent entries
+   with their original ID. A client timeout is only a guess; server failure is
+   final unless later delivery is proven.
+- **Delivery changes arrive by ID.** The wrapper emits `cody_delivery` SSE
+  frames with `clientMessageId` and status. A user `message_end` still renders
+  the message, but it does not settle an outbox row by text.
+- **OMP 18.3 prompt_result is correlated by RPC ID.** Structured failures are
+   surfaced once and deduped against the transcript; an aborted queued prompt
+   fails rather than claiming it was read. A terminal `agent_end` settles a
+   started send as delivered; engine loss settles started as delivered and
+   queued as failed. A joined all-mode user message and an image-only user
+   message can both prove delivery from the transcript.
+- **The route waits a bounded time for the ack** and answers 202
+   `pending` while the command stays in flight. Automatic transport and resume
+   retries keep the ID; manual Retry follows the ledger-first check above. A
+   steer, follow-up or queued-prompt ack timeout never recycles the child: only
+   the idle plain-prompt no-ack path may, because nothing was running to lose.
+- **omp serializes ordinary RPC commands** (`RpcInputDispatcher`), so one slow
+  command delays every later one, `get_state` included. GET routes therefore
+  bound `get_state` and fall back to the wrapper's last known state plus the live
+  flags it tracks itself, marked `stale`, instead of hanging a session switch
+  behind someone else's command.
+- **Client outbox** (`lib/outbox.ts`, sessionStorage per session). The composer
+  clears immediately; each message moves sending → queued/started → delivered,
+  or ends failed with Retry and Edit (Edit restores text and images). Retries on
+  network error, 202, 409 `session_restarting` and 503 back off up to 2 minutes,
+  then stop at failed. Nothing is ever dropped without a visible row; unfinished
+  entries resume only after the ledger-first check above.
+- Brand-new-session prompts and SidebarChatPanel sends also enter the same
+   outbox. Queue rows are derived from outbox state. The composer snapshots and
+   clears text, images and files before preparation; preparation failure restores
+   the snapshot if the composer is still empty, or keeps it in a failed Edit row
+   alongside any newer draft.
+- **A delivered user message always renders.** `message_end` with role `user`
+  is appended even when the client believes no run is active (the old
+  `agentRunningRef` guard dropped steers that landed after a missed
+  `agent_start`). The transcript is deduped against the loaded messages;
+  `cody_delivery` independently settles the matching outbox entry by client ID.
 
 ### Composer-attached panels (`components/ComposerPanels.tsx`)
 - The live todo plan (`TodoList`) and the subagent roster live **pinned above
@@ -2437,11 +2467,11 @@ second Enter was silently ignored while the first was in flight.
   (`.collapse-box-panel--motion`, set by `useCollapseMotion` on a real
   toggle) is absent. Measured mid-stream afterwards: `transition-property:
   none`, p95 frame 18.6 ms, one frame over 32 ms in 1119.
-- **Cancel subtask** (`SubagentTranscriptDialog` `CancelSubtaskButton`): omp's
-  RPC has no per-subagent abort (only whole-turn `abort`), so the button
-  STEERS the parent through the existing `steer` path with an instruction to
-  `hub cancel` that id and continue without its result. It never claims the
-  child was killed; a failed steer is a toast and nothing else.
+- **Cancel subtask** (SubagentTranscriptDialog CancelSubtaskButton): omp's RPC
+  has no per-subagent abort, so the button steers the parent through the
+  existing steer path. OMP 18.3 uses write proc://<id>/kill; the instruction
+  names legacy hub cancel only for an older engine that lacks proc://. It never
+  claims the child was killed; a failed steer is a toast and nothing else.
 
 ### Subagent integration (`lib/subagent-types.ts`, `lib/subagent-history.ts`)
 - **Live detail**: `subagent_progress` frames carry the full `AgentProgress`

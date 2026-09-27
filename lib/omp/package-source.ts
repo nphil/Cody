@@ -86,16 +86,141 @@ export function ompPackageVersion(packageRoot: string): string | null {
 export function loadOmpPackageSource(packageRoot: string, ...segments: string[]): Record<string, unknown> | null {
   return loadOmpSourceFile(path.join(packageRoot, ...segments));
 }
+export interface OmpRegistrySettingsResult {
+  definitions: Record<string, unknown>[] | null;
+  ui: Record<string, unknown> | null;
+  error: string | null;
+}
+
+/**
+ * OMP 18.3 moved settings into domain modules that register their definitions
+ * as the all-settings aggregator imports them. Load those modules against one
+ * real registry instance, then ask OMP's own aggregator for display order.
+ * Every unrelated import remains stubbed as in the legacy source reader.
+ */
+export function loadOmpRegistrySettings(packageRoot: string): OmpRegistrySettingsResult {
+  const aggregatorPath = path.join(packageRoot, "src", "config", "all-settings.ts");
+  const registryPath = path.join(packageRoot, "src", "config", "registry.ts");
+  const errors: string[] = [];
+  let aggregatorSource: string;
+  try {
+    aggregatorSource = fs.readFileSync(aggregatorPath, "utf8");
+  } catch {
+    return { definitions: null, ui: null, error: "OMP registry layout is missing " + aggregatorPath };
+  }
+
+  const registry = loadOmpSourceFile(registryPath, 0, undefined, errors);
+  if (!registry || typeof registry.all !== "function") {
+    return { definitions: null, ui: null, error: errors.at(-1) ?? "Could not load OMP settings registry " + registryPath };
+  }
+
+  const domainSpecifiers = [...aggregatorSource.matchAll(/^import\s+\*\s+as\s+\w+\s+from\s+"([^"]+)";/gm)].map((match) => match[1]);
+  if (domainSpecifiers.length === 0) {
+    return { definitions: null, ui: null, error: "No settings domains were found in " + aggregatorPath };
+  }
+
+  const domainModules: Record<string, Record<string, unknown>> = {};
+  for (const specifier of domainSpecifiers) {
+    const modulePath = resolveSourceSpecifier(aggregatorPath, specifier);
+    if (!modulePath) {
+      return { definitions: null, ui: null, error: "Could not resolve OMP settings domain " + specifier + " from " + aggregatorPath };
+    }
+    let source: string;
+    try {
+      source = fs.readFileSync(modulePath, "utf8");
+    } catch {
+      return { definitions: null, ui: null, error: "Could not read OMP settings domain " + modulePath };
+    }
+    const registrySpecifier = sourceImports(source).find((candidate) => resolveSourceSpecifier(modulePath, candidate) === registryPath);
+    if (!registrySpecifier) {
+      return { definitions: null, ui: null, error: "OMP settings domain " + modulePath + " does not import the shared registry" };
+    }
+    const loaded = loadOmpSourceFile(modulePath, 0, { [registrySpecifier]: registry }, errors);
+    if (!loaded) {
+      return { definitions: null, ui: null, error: errors.at(-1) ?? "Could not evaluate OMP settings domain " + modulePath };
+    }
+    domainModules[specifier] = loaded;
+  }
+
+  const aggregatorOverrides: Record<string, Record<string, unknown>> = {};
+  for (const specifier of sourceImports(aggregatorSource)) {
+    if (resolveSourceSpecifier(aggregatorPath, specifier) === registryPath) {
+      aggregatorOverrides[specifier] = registry;
+    } else if (domainModules[specifier]) {
+      aggregatorOverrides[specifier] = domainModules[specifier];
+    }
+  }
+  const aggregator = loadOmpSourceFile(aggregatorPath, 0, aggregatorOverrides, errors);
+  const orderedSettings = aggregator?.orderedSettings;
+  if (typeof orderedSettings !== "function") {
+    return { definitions: null, ui: null, error: errors.at(-1) ?? "OMP settings aggregator did not export orderedSettings(): " + aggregatorPath };
+  }
+  let handles: unknown;
+  try {
+    handles = (orderedSettings as () => unknown)();
+  } catch (error) {
+    return { definitions: null, ui: null, error: "OMP orderedSettings() failed: " + (error instanceof Error ? error.message : String(error)) };
+  }
+  if (!Array.isArray(handles)) {
+    return { definitions: null, ui: null, error: "OMP orderedSettings() did not return an array: " + aggregatorPath };
+  }
+  const definitions = handles.flatMap((handle): Record<string, unknown>[] => {
+    if (!handle || typeof handle !== "object") return [];
+    const definition = (handle as { definition?: unknown }).definition;
+    return definition && typeof definition === "object" ? [definition as Record<string, unknown>] : [];
+  });
+  if (definitions.length === 0) {
+    return { definitions: null, ui: null, error: "OMP settings registry contained no definitions: " + aggregatorPath };
+  }
+
+  const ui = loadOmpSettingsUiMetadata(packageRoot, errors);
+  return { definitions, ui, error: ui ? null : errors.at(-1) ?? "OMP settings loaded, but tab metadata could not be read" };
+}
+
+function loadOmpSettingsUiMetadata(packageRoot: string, errors: string[]): Record<string, unknown> | null {
+  const uiSourcePath = path.join(packageRoot, "src", "config", "settings-ui.ts");
+  let source: string;
+  try {
+    source = fs.readFileSync(uiSourcePath, "utf8");
+  } catch {
+    errors.push("Could not read OMP settings UI entrypoint " + uiSourcePath);
+    return null;
+  }
+  const specifier = sourceImports(source).find((candidate) => candidate.includes("settings-defs"));
+  const sourcePath = specifier ? resolveSourceSpecifier(uiSourcePath, specifier) : null;
+  if (!sourcePath) {
+    errors.push("Could not resolve OMP settings tab metadata from " + uiSourcePath);
+    return null;
+  }
+  const ui = loadOmpSourceFile(sourcePath, 0, undefined, errors);
+  if (!ui || !Array.isArray(ui.SETTING_TABS)) {
+    errors.push(errors.at(-1) ?? "OMP settings tab metadata is unavailable in " + sourcePath);
+    return null;
+  }
+  return ui;
+}
+
+function sourceImports(source: string): string[] {
+  return [...source.matchAll(/^import\s+[\s\S]*?from\s+"([^"]+)";/gm)].map((match) => match[1]);
+}
 
 /** The same evaluation, addressed by absolute path — the form the re-export
  * hop below needs, since the file it lands on lives in a sibling package.
  *
  * `depth` bounds the bridging below: a dependency's own file is loaded with
  * every import stubbed, so one hop is all that is ever needed. */
-function loadOmpSourceFile(file: string, depth = 0): Record<string, unknown> | null {
+function loadOmpSourceFile(
+  file: string,
+  depth = 0,
+  importOverrides?: Record<string, Record<string, unknown>>,
+  errors?: string[],
+): Record<string, unknown> | null {
   let stubDir: string | null = null;
   try {
-    if (!fs.existsSync(file)) return null;
+    if (!fs.existsSync(file)) {
+      errors?.push("OMP source file not found: " + file);
+      return null;
+    }
     const source = fs.readFileSync(file, "utf8");
     const imports = [...source.matchAll(/^import\s+[\s\S]*?from\s+"([^"]+)";/gm)].map((match) => match[1]);
     stubDir = fs.mkdtempSync(path.join(os.tmpdir(), "cody-omp-source-"));
@@ -103,11 +228,13 @@ function loadOmpSourceFile(file: string, depth = 0): Record<string, unknown> | n
     fs.writeFileSync(stubPath, STUB_SOURCE, "utf8");
     const alias: Record<string, string> = {};
     for (const specifier of imports) {
-      alias[specifier] = bridgeFor(specifier, file, stubDir, depth) ?? stubPath;
+      const override = importOverrides?.[specifier];
+      alias[specifier] = (override ? bridgeModule(override, stubDir) : null) ?? bridgeFor(specifier, file, stubDir, depth) ?? stubPath;
     }
     const jiti = createJiti(__filename, { alias, interopDefault: true, moduleCache: false });
     return jiti(file) as Record<string, unknown>;
-  } catch {
+  } catch (error) {
+    errors?.push("Could not evaluate OMP source " + file + ": " + (error instanceof Error ? error.message : String(error)));
     return null;
   } finally {
     if (stubDir) {
@@ -123,7 +250,7 @@ function loadOmpSourceFile(file: string, depth = 0): Record<string, unknown> | n
 /** Values a stubbed import would have destroyed, keyed for the bridge modules
  * below. Process-global because a generated CJS file is the only thing jiti's
  * alias map can point at. */
-const bridgedModules: Record<string, Record<string, unknown>> = {};
+const bridgedModules = ((globalThis as typeof globalThis & { __codyOmpBridgedModules?: Record<string, Record<string, unknown>> }).__codyOmpBridgedModules ??= {});
 let bridgeCounter = 0;
 
 /**
@@ -146,12 +273,15 @@ function bridgeFor(specifier: string, fromFile: string, stubDir: string, depth: 
   const resolved = resolveSourceSpecifier(fromFile, specifier);
   if (resolved === null) return null;
   const exported = loadOmpSourceFile(resolved, depth + 1);
-  if (exported === null) return null;
-  const id = `bridge-${bridgeCounter += 1}`;
+  return exported === null ? null : bridgeModule(exported, stubDir);
+}
+
+function bridgeModule(exported: Record<string, unknown>, stubDir: string): string | null {
+  const id = "bridge-" + (bridgeCounter += 1);
   bridgedModules[id] = exported;
-  const bridgePath = path.join(stubDir, `${id}.cjs`);
+  const bridgePath = path.join(stubDir, id + ".cjs");
   try {
-    fs.writeFileSync(bridgePath, `module.exports = require(${JSON.stringify(__filename)}).__codyBridgedModule(${JSON.stringify(id)});\n`, "utf8");
+    fs.writeFileSync(bridgePath, "module.exports = require(" + JSON.stringify(__filename) + ").__codyBridgedModule(" + JSON.stringify(id) + ");", "utf8");
   } catch {
     return null;
   }

@@ -107,45 +107,6 @@ test("the degraded and lost states reach the UI with a retry affordance", () => 
   assert.match(chatWindow, /onDismiss=\{dismissStreamAlert\}/);
 });
 
-test("a send that never lands clears the turn and raises a banner", () => {
-  // The wedge: the prompt POST hung (an oversized frame was chunked toward an
-  // omp that cannot reassemble), nothing ever answered, and the composer sat on
-  // "Waiting for model…". The POST is an ack — cap it, and treat any failure as
-  // "this turn never started".
-  assert.match(hook, /const PROMPT_SEND_TIMEOUT_MS = 30_000;/);
-
-  // The brand-new-session spawn still posts its one prompt inline, capped,
-  // and rolls back through the shared recovery on failure.
-  const send = hook.slice(hook.indexOf("const handleSend = useCallback"), hook.indexOf("const handleInterruptAndReply"));
-  assert.equal(send.match(/timeoutMs: PROMPT_SEND_TIMEOUT_MS/g).length, 1, "the isNew spawn's one prompt POST is capped");
-  const spawnFailure = send.slice(send.indexOf("} catch (e) {"));
-  assert.match(spawnFailure, /rollBackFailedSend\(message, detail,/);
-  // Never silently repeat a mutating instruction via a second, uncapped call.
-  assert.doesNotMatch(spawnFailure, /sendAgentCommand/);
-
-  // An EXISTING session's send goes through the outbox instead: its POST
-  // (same cap) and failure recovery live in deliverOutboxEntry, reached
-  // once retries are exhausted — same shared recovery, not a duplicated one.
-  const deliver = hook.slice(hook.indexOf("const deliverOutboxEntry = useCallback"), hook.indexOf("const handleSend = useCallback"));
-  assert.match(deliver, /timeoutMs: PROMPT_SEND_TIMEOUT_MS/);
-  assert.match(deliver, /rollBackFailedSend\(entry\.text, detail\)/);
-
-  // The shared recovery itself: clears the turn and raises the banner.
-  const rollback = hook.slice(hook.indexOf("const rollBackFailedSend = useCallback"), hook.indexOf("const deliverOutboxEntry = useCallback"));
-  assert.match(rollback, /setStreamAlert\(\{ kind: "send_failed", detail \}\)/);
-  assert.match(rollback, /agentRunningRef\.current = false/);
-  assert.match(rollback, /setAgentRunning\(false\)/);
-  assert.match(rollback, /setAgentPhase\(null\)/);
-  assert.match(rollback, /dispatch\(\{ type: "end" \}\)/);
-  // The shared recovery itself never re-sends anything.
-  assert.doesNotMatch(rollback, /sendAgentCommand|sendPromptDelivery/);
-
-  // The interrupt-and-reply path posts the same kind of ack and fails the same way.
-  const interrupt = hook.slice(hook.indexOf("const handleInterruptAndReply = useCallback"), hook.indexOf("const executeBash = useCallback"));
-  assert.match(interrupt, /timeoutMs: PROMPT_SEND_TIMEOUT_MS/);
-  assert.match(interrupt, /setStreamAlert\(\{ kind: "send_failed", detail \}\)/);
-});
-
 test("the send-failure banner shows why, and offers no retry button", () => {
   assert.match(hook, /\| \{ kind: "send_failed"; detail\?: string \}/);
   assert.match(chatWindow, /alert\.kind === "send_failed"/);
@@ -270,24 +231,10 @@ test("the notice reducer deduplicates repeats and caps visible errors at two", (
 });
 
 // ---------------------------------------------------------------------------
-// The send outbox (local://send-contract.md): one pipeline for an existing
-// session, a delivered user message that always renders, and a queue mirror
-// that clears the instant agent_end proves it, not five seconds later.
+// The send outbox. Delivery states, the server ledger and resume are tested
+// behaviourally in lib/outbox.test.mjs and lib/rpc-manager.test.mjs; what
+// stays here is the one wiring invariant the dedupe depends on.
 // ---------------------------------------------------------------------------
-
-test("an existing session's send always attaches streamingBehavior and a fresh clientMessageId, never a bare prompt", () => {
-  const send = hook.slice(hook.indexOf("const handleSend = useCallback"), hook.indexOf("const handleInterruptAndReply"));
-  // The isNew spawn path is the one documented exception (a brand-new
-  // session still goes through /api/agent/new) — everything past it is the
-  // existing-session outbox pipeline.
-  const existingSessionSend = send.slice(send.indexOf("if (!session) return false;"));
-  assert.match(existingSessionSend, /getSubmitDuringRunBehavior\(\) === "queue" \? "followUp" : "steer"/);
-  assert.match(existingSessionSend, /createOutboxEntry\(\{ sessionId: sid, text: trimmedMessage, images: outboxImages, behavior \}\)/);
-  // No client-side guess about whether the session is running gates the
-  // attempt itself — the composer's isStreaming belief is exactly the bug.
-  assert.doesNotMatch(existingSessionSend, /if \(agentRunningRef\.current\) return false;/);
-  assert.match(existingSessionSend, /void deliverOutboxEntry\(sid, entry\.id\);/);
-});
 
 test("deliverOutboxEntry attaches streamingBehavior on the wire and classifies every retryable outcome per the contract", () => {
   const deliver = hook.slice(hook.indexOf("const deliverOutboxEntry = useCallback"), hook.indexOf("const handleSend = useCallback"));
@@ -298,50 +245,3 @@ test("deliverOutboxEntry attaches streamingBehavior on the wire and classifies e
   assert.match(deliver, /setTimeout\(\(\) => \{ void deliverOutboxEntry\(sid, entryId\); \}, delay\)/);
 });
 
-test("a delivered user message renders even when the client already believes the run ended", () => {
-  // The bug: a steer's message_end could arrive after a late SSE frame or a
-  // reconcile already flipped agentRunningRef false, and got silently
-  // dropped — "acts like it didn't go through and then hangs" until refresh.
-  const messageEnd = hook.slice(hook.indexOf('case "message_end": {'), hook.indexOf('case "tool_execution_start"'));
-  const userBranch = messageEnd.slice(0, messageEnd.indexOf("} else {"));
-  // The running-turn guard is inside the user branch (gating only the
-  // trailing run-bookkeeping), never before the render/dedupe/resolve.
-  assert.doesNotMatch(userBranch.slice(0, userBranch.indexOf("setMessages((prev) => {")), /if \(!agentRunningRef\.current\) break;/);
-  assert.match(userBranch, /if \(!agentRunningRef\.current\) break;/);
-  // Dedupe reuses the existing userMessageKey machinery, against whatever is
-  // already last — an optimistic bubble, or a literal repeat.
-  assert.match(userBranch, /if \(last\?\.role === "user" && userMessageKey\(last\) === deliveredKey\) return prev;/);
-  // Delivery resolves both mirrors: the queue-bar text list and the outbox
-  // chip, so neither is left dangling once the server confirms delivery.
-  assert.match(userBranch, /consumeQueuedMessage\(deliveredText\);/);
-  assert.match(userBranch, /resolveOutboxDelivery\(deliveredText\);/);
-  // The non-user branch is untouched: still gated the same way it always was.
-  const otherBranch = messageEnd.slice(messageEnd.indexOf("} else {"));
-  assert.match(otherBranch, /if \(!agentRunningRef\.current\) break;/);
-});
-
-test("the queue mirror clears the instant agent_end's own state fetch proves it empty, not five seconds later", () => {
-  const agentEnd = hook.slice(hook.indexOf('case "agent_end":'), hook.indexOf('case "prompt_result":'));
-  assert.match(agentEnd, /if \(!d\.state \|\| d\.state\.queuedMessageCount === 0\) setQueuedMessages\(EMPTY_QUEUE\);/);
-  // The 5s staleness buffer that guards a mid-run snapshot against racing a
-  // just-written mutation is gone from this specific check: a get_state
-  // fetched AFTER agent_end already fired is never stale in that sense.
-  assert.doesNotMatch(agentEnd, /queueMutatedAtRef\.current >= 5000/);
-});
-
-test("consumeQueuedMessage and the outbox's own delivery match by normalized (trimmed) text", () => {
-  const consume = hook.slice(hook.indexOf("const consumeQueuedMessage = useCallback"), hook.indexOf("const removeQueuedMessage"));
-  assert.match(consume, /normalizeOutboxText\(text\)/);
-  const resolve = hook.slice(hook.indexOf("const resolveOutboxDelivery = useCallback"), hook.indexOf("const handleAgentEvent = useCallback"));
-  assert.match(resolve, /resolveDelivered\(readPersistedOutbox\(sid\), text\)/);
-});
-
-test("switching sessions (or a reload) revives every unfinished outbox entry, and a resolved delivery reconciles against the loaded transcript", () => {
-  const resume = hook.slice(hook.indexOf("useEffect(() => {\n    const sid = session?.id;"), hook.indexOf("// A resumed (or freshly loaded) transcript"));
-  assert.match(resume, /reviveForResume\(entries\)/);
-  // Only an entry with no live timer gets a fresh attempt kicked off here —
-  // one still running its own scheduled retry is never duplicated.
-  assert.match(resume, /entry\.status === "sending" && !outboxTimersRef\.current\.has\(entry\.id\)/);
-  const reconcile = hook.slice(hook.indexOf("// A resumed (or freshly loaded) transcript"), hook.indexOf("useEffect(() => {\n    onSystemPromptChange"));
-  assert.match(reconcile, /resolveOutboxDelivery\(extractMessageText\(message\)\)/);
-});

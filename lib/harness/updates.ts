@@ -79,39 +79,29 @@ export interface EngineUpdateStatus {
    * binary that resolves but cannot run. Null whenever the version is known,
    * so a healthy engine never pays for the extra probe. */
   probeError: string | null;
-  /** The registry's latest is a bigger major than this Cody build has been
-   * exercised against (adapter.verifiedVersion) — the update card warns
-   * before the jump instead of after it. */
+  /** The registry's latest is newer than this Cody build has been verified
+   * against — including a patch or minor release — so the card warns before
+   * the update instead of after it. */
   latestBeyondVerified: boolean;
-  /** The installed binary is already past the verified major — the row keeps
-   * a visible marker that Cody may not surface everything this engine can do. */
+  /** The installed binary is already newer than the verified version; the row
+   * marks that Cody may not surface everything this engine can do. */
   installedBeyondVerified: boolean;
   /** The exact version this Cody build was audited against (the package
-   * `installSpec` names), shown on the engine card. Null when unmarked. */
+   * installSpec names), shown on the engine card. Null when unmarked. */
   verifiedVersion: string | null;
 }
 
 // Lives in ./install (which owns the spec) and is re-exported here because
-// this module's importers have always taken it from `harness/updates`.
+// this module's importers have always taken it from harness/updates.
 export { packageNameFromSpec };
 
-/** Leading major out of "18.0.0" / "v18.0.0"; null when unparseable. */
-export function majorVersionOf(version: string | null): number | null {
-  const match = version?.match(/^v?(\d+)[.\-+]/) ?? version?.match(/^v?(\d+)$/);
-  return match ? Number(match[1]) : null;
-}
-
-/** Whether a version has crossed past the newest major this Cody build was
- * verified against. Unknown versions and unmarked adapters never warn — the
- * notice exists for a provable jump, not as ambient anxiety. */
-export function isBeyondVerifiedMajor(
+/** A newer semver version is beyond what this Cody build has been verified
+ * against. Unknown versions and unmarked engines never warn. */
+export function isBeyondVerifiedVersion(
   version: string | null,
   verifiedVersion: string | undefined,
 ): boolean {
-  const verifiedMajor = majorVersionOf(verifiedVersion ?? null);
-  if (verifiedMajor === null) return false;
-  const major = majorVersionOf(version);
-  return major !== null && major > verifiedMajor;
+  return Boolean(version && verifiedVersion && isNewerVersion(version, verifiedVersion));
 }
 
 const latestCache = new Map<string, { checkedAt: number; version: string | null }>();
@@ -226,8 +216,8 @@ export async function engineUpdateStatus(
     previousVersion: revertsSomething ? previous : null,
     previousEngineVersion: revertsSomething ? previousEngine : null,
     probeError: binary ? (await probeEngineVersion(binary, adapter.versionArgs)).error : null,
-    latestBeyondVerified: isBeyondVerifiedMajor(latestVersion, adapter.verifiedVersion),
-    installedBeyondVerified: isBeyondVerifiedMajor(installedVersion, adapter.verifiedVersion),
+    latestBeyondVerified: isBeyondVerifiedVersion(latestVersion, adapter.verifiedVersion),
+    installedBeyondVerified: isBeyondVerifiedVersion(installedVersion, adapter.verifiedVersion),
     verifiedVersion: adapter.verifiedVersion ?? null,
   };
 }

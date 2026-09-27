@@ -4,9 +4,10 @@ import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, f
 import { AlertTriangle, ChevronDown, Clock, Footprints, Gauge, ListChecks, Loader2, Paperclip, Pin, RefreshCw, ShieldCheck, SlidersHorizontal, Sparkles, Split, Target, TriangleAlert, Zap, ZapOff } from "lucide-react";
 import type { SessionModeOption } from "@/hooks/useAgentSession";
 import type { OutboxEntry } from "@/lib/outbox";
+import type { PendingInput, PendingInputResponse, RewoundDraft } from "@/lib/pending-input";
 import { ALL_CAPABILITIES, OMP_ENGINE_ID, type ActiveEngineInfo, type EngineCapabilities } from "./SettingsTabs";
 
-import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
+import type { BuiltinSlashCommandResult, CompactResultInfo, SlashCommandInfo } from "@/hooks/useAgentSession";
 import type { SessionPresetResponse } from "@/lib/model-presets/types";
 import { formatSmartTriggerLabel, type ComposerPresetOption, type PendingPresetPick } from "@/hooks/session-preset-state";
 import type { ParsedPresetSelector } from "@/lib/model-presets/selector";
@@ -41,6 +42,7 @@ import {
   type AtQueryMatch, type FileIndexEntry,
 } from "@/lib/file-fuzzy";
 import { FolderIcon, getFileIcon } from "./FileIcons";
+import { InputDock } from "./InputDock";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useResetCredits, useUsage } from "@/hooks/useUsage";
 import { useOpenRouterAccount } from "@/hooks/useOpenRouterAccount";
@@ -87,9 +89,9 @@ const NO_PRESETS: ComposerPresetOption[] = [];
 /** Stable empty list keeps the outbox rows memo-friendly before a session's
  *  first send. */
 const NO_OUTBOX: OutboxEntry[] = [];
-
+const NO_PENDING_INPUTS: PendingInput[] = [];
 interface Props {
-  onSend: (message: string, images?: AttachedImage[]) => void;
+  onSend: (message: string, images?: AttachedImage[]) => void | boolean | Promise<void | boolean>;
   onAbort: () => void;
   isStreaming: boolean;
   /** The engine can accept this send while a turn is running (steer or
@@ -197,12 +199,12 @@ interface Props {
   modelNameOverride?: string | null;
   retryInfo?: { attempt: number; maxAttempts: number; errorMessage?: string } | null;
   onAbortRetry?: () => void;
-  queuedMessages?: QueuedMessages | null;
   inputHistory?: string[];
   /** Remove one queued message from the queue panel (Edit/Delete/Steer). */
-  onRemoveQueuedMessage?: (text: string) => void;
+  onRemoveQueuedMessage?: (id: string) => void;
+  onEditQueuedMessage?: (id: string) => void;
   /** Relabel the first queued follow-up as a steering message. */
-  onPromoteQueuedToSteer?: (text: string) => void;
+  onPromoteQueuedToSteer?: (id: string) => void;
   /** Per-session send outbox (lib/outbox.ts): every send not yet confirmed
    *  delivered, rendered as a chip/row (sending → queued|started →
    *  delivered, or failed with Retry + Edit). */
@@ -212,6 +214,8 @@ interface Props {
   /** Remove a failed outbox entry and hand its text + images back so the
    *  composer can restore them for editing. */
   onEditOutboxEntry?: (id: string) => { text: string; images: OutboxEntry["images"] } | null;
+  pendingInputs?: PendingInput[];
+  onRespondToInput?: (item: PendingInput, response: PendingInputResponse) => void | Promise<void>;
   slashCommands?: SlashCommandInfo[];
   slashCommandsLoading?: boolean;
   onLoadSlashCommands?: () => Promise<SlashCommandInfo[]> | SlashCommandInfo[];
@@ -229,6 +233,7 @@ export interface ChatInputHandle {
   insertText: (text: string) => void;
   insertIfEmpty: (text: string) => void;
   prependText: (text: string) => void;
+  prependDraft: (draft: RewoundDraft) => void;
   addFiles: (files: File[]) => void;
 }
 
@@ -596,14 +601,17 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   onSend, onAbort, isStreaming, canSendWhileStreaming = false, canAttachWhileStreaming = false, canAttachImagesWhileStreaming = false, capabilities = ALL_CAPABILITIES, engine = null, model, sessionId, activeModels = NO_ACTIVE_MODELS, isAutoModelSelection, modelNames, modelList, modelError, modelErrorCode, modelsLoading, modelsRefreshKey, onModelChange, onSelectSmartModel, localOnly, onSelectLocalOnly, presets = NO_PRESETS, baseDefaultModel = null, activePresetId, pendingPresetPick = null, onPresetChange, autoModelSwitch, modelSwitchPending, modelChangeWhileStreaming = false, fastModeEnabled, fastModeActive, fastModeCapable, fastModeSupported, fastModePending, fastModeUnavailable, onFastModeChange,
   onAbortCompaction, isCompacting, compactResult,
   thinkingLevel, onThinkingLevelChange, thinkingLevelPending, thinkingLevelTarget, availableModes = NO_MODES, currentModeId = null, onModeChange, availableThinkingLevels, modelNameOverride,
-  retryInfo, queuedMessages, inputHistory = [], onAbortRetry,
+  retryInfo, inputHistory = [], onAbortRetry,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
   onAudioUnlock,
   outbox = NO_OUTBOX,
+  pendingInputs = NO_PENDING_INPUTS,
+  onRespondToInput,
   onRetryOutboxEntry,
   onEditOutboxEntry,
   onRemoveQueuedMessage,
+  onEditQueuedMessage,
   onPromoteQueuedToSteer,
   draftKey,
   cwd,
@@ -674,10 +682,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [attachedTextFiles, setAttachedTextFiles] = useState<AttachedTextFile[]>(() => (
     draftKey ? draftFilesToAttachedFiles(getDraft(draftKey)?.files) : []
   ));
+  const [pendingRewoundDraft, setPendingRewoundDraft] = useState<RewoundDraft | null>(null);
   const [attachError, setAttachError] = useState<string | null>(null);
   /** Images being decoded/compressed right now — the attach button spins and
    *  the composer will not send until they have landed. */
   const [preparingImageCount, setPreparingImageCount] = useState(0);
+  const [sendPreparing, setSendPreparing] = useState(false);
+  const [failedPreparations, setFailedPreparations] = useState<Array<{ id: string; text: string; images: AttachedImage[]; files: AttachedTextFile[]; detail: string }>>([]);
+  const failedPreparationIdRef = useRef(0);
   const trimmedValue = value.trimStart();
   // Shell mode is an rpc-dialect affordance: an ACP session's vocabulary has no
   // `bash` command, so tinting the composer and promising "output sent to model"
@@ -754,6 +766,24 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   valueRef.current = value;
   attachedImagesRef.current = attachedImages;
   attachedTextFilesRef.current = attachedTextFiles;
+  const applyRewoundDraft = useCallback((draft: RewoundDraft) => {
+    setValue(draft.text);
+    setAtQuery(null);
+    setAttachedImages((previous) => {
+      previous.forEach(revokeImagePreview);
+      return draftImagesToAttachedImages(draft.images);
+    });
+    setAttachedTextFiles([]);
+    setPendingRewoundDraft(null);
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current;
+      if (!ta) return;
+      ta.focus();
+      ta.setSelectionRange(draft.text.length, draft.text.length);
+      ta.style.height = "auto";
+      ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
+    });
+  }, []);
 
   useImperativeHandle(ref, () => ({
     insertIfEmpty(text: string) {
@@ -785,6 +815,20 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         ta.style.height = "auto";
         ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
       });
+    },
+    prependDraft(draft: RewoundDraft) {
+      const ta = textareaRef.current;
+      const currentText = ta ? ta.value : valueRef.current;
+      const composerHasContent = Boolean(currentText.trim())
+        || attachedImagesRef.current.length > 0
+        || attachedTextFilesRef.current.length > 0
+        || pendingImageCountRef.current > 0
+        || pendingTextFileCountRef.current > 0;
+      if (composerHasContent) {
+        setPendingRewoundDraft(draft);
+        return;
+      }
+      applyRewoundDraft(draft);
     },
     insertText(text: string) {
       const ta = textareaRef.current;
@@ -982,6 +1026,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   }, []);
 
   const clearInput = useCallback(() => {
+    valueRef.current = "";
+    attachedImagesRef.current = [];
+    attachedTextFilesRef.current = [];
     setValue("");
     setAtQuery(null);
     setHistoryMenuOpen(false);
@@ -1101,47 +1148,84 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const handleSend = useCallback(async () => {
     const msg = value.trim();
     if (!msg && !attachedImages.length && !attachedTextFiles.length) return;
-    // The engine that cannot take a message mid-run says so through the
-    // waiting strip; Enter must not silently eat the text there.
     if (isStreaming && !canSendWhileStreaming) return;
-    // An image still being prepared is not in the outgoing frame yet.
-    if (preparingImageCount > 0) return;
-    if (sendInFlightRef.current) return;
+    if (preparingImageCount > 0 || sendInFlightRef.current) return;
     sendInFlightRef.current = true;
+    const textSnapshot = value;
+    const imageSnapshot = attachedImages;
+    const fileSnapshot = attachedTextFiles;
+    const restoreSnapshot = (detail = t("chatInput.imageReadFailed")) => {
+      if (valueRef.current || attachedImagesRef.current.length || attachedTextFilesRef.current.length) {
+        setFailedPreparations((items) => [...items, { id: `preparation-${++failedPreparationIdRef.current}`, text: textSnapshot, images: imageSnapshot, files: fileSnapshot, detail }]);
+        setAttachError(null);
+        return;
+      }
+      const restoredImages = imageSnapshot.map((image) => ({
+        ...image,
+        previewUrl: image.source ? URL.createObjectURL(image.source) : `data:${image.mimeType};base64,${image.data}`,
+      }));
+      valueRef.current = textSnapshot;
+      attachedImagesRef.current = restoredImages;
+      attachedTextFilesRef.current = fileSnapshot;
+      setValue(textSnapshot);
+      setAttachedImages(restoredImages);
+      setAttachedTextFiles(fileSnapshot);
+      setAttachError(null);
+    };
+    const dispatchSend = async (message: string, images?: AttachedImage[]) => {
+      // The message is prepared and the composer already cleared: from here
+      // it belongs to the outbox, so the next Enter must not wait on this
+      // one (a new chat's first send waits for the chat to be created).
+      sendInFlightRef.current = false;
+      setSendPreparing(false);
+      try {
+        if (await onSend(message, images) === false) restoreSnapshot();
+      } catch (error) {
+        restoreSnapshot();
+        throw error;
+      }
+    };
+    setSendPreparing(true);
+    clearInput();
     try {
       onAudioUnlock?.();
       const composedMessage = composeMessageWithTextAttachments(msg, attachedTextFiles);
-      const outgoingImages = await prepareOutgoingImages(composedMessage);
-      if (outgoingImages === null) return;
-      if (!isStreaming && !outgoingImages.length && !attachedTextFiles.length && msg.startsWith("/") && onBuiltinCommand) {
-        const result = await onBuiltinCommand(msg);
+      if (!isStreaming && !attachedImages.length && !attachedTextFiles.length && msg.startsWith("/") && onBuiltinCommand) {
+        const result = await onBuiltinCommand(msg).catch((error) => {
+          restoreSnapshot();
+          throw error;
+        });
         if (result.handled) {
-          if (!result.error && !result.retainInput) clearInput();
+          if (result.error || result.retainInput) restoreSnapshot();
           return;
         }
       }
+      let preparationError: string | undefined;
+      const outgoingImages = await prepareOutgoingImages(composedMessage).catch((error) => {
+        preparationError = error instanceof Error ? error.message : String(error);
+        return null;
+      });
+      setSendPreparing(false);
+      if (outgoingImages === null) {
+        restoreSnapshot(preparationError);
+        return;
+      }
       if (isStreaming && !outgoingImages.length && !attachedTextFiles.length && msg.startsWith("/")) {
-        // Mid-run there is no builtin-command path; a web command expands to
-        // its prompt, a usage error keeps the text for the missing argument,
-        // and anything else goes to the engine verbatim.
         const expansion = expandWebSlashCommand(msg);
         if (expansion.kind === "usage-error") {
           toast.error(t("chatInput.commandUsageTitle"), t("agentSession.commandRequiresArgs", {
             command: expansion.command,
             usage: t(expansion.argumentHintKey),
           }));
+          restoreSnapshot();
           return;
         }
-        clearInput();
-        onSend(expansion.kind === "expand" ? expansion.prompt : composedMessage, undefined);
+        await dispatchSend(expansion.kind === "expand" ? expansion.prompt : composedMessage);
         return;
       }
-      // The composer clears IMMEDIATELY: from here the message lives in the
-      // session outbox (sending → queued|started → delivered, or failed with
-      // Retry/Edit), never in a promise the caller awaits before clearing.
-      clearInput();
-      onSend(composedMessage, outgoingImages.length ? outgoingImages : undefined);
+      await dispatchSend(composedMessage, outgoingImages.length ? outgoingImages : undefined);
     } finally {
+      setSendPreparing(false);
       sendInFlightRef.current = false;
     }
   }, [value, attachedImages, attachedTextFiles, isStreaming, canSendWhileStreaming, preparingImageCount, prepareOutgoingImages, onBuiltinCommand, onSend, clearInput, onAudioUnlock, t]);
@@ -1440,46 +1524,33 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     });
   }, [onEditOutboxEntry]);
 
-  // ── Queued follow-up bar ────────────────────────────────────────────────
-  // omp reports only a queued count over RPC; the texts are tracked in a
-  // client-side mirror, so Edit/Delete/Steer act on that mirror through the
-  // session hook's helpers.
-  const queuedEntries = [
-    ...(queuedMessages?.followUp ?? []).map((text) => ({ kind: "follow-up" as const, text })),
-    ...(queuedMessages?.steering ?? []).map((text) => ({ kind: "steer" as const, text })),
-  ];
-  const firstQueued = queuedEntries[0] ?? null;
-  const queuedCount = queuedEntries.length;
-
-  const handleQueuedEdit = useCallback(() => {
-    if (!firstQueued) return;
-    onRemoveQueuedMessage?.(firstQueued.text);
-    setValue(firstQueued.text);
+  const handlePreparationEdit = useCallback((id: string) => {
+    const failed = failedPreparations.find((item) => item.id === id);
+    if (!failed) return;
+    const restoredText = [failed.text, valueRef.current].filter(Boolean).join("\n\n");
+    valueRef.current = restoredText;
+    setValue(restoredText);
+    const restoredImages = failed.images.map((image) => ({
+      ...image,
+      previewUrl: image.source ? URL.createObjectURL(image.source) : `data:${image.mimeType};base64,${image.data}`,
+    }));
+    attachedImagesRef.current = [...restoredImages, ...attachedImagesRef.current];
+    setAttachedImages((current) => [...restoredImages, ...current]);
+    attachedTextFilesRef.current = [...failed.files, ...attachedTextFilesRef.current];
+    setAttachedTextFiles((current) => [...failed.files, ...current]);
+    setFailedPreparations((current) => current.filter((item) => item.id !== id));
+    setAttachError(null);
     setAtQuery(null);
     setHistoryMenuOpen(false);
     requestAnimationFrame(() => {
       const ta = textareaRef.current;
       if (!ta) return;
       ta.focus();
-      ta.setSelectionRange(firstQueued.text.length, firstQueued.text.length);
+      ta.setSelectionRange(restoredText.length, restoredText.length);
       ta.style.height = "auto";
       ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
     });
-  }, [firstQueued, onRemoveQueuedMessage]);
-
-  const handleQueuedDelete = useCallback(() => {
-    if (!firstQueued) return;
-    onRemoveQueuedMessage?.(firstQueued.text);
-  }, [firstQueued, onRemoveQueuedMessage]);
-
-  const handleQueuedSteer = useCallback(() => {
-    if (!firstQueued) return;
-    if (firstQueued.kind === "follow-up") {
-      onPromoteQueuedToSteer?.(firstQueued.text);
-    }
-    // Already a steering message: nothing to promote.
-  }, [firstQueued, onPromoteQueuedToSteer]);
-
+  }, [failedPreparations]);
   const getNextSlashIndex = useCallback((direction: "up" | "down" | "left" | "right") => {
     const lastIndex = filteredSlashCommands.length - 1;
     if (lastIndex < 0) return 0;
@@ -2714,10 +2785,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               </div>
             );
           })()}
-        {/* Waiting strip — same slot as the queued bar, shown when the engine
-            cannot take anything until the current turn ends. Visible even once
+        {/* Waiting strip — shown when the engine cannot take anything until
+            the current turn ends and nothing is queued yet. Visible even once
             the user has typed, which the placeholder alone would not be. */}
-        {turnWaiting && !firstQueued && (
+        {turnWaiting && !outbox.some((entry) => entry.status === "queued") && (
           <div
             role="status"
             style={{
@@ -2742,60 +2813,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         )}
         {/* Queued follow-up bar — thin strip attached to the composer's top
             edge. Hidden entirely when nothing is queued. */}
-        {firstQueued && (
-          <div style={{
-            border: "1px solid var(--border)",
-            borderBottom: "none",
-            borderRadius: "var(--radius-card) var(--radius-card) 0 0",
-            background: "var(--bg-panel)",
-            padding: "5px 8px 5px 12px",
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            minWidth: 0,
-          }}>
-            <span style={{
-              flexShrink: 0,
-              fontSize: 10,
-              fontWeight: 600,
-              letterSpacing: "0.06em",
-              textTransform: "uppercase",
-              color: "var(--text-muted)",
-            }}>
-              {firstQueued.kind === "steer" ? t("chatInput.queuedSteer") : t("chatInput.queuedFollowUp")}
-              {queuedCount > 1 && <span style={{ color: "var(--text-dim)" }}>{" · " + queuedCount}</span>}
-            </span>
-            <span
-              title={firstQueued.text}
-              style={{
-                flex: 1,
-                minWidth: 0,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-                fontSize: 12,
-                color: "var(--text-muted)",
-              }}
-            >
-              {firstQueued.text}
-            </span>
-            <QueuedActionButton onClick={handleQueuedEdit} title={t("chatInput.queuedEditTitle")}>
-              {t("chatInput.queuedEdit")}
-            </QueuedActionButton>
-            <QueuedActionButton onClick={handleQueuedDelete} title={t("chatInput.queuedDeleteTitle")}>
-              {t("chatInput.queuedDelete")}
-            </QueuedActionButton>
-            <QueuedActionButton onClick={handleQueuedSteer} title={t("chatInput.queuedSteerTitle")} accent>
-              {t("chatInput.queuedSteerAction")}
-            </QueuedActionButton>
-          </div>
-        )}
         {/* Send outbox rows — where each composer send lives from the moment
             the composer clears until the engine has it: sending → queued or
             started → delivered (briefly), or failed with Retry + Edit.
             Nothing a user typed is ever silently dropped. */}
         {outbox.filter((entry) => entry.status !== "delivered").map((entry, index) => {
           const failed = entry.status === "failed";
+          // Only a message Cody's server still holds can be taken back; once
+          // the engine has it, omp offers no way to pull it out again.
+          const editable = entry.status === "queued" && entry.held === true;
           return (
             <div
               key={entry.id}
@@ -2816,7 +2842,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             >
               {failed
                 ? <AlertTriangle size={11} strokeWidth={2.2} style={{ flexShrink: 0, color: "var(--status-error)" }} aria-hidden="true" />
-                : entry.status === "queued"
+                : editable
                   ? <Clock size={11} strokeWidth={2.2} style={{ flexShrink: 0, color: "var(--text-dim)" }} aria-hidden="true" />
                   : <Loader2 size={11} strokeWidth={2.2} style={{ flexShrink: 0, animation: "spin 0.8s linear infinite" }} aria-hidden="true" />}
               <span style={{
@@ -2828,7 +2854,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 color: failed ? "var(--status-error)" : "var(--text-muted)",
               }}>
                 {failed ? t("chatInput.outboxFailed")
-                  : entry.status === "queued" ? t("chatInput.outboxQueued")
+                  : editable ? (entry.behavior === "steer" ? t("chatInput.queuedSteer") : t("chatInput.queuedFollowUp"))
+                  : entry.status === "queued" ? t("chatInput.outboxHandedOver")
                   : entry.status === "started" ? t("chatInput.outboxStarted")
                   : t("chatInput.outboxSending")}
               </span>
@@ -2846,6 +2873,21 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               >
                 {entry.text}
               </span>
+              {editable && (
+                <>
+                  <QueuedActionButton onClick={() => onEditQueuedMessage?.(entry.id)} title={t("chatInput.queuedEditTitle")}>
+                    {t("chatInput.queuedEdit")}
+                  </QueuedActionButton>
+                  <QueuedActionButton onClick={() => onRemoveQueuedMessage?.(entry.id)} title={t("chatInput.queuedDeleteTitle")}>
+                    {t("chatInput.queuedDelete")}
+                  </QueuedActionButton>
+                  {entry.behavior === "followUp" && (
+                    <QueuedActionButton onClick={() => onPromoteQueuedToSteer?.(entry.id)} title={t("chatInput.queuedSteerTitle")} accent>
+                      {t("chatInput.queuedSteerAction")}
+                    </QueuedActionButton>
+                  )}
+                </>
+              )}
               {failed && (
                 <>
                   <QueuedActionButton
@@ -2864,7 +2906,19 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             </div>
           );
         })}
-          <div
+        {failedPreparations.map((preparation, index) => {
+          const attachmentNames = [...preparation.files.map((file) => file.name), ...preparation.images.map((image) => image.name).filter(Boolean)];
+          const label = preparation.text || attachmentNames.join(", ") || t("chatInput.imageReadFailed");
+          return (
+            <div key={preparation.id} data-testid="preparation-failed-row" role="status" style={{ border: "1px solid var(--border)", borderBottom: "none", borderRadius: outbox.length === 0 && index === 0 ? "var(--radius-card) var(--radius-card) 0 0" : 0, background: "color-mix(in srgb, var(--status-error) 6%, var(--bg-panel))", padding: "5px 8px 5px 12px", display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}> 
+              <AlertTriangle size={11} strokeWidth={2.2} style={{ flexShrink: 0, color: "var(--status-error)" }} aria-hidden="true" />
+              <span style={{ flexShrink: 0, fontSize: 10, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--status-error)" }}>{t("chatInput.outboxFailed")}</span>
+              <span title={preparation.detail} style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12, color: "var(--text-muted)" }}>{label}</span>
+              <QueuedActionButton onClick={() => handlePreparationEdit(preparation.id)} title={t("chatInput.outboxEditTitle")}>{t("chatInput.outboxEdit")}</QueuedActionButton>
+            </div>
+          );
+        })}
+        <div
             className="chat-input-shell"
             style={{
               display: "flex",
@@ -2877,6 +2931,25 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               transition: "border-color var(--dur-fast) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm), box-shadow var(--dur-fast) var(--ease-out-warm)",
             } as React.CSSProperties}
           >
+          {pendingInputs.length > 0 && onRespondToInput && (
+            <InputDock pendingInputs={pendingInputs} onRespond={onRespondToInput} composerRef={textareaRef} />
+          )}
+          {pendingRewoundDraft && (
+            <div
+              role="status"
+              aria-live="polite"
+              style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", padding: "8px 10px", marginBottom: 8, borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text-muted)", fontSize: 13 }}
+            >
+              <span>{t(pendingRewoundDraft.source === "queue" ? "chatInput.returnedQueuedNotice" : "refusal.rewoundDraftNotice")}</span>
+              <button
+                type="button"
+                onClick={() => applyRewoundDraft(pendingRewoundDraft)}
+                style={{ minHeight: 48, padding: "8px 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", cursor: "pointer", font: "inherit" }}
+              >
+                {t(pendingRewoundDraft.source === "queue" ? "chatInput.useReturnedQueued" : "refusal.useRewoundDraft")}
+              </button>
+            </div>
+          )}
           <textarea
             ref={textareaRef}
             className="composer-textarea"
@@ -2904,6 +2977,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             onPaste={handlePaste}
             // The full hint truncates to "…@ for" in a phone-width field, so
             // there the placeholder is only the part that still reads.
+            disabled={sendPreparing}
             placeholder={turnWaiting
               ? t("chatInput.waitingForTurn")
               : isMobile ? t("chatInput.placeholderShort") : t("chatInput.placeholder")}
@@ -3644,7 +3718,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 onClick={handleSend}
                 // Sending while an attachment is still being prepared would
                 // send the message without it.
-                disabled={preparingImageCount > 0 || (!value.trim() && !attachedImages.length && !attachedTextFiles.length)}
+                disabled={sendPreparing || preparingImageCount > 0 || (!value.trim() && !attachedImages.length && !attachedTextFiles.length)}
                 // Arrow only on a phone; the word survives in the accessible
                 // name, and the arrow grows to stay legible in a 38px target.
                 aria-label={isMobile ? t("chatInput.send") : undefined}

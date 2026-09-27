@@ -137,7 +137,7 @@ export function PermissionRequestCard({
       aria-label={t("permissionRequest.heading")}
       className="chat-block-in"
       style={{
-        marginBottom: 8,
+        marginBottom: 0,
         padding: "10px 12px",
         border: "1px solid color-mix(in srgb, var(--accent) 40%, var(--border))",
         borderRadius: "var(--radius-card)",
@@ -233,6 +233,7 @@ function PermissionOptionButton({
   return (
     <button
       type="button"
+      data-input-choice="true"
       onClick={onClick}
       disabled={disabled}
       style={{
@@ -240,6 +241,7 @@ function PermissionOptionButton({
         alignItems: "center",
         gap: 8,
         width: "100%",
+        minHeight: 48,
         padding: "8px 10px",
         borderRadius: "var(--radius-control)",
         border: `1px solid ${tone.border}`,

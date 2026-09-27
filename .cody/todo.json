@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "id": "t_86b2283a",
+      "title": "UI improvements - top bar icons moved to the side bars so that we can have a slide out drawer on both sides that works on mobile",
+      "status": "active",
+      "order": 1,
+      "createdAt": "2026-09-10T01:28:29.700Z",
+      "updatedAt": "2026-09-13T04:11:31.328Z",
+      "completedAt": null,
+      "color": "blue"
+    },
+    {
+      "id": "t_4913ea53",
+      "title": "Budget mode toggle",
+      "status": "active",
+      "order": 2,
+      "createdAt": "2026-09-13T04:12:58.122Z",
+      "updatedAt": "2026-09-14T06:42:15.453Z",
+      "completedAt": null,
+      "color": "pink"
+    },
+    {
+      "id": "t_d47e52f3",
+      "title": "check upstream with omp-web and incorporate latest changes/bug fixes and also check what the pull request wanted on github",
+      "status": "active",
+      "order": 3,
+      "createdAt": "2026-09-13T05:19:33.163Z",
+      "updatedAt": "2026-09-13T05:19:33.163Z",
+      "completedAt": null
+    },
+    {
+      "id": "t_92d4b013",
+      "title": "Option to enable or disable prewalk on the conversation chat box before a chat starts",
+      "status": "done",
+      "order": 4,
+      "createdAt": "2026-09-13T18:25:10.007Z",
+      "updatedAt": "2026-09-14T06:42:19.336Z",
+      "completedAt": "2026-09-14T06:42:19.336Z"
+    },
+    {
+      "id": "t_4bac3e16",
+      "title": "When a provider is exhausted, smartly use the fallback chain iuntil it's refilled instead of going through the whole fallback chain everutime",
+      "status": "done",
+      "order": 5,
+      "createdAt": "2026-09-13T23:46:13.552Z",
+      "updatedAt": "2026-09-14T06:42:23.447Z",
+      "completedAt": "2026-09-14T06:42:23.447Z"
+    },
+    {
+      "id": "t_37c94db6",
+      "title": "Be able to visualize code as its written, like show the structure and wiring. Be able to zoom in from an overall view to each node/process to see how the wriring works - all in a way that my brain lea",
+      "status": "active",
+      "order": 6,
+      "createdAt": "2026-09-22T00:08:25.596Z",
+      "updatedAt": "2026-09-22T00:08:49.010Z",
+      "completedAt": null,
+      "notes": "Brain works "
+    },
+    {
+      "id": "t_8670771a",
+      "title": "Need ot be able to upload larger files",
+      "status": "active",
+      "order": 7,
+      "createdAt": "2026-09-22T02:22:34.961Z",
+      "updatedAt": "2026-09-22T02:22:34.961Z",
+      "completedAt": null
+    }
+  ]
+}

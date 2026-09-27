@@ -380,6 +380,8 @@ export interface EngineSession {
   readonly cwd: string;
   isAlive(): boolean;
   isRunning(): boolean;
+  /** True while this session has a user response outstanding. */
+  hasPendingInput?(): boolean;
   start(): void;
   /** Resolves once identity is known and the session accepts commands. */
   waitUntilReady(): Promise<void>;

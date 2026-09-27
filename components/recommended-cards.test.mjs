@@ -6,12 +6,11 @@ import { createJiti } from "jiti";
 
 import { ompTestPackageBin } from "../lib/omp/omp-test-package.mjs";
 /**
- * The Behavior hub's Recommended layer is data: `RECOMMENDED_CARDS` (25
- * cards in five groups), `MCP_CARDS` (4, rendered by Extensions) and
- * `RETRY_CARDS` (3, rendered under Models) — 32 keys, one key space shared
- * with the schema list. Every card resolves its copy from the engine's
- * schema at render time, except the eight keys omp keeps config-file only,
- * whose copy lives in `CURATED_ONLY`.
+ * The Behavior hub's Recommended layer is data: 28 cards in five groups,
+ * plus 5 MCP cards and 3 Retry cards — 36 keys in the shared setting space.
+ * Every card resolves its copy from the engine's schema at render time,
+ * except the eight keys OMP keeps config-file only, whose copy lives in
+ * CURATED_ONLY.
  *
  * Membership is asserted twice: against the checked-in key snapshot
  * (lib/harness/fixtures/omp-schema-keys.json), so CI without an omp package
@@ -29,20 +28,21 @@ const {
 
 const snapshot = JSON.parse(await readFile(new URL("../lib/harness/fixtures/omp-schema-keys.json", import.meta.url), "utf8"));
 const SNAPSHOT_KEYS = new Set(snapshot.keys);
+const INTRODUCED_IN_183 = ["advisor.evictStaleResults", "mcp.startupTimeoutMs"];
 
-const EXPECTED_GROUP_SIZES = { safety: 3, thinking: 5, advisor: 4, context: 5, memory: 8 };
+const EXPECTED_GROUP_SIZES = { safety: 3, thinking: 5, advisor: 5, context: 7, memory: 8 };
 const CONTROLS = new Set(["select", "toggle", "number", "methodOrder"]);
 
-test("the five groups hold 25 cards, in the spec's sizes, with no duplicate keys", () => {
+test("the five groups hold 28 cards, in the spec's sizes, with no duplicate keys", () => {
   assert.deepEqual(RECOMMENDED_GROUPS.map((group) => group.id), Object.keys(EXPECTED_GROUP_SIZES));
   for (const [group, size] of Object.entries(EXPECTED_GROUP_SIZES)) {
     assert.equal(RECOMMENDED_CARDS.filter((card) => card.group === group).length, size, `${group} holds ${size} cards`);
   }
-  assert.equal(RECOMMENDED_CARDS.length, 25);
-  assert.equal(MCP_CARDS.length, 4);
+  assert.equal(RECOMMENDED_CARDS.length, 28);
+  assert.equal(MCP_CARDS.length, 5);
   assert.equal(RETRY_CARDS.length, 3);
-  assert.equal(ALL_CURATED_CARDS.length, 32, "32 keys across the three surfaces");
-  assert.equal(new Set(ALL_CURATED_CARDS.map((card) => card.key)).size, 32, "no key appears on two surfaces");
+  assert.equal(ALL_CURATED_CARDS.length, 36, "36 keys across the three surfaces");
+  assert.equal(new Set(ALL_CURATED_CARDS.map((card) => card.key)).size, 36, "no key appears on two surfaces");
   for (const card of ALL_CURATED_CARDS) {
     assert.match(card.key, /^[a-zA-Z][\w.]*$/, `${card.key} is a dotted config path`);
     if (card.control) assert.ok(CONTROLS.has(card.control), `${card.key}: unknown control ${card.control}`);
@@ -67,10 +67,16 @@ test("retry keys are not Recommended, MCP keys are not rendered here, and both s
   assert.equal(cardOwner("prewalk.enabled"), null, "a row nothing curates has no owner");
 });
 
-test("the 24/8 split holds against the checked-in schema key snapshot", () => {
-  const schemaDeclared = ALL_CURATED_CARDS.filter((card) => SNAPSHOT_KEYS.has(card.key)).map((card) => card.key);
-  const curatedOnlyKeys = ALL_CURATED_CARDS.filter((card) => !SNAPSHOT_KEYS.has(card.key)).map((card) => card.key);
-  assert.equal(schemaDeclared.length, 24, `24 keys come from the schema, got ${schemaDeclared.length}: ${schemaDeclared.join(", ")}`);
+test("the 28/8 split holds against the checked-in schema key snapshot, once 18.3-only cards are set aside", () => {
+  // The frozen snapshot predates OMP 18.3, so INTRODUCED_IN_183 can never
+  // appear in it. Confirm they are exactly the cards that are missing, then
+  // check the 28/8 split on everything the snapshot could have declared.
+  const newerThanSnapshot = ALL_CURATED_CARDS.filter((card) => !SNAPSHOT_KEYS.has(card.key) && INTRODUCED_IN_183.includes(card.key)).map((card) => card.key);
+  assert.deepEqual(newerThanSnapshot.sort(), [...INTRODUCED_IN_183].sort(), "every 18.3-only card is absent from the pre-18.3 snapshot, and nothing else is");
+  const rest = ALL_CURATED_CARDS.filter((card) => !INTRODUCED_IN_183.includes(card.key));
+  const schemaDeclared = rest.filter((card) => SNAPSHOT_KEYS.has(card.key)).map((card) => card.key);
+  const curatedOnlyKeys = rest.filter((card) => !SNAPSHOT_KEYS.has(card.key)).map((card) => card.key);
+  assert.equal(schemaDeclared.length, 28 - INTRODUCED_IN_183.length, `${28 - INTRODUCED_IN_183.length} pre-18.3 schema-declared keys; got ` + schemaDeclared.length + ": " + schemaDeclared.join(", "));
   assert.deepEqual(curatedOnlyKeys.sort(), [...CURATED_ONLY_KEYS].sort(), "the keys the snapshot lacks are exactly the curated-only table");
   assert.equal(CURATED_ONLY.length, 8);
   // The table must not describe a key the engine actually declares: the
@@ -93,7 +99,7 @@ function installedOmpBin() {
 
 const ompBin = installedOmpBin();
 
-test("every curated card is renderable against the installed omp schema", { skip: !ompBin && "no omp package to read" }, async () => {
+test("cards match the installed OMP schema, with newer-version cards gated until declared", { skip: !ompBin && "no omp package to read" }, async () => {
   const previous = process.env.CODY_OMP_BIN;
   process.env.CODY_OMP_BIN = ompBin;
   try {
@@ -105,14 +111,16 @@ test("every curated card is renderable against the installed omp schema", { skip
     const keys = new Set(schema.settings.map((setting) => setting.key));
     const declared = ALL_CURATED_CARDS.filter((card) => keys.has(card.key)).map((card) => card.key);
     const missing = ALL_CURATED_CARDS.filter((card) => !keys.has(card.key)).map((card) => card.key);
-    // The split is DERIVED: the hub prefers a schema row and falls back to the
-    // curated table, so a key the engine starts declaring simply moves sides
-    // (18.2.5 moved two). What must hold is that every card has one of the
-    // two, or its control cannot render at all.
+    // OMP 18.3 added these controls. With 18.2 they have no schema row or
+    // fallback writer, so the renderer keeps them hidden instead of saving
+    // settings the installed engine does not support.
     assert.ok(declared.length > 0, `installed ${schema.source.version}: no curated key is schema-declared`);
-    const unrenderable = missing.filter((key) => !CURATED_ONLY_KEYS.includes(key));
+    const [major, minor] = schema.source.version?.split(".").map(Number) ?? [];
+    const supports183 = major > 18 || (major === 18 && minor >= 3);
+    const missing183 = missing.filter((key) => INTRODUCED_IN_183.includes(key)).sort();
+    assert.deepEqual(missing183, supports183 ? [] : [...INTRODUCED_IN_183].sort(), `installed ${schema.source.version}: versioned cards match engine support`);
+    const unrenderable = missing.filter((key) => !CURATED_ONLY_KEYS.includes(key) && !INTRODUCED_IN_183.includes(key));
     assert.deepEqual(unrenderable, [], `installed ${schema.source.version}: curated cards with neither a schema row nor a curated-only entry`);
-    // A card's control must fit the type the engine declares for the key.
     for (const card of ALL_CURATED_CARDS) {
       const setting = schema.settings.find((entry) => entry.key === card.key);
       if (!setting || !card.control) continue;

@@ -12,9 +12,8 @@
  * `CURATED_ONLY` instead, which is the one hand-written table in this hub.
  *
  * Membership is pinned by components/recommended-cards.test.mjs against the
- * installed omp schema AND the checked-in key snapshot
- * (lib/harness/fixtures/omp-schema-keys.json): 24 schema-declared, 8
- * curated-only, 32 in all across the three card lists.
+ * installed OMP schema AND the checked-in key snapshot: 28 schema-declared,
+ * 8 curated-only, 36 total across the three card lists.
  *
  *   - RECOMMENDED_CARDS render here, in five groups.
  *   - MCP_CARDS are the same bound cards rendered by Extensions › MCP.
@@ -71,17 +70,20 @@ export const RECOMMENDED_CARDS: readonly RecommendedCard[] = [
   { key: "personality", group: "thinking", control: "select" },
   { key: "hideThinkingBlock", group: "thinking", control: "toggle", hint: "Cody draws its own thinking blocks; use Expand thinking blocks under Preferences for the browser." },
   { key: "externalThinking", group: "thinking", control: "toggle" },
-  // Advisor (4)
+  // Advisor (5)
   { key: "advisor.enabled", group: "advisor", control: "toggle", hint: "Also sets the default for new sessions in this browser." },
   { key: "advisor.syncBacklog", group: "advisor", control: "select" },
   { key: "advisor.immuneTurns", group: "advisor", control: "select" },
   { key: "advisor.subagents", group: "advisor", control: "toggle" },
-  // Context (5)
+  { key: "advisor.evictStaleResults", group: "advisor", control: "toggle" },
+  // Context (7)
   { key: "compaction.enabled", group: "context", control: "toggle" },
   { key: "compaction.midTurnEnabled", group: "context", control: "toggle" },
   { key: "compaction.methodOrder", group: "context", control: "methodOrder" },
   { key: "compaction.autoContinue", group: "context", control: "toggle" },
   { key: "compaction.keepRecentTokens", group: "context", control: "number" },
+  { key: "compaction.thresholdPercent", group: "context", control: "select" },
+  { key: "compaction.thresholdTokens", group: "context", control: "select" },
   // Memory & learning (8)
   { key: "memory.backend", group: "memory", control: "select" },
   { key: "autolearn.enabled", group: "memory", control: "toggle" },
@@ -93,13 +95,14 @@ export const RECOMMENDED_CARDS: readonly RecommendedCard[] = [
   { key: "mnemopi.noEmbeddings", group: "memory", control: "toggle" },
 ];
 
-/** The four MCP keys, rendered by Extensions › MCP as the same bound cards
- * (resolve each with `useSchemaIndex().byKey`, write with `setValue`). */
+/** The five MCP keys, rendered by Extensions › MCP as the same bound cards
+ * (resolve each through the schema index and write with setValue). */
 export const MCP_CARDS: readonly RecommendedCard[] = [
   { key: "mcp.enableProjectConfig", group: "mcp", control: "toggle" },
   { key: "mcp.renderMarkdownResults", group: "mcp", control: "toggle" },
   { key: "mcp.notifications", group: "mcp", control: "toggle" },
   { key: "mcp.notificationDebounceMs", group: "mcp", control: "number" },
+  { key: "mcp.startupTimeoutMs", group: "mcp", control: "number" },
 ];
 
 /** Retry lives under Models › Assignments (the retry panel), never here. */

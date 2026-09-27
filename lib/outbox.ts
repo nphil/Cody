@@ -9,7 +9,7 @@
  * text lives until the server has genuinely accepted it.
  *
  * Pure state machine and storage only: no network, no React, no i18n. The
- * HTTP call and the wiring into messages/queuedMessages live in
+ * HTTP call and the wiring into messages and the queue rows live in
  * hooks/useAgentSession.ts; the chip UI lives in components/ChatInput.tsx.
  */
 
@@ -17,6 +17,7 @@ import { SESSION_STORAGE_PREFIXES } from "./storage-keys";
 
 export type OutboxBehavior = "steer" | "followUp";
 export type OutboxStatus = "sending" | "queued" | "started" | "delivered" | "failed";
+export type OutboxFailureOrigin = "client" | "server";
 
 export interface OutboxImage {
   data: string;
@@ -42,11 +43,14 @@ export interface OutboxEntry {
   createdAt: number;
   /** Last retry/failure detail, for the failed chip. */
   error?: string;
+  /** Client give-up is only a guess; a server-reported failure is definitive. */
+  failureOrigin?: OutboxFailureOrigin;
+  /** Queued and still held by Cody's server (not yet handed to the engine):
+   *  the only state in which it can really be edited or deleted. */
+  held?: boolean;
 }
 
-/** Shared by the queue mirror match and delivery resolution: a delivered
- *  frame's text is compared against what was sent, ignoring incidental
- *  whitespace differences from the round trip. */
+/** Whitespace outside a submitted message is not significant in a transcript. */
 export function normalizeOutboxText(text: string): string {
   return text.trim();
 }
@@ -121,14 +125,14 @@ export interface RawDeliveryResponse {
   pending?: boolean;
   code?: string;
   error?: string;
-  data?: { delivery?: "started" | "queued" };
+  data?: { delivery?: "started" | "queued"; status?: "delivered"; held?: boolean };
 }
 
 export type DeliveryOutcome =
-  | { kind: "success"; delivery: "started" | "queued" }
+  | { kind: "success"; delivery: ServerDeliveryStatus; held?: boolean }
   | { kind: "pending" }
   | { kind: "retry"; detail?: string }
-  | { kind: "failed"; detail: string };
+  | { kind: "failed"; detail: string; origin: "server" };
 
 /**
  * Classifies one raw HTTP outcome per the send contract (local://send-contract.md):
@@ -139,12 +143,16 @@ export type DeliveryOutcome =
 export function classifyDeliveryOutcome(response: RawDeliveryResponse): DeliveryOutcome {
   if (response.status === null) return { kind: "retry", detail: response.error };
   if (response.status === 200 && response.success) {
-    return { kind: "success", delivery: response.data?.delivery === "queued" ? "queued" : "started" };
+    return {
+      kind: "success",
+      delivery: response.data?.status === "delivered" ? "delivered" : response.data?.delivery === "queued" ? "queued" : "started",
+      ...(response.data?.held === true ? { held: true } : {}),
+    };
   }
   if (response.status === 202 && response.pending) return { kind: "pending" };
   if (response.status === 409 && response.code === "session_restarting") return { kind: "retry", detail: response.error };
   if (response.status === 503) return { kind: "retry", detail: response.error };
-  return { kind: "failed", detail: response.error || response.code || `HTTP ${response.status}` };
+  return { kind: "failed", detail: response.error || response.code || `HTTP ${response.status}`, origin: "server" };
 }
 
 // ---- entry-list transitions -------------------------------------------------
@@ -154,7 +162,7 @@ export function classifyDeliveryOutcome(response: RawDeliveryResponse): Delivery
 /** Marks the start of one delivery attempt: bumps the attempt counter and
  *  clears any stale scheduled-retry timestamp. */
 export function beginAttempt(entries: readonly OutboxEntry[], id: string): OutboxEntry[] {
-  return entries.map((entry) => (entry.id === id
+  return entries.map((entry) => (entry.id === id && entry.status !== "delivered" && entry.status !== "failed"
     ? { ...entry, attempt: entry.attempt + 1, nextRetryAt: null, status: "sending" as const }
     : entry));
 }
@@ -165,51 +173,198 @@ export function applyOutcome(
   outcome: DeliveryOutcome,
   now: number = Date.now(),
 ): OutboxEntry[] {
+  if (outcome.kind === "success") return applyServerDelivery(entries, id, outcome.delivery, undefined, outcome.held);
   return entries.map((entry): OutboxEntry => {
-    if (entry.id !== id) return entry;
+    if (entry.id !== id || entry.status === "delivered" || entry.status === "failed" || entry.status === "queued" || entry.status === "started") return entry;
     switch (outcome.kind) {
-      case "success":
-        return { ...entry, status: outcome.delivery, nextRetryAt: null, error: undefined };
       case "pending":
         return shouldGiveUpRetrying(entry, now)
-          ? { ...entry, status: "failed", nextRetryAt: null, error: entry.error }
+          ? { ...entry, status: "failed", failureOrigin: "client", nextRetryAt: null, error: entry.error }
           : { ...entry, nextRetryAt: now + backoffDelayMs(entry.attempt) };
       case "retry":
         return shouldGiveUpRetrying(entry, now)
-          ? { ...entry, status: "failed", nextRetryAt: null, error: outcome.detail ?? entry.error }
+          ? { ...entry, status: "failed", failureOrigin: "client", nextRetryAt: null, error: outcome.detail ?? entry.error }
           : { ...entry, nextRetryAt: now + backoffDelayMs(entry.attempt), error: outcome.detail ?? entry.error };
       case "failed":
-        return { ...entry, status: "failed", nextRetryAt: null, error: outcome.detail };
+        return { ...entry, status: "failed", failureOrigin: outcome.origin, nextRetryAt: null, error: outcome.detail };
     }
   });
 }
 
-/** A user-initiated Retry on a failed entry: re-arms it for an immediate
- *  attempt with a fresh give-up budget, keeping the same clientMessageId
- *  (the point of the whole design). */
-export function retryEntry(entries: readonly OutboxEntry[], id: string, now: number = Date.now()): OutboxEntry[] {
-  return entries.map((entry) => (entry.id === id
-    ? { ...entry, status: "sending" as const, attempt: 0, nextRetryAt: null, retryingSince: now, error: undefined }
-    : entry));
+export type ServerDeliveryStatus = "queued" | "started" | "delivered" | "failed" | "withdrawn";
+
+/** Apply a ledger transition by id. A late acknowledgement can never undo a
+ *  delivery proof or move an accepted entry back to an earlier state.
+ *  `withdrawn` (deleted, taken back to edit, or returned by Stop — it never
+ *  reached the engine) removes the entry outright. */
+export function applyServerDelivery(
+  entries: readonly OutboxEntry[],
+  id: string,
+  status: ServerDeliveryStatus,
+  error?: string,
+  held?: boolean,
+): OutboxEntry[] {
+  if (status === "withdrawn") return entries.filter((entry) => entry.id !== id);
+  const rank: Record<OutboxStatus, number> = { sending: 0, queued: 1, started: 2, delivered: 3, failed: 3 };
+  return entries.map((entry): OutboxEntry => {
+    if (entry.id !== id || entry.status === "delivered") return entry;
+    // A held message handed to the engine stays queued, just no longer editable.
+    if (status === "queued" && entry.status === "queued") return { ...entry, held: held === true };
+    const clientGuess = entry.status === "failed" && entry.failureOrigin !== "server";
+    if (entry.status === "failed" && !clientGuess && status !== "delivered") return entry;
+    if (!clientGuess && rank[status] < rank[entry.status]) return entry;
+    return {
+      ...entry,
+      status,
+      nextRetryAt: null,
+      error: status === "failed" ? (error ?? entry.error) : undefined,
+      failureOrigin: status === "failed" ? "server" : undefined,
+      held: status === "queued" ? held === true : undefined,
+    };
+  });
 }
 
-/**
- * A delivered user message (message_end) resolves the FIRST still-open entry
- * (any status but "delivered") whose normalized text matches — mirroring the
- * existing queue mirror's `indexOf`-first-match semantics. A entry that had
- * already given up as "failed" is still eligible: hard proof of delivery
- * outranks a client-side timeout.
- */
-export function resolveDelivered(
+/** A manual retry appends a fresh delivery after the caller checks the old id.
+ * Keep the failed entry immutable, preserve its text and images, and reset the
+ * retry budget for the new id. */
+export function retryEntry(entries: readonly OutboxEntry[], id: string, now: number = Date.now(), retryId: string = createClientMessageId()): OutboxEntry[] {
+  const failed = entries.find((entry) => entry.id === id);
+  if (!failed) return entries as OutboxEntry[];
+  return [...entries, {
+    ...failed,
+    id: retryId,
+    status: "sending",
+    attempt: 0,
+    nextRetryAt: null,
+    retryingSince: now,
+    createdAt: now,
+    error: undefined,
+    failureOrigin: undefined,
+    held: undefined,
+  }];
+}
+
+function transcriptTimestamp(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function transcriptParts(message: unknown): { timestamp: number; text: string; imageCount: number } | null {
+  if (!isPlainObject(message) || message.role !== "user") return null;
+  const timestamp = transcriptTimestamp(message.timestamp ?? message.createdAt);
+  if (timestamp === null) return null;
+  const content = message.content;
+  if (typeof content === "string") return { timestamp, text: normalizeOutboxText(content), imageCount: 0 };
+  if (!Array.isArray(content)) return null;
+  let text = "";
+  let imageCount = 0;
+  for (const part of content) {
+    if (!isPlainObject(part)) continue;
+    if (part.type === "text" && typeof part.text === "string") text += part.text;
+    else if (part.type === "image" || part.type === "image_url") imageCount += 1;
+  }
+  return { timestamp, text: normalizeOutboxText(text), imageCount };
+}
+
+function boundaryOccurrences(text: string, value: string): number {
+  if (!value) return 0;
+  let count = 0;
+  let from = 0;
+  while (from <= text.length - value.length) {
+    const index = text.indexOf(value, from);
+    if (index < 0) break;
+    const end = index + value.length;
+    const leftBoundary = index === 0 || text.slice(0, index).endsWith("\n\n");
+    const rightBoundary = end === text.length || text.slice(end).startsWith("\n\n");
+    if (leftBoundary && rightBoundary) count += 1;
+    from = end;
+  }
+  return count;
+}
+
+/** Reconcile persisted outbox entries against loaded user messages after each
+ *  entry was created. unknownIds restricts updates to IDs absent from the
+ *  server ledger while still allowing known entries to explain joined messages. */
+export function reconcileTranscriptDeliveries(
   entries: readonly OutboxEntry[],
-  text: string,
-): { entries: OutboxEntry[]; resolvedId: string | null } {
-  const target = normalizeOutboxText(text);
-  const index = entries.findIndex((entry) => entry.status !== "delivered" && normalizeOutboxText(entry.text) === target);
-  if (index === -1) return { entries: entries as OutboxEntry[], resolvedId: null };
-  const resolvedId = entries[index].id;
-  const next = entries.map((entry, i) => (i === index ? { ...entry, status: "delivered" as const, nextRetryAt: null } : entry));
-  return { entries: next, resolvedId };
+  transcript: readonly unknown[],
+  unknownIds?: ReadonlySet<string>,
+): OutboxEntry[] {
+  const ordered = entries.map((entry, index) => ({ entry, index }))
+    .sort((a, b) => a.entry.createdAt - b.entry.createdAt || a.index - b.index)
+    .map(({ entry }) => entry);
+  let result = entries as OutboxEntry[];
+  const resolvedIds = new Set<string>();
+  const canResolve = (entry: OutboxEntry) => entry.status !== "delivered"
+    && !resolvedIds.has(entry.id)
+    && (!unknownIds || unknownIds.has(entry.id));
+  const resolve = (id: string) => {
+    result = applyServerDelivery(result, id, "delivered");
+    resolvedIds.add(id);
+  };
+
+  for (const rawMessage of transcript) {
+    const message = transcriptParts(rawMessage);
+    if (!message) continue;
+    let joinedMatch: OutboxEntry[] | null = null;
+    for (let start = 0; start < ordered.length && !joinedMatch; start += 1) {
+      let joinedText = "";
+      let imageCount = 0;
+      const group: OutboxEntry[] = [];
+      for (let end = start; end < ordered.length; end += 1) {
+        const entry = ordered[end];
+        if (entry.createdAt > message.timestamp) break;
+        joinedText = group.length ? joinedText + "\n\n" + normalizeOutboxText(entry.text) : normalizeOutboxText(entry.text);
+        imageCount += entry.images.length;
+        group.push(entry);
+        if (joinedText === message.text && imageCount === message.imageCount && group.some(canResolve)) {
+          joinedMatch = group;
+          break;
+        }
+        if (joinedText.length > message.text.length) break;
+      }
+    }
+    if (joinedMatch) {
+      for (const entry of joinedMatch) if (canResolve(entry)) resolve(entry.id);
+      continue;
+    }
+
+    if (!message.text && message.imageCount > 0) {
+      const imageOnly = ordered.find((entry) => canResolve(entry)
+        && entry.createdAt <= message.timestamp
+        && !normalizeOutboxText(entry.text)
+        && entry.images.length === message.imageCount);
+      if (imageOnly) resolve(imageOnly.id);
+      continue;
+    }
+
+    let matchedText = false;
+    const usedOccurrences = new Map<string, number>();
+    for (const entry of ordered) {
+      if (!canResolve(entry) || entry.createdAt > message.timestamp) continue;
+      const target = normalizeOutboxText(entry.text);
+      const occurrences = boundaryOccurrences(message.text, target);
+      const used = usedOccurrences.get(target) ?? 0;
+      if (occurrences > used && entry.images.length === message.imageCount) {
+        resolve(entry.id);
+        matchedText = true;
+        usedOccurrences.set(target, used + 1);
+      }
+    }
+
+    // Slash commands can become expanded prompts in the saved transcript. The
+    // first user message after the command is therefore the only safe fallback.
+    const slash = !matchedText && ordered.find((entry) => canResolve(entry)
+      && entry.createdAt <= message.timestamp
+      && entry.text.trimStart().startsWith("/")
+      && entry.images.length === message.imageCount);
+    if (slash) resolve(slash.id);
+  }
+  return result;
 }
 
 /** Edit on a failed chip: hand the entry back to the caller (to repopulate
@@ -222,17 +377,16 @@ export function restoreForEdit(entries: readonly OutboxEntry[], id: string): { e
 
 /** Prepares a persisted outbox for a fresh mount/session-switch-back: a
  *  reload can never know whether an in-flight "sending" attempt actually
- *  reached the server, so every unfinished entry (anything but delivered or
- *  failed) is re-armed with a fresh give-up budget for an immediate resume
- *  attempt, rather than trusting a stale backoff clock or an elapsed streak
- *  that ran out while nobody was watching. Entries already given up as
- *  failed stay failed — only an explicit Retry restarts those. */
+ *  reached the server; the ledger lookup decides which entry needs recovery.
+ * Unknown entries get a fresh give-up budget for an immediate resume attempt,
+ * without trusting stale backoff clocks. Server-reported failures stay failed;
+ * client-side give-ups are guesses and are re-armed. */
 export function reviveForResume(entries: readonly OutboxEntry[], now: number = Date.now()): OutboxEntry[] {
   return entries
     .filter((entry) => entry.status !== "delivered")
-    .map((entry) => (entry.status === "failed"
+    .map((entry) => (entry.status === "failed" && entry.failureOrigin === "server"
       ? entry
-      : { ...entry, status: "sending" as const, attempt: 0, nextRetryAt: null, retryingSince: now }));
+      : { ...entry, status: "sending" as const, attempt: 0, nextRetryAt: null, retryingSince: now, failureOrigin: undefined }));
 }
 
 // ---- persistence (sessionStorage; best-effort, size-bounded) ---------------
@@ -267,7 +421,9 @@ function isOutboxEntry(value: unknown): value is OutboxEntry {
     && (value.nextRetryAt === null || typeof value.nextRetryAt === "number")
     && typeof value.retryingSince === "number"
     && typeof value.createdAt === "number"
-    && (value.error === undefined || typeof value.error === "string");
+    && (value.error === undefined || typeof value.error === "string")
+    && (value.failureOrigin === undefined || value.failureOrigin === "client" || value.failureOrigin === "server")
+    && (value.held === undefined || typeof value.held === "boolean");
 }
 
 export function serializeOutboxEntries(entries: readonly OutboxEntry[]): string {

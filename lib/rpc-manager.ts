@@ -1,3 +1,4 @@
+import { randomUUID } from "crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import path from "path";
@@ -23,6 +24,7 @@ import { ProjectTodoError, type TodoDocument, formatTodoForAgent, mutateProjectT
 import { resolveProject } from "./worktree";
 import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
 import { assistantReplyText, replyAsksUser } from "./reply-question";
+import { readRefusalPolicyConfig, writeRefusalPolicyConfig } from "./refusal/config";
 import { PlanKeeper } from "./plan-keeper/keeper";
 import { readPlanOverlay } from "./plan-keeper/overlay";
 import { materializeLocalModelProfile, resolveLocalModelPromptProfile, type LocalModelProfileLaunch, type ModelProfileTarget, type ResolvedLocalModelProfile } from "./local-model-profile-runtime";
@@ -43,10 +45,12 @@ import type {
   OmpModel,
   RpcAvailableSlashCommand,
   RpcSessionState,
+  RefusalDecision,
   SessionStatsInfo,
   WebSessionState,
 } from "./pi-types";
 import type { ExtensionWidgetItem } from "./types";
+import type { OutboxImage } from "./outbox";
 
 // ============================================================================
 // Types
@@ -56,6 +60,141 @@ export interface AgentEvent {
   type: string;
   [key: string]: unknown;
 }
+type RefusalDecisionMode = "fallback" | "no_fallback";
+
+interface PendingRefusalRequest {
+  decision: RefusalDecision;
+  requestId: string;
+  userEntryId: string;
+  mode: RefusalDecisionMode;
+  responsePromise?: Promise<unknown>;
+}
+
+interface RefusalPurgeResult {
+  before: number;
+  deleted: number;
+  remaining: number;
+  skipped?: string;
+}
+
+interface RewoundDraft {
+  text: string;
+  images: OutboxImage[];
+}
+
+type RefusalDecisionChoice = "rewind" | "continue" | "keep";
+
+interface RefusalDecisionMetadata {
+  from: string;
+  mode: RefusalDecisionMode;
+  to: string | null;
+  userEntryId: string;
+}
+
+const REFUSAL_DECISION_TITLE_PREFIX = "CODY_REFUSAL_DECISION ";
+/** How long a fallback announcement waits for the refusal guard's question,
+ *  which omp sends a few milliseconds later when the fallback is a refusal. */
+const FALLBACK_NOTICE_HOLD_MS = 1_000;
+
+function parseRefusalDecisionMetadata(title: string): RefusalDecisionMetadata | null {
+  if (!title.startsWith(REFUSAL_DECISION_TITLE_PREFIX)) return null;
+  try {
+    const metadata: unknown = JSON.parse(title.slice(REFUSAL_DECISION_TITLE_PREFIX.length));
+    if (!isRecord(metadata) || metadata.kind !== "cody.refusal-decision"
+      || (metadata.mode !== "fallback" && metadata.mode !== "no_fallback")
+      || typeof metadata.from !== "string" || typeof metadata.userEntryId !== "string"
+      || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(metadata.userEntryId)
+      || (metadata.to !== null && typeof metadata.to !== "string")) return null;
+    return {
+      from: metadata.from,
+      mode: metadata.mode,
+      to: metadata.to,
+      userEntryId: metadata.userEntryId,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function refusalDraftFromEntries(entries: unknown[], userEntryId: string): RewoundDraft {
+  const entry = entries.find((candidate) => isRecord(candidate) && candidate.id === userEntryId && candidate.type === "message");
+  if (!isRecord(entry) || !isRecord(entry.message) || entry.message.role !== "user") {
+    throw new Error("The declined message is no longer available to restore.");
+  }
+  const content: unknown = entry.message.content;
+  if (typeof content === "string") return { text: content, images: [] };
+  if (!Array.isArray(content)) throw new Error("The declined message cannot be restored safely.");
+
+  const text: string[] = [];
+  const images: OutboxImage[] = [];
+  for (const block of content) {
+    if (!isRecord(block)) throw new Error("The declined message contains content that cannot be restored safely.");
+    if (block.type === "text" && typeof block.text === "string") {
+      text.push(block.text);
+    } else if (block.type === "image" && typeof block.data === "string" && typeof block.mimeType === "string") {
+      images.push({ data: block.data, mimeType: block.mimeType, ...(typeof block.name === "string" ? { name: block.name } : {}) });
+    } else {
+      throw new Error("The declined message contains content that cannot be restored safely.");
+    }
+  }
+  if (!text.length && !images.length) throw new Error("The declined message has no restorable content.");
+  return { text: text.join(""), images };
+}
+
+function refusalPurgeFromMarker(entries: unknown[], userEntryId: string): RefusalPurgeResult | null {
+  const marker = entries.find((candidate) => isRecord(candidate) && candidate.type === "custom"
+    && candidate.customType === "cody.rewind" && isRecord(candidate.data)
+    && candidate.data.rewoundEntryId === userEntryId);
+  if (!isRecord(marker) || !isRecord(marker.data)) return null;
+  const purged = marker.data.purged;
+  if (!isRecord(purged)) return { before: 0, deleted: 0, remaining: 0, skipped: "Cleanup result unavailable" };
+  return {
+    before: typeof purged.before === "number" ? purged.before : 0,
+    deleted: typeof purged.deleted === "number" ? purged.deleted : 0,
+    remaining: typeof purged.remaining === "number" ? purged.remaining : 0,
+    ...(typeof purged.skipped === "string" ? { skipped: purged.skipped } : {}),
+  };
+}
+
+/** What a client may be told about one clientMessageId. `withdrawn` is final:
+ *  the user deleted a queued message, took it back to edit, or a Stop handed
+ *  it back — it never reached the engine and must never be re-sent. */
+export type ServerDeliveryStatus = "queued" | "started" | "delivered" | "failed" | "withdrawn";
+
+/**
+ * Server-side delivery ledger row. `sending` is internal: the command is on
+ * its way to the engine but has not been acknowledged, so the message may not
+ * exist anywhere yet. It is never emitted and never reported as accepted —
+ * a retry of an unacknowledged send must reach the engine, not be told
+ * "queued" about a message the engine never saw (a child that died before
+ * acking would otherwise swallow it for good).
+ */
+export interface ServerDeliveryLedgerEntry {
+  clientMessageId: string;
+  text: string;
+  imageCount: number;
+  behavior: string;
+  status: ServerDeliveryStatus | "sending";
+  /** Queued in THIS wrapper, not yet handed to the engine: still editable
+   *  and deletable. False once the engine's own queue has it. */
+  held?: boolean;
+  rpcId?: string;
+  acceptedAt: number;
+  updatedAt: number;
+  error?: string;
+}
+
+/** A message Cody holds while a run is active (see AgentSessionWrapper.heldQueue). */
+interface HeldMessage {
+  clientMessageId: string;
+  message: string;
+  images?: unknown;
+  behavior: "steer" | "followUp";
+}
+
+export type ServerDeliveryLedgerSnapshot =
+  | (Omit<ServerDeliveryLedgerEntry, "status"> & { status: ServerDeliveryStatus })
+  | { clientMessageId: string; status: "unknown" };
 
 type EventListener = (event: AgentEvent) => void;
 
@@ -251,15 +390,10 @@ const MCP_LIST_TIMEOUT_MS = 15_000;
  * stay pending forever. Generous enough to cover slow local startup work the
  * child does before acking. */
 const PROMPT_ACK_TIMEOUT_MS = 30_000;
-/** How long a clientMessageId keeps its outcome memoized on the wrapper: long
- * enough to cover the client's own retry backoff (up to ~2 min per
- * local://send-contract.md) with headroom, short enough that a wrapper alive
- * for hours does not remember every id forever. */
-const CLIENT_MESSAGE_ID_TTL_MS = 10 * 60 * 1000;
-/** Bound on how many outcomes one wrapper remembers at once; the oldest is
- * evicted first once exceeded. A chat sends at most a handful of messages a
- * minute, so this is generous headroom, not a working limit. */
-const CLIENT_MESSAGE_ID_CAP = 200;
+const CLIENT_MESSAGE_ID_TTL_MS = 60 * 60 * 1000;
+const CLIENT_MESSAGE_ID_CAP = 500;
+const DELIVERY_LEDGER_TTL_MS = 60 * 60 * 1000;
+const DELIVERY_LEDGER_CAP = 500;
 
 const RESTARTING_MESSAGE = "This session is restarting. Retry in a moment.";
 
@@ -325,6 +459,9 @@ const LOCAL_WRAPPER_COMMANDS = new Set([
   "set_host_uri_schemes",
   "host_tool_result",
   "host_uri_result",
+  "respond_to_refusal_decision",
+  "withdraw_queued",
+  "promote_queued",
 ]);
 
 // pi-web commands with no omp RPC equivalent. The UI tolerates these failing.
@@ -494,6 +631,14 @@ export function buildEngineRpcLaunch(
     args.push("--tools", opts.profile.toolNames.join(","));
   }
   if (opts.profile?.systemPromptPath) args.push("--system-prompt", opts.profile.systemPromptPath);
+  // Main omp sessions carry Cody's refusal guard (lib/omp/extensions): it asks
+  // before a safety refusal falls back to another model and performs the
+  // in-place rewind. Resolved from the package dir the server itself sets,
+  // never the process cwd, so any launch directory finds it.
+  if (harness.id === "omp" && opts.kind !== "sidebar") {
+    const packageRoot = process.env.CODY_PACKAGE_DIR || process.cwd();
+    args.push("--extension", path.join(packageRoot, "lib", "omp", "extensions", "cody-refusal-guard.ts"));
+  }
   // A sidebar child gets its own agent dir, whose `mcp.json` is empty, so the
   // user-scope MCP servers (111 tool schemas / 89,303 tokens on the owner's
   // install) never reach it. Credentials, providers and blobs are symlinked
@@ -557,6 +702,47 @@ export function utilityRpcLaunchFor(harness: HarnessAdapter): RpcProcessLaunch |
 function toImageContents(value: unknown): Array<{ type: "image"; data: string; mimeType: string }> | undefined {
   const images = value as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
   return images?.length ? images : undefined;
+}
+
+function normalizeDeliveryText(text: string): string {
+  return text.trim();
+}
+
+function deliveryMessageParts(event: AgentEvent): { timestamp: number; text: string; imageCount: number } | null {
+  const message = isRecord(event.message) ? event.message : event;
+  if (message.role !== "user") return null;
+  const rawTimestamp = message.timestamp;
+  const timestamp = typeof rawTimestamp === "number" && Number.isFinite(rawTimestamp)
+    ? rawTimestamp
+    : typeof rawTimestamp === "string" && Number.isFinite(Date.parse(rawTimestamp))
+      ? Date.parse(rawTimestamp)
+      : Date.now();
+  const content = message.content;
+  if (typeof content === "string") return { timestamp, text: normalizeDeliveryText(content), imageCount: 0 };
+  if (!Array.isArray(content)) return null;
+  let text = "";
+  let imageCount = 0;
+  for (const part of content) {
+    if (!isRecord(part)) continue;
+    if (part.type === "text" && typeof part.text === "string") text += part.text;
+    else if (part.type === "image" || part.type === "image_url") imageCount += 1;
+  }
+  return { timestamp, text: normalizeDeliveryText(text), imageCount };
+}
+
+function findDeliveryTextOccurrence(text: string, value: string, from: number): { end: number } | null {
+  if (!value) return null;
+  let cursor = from;
+  while (cursor <= text.length - value.length) {
+    const index = text.indexOf(value, cursor);
+    if (index < 0) return null;
+    const end = index + value.length;
+    const leftBoundary = index === 0 || text.slice(0, index).endsWith("\n\n");
+    const rightBoundary = end === text.length || text.slice(end).startsWith("\n\n");
+    if (leftBoundary && rightBoundary) return { end };
+    cursor = end;
+  }
+  return null;
 }
 
 /**
@@ -680,8 +866,42 @@ export interface WrapperEngineContext {
 export class AgentSessionWrapper {
   private listeners: EventListener[] = [];
   private pendingUiRequests = new Map<string, AgentEvent>();
+  private pendingRefusalDecision: PendingRefusalRequest | null = null;
+  /** omp announces a fallback (`retry_fallback_applied`) a few milliseconds
+   *  BEFORE the refusal guard asks about it. Held briefly so a fallback the
+   *  guard then stops (rewind, or "ask" → hold) is never announced as
+   *  happening; any other fallback is released unchanged. */
+  private heldFallbackNotice: { event: AgentEvent; timer: ReturnType<typeof setTimeout> } | null = null;
   private uiExpiryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private extensionStatuses = new Map<string, string>();
+  /**
+   * A user Stop keeps the MAIN agent stopped until the user sends again.
+   * omp's RPC `abort` leaves queued steers in its queue and then resumes the
+   * run on them (only omp's terminal UI clears that queue before aborting, and
+   * RPC has no command for it); a finished background job can wake it too.
+   * While set, a run the engine starts on its own is aborted at its first
+   * model reply — after any queued message is recorded in the conversation,
+   * before a tool can run. Subagents are separate sessions and never touched.
+   */
+  private stopLatch: { aborting: boolean } | null = null;
+  /**
+   * Messages sent while a run is live are held HERE, not in the engine's
+   * queue: omp's RPC has no way to take a message back out of its queue, so
+   * only a message Cody still holds can really be edited, deleted, or handed
+   * back on Stop. They go to the engine exactly when it would read them
+   * anyway — steers when a tool batch starts (omp reads its steer queue when
+   * the batch ends), everything when the run is over — in the order sent.
+   */
+  private heldQueue: HeldMessage[] = [];
+  /** Tools executing right now. A steer sent while one runs goes straight to
+   *  the engine (its interrupt mode may cut that tool short), not into the hold. */
+  private toolsRunning = 0;
+  private handOverChain: Promise<void> = Promise.resolve();
+  /** omp announced a retry (`auto_retry_start`) whose `auto_retry_end` has not come. */
+  private retryAnnounced = false;
+  /** When the last terminal agent_end arrived, so a Stop knows whether it still owes one. */
+  private lastTerminalAgentEndAt = 0;
+  private pendingPermissionRequests = new Set<string>();
   private extensionWidgets = new Map<string, ExtensionWidgetItem>();
   private promptRunning = false;
   private bashRunning = false;
@@ -725,6 +945,7 @@ export class AgentSessionWrapper {
    * follow_up): a repeat id rejoins this exact promise instead of re-sending
    * to omp. TTL + cap keep a long-lived wrapper from remembering forever. */
   private clientMessageOutcomes = new Map<string, { promise: Promise<unknown>; expiresAt: number }>();
+  private deliveryLedger = new Map<string, ServerDeliveryLedgerEntry>();
   /** The most recent successful get_state result (buildWebState), so a GET
    * route whose bounded get_state times out can still answer something
    * instead of nothing (see lib/api-utils.ts getStateBounded). */
@@ -1131,6 +1352,7 @@ export class AgentSessionWrapper {
     // Terminal agent_end so a client mid-stream stops spinning immediately
     // instead of waiting for the reconcile poll.
     if (this.streaming || this.promptRunning) this.emit({ type: "agent_end", isTerminal: true, messages: [] });
+    this.settleDeliveriesOnEngineLoss("The engine stopped before it read this message.");
     this.destroy();
   }
 
@@ -1138,6 +1360,11 @@ export class AgentSessionWrapper {
     this.resetIdleTimer();
     const event = frame as AgentEvent;
     let refreshSessionList = false;
+    if (event.type === "permission_request" && typeof event.requestId === "string") {
+      this.pendingPermissionRequests.add(event.requestId);
+    } else if (event.type === "permission_resolved" && typeof event.requestId === "string") {
+      this.pendingPermissionRequests.delete(event.requestId);
+    }
 
     switch (event.type) {
       case "command_output": {
@@ -1173,6 +1400,17 @@ export class AgentSessionWrapper {
         break;
       case "agent_end":
         if (event.isTerminal !== false) {
+          this.lastTerminalAgentEndAt = Date.now();
+          this.toolsRunning = 0;
+          // The run is over: held messages go now (after this frame's flags settle).
+          setTimeout(() => this.flushHeld("all"), 0);
+          // The run a `started` message began is over, so that message was
+          // consumed even when no user message_end matched it (a slash or
+          // skill prompt the engine expanded) and no prompt_result names it
+          // (omp before 18.3 sends none for agent runs).
+          for (const entry of [...this.deliveryLedger.values()]) {
+            if (entry.status === "started") this.transitionDelivery(entry.clientMessageId, "delivered");
+          }
           this.streaming = false;
           this.promptRunning = false;
           this.lastReplyText = null;
@@ -1195,6 +1433,7 @@ export class AgentSessionWrapper {
         }
         break;
       case "message_end": {
+        this.resolveDeliveryFromMessage(event);
         const text = assistantReplyText(event as unknown as { type: string; [key: string]: unknown });
         if (text !== null) {
           this.lastReplyText = text;
@@ -1223,6 +1462,7 @@ export class AgentSessionWrapper {
         break;
       }
       case "tool_execution_end": {
+        this.toolsRunning = Math.max(0, this.toolsRunning - 1);
         const toolName = typeof event.toolName === "string" ? event.toolName : "tool";
         this.getPlanKeeper()?.notifyToolExecutionEnd(toolName, event.args, event.result);
         break;
@@ -1241,9 +1481,61 @@ export class AgentSessionWrapper {
       case "turn_end":
         this.getPlanKeeper()?.notifyTurnEnd();
         break;
-      case "prompt_result":
-        // Local-only prompt (builtin/extension slash command) — no agent run.
-        this.promptRunning = false;
+      case "prompt_result": {
+        const rpcId = typeof event.id === "string"
+          ? event.id
+          : typeof event.rpcId === "string" ? event.rpcId : undefined;
+        const clientMessageId = rpcId ? this.findDeliveryByRpcId(rpcId) : undefined;
+        const error = isRecord(event.error) && typeof event.error.message === "string"
+          ? event.error.message
+          : typeof event.error === "string" ? event.error : undefined;
+        if (clientMessageId) {
+          // omp 18.3: exactly one prompt_result per accepted prompt, once the
+          // work it caused yielded. `error` + agentInvoked:false means it failed
+          // before reaching the agent. `aborted` while the message was still
+          // only queued means a stop won before the engine read it: report it
+          // (Retry/Edit) rather than claim a delivery nobody saw — if the engine
+          // drains it later anyway, its user message_end still flips it to
+          // delivered. Everything else yielded with the message consumed.
+          const entry = this.deliveryLedger.get(clientMessageId);
+          if (event.status === "error" && event.agentInvoked === false) {
+            this.transitionDelivery(clientMessageId, "failed", error);
+          } else if (event.status === "aborted" && entry?.status === "queued") {
+            this.transitionDelivery(clientMessageId, "failed", "Stopped before this message was read.");
+          } else {
+            this.transitionDelivery(clientMessageId, "delivered");
+          }
+        }
+        const legacyLocalPrompt = event.status === undefined && event.agentInvoked === false;
+        const settled18Prompt = event.status !== undefined && event.sessionSettled === true
+          && !this.streaming && !this.compacting && !this.bashRunning;
+        if (legacyLocalPrompt || settled18Prompt) {
+          this.promptRunning = false;
+          notifyRunningChange();
+        }
+        break;
+      }
+      case "retry_fallback_applied":
+        // Released after a short hold unless the refusal guard stops it.
+        this.holdFallbackNotice(event);
+        return;
+      case "auto_retry_start":
+        this.retryAnnounced = true;
+        break;
+      case "tool_execution_start":
+        this.toolsRunning += 1;
+        // omp reads its steer queue when this tool batch ends.
+        this.flushHeld("steers");
+        break;
+      case "auto_retry_end":
+        this.retryAnnounced = false;
+        break;
+      case "message_start":
+        // Stopped by the user: a run the engine started on its own ends at its
+        // first model reply (see stopLatch).
+        if (this.stopLatch && !this.stopLatch.aborting && isRecord(event.message) && event.message.role === "assistant") {
+          this.enforceStopLatch();
+        }
         break;
       case "auto_compaction_start":
         this.compacting = true;
@@ -1362,13 +1654,321 @@ export class AgentSessionWrapper {
     for (const timer of this.uiExpiryTimers.values()) clearTimeout(timer);
     this.uiExpiryTimers.clear();
     this.pendingUiRequests.clear();
+    this.pendingPermissionRequests.clear();
+    if (!this.clearPendingRefusalDecision()) notifyRunningChange();
+  }
+  hasPendingRefusalDecision(): boolean {
+    return this.pendingRefusalDecision !== null;
+  }
+  hasPendingInput(): boolean {
+    return this.pendingUiRequests.size > 0 || this.pendingPermissionRequests.size > 0 || this.hasPendingRefusalDecision();
+  }
+
+  /**
+   * The refusal guard's question, answered IMMEDIATELY in every policy: omp
+   * pauses its 30 s extension-handler budget for dialogs only on tool-approval
+   * events, so a question held open on `retry_fallback_applied` times out and
+   * omp then runs the fallback anyway. "ask" therefore answers `hold` — the
+   * guard restores the original model and stops the fallback — and the choice
+   * itself waits here, in wrapper state, for as long as the user needs, with or
+   * without a browser attached. Rewind and continue are then carried out by
+   * this wrapper (applyRefusalChoice), not by the extension.
+   */
+  private handleRefusalDecisionRequest(event: AgentEvent): void {
+    const requestId = typeof event.id === "string" ? event.id : "";
+    if (!requestId) return;
+    const metadata = typeof event.title === "string" ? parseRefusalDecisionMetadata(event.title) : null;
+    if (!metadata) {
+      this.proc.sendFrame({ type: "extension_ui_response", id: requestId, value: "continue" });
+      this.emit({ type: "cody_refusal_error", decisionId: requestId, code: "decision_unreadable" });
+      return;
+    }
+
+    // A newer refusal supersedes an unanswered one; the older run is long over.
+    if (this.pendingRefusalDecision) this.clearPendingRefusalDecision(this.pendingRefusalDecision);
+
+    const pending: PendingRefusalRequest = {
+      requestId,
+      userEntryId: metadata.userEntryId,
+      mode: metadata.mode,
+      decision: {
+        id: requestId,
+        fromModel: metadata.from,
+        toModel: metadata.to,
+        canContinue: metadata.mode === "fallback" && metadata.to !== null,
+        createdAt: Date.now(),
+      },
+    };
+    const policy = readRefusalPolicyConfig().policy;
+    if (policy === "ask") {
+      this.sendRefusalUiChoice(pending, "hold");
+      this.suppressHeldFallbackNotice();
+      this.pendingRefusalDecision = pending;
+      this.emit({ type: "cody_refusal_decision", decision: pending.decision });
+      notifyRunningChange();
+      void this.settleAfterGuardStop(Date.now());
+      return;
+    }
+    if (policy === "rewind") {
+      this.sendRefusalUiChoice(pending, "rewind");
+      this.suppressHeldFallbackNotice();
+      void this.settleAfterGuardStop(Date.now());
+      void this.rewindRefusal(pending, { restoreDraft: true }).catch(() => {
+        this.emitRefusalError(pending.decision.id, "rewind_failed");
+      });
+      return;
+    }
+    this.sendRefusalUiChoice(pending, pending.mode === "fallback" ? "continue" : "keep");
+    this.releaseHeldFallbackNotice();
+  }
+
+  private sendRefusalUiChoice(pending: PendingRefusalRequest, choice: RefusalDecisionChoice | "hold"): void {
+    this.proc.sendFrame({ type: "extension_ui_response", id: pending.requestId, value: choice });
+  }
+
+  private holdFallbackNotice(event: AgentEvent): void {
+    this.releaseHeldFallbackNotice();
+    const timer = setTimeout(() => this.releaseHeldFallbackNotice(), FALLBACK_NOTICE_HOLD_MS);
+    timer.unref?.();
+    this.heldFallbackNotice = { event, timer };
+  }
+
+  private releaseHeldFallbackNotice(): void {
+    const held = this.heldFallbackNotice;
+    if (!held) return;
+    clearTimeout(held.timer);
+    this.heldFallbackNotice = null;
+    this.emit(held.event);
+  }
+
+  /** The guard stopped this fallback: it never happened, so never say it did. */
+  private suppressHeldFallbackNotice(): void {
+    const held = this.heldFallbackNotice;
+    if (!held) return;
+    clearTimeout(held.timer);
+    this.heldFallbackNotice = null;
+  }
+
+  /** Abort a run the engine started by itself while the user's Stop holds. */
+  private enforceStopLatch(): void {
+    const latch = this.stopLatch;
+    if (!latch) return;
+    latch.aborting = true;
+    const requestedAt = Date.now();
+    void this.proc.sendCommand({ type: "abort" })
+      .catch(() => {})
+      .finally(() => {
+        latch.aborting = false;
+        this.settleAfterStop(requestedAt);
+      });
+  }
+
+  /**
+   * After a stop the engine has confirmed, make every listener agree the run is
+   * over: clear the wrapper's run flags, close a retry the engine announced but
+   * will never finish, and — when no terminal agent_end followed the stop (the
+   * engine was already idle, or its end is still being deferred) — send one
+   * shortly, so no tab keeps showing a live turn.
+   */
+  private settleAfterStop(requestedAt: number): void {
+    const believedRunning = this.streaming || this.promptRunning;
+    this.streaming = false;
+    this.promptRunning = false;
+    if (this.retryAnnounced) {
+      this.retryAnnounced = false;
+      this.emit({ type: "auto_retry_end", success: false, attempt: 0, finalError: "Stopped" });
+    }
+    notifyRunningChange();
+    if (!believedRunning) return;
+    const grace = setTimeout(() => {
+      if (this.lastTerminalAgentEndAt >= requestedAt || this.isRunning()) return;
+      this.emit({ type: "agent_end", isTerminal: true, messages: [] });
+    }, 250);
+    grace.unref?.();
+  }
+
+  /** The refusal guard aborted the run itself (hold or rewind): wait until the
+   *  engine is idle, then settle exactly like a user Stop. */
+  private async settleAfterGuardStop(requestedAt: number): Promise<void> {
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline && this.isAlive()) {
+      try {
+        const state = await this.proc.sendCommand<RpcSessionState>({ type: "get_state" }, 5_000);
+        if (!state.isStreaming) {
+          this.settleAfterStop(requestedAt);
+          return;
+        }
+      } catch {
+        return;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 300));
+    }
+  }
+
+  private clearPendingRefusalDecision(expected?: PendingRefusalRequest): boolean {
+    if (expected && this.pendingRefusalDecision !== expected) return false;
+    if (!this.pendingRefusalDecision) return false;
+    this.pendingRefusalDecision = null;
+    this.emit({ type: "cody_refusal_decision", decision: null });
+    notifyRunningChange();
+    return true;
+  }
+
+  private emitRefusalError(decisionId: string, code: string): void {
+    this.emit({ type: "cody_refusal_error", decisionId, code });
+  }
+
+  private async readRefusedDraft(userEntryId: string): Promise<RewoundDraft> {
+    const result = await this.proc.sendCommand<{ entries?: unknown[] }>({ type: "get_entries" }, 10_000);
+    if (!Array.isArray(result.entries)) throw new Error("The session entries are unavailable.");
+    return refusalDraftFromEntries(result.entries, userEntryId);
+  }
+
+  private rememberRefusalChoice(decisionId: string, choice: RefusalDecisionChoice): boolean {
+    try {
+      writeRefusalPolicyConfig({ policy: choice === "rewind" ? "rewind" : "fallback" });
+      return true;
+    } catch {
+      this.emitRefusalError(decisionId, "policy_save_failed");
+      return false;
+    }
+  }
+
+  /**
+   * The in-place rewind: read the declined message (text + images) while it
+   * is still on the branch, run the guard's `/cody-rewind` (navigateTree to
+   * before it, a durable marker entry, memory purge), and wait for that marker
+   * to land. `restoreDraft` hands the text back to the composer through a
+   * `cody_rewound` frame; continue-on-fallback re-sends it instead.
+   */
+  private async rewindRefusal(
+    pending: PendingRefusalRequest,
+    options: { restoreDraft: boolean },
+  ): Promise<{ draft: RewoundDraft; purged: RefusalPurgeResult }> {
+    const draft = await this.readRefusedDraft(pending.userEntryId);
+    const proc = this.proc;
+    let promptId = "";
+    let promptFailed = false;
+    const unsubscribe = proc.onFrame((frame) => {
+      if (promptId && frame.type === "prompt_result" && frame.id === promptId && frame.status === "error") {
+        promptFailed = true;
+      }
+    });
+    try {
+      const prompt = proc.sendCommandWithId({ type: "prompt", message: `/cody-rewind ${pending.userEntryId}` }, 20_000);
+      promptId = prompt.id;
+      await prompt.result;
+      const deadline = Date.now() + 30_000;
+      while (Date.now() < deadline) {
+        if (promptFailed) throw new Error("The rewind command did not complete.");
+        const result = await proc.sendCommand<{ entries?: unknown[] }>({ type: "get_entries" }, 5_000);
+        const entries = Array.isArray(result.entries) ? result.entries : [];
+        const purged = refusalPurgeFromMarker(entries, pending.userEntryId);
+        if (purged) {
+          if (options.restoreDraft) {
+            this.emit({
+              type: "cody_rewound",
+              decisionId: pending.decision.id,
+              text: draft.text,
+              images: draft.images,
+              purged,
+            });
+          }
+          return { draft, purged };
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      }
+      throw new Error("The rewind command did not finish in time.");
+    } finally {
+      unsubscribe();
+    }
+  }
+
+  /** Continue on the fallback chain after the user chose to: the same history
+   *  omp's own fallback would have produced — the declined message rewound off
+   *  the branch and sent again, now to the fallback model — so nothing about
+   *  the refused attempt stays in context. */
+  private async continueOnFallback(pending: PendingRefusalRequest): Promise<void> {
+    const toModel = pending.decision.toModel;
+    const slash = toModel?.indexOf("/") ?? -1;
+    if (!toModel || slash <= 0) throw new Error("No fallback model to continue with.");
+    const { draft } = await this.rewindRefusal(pending, { restoreDraft: false });
+    await this.proc.sendCommand({ type: "set_model", provider: toModel.slice(0, slash), modelId: toModel.slice(slash + 1) });
+    await this.send({
+      type: "prompt",
+      message: draft.text,
+      ...(draft.images.length ? { images: draft.images.map((image) => ({ type: "image", data: image.data, mimeType: image.mimeType })) } : {}),
+      streamingBehavior: "followUp",
+      clientMessageId: randomUUID(),
+    });
+  }
+
+  respondToRefusalDecision(decisionId: string, choice: unknown, remember: boolean): Promise<unknown> {
+    const pending = this.pendingRefusalDecision;
+    if (!pending || pending.decision.id !== decisionId) {
+      return Promise.reject(new WebRpcError("This refusal choice is no longer active.", "refusal_decision_expired"));
+    }
+    if (choice !== "rewind" && choice !== "continue" && choice !== "keep") {
+      return Promise.reject(new WebRpcError("Choose one of the available refusal options.", "invalid_refusal_choice"));
+    }
+    if ((choice === "continue" && pending.mode !== "fallback")
+      || (choice === "keep" && pending.mode !== "no_fallback")) {
+      return Promise.reject(new WebRpcError("That refusal option is not available here.", "invalid_refusal_choice"));
+    }
+    if (pending.responsePromise) return pending.responsePromise;
+    const response = Promise.resolve().then(() => this.applyRefusalChoice(pending, choice, remember));
+    pending.responsePromise = response;
+    response.catch(() => {
+      if (this.pendingRefusalDecision === pending) pending.responsePromise = undefined;
+    });
+    return response;
+  }
+
+  private async applyRefusalChoice(
+    pending: PendingRefusalRequest,
+    choice: RefusalDecisionChoice,
+    remember: boolean,
+  ): Promise<unknown> {
+    if (this.pendingRefusalDecision !== pending) {
+      throw new WebRpcError("This refusal choice is no longer active.", "refusal_decision_expired");
+    }
+    // The guard already answered `hold` (see handleRefusalDecisionRequest), so
+    // the engine is stopped and waiting on nothing: every choice runs here.
+    let result: { draft: RewoundDraft; purged: RefusalPurgeResult } | undefined;
+    try {
+      if (choice === "rewind") result = await this.rewindRefusal(pending, { restoreDraft: true });
+      else if (choice === "continue") await this.continueOnFallback(pending);
+    } catch {
+      this.emitRefusalError(pending.decision.id, choice === "continue" ? "continue_failed" : "rewind_failed");
+      throw new WebRpcError(
+        choice === "continue" ? "Could not continue with the fallback model." : "The declined message could not be rewound.",
+        choice === "continue" ? "refusal_continue_failed" : "refusal_rewind_failed",
+      );
+    }
+    this.clearPendingRefusalDecision(pending);
+    const remembered = remember ? this.rememberRefusalChoice(pending.decision.id, choice) : undefined;
+    return {
+      success: true,
+      ...(result ? { rewoundDraft: { decisionId: pending.decision.id, text: result.draft.text, images: result.draft.images }, purged: result.purged } : {}),
+      ...(remember ? { remembered } : {}),
+    };
   }
 
   private trackExtensionUiRequest(event: AgentEvent): boolean {
     const method = event.method as string;
     const id = event.id as string;
+    if (method === "select" && typeof event.title === "string" && event.title.startsWith(REFUSAL_DECISION_TITLE_PREFIX)) {
+      this.handleRefusalDecisionRequest(event);
+      return true;
+    }
     if (method === "cancel") {
-      this.forgetPendingUiRequest(event.targetId as string);
+      const targetId = typeof event.targetId === "string" ? event.targetId : "";
+      if (targetId && this.pendingRefusalDecision?.requestId === targetId) {
+        this.clearPendingRefusalDecision(this.pendingRefusalDecision);
+        this.emitRefusalError(targetId, "decision_cancelled");
+        return true;
+      }
+      this.forgetPendingUiRequest(targetId);
       return false;
     }
     // Only the “Allow tool: <name>” confirmation is covered. Other extension
@@ -1389,7 +1989,10 @@ export class AgentSessionWrapper {
       const timeout = typeof event.timeout === "number" ? event.timeout : undefined;
       if (timeout && timeout > 0) {
         event.expiresAt = Date.now() + timeout;
-        const timer = setTimeout(() => this.forgetPendingUiRequest(id), timeout);
+        const timer = setTimeout(() => {
+          this.forgetPendingUiRequest(id);
+          notifyRunningChange();
+        }, timeout);
         timer.unref?.();
         this.uiExpiryTimers.set(id, timer);
       }
@@ -1901,6 +2504,7 @@ export class AgentSessionWrapper {
       sessionId: state.sessionId,
       sessionFile: state.sessionFile ?? "",
       sessionName: state.sessionName,
+      pendingRefusalDecision: this.pendingRefusalDecision?.decision ?? null,
       isStreaming: state.isStreaming,
       isPromptRunning: this.promptRunning,
       isBashRunning: this.bashRunning,
@@ -1966,6 +2570,7 @@ export class AgentSessionWrapper {
     try {
       await old.dispose();
       if (!this._alive) return;
+      this.settleDeliveriesOnEngineLoss("The session restarted before this message was read.");
 
       this.extensionStatuses.clear();
       this.extensionWidgets.clear();
@@ -2034,17 +2639,281 @@ export class AgentSessionWrapper {
     }
   }
 
+  private pruneDeliveryLedger(): void {
+    const now = Date.now();
+    for (const [id, entry] of this.deliveryLedger) {
+      if (entry.updatedAt + DELIVERY_LEDGER_TTL_MS <= now) this.deliveryLedger.delete(id);
+    }
+    while (this.deliveryLedger.size > DELIVERY_LEDGER_CAP) {
+      const oldest = this.deliveryLedger.keys().next().value;
+      if (oldest === undefined) break;
+      this.deliveryLedger.delete(oldest);
+    }
+  }
+
+  /** Ledger lookup for a resuming client. An unacknowledged send reads as
+   *  `unknown`: re-POSTing the same id then rejoins the in-flight command
+   *  (dedupe) or, if it already failed without an ack, sends it for real. */
+  getDeliveryLedger(clientMessageIds: string[]): ServerDeliveryLedgerSnapshot[] {
+    this.pruneDeliveryLedger();
+    return clientMessageIds.map((clientMessageId): ServerDeliveryLedgerSnapshot => {
+      const entry = this.deliveryLedger.get(clientMessageId);
+      if (!entry || entry.status === "sending") return { clientMessageId, status: "unknown" };
+      return { ...entry, status: entry.status };
+    });
+  }
+
+  /** (Re)opens the ledger row for a send that is about to reach the engine.
+   *  Only called from inside the clientMessageId dedupe, i.e. when no
+   *  in-flight or successful attempt exists for this id, so replacing a row
+   *  left by an unacknowledged attempt is correct: that attempt never reached
+   *  the engine as far as anyone can prove. Nothing is emitted until the
+   *  engine acknowledges. */
+  private beginDeliveryRecord(clientMessageId: string | undefined, command: Record<string, unknown>, type: string): void {
+    if (!clientMessageId) return;
+    const now = Date.now();
+    const images = Array.isArray(command.images) ? command.images : [];
+    this.deliveryLedger.set(clientMessageId, {
+      clientMessageId,
+      text: typeof command.message === "string" ? normalizeDeliveryText(command.message) : "",
+      imageCount: images.length,
+      behavior: type === "prompt" && typeof command.streamingBehavior === "string"
+        ? command.streamingBehavior
+        : type,
+      status: "sending",
+      acceptedAt: now,
+      updatedAt: now,
+    });
+    this.pruneDeliveryLedger();
+  }
+
+  private attachDeliveryRpcId(clientMessageId: string | undefined, rpcId: string | undefined): void {
+    if (!clientMessageId || !rpcId) return;
+    const entry = this.deliveryLedger.get(clientMessageId);
+    if (entry) this.deliveryLedger.set(clientMessageId, { ...entry, rpcId, updatedAt: Date.now() });
+  }
+
+  /** Monotonic: sending < queued < started < delivered|failed. `delivered` is
+   *  final; `failed` yields only to hard proof of delivery (the engine may
+   *  still consume a message Cody gave up on). Every accepted transition is
+   *  stored AND pushed to listeners as a `cody_delivery` frame. */
+  private transitionDelivery(clientMessageId: string | undefined, status: ServerDeliveryStatus, error?: string): void {
+    if (!clientMessageId) return;
+    const entry = this.deliveryLedger.get(clientMessageId);
+    if (!entry || entry.status === status || entry.status === "delivered" || entry.status === "withdrawn") return;
+    if (entry.status === "failed" && status !== "delivered") return;
+    const rank: Record<ServerDeliveryLedgerEntry["status"], number> = { sending: 0, queued: 1, started: 2, delivered: 3, failed: 3, withdrawn: 3 };
+    if (rank[status] < rank[entry.status]) return;
+    const now = Date.now();
+    const updated: ServerDeliveryLedgerEntry = {
+      ...entry,
+      status,
+      held: status === "queued" ? entry.held : false,
+      updatedAt: now,
+      error: status === "failed" ? (error ?? entry.error) : undefined,
+    };
+    this.deliveryLedger.set(clientMessageId, updated);
+    // A remembered outcome must outlive the ledger row it answers for.
+    const outcome = this.clientMessageOutcomes.get(clientMessageId);
+    if (outcome) outcome.expiresAt = now + CLIENT_MESSAGE_ID_TTL_MS;
+    this.emitDelivery(updated);
+    this.pruneDeliveryLedger();
+  }
+
+  /** Hold a message sent while a run is live (see heldQueue). */
+  private holdMessage(clientMessageId: string, command: Record<string, unknown>, behavior: "steer" | "followUp"): { delivery: "queued"; clientMessageId: string; held: true } {
+    this.beginDeliveryRecord(clientMessageId, command, "prompt");
+    const entry = this.deliveryLedger.get(clientMessageId);
+    if (entry) this.deliveryLedger.set(clientMessageId, { ...entry, held: true });
+    this.heldQueue.push({ clientMessageId, message: command.message as string, images: command.images, behavior });
+    this.transitionDelivery(clientMessageId, "queued");
+    // A run that was already ending when this arrived must not strand it.
+    const guard = setTimeout(() => {
+      if (!this.streaming && !this.promptRunning) this.flushHeld("all");
+    }, 1_500);
+    guard.unref?.();
+    return { delivery: "queued", clientMessageId, held: true };
+  }
+
+  /** Hand held messages to the engine, in the order they were sent: steers
+   *  when a tool batch starts, everything once the run is over. Never while a
+   *  user Stop holds. */
+  private flushHeld(kind: "steers" | "all"): void {
+    if (this.stopLatch || this.heldQueue.length === 0) return;
+    const ready = kind === "all" ? this.heldQueue : this.heldQueue.filter((held) => held.behavior === "steer");
+    if (ready.length === 0) return;
+    this.heldQueue = kind === "all" ? [] : this.heldQueue.filter((held) => held.behavior !== "steer");
+    for (const held of ready) {
+      this.handOverChain = this.handOverChain.then(() => this.handOver(held)).catch(() => {});
+    }
+  }
+
+  private async handOver(held: HeldMessage): Promise<void> {
+    const entry = this.deliveryLedger.get(held.clientMessageId);
+    // Withdrawn (or already settled) while it waited its turn in the chain.
+    if (!entry || entry.status !== "queued" || !entry.held || !this.isAlive()) return;
+    const handedOver: ServerDeliveryLedgerEntry = { ...entry, held: false, updatedAt: Date.now() };
+    this.deliveryLedger.set(held.clientMessageId, handedOver);
+    this.emitDelivery(handedOver);
+    const startingFresh = !this.streaming && !this.promptRunning;
+    if (startingFresh) {
+      this.promptRunning = true;
+      notifyRunningChange();
+    }
+    try {
+      const images = toImageContents(held.images);
+      const pending = this.sendTrackedCommand<{ agentInvoked?: boolean } | undefined>({
+        type: "prompt",
+        message: held.message,
+        ...(images ? { images } : {}),
+        streamingBehavior: held.behavior,
+      });
+      this.attachDeliveryRpcId(held.clientMessageId, pending.id);
+      const ack = await pending.result;
+      if (ack?.agentInvoked === false) {
+        this.transitionDelivery(held.clientMessageId, "delivered");
+        if (startingFresh) {
+          this.promptRunning = false;
+          notifyRunningChange();
+        }
+      } else if (startingFresh) {
+        this.transitionDelivery(held.clientMessageId, "started");
+      }
+    } catch (error) {
+      if (startingFresh) {
+        this.promptRunning = false;
+        notifyRunningChange();
+      }
+      this.transitionDelivery(held.clientMessageId, "failed", error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  /** Take back a message Cody still holds (Delete, or Edit, which returns its
+   *  content to the composer). One the engine already has cannot be taken
+   *  back — omp offers no way to — and says so. */
+  withdrawQueued(clientMessageId: string): { withdrawn: true; text: string; images: unknown[] } | { withdrawn: false; reason: "already_sent" | "unknown" } {
+    const index = this.heldQueue.findIndex((held) => held.clientMessageId === clientMessageId);
+    const entry = this.deliveryLedger.get(clientMessageId);
+    if (index === -1 || !entry?.held) return { withdrawn: false, reason: entry ? "already_sent" : "unknown" };
+    const [held] = this.heldQueue.splice(index, 1);
+    this.transitionDelivery(clientMessageId, "withdrawn");
+    return { withdrawn: true, text: held.message, images: Array.isArray(held.images) ? held.images : [] };
+  }
+
+  /** Turn a held follow-up into a steer (delivered at the next tool boundary). */
+  promoteQueued(clientMessageId: string): boolean {
+    const held = this.heldQueue.find((candidate) => candidate.clientMessageId === clientMessageId);
+    const entry = this.deliveryLedger.get(clientMessageId);
+    if (!held || !entry?.held) return false;
+    held.behavior = "steer";
+    this.deliveryLedger.set(clientMessageId, { ...entry, behavior: "steer", updatedAt: Date.now() });
+    return true;
+  }
+
+  /** Stop hands every held message back instead of letting it start a run —
+   *  the same thing omp's own terminal does with its queue on Esc. */
+  private returnHeldOnStop(): void {
+    const returned = this.heldQueue.splice(0);
+    for (const held of returned) this.transitionDelivery(held.clientMessageId, "withdrawn");
+    if (returned.length === 0) return;
+    this.emit({
+      type: "cody_queue_returned",
+      messages: returned.map((held) => ({
+        clientMessageId: held.clientMessageId,
+        text: held.message,
+        images: Array.isArray(held.images) ? held.images : [],
+      })),
+    });
+  }
+
+  private emitDelivery(entry: ServerDeliveryLedgerEntry): void {
+    if (entry.status === "sending") return;
+    this.emit({
+      type: "cody_delivery",
+      clientMessageId: entry.clientMessageId,
+      status: entry.status,
+      ...(entry.status === "queued" ? { held: entry.held === true } : {}),
+      ...(entry.error ? { error: entry.error } : {}),
+    });
+  }
+
+  /** The engine is gone (crash) or was replaced (restart): whatever it had
+   *  queued died with it. A `started` message began a run, so the engine
+   *  already recorded it in the transcript; a `queued` one was never read and
+   *  is reported failed so the user sees it and can Retry or Edit. Unacked
+   *  sends are left alone — their own command rejects and the client's retry
+   *  reaches the next engine. */
+  private settleDeliveriesOnEngineLoss(reason: string): void {
+    this.heldQueue = [];
+    for (const entry of [...this.deliveryLedger.values()]) {
+      if (entry.status === "started") this.transitionDelivery(entry.clientMessageId, "delivered");
+      else if (entry.status === "queued") this.transitionDelivery(entry.clientMessageId, "failed", reason);
+    }
+  }
+
+  /** Reply for a repeat send the ledger already accounts for (its memoized
+   *  outcome expired first). `status` carries a delivery the client may have
+   *  missed while it was away. */
+  private existingDeliveryAck(clientMessageId: string | undefined): { delivery: "queued" | "started"; clientMessageId: string; status: ServerDeliveryStatus } | null {
+    if (!clientMessageId) return null;
+    const entry = this.deliveryLedger.get(clientMessageId);
+    if (!entry || entry.status === "failed" || entry.status === "sending") return null;
+    return { delivery: entry.status === "queued" ? "queued" : "started", clientMessageId, status: entry.status };
+  }
+
+  private sendTrackedCommand<T>(command: { type: string; [key: string]: unknown }, timeoutMs?: number): { id?: string; result: Promise<T> } {
+    const tracked = (this.proc as unknown as {
+      sendCommandWithId?: <R>(command: { type: string; [key: string]: unknown }, timeoutMs?: number) => { id: string; result: Promise<R> };
+    }).sendCommandWithId;
+    if (typeof tracked === "function") {
+      const pending = tracked.call(this.proc, command, timeoutMs);
+      return { id: pending.id, result: pending.result as Promise<T> };
+    }
+    return { result: this.proc.sendCommand<T>(command, timeoutMs) };
+  }
+
+  private findDeliveryByRpcId(rpcId: string): string | undefined {
+    for (const [clientMessageId, entry] of this.deliveryLedger) {
+      if (entry.rpcId === rpcId) return clientMessageId;
+    }
+    return undefined;
+  }
+
+  private resolveDeliveryFromMessage(event: AgentEvent): void {
+    const message = deliveryMessageParts(event);
+    if (!message) return;
+    this.pruneDeliveryLedger();
+    const candidates = [...this.deliveryLedger.values()]
+      .filter((entry) => entry.acceptedAt <= message.timestamp && entry.status !== "delivered")
+      .sort((a, b) => a.acceptedAt - b.acceptedAt);
+    if (message.text === "" && message.imageCount > 0) {
+      const match = candidates.find((entry) => entry.text === "" && entry.imageCount === message.imageCount);
+      if (match) this.transitionDelivery(match.clientMessageId, "delivered");
+      return;
+    }
+    let consumedThrough = 0;
+    for (const entry of candidates) {
+      const text = normalizeDeliveryText(entry.text);
+      if (!text) continue;
+      const occurrence = findDeliveryTextOccurrence(message.text, text, consumedThrough);
+      if (!occurrence) continue;
+      this.transitionDelivery(entry.clientMessageId, "delivered");
+      consumedThrough = occurrence.end;
+    }
+  }
+
   /** A repeat clientMessageId must never re-send to omp: it rejoins the exact
    * promise the first call created, whether still pending (the caller awaits
    * the same in-flight command) or already settled successfully (the caller
-   * gets the first outcome, with no second RPC round trip). A REJECTED
-   * outcome is deliberately NOT kept: this wrapper survives a restart() (only
-   * `this.proc` is swapped), so memoizing a transient failure — the child
-   * disposed mid-flight by a routing/profile restart, say — for the rest of
-   * the TTL would make every retry (automatic or manual) rejoin that same
-   * failure forever, and the message could never be delivered. No id — every
-   * other command, and any prompt sent without one — always runs, matching
-   * prior behavior. */
+   * gets the first outcome, with no second RPC round trip). A DEFINITIVE
+   * rejection (the engine answered with an error, recorded as `failed` in the
+   * ledger) stays memoized too, so an automatic retry cannot resend a message
+   * the engine refused; a manual Retry uses a fresh id. Any OTHER rejection is
+   * dropped: this wrapper survives a restart() (only `this.proc` is swapped),
+   * so memoizing a transient failure — the child disposed mid-flight by a
+   * routing/profile restart, say — would make every retry rejoin it forever
+   * and the message could never be delivered. No id — every other command,
+   * and any prompt sent without one — always runs. */
   private dedupeByClientMessageId(clientMessageId: string | undefined, run: () => Promise<unknown>): Promise<unknown> {
     if (!clientMessageId) return run();
     this.pruneClientMessageOutcomes();
@@ -2054,10 +2923,8 @@ export class AgentSessionWrapper {
     const entry = { promise, expiresAt: Date.now() + CLIENT_MESSAGE_ID_TTL_MS };
     this.clientMessageOutcomes.set(clientMessageId, entry);
     promise.catch(() => {
-      // Only remove the entry THIS call inserted: a concurrent send that
-      // found no entry (this one already pruned by TTL/cap) and inserted its
-      // own attempt under the same id must not be evicted by this cleanup.
-      if (this.clientMessageOutcomes.get(clientMessageId) === entry) {
+      if (this.clientMessageOutcomes.get(clientMessageId) === entry
+        && this.deliveryLedger.get(clientMessageId)?.status !== "failed") {
         this.clientMessageOutcomes.delete(clientMessageId);
       }
     });
@@ -2070,9 +2937,11 @@ export class AgentSessionWrapper {
     this.resetIdleTimer();
     const type = command.type as string;
 
-    if (type === "prompt" || type === "steer" || type === "follow_up") {
+    if (type === "prompt" || type === "steer" || type === "follow_up" || type === "abort_and_prompt") {
       const imageError = validateAgentImages(command.images);
       if (imageError) throw new Error(imageError);
+      // The user is talking to the agent again: a previous Stop no longer holds.
+      this.stopLatch = null;
     }
 
     const unsupported = UNSUPPORTED_COMMANDS[type];
@@ -2093,9 +2962,26 @@ export class AgentSessionWrapper {
         if (this.bashRunning) {
           throw new Error("Cannot send a prompt while a shell command is running");
         }
+        // A new message moves on from an unanswered refusal question: the
+        // guard already answered `hold`, so this only retires the card (the
+        // declined message stays in the conversation, exactly as "Keep").
+        if (this.pendingRefusalDecision) this.clearPendingRefusalDecision(this.pendingRefusalDecision);
         const streamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
         const clientMessageId = typeof command.clientMessageId === "string" ? command.clientMessageId : undefined;
+        if (clientMessageId) {
+          this.pruneDeliveryLedger();
+          this.pruneClientMessageOutcomes();
+          const prior = this.existingDeliveryAck(clientMessageId);
+          if (prior && !this.clientMessageOutcomes.has(clientMessageId)) return prior;
+        }
         return this.dedupeByClientMessageId(clientMessageId, async () => {
+          // Sent while a run is live: held here, editable, until the engine
+          // would read it anyway (heldQueue).
+          if (streamingBehavior && clientMessageId && (this.streaming || this.promptRunning)
+            && !(streamingBehavior === "steer" && this.toolsRunning > 0)) {
+            return this.holdMessage(clientMessageId, command, streamingBehavior);
+          }
+          this.beginDeliveryRecord(clientMessageId, command, type);
           // Authoritative on the wrapper's OWN isRunning(), never the
           // caller's guess: idle marks promptRunning=true exactly like a
           // plain prompt; already running is a queue omp settles on its own.
@@ -2121,22 +3007,33 @@ export class AgentSessionWrapper {
           // answered 202 for this very send.
           const useAckTimeout = !streamingBehavior;
           try {
-            // omp acks immediately; agent output streams as events, completion is
-            // agent_end (agent runs) or prompt_result (local-only slash commands).
-            const ack = await this.proc.sendCommand<{ agentInvoked?: boolean } | undefined>({
+            const pending = this.sendTrackedCommand<{ agentInvoked?: boolean } | undefined>({
               type: "prompt",
               message: command.message as string,
               ...(toImageContents(command.images) ? { images: toImageContents(command.images) } : {}),
               ...(streamingBehavior ? { streamingBehavior } : {}),
             }, useAckTimeout ? PROMPT_ACK_TIMEOUT_MS : undefined);
-            // Slash commands fully consumed by a builtin report agentInvoked:false
-            // in the ack itself — no prompt_result frame follows.
-            if (ack?.agentInvoked === false && !streamingBehavior) {
-              this.promptRunning = false;
-              this.emit({ type: "prompt_result", agentInvoked: false });
-              notifyRunningChange();
+            // omp 18.3 correlates this prompt's single prompt_result by the
+            // RPC id, which is how the ledger settles it without text matching.
+            this.attachDeliveryRpcId(clientMessageId, pending.id);
+            const ack = await pending.result;
+            // A slash command fully consumed by a builtin or extension reports
+            // agentInvoked:false in the ack itself; no run and (on omp 18.3)
+            // no prompt_result follow, so the message is settled right here.
+            if (ack?.agentInvoked === false) {
+              this.transitionDelivery(clientMessageId, "delivered");
+              if (startingFresh) {
+                this.promptRunning = false;
+                this.emit({ type: "prompt_result", agentInvoked: false });
+                notifyRunningChange();
+              }
+            } else {
+              this.transitionDelivery(clientMessageId, startingFresh ? "started" : "queued");
             }
           } catch (error) {
+            if (error instanceof RpcCommandError) {
+              this.transitionDelivery(clientMessageId, "failed", error.message);
+            }
             if (startingFresh) {
               this.promptRunning = false;
               notifyRunningChange();
@@ -2153,33 +3050,69 @@ export class AgentSessionWrapper {
             }
             throw error;
           }
-          if (!streamingBehavior) return null;
-          return { delivery: startingFresh ? "started" : "queued", clientMessageId };
+          if (!clientMessageId) return null;
+          // The ledger may already be ahead of this ack (the engine's user
+          // message_end can arrive before its response frame): report it.
+          const settled = this.deliveryLedger.get(clientMessageId)?.status;
+          return {
+            delivery: startingFresh ? "started" : "queued",
+            clientMessageId,
+            ...(settled === "delivered" ? { status: settled } : {}),
+          };
         });
       }
 
       case "steer":
       case "follow_up": {
         const clientMessageId = typeof command.clientMessageId === "string" ? command.clientMessageId : undefined;
+        if (clientMessageId) {
+          this.pruneDeliveryLedger();
+          this.pruneClientMessageOutcomes();
+          const prior = this.existingDeliveryAck(clientMessageId);
+          if (prior && !this.clientMessageOutcomes.has(clientMessageId)) return prior;
+        }
         return this.dedupeByClientMessageId(clientMessageId, async () => {
-          await this.proc.sendCommand({
-            type,
-            message: command.message as string,
-            ...(toImageContents(command.images) ? { images: toImageContents(command.images) } : {}),
-          });
-          return null;
+          const wasRunning = this.isRunning();
+          this.beginDeliveryRecord(clientMessageId, command, type);
+          try {
+            const pending = this.sendTrackedCommand<{ agentInvoked?: boolean } | undefined>({
+              type,
+              message: command.message as string,
+              ...(toImageContents(command.images) ? { images: toImageContents(command.images) } : {}),
+            });
+            this.attachDeliveryRpcId(clientMessageId, pending.id);
+            const ack = await pending.result;
+            this.transitionDelivery(clientMessageId, ack?.agentInvoked === false
+              ? "delivered"
+              : wasRunning ? "queued" : "started");
+          } catch (error) {
+            if (error instanceof RpcCommandError) {
+              this.transitionDelivery(clientMessageId, "failed", error.message);
+            }
+            throw error;
+          }
+          if (!clientMessageId) return null;
+          const settled = this.deliveryLedger.get(clientMessageId)?.status;
+          return {
+            delivery: wasRunning ? "queued" : "started",
+            clientMessageId,
+            ...(settled === "delivered" ? { status: settled } : {}),
+          };
         });
       }
 
-      case "abort":
+      case "abort": {
+        // Stop means the MAIN agent stops and stays stopped until the user
+        // sends again (stopLatch); subagents are never aborted from here.
+        const requestedAt = Date.now();
+        this.stopLatch = { aborting: false };
+        this.returnHeldOnStop();
         await this.withFinalRunningNotification(async () => {
           await this.proc.sendCommand({ type: "abort" });
-          // If the prompt was aborted before the agent loop started, no
-          // agent_end will arrive to clear the flag; the streaming flag still
-          // tracks a live turn that ends with its own agent_end.
-          this.promptRunning = false;
         });
+        this.settleAfterStop(requestedAt);
         return null;
+      }
 
       case "get_state": {
         const state = await this.proc.sendCommand<RpcSessionState>({ type: "get_state" });
@@ -2298,6 +3231,23 @@ export class AgentSessionWrapper {
       case "reload": {
         await this.restart();
         return { success: true };
+      }
+
+      case "withdraw_queued": {
+        const clientMessageId = typeof command.clientMessageId === "string" ? command.clientMessageId : "";
+        return this.withdrawQueued(clientMessageId);
+      }
+
+      case "promote_queued": {
+        const clientMessageId = typeof command.clientMessageId === "string" ? command.clientMessageId : "";
+        return { promoted: this.promoteQueued(clientMessageId) };
+      }
+
+      case "respond_to_refusal_decision": {
+        if (typeof command.decisionId !== "string") {
+          throw new WebRpcError("A refusal decision id is required.", "refusal_decision_id_required");
+        }
+        return this.respondToRefusalDecision(command.decisionId, command.choice, command.remember === true);
       }
 
       case "extension_ui_response": {
@@ -2429,6 +3379,7 @@ export class AgentSessionWrapper {
 // ============================================================================
 export interface RunningSessionUpdate {
   ids: string[];
+  sessions: Array<{ id: string; awaitingInput: boolean }>;
   refreshSessionList: boolean;
 }
 
@@ -2510,6 +3461,27 @@ export function getLiveSessionPhases(): Map<string, SessionLivePhase> {
   return phases;
 }
 
+export interface RunningRpcSessionSnapshot {
+  ids: string[];
+  sessions: Array<{ id: string; awaitingInput: boolean }>;
+}
+
+export function getRunningRpcSessionSnapshot(): RunningRpcSessionSnapshot {
+  const ids = new Set<string>();
+  const sessions = new Map<string, boolean>();
+  for (const [sessionId, session] of getRegistry()) {
+    const id = session.sessionId || sessionId;
+    const running = session.isRunning();
+    const awaitingInput = session.hasPendingInput?.() ?? false;
+    if (running) ids.add(id);
+    if (running || awaitingInput) sessions.set(id, awaitingInput);
+  }
+  return {
+    ids: [...ids],
+    sessions: [...sessions].map(([id, awaitingInput]) => ({ id, awaitingInput })).sort((a, b) => a.id.localeCompare(b.id)),
+  };
+}
+
 export function getRunningRpcSessionIds(): string[] {
   const ids = new Set<string>();
   for (const [sessionId, session] of getRegistry()) {
@@ -2579,11 +3551,11 @@ let lastRunningSnapshot = "";
  * force one otherwise-identical update to refresh sidebar session metadata.
  */
 export function notifyRunningChange({ refreshSessionList = false }: { refreshSessionList?: boolean } = {}): void {
-  const ids = getRunningRpcSessionIds();
-  const snapshot = JSON.stringify([...ids].sort());
+  const { ids, sessions } = getRunningRpcSessionSnapshot();
+  const snapshot = JSON.stringify({ ids: [...ids].sort(), sessions });
   if (snapshot === lastRunningSnapshot && !refreshSessionList) return;
   lastRunningSnapshot = snapshot;
-  const update = { ids, refreshSessionList };
+  const update = { ids, sessions, refreshSessionList };
   for (const listener of getRunningListeners()) {
     try { listener(update); } catch { /* ignore listener errors */ }
   }
@@ -2626,6 +3598,8 @@ async function startEngineSession(
   created.onEvent((event) => {
     if (event.type === "agent_start" || event.type === "agent_end") {
       notifyRunningChange({ refreshSessionList: true });
+    } else if (event.type === "permission_request" || event.type === "permission_resolved") {
+      notifyRunningChange();
     }
   });
   registry.set(realSessionId, created);

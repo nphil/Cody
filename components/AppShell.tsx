@@ -229,6 +229,7 @@ export function AppShell() {
   const [sessionModels, setSessionModels] = useState<{ provider: string; id: string; name: string }[] | null>(null);
   const [advisorEnabled, setAdvisorEnabled] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [hasAwaitingInput, setHasAwaitingInput] = useState(false);
   const [mobileSidebarReady, setMobileSidebarReady] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState<number>(SIDEBAR_DEFAULT_WIDTH);
   const [activityDisplayMode, setActivityDisplayMode] = useState<ActivityDisplayMode>("compact");
@@ -1151,6 +1152,7 @@ export function AppShell() {
         selectedSessionId={selectedSession?.id ?? null}
         optimisticSession={selectedSession?.path === "" ? selectedSession : null}
         onSelectSession={handleSelectSession}
+        onAwaitingInputChange={setHasAwaitingInput}
         onNewSession={handleNewSession}
         initialSessionId={initialSessionId}
         skipInitialProjectSelection={initialNavigation.requestedCwd !== null}
@@ -1302,11 +1304,14 @@ export function AppShell() {
         <div style={{ display: "flex", alignItems: "center", gap: 4, height: "100%", paddingLeft: isMobile ? 4 : 8 }}>
           <button
             onClick={handleSidebarToggle}
-            title={sidebarOpen ? t("appShell.hideSidebar") : t("appShell.showSidebar")}
-            aria-label={sidebarOpen ? t("appShell.hideSidebar") : t("appShell.showSidebar")}
+            title={`${sidebarOpen ? t("appShell.hideSidebar") : t("appShell.showSidebar")}${hasAwaitingInput ? ` — ${t("sessionSidebar.needsYou")}` : ""}`}
+            aria-label={`${sidebarOpen ? t("appShell.hideSidebar") : t("appShell.showSidebar")}${hasAwaitingInput ? ` — ${t("sessionSidebar.needsYou")}` : ""}`}
             className="shell-toolbar-btn ui-focus-ring"
           >
-            {sidebarOpen ? <PanelLeft size={14} strokeWidth={1.8} aria-hidden="true" /> : <Menu size={14} strokeWidth={1.8} aria-hidden="true" />}
+            <span style={{ position: "relative", display: "inline-flex" }}>
+              {sidebarOpen ? <PanelLeft size={14} strokeWidth={1.8} aria-hidden="true" /> : <Menu size={14} strokeWidth={1.8} aria-hidden="true" />}
+              {hasAwaitingInput && <span aria-hidden="true" style={{ position: "absolute", top: -2, right: -3, width: 7, height: 7, borderRadius: "50%", background: "var(--status-warning)", boxShadow: "0 0 0 2px var(--bg-panel)", pointerEvents: "none" }} />}
+            </span>
           </button>
           <ThemePicker />
         </div>

@@ -299,7 +299,7 @@ function SidebarChatSession({ session, cwd, contextSessionId, onSessionCreated, 
     messages, entryIds, streamState, agentRunning, loading,
     currentModel, modelList, modelNames, modelThinkingLevels, thinkingLevel, thinkingLevelPending,
     contextUsage, sessionStats,
-    handleSend, handleSteer, handleAbort, handleModelChange, handleThinkingLevelChange,
+    handleSend, handleAbort, handleModelChange, handleThinkingLevelChange,
     scrollContainerRef, messagesEndRef,
   } = useAgentSession({
     session,
@@ -414,43 +414,50 @@ function SidebarChatSession({ session, cwd, contextSessionId, onSessionCreated, 
   }, [addImageFiles]);
 
   const submit = useCallback(async () => {
-    const text = draft.trim();
-    if (!text && !images.length) return;
+    const draftSnapshot = draft;
+    const text = draftSnapshot.trim();
+    const imageSnapshot = images;
+    if (!text && !imageSnapshot.length) return;
     if (preparingImages) return;
+    const restoreSnapshot = () => {
+      setDraft((current) => current ? [draftSnapshot, current].filter(Boolean).join("\n\n") : draftSnapshot);
+      setImages((current) => [...imageSnapshot, ...current]);
+    };
+    setDraft("");
+    setImages([]);
     let outgoing: AttachedImage[] | undefined;
-    if (images.length) {
+    if (imageSnapshot.length) {
       setPreparingImages(true);
       try {
         const batch = await prepareImageBatchForAttachment({
-          files: images.map((image) => image.file),
+          files: imageSnapshot.map((image) => image.file),
           message: text,
           unsupportedMessage: unsupportedImageMessage,
         });
-        outgoing = images.map((image, index) => ({
+        outgoing = imageSnapshot.map((image, index) => ({
           data: batch[index].data,
           mimeType: batch[index].mimeType,
           previewUrl: image.previewUrl,
         }));
       } catch (error) {
-        toast.error(error instanceof Error
-          ? error.message
-          : t("sidebarChat.imageReadFailed", { name: images[0]?.name ?? t("sidebarChat.attachFile") }));
-        setPreparingImages(false);
+        restoreSnapshot();
+        toast.error(error instanceof Error ? error.message : t("sidebarChat.imageReadFailed", { name: imageSnapshot[0]?.name ?? t("sidebarChat.attachFile") }));
         return;
+      } finally {
+        setPreparingImages(false);
       }
-      setPreparingImages(false);
     }
-    setDraft("");
-    const sentImages = images;
-    setImages([]);
-    const accepted = agentRunning ? (await handleSteer(text, outgoing), true) : await handleSend(text, outgoing);
-    if (!accepted) {
-      setDraft(text);
-      setImages(sentImages);
-    } else {
-      sentImages.forEach(revokeImagePreview);
+    let accepted = false;
+    try {
+      accepted = await handleSend(text, outgoing);
+    } catch (error) {
+      restoreSnapshot();
+      toast.error(error instanceof Error ? error.message : t("sidebarChat.imageReadFailed", { name: imageSnapshot[0]?.name ?? t("sidebarChat.attachFile") }));
+      return;
     }
-  }, [agentRunning, draft, handleSend, handleSteer, images, preparingImages, t, unsupportedImageMessage]);
+    if (!accepted) restoreSnapshot();
+    else imageSnapshot.forEach(revokeImagePreview);
+  }, [draft, handleSend, images, preparingImages, t, unsupportedImageMessage]);
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {

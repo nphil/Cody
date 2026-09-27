@@ -120,7 +120,8 @@ test("a requested cancel stays visible but muted and disabled", () => {
 test("the cancel steer names the subagent id, agent, and a one-line summary", () => {
   const text = cancelSubtaskSteerText({ id: "task_abc123", agent: "reviewer", task: "# Target\nReview   the\n\ndiff." });
   assert.match(text, /cancelled subtask "task_abc123" \(reviewer: # Target Review the diff\.\)/);
-  assert.match(text, /hub cancel \(ids: \["task_abc123"\]\)/);
+  assert.ok(text.includes("write proc://task_abc123/kill"));
+  assert.ok(text.includes("OMP 18.3+; if this older engine does not support proc://, use hub cancel (ids: [\"task_abc123\"])") );
   assert.match(text, /do not wait for or use anything it produces\.$/);
   assert.doesNotMatch(text, /\n/);
 

@@ -594,6 +594,10 @@ export class AcpEngineSession implements EngineSession {
     return this._alive && this.turn !== null;
   }
 
+  hasPendingInput(): boolean {
+    return this.pendingPermissions.size > 0;
+  }
+
   start(): void {
     void this.ensureReady();
   }

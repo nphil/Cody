@@ -11,10 +11,11 @@ import { DEFAULT_HARNESS_LABEL } from "../SettingsTabs";
 import { NativeSetting, ToggleSwitch } from "./primitives";
 import { useSaveStatus } from "./SaveStatus";
 import { ShellContext } from "./shell-context";
-import { SettingsSection, SettingsRow } from "./SettingsSection";
+import { SettingsSection } from "./SettingsSection";
 import { SettingsActions } from "./SettingsActions";
 import { ChainList, ChainRow } from "./models/ChainList";
 import { formatModelDisplayName } from "@/lib/model-display";
+import type { RefusalPolicy } from "@/lib/refusal/config";
 
 /**
  * The engine's native retry/fallback config, redesigned so the fallback-chain
@@ -65,6 +66,20 @@ interface RetryConfig {
   fallbackRevertPolicy?: FallbackRevertPolicy;
   fallbackChains?: Record<string, string[]>;
 }
+type RefusalPolicyResponse = {
+  policy?: RefusalPolicy;
+  supported?: boolean;
+  canManage?: boolean;
+  version?: string | null;
+  reason?: string;
+};
+
+const REFUSAL_POLICY_CHOICES: { value: RefusalPolicy; label: string; description: string }[] = [
+  { value: "ask", label: "Ask each time", description: "Choose whether to rewind the declined message or continue on the configured fallback." },
+  { value: "rewind", label: "Rewind automatically", description: "Remove the declined message and clear its saved session memories." },
+  { value: "fallback", label: "Continue automatically", description: "Use the configured fallback; if none is available, keep the declined response." },
+];
+
 
 const RETRY_ATTEMPT_OPTIONS = [0, 1, 2, 3, 5, 10, 15, 20];
 const RESERVE_PCT_OPTIONS = [5, 10, 15, 20, 25];
@@ -205,6 +220,9 @@ export function RetryFallbackPanel({ models, onOpenPresets, panelId = "models" }
   const native = useNativeSettings(true);
   const { track } = useSaveStatus(panelId);
   const rolesRoute = useSettingsRoute<{ roleNames?: string[] }>("/api/model-roles");
+  const refusalPolicyRoute = useSettingsRoute<RefusalPolicyResponse>("/api/refusal/config");
+  const [refusalPolicySaving, setRefusalPolicySaving] = useState(false);
+  const [refusalPolicyError, setRefusalPolicyError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Chain keys the user just added (or fully emptied out) that have no
   // persisted entries yet — see the module doc comment above.
@@ -238,6 +256,23 @@ export function RetryFallbackPanel({ models, onOpenPresets, panelId = "models" }
     void track(() => native.patchSection("retry", patch as Partial<NonNullable<NativeSettings["retry"]>>)).then((ok) => {
       if (!ok) setError("Could not save — see the status above.");
     });
+  };
+  const saveRefusalPolicy = async (policy: RefusalPolicy) => {
+    setRefusalPolicySaving(true);
+    setRefusalPolicyError(null);
+    try {
+      const response = await fetch("/api/refusal/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ policy }),
+      });
+      if (!response.ok) throw new Error("save failed");
+      await refusalPolicyRoute.reload();
+    } catch {
+      setRefusalPolicyError("Could not save this setting.");
+    } finally {
+      setRefusalPolicySaving(false);
+    }
   };
 
   const setChainEntries = (key: string, entries: string[]) => {
@@ -496,6 +531,48 @@ export function RetryFallbackPanel({ models, onOpenPresets, panelId = "models" }
           {error}
         </div>
       )}
+
+      <SettingsSection
+        title="When a model declines for safety reasons"
+        description="Choose whether Cody asks, rewinds automatically, or continues on an available fallback."
+      >
+        <fieldset
+          disabled={!refusalPolicyRoute.data?.supported || refusalPolicyRoute.data.canManage !== true || refusalPolicySaving}
+          style={{ border: 0, padding: 0, margin: 0, minWidth: 0, display: "flex", flexDirection: "column" }}
+        >
+          <legend className="sr-only">When a model declines for safety reasons</legend>
+          {REFUSAL_POLICY_CHOICES.map((choice) => (
+            <label key={choice.value} style={{ display: "flex", alignItems: "flex-start", gap: 10, minHeight: 48, padding: "7px 0", cursor: "pointer" }}>
+              <input
+                type="radio"
+                name="refusal-policy"
+                value={choice.value}
+                checked={(refusalPolicyRoute.data?.policy ?? "ask") === choice.value}
+                onChange={() => { void saveRefusalPolicy(choice.value); }}
+                style={{ width: 18, height: 18, flexShrink: 0, margin: "2px 0 0", accentColor: "var(--accent)" }}
+              />
+              <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+                <span style={{ color: "var(--text)", fontSize: 12, fontWeight: 600 }}>{choice.label}</span>
+                <span style={{ color: "var(--text-muted)", fontSize: 11, lineHeight: 1.45 }}>{choice.description}</span>
+              </span>
+            </label>
+          ))}
+        </fieldset>
+        {refusalPolicyRoute.data?.supported === false && (
+          <p role="status" style={{ margin: "8px 0 0", color: "var(--text-muted)", fontSize: 11 }}>
+            {refusalPolicyRoute.data.reason ?? "Needs OMP 18.3 or newer."}
+            {refusalPolicyRoute.data.version ? ` (Detected ${refusalPolicyRoute.data.version}.)` : ""}
+          </p>
+        )}
+        {refusalPolicyRoute.data?.canManage === false && (
+          <p role="status" style={{ margin: "8px 0 0", color: "var(--text-muted)", fontSize: 11 }}>Only an administrator can change this setting.</p>
+        )}
+        {(refusalPolicyError || refusalPolicyRoute.error) && (
+          <p role="alert" style={{ margin: "8px 0 0", color: "var(--status-error)", fontSize: 11 }}>
+            {refusalPolicyError ?? refusalPolicyRoute.error}
+          </p>
+        )}
+      </SettingsSection>
 
       <SettingsActions onReset={() => setResetOpen(true)} resetLabel={`Reset to ${engineName} defaults`} />
 

@@ -58,6 +58,8 @@ const REFUSAL_PATTERNS = [
   /content polic/i,
   /flagged for possible cybersecurity risk/i,
   /trusted access for cyber/i,
+  /\bcontent[_ -]?filter\b/i,
+  /\bcontent[-_ ]?blocked\b/i,
   /\bsensitive\b/i,
 ];
 

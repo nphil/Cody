@@ -24,9 +24,9 @@ const jiti = createJiti(import.meta.url, {
   tsconfigPaths: true,
 });
 const { PermissionRequestCard } = await jiti.import("./PermissionRequestCard.tsx");
+const { InputDock } = await jiti.import("./InputDock.tsx");
 
 const hook = await readFile(new URL("../hooks/useAgentSession.ts", import.meta.url), "utf8");
-const chatWindow = await readFile(new URL("./ChatWindow.tsx", import.meta.url), "utf8");
 const card = await readFile(new URL("./PermissionRequestCard.tsx", import.meta.url), "utf8");
 
 const locales = Object.fromEntries(
@@ -54,6 +54,10 @@ const noop = () => {};
 
 function render(request) {
   return renderToStaticMarkup(React.createElement(PermissionRequestCard, { request, onRespond: noop }));
+}
+
+function renderDock(pendingInputs) {
+  return renderToStaticMarkup(React.createElement(InputDock, { pendingInputs, onRespond: noop, composerRef: { current: null } }));
 }
 
 test("every option the agent offered is rendered, in the order it sent them", () => {
@@ -145,18 +149,12 @@ test("one click is all a card ever sends", () => {
   assert.match(card, /answeredRef\.current = option\.optionId;/);
 });
 
-test("the card is inline in the transcript, not a modal", () => {
-  // ExtensionDialog is deliberately a modal; this is deliberately not one. An
-  // approval arrives mid-stream and the answer depends on what the agent just
-  // said, so the transcript must stay readable underneath it.
-  assert.doesNotMatch(card, /aria-modal/);
-  assert.doesNotMatch(card, /position: "absolute"|position: "fixed"/);
-  assert.doesNotMatch(card, /overlay-backdrop/);
-  // Rendered in the message column, at the live tail next to the running-tool
-  // indicator — the sentinel that ends the transcript comes after it.
-  const tail = chatWindow.slice(chatWindow.indexOf("chat-status-slot"), chatWindow.indexOf("ref={messagesEndRef}"));
-  assert.match(tail, /<PermissionRequestCard/);
-  assert.match(tail, /key=\{request\.requestId\}/);
+test("approval prompts are available in the non-modal composer dock", () => {
+  const html = renderDock([{ kind: "permission", request: SAMPLE_REQUEST }]);
+  assert.match(html, /role="region"/);
+  assert.match(html, /Allow once/);
+  assert.match(html, /Allow always/);
+  assert.doesNotMatch(html, /aria-modal|role="dialog"|overlay-backdrop/);
 });
 
 test("the hook adds on request and removes on resolve", () => {
@@ -189,17 +187,6 @@ test("a reloaded tab recovers the open approval from get_state", () => {
   assert.ok(adoptAt !== -1 && busyAt !== -1 && adoptAt < busyAt, "approvals must be mirrored before the busy return");
 });
 
-test("answering is optimistic, logged rather than thrown, and session-scoped", () => {
-  const respondAt = hook.indexOf("const respondToPermission = useCallback");
-  const respond = hook.slice(respondAt, hook.indexOf("}, [session?.id]);", respondAt));
-  assert.match(respond, /setPermissionRequests\(\(prev\) => prev\.filter\(/, "the card goes on click");
-  assert.match(respond, /type: "respond_permission", requestId, optionId/);
-  assert.match(respond, /console\.error\("Failed to answer permission request:"/);
-  assert.doesNotMatch(respond, /throw /);
-  // Switching sessions drops the cards: answering one from another
-  // conversation would grant something in a transcript nobody is reading.
-  assert.match(respond, /setPermissionRequests\(\(prev\) => \(prev\.length === 0 \? prev : \[\]\)\);/);
-});
 
 test("the approval copy is real in all three locales", () => {
   const keys = [

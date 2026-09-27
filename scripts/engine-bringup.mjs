@@ -15,7 +15,10 @@
  *     That proves the binary exists, runs, and speaks ACP at the version Cody
  *     drives it with.
  *   rpc-ui engines (omp, pi) — spawn with the engine's own `--mode`, then
- *     answer `get_state`. That is the same first command rpc-manager sends.
+ *     answer `get_state`. That is the same first command rpc-manager sends;
+ *     under `--sessions` it also sends a real `prompt` (aborted right away)
+ *     and checks the `prompt_result` completion frame rpc-manager's delivery
+ *     ledger depends on (present with or without OMP 18.3's `status` field).
  *
  * Opening a session is reported but never required, and that line is drawn
  * from measurement rather than caution: with no credentials the Claude
@@ -43,7 +46,8 @@
  *   node scripts/engine-bringup.mjs omp codex  # only these
  *   node scripts/engine-bringup.mjs --sessions      # also open a session
  *       …needs each engine signed in; without credentials two of three hang
- *       or refuse, which is why it is not the default.
+ *       or refuse, which is why it is not the default. For rpc-ui engines
+ *       this also drives a real prompt/prompt_result round trip.
  *   node scripts/engine-bringup.mjs --require omp,codex
  *       …additionally FAIL if one of those is not installed, which is what
  *       the smoke gate wants: it just installed them, so absent means broken.
@@ -143,8 +147,15 @@ async function bringUpAcp(adapter, cwd, { openSession }) {
 }
 
 /** Spawn an rpc-dialect engine the way rpc-manager does and ask it for state.
- * NDJSON in, NDJSON out, one JSON object per line. */
-function bringUpRpcUi(adapter, binary, cwd) {
+ * NDJSON in, NDJSON out, one JSON object per line. Under `--sessions` (real
+ * credentials assumed) it goes one command further: a real `prompt`, aborted
+ * right away, to check the engine still emits `prompt_result` — the
+ * completion frame rpc-manager's delivery ledger depends on (rpc-types.ts
+ * RpcPromptResultFrame), present with or without OMP 18.3's `status` field.
+ * A prompt round trip that fails for a mundane runtime reason (not signed
+ * in, no model resolves) is reported like ACP's "no session" case — a
+ * detail, not a failure; only a malformed completion frame fails the gate. */
+function bringUpRpcUi(adapter, binary, cwd, { openSession }) {
   const { mode, supportsCwdFlag } = adapter.rpcUi;
   const argv = ["--mode", mode, ...(supportsCwdFlag ? ["--cwd", cwd] : [])];
   const child = spawn(binary, argv, { cwd, env: process.env, stdio: ["pipe", "pipe", "pipe"] });
@@ -153,6 +164,10 @@ function bringUpRpcUi(adapter, binary, cwd) {
     let pending = "";
     let stderr = "";
     let answered = false;
+    // "state" until get_state answers; "prompt" while the optional
+    // prompt/prompt_result round trip is in flight (only entered under
+    // --sessions).
+    let phase = "state";
 
     const finish = (error, value) => {
       if (answered) return;
@@ -160,6 +175,8 @@ function bringUpRpcUi(adapter, binary, cwd) {
       try { child.kill("SIGTERM"); } catch { /* already gone */ }
       if (error) reject(error); else resolve(value);
     };
+    const finishPromptSoft = (detail, needsSetup) =>
+      finish(null, { detail: `--mode ${mode} + get_state, ${detail}`, needsSetup: needsSetup ?? null });
 
     child.stdout.setEncoding("utf8");
     let seen = "";
@@ -174,11 +191,39 @@ function bringUpRpcUi(adapter, binary, cwd) {
         if (!line) continue;
         let frame;
         try { frame = JSON.parse(line); } catch { continue; }
-        // The engine answers a command with a frame naming it. Anything else
-        // on the way (ready frames, notices) is normal startup chatter.
-        if (frame && typeof frame === "object" && frame.command === "get_state") {
-          if (frame.success === false) finish(new Error(`get_state was rejected: ${JSON.stringify(frame)}`));
-          else finish(null, { detail: `--mode ${mode} + get_state` });
+        if (!frame || typeof frame !== "object") continue;
+
+        if (phase === "state") {
+          // The engine answers a command with a frame naming it. Anything
+          // else on the way (ready frames, notices) is normal startup chatter.
+          if (frame.command !== "get_state") continue;
+          if (frame.success === false) { finish(new Error(`get_state was rejected: ${JSON.stringify(frame)}`)); continue; }
+          if (!openSession) { finish(null, { detail: `--mode ${mode} + get_state` }); continue; }
+          phase = "prompt";
+          // A real prompt, aborted immediately: exercises the round trip
+          // without waiting out a full turn.
+          child.stdin.write(`${JSON.stringify({ type: "prompt", id: "bringup-prompt", message: "Reply with the single word ok." })}\n`);
+          child.stdin.write(`${JSON.stringify({ type: "abort", id: "bringup-abort" })}\n`);
+          continue;
+        }
+
+        // phase === "prompt"
+        if (frame.type === "response" && frame.command === "prompt" && frame.id === "bringup-prompt" && frame.success === false) {
+          const message = String(frame.error ?? "prompt rejected");
+          if (NEEDS_SETUP_RE.test(message)) finishPromptSoft("needs setup for prompt", message);
+          else finishPromptSoft(`prompt rejected before dispatch: ${message}`);
+          continue;
+        }
+        if (frame.type === "prompt_result" && frame.id === "bringup-prompt") {
+          if (typeof frame.agentInvoked !== "boolean") {
+            finish(new Error(`prompt_result missing agentInvoked: ${JSON.stringify(frame)}`));
+            continue;
+          }
+          if (frame.status !== undefined && !["completed", "aborted", "error"].includes(frame.status)) {
+            finish(new Error(`prompt_result has an unknown status: ${JSON.stringify(frame)}`));
+            continue;
+          }
+          finish(null, { detail: `--mode ${mode} + get_state + prompt/prompt_result (${frame.status ?? "legacy, no status"})` });
         }
       }
     });
@@ -188,6 +233,12 @@ function bringUpRpcUi(adapter, binary, cwd) {
       const said = `${stderr}\n${seen}`.trim();
       if (NEEDS_SETUP_RE.test(said)) {
         finish(null, { detail: `--mode ${mode}, needs setup`, needsSetup: said.split("\n")[0] });
+        return;
+      }
+      if (phase === "prompt") {
+        // Exited mid round trip: as informative as a hang, but the process
+        // is gone either way — the same "no session" softening as ACP.
+        finishPromptSoft(`prompt round trip did not complete before exit${said ? `: ${said.split("\n")[0]}` : ""}`);
         return;
       }
       finish(new Error(`exited ${signal ? `on ${signal}` : `with code ${code}`} before answering get_state${said ? `\n${said}` : ""}`));
@@ -219,7 +270,7 @@ for (const adapter of engines) {
   const transport = adapter.rpcUi ? "rpc-ui" : "acp";
   try {
     const outcome = adapter.rpcUi
-      ? await bringUpRpcUi(adapter, binary, cwd)
+      ? await bringUpRpcUi(adapter, binary, cwd, { openSession })
       : await bringUpAcp(adapter, cwd, { openSession });
     results.push({
       id: adapter.id,

@@ -1,5 +1,5 @@
 import { getHarness } from "@/lib/harness";
-import { getRunningRpcSessionIds, subscribeRunningSessions } from "@/lib/rpc-manager";
+import { getRunningRpcSessionSnapshot, subscribeRunningSessions } from "@/lib/rpc-manager";
 
 export const dynamic = "force-dynamic";
 
@@ -41,12 +41,13 @@ export async function GET(req: Request) {
 
       // Subscribe BEFORE taking the initial snapshot so no state change can slip
       // through the gap between snapshot and subscription.
-      const unsubscribe = subscribeRunningSessions(({ ids, refreshSessionList }) => {
+      const unsubscribe = subscribeRunningSessions(({ ids, sessions, refreshSessionList }) => {
         try {
           encode({
             type: "running",
             engine: activeEngineId(),
             runningSessionIds: ids,
+            runningSessions: sessions,
             ...(refreshSessionList ? { refreshSessionList: true } : {}),
           });
         } catch {
@@ -56,7 +57,8 @@ export async function GET(req: Request) {
 
       // Initial snapshot so the client renders the correct state immediately.
       // (A duplicate frame here is harmless: the client just sets the same set.)
-      encode({ type: "running", engine: activeEngineId(), runningSessionIds: getRunningRpcSessionIds() });
+      const initialSnapshot = getRunningRpcSessionSnapshot();
+      encode({ type: "running", engine: activeEngineId(), runningSessionIds: initialSnapshot.ids, runningSessions: initialSnapshot.sessions });
 
       // Heartbeat to keep the connection alive through proxies/timeouts. A
       // data frame rather than the usual `:` comment so it can carry the

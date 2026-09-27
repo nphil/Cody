@@ -1,27 +1,21 @@
 import fs from "fs";
 import path from "path";
-import { findOmpPackageRoot, loadOmpPackageSource, ompPackageVersion } from "./package-source";
+import { findOmpPackageRoot, loadOmpPackageSource, loadOmpRegistrySettings, ompPackageVersion } from "./package-source";
 import { isTerminalOnlySetting, settingNoteFor } from "./settings-surface";
 
 /**
- * Cody renders OMP's settings from OMP's own schema rather than a hand-kept
- * list, so a setting added upstream shows up here — in its declared tab and
- * group, with its declared label — without a code change on this side.
+ * Cody reads settings from the installed OMP package rather than a hand-kept
+ * list. OMP 18.2 ships a flat schema module; 18.3 registers settings by domain
+ * and exposes the display order through its registry aggregator.
  *
- * OMP exposes no settings-schema RPC command (checked against the RPC command
- * union), so the schema is read from the installed package's source:
- * `<package>/src/config/settings-schema.ts`, which ships in the npm tarball.
- *
- * That file imports Bun-only siblings which cannot load under Node, so it is
- * evaluated through ./package-source, which stubs every import. Only the `ui`
- * metadata matters here: values derived from those imports (some `default`s and
- * `options`) come out as stub objects and are discarded by normalization, while
- * labels, tabs and groups are plain literals and survive intact.
+ * The package source imports Bun-only runtime siblings, so the source loader
+ * stubs unrelated imports while preserving the shared settings registry and
+ * the tab metadata. Values that depend on stubbed imports are discarded by
+ * normalization; UI labels and choices remain real package data.
  */
 
-/** Types Cody can render. OMP's `record` settings are structured maps with
- * bespoke editors upstream; Cody surfaces the ones that matter (tool approval,
- * retry fallback chains) through its own curated controls instead. */
+/** Record settings use their dedicated controls and stay out of the generic
+ * settings list, avoiding a second editor for the same value. */
 export type OmpSettingType = "boolean" | "enum" | "number" | "string" | "array";
 
 export interface OmpSettingOption {
@@ -43,7 +37,7 @@ export interface OmpSetting {
   values?: string[];
   options?: OmpSettingOption[];
   /** JSON-safe default; omitted when the schema computes it from an import. */
-  default?: boolean | number | string;
+  default?: boolean | number | string | string[];
   /** OMP populates the choices from a runtime registry (its TUI theme list).
    * Cody has no equivalent registry, so those render as a free text field. */
   runtimeOptions?: boolean;
@@ -93,19 +87,33 @@ export function getOmpChangelogPath(): string | null {
 }
 
 
-function isPlainValue(value: unknown): value is boolean | number | string {
-  return typeof value === "boolean" || typeof value === "number" || typeof value === "string";
+function isSettingDefault(value: unknown): value is boolean | number | string | string[] {
+  if (typeof value === "boolean" || typeof value === "number" || typeof value === "string") return true;
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
 }
 
+const CODY_UI_OVERRIDES: Record<string, Record<string, unknown>> = {
+  "providers.anthropic.slowMode": {
+    tab: "providers",
+    group: "Anthropic",
+    label: "Anthropic Slow Mode",
+    description: "Allow Anthropic subscription requests to use the low-priority lane.",
+  },
+};
+
 /** Options survive only when they are real literals; anything derived from a
- * stubbed import is dropped rather than rendered as garbage. */
-function normalizeOptions(raw: unknown): OmpSettingOption[] | undefined {
+ * stubbed import is dropped rather than rendered as garbage. A NUMBER setting
+ * may offer a word choice meaning "use the built-in default" (omp 18.3's
+ * compaction thresholds offer "default", whose stored value is -1): it is
+ * rewritten to that numeric default so a picked option is always writable. */
+function normalizeOptions(raw: unknown, numericDefault?: number): OmpSettingOption[] | undefined {
   if (!Array.isArray(raw)) return undefined;
   const options = raw.flatMap((entry): OmpSettingOption[] => {
     if (typeof entry !== "object" || entry === null) return [];
     const { value, label, description } = entry as Record<string, unknown>;
     if (typeof value !== "string" || typeof label !== "string") return [];
-    return [{ value, label, ...(typeof description === "string" ? { description } : {}) }];
+    const numericValue = numericDefault !== undefined && !Number.isFinite(Number(value)) ? String(numericDefault) : value;
+    return [{ value: numericValue, label, ...(typeof description === "string" ? { description } : {}) }];
   });
   return options.length > 0 ? options : undefined;
 }
@@ -115,7 +123,6 @@ function normalizeValues(raw: unknown): string[] | undefined {
   const values = raw.filter((entry): entry is string => typeof entry === "string");
   return values.length > 0 ? values : undefined;
 }
-
 function normalize(schemaModule: Record<string, unknown>, source: OmpSettingsSchema["source"]): OmpSettingsSchema | null {
   const rawSchema = schemaModule.SETTINGS_SCHEMA;
   if (typeof rawSchema !== "object" || rawSchema === null) return null;
@@ -134,10 +141,10 @@ function normalize(schemaModule: Record<string, unknown>, source: OmpSettingsSch
   for (const [key, entry] of Object.entries(rawSchema as Record<string, unknown>)) {
     if (typeof entry !== "object" || entry === null) continue;
     const definition = entry as Record<string, unknown>;
-    // A credential must never reach the browser, even masked.
     if (definition.credential === true) continue;
-    const ui = definition.ui;
-    // No ui metadata means OMP itself does not surface it — config-file only.
+    const ui = definition.ui ?? CODY_UI_OVERRIDES[key];
+    // No ui metadata means OMP itself does not surface it, except for the one
+    // known provider preference omitted from its panel despite being supported.
     if (typeof ui !== "object" || ui === null) continue;
     const uiMeta = ui as Record<string, unknown>;
     const tab = uiMeta.tab;
@@ -146,9 +153,8 @@ function normalize(schemaModule: Record<string, unknown>, source: OmpSettingsSch
     const type = definition.type;
     if (type !== "boolean" && type !== "enum" && type !== "number" && type !== "string" && type !== "array") continue;
     if (uiMeta.secret === true) continue;
-    // An enum with no usable values and no options has nothing to choose from.
     const values = normalizeValues(definition.values);
-    const options = normalizeOptions(uiMeta.options);
+    const options = normalizeOptions(uiMeta.options, type === "number" && typeof definition.default === "number" ? definition.default : undefined);
     if (type === "enum" && !values && !options) continue;
 
     settings.push({
@@ -160,7 +166,7 @@ function normalize(schemaModule: Record<string, unknown>, source: OmpSettingsSch
       ...(typeof uiMeta.description === "string" ? { description: uiMeta.description } : {}),
       ...(values ? { values } : {}),
       ...(options ? { options } : {}),
-      ...(isPlainValue(definition.default) ? { default: definition.default } : {}),
+      ...(isSettingDefault(definition.default) ? { default: definition.default } : {}),
       ...(uiMeta.options === "runtime" ? { runtimeOptions: true } : {}),
       ...(uiMeta.ordered === true ? { ordered: true } : {}),
       ...(typeof uiMeta.condition === "string" ? { condition: uiMeta.condition } : {}),
@@ -193,7 +199,6 @@ function normalize(schemaModule: Record<string, unknown>, source: OmpSettingsSch
     source,
   };
 }
-
 let cached: { key: string; schema: OmpSettingsSchema | null } | null = null;
 
 /**
@@ -211,19 +216,28 @@ export function getOmpSettingsSchema(): OmpSettingsSchema | null {
 
   let schema: OmpSettingsSchema | null = null;
   try {
-    const loaded = loadOmpPackageSource(packageRoot, "src", "config", "settings-schema.ts");
-    // A failure here (new upstream layout, transpile error, evaluation throw)
-    // leaves the hand-written controls in charge instead of an empty panel.
-    if (loaded) schema = normalize(loaded, { packagePath: packageRoot, version });
+    // OMP 18.2 shipped one flat schema module. 18.3 registers settings by
+    // domain, so load its registry aggregate only when the legacy entrypoint is
+    // absent; this keeps the supported older engine path intact.
+    const legacy = loadOmpPackageSource(packageRoot, "src", "config", "settings-schema.ts");
+    if (legacy) {
+      schema = normalize(legacy, { packagePath: packageRoot, version });
+    } else {
+      const loaded = loadOmpRegistrySettings(packageRoot);
+      if (loaded.definitions && loaded.ui) {
+        const entries = Object.fromEntries(loaded.definitions.flatMap((definition) =>
+          typeof definition.id === "string" ? [[definition.id, definition]] : [],
+        ));
+        schema = normalize({ ...loaded.ui, SETTINGS_SCHEMA: entries }, { packagePath: packageRoot, version });
+      }
+    }
   } catch {
     schema = null;
   }
-
   cached = { key: cacheKey, schema };
   return schema;
 }
 
-/** Drop the memoized schema so the next read re-evaluates the package. */
 export function clearOmpSettingsSchemaCache(): void {
   cached = null;
 }

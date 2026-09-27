@@ -274,14 +274,17 @@ export function subagentActivityLabel(event: SubagentActivityEvent, t: (key: str
 const CANCEL_CONFIRM_WINDOW_MS = 4000;
 const CANCEL_SUMMARY_MAX = 160;
 
-/** The steer that asks the parent model to cancel a subtask. omp exposes no
- * per-subagent abort over RPC, so the parent is told exactly which hub job to
- * cancel and to carry on without it. Exported for tests. */
+/** The steer that asks the parent model to stop a subtask. OMP 18.3 uses the
+ * process resource; the older command is mentioned only as a compatibility
+ * fallback. Exported for tests. */
 export function cancelSubtaskSteerText(subagent: Pick<SubagentInfo, "id" | "agent" | "task" | "description" | "assignment">): string {
   const raw = (subagent.task ?? subagent.assignment ?? subagent.description ?? "").replace(/\s+/g, " ").trim();
   const summary = raw.length > CANCEL_SUMMARY_MAX ? raw.slice(0, CANCEL_SUMMARY_MAX - 1).trimEnd() + "…" : raw;
   const idJson = JSON.stringify(subagent.id);
-  return `The user cancelled subtask ${idJson} (${subagent.agent}: ${summary}). Cancel it now with hub cancel (ids: [${idJson}]) and continue without its result; do not wait for or use anything it produces.`;
+  const idPath = encodeURIComponent(subagent.id);
+  return "The user cancelled subtask " + idJson + " (" + subagent.agent + ": " + summary + "). "
+    + "Cancel it with write proc://" + idPath + "/kill (OMP 18.3+; if this older engine does not support proc://, use hub cancel (ids: [" + idJson + "])). "
+    + "Continue without its result; do not wait for or use anything it produces.";
 }
 
 /** Header icon button that steers the parent model to cancel a running

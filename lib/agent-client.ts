@@ -85,7 +85,7 @@ export interface PromptDeliveryResponse {
   pending?: boolean;
   code?: string;
   error?: string;
-  data?: { delivery?: "started" | "queued"; clientMessageId?: string };
+  data?: { delivery?: "started" | "queued"; clientMessageId?: string; status?: "delivered" };
 }
 
 export interface PromptDeliveryCommand {
@@ -121,4 +121,50 @@ export async function sendPromptDelivery(
   }
   const body = (await res.json().catch(() => ({}))) as Omit<PromptDeliveryResponse, "status">;
   return { status: res.status, ...body };
+}
+
+export type PromptDeliveryLedgerStatus = "queued" | "started" | "delivered" | "failed" | "unknown";
+
+export interface PromptDeliveryLedgerItem {
+  clientMessageId: string;
+  status: PromptDeliveryLedgerStatus;
+  text?: string;
+  imageCount?: number;
+  behavior?: string;
+  rpcId?: string;
+  acceptedAt?: number;
+  updatedAt?: number;
+  error?: string;
+}
+
+export async function getPromptDeliveryLedger(
+  sessionId: string,
+  clientMessageIds: string[],
+): Promise<PromptDeliveryLedgerItem[]> {
+  if (clientMessageIds.length === 0) return [];
+  const query = new URLSearchParams();
+  for (const clientMessageId of clientMessageIds) query.append("clientMessageId", clientMessageId);
+  const res = await fetch("/api/agent/" + encodeURIComponent(sessionId) + "?" + query.toString(), {
+    method: "GET",
+    cache: "no-store",
+  });
+  const body = (await res.json().catch(() => ({}))) as {
+    deliveries?: unknown;
+    error?: string;
+    code?: string;
+  };
+  if (!res.ok || !Array.isArray(body.deliveries)) {
+    throw new AgentCommandError(
+      body.error ? formatApiError(body) : "Could not load message delivery status",
+      body.code,
+    );
+  }
+  const validStatuses = new Set<PromptDeliveryLedgerStatus>(["queued", "started", "delivered", "failed", "unknown"]);
+  return body.deliveries.map((item) => {
+    if (typeof item !== "object" || item === null || typeof (item as { clientMessageId?: unknown }).clientMessageId !== "string"
+      || !validStatuses.has((item as { status?: PromptDeliveryLedgerStatus }).status as PromptDeliveryLedgerStatus)) {
+      throw new AgentCommandError("Invalid message delivery status response");
+    }
+    return item as PromptDeliveryLedgerItem;
+  });
 }

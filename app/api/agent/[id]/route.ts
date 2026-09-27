@@ -126,12 +126,23 @@ export async function POST(
 
 // GET /api/agent/[id] - Get current agent state
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
 
   try {
+    const clientMessageIds = new URL(req.url).searchParams.getAll("clientMessageId");
+    if (clientMessageIds.length > 0) {
+      const session = getRpcSession(id) as (EngineSession & {
+        getDeliveryLedger?: (ids: string[]) => Array<{ clientMessageId: string; status: string; [key: string]: unknown }>;
+      }) | null;
+      const deliveries = session?.getDeliveryLedger
+        ? session.getDeliveryLedger(clientMessageIds)
+        : clientMessageIds.map((clientMessageId) => ({ clientMessageId, status: "unknown" }));
+      return NextResponse.json({ deliveries });
+    }
+
     const session = getRpcSession(id);
     if (!session || !session.isAlive()) {
       return NextResponse.json({ running: false });

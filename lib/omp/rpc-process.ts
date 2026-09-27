@@ -297,11 +297,19 @@ export class RpcProcess {
    * cap pass `timeoutMs` (>0); when set, the timer is unref'd so it never
    * keeps the event loop alive on its own. */
   sendCommand<T = unknown>(command: { type: string; [key: string]: unknown }, timeoutMs?: number): Promise<T> {
-    if (this.exited) {
-      return Promise.reject(new Error(`${this.label} RPC process has exited`));
-    }
-    const id = `w${this.nextId++}`;
-    return new Promise<T>((resolve, reject) => {
+    if (this.exited) return Promise.reject(new Error(this.label + " RPC process has exited"));
+    return this.sendCommandWithId<T>(command, timeoutMs).result;
+  }
+
+  /** Like sendCommand, but exposes the RPC id synchronously so callers can
+   * correlate later lifecycle frames with the command before its ack arrives. */
+  sendCommandWithId<T = unknown>(
+    command: { type: string; [key: string]: unknown },
+    timeoutMs?: number,
+  ): { id: string; result: Promise<T> } {
+    if (this.exited) return { id: "", result: Promise.reject(new Error(this.label + " RPC process has exited")) };
+    const id = "w" + this.nextId++;
+    const result = new Promise<T>((resolve, reject) => {
       const entry: PendingCommand = {
         command: command.type,
         resolve: resolve as (data: unknown) => void,
@@ -333,6 +341,7 @@ export class RpcProcess {
         }
       });
     });
+    return { id, result };
   }
 
   /** Write an already-correlated protocol frame without allocating a command id

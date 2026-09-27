@@ -10,8 +10,6 @@ import { estimateTurnHeight, type TurnContentSignal } from "@/lib/turn-height-es
 import { imageSource, MessageView } from "./MessageView";
 import { ClickableImage } from "./ImageLightbox";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
-import { ExtensionDialog } from "./ExtensionDialog";
-import { PermissionRequestCard } from "./PermissionRequestCard";
 import { SubagentTranscriptDialog } from "./SubagentTranscriptDialog";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ComposerPanels } from "./ComposerPanels";
@@ -802,9 +800,9 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     liveModelMeta, smartPinnedModel, availableModes, currentModeId,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactResult, compactionStatus, displayModel: displayModelValue, sessionStats,
-    slashCommands, slashCommandsLoading, queuedMessages, outbox,
-    notices, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
-    permissionRequests, respondToPermission,
+    slashCommands, slashCommandsLoading, outbox,
+    notices, extensionCustomUi, extensionStatuses, extensionWidgets, sendExtensionCustomInput,
+    pendingInputs, respondToInput, rewoundDraft,
     isAutoModelSelection, autoModelSwitch, modelSwitchPending, localOnly, selectLocalOnly,
     agentPhase, streamDegraded, streamAlert, dismissStreamAlert, retryEventStream, activeGoal, activePlan,
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases, planOverlay,
@@ -813,7 +811,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, selectSmartModel,
     handleSteer, handleAbortCompaction,
     handleRetryOutboxEntry, handleEditOutboxEntry,
-    removeQueuedMessage, promoteQueuedToSteer,
+    removeQueuedMessage, editQueuedMessage, promoteQueuedToSteer,
     handleBuiltinSlashCommand,
     handleThinkingLevelChange, handleModeChange, handleFastModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, loadSlashCommands,
     retryLoadSession,
@@ -823,6 +821,12 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     onOpenFile, onOpenPreview, onPreviewUrlsSeen,
     newSessionPresetId: presetState.newSessionPresetId,
   });
+  const restoredDraftDecisionIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!rewoundDraft || restoredDraftDecisionIdRef.current === rewoundDraft.decisionId) return;
+    restoredDraftDecisionIdRef.current = rewoundDraft.decisionId;
+    chatInputRef?.current?.prependDraft({ text: rewoundDraft.text, images: rewoundDraft.images });
+  }, [chatInputRef, rewoundDraft]);
   resolveSpawnedSessionIdRef.current = () => sessionIdRef.current;
   const sessionBusy = agentRunning || bashRunning;
   // The REAL Smart-pin implementation (see the ref's own comment above):
@@ -1207,6 +1211,8 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       onAbort={handleAbort}
       canSendWhileStreaming={(chatExtras || steeringSupported) && agentRunning}
       outbox={outbox}
+      pendingInputs={pendingInputs}
+      onRespondToInput={respondToInput}
       onRetryOutboxEntry={handleRetryOutboxEntry}
       onEditOutboxEntry={handleEditOutboxEntry}
       isStreaming={sessionBusy}
@@ -1262,9 +1268,9 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       activeGoal={activeGoal}
       activePlan={activePlan}
       advisorEnabled={advisorEnabled}
-      queuedMessages={queuedMessages}
       inputHistory={inputHistory}
       onRemoveQueuedMessage={removeQueuedMessage}
+      onEditQueuedMessage={(id) => { void editQueuedMessage(id); }}
       onPromoteQueuedToSteer={promoteQueuedToSteer}
       slashCommands={slashCommands}
       slashCommandsLoading={slashCommandsLoading}
@@ -1382,12 +1388,6 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
         </div>
       )}
 
-      {extensionDialog && (
-        <ExtensionDialog
-          request={extensionDialog}
-          onRespond={respondToExtensionUi}
-        />
-      )}
 
       <SubagentTranscriptDialog
         subagent={selectedSubagent}
@@ -1601,21 +1601,6 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
               </div>
             )}
 
-            {/* Approvals the agent is blocked on, INLINE at the live tail of
-                the transcript — last thing above the composer, where the
-                running-tool indicator and the status line already are.
-                Deliberately not a modal (ExtensionDialog is, and this is not
-                that): the request arrives mid-stream and the answer usually
-                depends on what the agent just said, so the user has to be able
-                to read the conversation while deciding. The follow-scroll
-                brings it into view like any other tail content. */}
-            {permissionRequests.map((request) => (
-              <PermissionRequestCard
-                key={request.requestId}
-                request={request}
-                onRespond={respondToPermission}
-              />
-            ))}
 
             {pendingBash && (
               <MessageView

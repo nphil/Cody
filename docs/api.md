@@ -308,10 +308,10 @@ The engine roster, in one authenticated round trip.
 `/api/engines/setup-complete`, `/api/engines/updates`) are admin-only. The
 roster itself — the set of engine ids — is **Incidental**: engines come and go.
 
-`/api/engines/updates` rows also carry `latestBeyondVerified` /
-`installedBeyondVerified`: whether that version's MAJOR is past the newest one
-this Cody build was audited against, so clients can warn that a brand-new
-engine major may hold features Cody does not surface yet.
+/api/engines/updates rows also carry latestBeyondVerified /
+installedBeyondVerified: whether the latest or installed version is newer
+than this Cody build's exact verified semver version, including patch and
+minor releases, so clients can warn when newer engine features may be absent.
 
 ### `GET /api/engines/changelog?id=omp` — Incidental
 
