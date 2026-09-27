@@ -853,7 +853,7 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
                     }}
                   >
                     <span style={{ color: "var(--text-dim)", flexShrink: 0 }}>
-                      {event.kind === "tool" ? "·" : event.kind === "retry_fallback_applied" || event.kind === "notice" ? "!" : "»"}
+                      {event.kind === "tool" ? "·" : event.kind === "retry_fallback_applied" ? "!" : "»"}
                     </span>
                     <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{subagentActivityLabel(event, t)}</span>
                     {subagentActive && i === recentEvents.length - 1 && (

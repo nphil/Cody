@@ -70,7 +70,7 @@ import { newSessionSpawnPlan } from "@/hooks/session-preset-state";
 import {
   classifyFallbackReason,
   fallbackAttributionForRole,
-  fallbackAttributionForSubagentEvent,
+  fallbackAttributionForSubagent,
   isFastModeUnavailableError,
   pendingModelSwitchApplied,
   queueModelSwitch,
@@ -96,10 +96,9 @@ import { SESSION_STORAGE_PREFIXES } from "@/lib/storage-keys";
 import { getCachedSessionData, setCachedSessionData } from "@/lib/session-transcript-cache";
 import { captureTranscriptAnchor, restoreTranscriptAnchor, type TranscriptAnchor } from "@/lib/transcript-anchor";
 import {
-  parseSubagentActivityEvent,
+  activityFromProgressChange,
   parseSubagentLifecycle,
   parseSubagentProgress,
-  parseSubagentProgressEvent,
   parseSubagentSnapshot,
   withModelHandoff,
   type SubagentActivityEvent,
@@ -156,6 +155,14 @@ interface AgentEvent {
 }
 
 const SUBAGENT_ACTIVITY_BUFFER_MAX = 50;
+
+/** The roster after a main run ends: only children still working. Returns
+ *  the same array when nothing changes, so React skips the rerender. */
+function keepRunningSubagents(roster: SubagentInfo[]): SubagentInfo[] {
+  const running = roster.filter((subagent) => subagent.status === "started");
+  return running.length === roster.length ? roster : running;
+}
+
 // Distinct subagent ids retained in the activity/version maps. Each per-id
 // array is already capped, but a long turn can spawn unbounded ids (repeated
 // or recursive task calls) — the OUTER maps must be bounded too.
@@ -2893,14 +2900,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setAgentPhase(null);
       setRetryInfo(null);
       retryErrorByJobRef.current.clear();
-      setSubagents([]);
+      // The run is over: its finished children leave the roster. Children
+      // still working in the background (async tasks) stay, and one missing
+      // anyway re-adopts itself from its next progress frame.
+      setSubagents((prev) => keepRunningSubagents(prev));
       subagentRosterGenerationRef.current += 1;
       // Bound per-run activity state: without this, subagentEvents and the
       // transcript-version map retain one entry per subagent id forever.
       resetSubagentActivityState();
-      // The run is over: the roster stays EMPTY (still-working detached
-      // children re-adopt themselves through their live frames). Only the
-      // usage headline is refreshed from the settled child transcripts.
+      // Only the usage headline is refreshed from the settled child transcripts.
       if (sid) void refreshSubagentUsage(sid);
       dispatch({ type: "end" });
       onAgentEnd?.();
@@ -3355,7 +3363,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setAgentPhase(null);
         setRetryInfo(null);
         retryErrorByJobRef.current.clear();
-        setSubagents([]);
+        setSubagents((prev) => keepRunningSubagents(prev));
         subagentRosterGenerationRef.current += 1;
         resetSubagentActivityState();
         dispatch({ type: "end" });
@@ -3819,8 +3827,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         break;
       }
       case "subagent_progress": {
-        // Progress frames carry the full AgentProgress snapshot (throttled to
-        // one per 150ms and flushed at terminal). The reliable key is
+        // Progress frames carry the full AgentProgress snapshot (throttled by
+        // omp to one per ~150ms per child and flushed at terminal). They are
+        // the ONLY per-child stream Cody subscribes to (rpc-manager
+        // SUBAGENT_SUBSCRIPTION_LEVEL), so they also drive the live activity
+        // list and the transcript dialog's follow. The reliable key is
         // progress.id; parentToolCallId/index are fallbacks.
         const payload = event.payload as { index?: unknown; agent?: unknown; agentSource?: unknown; task?: unknown; parentToolCallId?: unknown; sessionFile?: unknown; assignment?: unknown; detached?: unknown; progress?: unknown } | undefined;
         const progress = parseSubagentProgress(payload?.progress);
@@ -3833,36 +3844,46 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const task = typeof payload?.task === "string" && payload.task.trim() ? payload.task : (progress?.task ?? null);
         const assignment = typeof payload?.assignment === "string" ? payload.assignment : progress?.assignment;
         if (!progressId && !task && !parentToolCallId && index < 0) break;
-        setSubagents((prev) => {
-          if (prev.length === 0) return prev;
+        const agentSource = typeof payload?.agentSource === "string"
+          && (payload.agentSource === "bundled" || payload.agentSource === "user" || payload.agentSource === "project")
+          ? payload.agentSource
+          : undefined;
+        const findTarget = (list: SubagentInfo[]): number => {
+          if (progressId) return list.findIndex((subagent) => subagent.id === progressId);
+          // ID-less fallback frames: prefer the exact (parent, index) pair
+          // (batch children share parentToolCallId), then each key alone.
           let target = -1;
-          if (progressId) {
-            // A valid progress frame names its subagent; if that id is gone the
-            // frame is stale (terminal frame was missed, then cleared) — falling
-            // back to parentToolCallId/index could overwrite a DIFFERENT child.
-            target = prev.findIndex((subagent) => subagent.id === progressId);
-          } else {
-            // ID-less fallback frames: prefer the exact (parent, index) pair
-            // (batch children share parentToolCallId), then each key alone.
-            if (parentToolCallId && index >= 0) {
-              target = prev.findIndex((subagent) => subagent.parentToolCallId === parentToolCallId && subagent.index === index);
-            }
-            if (target === -1 && parentToolCallId) target = prev.findIndex((subagent) => subagent.parentToolCallId === parentToolCallId);
-            if (target === -1 && index >= 0) target = prev.findIndex((subagent) => subagent.index === index);
+          if (parentToolCallId && index >= 0) {
+            target = list.findIndex((subagent) => subagent.parentToolCallId === parentToolCallId && subagent.index === index);
           }
-          if (target === -1) return prev;
-          const current = prev[target];
+          if (target === -1 && parentToolCallId) target = list.findIndex((subagent) => subagent.parentToolCallId === parentToolCallId);
+          if (target === -1 && index >= 0) target = list.findIndex((subagent) => subagent.index === index);
+          return target;
+        };
+        // A still-working child the roster does not know is adopted: the
+        // roster is cleared when the main run ends and starts empty after a
+        // session switch, while background (async) children keep running.
+        // Their lifecycle `started` frame is long gone, so without this they
+        // were invisible until they finished. A finished child is never
+        // adopted from a late frame.
+        const adoptable = progressId !== undefined && (progress?.status === "running" || progress?.status === "pending");
+        const known = findTarget(subagentsRef.current);
+        const previousProgress = known === -1 ? undefined : subagentsRef.current[known].progress;
+        const subagentId = known === -1 ? (adoptable ? progressId : undefined) : subagentsRef.current[known].id;
+        setSubagents((prev) => {
+          const target = findTarget(prev);
+          if (target === -1 && !adoptable) return prev;
+          const current: SubagentInfo = target === -1
+            ? { id: progressId as string, agent: "subagent", status: "started", index, lastUpdate: Date.now(), source: "live" }
+            : prev[target];
           const nextEntry: SubagentInfo = {
             ...current,
             agent: typeof payload?.agent === "string" ? payload.agent : current.agent,
             // The snapshot's agent-source literal lives in payload.agentSource,
             // not payload.agent (which holds the agent name).
-            agentSource:
-              typeof payload?.agentSource === "string"
-                && (payload.agentSource === "bundled" || payload.agentSource === "user" || payload.agentSource === "project")
-                ? payload.agentSource
-                : current.agentSource,
+            agentSource: agentSource ?? current.agentSource,
             ...(typeof payload?.sessionFile === "string" ? { sessionFile: payload.sessionFile } : {}),
+            ...(parentToolCallId ? { parentToolCallId } : {}),
             ...(typeof payload?.detached === "boolean" ? { detached: payload.detached } : {}),
             ...(task ? { task } : {}),
             ...(assignment !== undefined ? { assignment } : {}),
@@ -3870,90 +3891,60 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             lastUpdate: Date.now(),
             source: "live",
           };
+          if (target === -1) {
+            const next = [...prev, nextEntry];
+            subagentsRef.current = next;
+            return next;
+          }
           // Progress frames arrive every ~150ms; skip the rerender when no
           // displayed field actually changed (lastUpdate is never rendered;
           // undefined values are omitted by JSON.stringify).
           if (JSON.stringify({ ...current, lastUpdate: undefined }) === JSON.stringify({ ...nextEntry, lastUpdate: undefined })) return prev;
           const next = [...prev];
-          next[target] = nextEntry;
+          // A running child changing model is a handoff worth showing; a
+          // fallback is reported as one (activity + notice) instead.
+          next[target] = progress?.resolvedModelIsFallback ? nextEntry : withModelHandoff(current, nextEntry);
+          subagentsRef.current = next;
           return next;
         });
-        break;
-      }
-      case "subagent_event": {
-        // An events-level subscription embeds raw child-session events here.
-        // The transcript remains paged on the server; a per-child revision
-        // tells an open dialog to fetch only the appended byte range. Also
-        // keep a bounded live-activity buffer for the transcript dialog.
-        const payload = event.payload as { id?: unknown; event?: unknown } | undefined;
-        const subagentId = typeof payload?.id === "string" ? payload.id : null;
-        const childEvent = isRecord(payload?.event) ? payload.event : null;
-        const childType = typeof childEvent?.type === "string" ? childEvent.type : null;
-        const attribution = fallbackAttributionForSubagentEvent(payload, subagentsRef.current);
-        if (attribution && childType === "auto_retry_start") {
-          const errorMessage = typeof childEvent?.errorMessage === "string" && childEvent.errorMessage.trim()
-            ? childEvent.errorMessage.trim()
-            : undefined;
-          if (errorMessage) retryErrorByJobRef.current.set(fallbackJobKey(attribution.job), errorMessage);
-        } else if (attribution && childType === "retry_fallback_applied") {
-          announceFallbackApplied(
-            attribution,
-            typeof childEvent?.from === "string" ? childEvent.from : "?",
-            typeof childEvent?.to === "string" ? childEvent.to : "?",
-          );
-        } else if (attribution && childType === "retry_fallback_succeeded") {
-          announceFallbackSucceeded(attribution, typeof childEvent?.model === "string" ? childEvent.model : "?");
+        if (!subagentId || !progress) break;
+        const activity = activityFromProgressChange(previousProgress, progress);
+        const fallback = activity.find((entry) => entry.kind === "retry_fallback_applied");
+        if (fallback?.from && fallback.to) {
+          announceFallbackApplied(fallbackAttributionForSubagent(subagentId, progress.modelRole, subagentsRef.current), fallback.from, fallback.to);
         }
-        const progressPatch = parseSubagentProgressEvent(payload);
-        if (subagentId && progressPatch) {
-          setSubagents((prev) => {
-            const target = prev.findIndex((subagent) => subagent.id === subagentId);
-            if (target === -1) return prev;
-            const current = prev[target];
-            const nextEntry: SubagentInfo = {
-              ...current,
-              progress: { ...current.progress, ...progressPatch },
-              lastUpdate: Date.now(),
-              source: "live",
-            };
-            const next = [...prev];
-            next[target] = nextEntry;
-            subagentsRef.current = next;
-            return next;
+        if (activity.length > 0) {
+          setSubagentEvents((prev) => {
+            const existing = prev[subagentId] ?? [];
+            const merged = [...existing, ...activity];
+            const nextEvents = merged.length > SUBAGENT_ACTIVITY_BUFFER_MAX
+              ? merged.slice(merged.length - SUBAGENT_ACTIVITY_BUFFER_MAX)
+              : merged;
+            // Re-key first so pruning evicts the LEAST recently UPDATED ids
+            // (a plain spread keeps an existing key at its original position
+            // and can evict an actively-updated early id).
+            const next = { ...prev };
+            delete next[subagentId];
+            next[subagentId] = nextEvents;
+            return pruneSubagentIdMap(next);
           });
         }
-        if (subagentId) {
-          const pending = subagentVersionFlushRef.current ?? (subagentVersionFlushRef.current = new Set());
-          pending.add(subagentId);
-          if (subagentVersionFlushFrameRef.current === null) {
-            subagentVersionFlushFrameRef.current = requestAnimationFrame(() => {
-              subagentVersionFlushFrameRef.current = null;
-              const queued = subagentVersionFlushRef.current;
-              subagentVersionFlushRef.current = null;
-              if (!queued || queued.size === 0) return;
-              setSubagentTranscriptVersions((prev) => {
-                let next = prev;
-                for (const id of queued) next = { ...next, [id]: (next[id] ?? 0) + 1 };
-                return pruneSubagentIdMap(next);
-              });
-            });
-          }
-          const activity = parseSubagentActivityEvent(payload);
-          if (activity) {
-            setSubagentEvents((prev) => {
-              const existing = prev[subagentId] ?? [];
-              const nextEvents = existing.length >= SUBAGENT_ACTIVITY_BUFFER_MAX
-                ? [...existing.slice(existing.length - SUBAGENT_ACTIVITY_BUFFER_MAX + 1), activity]
-                : [...existing, activity];
-              // Re-key first so pruning evicts the LEAST recently UPDATED ids
-              // (a plain spread keeps an existing key at its original position
-              // and can evict an actively-updated early id).
-              const next = { ...prev };
-              delete next[subagentId];
-              next[subagentId] = nextEvents;
+        // A per-child revision tells an open transcript dialog to fetch only
+        // the byte range appended since; batched to one bump per frame.
+        const pending = subagentVersionFlushRef.current ?? (subagentVersionFlushRef.current = new Set());
+        pending.add(subagentId);
+        if (subagentVersionFlushFrameRef.current === null) {
+          subagentVersionFlushFrameRef.current = requestAnimationFrame(() => {
+            subagentVersionFlushFrameRef.current = null;
+            const queued = subagentVersionFlushRef.current;
+            subagentVersionFlushRef.current = null;
+            if (!queued || queued.size === 0) return;
+            setSubagentTranscriptVersions((prev) => {
+              let next = prev;
+              for (const id of queued) next = { ...next, [id]: (next[id] ?? 0) + 1 };
               return pruneSubagentIdMap(next);
             });
-          }
+          });
         }
         break;
       }
@@ -5192,28 +5183,34 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             setAgentRunning(true);
             setAgentPhase(agentState.state?.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
             dispatch({ type: "start" });
-            void connectEvents(session.id);
-            // Register the host-tool + URI bridges so the agent can call
-            // open_url/notify/open_file and resolve pi-web://clipboard.
-            void registerHostTools(session.id);
-            void registerHostUriSchemes(session.id);
-            // Rehydrate the live roster (missed lifecycle/progress frames).
-            // Tracked + session-guarded: a session switch during the delay must
-            // not issue a stale get_subagents against the old session.
-            if (rosterRefreshTimerRef.current) {
-              clearTimeout(rosterRefreshTimerRef.current);
-              rosterRefreshTimerRef.current = null;
-            }
-            const rosterTimerSid = session.id;
-            rosterRefreshTimerRef.current = setTimeout(() => {
-              rosterRefreshTimerRef.current = null;
-              if (sessionIdRef.current !== rosterTimerSid) return;
-              void refreshSubagentRoster(rosterTimerSid);
-            }, 600);
             if (knownActive && !agentState.state?.isStreaming && agentState.state?.isPromptRunning) {
               void waitForPromptSettlement(session.id);
             }
           }
+          // Any live engine gets the event stream and a roster read, even
+          // when its main agent is idle: background (async) subagents keep
+          // working after the main turn ends, and their frames only reach a
+          // page that is listening. Attaching to a live child spawns nothing
+          // (only `running: false` means there is none), and an attached
+          // stream is also what keeps a viewed session warm.
+          void connectEvents(session.id);
+          // Register the host-tool + URI bridges so the agent can call
+          // open_url/notify/open_file and resolve pi-web://clipboard.
+          void registerHostTools(session.id);
+          void registerHostUriSchemes(session.id);
+          // Rehydrate the live roster (missed lifecycle/progress frames).
+          // Tracked + session-guarded: a session switch during the delay must
+          // not issue a stale get_subagents against the old session.
+          if (rosterRefreshTimerRef.current) {
+            clearTimeout(rosterRefreshTimerRef.current);
+            rosterRefreshTimerRef.current = null;
+          }
+          const rosterTimerSid = session.id;
+          rosterRefreshTimerRef.current = setTimeout(() => {
+            rosterRefreshTimerRef.current = null;
+            if (sessionIdRef.current !== rosterTimerSid) return;
+            void refreshSubagentRoster(rosterTimerSid);
+          }, 600);
           if (agentState.state?.isBashRunning) {
             bashRunningRef.current = true;
             setBashRunning(true);

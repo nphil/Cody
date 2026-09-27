@@ -9,7 +9,7 @@ import { createJiti } from "jiti";
 // jiti for the same reason.
 const jiti = createJiti(import.meta.url, { tsconfigPaths: true });
 const {
-  fallbackAttributionForSubagentEvent,
+  fallbackAttributionForSubagent,
   isFastModeUnavailableError,
   pendingModelSwitchApplied,
   queueModelSwitch,
@@ -93,11 +93,8 @@ test("a stale model reply is ignored after the user changes sessions", () => {
   assert.equal(pendingModelSwitchApplied(applying, "session-a", { provider: "provider-b", modelId: "next" }), true);
 });
 
-test("a wrapped child fallback is attributed to that subagent, not the main conversation", () => {
-  const attribution = fallbackAttributionForSubagentEvent(
-    { id: "Scout", event: { type: "retry_fallback_applied", role: "default" } },
-    [{ id: "Scout", agent: "task" }],
-  );
+test("a child's fallback is attributed to that subagent, not the main conversation", () => {
+  const attribution = fallbackAttributionForSubagent("Scout", "default", [{ id: "Scout", agent: "task" }]);
 
   assert.deepEqual(attribution, {
     role: "default",

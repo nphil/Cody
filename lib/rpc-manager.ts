@@ -210,6 +210,19 @@ const READY_TIMEOUT_MS = 120_000;
  *  goes away. A browser page reconnecting (reload, sleep, network blip) comes
  *  back well inside this, and must not re-send the tool roster twice. */
 const DEVICE_TOOLS_RELEASE_GRACE_MS = 30_000;
+/**
+ * Subagent frames Cody asks omp for: lifecycle + progress, never "events".
+ * The events level forwards every child's streaming delta as a subagent_event
+ * carrying the FULL message so far (~70 KB each, one per token batch). Five
+ * children thinking at once produced 5.3 GB of output in five minutes;
+ * omp spilled it to a temp file and then drained it to Cody at ~270 KB/s,
+ * so every later frame of that session — replies, agent_end, the answer to
+ * get_subagents — arrived hours late, and the subagents vanished from view.
+ * Progress frames (throttled by omp to ~7/s per child, ~11 KB) already carry
+ * everything the UI shows: current tool, recent tools, model, fallback,
+ * retry state.
+ */
+const SUBAGENT_SUBSCRIPTION_LEVEL = "progress";
 
 /**
  * System prompt for sidebar chat sessions.
@@ -1371,13 +1384,13 @@ export class AgentSessionWrapper {
   private async initialize(): Promise<void> {
     const ready = await this.proc.waitReady(READY_TIMEOUT_MS);
     await this.proc.negotiateProtocol(ready);
-    // Subscribe to subagent lifecycle/progress/event frames so the UI can show
-    // a live subagent roster. Older omp builds may not know the command —
+    // Subscribe to subagent lifecycle/progress frames so the UI can show a
+    // live subagent roster. Older omp builds may not know the command —
     // degrade silently (the UI falls back to no subagent info). Engines whose
     // protocol has no subagent surface (pi) are never asked: their id-less
     // unknown-command responses can never settle the request.
     if (this.engine.rpcUi.subagentEvents) {
-      await this.proc.sendCommand({ type: "set_subagent_subscription", level: "events" }).catch(() => {});
+      await this.proc.sendCommand({ type: "set_subagent_subscription", level: SUBAGENT_SUBSCRIPTION_LEVEL }).catch(() => {});
     }
     // Publish host tools before the first turn. Minimal profiles publish an
     // empty set to clear registrations retained by a resumed engine session;
@@ -2688,7 +2701,7 @@ export class AgentSessionWrapper {
         const ready = await proc.waitReady(READY_TIMEOUT_MS);
         await proc.negotiateProtocol(ready);
         if (this.engine.rpcUi.subagentEvents) {
-          await proc.sendCommand({ type: "set_subagent_subscription", level: "events" }).catch(() => {});
+          await proc.sendCommand({ type: "set_subagent_subscription", level: SUBAGENT_SUBSCRIPTION_LEVEL }).catch(() => {});
         }
         if (this.engine.rpcUi.hostTools) {
           await this.publishHostTools({ force: true }).catch(() => {});

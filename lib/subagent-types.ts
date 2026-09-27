@@ -47,9 +47,9 @@ export interface SubagentProgress {
   extractedToolData?: Record<string, unknown[]>;
 }
 
-/** Compact live-activity entry derived from subagent_event frames. */
+/** Compact live-activity entry, derived from successive progress frames. */
 export interface SubagentActivityEvent {
-  kind: "tool" | "text" | "notice" | "model_changed" | "thinking_level_changed" | "retry_fallback_applied";
+  kind: "tool" | "model_changed" | "thinking_level_changed" | "retry_fallback_applied";
   label: string;
   ts: number;
   from?: string;
@@ -136,21 +136,6 @@ function splitResolvedModel(value: string): { resolvedModel: string; thinkingLev
   return EXPLICIT_THINKING_LEVELS.has(thinkingLevel)
     ? { resolvedModel: value.slice(0, separator), thinkingLevel }
     : { resolvedModel: value };
-}
-
-function wrappedSubagentEvent(value: unknown): Record<string, unknown> | null {
-  if (!isRecord(value)) return null;
-  return isRecord(value.event) ? value.event : null;
-}
-
-function resolvedModelFromEvent(event: Record<string, unknown>): string | undefined {
-  const direct = asString(event.resolvedModel) ?? asString(event.model);
-  if (direct !== undefined) return direct;
-  const model = isRecord(event.model) ? event.model : null;
-  const provider = asString(model?.provider) ?? asString(event.provider);
-  const modelId = asString(model?.id) ?? asString(event.modelId);
-  if (!modelId) return undefined;
-  return provider ? provider + "/" + modelId : modelId;
 }
 
 /** Defensively copy an AgentProgress-shaped object into a SubagentProgress. */
@@ -304,85 +289,40 @@ export function parseSubagentLifecycle(value: unknown): SubagentInfo | undefined
   return info;
 }
 
-/** Apply model/reasoning state carried by a wrapped child event to its live progress. */
-export function parseSubagentProgressEvent(value: unknown): Partial<Pick<SubagentProgress, "resolvedModel" | "resolvedModelIsFallback" | "thinkingLevel">> | undefined {
-  const event = wrappedSubagentEvent(value);
-  if (!event) return undefined;
-  const type = asString(event.type);
-  if (type === "thinking_level_changed") {
-    const thinkingLevel = asString(event.thinkingLevel);
-    return thinkingLevel ? { thinkingLevel } : undefined;
+/**
+ * What changed between two progress snapshots of one child, as activity
+ * entries: a tool it started, a model switch (a fallback when the new model
+ * is marked as one), a reasoning-level change. Progress frames are omp's
+ * throttled summary (~7/s per child), so a tool that starts and ends between
+ * two frames is not seen — the transcript still has it.
+ */
+export function activityFromProgressChange(
+  previous: SubagentProgress | undefined,
+  next: SubagentProgress,
+  ts: number = Date.now(),
+): SubagentActivityEvent[] {
+  const events: SubagentActivityEvent[] = [];
+  const tool = next.currentTool;
+  if (tool && (tool !== previous?.currentTool || next.currentToolStartMs !== previous?.currentToolStartMs)) {
+    const intent = next.lastIntent?.trim();
+    const args = next.currentToolArgs?.trim();
+    const label = intent
+      ? "→ " + tool + ": " + intent
+      : args ? "→ " + tool + " (" + args.slice(0, 80) + ")" : "→ " + tool;
+    events.push({ kind: "tool", label, ts });
   }
-  if (type === "retry_fallback_applied") {
-    const to = asString(event.to);
-    if (!to) return { resolvedModelIsFallback: true };
-    const parsed = splitResolvedModel(to);
-    return {
-      resolvedModel: parsed.resolvedModel,
-      resolvedModelIsFallback: true,
-      ...(parsed.thinkingLevel ? { thinkingLevel: parsed.thinkingLevel } : {}),
-    };
+  const from = previous?.resolvedModel;
+  const to = next.resolvedModel;
+  if (from && to && from !== to) {
+    events.push(next.resolvedModelIsFallback && !previous?.resolvedModelIsFallback
+      ? { kind: "retry_fallback_applied", label: "Fallback: " + from + " → " + to, from, to, ts }
+      : { kind: "model_changed", label: to, to, ts });
   }
-  if (type === "model_changed") {
-    const model = resolvedModelFromEvent(event);
-    if (!model) return undefined;
-    const parsed = splitResolvedModel(model);
-    return {
-      resolvedModel: parsed.resolvedModel,
-      ...(parsed.thinkingLevel ? { thinkingLevel: parsed.thinkingLevel } : {}),
-    };
+  const thinkingLevel = next.thinkingLevel;
+  if (previous?.thinkingLevel && thinkingLevel && thinkingLevel !== previous.thinkingLevel) {
+    events.push({ kind: "thinking_level_changed", label: thinkingLevel, thinkingLevel, ts });
   }
-  return undefined;
-}
-
-/** Extract a compact live-activity entry from a subagent_event payload. */
-export function parseSubagentActivityEvent(value: unknown): SubagentActivityEvent | null {
-  const event = wrappedSubagentEvent(value);
-  if (!event) return null;
-  const type = asString(event.type);
-  const ts = Date.now();
-  if (type === "tool_execution_start") {
-    const toolName = asString(event.toolName) ?? "tool";
-    const intent = asString(event.intent)?.trim();
-    if (intent) return { kind: "tool", label: "→ " + toolName + ": " + intent, ts };
-    const args = isRecord(event.args) ? Object.keys(event.args).slice(0, 3).join(", ") : undefined;
-    return { kind: "tool", label: args ? "→ " + toolName + " (" + args + ")" : "→ " + toolName, ts };
-  }
-  if (type === "message_end") {
-    const message = isRecord(event.message) ? event.message : null;
-    if (message && message.role === "assistant") {
-      const content = message.content;
-      const text = typeof content === "string"
-        ? content
-        : Array.isArray(content)
-          ? content
-            .filter((block): block is { type: "text"; text?: unknown } => isRecord(block) && block.type === "text")
-            .map((block) => (typeof block.text === "string" ? block.text : ""))
-            .join("\n")
-          : "";
-      const trimmed = text.trim();
-      if (trimmed) return { kind: "text", label: trimmed.slice(0, 140), ts };
-    }
-  }
-  if (type === "notice") {
-    const message = asString(event.message);
-    if (message) return { kind: "notice", label: message.slice(0, 140), ts };
-  }
-  if (type === "model_changed") {
-    const model = resolvedModelFromEvent(event);
-    return { kind: "model_changed", label: model ?? "Model changed", ...(model ? { to: splitResolvedModel(model).resolvedModel } : {}), ts };
-  }
-  if (type === "thinking_level_changed") {
-    const thinkingLevel = asString(event.thinkingLevel);
-    return { kind: "thinking_level_changed", label: thinkingLevel ?? "Reasoning changed", ...(thinkingLevel ? { thinkingLevel } : {}), ts };
-  }
-  if (type === "retry_fallback_applied") {
-    const from = asString(event.from);
-    const to = asString(event.to);
-    const label = from && to ? "Fallback: " + from + " → " + to : "Fallback applied";
-    return { kind: "retry_fallback_applied", label, ...(from ? { from } : {}), ...(to ? { to } : {}), ts };
-  }
-  return null;
+  return events;
 }
 
 // SubagentInfo is defined here so server-side history and the hook share the

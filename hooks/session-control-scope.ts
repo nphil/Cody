@@ -153,20 +153,15 @@ export function fallbackAttributionForRole(
   };
 }
 
-/** Attribute an embedded child event to its wrapper id, never the parent session. */
-export function fallbackAttributionForSubagentEvent(
-  payload: unknown,
+/** Attribute a child's model fallback to that subagent, never the parent session. */
+export function fallbackAttributionForSubagent(
+  subagentId: string,
+  role: unknown,
   subagents: readonly FallbackSubagent[],
-): ModelFallbackAttribution | null {
-  if (!payload || typeof payload !== "object") return null;
-  const wrapper = payload as { id?: unknown; event?: unknown };
-  if (typeof wrapper.id !== "string" || !wrapper.id) return null;
-  const event = wrapper.event && typeof wrapper.event === "object"
-    ? wrapper.event as { role?: unknown }
-    : null;
+): ModelFallbackAttribution {
   return {
-    role: normalizedRole(event?.role),
-    job: subagentJob(wrapper.id, subagents),
+    role: normalizedRole(role),
+    job: subagentJob(subagentId, subagents),
   };
 }
 
