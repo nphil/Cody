@@ -38,7 +38,7 @@ import { SESSION_AWARENESS_TOOLS, type SessionLivePhase, type SessionToolContext
 import { findUserById, hasAnyUser, type UserRecord } from "./auth/users";
 import { DEVICE_OPERATION_TOOLS } from "./devices/operation-tools";
 import { DEVICE_TOOLS } from "./devices/tools";
-import { aliasDeviceBridge, getDeviceBridge, peekDeviceBridge } from "./devices/bus";
+import { aliasDeviceBridge, getDeviceBridge } from "./devices/bus";
 import type {
   BashResultInfo,
   HostToolDefinition,
@@ -206,6 +206,10 @@ interface CompactionResultLike {
 
 const IDLE_DESTROY_MS = 10 * 60 * 1000;
 const READY_TIMEOUT_MS = 120_000;
+/** How long a session's hardware tools stay published after its last device
+ *  goes away. A browser page reconnecting (reload, sleep, network blip) comes
+ *  back well inside this, and must not re-send the tool roster twice. */
+const DEVICE_TOOLS_RELEASE_GRACE_MS = 30_000;
 
 /**
  * System prompt for sidebar chat sessions.
@@ -449,6 +453,13 @@ const PASSTHROUGH_COMMANDS = new Set([
   "get_login_providers",
   "login",
 ]);
+
+/** Read-only, argument-free snapshots. omp answers commands one at a time,
+ *  so while one of these is still waiting its turn, another identical ask
+ *  joins it instead of queuing a second copy: after a stall, a page's
+ *  pollers had stacked dozens of get_state calls that the child then worked
+ *  through one by one ahead of the user's next message. */
+const COALESCED_READS: Record<string, true> = { get_state: true, get_subagents: true };
 
 // Commands the wrapper settles locally (or forwards conditionally) — exempt
 // from the engine RPC-vocabulary gate below, because rejecting them would
@@ -885,17 +896,22 @@ export class AgentSessionWrapper {
    */
   private stopLatch: { aborting: boolean } | null = null;
   /**
-   * Messages sent while a run is live are held HERE, not in the engine's
+   * Follow-ups sent while a run is live are held HERE, not in the engine's
    * queue: omp's RPC has no way to take a message back out of its queue, so
    * only a message Cody still holds can really be edited, deleted, or handed
-   * back on Stop. They go to the engine exactly when it would read them
-   * anyway — steers when a tool batch starts (omp reads its steer queue when
-   * the batch ends), everything when the run is over — in the order sent.
+   * back on Stop. They go to the engine when the run is over, in the order
+   * sent — exactly when omp would have read them anyway.
+   *
+   * Steers are never held. A steer is an interruption: omp delivers it into
+   * the reply it is streaming (live steering), cuts a running tool batch
+   * short, or reads it at the next step boundary. Holding one until a tool
+   * started meant a steer typed while the model was writing waited for the
+   * whole reply and then arrived as a brand-new prompt.
    */
   private heldQueue: HeldMessage[] = [];
-  /** Tools executing right now. A steer sent while one runs goes straight to
-   *  the engine (its interrupt mode may cut that tool short), not into the hold. */
-  private toolsRunning = 0;
+  /** Re-checks a non-empty hold until the run it waited on is over, so a
+   *  follow-up can never be stranded by an agent_end that raced its arrival. */
+  private heldGuard: ReturnType<typeof setInterval> | null = null;
   private handOverChain: Promise<void> = Promise.resolve();
   /** omp announced a retry (`auto_retry_start`) whose `auto_retry_end` has not come. */
   private retryAnnounced = false;
@@ -913,6 +929,9 @@ export class AgentSessionWrapper {
   private fastModeEnabled = false;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private onDestroyCallback: (() => void) | null = null;
+  /** Told when this session closes, so an attached event stream ends instead
+   *  of staying open on a dead child (see onClose). */
+  private closeListeners = new Set<() => void>();
   private onIdentityChangeCallback: ((oldId: string, newId: string) => void) | null = null;
   private unsubscribeFrames: (() => void) | null = null;
   private initPromise: Promise<void> | null = null;
@@ -923,6 +942,15 @@ export class AgentSessionWrapper {
   private operationWatch: (() => void) | null = null;
   /** Unsubscribe for the device-bridge watch, set once the session id is known. */
   private deviceWatch: (() => void) | null = null;
+  /** Whether the hardware tools beyond `device_list` are published. Follows
+   *  the granted-device count, but lets go only after a grace period. */
+  private workingDeviceToolsPublished = false;
+  private deviceToolsReleaseTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The roster (and URI schemes) the current child last accepted. omp
+   *  answers commands one at a time, and a tool-roster change is announced
+   *  in the transcript, so an identical roster is never sent twice. */
+  private publishedHostToolsSignature: string | null = null;
+  private publishedHostUriSchemesSignature: string | null = null;
   /** Host tools the web UI registered via set_host_tools (agent-callable). */
   private hostToolNames: Set<string> = new Set();
   private hostTools: Array<Record<string, unknown>> = [];
@@ -984,6 +1012,38 @@ export class AgentSessionWrapper {
     return [...this.hostTools, ...SERVER_HOST_TOOLS, ...this.deviceToolsForSession()];
   }
 
+  /** Send the tool roster unless the child already has exactly this one.
+   *  `force` is for a child that has just started and has nothing yet. */
+  private async publishHostTools(options: { force?: boolean } = {}): Promise<void> {
+    const tools = this.hostToolsForCurrentProfile();
+    const signature = JSON.stringify(tools);
+    if (!options.force && signature === this.publishedHostToolsSignature) return;
+    this.publishedHostToolsSignature = null;
+    await this.proc.sendCommand({ type: "set_host_tools", tools });
+    this.publishedHostToolsSignature = signature;
+  }
+
+  private async publishHostUriSchemes(options: { force?: boolean } = {}): Promise<void> {
+    const signature = JSON.stringify(this.hostUriSchemeEntries);
+    if (!options.force && signature === this.publishedHostUriSchemesSignature) return;
+    this.publishedHostUriSchemesSignature = null;
+    await this.proc.sendCommand({ type: "set_host_uri_schemes", schemes: this.hostUriSchemeEntries });
+    this.publishedHostUriSchemesSignature = signature;
+  }
+
+  private inFlightReads = new Map<string, Promise<unknown>>();
+
+  /** One outstanding copy of a COALESCED_READS command at a time. */
+  private coalescedRead<T>(type: string): Promise<T> {
+    const existing = this.inFlightReads.get(type);
+    if (existing) return existing as Promise<T>;
+    const pending: Promise<unknown> = this.proc.sendCommand<T>({ type }).finally(() => {
+      if (this.inFlightReads.get(type) === pending) this.inFlightReads.delete(type);
+    });
+    this.inFlightReads.set(type, pending);
+    return pending as Promise<T>;
+  }
+
   /**
    * The working tools exist only while a page is actually holding hardware
    * for this session. Registering all seven unconditionally would spend
@@ -991,35 +1051,39 @@ export class AgentSessionWrapper {
    * use — and offering a model `device_write` with nothing attached invites
    * it to try.
    *
-   * `device_list` is the exception, and is published whenever a browser is
-   * attached at all. A capability the model cannot SEE is one it never
-   * suggests: with nothing granted yet, an agent asked to talk to a plugged-in
-   * board had no way to learn that the browser it is being read in can reach
-   * USB, serial and BLE directly. One small schema buys that, and the tool's
-   * own output names the next step (grant a device in the Devices panel) and
-   * reports what this particular browser can do — which differs per machine,
-   * since the human may be on a laptop, a phone or a tablet.
+   * `device_list` is the exception, and is always published. A capability the
+   * model cannot SEE is one it never suggests: with nothing granted yet, an
+   * agent asked to talk to a plugged-in board had no way to learn that the
+   * browser it is being read in can reach USB, serial and BLE directly. Its
+   * own output names the next step (open the Devices panel) and reports what
+   * the attached browser can do, or that none is attached.
+   *
+   * It used to follow the browser's device socket instead, and that socket
+   * comes and goes with every reload, session switch, backgrounded phone tab
+   * and network blip. Each flip re-sent the whole tool roster to omp, which
+   * announced it in the transcript ("xd://: unmounted device_list", then
+   * "mounted") and handled it on the same one-at-a-time command line a
+   * message waits in — a burst of flips was a burst of delay before a send.
    */
   private deviceToolsForSession(): HostToolDefinition[] {
-    if (!this._sessionId) return [];
-    const bridge = peekDeviceBridge(this._sessionId);
-    if (!bridge?.attached) return [];
-    const published = bridge.list().length > 0
+    const published = this.workingDeviceToolsPublished
       ? [...DEVICE_TOOLS, ...DEVICE_OPERATION_TOOLS]
       : DEVICE_TOOLS.filter((tool) => tool.name === "device_list");
     return published.map(({ handler: _handler, ...tool }) => tool);
   }
 
-  /** Re-publish the tool list when a browser or its hardware comes or goes,
-   * and say so once in the transcript: a tool that silently materializes
+  /** Re-publish the tool list when this session gains or loses hardware, and
+   * say so once in the transcript: a tool that silently materializes
    * mid-conversation is a capability the model has no reason to go looking
-   * for. Attachment is tracked alongside the device count because a browser
-   * arriving with nothing granted still changes the published set — that is
-   * when `device_list` appears. */
+   * for. Only the "any hardware at all" transition changes the published
+   * set, and a loss is published only once it has lasted
+   * DEVICE_TOOLS_RELEASE_GRACE_MS, so a socket that drops and comes straight
+   * back changes nothing the engine sees. */
   private watchDeviceBridge(): void {
     if (!this._sessionId || this.deviceWatch) return;
-    const bridge = peekDeviceBridge(this._sessionId);
-    if (!bridge) return;
+    // Created if absent: a page usually attaches after the session starts,
+    // and a watch that was never installed would miss its hardware entirely.
+    const bridge = getDeviceBridge(this._sessionId);
     if (!this.operationWatch) {
       this.operationWatch = bridge.onOperation((snapshot, event) => {
         if (!this.isAlive()) return;
@@ -1044,8 +1108,16 @@ export class AgentSessionWrapper {
         this.emit({ type: "notice", level, message });
       });
     }
+    const republish = () => {
+      if (!this.engine.rpcUi.hostTools || !this.isAlive()) return;
+      void this.publishHostTools().catch(() => {});
+    };
     let lastAttached = bridge.attached;
     let lastCount = bridge.attached ? bridge.list().length : 0;
+    if (lastCount > 0 && !this.workingDeviceToolsPublished) {
+      this.workingDeviceToolsPublished = true;
+      republish();
+    }
     this.deviceWatch = bridge.onChange(() => {
       const attached = bridge.attached;
       const count = attached ? bridge.list().length : 0;
@@ -1053,8 +1125,22 @@ export class AgentSessionWrapper {
       const previous = lastCount;
       lastAttached = attached;
       lastCount = count;
-      if (!this.engine.rpcUi.hostTools || !this.isAlive()) return;
-      void this.proc.sendCommand({ type: "set_host_tools", tools: this.hostToolsForCurrentProfile() }).catch(() => {});
+      if (count > 0) {
+        clearTimeout(this.deviceToolsReleaseTimer ?? undefined);
+        this.deviceToolsReleaseTimer = null;
+        if (!this.workingDeviceToolsPublished) {
+          this.workingDeviceToolsPublished = true;
+          republish();
+        }
+      } else if (this.workingDeviceToolsPublished && !this.deviceToolsReleaseTimer) {
+        this.deviceToolsReleaseTimer = setTimeout(() => {
+          this.deviceToolsReleaseTimer = null;
+          if (lastCount > 0 || !this.workingDeviceToolsPublished) return;
+          this.workingDeviceToolsPublished = false;
+          republish();
+        }, DEVICE_TOOLS_RELEASE_GRACE_MS);
+        this.deviceToolsReleaseTimer.unref?.();
+      }
       if (count > 0 && previous === 0) {
         const labels = bridge.list().map((device) => device.label).join(", ");
         this.emit({
@@ -1105,7 +1191,7 @@ export class AgentSessionWrapper {
       this.planKeeper = new PlanKeeper({
         sessionId: this._sessionId,
         getTodoPhases: async () => {
-          const state = await this.proc.sendCommand<RpcSessionState>({ type: "get_state" });
+          const state = await this.coalescedRead<RpcSessionState>("get_state");
           return state.todoPhases ?? [];
         },
         setTodoPhases: async (phases) => {
@@ -1297,7 +1383,7 @@ export class AgentSessionWrapper {
     // empty set to clear registrations retained by a resumed engine session;
     // engines without this surface are never asked.
     if (this.engine.rpcUi.hostTools) {
-      await this.proc.sendCommand({ type: "set_host_tools", tools: this.hostToolsForCurrentProfile() }).catch(() => {});
+      await this.publishHostTools({ force: true }).catch(() => {});
     }
     const state = await this.proc.sendCommand<RpcSessionState>({ type: "get_state" });
     this.applyIdentity(state);
@@ -1401,9 +1487,8 @@ export class AgentSessionWrapper {
       case "agent_end":
         if (event.isTerminal !== false) {
           this.lastTerminalAgentEndAt = Date.now();
-          this.toolsRunning = 0;
-          // The run is over: held messages go now (after this frame's flags settle).
-          setTimeout(() => this.flushHeld("all"), 0);
+          // The run is over: held follow-ups go now (after this frame's flags settle).
+          setTimeout(() => this.flushHeld(), 0);
           // The run a `started` message began is over, so that message was
           // consumed even when no user message_end matched it (a slash or
           // skill prompt the engine expanded) and no prompt_result names it
@@ -1462,7 +1547,6 @@ export class AgentSessionWrapper {
         break;
       }
       case "tool_execution_end": {
-        this.toolsRunning = Math.max(0, this.toolsRunning - 1);
         const toolName = typeof event.toolName === "string" ? event.toolName : "tool";
         this.getPlanKeeper()?.notifyToolExecutionEnd(toolName, event.args, event.result);
         break;
@@ -1521,11 +1605,6 @@ export class AgentSessionWrapper {
         return;
       case "auto_retry_start":
         this.retryAnnounced = true;
-        break;
-      case "tool_execution_start":
-        this.toolsRunning += 1;
-        // omp reads its steer queue when this tool batch ends.
-        this.flushHeld("steers");
         break;
       case "auto_retry_end":
         this.retryAnnounced = false;
@@ -2376,7 +2455,10 @@ export class AgentSessionWrapper {
   private resetIdleTimer(): void {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = setTimeout(() => {
-      if (this.isRunning()) {
+      // A session someone has open stays warm. Disposing it under an attached
+      // viewer meant their next message paid a cold spawn plus omp's first-
+      // prompt preparation (measured ~7 s) before the agent even started.
+      if (this.isRunning() || this.listeners.length > 0) {
         this.resetIdleTimer();
         return;
       }
@@ -2409,6 +2491,19 @@ export class AgentSessionWrapper {
 
   onDestroy(cb: () => void): void {
     this.onDestroyCallback = cb;
+  }
+
+  /** Called once when this session closes (idle, restart, crash, delete).
+   *  An event stream must end then: a stream still subscribed to a dead
+   *  wrapper hears nothing from the replacement a later command spawns, so
+   *  the page sat on "Sending…" until a manual refresh. */
+  onClose(listener: () => void): () => void {
+    if (!this._alive) {
+      listener();
+      return () => {};
+    }
+    this.closeListeners.add(listener);
+    return () => { this.closeListeners.delete(listener); };
   }
 
   /** Called when a session-changing command re-keyed this wrapper (branch/new_session/switch_session). */
@@ -2596,9 +2691,9 @@ export class AgentSessionWrapper {
           await proc.sendCommand({ type: "set_subagent_subscription", level: "events" }).catch(() => {});
         }
         if (this.engine.rpcUi.hostTools) {
-          await proc.sendCommand({ type: "set_host_tools", tools: this.hostToolsForCurrentProfile() }).catch(() => {});
+          await this.publishHostTools({ force: true }).catch(() => {});
           if (this.hostUriSchemeEntries.length) {
-            await proc.sendCommand({ type: "set_host_uri_schemes", schemes: this.hostUriSchemeEntries }).catch(() => {});
+            await this.publishHostUriSchemes({ force: true }).catch(() => {});
           }
         }
         const state = await proc.sendCommand<RpcSessionState>({ type: "get_state" });
@@ -2720,29 +2815,36 @@ export class AgentSessionWrapper {
     this.pruneDeliveryLedger();
   }
 
-  /** Hold a message sent while a run is live (see heldQueue). */
-  private holdMessage(clientMessageId: string, command: Record<string, unknown>, behavior: "steer" | "followUp"): { delivery: "queued"; clientMessageId: string; held: true } {
+  /** Hold a follow-up sent while a run is live (see heldQueue). */
+  private holdMessage(clientMessageId: string, command: Record<string, unknown>): { delivery: "queued"; clientMessageId: string; held: true } {
     this.beginDeliveryRecord(clientMessageId, command, "prompt");
     const entry = this.deliveryLedger.get(clientMessageId);
     if (entry) this.deliveryLedger.set(clientMessageId, { ...entry, held: true });
-    this.heldQueue.push({ clientMessageId, message: command.message as string, images: command.images, behavior });
+    this.heldQueue.push({ clientMessageId, message: command.message as string, images: command.images, behavior: "followUp" });
     this.transitionDelivery(clientMessageId, "queued");
-    // A run that was already ending when this arrived must not strand it.
-    const guard = setTimeout(() => {
-      if (!this.streaming && !this.promptRunning) this.flushHeld("all");
-    }, 1_500);
-    guard.unref?.();
+    // The run's agent_end normally flushes the hold. This covers the one it
+    // cannot: a run that ended in the instant this message arrived. It keeps
+    // checking until the hold is empty, so nothing waits on a single timer.
+    if (!this.heldGuard) {
+      this.heldGuard = setInterval(() => {
+        if (this.heldQueue.length === 0 || !this.isAlive()) {
+          clearInterval(this.heldGuard ?? undefined);
+          this.heldGuard = null;
+          return;
+        }
+        if (!this.streaming && !this.promptRunning) this.flushHeld();
+      }, 1_000);
+      this.heldGuard.unref?.();
+    }
     return { delivery: "queued", clientMessageId, held: true };
   }
 
-  /** Hand held messages to the engine, in the order they were sent: steers
-   *  when a tool batch starts, everything once the run is over. Never while a
-   *  user Stop holds. */
-  private flushHeld(kind: "steers" | "all"): void {
+  /** Hand every held follow-up to the engine, in the order sent, once the
+   *  run is over. Never while a user Stop holds. */
+  private flushHeld(): void {
     if (this.stopLatch || this.heldQueue.length === 0) return;
-    const ready = kind === "all" ? this.heldQueue : this.heldQueue.filter((held) => held.behavior === "steer");
-    if (ready.length === 0) return;
-    this.heldQueue = kind === "all" ? [] : this.heldQueue.filter((held) => held.behavior !== "steer");
+    const ready = this.heldQueue;
+    this.heldQueue = [];
     for (const held of ready) {
       this.handOverChain = this.handOverChain.then(() => this.handOver(held)).catch(() => {});
     }
@@ -2800,13 +2902,16 @@ export class AgentSessionWrapper {
     return { withdrawn: true, text: held.message, images: Array.isArray(held.images) ? held.images : [] };
   }
 
-  /** Turn a held follow-up into a steer (delivered at the next tool boundary). */
+  /** Turn a held follow-up into a steer: it leaves the hold and goes to the
+   *  engine now, exactly like a steer typed during the run. */
   promoteQueued(clientMessageId: string): boolean {
-    const held = this.heldQueue.find((candidate) => candidate.clientMessageId === clientMessageId);
+    const index = this.heldQueue.findIndex((candidate) => candidate.clientMessageId === clientMessageId);
     const entry = this.deliveryLedger.get(clientMessageId);
-    if (!held || !entry?.held) return false;
+    if (index === -1 || !entry?.held) return false;
+    const [held] = this.heldQueue.splice(index, 1);
     held.behavior = "steer";
     this.deliveryLedger.set(clientMessageId, { ...entry, behavior: "steer", updatedAt: Date.now() });
+    this.handOverChain = this.handOverChain.then(() => this.handOver(held)).catch(() => {});
     return true;
   }
 
@@ -2975,11 +3080,13 @@ export class AgentSessionWrapper {
           if (prior && !this.clientMessageOutcomes.has(clientMessageId)) return prior;
         }
         return this.dedupeByClientMessageId(clientMessageId, async () => {
-          // Sent while a run is live: held here, editable, until the engine
-          // would read it anyway (heldQueue).
-          if (streamingBehavior && clientMessageId && (this.streaming || this.promptRunning)
-            && !(streamingBehavior === "steer" && this.toolsRunning > 0)) {
-            return this.holdMessage(clientMessageId, command, streamingBehavior);
+          // A follow-up sent while a run is live is held here, editable, until
+          // the run ends (heldQueue) — as is one sent behind follow-ups still
+          // held, so the order Enter was pressed survives. A steer always goes
+          // straight to the engine: it is meant to interrupt.
+          if (streamingBehavior === "followUp" && clientMessageId
+            && (this.streaming || this.promptRunning || this.heldQueue.length > 0)) {
+            return this.holdMessage(clientMessageId, command);
           }
           this.beginDeliveryRecord(clientMessageId, command, type);
           // Authoritative on the wrapper's OWN isRunning(), never the
@@ -3115,7 +3222,7 @@ export class AgentSessionWrapper {
       }
 
       case "get_state": {
-        const state = await this.proc.sendCommand<RpcSessionState>({ type: "get_state" });
+        const state = await this.coalescedRead<RpcSessionState>("get_state");
         return this.buildWebState(state);
       }
 
@@ -3285,9 +3392,7 @@ export class AgentSessionWrapper {
         const valid = tools.filter((t) => typeof t.name === "string" && t.name && !SERVER_HOST_TOOL_NAMES.has(t.name as string));
         this.hostToolNames = new Set(valid.map((t) => t.name as string));
         this.hostTools = valid;
-        if (this.engine.rpcUi.hostTools) {
-          await this.proc.sendCommand({ type: "set_host_tools", tools: this.hostToolsForCurrentProfile() });
-        }
+        if (this.engine.rpcUi.hostTools) await this.publishHostTools();
         return null;
       }
 
@@ -3306,9 +3411,7 @@ export class AgentSessionWrapper {
           }
         }
         this.hostUriSchemeEntries = schemes;
-        if (this.engine.rpcUi.hostTools) {
-          await this.proc.sendCommand({ type: "set_host_uri_schemes", schemes });
-        }
+        if (this.engine.rpcUi.hostTools) await this.publishHostUriSchemes();
         return null;
       }
 
@@ -3320,7 +3423,9 @@ export class AgentSessionWrapper {
 
       default: {
         if (PASSTHROUGH_COMMANDS.has(type)) {
-          const result: unknown = await this.proc.sendCommand(command as { type: string });
+          const result: unknown = COALESCED_READS[type] && Object.keys(command).length === 1
+            ? await this.coalescedRead(type)
+            : await this.proc.sendCommand(command as { type: string });
           if (type === "set_thinking_level") invalidateSessionListCache();
           return result ?? null;
         }
@@ -3346,6 +3451,10 @@ export class AgentSessionWrapper {
     if (!this._alive) return;
     this._alive = false;
     if (this.idleTimer) clearTimeout(this.idleTimer);
+    clearInterval(this.heldGuard ?? undefined);
+    clearTimeout(this.deviceToolsReleaseTimer ?? undefined);
+    this.deviceToolsReleaseTimer = null;
+    this.heldGuard = null;
     if (this.sessionFileSignalTimer) {
       clearTimeout(this.sessionFileSignalTimer);
       this.sessionFileSignalTimer = null;
@@ -3369,6 +3478,13 @@ export class AgentSessionWrapper {
     this.pendingHostUris.clear();
     this.hostUriSchemes.clear();
     this.onDestroyCallback?.();
+    // After the registry forgot this wrapper, so a stream that reconnects in
+    // response reaches a fresh child rather than this one.
+    const closeListeners = [...this.closeListeners];
+    this.closeListeners.clear();
+    for (const listener of closeListeners) {
+      try { listener(); } catch { /* one stream's cleanup must not stop another's */ }
+    }
     notifyRunningChange();
     await disposed;
   }

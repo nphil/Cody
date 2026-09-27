@@ -60,6 +60,7 @@ export async function GET(
     start(controller) {
       let closed = false;
       let unsubscribe: (() => void) | null = null;
+      let offClose: (() => void) | null = null;
       // Backpressure slot: while the consumer is behind (desiredSize < 0),
       // replaceable `message_update` frames collapse to the latest one (omp
       // sends the FULL accumulated message each time, so latest-wins is safe).
@@ -112,6 +113,7 @@ export async function GET(
         closed = true;
         clearInterval(heartbeat);
         unsubscribe?.();
+        offClose?.();
         try {
           controller.close();
         } catch {
@@ -139,6 +141,14 @@ export async function GET(
       // to resume below is idle by definition — the spawn is a brand-new child
       // that inherited no turn, and no agent_end will ever arrive for the one
       // that died. A client waiting on that turn must stop waiting.
+      // A closed stream is re-opened by the browser after `retry` ms. It
+      // closes on purpose when the session behind it closes (below), and the
+      // default ~3 s would leave a restarted chat deaf for that long.
+      try {
+        controller.enqueue(encoder.encode("retry: 1000\n\n"));
+      } catch {
+        closed = true;
+      }
       encode({ type: "connected", sessionId: id, running: alive ? alive.isRunning() : false });
 
       void (async () => {
@@ -157,6 +167,11 @@ export async function GET(
         }
         if (closed) return;
         unsubscribe = session.onEvent((event) => encode(event));
+        // The session can close under an open stream: idle, a settings
+        // restart, a crash. Staying subscribed to it would hear nothing from
+        // the replacement the next command spawns, so end the stream instead;
+        // the browser reconnects, and that reconnect starts the new child.
+        offClose = session.onClose(cleanup);
       })();
     },
     cancel() {

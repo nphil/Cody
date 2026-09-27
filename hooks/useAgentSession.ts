@@ -751,6 +751,9 @@ const EVENT_STREAM_SLOW_CONNECT_MS = 4_000;
 // unanswered after this is not a slow start: it is a request that will never
 // come back, and waiting on it forever is exactly the wedge this cap removes.
 const PROMPT_SEND_TIMEOUT_MS = 30_000;
+// How often an accepted-but-unsettled send re-reads its status from the
+// server, in case the frame that would have settled it was missed.
+const OUTBOX_LEDGER_POLL_MS = 3_000;
 // How often the stream watchdog re-checks a believed-running turn. Cheap: it
 // reads two refs and sets a boolean React bails out of when unchanged.
 const STREAM_HEALTH_POLL_MS = 2_000;
@@ -2212,7 +2215,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       let hasOpened = false;
       es.onopen = () => {
         settle("connected");
-        if (hasOpened) refreshOutboxLedgerRef.current?.(sid);
+        if (hasOpened) {
+          // The browser re-opened this stream on its own. The server ends a
+          // stream when the session behind it closes (idle, a settings
+          // restart, a crash), so this reconnect may have reached a NEW
+          // child: re-register what the old one knew, and re-check every
+          // unfinished send against the server's record.
+          reconnectActionsRef.current?.(sid);
+          refreshOutboxLedgerRef.current?.(sid);
+        }
         hasOpened = true;
       };
 
@@ -3237,7 +3248,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         for (const entry of candidates) {
           const delivery = byId.get(entry.id);
           if (delivery && delivery.status !== "unknown") {
-            next = applyServerDelivery(next, entry.id, delivery.status, delivery.error);
+            next = applyServerDelivery(next, entry.id, delivery.status, delivery.error, delivery.held);
           }
         }
         return next;
@@ -3301,6 +3312,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       case "agent_start":
         interruptReplyPendingRef.current = false;
+        // A run this page did not start (a held follow-up the server handed
+        // over when the last run ended, a queued message the engine drained)
+        // is still a new run: give it its own id, so the previous run's
+        // terminal reload — often still in flight — cannot land on top of it.
+        if (!agentRunningRef.current) promptRunIdRef.current += 1;
         agentRunningRef.current = true;
         assistantProviderCallRef.current = true;
         retryErrorByJobRef.current.clear();
@@ -5257,6 +5273,34 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setOutbox(readPersistedOutbox(sid));
     refreshOutboxLedger(sid);
   }, [session?.id, refreshOutboxLedger]);
+
+  // A send the server accepted (queued or started) settles by a cody_delivery
+  // frame. A frame can still be missed — a stream that dropped and came back,
+  // a tab the browser throttled — and nothing else would ever revisit that row,
+  // which is how "Sent" sat on screen until a manual refresh. While any row is
+  // waiting on the server, re-read its status. The ledger read is a map lookup
+  // on the server, never a round trip to the engine.
+  const outboxAwaitingServer = outbox.some((entry) => entry.status === "queued" || entry.status === "started");
+  useEffect(() => {
+    const sid = session?.id;
+    if (!sid || !outboxAwaitingServer) return;
+    const timer = setInterval(() => {
+      const ids = readPersistedOutbox(sid)
+        .filter((entry) => entry.status === "queued" || entry.status === "started")
+        .map((entry) => entry.id);
+      if (ids.length === 0) return;
+      void getPromptDeliveryLedger(sid, ids).then((deliveries) => {
+        if (sessionIdRef.current !== sid) return;
+        for (const delivery of deliveries) {
+          if (delivery.status === "unknown") continue;
+          applyOutboxDelivery(sid, delivery.clientMessageId, delivery.status, delivery.error, delivery.held);
+        }
+      }).catch(() => {
+        // The next tick, a reconnect, or a session resume asks again.
+      });
+    }, OUTBOX_LEDGER_POLL_MS);
+    return () => clearInterval(timer);
+  }, [session?.id, outboxAwaitingServer, applyOutboxDelivery]);
 
   useEffect(() => {
     const resume = resumeLedger;

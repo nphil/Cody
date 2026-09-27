@@ -1406,8 +1406,9 @@ must name the panel that fixes it.
 ### RPC session lifecycle (`lib/rpc-manager.ts`)
 - One wrapper per session id, keyed in a `globalThis` registry.
 - `globalThis` survives Next.js hot-reload; plain module-level Map does not.
-- Idle sessions are disposed after a timeout; concurrent `startRpcSession()`
-  calls must share a single start promise.
+- Idle sessions are disposed after a timeout — never while an event stream is
+  attached (see "A viewed session stays warm" below); concurrent
+  `startRpcSession()` calls must share a single start promise.
 - **Every ack the wrapper awaits is bounded** (`PROMPT_ACK_TIMEOUT_MS`, 30 s):
   `RpcProcess.sendCommand` never times out unless told to, and a child that
   accepts a `prompt` (or the `/mcp list` prompt) but never acks it used to
@@ -2284,6 +2285,64 @@ second Enter was silently ignored while the first was in flight.
   `agentRunningRef` guard dropped steers that landed after a missed
   `agent_start`). The transcript is deduped against the loaded messages;
   `cody_delivery` independently settles the matching outbox entry by client ID.
+- **Steers go to the engine at once; only follow-ups are held.** A follow-up
+  sent mid-run (or behind follow-ups still held) waits in the wrapper's
+  `heldQueue` — editable, deletable, handed back on Stop — and goes out when
+  the run ends, with a 1 s guard that re-checks until the hold is empty. A
+  steer is never held: omp delivers it into the reply it is streaming (live
+  steering), cuts a tool batch short, or reads it at the next step. The 0.41
+  hold kept a steer typed while the model was only WRITING until the whole
+  reply finished, and then sent it as a brand-new prompt. Promote ("Steer")
+  on a held follow-up hands it over immediately.
+- **A missed frame cannot strand a row.** While any outbox row is `queued`
+  or `started`, the client re-reads the ledger every 3 s
+  (`OUTBOX_LEDGER_POLL_MS`, a map lookup on the server, never an engine round
+  trip). The ledger client accepts `withdrawn` and `held`: rejecting
+  `withdrawn` used to fail the WHOLE lookup, silently.
+- **A run the page did not start gets its own run id.** A held follow-up
+  handed over at `agent_end` starts a run server-side; `agent_start` with no
+  run believed active bumps `promptRunIdRef`, so the previous run's terminal
+  reload cannot land on top of the new one.
+
+### A viewed session stays warm, and a closed one never leaves a deaf stream
+- **Idle disposal skips a session with an attached event stream**
+  (`resetIdleTimer`). A cold child costs a spawn (~2.7 s) plus omp's first-
+  prompt preparation (~4 s, measured: the memory backend's first recall), so
+  disposing the chat a user is looking at turned their next message into a
+  ~7 s wait before the agent even started.
+- **Every close is announced** (`EngineSession.onClose`, both the omp wrapper
+  and `AcpEngineSession`): idle, `restartIdleRpcSessions` after a settings
+  save, a crash. The events route ends its stream on it, after sending
+  `retry: 1000`, so the browser reconnects within a second and that reconnect
+  starts the replacement child. Before this, a stream stayed subscribed to
+  the dead wrapper, the next POST spawned a new one nobody listened to, and
+  the page sat on "Sent" until a manual refresh showed the agent had moved on.
+  An auto-reconnect re-registers host tools and re-checks the outbox.
+- **The tool roster is sent only when it changes** (`publishHostTools`,
+  signature-deduped, forced for a fresh child). `device_list` is always
+  published; the working hardware tools follow the granted-device count and
+  are withdrawn only after `DEVICE_TOOLS_RELEASE_GRACE_MS`. `device_list`
+  used to follow the browser's device socket, which flaps on every reload,
+  session switch and backgrounded tab: each flip re-sent the roster to omp's
+  one-at-a-time command line (delaying a send queued behind it) and printed
+  "xd://: unmounted device_list" / "mounted device_list" into the transcript.
+- **Status reads coalesce** (`COALESCED_READS`: `get_state`, `get_subagents`).
+  While one is waiting its turn in omp's queue, an identical ask joins it. The
+  page's pollers (15 s reconcile, stream watchdog, turn-end refresh, the
+  subagent dialog, the plan keeper) otherwise stacked dozens of copies during
+  a stall, which the child then worked through one by one ahead of the next
+  prompt.
+- **A steer into a running turn takes no workspace checkpoint.** It exists to
+  interrupt, the workspace is mid-edit anyway, and it must not wait on a full
+  `git add -A` of the workspace before it reaches omp. Prompts that start a run
+  and mid-run follow-ups still snapshot as before.
+- **omp can freeze for minutes on its own databases.** Measured: after a turn,
+  omp's post-turn memory work waited ~4.5 min on a locked `agent.db`
+  (`SQLiteError: database is locked` in `~/.omp/logs`); bun's SQLite waits
+  synchronously, so the child answered NO command meanwhile — `get_state`,
+  `get_subagents` and the next prompt all queued. Cody cannot unlock it; the
+  bounded ack (202 pending), the ledger poll and the dedupe above are what keep
+  the UI truthful through it. Check those logs first when "Sending…" lingers.
 
 ### Composer-attached panels (`components/ComposerPanels.tsx`)
 - The live todo plan (`TodoList`) and the subagent roster live **pinned above

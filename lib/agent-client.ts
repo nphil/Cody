@@ -123,7 +123,7 @@ export async function sendPromptDelivery(
   return { status: res.status, ...body };
 }
 
-export type PromptDeliveryLedgerStatus = "queued" | "started" | "delivered" | "failed" | "unknown";
+export type PromptDeliveryLedgerStatus = "queued" | "started" | "delivered" | "failed" | "withdrawn" | "unknown";
 
 export interface PromptDeliveryLedgerItem {
   clientMessageId: string;
@@ -131,6 +131,8 @@ export interface PromptDeliveryLedgerItem {
   text?: string;
   imageCount?: number;
   behavior?: string;
+  /** Still in Cody's hold (editable), not yet in the engine's own queue. */
+  held?: boolean;
   rpcId?: string;
   acceptedAt?: number;
   updatedAt?: number;
@@ -159,7 +161,7 @@ export async function getPromptDeliveryLedger(
       body.code,
     );
   }
-  const validStatuses = new Set<PromptDeliveryLedgerStatus>(["queued", "started", "delivered", "failed", "unknown"]);
+  const validStatuses = new Set<PromptDeliveryLedgerStatus>(["queued", "started", "delivered", "failed", "withdrawn", "unknown"]);
   return body.deliveries.map((item) => {
     if (typeof item !== "object" || item === null || typeof (item as { clientMessageId?: unknown }).clientMessageId !== "string"
       || !validStatuses.has((item as { status?: PromptDeliveryLedgerStatus }).status as PromptDeliveryLedgerStatus)) {

@@ -387,6 +387,10 @@ export interface EngineSession {
   waitUntilReady(): Promise<void>;
   onEvent(listener: (event: EngineEvent) => void): () => void;
   onDestroy(cb: () => void): void;
+  /** Every listener runs once when the session closes, however it closed.
+   *  An attached event stream ends then, so the client reconnects to the
+   *  replacement instead of listening to a dead session. */
+  onClose(listener: () => void): () => void;
   onIdentityChange(cb: (oldId: string, newId: string) => void): void;
   send(command: Record<string, unknown>): Promise<unknown>;
   destroy(): void;

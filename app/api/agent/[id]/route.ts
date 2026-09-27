@@ -35,9 +35,12 @@ function commandErrorResponse(error: unknown) {
 }
 
 // POST /api/agent/[id] - Send a command to an existing session
-/** A workspace snapshot before every prompt: the agent is about to edit files,
- * and this is what makes "restore to before that message" possible. Failure is
- * deliberately silent — a missing checkpoint must never block a send. */
+/** A workspace snapshot before a prompt: the agent is about to edit files,
+ * and this is what makes "restore to before that message" possible. Failure
+ * is deliberately silent — a missing checkpoint must never block a send. A
+ * STEER into a running turn takes none: it exists to interrupt, the workspace
+ * is mid-edit (no clean restore point), and it must not wait on a full
+ * workspace scan first. */
 async function checkpointBeforePrompt(cwd: string, body: { type?: unknown; message?: unknown }): Promise<void> {
   if (body.type !== "prompt") return;
   const message = typeof body.message === "string" ? body.message : "";
@@ -94,7 +97,8 @@ export async function POST(
     // Fast path: already-running session
     const existing = getRpcSession(id);
     if (existing?.isAlive()) {
-      await checkpointBeforePrompt(existing.cwd, body);
+      const midRunSteer = existing.isRunning() && body.streamingBehavior === "steer";
+      if (!midRunSteer) await checkpointBeforePrompt(existing.cwd, body);
       return await sendWithAckBound(existing, body);
     }
 

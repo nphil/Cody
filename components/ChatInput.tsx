@@ -2854,7 +2854,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 color: failed ? "var(--status-error)" : "var(--text-muted)",
               }}>
                 {failed ? t("chatInput.outboxFailed")
-                  : editable ? (entry.behavior === "steer" ? t("chatInput.queuedSteer") : t("chatInput.queuedFollowUp"))
+                  : editable ? t("chatInput.queuedFollowUp")
                   : entry.status === "queued" ? t("chatInput.outboxHandedOver")
                   : entry.status === "started" ? t("chatInput.outboxStarted")
                   : t("chatInput.outboxSending")}
@@ -2881,11 +2881,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   <QueuedActionButton onClick={() => onRemoveQueuedMessage?.(entry.id)} title={t("chatInput.queuedDeleteTitle")}>
                     {t("chatInput.queuedDelete")}
                   </QueuedActionButton>
-                  {entry.behavior === "followUp" && (
-                    <QueuedActionButton onClick={() => onPromoteQueuedToSteer?.(entry.id)} title={t("chatInput.queuedSteerTitle")} accent>
-                      {t("chatInput.queuedSteerAction")}
-                    </QueuedActionButton>
-                  )}
+                  <QueuedActionButton onClick={() => onPromoteQueuedToSteer?.(entry.id)} title={t("chatInput.queuedSteerTitle")} accent>
+                    {t("chatInput.queuedSteerAction")}
+                  </QueuedActionButton>
                 </>
               )}
               {failed && (

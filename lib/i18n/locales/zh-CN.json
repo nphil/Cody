@@ -279,7 +279,6 @@
   "chatInput.queuedEdit": "编辑",
   "chatInput.queuedEditTitle": "编辑这条已排队消息",
   "chatInput.queuedFollowUp": "已排队的后续消息",
-  "chatInput.queuedSteer": "已排队的引导消息",
   "chatInput.queuedSteerAction": "引导",
   "chatInput.queuedSteerTitle": "将此消息作为引导发送",
   "chatInput.returnedQueuedNotice": "你当前的草稿未改动。也可以改用排队中的那条消息。",
