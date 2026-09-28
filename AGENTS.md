@@ -257,6 +257,14 @@ lib/
                        runtime selection state, three transports (rpc-ui, ACP,
                        per-turn), session index, binary probe + on-demand install
                        (docs/harnesses.md)
+    housekeeping.ts    the server's own daily cleanup (first run 60 s after
+                       boot, timers unref'd): today omp's temp leftovers via
+                       lib/omp/temp-files.ts — browser screenshots
+                       (`omp-sshots-*`) and helper stderr dirs
+                       (`omp-worker-stderr-*`) older than 7 days, in the
+                       temp dir every engine child shares. Built into Cody on
+                       purpose: an install must never depend on a host cron
+                       or user script to stop an engine's files piling up
     pi-settings.ts     pi's settings, derived from the settings TABLES in the
                        installed pi package's own docs/settings.md (parsed at
                        runtime, failing soft) and written back to
@@ -1955,6 +1963,17 @@ origin/session/device/protocol, use typed allowlisted vendor invocations (never
 shell/PATH passthrough), require native point-of-risk confirmation and
 revocation, and enforce the same backup/readback rule. It supplies no current
 vendor CLI parity, elevated capability, CMSIS-DAP, or generic UF2 flashing.
+### Nothing Cody or its engine writes may grow without bound
+- Every store that grows per turn, per spawn or per screenshot needs an owner
+  that prunes it, inside Cody (see `lib/harness/housekeeping.ts`) — never a
+  host cron. Measured on the owner's instance before this rule: 21 GB of leaked
+  checkpoint packs, a 5.2 GB memory DB, ~75 screenshots a day in /tmp, ~50 temp
+  dirs per `npm test`, and 7,700 memories (88% of the store) that were Cody's own
+  one-shot jobs (plan keeper, Distill, session namer, model planner) retained
+  because their overlay's memory switch was ignored. Those junk memories were
+  also RECALLED into real chats. When adding anything that writes per event,
+  add its pruning in the same change.
+
 ### Disk exhaustion is a first-class failure (`lib/disk-space.ts`)
 - The instance data dir is finite and often quota-capped (a ZFS dataset on
   Unraid appdata). When it fills, npm dies with `errno -122` — EDQUOT, which
