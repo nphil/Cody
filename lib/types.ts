@@ -452,3 +452,11 @@ export interface SessionContext {
   /** Latest persisted todo snapshot on the selected session branch. */
   todoPhases: TodoPhase[];
 }
+
+/** Answer to `steer_now`. `interrupted`: the model's reply was cut short and
+ *  the agent continues with this message now. `next_step`: a tool (or other
+ *  engine work) is running, which is never aborted for a steer, so the
+ *  message lands the moment that step ends. */
+export type SteerNowResult =
+  | { steered: true; mode: "interrupted" | "next_step" }
+  | { steered: false; reason: "unknown" | "sending" | "not_sent" | "already_read" | "not_steer" };

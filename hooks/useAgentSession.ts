@@ -9,6 +9,7 @@ import type {
   ExtensionWidgetItem,
   SessionInfo,
   SessionTreeNode,
+  SteerNowResult,
 } from "@/lib/types";
 import { normalizeToolCalls } from "@/lib/normalize";
 import {
@@ -3221,19 +3222,28 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (returned) opts.chatInputRef?.current?.prependDraft({ ...returned, source: "queue" });
   }, [withdrawQueuedMessage, opts.chatInputRef]);
 
-  const promoteQueuedToSteer = useCallback(async (id: string) => {
+  /** "Steer now" on a queued message (held follow-up or a steer the engine
+   *  has not read yet): the server cuts the model's current reply short so the
+   *  agent reads it at once, never aborting a running tool or subagent. */
+  const steerQueuedNow = useCallback(async (id: string) => {
     const sid = sessionIdRef.current;
     if (!sid || !id) return;
     try {
-      const result = await sendAgentCommand<{ promoted?: boolean }>(sid, { type: "promote_queued", clientMessageId: id });
-      if (result?.promoted !== true) {
-        addNotice({ type: "warning", message: translate("agentSession.queuedAlreadySent") });
+      const result = await sendAgentCommand<SteerNowResult>(sid, { type: "steer_now", clientMessageId: id });
+      if (!result?.steered) {
+        const reason = result?.reason;
+        const key = reason === "not_steer" ? "agentSession.steerNotSteer"
+          : reason === "sending" ? "agentSession.steerStillSending"
+          : reason === "already_read" ? null
+          : "agentSession.queuedAlreadySent";
+        if (key) addNotice({ type: "warning", message: translate(key) });
         return;
       }
       const entries = mutatePersistedOutbox(sid, (current) => current.map((entry) => (
-        entry.id === id && entry.status === "queued" ? { ...entry, behavior: "steer" as const } : entry
+        entry.id === id && entry.status === "queued" ? { ...entry, behavior: "steer" as const, held: false } : entry
       )));
       if (sessionIdRef.current === sid) setOutbox(entries);
+      if (result.mode === "next_step") addNotice({ type: "info", message: translate("agentSession.steerAfterTool") });
     } catch (e) {
       addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
     }
@@ -5623,7 +5633,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     respondToRefusalDecision,
     pendingInputs, respondToInput,
     handleRetryOutboxEntry, handleEditOutboxEntry,
-    removeQueuedMessage, editQueuedMessage, promoteQueuedToSteer,
+    removeQueuedMessage, editQueuedMessage, steerQueuedNow,
     handleBuiltinSlashCommand,
     handleThinkingLevelChange, handleModeChange, loadSlashCommands, setActiveLeafId, setData, setMessages,
     retryLoadSession,

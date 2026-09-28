@@ -49,7 +49,7 @@ import type {
   SessionStatsInfo,
   WebSessionState,
 } from "./pi-types";
-import type { ExtensionWidgetItem } from "./types";
+import type { ExtensionWidgetItem, SteerNowResult } from "./types";
 import type { OutboxImage } from "./outbox";
 
 // ============================================================================
@@ -192,6 +192,10 @@ interface HeldMessage {
   behavior: "steer" | "followUp";
 }
 
+/** How long after a "Steer now" abort the engine gets to start the run that
+ *  reads the steer before the aborted run's end is treated as a real end. */
+const STEER_CONTINUATION_GRACE_MS = 3_000;
+
 export type ServerDeliveryLedgerSnapshot =
   | (Omit<ServerDeliveryLedgerEntry, "status"> & { status: ServerDeliveryStatus })
   | { clientMessageId: string; status: "unknown" };
@@ -252,8 +256,22 @@ const SIDEBAR_CHAT_SYSTEM_PROMPT = [
  * operator's ambient config a single turn pulled 14k tokens of injected
  * context. `mcp.enableProjectConfig` joins them so a workspace's own
  * mcp.json cannot add tools either. Written once into the sidebar-chats dir;
- * rewritten if its content ever changes. */
-const SIDEBAR_OVERLAY_YAML = "memory.backend: off\nautolearn.enabled: false\nadvisor.enabled: false\nprewalk.enabled: false\nmcp.enableProjectConfig: false\n";
+ * rewritten if its content ever changes. NESTED keys only: a flat
+ * `memory.backend: off` is a key literally named "memory.backend", which omp
+ * ignores (see lib/model-plan/one-shot.ts). */
+const SIDEBAR_OVERLAY_YAML = [
+  "memory:",
+  "  backend: off",
+  "autolearn:",
+  "  enabled: false",
+  "advisor:",
+  "  enabled: false",
+  "prewalk:",
+  "  enabled: false",
+  "mcp:",
+  "  enableProjectConfig: false",
+  "",
+].join("\n");
 function sidebarOverlayPath(): string {
   const dir = getSidebarChatsDir();
   const file = path.join(dir, "overlay.yml");
@@ -485,7 +503,7 @@ const LOCAL_WRAPPER_COMMANDS = new Set([
   "host_uri_result",
   "respond_to_refusal_decision",
   "withdraw_queued",
-  "promote_queued",
+  "steer_now",
 ]);
 
 // pi-web commands with no omp RPC equivalent. The UI tolerates these failing.
@@ -926,6 +944,22 @@ export class AgentSessionWrapper {
    *  follow-up can never be stranded by an agent_end that raced its arrival. */
   private heldGuard: ReturnType<typeof setInterval> | null = null;
   private handOverChain: Promise<void> = Promise.resolve();
+  /**
+   * Tool calls the main agent is executing right now. "Steer now" only cuts
+   * the model's own reply short: a running tool (a shell command, a subagent
+   * launch) is never aborted for it, because omp already lands a steer at the
+   * end of a tool batch and nudges backgroundable tools to detach.
+   */
+  private runningToolCalls = new Set<string>();
+  /**
+   * Set while "Steer now" has aborted the model's reply so omp continues with
+   * the queued steer. omp restores that steer to its queue on abort and drains
+   * it at once (a queued steer bypasses its post-interrupt suppression), so the
+   * aborted run's terminal agent_end is really a hand-off, not the end: it is
+   * forwarded as non-terminal and the wrapper keeps its run state. If the
+   * engine has not started the continuation shortly after, the end is real.
+   */
+  private steerInterrupt: { timer: ReturnType<typeof setTimeout> | null } | null = null;
   /** omp announced a retry (`auto_retry_start`) whose `auto_retry_end` has not come. */
   private retryAnnounced = false;
   /** When the last terminal agent_end arrived, so a Stop knows whether it still owes one. */
@@ -1482,6 +1516,8 @@ export class AgentSessionWrapper {
       case "agent_start":
         this.streaming = true;
         this.lastReplyText = null;
+        // The continuation a "Steer now" was waiting for has begun.
+        this.clearSteerInterrupt();
         // The session file can appear just after the prompt acknowledgement.
         // Invalidate and signal the sidebar now rather than waiting for the
         // agent's first reply or terminal event.
@@ -1498,7 +1534,24 @@ export class AgentSessionWrapper {
         }
         break;
       case "agent_end":
+        if (event.isTerminal !== false && this.steerInterrupt && this.steerInterrupt.timer === null) {
+          // "Steer now" aborted the model's reply: omp is about to continue
+          // with the steer. Forward this end as a pause, keep the run state
+          // (no hand-over of held follow-ups mid-run), and fall back to a real
+          // end only if the continuation never starts.
+          event.isTerminal = false;
+          const pending = this.steerInterrupt;
+          pending.timer = setTimeout(() => {
+            if (this.steerInterrupt !== pending) return;
+            this.steerInterrupt = null;
+            this.handleFrame({ type: "agent_end", isTerminal: true, messages: [] } as unknown as RpcFrame);
+          }, STEER_CONTINUATION_GRACE_MS);
+          pending.timer.unref?.();
+          break;
+        }
         if (event.isTerminal !== false) {
+          this.clearSteerInterrupt();
+          this.runningToolCalls.clear();
           this.lastTerminalAgentEndAt = Date.now();
           // The run is over: held follow-ups go now (after this frame's flags settle).
           setTimeout(() => this.flushHeld(), 0);
@@ -1559,7 +1612,11 @@ export class AgentSessionWrapper {
         }
         break;
       }
+      case "tool_execution_start":
+        if (typeof event.toolCallId === "string") this.runningToolCalls.add(event.toolCallId);
+        break;
       case "tool_execution_end": {
+        if (typeof event.toolCallId === "string") this.runningToolCalls.delete(event.toolCallId);
         const toolName = typeof event.toolName === "string" ? event.toolName : "tool";
         this.getPlanKeeper()?.notifyToolExecutionEnd(toolName, event.args, event.result);
         break;
@@ -2915,17 +2972,53 @@ export class AgentSessionWrapper {
     return { withdrawn: true, text: held.message, images: Array.isArray(held.images) ? held.images : [] };
   }
 
-  /** Turn a held follow-up into a steer: it leaves the hold and goes to the
-   *  engine now, exactly like a steer typed during the run. */
-  promoteQueued(clientMessageId: string): boolean {
-    const index = this.heldQueue.findIndex((candidate) => candidate.clientMessageId === clientMessageId);
-    const entry = this.deliveryLedger.get(clientMessageId);
-    if (index === -1 || !entry?.held) return false;
-    const [held] = this.heldQueue.splice(index, 1);
-    held.behavior = "steer";
-    this.deliveryLedger.set(clientMessageId, { ...entry, behavior: "steer", updatedAt: Date.now() });
-    this.handOverChain = this.handOverChain.then(() => this.handOver(held)).catch(() => {});
-    return true;
+  /**
+   * "Steer now": make the agent read this message at once.
+   *
+   * A held follow-up first becomes a steer and goes to the engine. A steer the
+   * engine already queued is then read at once by cutting the model's CURRENT
+   * reply short (omp `abort`): omp puts the steer back in its queue and
+   * continues straight into it. Only the reply is interrupted — while a tool
+   * is running nothing is aborted (omp already lands the steer when the tool
+   * batch ends and asks backgroundable tools to detach), and subagents are
+   * separate sessions an abort never touches. A queued follow-up is not
+   * interrupted for: after an abort omp would leave it waiting.
+   */
+  async steerNow(clientMessageId: string): Promise<SteerNowResult> {
+    let entry = this.deliveryLedger.get(clientMessageId);
+    if (!entry) return { steered: false, reason: "unknown" };
+    const heldIndex = this.heldQueue.findIndex((candidate) => candidate.clientMessageId === clientMessageId);
+    if (heldIndex !== -1 && entry.held) {
+      const [held] = this.heldQueue.splice(heldIndex, 1);
+      held.behavior = "steer";
+      this.deliveryLedger.set(clientMessageId, { ...entry, behavior: "steer", updatedAt: Date.now() });
+      this.handOverChain = this.handOverChain.then(() => this.handOver(held)).catch(() => {});
+      await this.handOverChain;
+      entry = this.deliveryLedger.get(clientMessageId);
+      if (!entry) return { steered: false, reason: "unknown" };
+    }
+    if (entry.status === "failed" || entry.status === "withdrawn") return { steered: false, reason: "not_sent" };
+    if (entry.status === "sending") return { steered: false, reason: "sending" };
+    // Started a run of its own, or already in the conversation: being read.
+    if (entry.status !== "queued") return { steered: false, reason: "already_read" };
+    if (entry.behavior !== "steer") return { steered: false, reason: "not_steer" };
+    if (!this.isRunning() || this.compacting || this.stopLatch || this.steerInterrupt || this.runningToolCalls.size > 0) {
+      return { steered: true, mode: "next_step" };
+    }
+    const pending: { timer: ReturnType<typeof setTimeout> | null } = { timer: null };
+    this.steerInterrupt = pending;
+    try {
+      await this.proc.sendCommand({ type: "abort" });
+    } catch (error) {
+      if (this.steerInterrupt === pending) this.clearSteerInterrupt();
+      throw error;
+    }
+    return { steered: true, mode: "interrupted" };
+  }
+
+  private clearSteerInterrupt(): void {
+    if (this.steerInterrupt?.timer) clearTimeout(this.steerInterrupt.timer);
+    this.steerInterrupt = null;
   }
 
   /** Stop hands every held message back instead of letting it start a run —
@@ -3226,6 +3319,7 @@ export class AgentSessionWrapper {
         // sends again (stopLatch); subagents are never aborted from here.
         const requestedAt = Date.now();
         this.stopLatch = { aborting: false };
+        this.clearSteerInterrupt();
         this.returnHeldOnStop();
         await this.withFinalRunningNotification(async () => {
           await this.proc.sendCommand({ type: "abort" });
@@ -3358,9 +3452,9 @@ export class AgentSessionWrapper {
         return this.withdrawQueued(clientMessageId);
       }
 
-      case "promote_queued": {
+      case "steer_now": {
         const clientMessageId = typeof command.clientMessageId === "string" ? command.clientMessageId : "";
-        return { promoted: this.promoteQueued(clientMessageId) };
+        return this.steerNow(clientMessageId);
       }
 
       case "respond_to_refusal_decision": {

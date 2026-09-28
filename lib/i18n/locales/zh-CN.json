@@ -280,7 +280,7 @@
   "chatInput.queuedEditTitle": "编辑这条已排队消息",
   "chatInput.queuedFollowUp": "已排队的后续消息",
   "chatInput.queuedSteerAction": "引导",
-  "chatInput.queuedSteerTitle": "将此消息作为引导发送",
+  "chatInput.queuedSteerTitle": "让代理立即读取这条消息。会打断当前回复；正在运行的工具和子代理会继续。",
   "chatInput.returnedQueuedNotice": "你当前的草稿未改动。也可以改用排队中的那条消息。",
   "chatInput.useReturnedQueued": "使用排队的消息",
   "chatInput.recallQueueTitle": "移除所有排队消息并放回输入框以便编辑",
@@ -2193,5 +2193,8 @@
   "presets.diffUsageAware": "按用量回退",
   "presets.listSeparator": "、",
   "agentSession.queueReturnedOnStop": "已停止。{count} 条排队消息未发送，已放回输入框。",
-  "agentSession.queuedAlreadySent": "这条消息已交给代理，无法再修改或删除。"
+  "agentSession.queuedAlreadySent": "这条消息已交给代理，无法再修改或删除。",
+  "agentSession.steerAfterTool": "有工具正在运行，因此没有打断任何内容。该步骤一结束，代理就会读取你的消息。",
+  "agentSession.steerNotSteer": "这条消息已作为后续消息排队，无法提前。代理完成后会读取它。",
+  "agentSession.steerStillSending": "这条消息仍在发送给代理。请稍后再点“引导”。"
 }

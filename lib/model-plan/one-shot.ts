@@ -56,11 +56,22 @@ const STDERR_KEEP = 2_000;
 // operator's config the planner sent 14.1k input tokens and produced a spurious
 // extra turn, so the useful answer was not the last one; with this overlay plus
 // --no-prewalk it is a single turn at 10.5k.
+//
+// NESTED keys only: omp reads a config layer by path segments, so a flat
+// `memory.backend: off` line is a key literally named "memory.backend" and is
+// ignored (verified with `PI_CONFIG_FILES=<overlay> omp config get
+// memory.backend` on omp 18.3.4). Written flat, none of this applied, and every
+// Distill/session-name run booted the memory system: an ~800 MB embedding
+// worker per run, recall into the prompt, and its own transcript retained.
 const OVERLAY_YAML = [
-  "memory.backend: off",
-  "autolearn.enabled: false",
-  "advisor.enabled: false",
-  "prewalk.enabled: false",
+  "memory:",
+  "  backend: off",
+  "autolearn:",
+  "  enabled: false",
+  "advisor:",
+  "  enabled: false",
+  "prewalk:",
+  "  enabled: false",
   "",
 ].join("\n");
 

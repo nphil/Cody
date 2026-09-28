@@ -122,6 +122,14 @@ const SETTING_NOTES: Record<string, string> = {
   // disagree about what a spent quota should do.
   "retry.waitForUsageReset":
     "In Cody the wait appears as an auto-retry countdown that can last until the provider's reset (hours to a week) and holds subagents; Abort retry ends it. Cody's routing already routes roles around exhausted providers, so leave this off unless you want turns to block instead.",
+  // pi-mnemopi episodic-graph.ts ingestMemory(linkExisting: true): every new
+  // memory is scored against EVERY stored memory (content re-read + token
+  // Jaccard + entity/temporal queries), synchronously on the engine's JS
+  // thread. Measured on a real install (omp 18.3.4): ~10k memories, 20.6 M
+  // graph_edges rows, a 5.2 GB mnemopi.db, and each agent_end froze the whole
+  // session, subagents included, for 3 min 14 s. Grows with every memory.
+  "mnemopi.proactiveLinking":
+    "Slows down as memories pile up: after every reply the engine compares the new memory with every stored one, and the whole session (subagents included) is frozen while it does. On an install with ~10,000 memories this took over 3 minutes per reply and grew the memory database to 5 GB. Leave this off.",
 };
 
 /** The Cody-specific caveat for a setting, when one applies. */

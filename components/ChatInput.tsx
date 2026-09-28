@@ -203,8 +203,9 @@ interface Props {
   /** Remove one queued message from the queue panel (Edit/Delete/Steer). */
   onRemoveQueuedMessage?: (id: string) => void;
   onEditQueuedMessage?: (id: string) => void;
-  /** Relabel the first queued follow-up as a steering message. */
-  onPromoteQueuedToSteer?: (id: string) => void;
+  /** "Steer now": make the agent read a queued message at once (cuts its
+   *  current reply short; running tools and subagents keep going). */
+  onSteerQueuedNow?: (id: string) => void;
   /** Per-session send outbox (lib/outbox.ts): every send not yet confirmed
    *  delivered, rendered as a chip/row (sending → queued|started →
    *  delivered, or failed with Retry + Edit). */
@@ -612,7 +613,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   onEditOutboxEntry,
   onRemoveQueuedMessage,
   onEditQueuedMessage,
-  onPromoteQueuedToSteer,
+  onSteerQueuedNow,
   draftKey,
   cwd,
   activeGoal,
@@ -2822,6 +2823,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           // Only a message Cody's server still holds can be taken back; once
           // the engine has it, omp offers no way to pull it out again.
           const editable = entry.status === "queued" && entry.held === true;
+          // A steer the engine has but has not read yet (the agent is still
+          // thinking or writing): "Steer" cuts that reply short so it is read now.
+          const steerable = editable || (entry.status === "queued" && entry.held !== true && entry.behavior === "steer");
           return (
             <div
               key={entry.id}
@@ -2881,10 +2885,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   <QueuedActionButton onClick={() => onRemoveQueuedMessage?.(entry.id)} title={t("chatInput.queuedDeleteTitle")}>
                     {t("chatInput.queuedDelete")}
                   </QueuedActionButton>
-                  <QueuedActionButton onClick={() => onPromoteQueuedToSteer?.(entry.id)} title={t("chatInput.queuedSteerTitle")} accent>
-                    {t("chatInput.queuedSteerAction")}
-                  </QueuedActionButton>
                 </>
+              )}
+              {steerable && (
+                <QueuedActionButton onClick={() => onSteerQueuedNow?.(entry.id)} title={t("chatInput.queuedSteerTitle")} accent>
+                  {t("chatInput.queuedSteerAction")}
+                </QueuedActionButton>
               )}
               {failed && (
                 <>

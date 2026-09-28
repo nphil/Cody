@@ -280,7 +280,7 @@
   "chatInput.queuedEditTitle": "このキューされたメッセージを編集",
   "chatInput.queuedFollowUp": "キューされたフォローアップ",
   "chatInput.queuedSteerAction": "ステア",
-  "chatInput.queuedSteerTitle": "このメッセージをステアとして送信",
+  "chatInput.queuedSteerTitle": "今すぐエージェントに読ませます。現在の返信は中断されますが、実行中のツールやサブエージェントは続行します。",
   "chatInput.returnedQueuedNotice": "入力中の下書きはそのままです。キューにあったメッセージを代わりに使うこともできます。",
   "chatInput.useReturnedQueued": "キューのメッセージを使う",
   "chatInput.recallQueueTitle": "キュー内のすべてのメッセージを取り消し、編集のため入力欄に戻します",
@@ -2193,5 +2193,8 @@
   "presets.diffUsageAware": "使用量に応じたフォールバック",
   "presets.listSeparator": "、",
   "agentSession.queueReturnedOnStop": "停止しました。キューにあった {count} 件のメッセージは送信されず、入力欄に戻されました。",
-  "agentSession.queuedAlreadySent": "このメッセージはすでにエージェントに渡されたため、変更や削除はできません。"
+  "agentSession.queuedAlreadySent": "このメッセージはすでにエージェントに渡されたため、変更や削除はできません。",
+  "agentSession.steerAfterTool": "ツールの実行中のため、何も中断していません。そのステップが終わりしだい、エージェントがメッセージを読みます。",
+  "agentSession.steerNotSteer": "このメッセージはすでにフォローアップとしてキューに入っているため、前に移動できません。エージェントの作業が終わったら読まれます。",
+  "agentSession.steerStillSending": "このメッセージはまだエージェントに送信中です。少し待ってからもう一度ステアしてください。"
 }

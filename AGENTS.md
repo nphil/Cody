@@ -1246,6 +1246,13 @@ setting added upstream appears without a Cody change.
   without bouncing on its own save.
 - `jiti` must remain in `serverExternalPackages` — bundling it breaks its
   runtime file resolution.
+- **Trap — `ui` fields can be getters that throw.** In omp 18.3 some
+  descriptions are computed (`get description() { … formatKeyHint(…) }`) from
+  an import the source loader stubs, so reading one throws. Uncaught, that one
+  throw made `getOmpSettingsSchema()` return null and blanked the whole
+  settings panel (and every Cody note). `readText` in
+  `lib/omp/settings-schema.ts` reads each text field defensively and drops only
+  the field that failed.
 - Behavior sits with the other engine-scoped hubs in the registry, named from
   the active harness (`HarnessAdapter.shortName`, served by the schema
   route), so switching `CODY_HARNESS` renames it rather than requiring a UI
@@ -1996,6 +2003,33 @@ vendor CLI parity, elevated capability, CMSIS-DAP, or generic UF2 flashing.
     into live appdata — **465** stale `cody-ckpt-*` repos. The test now sets
     `PI_CODING_AGENT_DIR` to a temp dir BEFORE importing the module. Any test
     touching agent-dir state must do the same.
+- A second production failure was /data/home/LumaShow: it is not a git repo,
+  has no .gitignore, and contains about **4.3 GB** of untracked files (including
+  a ~1 GB Android NDK under tools/, 148 MB of tarballs under downloads/, a
+  538 MB disk image under backups/, and Rust target/ trees). Every 15-second
+  git add -A timeout left another 400–530 MB temporary pack/object behind:
+  **52 leaked packs used 21 GB**, and there were **zero successful checkpoints**.
+  Each send waited 15 seconds or longer before reaching the agent.
+- New shadow repos exclude common dependency, compiler and cache dirs:
+  node_modules/, target/, .gradle/, .venv/, venv/, __pycache__/,
+  .pytest_cache/, .mypy_cache/, .ruff_cache/, .next/, .nuxt/, .svelte-kit/,
+  .vite/, .output/, .turbo/, .cache/, dist/, and coverage/. NOT `build/`: in
+  plenty of projects that name holds source, and an excluded directory quietly
+  drops out of every undo snapshot.
+  Each snapshot measures untracked files and excludes files larger than 20 MB using
+  escaped, workspace-root-anchored literal patterns in the shadow repo's info/exclude.
+  Those per-file rules are regenerated every time, so a file that shrinks can be
+  captured later. Never exclude tracked files that grow; restore must be able to
+  put those back.
+- Sends spend at most 14 seconds on a snapshot. A timeout returns null and starts
+  one low-priority warm-up (up to 10 minutes); further sends skip immediately
+  while it runs. Restore uses the same per-workspace queue and waits for that
+  warm-up. If it fails, cody-backoff.json skips snapshots for six hours; a later
+  successful snapshot clears the marker.
+- After a timed-out git process is killed, temporary tmp_pack_*, tmp_obj_*, and
+  the fresh index.lock it left are removed. The first shadow-repo use in each
+  process also sweeps those leftovers and removes an index.lock older than the
+  snapshot timeout.
 
 ### Two kinds of branching — don't confuse them
 - **Fork** (Fork button on user message): creates a new independent `.jsonl` file. Shown as a child in the sidebar tree via `parentSession` header field.
@@ -2293,8 +2327,24 @@ second Enter was silently ignored while the first was in flight.
   steer is never held: omp delivers it into the reply it is streaming (live
   steering), cuts a tool batch short, or reads it at the next step. The 0.41
   hold kept a steer typed while the model was only WRITING until the whole
-  reply finished, and then sent it as a brand-new prompt. Promote ("Steer")
-  on a held follow-up hands it over immediately.
+  reply finished, and then sent it as a brand-new prompt.
+- **"Steer" is a real interrupt, and only of the model's reply**
+  (`steer_now`, `AgentSessionWrapper.steerNow`). The button shows on a held
+  follow-up AND on a steer the engine has queued but not read (the agent is
+  still thinking or writing — non-live-steering providers such as Anthropic
+  only read a steer when the reply ends). A held follow-up is first handed
+  over as a steer. Then, if no tool is running, the wrapper sends omp `abort`
+  WITHOUT the Stop latch: omp restores undelivered and live-steered messages
+  to its steering queue on abort, and a queued steer bypasses its
+  post-interrupt suppression, so it continues straight into the steer. That
+  aborted run's terminal `agent_end` is forwarded as NON-terminal (the page
+  keeps its run, held follow-ups are not flushed ahead of the steer); if no
+  `agent_start` follows within `STEER_CONTINUATION_GRACE_MS` the end is
+  replayed as real. While a tool runs nothing is aborted (`next_step`): omp
+  already lands the steer at the batch end and asks backgroundable bash/eval
+  to detach, and subagents are separate sessions an abort never touches. A
+  follow-up already in omp's queue is refused (`not_steer`): after an abort
+  omp would leave it waiting. A user Stop clears a pending steer interrupt.
 - **A missed frame cannot strand a row.** While any outbox row is `queued`
   or `started`, the client re-reads the ledger every 3 s
   (`OUTBOX_LEDGER_POLL_MS`, a map lookup on the server, never an engine round
@@ -2344,6 +2394,16 @@ second Enter was silently ignored while the first was in flight.
   `get_subagents` and the next prompt all queued. Cody cannot unlock it; the
   bounded ack (202 pending), the ledger poll and the dedupe above are what keep
   the UI truthful through it. Check those logs first when "Sending…" lingers.
+- **`mnemopi.proactiveLinking` freezes a session after every reply.** omp's
+  memory ingest (`pi-mnemopi` `EpisodicGraph.ingestMemory`, linkExisting)
+  scores each new memory against EVERY stored one on the engine's JS thread.
+  Measured on the owner's instance (omp 18.3.4, ~10k memories, 20.6 M
+  `graph_edges` rows, 5.2 GB `mnemopi.db`): each `agent_end` froze the whole
+  child — main agent AND in-process subagents, every transcript silent for
+  the same 3 min 14 s — so a message sent then sat at "Sending…". Off by
+  default in omp; Settings shows a Cody note on it (`SETTING_NOTES`). The
+  symptom to recognise: all of a session's subagent `.jsonl` files go quiet at
+  the same second and resume at the same second.
 
 ### Composer-attached panels (`components/ComposerPanels.tsx`)
 - The live todo plan (`TodoList`) and the subagent roster live **pinned above
@@ -2453,6 +2513,18 @@ second Enter was silently ignored while the first was in flight.
   keeps its OWN fresh directory per run instead of the shared one: it
   spends its turn on untrusted web content, so a longer-lived shared dir is
   the wrong shape for it regardless of the file-linking logic being shared.
+- **Trap — a config overlay must use NESTED keys.** omp resolves a setting
+  by path segments, so a flat `memory.backend: off` line in an overlay is a
+  key literally named "memory.backend" that nothing reads (verified with
+  `PI_CONFIG_FILES=<overlay> omp config get memory.backend`, omp 18.3.4). The
+  one-shot overlay (`lib/model-plan/one-shot.ts`) and the sidebar overlay
+  (`SIDEBAR_OVERLAY_YAML` in rpc-manager) were written flat, so none of their
+  switches applied: every Distill/session-name run booted the full memory
+  system (an ~800 MB embedding worker per run, recall into the prompt, its own
+  transcript retained into the shared memory DB), and the sidebar loaded the
+  workspace's project MCP config. ~4,400 omp processes a day were spawned on
+  the owner's instance. `one-shot.test.mjs` parses the overlay and fails on
+  any dotted top-level key.
 - **The subagent "summary" is not a model.** Chips and the transcript dialog
   show the raw tool-call intent strings and the verbatim `<id>.md`; the
   reusable one-shot mechanism is the session namer's `omp -p --mode=json`
