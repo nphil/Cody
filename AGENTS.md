@@ -18,6 +18,10 @@ npm run dev   # port 30178
 
 Typecheck: `node_modules/.bin/tsc --noEmit`  
 Lint: `npm run lint`  
+Tests: `npm test` (`scripts/test.mjs`) — runs the whole suite under a private
+`TMPDIR` that is deleted afterwards, because many tests `mkdtemp` and never
+remove what they made (one run used to leave ~50 dirs in `/tmp`). Add new test
+globs to its `SUITES` list.
 **Never run `next build` during dev** — pollutes `.next/` and breaks `npm run dev`.
 
 The dev server needs the `omp` binary installed (on `PATH`, or set `CODY_OMP_BIN`).
