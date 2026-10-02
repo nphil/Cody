@@ -1465,6 +1465,7 @@ export class DeviceBridgeConnection implements PageOperationBridge {
 
   destroy(): void {
     this.destroyed = true;
+    this.operationManager?.revokeAuthority("Device connection closed.");
     clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
     this.coalescer.destroy();
@@ -1620,6 +1621,7 @@ export class DeviceBridgeConnection implements PageOperationBridge {
     if (this.lifecycleUnsubs.has(id)) return;
     const unsubscribe = watchDeviceLifecycle(id, {
       onGone: (reason) => {
+        this.operationManager?.deviceDisconnected(id);
         this.lifecycleUnsubs.delete(id);
         if (!deviceLeases.isBorrowed(id)) deviceLeases.releaseGoneDevice(id);
         this.send({ type: "gone", deviceId: id, reason });
@@ -1813,12 +1815,14 @@ export class DeviceBridgeConnection implements PageOperationBridge {
     deviceLeases.claim(this.sessionId, info.id);
     const entry = registry.get(info.id);
     if (entry?.kind === "usb" && entry.stableIdentity) rememberUsbOwner(entry.stableIdentity, this.sessionId);
+    this.operationManager?.setShellAccess(info.id, false);
     this.watchLifecycle(info.id);
     this.refresh();
     return info;
   }
 
   async disconnectDevice(id: string): Promise<void> {
+    this.operationManager?.deviceDisconnected(id);
     const rawLease = deviceLeases.claimForRawOperation(this.sessionId, id);
     try {
       this.lifecycleUnsubs.get(id)?.();

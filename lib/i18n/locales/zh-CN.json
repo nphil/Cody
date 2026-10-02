@@ -1,4 +1,13 @@
 {
+  "devices.shellAllow": "允许代理在 {device} 上运行 shell 命令，直到断开连接",
+  "devices.shellRevoke": "撤销代理在 {device} 上的 shell 权限",
+  "devices.shellGranted": "代理的 shell 权限已开启。命令和输出会显示在操作日志中。撤销权限会取消正在运行的代理 ADB 操作，但无法撤销已执行的命令。",
+  "devices.shellRestricted": "代理的 shell 权限已关闭。你仍可使用自己的终端。",
+  "devices.adbTerminal": "ADB 终端 — {device}",
+  "devices.terminalStart": "打开终端",
+  "devices.terminalStop": "关闭终端",
+  "devices.terminalInput": "终端输入",
+  "devices.terminalSend": "发送",
   "agentSession.commandCompleted": "命令已完成",
   "agentSession.commandFailed": "命令失败",
   "agentSession.commandRequiresArgs": "用法：{command} {usage}",

@@ -2057,6 +2057,14 @@ or cross another session. Use the Devices panel's explicit download to retain an
 important backup outside browser storage. An output backup is selectable as a new input without download/re-upload; selecting it does not itself restore anything, and there is no generic or automatic restore. The panel displays artifact hashes, output,
 progress, cancellation, and the exact confirmation footprint.
 
+ADB shell authority is separate from the USB grant. `ShellAccessControl` grants
+agent shell access for this device connection only; revoke, disconnect, re-grant,
+or page replacement removes it and cancels active agent ADB work. `DeviceTerminal`
+is user-driven and does not grant agent access. `device_exec` streams arbitrary
+shell commands only with that grant; without it the four read-only diagnostics
+remain available. `device_monitor` / `device_monitor_send` also support an ADB
+PTY. Requests/options cannot supply the grant or impersonate the panel.
+
 #### Verified flashing is intrinsic, never caller-designed
 
 A caller cannot supply a layout, geometry, protections, or approval in

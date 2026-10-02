@@ -1,4 +1,13 @@
 {
+  "devices.shellAllow": "Allow the agent to run shell commands on {device} until disconnect",
+  "devices.shellRevoke": "Revoke agent shell access on {device}",
+  "devices.shellGranted": "Agent shell access is on. Commands and output appear in the operation log. Revoking cancels active agent ADB operations, but cannot undo commands already run.",
+  "devices.shellRestricted": "Agent shell access is off. You can still use your own terminal.",
+  "devices.adbTerminal": "ADB terminal — {device}",
+  "devices.terminalStart": "Open terminal",
+  "devices.terminalStop": "Close terminal",
+  "devices.terminalInput": "Terminal input",
+  "devices.terminalSend": "Send",
   "agentSession.commandCompleted": "Command completed",
   "agentSession.commandFailed": "Command failed",
   "agentSession.commandRequiresArgs": "Usage: {command} {usage}",

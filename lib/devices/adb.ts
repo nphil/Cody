@@ -67,11 +67,17 @@ void serializer.readable
     outputFailure = error;
   });
 const serializerWriter = serializer.writable.getWriter();
-const writable = new Consumable.WritableStream<AdbPacketInit>({
+const writable = new AdbWritableStream<Consumable<AdbPacketInit>>({
   async write(packet) {
-    if (outputFailure !== undefined) throw outputFailure;
-    await serializerWriter.write(new Consumable(packet));
-    if (outputFailure !== undefined) throw outputFailure;
+    // A failed write rejects both write() and consumed. Observe the duplicate
+    // consumed rejection even when the upstream writer exits on write() first.
+    void packet.consumed.catch(() => undefined);
+    await packet.tryConsume(async (value) => {
+      if (outputFailure !== undefined) throw outputFailure;
+      const serialized = new Consumable(value);
+      await Promise.all([serializerWriter.write(serialized), serialized.consumed]);
+      if (outputFailure !== undefined) throw outputFailure;
+    });
   },
   close() {
     return serializerWriter.close();
@@ -128,9 +134,8 @@ async function adbFor(context: HardwareContext): Promise<Adb> {
   adbSessions.set(context.transport, pending);
   try {
     const adb = await pending;
-    void adb.disconnected.then(() => {
-      adbSessions.delete(context.transport);
-    });
+    const forget = () => { adbSessions.delete(context.transport); };
+    void adb.disconnected.then(forget, forget);
     return adb;
   } catch (error) {
     adbSessions.delete(context.transport);
@@ -139,7 +144,8 @@ async function adbFor(context: HardwareContext): Promise<Adb> {
     if (existing) {
       const restored = Promise.resolve(existing);
       adbSessions.set(context.transport, restored);
-      void existing.disconnected.then(() => adbSessions.delete(context.transport));
+      const forget = () => { adbSessions.delete(context.transport); };
+      void existing.disconnected.then(forget, forget);
       return existing;
     } }
     throw new AdbProtocolError(
@@ -622,19 +628,71 @@ async function reconnectStaging(context: HardwareContext): Promise<AdbStagingIo>
 
 
 
-function literalReadOnlyShellCommand(request: HardwareRequest): string {
+function shellCommand(request: HardwareRequest, context: HardwareContext): string {
   const command = request.command;
-  if (!command?.trim()) throw new AdbProtocolError("ADB shell requires a non-empty command.");
-  if (!/^(?:id|uname -a|df -h|getprop(?: ro\.[A-Za-z0-9_.-]+)?)$/.test(command)) {
-    throw new AdbProtocolError("ADB shell supports only literal read-only diagnostics: id, uname -a, df -h, or getprop [ro.*].");
+  if (!command?.trim() || command.includes("\0")) throw new AdbProtocolError("ADB shell requires a non-empty command without NUL bytes.");
+  if (!context.shellAccess?.() && !/^(?:id|uname -a|df -h|getprop(?: ro\.[A-Za-z0-9_.-]+)?)$/.test(command)) {
+    throw new AdbProtocolError("Allow agent shell access in the Devices panel first. Without it, only literal read-only diagnostics are available: id, uname -a, df -h, or getprop [ro.*].");
   }
   return command;
 }
 
+async function streamShellOutput(stream: AdbReadableStream<Uint8Array>, context: HardwareContext): Promise<string> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let tail = "";
+  try {
+    for (;;) {
+      context.signal.throwIfAborted();
+      const next = await reader.read();
+      const text = next.done ? decoder.decode() : decoder.decode(next.value, { stream: true });
+      if (text) { context.output?.(text); tail = (tail + text).slice(-64 * 1024); }
+      if (next.done) return tail;
+    }
+  } finally { reader.releaseLock(); }
+}
+
 async function runShellCommand(command: string, context: HardwareContext, adb: Adb): Promise<HardwareResult> {
-  await context.confirm({ action: "adb.shell", target: command, backup: "not applicable: shell command" });
-  const output = await shell(adb, command, "ADB shell command");
-  return { summary: "ADB shell command completed.", details: { output } };
+  context.signal.throwIfAborted();
+  context.output?.("> adb shell: " + command);
+  const protocol = adb.subprocess.shellProtocol;
+  if (protocol) {
+    const process = await protocol.spawn(["sh", "-c", command], context.signal);
+    const [stdout, stderr, exitCode] = await Promise.all([streamShellOutput(process.stdout, context), streamShellOutput(process.stderr, context), process.exited]);
+    if (exitCode !== 0) throw new AdbProtocolError("ADB shell exited with status " + exitCode + ".");
+    return { summary: "ADB shell command completed.", details: { output: (stdout + stderr).slice(-64 * 1024), exitCode } };
+  }
+  const wrapped = `(${command}); c=$?; printf '\\n${SHELL_STATUS_PREFIX}%s\\n' "$c"; exit "$c"`;
+  const process = await adb.subprocess.noneProtocol.spawn(["sh", "-c", wrapped], context.signal);
+  const output = await streamShellOutput(process.output, context);
+  const match = output.match(/\n__CODY_ADB_STATUS__(\d+)\r?\n?$/);
+  if (!match) throw new AdbProtocolError("ADB shell ended without a command status; completion is unknown.");
+  const exitCode = Number(match[1]);
+  if (exitCode !== 0) throw new AdbProtocolError("ADB shell exited with status " + exitCode + ".");
+  return { summary: "ADB shell command completed.", details: { output: output.slice(0, match.index), exitCode } };
+}
+
+async function terminal(context: HardwareContext): Promise<HardwareResult> {
+  if (!context.shellAccess?.()) throw new AdbProtocolError("Allow agent shell access in the Devices panel before opening an ADB terminal.");
+  const adb = await adbFor(context);
+  context.signal.throwIfAborted();
+  const process = adb.subprocess.shellProtocol
+    ? await adb.subprocess.shellProtocol.pty({ terminalType: "dumb" })
+    : await adb.subprocess.noneProtocol.pty();
+  const writer = process.input.getWriter();
+  const abort = () => { void Promise.resolve(process.kill()).catch(() => undefined); };
+  context.signal.addEventListener("abort", abort, { once: true });
+  context.setTerminalInput?.(async (bytes) => { context.signal.throwIfAborted(); await writer.write(bytes); });
+  context.progress({ phase: "monitoring", message: "ADB terminal connected" });
+  try {
+    const [, exitCode] = await Promise.all([streamShellOutput(process.output, context), process.exited]);
+    return { summary: "ADB terminal closed.", details: { exitCode } };
+  } finally {
+    context.setTerminalInput?.(undefined);
+    context.signal.removeEventListener("abort", abort);
+    writer.releaseLock();
+    await Promise.resolve(process.kill()).catch(() => undefined);
+  }
 }
 
 async function reboot(request: HardwareRequest, context: HardwareContext, adb: Adb): Promise<HardwareResult> {
@@ -741,30 +799,32 @@ function operationKind(request: HardwareRequest): string | undefined {
 
 export const adbFlasher: Flasher = {
   protocol: "adb",
-  actions: ["detect", "exec", "push", "pull", "dump"],
+  actions: ["detect", "exec", "push", "pull", "dump", "monitor"],
   async run(request, context) {
     try {
       switch (request.action) {
+        case "monitor":
+          return await terminal(context);
         case "detect":
-          return detect(context);
+          return await detect(context);
         case "pull":
-          return pull(request, context, "pull");
+          return await pull(request, context, "pull");
         case "dump":
-          return pull(request, context, "dump");
+          return await pull(request, context, "dump");
         case "push": {
           const adb = await adbFor(context);
-          return push(request, context, adb);
+          return await push(request, context, adb);
         }
         case "exec": {
           switch (operationKind(request)) {
             case "reboot":
-              return reboot(request, context, await adbFor(context));
+              return await reboot(request, context, await adbFor(context));
             case "twrp-openrecoveryscript":
-              return queueTwrpOpenRecoveryScript(request, context, await adbFor(context));
+              return await queueTwrpOpenRecoveryScript(request, context, await adbFor(context));
             case undefined:
             case "shell": {
-              const command = literalReadOnlyShellCommand(request);
-              return runShellCommand(command, context, await adbFor(context));
+              const command = shellCommand(request, context);
+              return await runShellCommand(command, context, await adbFor(context));
             }
             default:
               throw new AdbProtocolError(`Unsupported ADB exec kind '${operationKind(request)}'.`);

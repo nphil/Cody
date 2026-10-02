@@ -213,10 +213,10 @@ export const DEVICE_OPERATION_TOOLS: DeviceOperationToolDefinition[] = [
   startDefinition("device_detect", "detect", "Start a browser-hosted protocol detection operation."),
   startDefinition("device_flash", "flash", "Start a verified flashing operation. Destructive writes pause for direct browser UI approval bound to the exact target, digest, and offset."),
   startDefinition("device_dump", "dump", "Start a device dump or backup operation; resulting bytes remain a session-owned browser artifact."),
-  startDefinition("device_exec", "exec", "Start a protocol command operation. Commands that can change device state pause for direct browser UI approval.", ["device", "protocol", "command"]),
+  startDefinition("device_exec", "exec", "Run a protocol command with streamed output. ADB arbitrary shell requires the user's connection-scoped shell grant in Devices; without it only id, uname -a, df -h, getprop [ro.*] work. Other state-changing commands require exact browser confirmation.", ["device", "protocol", "command"]),
   startDefinition("device_push", "push", "Start a resumable protocol file push using a session artifact."),
   startDefinition("device_pull", "pull", "Start a protocol file pull; output remains a session-owned browser artifact."),
-  startDefinition("device_monitor", "monitor", "Start an exclusive serial monitor. Use device_monitor_send with its operation id for interactive input."),
+  startDefinition("device_monitor", "monitor", "Start an exclusive serial or ADB terminal. ADB needs the user's shell grant. Use device_monitor_send for interactive input."),
   {
     name: "device_operation_status",
     description: "Read the bounded current snapshot and recent output for a device operation id.",
@@ -231,7 +231,7 @@ export const DEVICE_OPERATION_TOOLS: DeviceOperationToolDefinition[] = [
   },
   {
     name: "device_monitor_send",
-    description: "Send immediate UTF-8 input to a running serial monitor operation. The input is never queued or replayed after cancel/reconnect.",
+    description: "Send immediate UTF-8 input to a running serial or ADB terminal. ADB requires the current shell grant. Input is never replayed after cancel/reconnect.",
     parameters: { type: "object", properties: { operationId: { type: "string" }, text: { type: "string" } }, required: ["operationId", "text"] },
     handler: monitorSend,
   },

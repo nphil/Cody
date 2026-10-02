@@ -8,6 +8,7 @@ import { formatBytes } from "@/lib/format-bytes";
 import type { DeviceActivity, DeviceCapabilities, DeviceInfo, DeviceKind, DeviceOpName } from "@/lib/devices/protocol";
 import { ArtifactPanel } from "@/components/devices/ArtifactPanel";
 import { OperationPanel } from "@/components/devices/OperationPanel";
+import { DeviceTerminals } from "@/components/devices/DeviceTerminals";
 
 export interface DevicePanelProps {
   sessionId: string | null;
@@ -352,6 +353,7 @@ export function DevicePanel({ sessionId }: DevicePanelProps): React.ReactElement
               </div>
             )}
 
+            <DeviceTerminals manager={operationManager} devices={devices} />
             <ArtifactPanel sessionId={sessionId} selectedInputId={selectedInputId} onSelectInput={setSelectedInputId} />
             <OperationPanel sessionId={sessionId} manager={operationManager} devices={devices} selectedInputId={selectedInputId} />
           </>

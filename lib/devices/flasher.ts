@@ -61,6 +61,11 @@ export interface HardwareContext {
   transport: HardwareTransport;
   signal: AbortSignal;
   progress: (event: HardwareProgress) => void;
+  /** Browser-owned permission; never read from agent-supplied options. */
+  shellAccess?: () => boolean;
+  output?: (text: string) => void;
+  /** Installs protocol-framed input for a live terminal. */
+  setTerminalInput?: (send: ((bytes: Uint8Array) => Promise<void>) | undefined) => void;
   /** Firmware resolved within this operation's session, hash-checked before use. */
   input?: Blob;
   /** Produces a session-scoped downloadable file and returns its opaque id. */

@@ -1,4 +1,13 @@
 {
+  "devices.shellAllow": "切断するまで、エージェントが {device} でシェルコマンドを実行することを許可",
+  "devices.shellRevoke": "{device} のエージェントのシェル権限を取り消す",
+  "devices.shellGranted": "エージェントのシェル権限は有効です。コマンドと出力は操作ログに表示されます。取り消すと実行中の ADB 操作は中止されますが、実行済みのコマンドは元に戻りません。",
+  "devices.shellRestricted": "エージェントのシェル権限は無効です。自分のターミナルは使用できます。",
+  "devices.adbTerminal": "ADB ターミナル — {device}",
+  "devices.terminalStart": "ターミナルを開く",
+  "devices.terminalStop": "ターミナルを閉じる",
+  "devices.terminalInput": "ターミナル入力",
+  "devices.terminalSend": "送信",
   "agentSession.commandCompleted": "コマンドが完了しました",
   "agentSession.commandFailed": "コマンドが失敗しました",
   "agentSession.commandRequiresArgs": "使用法: {command} {usage}",

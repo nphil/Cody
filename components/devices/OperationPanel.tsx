@@ -131,7 +131,7 @@ function OperationStartForm({ manager, devices, selectedInputId, sessionId }: Op
       const options: Record<string, string> = {};
       if (expectedChip.trim()) options.expectedChip = expectedChip.trim();
       if (protectedOverride) options.protectedOverride = protectedOverride;
-      manager.start({
+      manager.startUser({
         deviceId, protocol, action,
         ...(selectedCandidate ? { interfaceNumber: selectedCandidate.interfaceNumber } : {}),
         ...(selectedCandidate ? { alternateSetting: selectedCandidate.alternateSetting } : {}),
@@ -223,7 +223,7 @@ function OperationCard({ manager, operation }: { manager: DeviceOperationManager
   const canCancel = !terminal(operation.state) && operation.state !== "cancelling";
   const sendMonitor = async () => {
     try {
-      await manager.send(operation.id, monitorInput);
+      await manager.sendUser(operation.id, monitorInput);
       setMonitorInput("");
       setError(null);
     } catch (caught) {

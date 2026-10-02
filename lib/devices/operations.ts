@@ -105,6 +105,7 @@ export interface DeviceOperationSnapshot {
   id: string;
   sessionId: string;
   request: Readonly<DeviceOperationRequest>;
+  origin: "user" | "agent";
   state: OperationState;
   createdAt: number;
   updatedAt: number;
@@ -136,6 +137,8 @@ interface PendingConfirmation {
 interface OperationRecord {
   id: string;
   sessionId: string;
+  origin: "user" | "agent";
+  terminalInput?: (bytes: Uint8Array) => Promise<void>;
   request: DeviceOperationRequest;
   state: OperationState;
   createdAt: number;
@@ -203,6 +206,7 @@ function frozenSnapshot(record: OperationRecord): DeviceOperationSnapshot {
   const snapshot: DeviceOperationSnapshot = {
     id: record.id,
     sessionId: record.sessionId,
+    origin: record.origin,
     request: Object.freeze(request),
     state: record.state,
     createdAt: record.createdAt,
@@ -277,6 +281,38 @@ export class DeviceOperationManager {
   private readonly transportProvider: HardwareTransportProvider;
   private readonly artifacts: OperationArtifacts;
   private authorityRevokedReason: string | undefined;
+  private readonly shellGrants = new Set<string>();
+  private readonly shellListeners = new Set<() => void>();
+
+  hasShellAccess(deviceId: string): boolean { return this.shellGrants.has(deviceId); }
+
+  subscribeShellAccess(listener: () => void): () => void {
+    this.shellListeners.add(listener);
+    return () => this.shellListeners.delete(listener);
+  }
+
+  /** Panel-only action. No server command can grant shell authority. */
+  setShellAccess(deviceId: string, allowed: boolean): void {
+    if (this.authorityRevokedReason) throw new Error(this.authorityRevokedReason);
+    if (allowed) this.shellGrants.add(deviceId);
+    else {
+      this.shellGrants.delete(deviceId);
+      for (const record of this.records.values()) {
+        if (record.request.deviceId === deviceId && record.request.protocol === "adb" && record.origin === "agent" && !isTerminal(record.state)) {
+          this.addOutput(record, "Agent shell access revoked. Cancelling this operation; already executed commands cannot be undone.");
+          this.cancel(record.id);
+        }
+      }
+    }
+    for (const listener of this.shellListeners) listener();
+  }
+
+  deviceDisconnected(deviceId: string): void {
+    this.setShellAccess(deviceId, false);
+    for (const record of this.records.values()) {
+      if (record.request.deviceId === deviceId && !isTerminal(record.state)) this.cancel(record.id);
+    }
+  }
 
   constructor(
     sessionId: string,
@@ -300,13 +336,22 @@ export class DeviceOperationManager {
     return () => this.listeners.delete(listener);
   }
 
+  startUser(request: DeviceOperationRequest): OperationStartResult {
+    return this.begin(request, randomId("device-operation"), "user");
+  }
+
   start(request: DeviceOperationRequest, operationId = randomId("device-operation")): OperationStartResult {
+    return this.begin(request, operationId, "agent");
+  }
+
+  private begin(request: DeviceOperationRequest, operationId: string, origin: "user" | "agent"): OperationStartResult {
     if (this.authorityRevokedReason) throw new Error(this.authorityRevokedReason);
     validateRequest(request);
     if (!operationId.trim()) throw new Error("An operation id is required.");
     if (this.records.has(operationId)) throw new Error("That operation id already exists.");
     const now = Date.now();
     const record: OperationRecord = {
+      origin,
       id: operationId,
       sessionId: this.sessionId,
       request: cloneRequest(request),
@@ -339,6 +384,8 @@ export class DeviceOperationManager {
   /** A replacement browser page took this session's hardware authority. */
   revokeAuthority(reason = "This browser page no longer owns the session hardware authority."): void {
     if (this.authorityRevokedReason) return;
+    this.shellGrants.clear();
+    for (const listener of this.shellListeners) listener();
     this.authorityRevokedReason = reason;
     for (const record of this.records.values()) {
       if (!isTerminal(record.state)) this.cancel(record.id);
@@ -366,13 +413,22 @@ export class DeviceOperationManager {
    * Live monitor input only. There is deliberately no retry or stored queue:
    * a returned success means this exact write reached the borrowed transport.
    */
+  async sendUser(id: string, text: string): Promise<DeviceOperationSnapshot> {
+    return this.sendInput(id, text, "user");
+  }
+
   async send(id: string, text: string): Promise<DeviceOperationSnapshot> {
+    return this.sendInput(id, text, "agent");
+  }
+
+  private async sendInput(id: string, text: string, origin: "user" | "agent"): Promise<DeviceOperationSnapshot> {
     if (this.authorityRevokedReason) throw new Error(this.authorityRevokedReason);
     const record = this.requireRecord(id);
     if (record.request.action !== "monitor") throw new Error("Only monitor operations accept interactive input.");
     if (record.state !== "running" || record.controller.signal.aborted || !record.lease) {
       throw new Error("The monitor is not accepting input.");
     }
+    if (origin === "agent" && record.request.protocol === "adb" && !this.hasShellAccess(record.request.deviceId)) throw new Error("Allow agent shell access in the Devices panel first.");
     if (!text.length) throw new Error("Monitor input must not be empty.");
     const generation = record.writeGeneration;
     const bytes = textEncoder.encode(text);
@@ -380,8 +436,11 @@ export class DeviceOperationManager {
       if (record.writeGeneration !== generation || record.state !== "running" || record.controller.signal.aborted || !record.lease) {
         throw new DOMException("Monitor input was cancelled before it was sent.", "AbortError");
       }
-      await record.lease.transport.write(bytes, record.controller.signal);
-      this.addOutput(record, `> sent ${bytes.byteLength} byte${bytes.byteLength === 1 ? "" : "s"}`);
+      if (origin === "agent" && record.request.protocol === "adb" && !this.hasShellAccess(record.request.deviceId)) throw new Error("Agent shell access was revoked.");
+      if (record.terminalInput) await record.terminalInput(bytes);
+      else if (record.lease.transport.kind === "serial") await record.lease.transport.write(bytes, record.controller.signal);
+      else throw new Error("The terminal is not ready for input.");
+      this.addOutput(record, `> ${origin}: ${text}`);
     });
     await record.writeChain;
     return frozenSnapshot(record);
@@ -488,7 +547,7 @@ export class DeviceOperationManager {
       if (record.controller.signal.aborted) throw new DOMException("Operation cancelled.", "AbortError");
       record.state = "running";
       this.emit(record, { type: "state", state: record.state });
-      const result = record.request.action === "monitor"
+      const result = record.request.action === "monitor" && record.request.protocol !== "adb"
         ? await this.runSerialMonitor(record, record.lease.transport)
         : await this.runFlasher(record, record.lease.transport, input);
       if (record.controller.signal.aborted) throw new DOMException("Operation cancelled.", "AbortError");
@@ -542,6 +601,9 @@ export class DeviceOperationManager {
       transport,
       signal: record.controller.signal,
       progress: (progress) => this.reportProgress(record, progress),
+      shellAccess: () => !record.controller.signal.aborted && (record.origin === "user" || this.hasShellAccess(record.request.deviceId)),
+      output: (text) => this.addOutput(record, text),
+      setTerminalInput: (send) => { record.terminalInput = send; },
       input,
       save: (name, data) => this.artifacts.save(this.sessionId, name, data),
       confirm: (risk) => this.awaitHumanConfirmation(record, risk),
