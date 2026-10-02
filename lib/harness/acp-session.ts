@@ -7,6 +7,7 @@ import type { EngineEvent, EngineSession, EngineSessionOptions, EngineUsage } fr
 import { getEngineSession, upsertEngineSession } from "./engine-sessions";
 import { EngineCommandError } from "./errors";
 import { engineChildEnv } from "./provider-keys";
+import { normalizeTimeZone } from "../time-zone";
 import { validateAgentImages } from "../image-attachments";
 
 /**
@@ -520,6 +521,7 @@ export function emptyTurnMessage(engineName: string, stopReason: string, setupHi
 
 export class AcpEngineSession implements EngineSession {
   readonly cwd: string;
+  readonly timeZone?: string;
   private spec: AcpEngineSpec;
   private _sessionId: string;
   /** The id the AGENT knows this session by (from session/new or session/load). */
@@ -570,6 +572,7 @@ export class AcpEngineSession implements EngineSession {
     this.spec = spec;
     this.cwd = options.cwd && existsSync(options.cwd) ? options.cwd : process.cwd();
     this._sessionId = options.sessionId || `${spec.id}-${randomUUID()}`;
+    this.timeZone = normalizeTimeZone(options.timeZone) ?? undefined;
     const known = options.sessionId ? getEngineSession(options.sessionId) : null;
     if (known?.engineSessionId) this.acpSessionId = known.engineSessionId;
   }
@@ -750,7 +753,7 @@ export class AcpEngineSession implements EngineSession {
       // Provider keys saved in Settings ride along with the spec's own
       // variables (lib/harness/provider-keys.ts): the one credential path all
       // five engines share is their environment.
-      env: engineChildEnv(this.spec.env),
+      env: engineChildEnv(this.spec.env, { timeZone: this.timeZone }),
       stdio: ["pipe", "pipe", "pipe"],
     });
     this.child = child;

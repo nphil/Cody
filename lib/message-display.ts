@@ -62,10 +62,23 @@ export function groupHasThinking(
   return false;
 }
 
+/**
+ * Messages the engine gives the model that the transcript never shows: no row,
+ * no spacing, not counted as a turn. The one predicate every reader
+ * (session history, subagent pages, live frames, grouping) shares.
+ *
+ * "cody-local-time" is LOCAL_TIME_CUSTOM_TYPE (lib/time-zone.ts), repeated here
+ * because this module is also loaded without a bundler, where an extensionless
+ * import does not resolve; lib/time-zone.test.mjs pins the two together.
+ */
+export function isHiddenFromTranscript(message: { role?: string; customType?: string }): boolean {
+  return message.role === "custom" && (message.customType === "xdev-mount-notice" || message.customType === "cody-local-time");
+}
+
 /** Shared visibility boundary so hidden activity leaves no transcript wrapper. */
 export function isVisibleTranscriptMessage(message: AgentMessage, mode: ActivityDisplayMode, results?: Map<string, ToolResultMessage>): boolean {
   if (message.role === "toolResult") return false;
-  if (message.role === "custom" && message.customType === "xdev-mount-notice") return false;
+  if (isHiddenFromTranscript(message)) return false;
   if (mode !== "hidden" || message.role === "user") return true;
   if (message.role === "assistant") {
     return message.content.some(block => block.type === "toolCall"

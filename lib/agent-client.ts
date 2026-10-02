@@ -7,8 +7,10 @@
 // Call sites previously repeated the same 5-line fetch block 13× in
 // hooks/useAgentSession.ts. This helper collapses that down to one line.
 
+import { deviceTimeZoneField } from "@/lib/device-time-zone";
 import { translate } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
+import { isMessageCommandType } from "@/lib/time-zone";
 
 export interface SendAgentCommandOptions {
   /**
@@ -30,7 +32,6 @@ export class AgentCommandError extends Error {
   }
 }
 
-
 export async function sendAgentCommand<T = unknown>(
   sessionId: string,
   command: Record<string, unknown>,
@@ -38,12 +39,15 @@ export async function sendAgentCommand<T = unknown>(
 ): Promise<T> {
   const controller = options.timeoutMs && options.timeoutMs > 0 ? new AbortController() : null;
   const timer = controller ? setTimeout(() => controller.abort(), options.timeoutMs) : null;
+  // Only commands that carry the person's words say where they are
+  // (isMessageCommandType); get_state, set_model, bash and the rest do not.
+  const payload = isMessageCommandType(command.type) ? { ...command, ...deviceTimeZoneField() } : command;
   let res: Response;
   try {
     res = await fetch(`/api/agent/${encodeURIComponent(sessionId)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(command),
+      body: JSON.stringify(payload),
       ...(controller ? { signal: controller.signal } : {}),
     });
   } catch (error) {
@@ -108,7 +112,9 @@ export async function sendPromptDelivery(
     res = await fetch(`/api/agent/${encodeURIComponent(sessionId)}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(command),
+      // A delivery attempt is always a message, and the zone is read per
+      // attempt: an outbox retry goes out from wherever the person is now.
+      body: JSON.stringify({ ...command, ...deviceTimeZoneField() }),
       ...(controller ? { signal: controller.signal } : {}),
     });
   } catch (error) {

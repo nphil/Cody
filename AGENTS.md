@@ -201,6 +201,18 @@ lib/
                         dance for sidebar chat, Distill, the session namer
                         and the web-research planner)
   agent-client.ts      typed fetch helper for /api/agent commands
+  time-zone.ts         zones in one pure, browser-and-server-safe place: IANA
+                       validation/canonicalisation (`normalizeTimeZone`), the
+                       precedence (`resolveTimeZone`), `formatLocalTime` /
+                       `describeLocalNow`, the message-command set and the
+                       hidden line's `LOCAL_TIME_CUSTOM_TYPE` — see "Time zones"
+  time-zone-prefs.ts   server only: a person's chosen zone and last-seen device
+                       zone (account record; `<accounts dir>/time-zone.json` on
+                       an open instance), `zoneForMessage`, `ownerTimeZone`
+  tool-time.ts         `formatToolTime()`: how a host tool writes a time the
+                       model reads
+  device-time-zone.ts  browser: `deviceTimeZoneField()`, the zone to spread into
+                       a request body, read fresh on every call
   draft-store.ts       composer drafts: in-memory per session key, with the TEXT
                         mirrored to sessionStorage (`cody:draft:<key>`, 64 K cap)
                         so a reload or navigation never loses an unsent prompt;
@@ -1519,6 +1531,99 @@ must name the panel that fixes it.
   Those frames are forwarded but never reset the idle timer, flip the running
   state or signal the sidebar, so an unattended child still idles out after 10
   minutes (warming costs real provider calls until the child is gone).
+
+### Time zones: the device that sent the message decides (`lib/time-zone.ts`, `lib/time-zone-prefs.ts`)
+
+Agents used to reason in UTC: omp's own "Today:" line has a date and no time or
+zone, and a container with no `TZ` ran every shell in UTC. The owner travels
+with a tablet, so the rule is **the zone of the browser that sent THIS
+message, read when it was sent** — not the server's, not a saved setting.
+
+- **Precedence** (`resolveTimeZone`, first valid wins): the zone the person
+  CHOSE in Settings → Preferences → Time zone ("Automatic" = none chosen) > the
+  browser sending this message > the account's last-seen device zone > the
+  server's `TZ`, then its system zone > UTC. Zones are IANA names stored
+  canonically by `normalizeTimeZone` (the server may keep `Asia/Calcutta` for a
+  pick of `Asia/Kolkata` — compare canonical forms, never raw strings); a
+  layer that is not a zone is skipped, an explicit save of one is `400
+  invalid_time_zone`. Per account (`UserPreferences.timeZone`/`.deviceTimeZone`);
+  an instance with no accounts keeps one record in `<accounts dir>/time-zone.json`
+  (also what an unowned session on an instance WITH accounts uses).
+  `readTimeZonePrefs` always re-reads the account: a request's record predates
+  its own write.
+- **The browser reports it twice.** Every message-bearing command
+  (`isMessageCommandType`: prompt, steer, follow_up, abort_and_prompt) carries
+  `timeZone` from `deviceTimeZoneField()` — stamped per attempt in
+  `lib/agent-client.ts`, so an outbox retry goes out from where the person is
+  now; the new-chat spawn and the terminal POST carry it too — and
+  `hooks/useDeviceTimeZone.ts` (mounted in `AppShell`) PUTs `/api/time-zone` on
+  load, focus, visible and online when the zone changed, which keeps the
+  last-seen zone current for work nobody is typing for.
+- **Routes settle it, sessions get only the result.** `/api/agent/[id]` and
+  `/api/agent/new` call `zoneForMessage` (resolve + remember the device) and
+  hand the session the resolved `timeZone`; a client value that is not a zone
+  never reaches an engine. A child started with nobody typing uses
+  `ownerTimeZone(sessionId)`.
+- **A zone becomes a child's `TZ` in exactly one place:**
+  `engineChildEnv(extra, { timeZone })` (`lib/harness/provider-keys.ts`). Callers
+  pass the zone: `RpcProcess`, `AcpEngineSession`, Cody terminals, and the
+  one-shot children (Distill, session namer, plan keeper, planner, research —
+  the owner's/actor's zone, else the instance-level one). Sidebar chats get it
+  too.
+- **A running process cannot change its `TZ`.** `alignSessionTimeZone` runs
+  BEFORE a message is handed over: omp restarts the same wrapper in place
+  (`AgentSessionWrapper.alignTimeZone` → `restart(profile, zone)`; listeners,
+  ledger and event stream stay attached, concurrent sends join one restart); an
+  ACP engine's idle child is closed and the session started again from the
+  engine's own stored session. Never while a turn runs, a follow-up is held or a
+  delivery is unsettled (a restart would fail it) — then nothing restarts, and
+  the next idle message from the new zone does. The message is not delivered
+  until the restart finishes, so nothing is lost; a failed restart reaches the
+  sender, whose outbox keeps it.
+- **The agent is told every prompt** by `lib/omp/extensions/cody-local-time.ts`
+  (a second `--extension` beside the refusal guard, main omp sessions only): on
+  `before_agent_start` it asks the wrapper which zone this message is from (an
+  `input` dialog titled `CODY_TIME_ZONE`, answered by `answerTimeZoneRequest`
+  from memory and never forwarded to a page — the refusal guard's channel in
+  reverse) and returns ONE hidden custom message (`cody-local-time`, `display:
+  false`, `details.zone`): "Current local time: Friday 2 October 2026, 14:58 EDT
+  (America/New_York, UTC-04:00). Use this time zone for any times you state to
+  the user." When the previous line in the transcript (read back from the
+  branch, so restarts, resumes and forks all know) named another zone it opens
+  "The user's device time zone changed: was X, now Y.", and when the shell still
+  runs in another zone it closes "Shell commands (`date`) still report X until
+  the next idle restart." It is a message at the tail, never a system-prompt
+  edit: replacing the system prompt would break the provider's prompt cache on
+  every turn. No answer (an older Cody) means the process's own zone. The file
+  repeats a few helpers of `lib/time-zone.ts` because omp loads it with no
+  Cody imports; `lib/omp/cody-local-time.test.mjs` runs both on the same inputs.
+  Subagents and the sidebar are not given the line (their shells and Cody's
+  tools are still in the right zone).
+- **Hidden on every path.** `isHiddenFromTranscript` (`lib/message-display.ts`)
+  is the one predicate: `entryToUiMessage` drops the entry on reload, the
+  wrapper drops the live `message_start`/`message_end` frames (only this type —
+  the MCP mount notice still drives its toast), `isVisibleTranscriptMessage`,
+  `MessageView` and the turn grouping in `ChatWindow` never make a row or a gap.
+  A new reader of session entries must go through `entryToUiMessage`.
+- **Cody's tools speak local time.** Every host tool that prints a time takes
+  `timeZone` in its context and writes it with `formatToolTime`
+  ("2026-10-01 19:31 EDT", "…08:31 UTC+09:00" where the zone has no
+  abbreviation): `list_sessions`/`session_status`, `forge`, `read_app_logs`
+  (whose zoneless `since` is read in that zone). The zone is the newest
+  message's (`AgentSessionWrapper.currentTimeZone()`, `getSessionTimeZone()`
+  for the ACP bridge route).
+- **What ACP engines (Claude Code, Codex) get:** `TZ` in the child's
+  environment and the idle respawn above, and Cody's tool results in local
+  time. They have no extension API, so there is no hidden per-prompt line and
+  no prompt is rewritten for them.
+- **The Settings row** is `components/settings/TimeZoneSetting.tsx` (rows from
+  `lib/time-zone-options.ts`): "Automatic (this device: X)" is the first, REAL
+  option (value `""`), and a saved zone selects the row naming the same zone by
+  canonical name, so an alias the server stored still shows as chosen. The
+  picker is `components/ui/Select.tsx` with its optional `search={{placeholder,
+  empty}}` (base-ui Combobox, input inside the popup; every typed word must
+  appear, any order, `_` `/` `-` count as spaces); without `search` the plain
+  path is unchanged. Saves go through the panel's Save corner, not a toast.
 
 ### Agent-driven Preview panel (`lib/preview-url.ts`, `lib/preview-autoopen.ts`)
 - The agent reaches the Preview tab two ways. Deliberately: the `open_preview`

@@ -3,6 +3,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { getAllowedFileRoots, isExistingFilePathAllowed, isFilePathAllowed, isWindowsAbsolutePath } from "@/lib/file-access";
 import { authorizeTerminalCwd, getTerminalManager } from "@/lib/terminal-manager";
 import { readTasksConfig } from "@/lib/workspace-tasks-file";
+import { getRequestUser } from "@/lib/auth/guard";
+import { effectiveTimeZone } from "@/lib/time-zone-prefs";
 
 export const dynamic = "force-dynamic";
 
@@ -91,7 +93,7 @@ export async function POST(request: NextRequest) {
     }
 
     const manager = getTerminalManager();
-    const info = manager.create(authorizedCwd, terminalNameForTask(task.title, task.id));
+    const info = manager.create(authorizedCwd, terminalNameForTask(task.title, task.id), undefined, undefined, undefined, effectiveTimeZone(getRequestUser(request)).zone);
     try {
       manager.write(info.id, `${task.command}\n`);
     } catch (error) {

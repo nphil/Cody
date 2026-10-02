@@ -87,6 +87,8 @@ export interface RpcProcessOptions {
   launch?: RpcProcessLaunch;
   /** Environment overrides merged over process.env. */
   env?: Record<string, string>;
+  /** IANA zone the child runs under (its `TZ`); absent leaves the server's. */
+  timeZone?: string;
   /** Called for every non-response frame (events, extension UI, subagent frames). */
   onFrame?: (frame: RpcFrame) => void;
   /** Called once when the child exits, after pending commands are rejected. */
@@ -143,7 +145,7 @@ export class RpcProcess {
       cwd: options.cwd,
       // Cody provider credentials, then launch-specific profile/routing data,
       // then an explicit process override supplied by the caller.
-      env: engineChildEnv({ ...(options.launch?.env ?? {}), ...(options.env ?? {}) }),
+      env: engineChildEnv({ ...(options.launch?.env ?? {}), ...(options.env ?? {}) }, { timeZone: options.timeZone }),
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       // On POSIX, omp launches grandchildren (LSP servers, extension subprocesses). Run the

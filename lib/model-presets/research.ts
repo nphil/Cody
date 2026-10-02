@@ -17,6 +17,7 @@ import {
   type ToolStartEvent,
 } from "../model-plan/one-shot";
 import type { Roster, RosterModel } from "../model-plan/roster";
+import { effectiveTimeZone } from "../time-zone-prefs";
 import { isRecord } from "../type-guards";
 import { presetRoleNames } from "./store";
 import type {
@@ -477,6 +478,7 @@ export const realResearchRunner: ResearchRunner = async ({ plannerModel, prompt,
       systemPrompt: RESEARCH_SYSTEM_PROMPT,
       prompt,
       timeoutMs: RESEARCH_TIMEOUT_MS,
+      timeZone: effectiveTimeZone(null).zone,
       tools: [...RESEARCH_TOOLS],
       cwd,
       extraEnv: { PI_CODING_AGENT_DIR: isoAgentDir },

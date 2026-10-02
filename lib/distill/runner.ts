@@ -97,7 +97,7 @@ export interface DistillAttemptInput {
 /** One model call. The test seam: every failure is a value, never a throw. */
 export type DistillAttempt = (input: DistillAttemptInput) => Promise<{ text: string | null; error: string | null }>;
 
-export function engineAttempt(bin: string): DistillAttempt {
+export function engineAttempt(bin: string, timeZone?: string): DistillAttempt {
   return async (input) => runOneShotModelStreaming({
     bin,
     model: input.model,
@@ -105,6 +105,7 @@ export function engineAttempt(bin: string): DistillAttempt {
     prompt: input.prompt,
     timeoutMs: input.timeoutMs,
     onDelta: input.onDelta,
+    timeZone,
     signal: input.signal,
     // Isolated, never the real agent dir directly — rule 4 in the module
     // doc above.

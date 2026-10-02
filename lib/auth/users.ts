@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import * as fs from "fs";
 import * as path from "path";
 import { isRecord } from "../type-guards";
+import { normalizeTimeZone } from "../time-zone";
 import { readEnv } from "../env";
 import { getAccountsDir, getAccountsFilePath, getAvatarsDir } from "./paths";
 
@@ -53,6 +54,12 @@ export interface UserRecord {
  */
 export interface UserPreferences {
   theme?: string;
+  /** The zone the person CHOSE (Settings → Preferences → Time zone). Absent
+   * means "Automatic": follow the device that is sending each message. */
+  timeZone?: string;
+  /** The zone of the last browser seen for this account — the fallback for a
+   * message that carries no device zone of its own (see lib/time-zone.ts). */
+  deviceTimeZone?: string;
 }
 
 const MAX_PREFERENCE_LENGTH = 64;
@@ -106,12 +113,22 @@ export function toPublicUser(user: UserRecord): PublicUser {
   };
 }
 
+function parsePreferences(value: unknown): UserPreferences | null {
+  if (!isRecord(value)) return null;
+  const preferences: UserPreferences = {};
+  if (typeof value.theme === "string" && value.theme.length <= MAX_PREFERENCE_LENGTH) preferences.theme = value.theme;
+  // Re-validated on every read: a hand-edited or stale value must never reach an engine as its TZ.
+  const timeZone = normalizeTimeZone(value.timeZone);
+  if (timeZone) preferences.timeZone = timeZone;
+  const deviceTimeZone = normalizeTimeZone(value.deviceTimeZone);
+  if (deviceTimeZone) preferences.deviceTimeZone = deviceTimeZone;
+  return Object.keys(preferences).length > 0 ? preferences : null;
+}
+
 function parseUser(value: unknown): UserRecord | null {
   if (!isRecord(value)) return null;
-  const { id, username, fullName, role, passwordHash, envManaged, tokenVersion, avatar, createdAt, preferences } = value;
-  const theme = isRecord(preferences) && typeof preferences.theme === "string" && preferences.theme.length <= MAX_PREFERENCE_LENGTH
-    ? preferences.theme
-    : null;
+  const { id, username, fullName, role, passwordHash, envManaged, tokenVersion, avatar, createdAt } = value;
+  const preferences = parsePreferences(value.preferences);
   if (typeof id !== "string" || typeof username !== "string" || typeof createdAt !== "string") return null;
   if (role !== "admin" && role !== "member") return null;
   return {
@@ -124,7 +141,7 @@ function parseUser(value: unknown): UserRecord | null {
     tokenVersion: typeof tokenVersion === "number" && Number.isInteger(tokenVersion) ? tokenVersion : 1,
     ...(typeof avatar === "string" && /^[a-f0-9-]+\.(png|jpe?g|webp)$/.test(avatar) ? { avatar } : {}),
     createdAt,
-    ...(theme !== null ? { preferences: { theme } } : {}),
+    ...(preferences ? { preferences } : {}),
   };
 }
 

@@ -3,7 +3,7 @@ import { getSessionOwner } from "@/lib/auth/session-owners";
 import { findUserById, hasAnyUser, type UserRecord } from "@/lib/auth/users";
 import { parseJsonWithinLimit } from "@/lib/bounded-form-data";
 import { verifyDisplayCapability } from "@/lib/display/capability";
-import { getLiveSessionPhases, getRunningRpcSessionIds } from "@/lib/rpc-manager";
+import { getLiveSessionPhases, getRunningRpcSessionIds, getSessionTimeZone } from "@/lib/rpc-manager";
 import { SESSION_AWARENESS_TOOLS, type SessionToolContext } from "@/lib/session-tools";
 import { isRecord } from "@/lib/type-guards";
 
@@ -80,6 +80,7 @@ export async function POST(request: Request) {
     runningSessionIds: new Set(getRunningRpcSessionIds()),
     livePhases: getLiveSessionPhases(),
     restrictToUnowned,
+    timeZone: getSessionTimeZone(capability.sid),
   };
 
   try {

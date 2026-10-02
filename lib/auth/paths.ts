@@ -40,3 +40,11 @@ export function getAvatarsDir(): string {
 export function getSessionOwnersPath(): string {
   return path.join(getAccountsDir(), "session-owners.json");
 }
+
+/** The OPEN-instance time zone: what an instance with no accounts keeps where an
+ * account would keep its own (lib/time-zone-prefs.ts). It sits in the accounts
+ * directory so a deployment that persists accounts persists it too, and so a
+ * test or scratch instance that redirects CODY_ACCOUNTS_DIR redirects it. */
+export function getInstanceTimeZonePath(): string {
+  return path.join(getAccountsDir(), "time-zone.json");
+}

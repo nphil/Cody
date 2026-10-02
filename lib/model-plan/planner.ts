@@ -1,4 +1,5 @@
 import { OMP_BIN_MISSING, resolveOmpBin } from "../omp/omp-cli";
+import { effectiveTimeZone } from "../time-zone-prefs";
 import { isRecord } from "../type-guards";
 import { ROLE_NAMES, type PlanDraft, type PlanRationale } from "./derive";
 import { runOneShotModel } from "./one-shot";
@@ -152,6 +153,7 @@ export async function planWithModel(model: string, roster: Roster): Promise<Plan
     systemPrompt: SYSTEM_PROMPT,
     prompt: buildUserPrompt(roster),
     timeoutMs: PLANNER_TIMEOUT_MS,
+    timeZone: effectiveTimeZone(null).zone,
   });
   if (!answer.text) return { ok: false, reason: answer.error ?? "the planner returned no answer" };
 

@@ -362,6 +362,8 @@ export interface ProviderDirectoryInfo {
 export interface EngineSessionOptions {
   /** Cody session id — "" lets the engine mint one for a brand-new session. */
   sessionId: string;
+  /** IANA zone the child process runs under (its `TZ`); absent leaves the server's. */
+  timeZone?: string;
   /** Working directory the agent operates in. */
   cwd: string;
 }
@@ -378,6 +380,8 @@ export interface EngineSession {
   /** Transcript path on disk; "" when the engine owns its own storage. */
   readonly sessionFile: string;
   readonly cwd: string;
+  /** The IANA zone this session's child process was started with; undefined when unknown. */
+  readonly timeZone?: string;
   isAlive(): boolean;
   isRunning(): boolean;
   /** True while this session has a user response outstanding. */

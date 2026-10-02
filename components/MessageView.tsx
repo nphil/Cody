@@ -178,7 +178,7 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     return null;
   }
   if (message.role === "custom") {
-    if ((message as CustomMessage).customType === "xdev-mount-notice") return null;
+    // Hidden messages are filtered by isVisibleTranscriptMessage above.
     if ((message as CustomMessage).customType === "compaction") return <CompactionMessageView message={message as CustomMessage} />;
     // Hidden (display:false) messages are the engine's instructions to the
     // model, not something said to the user: same slim row as a reminder.

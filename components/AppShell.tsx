@@ -21,6 +21,7 @@ import { formatApiError } from "@/lib/i18n/api-error";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useSetupStatus } from "@/hooks/useSetupStatus";
 import { useVisualViewportHeight } from "@/hooks/useVisualViewportHeight";
+import { useDeviceTimeZone } from "@/hooks/useDeviceTimeZone";
 import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
 import { useDisplayRequests } from "@/hooks/useDisplayRequests";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
@@ -204,6 +205,9 @@ export function AppShell() {
   // Phones only: keep the top bar and the docked composer on screen while the
   // soft keyboard is up (see the hook for why 100dvh alone cannot).
   useVisualViewportHeight(isMobile);
+  // Tell the server which time zone this device is in, and again when it
+  // changes. AppShell only mounts past the login screen (/login is its own page).
+  useDeviceTimeZone();
   const { isDesktop } = useDesktopShell();
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
   // When user clicks +, we only store the cwd — no fake session id

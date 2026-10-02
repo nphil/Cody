@@ -1,4 +1,6 @@
 import { resolveDisplaySessionId } from "../display/bus";
+import { formatUtcOffset, utcOffsetMinutes } from "../time-zone";
+import { formatToolTime, toolTimeZone } from "../tool-time";
 import type { AppLogDigest, AppLogEntry, AppLogInput, AppLogLevel, AppLogQuery } from "./types";
 
 /**
@@ -204,21 +206,42 @@ export function appLogNotice(sessionId: string): string | null {
   return `${entries} new app error${entries === 1 ? "" : "s"}${repeats} in the previewed page since your last action — call read_app_logs to see them.`;
 }
 
-/**
- * "90s" / "5m" / "2h" / "1d", an ISO timestamp, or epoch ms. Returns null for
- * anything unparseable, which reads as "no lower bound" rather than an error:
- * a malformed `since` must not cost the model its logs.
- */
 const DURATION = /^(\d+(?:\.\d+)?)\s*(ms|s|m|h|d)$/i;
 const DURATION_SCALE: Record<string, number> = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 };
+const ZONELESS_TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?)?$/;
 
-export function parseSince(value: unknown, now = Date.now()): number | null {
+/** The instant at which a wall clock in `zone` reads these fields. */
+function zonedInstant(fields: number[], zone: string): number {
+  const [year, month, day, hour, minute, second] = fields;
+  const asUtc = Date.UTC(year, month - 1, day, hour, minute, second);
+  const firstOffset = utcOffsetMinutes(new Date(asUtc), zone);
+  const guess = asUtc - firstOffset * 60_000;
+  const settledOffset = utcOffsetMinutes(new Date(guess), zone);
+  return settledOffset === firstOffset ? guess : asUtc - settledOffset * 60_000;
+}
+
+/**
+ * "90s" / "5m" / "2h" / "1d", a timestamp, or epoch ms. Returns null for
+ * anything unparseable, which reads as "no lower bound" rather than an error:
+ * a malformed `since` must not cost the model its logs.
+ *
+ * A timestamp that names no zone ("2026-10-01 19:31", "2026-10-01T19:31:00")
+ * is the model's own local time, so it is read in the session's zone — not the
+ * server process's. One that carries a zone or offset ("…Z", "…+02:00", "… EDT")
+ * means exactly that.
+ */
+export function parseSince(value: unknown, now = Date.now(), timeZone?: string): number | null {
   if (typeof value === "number") return Number.isFinite(value) && value > 0 ? value : null;
   if (typeof value !== "string") return null;
   const raw = value.trim();
   if (!raw) return null;
   const duration = DURATION.exec(raw);
   if (duration) return now - Number(duration[1]) * DURATION_SCALE[duration[2].toLowerCase()];
+  const zoneless = ZONELESS_TIMESTAMP.exec(raw);
+  if (zoneless) {
+    const [, year, month, day, hour, minute, second] = zoneless;
+    return zonedInstant([year, month, day, hour ?? "0", minute ?? "0", second ?? "0"].map(Number), toolTimeZone(timeZone));
+  }
   const parsed = Date.parse(raw);
   return Number.isNaN(parsed) ? null : parsed;
 }
@@ -279,8 +302,17 @@ export function readAppLogs(sessionId: string, query: AppLogQuery = {}): AppLogD
   };
 }
 
-function clock(at: number): string {
-  return new Date(at).toTimeString().slice(0, 8);
+const clocks = new Map<string, Intl.DateTimeFormat>();
+
+/** "19:31:39" on the wall clock of `zone`. The header line of a digest says
+ * which zone and offset these times are in, so a line carries only the clock. */
+function clock(at: number, zone: string): string {
+  let format = clocks.get(zone);
+  if (!format) {
+    format = new Intl.DateTimeFormat("en-GB", { timeZone: zone, hourCycle: "h23", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    clocks.set(zone, format);
+  }
+  return format.format(new Date(at));
 }
 
 function kb(bytes: number): string {
@@ -292,10 +324,11 @@ function kb(bytes: number): string {
  * never the raw stream — plus up to MAX_STACK_FRAMES indented stack frames that
  * were already clipped at capture time.
  */
-export function formatAppLogDigest(digest: AppLogDigest, query: AppLogQuery = {}): string {
+export function formatAppLogDigest(digest: AppLogDigest, query: AppLogQuery = {}, timeZone?: string): string {
+  const zone = toolTimeZone(timeZone);
   const filters: string[] = [];
   if (query.level) filters.push(`level>=${query.level}`);
-  if (query.since !== undefined) filters.push(`since ${clock(query.since)}`);
+  if (query.since !== undefined) filters.push(`since ${formatToolTime(query.since, zone)}`);
   if (query.grep) filters.push(`grep /${query.grep}/i`);
   const scope = filters.length > 0 ? ` [${filters.join(", ")}]` : "";
   if (digest.held === 0) {
@@ -315,10 +348,10 @@ export function formatAppLogDigest(digest: AppLogDigest, query: AppLogQuery = {}
   for (let index = digest.entries.length - 1; index >= 0; index -= 1) {
     const entry = digest.entries[index];
     const [head, ...stack] = entry.text.split("\n");
-    const repeat = entry.count > 1 ? ` x${entry.count} since ${clock(entry.firstSeen)}` : "";
+    const repeat = entry.count > 1 ? ` x${entry.count} since ${clock(entry.firstSeen, zone)}` : "";
     const where = entry.url !== "" ? `  ${entry.url}` : "";
     const group = [
-      clip(`${clock(entry.lastSeen)} ${entry.level} ${entry.source}${repeat}: ${head}${where}`, MAX_DIGEST_LINE_CHARS),
+      clip(`${clock(entry.lastSeen, zone)} ${entry.level} ${entry.source}${repeat}: ${head}${where}`, MAX_DIGEST_LINE_CHARS),
       ...stack.map((frame) => clip(`    ${frame.trim()}`, MAX_DIGEST_LINE_CHARS)),
     ];
     const cost = group.reduce((total, line) => total + Buffer.byteLength(line) + 1, 0);
@@ -335,7 +368,8 @@ export function formatAppLogDigest(digest: AppLogDigest, query: AppLogQuery = {}
     `${digest.matched} entr${digest.matched === 1 ? "y" : "ies"} match${scope}${window}`
     + ` — ${digest.errors} error${digest.errors === 1 ? "" : "s"}, ${digest.warnings} warning${digest.warnings === 1 ? "" : "s"}`
     + `, deduped from ${digest.events} event${digest.events === 1 ? "" : "s"}`
-    + ` (ring: ${digest.held}/${MAX_ENTRIES} entries, ${kb(digest.bytes)}/${kb(MAX_BYTES)}${dropped}). Oldest first.`,
+    + ` (ring: ${digest.held}/${MAX_ENTRIES} entries, ${kb(digest.bytes)}/${kb(MAX_BYTES)}${dropped}). Oldest first.`
+    + ` Times are ${zone} ${formatUtcOffset(utcOffsetMinutes(new Date(digest.entries.at(-1)?.lastSeen ?? Date.now()), zone))}.`,
   ];
   for (const group of groups) for (const line of group) lines.push(line);
   return lines.join("\n");

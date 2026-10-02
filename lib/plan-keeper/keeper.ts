@@ -1,6 +1,7 @@
 import { getHarness } from "../harness";
 import { runOneShotModel } from "../model-plan/one-shot";
 import { readModelRoles } from "../omp/model-roles";
+import { ownerTimeZone } from "../time-zone-prefs";
 import { isRecord } from "../type-guards";
 import type { PlanOverlay, PlanOverlaySubtask, PlanOverlayUpdateFrame, TodoAutoUpdateFrame, TodoItem, TodoPhase } from "../pi-types";
 import { readPlanKeeperConfig } from "./config";
@@ -71,13 +72,14 @@ export interface PlanKeeperRunnerInput {
  * same contract as lib/distill/runner.ts's DistillAttempt. */
 export type PlanKeeperRunner = (input: PlanKeeperRunnerInput) => Promise<{ text: string | null; error: string | null }>;
 
-function engineRunner(bin: string): PlanKeeperRunner {
+function engineRunner(bin: string, timeZone: string): PlanKeeperRunner {
   return (input) => runOneShotModel({
     bin,
     model: input.model,
     systemPrompt: input.systemPrompt,
     prompt: input.prompt,
     timeoutMs: input.timeoutMs,
+    timeZone,
   });
 }
 
@@ -374,7 +376,7 @@ export class PlanKeeper {
     if (!runner) {
       const engine = planKeeperEngine();
       if (engine.status !== "ready") return null;
-      runner = engineRunner(engine.bin);
+      runner = engineRunner(engine.bin, ownerTimeZone(this.hooks.sessionId));
     }
     for (const model of modelChain(harnessId)) {
       const result = await runner({ model, systemPrompt, prompt, timeoutMs: RUN_TIMEOUT_MS });

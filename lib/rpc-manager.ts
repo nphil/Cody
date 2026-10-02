@@ -33,6 +33,8 @@ import { copySessionPreset, renameSessionPreset, sessionPresetOverlay } from "./
 import { selectPromptProfileId, type PromptProfileId } from "./local-model-profile";
 import { PRESET_FULL } from "./tool-presets";
 import { isRecord } from "./type-guards";
+import { LOCAL_TIME_CUSTOM_TYPE, normalizeTimeZone, serverTimeZone } from "./time-zone";
+import { ownerTimeZone } from "./time-zone-prefs";
 import { SIDEBAR_CONTEXT_TOOLS } from "./sidebar-context-tools";
 import { SESSION_AWARENESS_TOOLS, type SessionLivePhase, type SessionToolContext } from "./session-tools";
 import { findUserById, hasAnyUser, type UserRecord } from "./auth/users";
@@ -92,6 +94,10 @@ interface RefusalDecisionMetadata {
 }
 
 const REFUSAL_DECISION_TITLE_PREFIX = "CODY_REFUSAL_DECISION ";
+/** The question lib/omp/extensions/cody-local-time.ts asks before every prompt:
+ *  "which zone is this message from?". Answered here from memory (answerTimeZoneRequest),
+ *  never shown to a person. */
+const TIME_ZONE_REQUEST_TITLE = "CODY_TIME_ZONE";
 /** How long a fallback announcement waits for the refusal guard's question,
  *  which omp sends a few milliseconds later when the fallback is a refusal. */
 const FALLBACK_NOTICE_HOLD_MS = 1_000;
@@ -701,13 +707,17 @@ export function buildEngineRpcLaunch(
     args.push("--tools", opts.profile.toolNames.join(","));
   }
   if (opts.profile?.systemPromptPath) args.push("--system-prompt", opts.profile.systemPromptPath);
-  // Main omp sessions carry Cody's refusal guard (lib/omp/extensions): it asks
-  // before a safety refusal falls back to another model and performs the
-  // in-place rewind. Resolved from the package dir the server itself sets,
-  // never the process cwd, so any launch directory finds it.
+  // Main omp sessions carry Cody's two extensions (lib/omp/extensions): the
+  // refusal guard asks before a safety refusal falls back to another model and
+  // performs the in-place rewind, and the local-time extension gives the agent
+  // one hidden line with the user's local time before every prompt. Resolved
+  // from the package dir the server itself sets, never the process cwd, so any
+  // launch directory finds them.
   if (harness.id === "omp" && opts.kind !== "sidebar") {
     const packageRoot = process.env.CODY_PACKAGE_DIR || process.cwd();
-    args.push("--extension", path.join(packageRoot, "lib", "omp", "extensions", "cody-refusal-guard.ts"));
+    const extensions = path.join(packageRoot, "lib", "omp", "extensions");
+    args.push("--extension", path.join(extensions, "cody-refusal-guard.ts"));
+    args.push("--extension", path.join(extensions, "cody-local-time.ts"));
   }
   // A sidebar child gets its own agent dir, whose `mcp.json` is empty, so the
   // user-scope MCP servers (111 tool schemas / 89,303 tokens on the owner's
@@ -938,6 +948,8 @@ export interface WrapperEngineContext {
   contextSessionId?: string | null;
   /** Acting account, for the ownership gate on session reads. */
   user?: UserRecord | null;
+  /** The zone the first child is started under (its `TZ`). Absent: the server's. */
+  timeZone?: string;
 }
 
 export class AgentSessionWrapper {
@@ -1074,6 +1086,17 @@ export class AgentSessionWrapper {
   private localProfileLaunch: LocalModelProfileLaunch | undefined;
   private localProfileResolution: ResolvedLocalModelProfile | undefined;
   private proc: RpcProcess;
+  /** The `TZ` the current child was started with: what `date`, logs and every
+   *  script it runs report. A running process cannot change it, so it moves only
+   *  when the child is restarted (alignTimeZone). */
+  private childTimeZone: string;
+  /** The zone of the newest message handed to this session: what the agent is
+   *  told and what Cody's tools print. It follows the device that is typing, so
+   *  it can differ from childTimeZone until the next idle restart. */
+  private messageTimeZone: string;
+  /** The restart a zone change is waiting on. A second send from the same device
+   *  joins it instead of racing restart()'s own session_restarting guard. */
+  private zoneAlignment: Promise<boolean> | null = null;
   readonly cwd: string;
 
   private readonly engine: WrapperEngineContext;
@@ -1086,6 +1109,8 @@ export class AgentSessionWrapper {
     this.engine = engine;
     this.localProfileLaunch = engine.initialProfile;
     this.localProfileResolution = engine.initialResolution;
+    this.childTimeZone = normalizeTimeZone(engine.timeZone) ?? serverTimeZone();
+    this.messageTimeZone = this.childTimeZone;
   }
 
   /** The smallest local profile is deliberately limited to its two OMP tools.
@@ -1305,6 +1330,71 @@ export class AgentSessionWrapper {
 
   isRunning(): boolean {
     return this.isAlive() && (this.promptRunning || this.streaming || this.compacting || this.bashRunning);
+  }
+
+  /** The zone this session's child process runs under: its `TZ`. */
+  get timeZone(): string {
+    return this.childTimeZone;
+  }
+
+  /** The zone of the newest message — what the agent was last told and what
+   *  Cody's tools print. Before any message it is the child's own. */
+  currentTimeZone(): string {
+    return this.messageTimeZone;
+  }
+
+  private noteMessageTimeZone(zone: unknown): void {
+    const known = normalizeTimeZone(zone);
+    if (known) this.messageTimeZone = known;
+  }
+
+  /** A message the engine has not finished with is one a restart would fail. */
+  private hasUnsettledDelivery(): boolean {
+    for (const entry of this.deliveryLedger.values()) {
+      if (entry.status === "sending" || entry.status === "queued" || entry.status === "started") return true;
+    }
+    return false;
+  }
+
+  /**
+   * Put the child on `zone` before a message from that zone is delivered.
+   *
+   * A running process cannot change its `TZ`, so a change is a restart of this
+   * same wrapper against the same session file: its listeners, delivery ledger
+   * and event stream stay attached and the conversation carries on. It happens
+   * only when nothing is in flight — a running turn, a held follow-up or a
+   * message the engine has not finished with would be failed by a restart —
+   * and the message being sent has not been delivered yet, so it simply waits
+   * for it and nothing is lost (a failed restart surfaces to the sender, whose
+   * outbox keeps the message). While a turn runs this does nothing: the hidden
+   * line the agent receives then says its shell still reports the old zone,
+   * and the next idle message from the new zone restarts.
+   *
+   * Returns true when the child was restarted.
+   */
+  async alignTimeZone(zone: string): Promise<boolean> {
+    const wanted = normalizeTimeZone(zone);
+    if (!wanted) return false;
+    if (this.zoneAlignment) return this.zoneAlignment;
+    if (wanted === this.childTimeZone || !this.isAlive()) return false;
+    if (this.restarting || this.isRunning() || this.heldQueue.length > 0 || this.hasUnsettledDelivery()) return false;
+    const alignment = this.restart(this.localProfileLaunch, wanted).then(() => true).finally(() => {
+      this.zoneAlignment = null;
+    });
+    this.zoneAlignment = alignment;
+    return alignment;
+  }
+
+  /** Answer the hidden-line extension's question: the zone of the message it is
+   *  about to read, and the zone the shell runs in. */
+  private answerTimeZoneRequest(event: AgentEvent): void {
+    const id = typeof event.id === "string" ? event.id : "";
+    if (!id) return;
+    this.proc.sendFrame({
+      type: "extension_ui_response",
+      id,
+      value: JSON.stringify({ zone: this.messageTimeZone, shell: this.childTimeZone }),
+    });
   }
 
   /** The profile actually launched for this live wrapper, for the settings API.
@@ -1637,6 +1727,13 @@ export class AgentSessionWrapper {
       this.pendingPermissionRequests.add(event.requestId);
     } else if (event.type === "permission_resolved" && typeof event.requestId === "string") {
       this.pendingPermissionRequests.delete(event.requestId);
+    }
+    // The hidden per-prompt line (lib/omp/extensions/cody-local-time.ts) is
+    // for the model only. Dropped here, before any listener or the sidebar sees
+    // it, so a live transcript never flashes a row the reloaded one lacks.
+    if ((event.type === "message_start" || event.type === "message_end") && isRecord(event.message)
+      && event.message.role === "custom" && event.message.customType === LOCAL_TIME_CUSTOM_TYPE) {
+      return;
     }
 
     switch (event.type) {
@@ -2256,6 +2353,10 @@ export class AgentSessionWrapper {
       this.handleRefusalDecisionRequest(event);
       return true;
     }
+    if (method === "input" && typeof event.title === "string" && event.title.startsWith(TIME_ZONE_REQUEST_TITLE)) {
+      this.answerTimeZoneRequest(event);
+      return true;
+    }
     if (method === "cancel") {
       const targetId = typeof event.targetId === "string" ? event.targetId : "";
       if (targetId && this.pendingRefusalDecision?.requestId === targetId) {
@@ -2372,7 +2473,7 @@ export class AgentSessionWrapper {
     }
     if (toolName === "forge") {
       try {
-        const text = await runForgeTool(event.arguments, { cwd: this.cwd });
+        const text = await runForgeTool(event.arguments, { cwd: this.cwd, timeZone: this.messageTimeZone });
         this.sendHostToolResult({ type: "host_tool_result", id, result: { content: [{ type: "text", text }] } });
       } catch (error) {
         // A ForgeError already reads as an instruction ("pass repo as
@@ -2488,7 +2589,7 @@ export class AgentSessionWrapper {
       const requested = typeof input.level === "string" ? input.level : "";
       const query: AppLogQuery = {
         level: APP_LOG_LEVELS.find((candidate) => candidate === requested),
-        since: parseSince(input.since) ?? undefined,
+        since: parseSince(input.since, Date.now(), this.messageTimeZone) ?? undefined,
         grep: typeof input.grep === "string" && input.grep !== "" ? input.grep : undefined,
         limit: typeof input.limit === "number" ? input.limit : undefined,
       };
@@ -2499,7 +2600,7 @@ export class AgentSessionWrapper {
       this.sendHostToolResult({
         type: "host_tool_result",
         id,
-        result: { content: [{ type: "text", text: formatAppLogDigest(digest, query) }] },
+        result: { content: [{ type: "text", text: formatAppLogDigest(digest, query, this.messageTimeZone) }] },
       });
       return;
     }
@@ -2576,6 +2677,7 @@ export class AgentSessionWrapper {
       runningSessionIds,
       livePhases,
       restrictToUnowned: user === null && hasAnyUser(),
+      timeZone: this.messageTimeZone,
       ...(this.engine.kind === "sidebar" ? {} : { charBudget: MAIN_SESSION_RESULT_CHARS }),
     };
   }
@@ -2887,7 +2989,7 @@ export class AgentSessionWrapper {
   }
 
   /** Full restart of the child process against the same session file. */
-  private async restart(profile: LocalModelProfileLaunch | undefined = this.localProfileLaunch): Promise<void> {
+  private async restart(profile: LocalModelProfileLaunch | undefined = this.localProfileLaunch, timeZone: string = this.childTimeZone): Promise<void> {
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
     const sessionFile = this._sessionFile;
     const resumable = !!sessionFile && existsSync(sessionFile);
@@ -2910,11 +3012,13 @@ export class AgentSessionWrapper {
       const proc = new RpcProcess({
         cwd: this.cwd,
         launch: this.engine.relaunch(resumable ? sessionFile : "", profile),
+        timeZone,
         onExit: ({ stderrTail }) => {
           if (this.proc === proc) this.handleProcessExit(stderrTail);
         },
       });
       this.proc = proc;
+      this.childTimeZone = timeZone;
       this.unsubscribeFrames = proc.onFrame((frame) => this.handleFrame(frame));
       try {
         const ready = await proc.waitReady(READY_TIMEOUT_MS);
@@ -3365,6 +3469,7 @@ export class AgentSessionWrapper {
       if (imageError) throw new Error(imageError);
       // The user is talking to the agent again: a previous Stop no longer holds.
       this.stopLatch = null;
+      this.noteMessageTimeZone(command.timeZone);
     }
 
     const unsupported = UNSUPPORTED_COMMANDS[type];
@@ -3884,6 +3989,54 @@ export async function restartSessionForRoutingWhenIdle(sessionId: string): Promi
 }
 
 /**
+ * The zone a session's tools print times in and its agent was last told: that
+ * of its newest message. An engine that does not track messages answers with
+ * the zone its child runs under, and a session that is not live with its
+ * owner's.
+ */
+export function getSessionTimeZone(sessionId: string): string {
+  const session = getRegistry().get(sessionId);
+  if (session instanceof AgentSessionWrapper) return session.currentTimeZone();
+  return normalizeTimeZone(session?.timeZone) ?? ownerTimeZone(sessionId);
+}
+
+const zoneRespawns = new Map<string, Promise<EngineSession>>();
+
+/**
+ * Make a live session's child run in `zone` before a message from that zone is
+ * delivered. Returns the session to deliver to — the same one, or its
+ * replacement.
+ *
+ * A running process cannot change its `TZ`, so a change needs a new process;
+ * it happens only while the session is idle (never mid-turn — the agent is
+ * told its shell still reports the old zone until the next idle message) and
+ * before the message is handed over, so the message cannot be lost to it.
+ *  - omp restarts the same wrapper in place (AgentSessionWrapper.alignTimeZone):
+ *    streams, ledger and listeners stay attached.
+ *  - An ACP engine has no in-place restart: its idle child is closed and the
+ *    session started again from the engine's own stored session, exactly as an
+ *    idle timeout followed by the next message does.
+ */
+export async function alignSessionTimeZone(session: EngineSession, zone: string): Promise<EngineSession> {
+  if (session instanceof AgentSessionWrapper) {
+    await session.alignTimeZone(zone);
+    return session;
+  }
+  const wanted = normalizeTimeZone(zone);
+  if (!wanted || !session.timeZone || session.timeZone === wanted || session.isRunning()) return session;
+  const sessionId = session.sessionId;
+  const inflight = zoneRespawns.get(sessionId);
+  if (inflight) return inflight;
+  const respawn = (async () => {
+    await session.destroyAndWait();
+    const { session: replacement } = await startRpcSession(sessionId, "", session.cwd, undefined, false, sessionId, undefined, undefined, undefined, { timeZone: wanted });
+    return replacement;
+  })().finally(() => zoneRespawns.delete(sessionId));
+  zoneRespawns.set(sessionId, respawn);
+  return respawn;
+}
+
+/**
  * Every live session's phase, keyed by session id — the source both the
  * omp host-tool path and the internal route the ACP bridge posts to read, so
  * a status report says the same thing whichever engine asked for it.
@@ -4016,9 +4169,10 @@ async function startEngineSession(
   create: (options: EngineSessionOptions) => EngineSession,
   sessionId: string,
   cwd: string,
+  timeZone: string,
 ): Promise<{ session: EngineSession; realSessionId: string }> {
   const registry = getRegistry();
-  const created = create({ sessionId, cwd });
+  const created = create({ sessionId, cwd, timeZone });
   created.start();
   await created.waitUntilReady();
 
@@ -4071,6 +4225,10 @@ export async function startRpcSession(
    * as an object rather than two more positional arguments: this signature is
    * already eight deep. */
   sidebar?: { contextSessionId?: string | null; user?: UserRecord | null },
+  /** The zone the child starts under: that of the message that caused the
+   * start. Omitted for a start nobody typed for (a session merely viewed),
+   * which uses the session owner's. */
+  spawn?: { timeZone?: string },
 ): Promise<{ session: EngineSession; realSessionId: string }> {
   const registry = getRegistry();
   const locks = getLocks();
@@ -4087,8 +4245,9 @@ export async function startRpcSession(
   const createEngineSession = harness.createSession?.bind(harness);
 
   const starting = (async () => {
+    const timeZone = normalizeTimeZone(spawn?.timeZone) ?? ownerTimeZone(createEngineSession ? (engineSessionId || sessionId) : sessionId);
     if (createEngineSession) {
-      return startEngineSession(createEngineSession, engineSessionId ?? sessionId, cwd);
+      return startEngineSession(createEngineSession, engineSessionId ?? sessionId, cwd, timeZone);
     }
     const initialResolution = profileTarget ? resolveLocalModelPromptProfile(profileTarget) : undefined;
     const initialProfile = initialResolution ? materializeLocalModelProfile(initialResolution) : undefined;
@@ -4097,6 +4256,7 @@ export async function startRpcSession(
     const proc = new RpcProcess({
       cwd,
       launch: buildEngineRpcLaunch(harness, { cwd, sessionFile, toolNames, advisor, profile: launchProfile, kind }),
+      timeZone,
       onExit: ({ stderrTail }) => holder.wrapper?.handleProcessExit(stderrTail),
     });
     const created = new AgentSessionWrapper(proc, cwd, {
@@ -4104,6 +4264,7 @@ export async function startRpcSession(
       label: harness.binaryName,
       initialProfile: launchProfile,
       initialResolution,
+      timeZone,
       relaunch: (file, profile) => buildEngineRpcLaunch(harness, {
         cwd,
         sessionFile: file,

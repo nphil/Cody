@@ -57,6 +57,25 @@ test("MCP mount notices stay out of the transcript", () => {
   assert.equal(html, "");
 });
 
+test("the hidden local-time line renders nothing in any activity mode", () => {
+  for (const activityDisplayMode of ["full", "compact", "hidden"]) {
+    const html = renderToStaticMarkup(React.createElement(MessageView, {
+      activityDisplayMode,
+      message: { role: "custom", customType: "cody-local-time", content: "Current local time: 2026-10-02 09:00 EDT", display: false },
+    }));
+    assert.equal(html, "", activityDisplayMode);
+  }
+});
+
+test("other hidden custom messages still render as the slim engine note", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    message: { role: "custom", customType: "extension_debug", content: "hidden extension payload", display: false },
+  }));
+
+  assert.notEqual(html, "");
+  assert.match(html, /hidden extension payload|Engine note/);
+});
+
 test("streaming tool calls start collapsed when the interface preference is enabled", () => {
   const html = renderToStaticMarkup(React.createElement(MessageView, {
     isStreaming: true,

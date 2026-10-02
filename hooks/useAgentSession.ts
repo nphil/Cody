@@ -24,6 +24,7 @@ import { extractLoopbackUrls, normalizePreviewUrl } from "@/lib/preview-url";
 import { derivePersistedContextUsage, type ContextUsageValue } from "@/lib/context-usage";
 import type { ThinkingModelMeta } from "@/lib/thinking-levels";
 import { AgentCommandError, getPromptDeliveryLedger, sendAgentCommand, sendPromptDelivery } from "@/lib/agent-client";
+import { deviceTimeZoneField } from "@/lib/device-time-zone";
 import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import {
   applyOutcome,
@@ -2142,6 +2143,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             ...(advisorEnabled ? { advisor: true } : {}),
             ...(newSessionLocalOnlyRef.current ? { localOnly: true } : {}),
             ...(opts.newSessionPresetId !== undefined && spawn.sendPresetId ? { presetId: opts.newSessionPresetId } : {}),
+            ...deviceTimeZoneField(),
           }),
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);

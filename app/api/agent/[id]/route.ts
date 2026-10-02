@@ -2,10 +2,13 @@ import { NextResponse } from "next/server";
 import { createCheckpoint } from "@/lib/checkpoints";
 import { readSessionHeader, isSidebarSessionPath } from "@/lib/session-reader";
 import { agentCommandErrorResponse, getStateBounded, resolveEngineSessionOr404, resolveSessionPathOr404 } from "@/lib/api-utils";
-import { startRpcSession, getRpcSession, resolveSpawnCwd } from "@/lib/rpc-manager";
+import { alignSessionTimeZone, startRpcSession, getRpcSession, resolveSpawnCwd } from "@/lib/rpc-manager";
 import type { EngineSession } from "@/lib/harness/types";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
+import { getRequestUser } from "@/lib/auth/guard";
+import { isMessageCommandType } from "@/lib/time-zone";
+import { zoneForMessage } from "@/lib/time-zone-prefs";
 
 import { getHarness } from "@/lib/harness";
 
@@ -94,6 +97,13 @@ export async function POST(
       return NextResponse.json({ error: "command type is required", code: "command_type_required" }, { status: 400 });
     }
 
+    // A message carries the zone of the browser it was typed in, read when it
+    // was sent. It is resolved here against the person's own choice and their
+    // last-seen device, then handed on as `timeZone`: whatever the client sent
+    // that is not a zone never reaches a session.
+    const timeZone = isMessageCommandType(body.type) ? zoneForMessage(getRequestUser(req), body.timeZone) : undefined;
+    if (timeZone) body.timeZone = timeZone;
+
     // Word completion is a keystroke-rate query about the composer, never a
     // reason to start an engine: with no live session there is nothing to ask,
     // and "no suggestion" is the honest answer. (A live session falls through
@@ -105,9 +115,12 @@ export async function POST(
     // Fast path: already-running session
     const existing = getRpcSession(id);
     if (existing?.isAlive()) {
-      const midRunSteer = existing.isRunning() && body.streamingBehavior === "steer";
-      if (!midRunSteer) await checkpointBeforePrompt(existing.cwd, body);
-      return await sendWithAckBound(existing, body);
+      // A message from a new zone restarts an idle child first (never one that
+      // is mid-turn), and only then is handed over — see alignSessionTimeZone.
+      const session = timeZone ? await alignSessionTimeZone(existing, timeZone) : existing;
+      const midRunSteer = session.isRunning() && body.streamingBehavior === "steer";
+      if (!midRunSteer) await checkpointBeforePrompt(session.cwd, body);
+      return await sendWithAckBound(session, body);
     }
 
     // Non-omp engines own their transcripts; the session is known by its index
@@ -116,7 +129,7 @@ export async function POST(
       const engine = resolveEngineSessionOr404(id, req);
       if ("response" in engine) return engine.response;
       const engineCwd = resolveSpawnCwd(engine.row.cwd);
-      const { session } = await startRpcSession(id, "", engineCwd, undefined, false, id);
+      const { session } = await startRpcSession(id, "", engineCwd, undefined, false, id, undefined, undefined, undefined, { timeZone });
       await checkpointBeforePrompt(engineCwd, body);
       return await sendWithAckBound(session, body);
     }
@@ -128,7 +141,7 @@ export async function POST(
 
     const cwd = resolveSpawnCwd(readSessionHeader(filePath)?.cwd);
 
-    const { session } = await startRpcSession(id, filePath, cwd, undefined, false, undefined, undefined, kind);
+    const { session } = await startRpcSession(id, filePath, cwd, undefined, false, undefined, undefined, kind, undefined, { timeZone });
     await checkpointBeforePrompt(cwd, body);
     return await sendWithAckBound(session, body);
   } catch (error) {

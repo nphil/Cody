@@ -29,6 +29,7 @@ import { NativeSetting, ToggleSwitch, slugify } from "../primitives";
 import { SaveStatusCorner, useSaveStatus } from "../SaveStatus";
 import type { SearchEntry } from "../search-index";
 import { useSettingsShell } from "../shell-context";
+import { TimeZoneSetting } from "../TimeZoneSetting";
 
 export const PREFERENCES_PANEL_ID = "general";
 
@@ -45,6 +46,7 @@ export interface PreferenceCard {
 export const PREFERENCE_CARDS: readonly PreferenceCard[] = [
   { id: "theme", label: "Theme", description: "Colour theme for this account, applied on every device you sign in from. The title-bar picker changes the same setting.", scope: "Cody only", keywords: ["dark", "light", "colour", "color"] },
   { id: "language", label: "Language", description: "Interface language. Auto-detected from the browser until chosen here.", scope: "Cody only", keywords: ["locale", "english", "japanese", "chinese"] },
+  { id: "time-zone", label: "Time zone", description: "Which clock your agents and terminals use. Automatic follows the device you are on, so it keeps up when you travel. Pick a zone to keep it fixed for your whole account.", scope: "Cody only", keywords: ["timezone", "clock", "travel", "date", "local time", "utc", "device"] },
   { id: "chat-font-size", label: "Chat text size", description: "Font size for transcript text, thinking blocks, and tool results. Applies only to chat content, not the interface.", scope: "Cody only", keywords: ["font", "size", "text", "zoom", "readable"] },
   { id: "activity", label: "Tool and background activity", description: "Choose whether tool calls, results and structured background work stay compact, open in full, or disappear from the transcript. User and assistant conversation and thinking are unchanged.", scope: "Cody only", keywords: ["tools", "results", "async", "background", "transcript", "compact", "full", "hidden"] },
   { id: "thinking", label: "Expand thinking blocks", description: "Show the model's reasoning open by default instead of behind a collapsed header.", scope: "Cody only" },
@@ -210,7 +212,7 @@ export function PreferencesPanel() {
       <SaveStatusCorner panelId={PREFERENCES_PANEL_ID} />
       <div>
         <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>Preferences</h3>
-        <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)" }}>How Cody looks and behaves for you: theme, language, transcript defaults, sounds and the composer&apos;s submit mode.</p>
+        <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)" }}>How Cody looks and behaves for you: theme, language, time zone, transcript defaults, sounds and the composer&apos;s submit mode.</p>
       </div>
       <div style={grid}>
         <NativeSetting label={card("theme").label} description={card("theme").description} scope="Cody only">
@@ -219,6 +221,12 @@ export function PreferencesPanel() {
         <NativeSetting label={card("language").label} description={card("language").description} scope="Cody only">
           <Select value={locale} onChange={(next) => saved(() => setLocale(next))} options={localeOptions} aria-label="Language" />
         </NativeSetting>
+        <TimeZoneSetting
+          panelId={PREFERENCES_PANEL_ID}
+          label={t("preferences.timeZoneLabel")}
+          description={t("preferences.timeZoneDescription")}
+          searchId={slugify(card("time-zone").label)}
+        />
         <NativeSetting label={card("chat-font-size").label} description={card("chat-font-size").description} scope="Cody only">
           <Select
             value={chatFontSize}

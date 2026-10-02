@@ -5,7 +5,7 @@ import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRe
 import { ChevronDown, ShieldAlert, TriangleAlert, X } from "lucide-react";
 import type { ActivityDisplayMode, AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, ImageContent, SessionInfo, SessionTreeNode, TextContent, ToolCallContent, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
-import { countToolCallBlocks, getDisplayableAssistantBlocks, isVisibleTranscriptMessage, groupHasThinking, splitFinalAssistantBlocks } from "@/lib/message-display";
+import { countToolCallBlocks, getDisplayableAssistantBlocks, isHiddenFromTranscript, isVisibleTranscriptMessage, groupHasThinking, splitFinalAssistantBlocks } from "@/lib/message-display";
 import { isReminderCustomType } from "@/lib/system-reminder";
 import { estimateTurnHeight, type TurnContentSignal } from "@/lib/turn-height-estimate";
 import { imageSource, MessageView } from "./MessageView";
@@ -193,7 +193,7 @@ function hasDisplayableProcessMessage(message: AgentMessage): boolean {
   if (message.role === "assistant") {
     return getDisplayableAssistantBlocks(message as AssistantMessage).length > 0;
   }
-  return message.role === "custom";
+  return message.role === "custom" && !isHiddenFromTranscript(message);
 }
 
 /** Concatenates a user/developer/custom/toolResult message's text blocks
@@ -454,6 +454,11 @@ const LIVE_TAIL_UNITS = 6;
 function buildTranscriptUnits(messages: AgentMessage[], lastAnchorIdx: number, tailIsLive: boolean): TranscriptUnit[] {
   const units: TranscriptUnit[] = [];
   const heightForMessage = (idx: number) => estimateTurnHeight(turnContentSignal(messages[idx]));
+  // A hidden engine message gets no unit at all: an empty turn wrapper would
+  // still leave a gap between its neighbours.
+  const pushMessageUnit = (idx: number) => {
+    if (!isHiddenFromTranscript(messages[idx])) units.push({ kind: "message", idx, estimatedHeight: heightForMessage(idx) });
+  };
   // Process groups render collapsed by default (ProcessDetailsGroup) — the
   // toggle button is the only thing that actually paints until expanded, so
   // its placeholder stays near the floor regardless of how much (or little)
@@ -465,7 +470,7 @@ function buildTranscriptUnits(messages: AgentMessage[], lastAnchorIdx: number, t
   for (let idx = 0; idx < messages.length;) {
     const msg = messages[idx];
     if (!isGroupAnchor(msg)) {
-      units.push({ kind: "message", idx, estimatedHeight: heightForMessage(idx) });
+      pushMessageUnit(idx);
       idx += 1;
       continue;
     }
@@ -479,13 +484,13 @@ function buildTranscriptUnits(messages: AgentMessage[], lastAnchorIdx: number, t
 
     if (finalAssistantIdx === -1 || isLiveTail) {
       for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
-        units.push({ kind: "message", idx: renderIdx, estimatedHeight: heightForMessage(renderIdx) });
+        pushMessageUnit(renderIdx);
       }
       idx = endIdx;
       continue;
     }
 
-    units.push({ kind: "message", idx: userIdx, estimatedHeight: heightForMessage(userIdx) });
+    pushMessageUnit(userIdx);
 
     const processIndices: number[] = [];
     for (let processIdx = userIdx + 1; processIdx < finalAssistantIdx; processIdx++) {
@@ -506,7 +511,7 @@ function buildTranscriptUnits(messages: AgentMessage[], lastAnchorIdx: number, t
       units.push({ kind: "answer", idx: finalAssistantIdx, message: answerMessage, estimatedHeight: estimateTurnHeight(turnContentSignal(answerMessage)) });
     }
     for (let renderIdx = finalAssistantIdx + 1; renderIdx < endIdx; renderIdx++) {
-      units.push({ kind: "message", idx: renderIdx, estimatedHeight: heightForMessage(renderIdx) });
+      pushMessageUnit(renderIdx);
     }
     idx = endIdx;
   }

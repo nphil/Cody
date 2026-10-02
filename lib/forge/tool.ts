@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { HostToolDefinition } from "../pi-types";
+import { formatToolTime, toolTimeZone } from "../tool-time";
 import {
   createForgeClient,
   fileAsBlob,
@@ -33,6 +34,10 @@ const REMOTE_TIMEOUT_MS = 5_000;
 const RUN_POLL_MS = 5_000;
 const DEFAULT_RUN_WATCH_SECONDS = 300;
 const MAX_RUN_WATCH_SECONDS = 1_800;
+
+/** Keys the client maps from a code host's `*_at` timestamps. The tool writes
+ * them in the session's zone instead of the host's UTC string. */
+const TIMESTAMP_FIELDS: Record<string, true> = { createdAt: true, updatedAt: true, publishedAt: true, startedAt: true, completedAt: true };
 
 export const FORGE_TOOL_OPS = [
   "hosts",
@@ -97,6 +102,8 @@ export const FORGE_HOST_TOOL: HostToolDefinition = {
 export interface ForgeToolContext {
   /** The session's working directory, used to find the origin remote. */
   cwd: string;
+  /** IANA zone of the message the agent is answering; dates in results are written in it. Omitted or invalid -> the server's zone. */
+  timeZone?: string;
 }
 
 interface ForgeToolArgs {
@@ -266,10 +273,14 @@ export async function runForgeTool(rawArgs: unknown, context: ForgeToolContext):
   const client = createForgeClient(host);
   const limit = boundedLimit(args.limit, 30);
   const state = args.state === "closed" || args.state === "all" ? args.state : "open";
+  const zone = toolTimeZone(context.timeZone);
+  const json = (value: unknown): string => JSON.stringify(value, (key, field) => (
+    TIMESTAMP_FIELDS[key] === true && typeof field === "string" && field !== "" ? formatToolTime(field, zone) : field
+  ), 2);
 
   switch (op) {
     case "repo_view":
-      return JSON.stringify({ host: host.id, ...(await client.repoView(repo)) }, null, 2);
+      return json({ host: host.id, ...(await client.repoView(repo)) });
 
     case "file_read": {
       const content = await client.fileRead(repo, requireString(args, "path", "file_read"), typeof args.ref === "string" ? args.ref : undefined);
@@ -279,16 +290,16 @@ export async function runForgeTool(rawArgs: unknown, context: ForgeToolContext):
     }
 
     case "issues":
-      return JSON.stringify({ repo: `${repo.owner}/${repo.name}`, issues: await client.issues(repo, { state, limit }) }, null, 2);
+      return json({ repo: `${repo.owner}/${repo.name}`, issues: await client.issues(repo, { state, limit }) });
 
     case "issue_view":
-      return JSON.stringify(await client.issueView(repo, requireNumber(args, "number", "issue_view"), args.comments === true), null, 2);
+      return json(await client.issueView(repo, requireNumber(args, "number", "issue_view"), args.comments === true));
 
     case "prs":
-      return JSON.stringify({ repo: `${repo.owner}/${repo.name}`, pulls: await client.pulls(repo, { state, limit }) }, null, 2);
+      return json({ repo: `${repo.owner}/${repo.name}`, pulls: await client.pulls(repo, { state, limit }) });
 
     case "pr_view":
-      return JSON.stringify(await client.pullView(repo, requireNumber(args, "number", "pr_view")), null, 2);
+      return json(await client.pullView(repo, requireNumber(args, "number", "pr_view")));
 
     case "pr_diff": {
       const diff = await client.pullDiff(repo, requireNumber(args, "number", "pr_diff"));
@@ -296,35 +307,35 @@ export async function runForgeTool(rawArgs: unknown, context: ForgeToolContext):
     }
 
     case "pr_create":
-      return JSON.stringify(await client.pullCreate(repo, {
+      return json(await client.pullCreate(repo, {
         head: requireString(args, "head", "pr_create"),
         base: requireString(args, "base", "pr_create"),
         title: requireString(args, "title", "pr_create"),
         body: typeof args.body === "string" ? args.body : "",
-      }), null, 2);
+      }));
 
     case "releases":
-      return JSON.stringify({ repo: `${repo.owner}/${repo.name}`, releases: await client.releases(repo, limit) }, null, 2);
+      return json({ repo: `${repo.owner}/${repo.name}`, releases: await client.releases(repo, limit) });
 
     case "release_create":
-      return JSON.stringify(await client.releaseCreate(repo, {
+      return json(await client.releaseCreate(repo, {
         tag: requireString(args, "tag", "release_create"),
         name: typeof args.name === "string" ? args.name : undefined,
         body: typeof args.body === "string" ? args.body : "",
         draft: args.draft === true,
         prerelease: args.prerelease === true,
-      }), null, 2);
+      }));
 
     case "release_upload": {
       const releaseId = requireNumber(args, "release_id", "release_upload");
       const filePath = requireString(args, "path", "release_upload");
       const { blob, name } = await fileAsBlob(filePath);
       const assetName = typeof args.name === "string" && args.name.trim() ? args.name.trim() : name;
-      return JSON.stringify(await client.releaseUpload(repo, releaseId, blob, assetName), null, 2);
+      return json(await client.releaseUpload(repo, releaseId, blob, assetName));
     }
 
     case "runs":
-      return JSON.stringify({
+      return json({
         repo: `${repo.owner}/${repo.name}`,
         runs: await client.runs(repo, {
           limit,
@@ -332,14 +343,14 @@ export async function runForgeTool(rawArgs: unknown, context: ForgeToolContext):
           event: typeof args.event === "string" ? args.event : undefined,
           status: typeof args.status === "string" ? args.status : undefined,
         }),
-      }, null, 2);
+      });
 
     case "run_watch":
-      return JSON.stringify(await runWatch(client, repo, args), null, 2);
+      return json(await runWatch(client, repo, args));
 
     case "packages": {
       const owner = typeof args.owner === "string" && args.owner.trim() ? args.owner.trim() : host.owner || repo.owner;
-      return JSON.stringify({ owner, packages: await client.packages(owner, limit) }, null, 2);
+      return json({ owner, packages: await client.packages(owner, limit) });
     }
 
     default:

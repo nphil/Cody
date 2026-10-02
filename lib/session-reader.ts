@@ -26,6 +26,7 @@ import { taskResultRetryFailure, taskResultStructuredOutput, taskResultUsageCost
 import type { TodoPhase } from "./pi-types";
 import { sessionPathKey } from "./session-path";
 import { foldSystemReminder } from "./system-reminder";
+import { isHiddenFromTranscript } from "./message-display";
 import { resolveProject, type ProjectInfo } from "./worktree";
 
 export { getAgentDir };
@@ -871,6 +872,7 @@ export function entryToUiMessage(
       // of crashing every reader of the file.
       if (!isRecord(entry.message)) return null;
       const raw = entry.message;
+      if (isHiddenFromTranscript(raw as { role?: string; customType?: string })) return null;
       // omp-only roles are folded into displayable custom messages so the
       // existing role-keyed UI renders them without new components.
       if (raw.role === "developer") {
@@ -944,6 +946,7 @@ export function entryToUiMessage(
         timestamp: parseEntryTimestamp(entry.timestamp),
       };
     case "custom_message":
+      if (isHiddenFromTranscript({ role: "custom", customType: entry.customType })) return null;
       return {
         role: "custom",
         customType: entry.customType,

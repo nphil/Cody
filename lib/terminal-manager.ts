@@ -40,6 +40,9 @@ type TerminalRecord = TerminalInfo & {
    * Internal: it stays off TerminalInfo so it never reaches an API response.
    * A plain shell leaves it undefined and is never touched by a switch. */
   engineId?: string;
+  /** The zone the terminal's shell runs in (its `TZ`). Kept so a respawn after
+   * the engine exits ("continue") stays in the same zone. Internal, like engineId. */
+  timeZone?: string;
 };
 const MAX_REPLAY = 200_000;
 const MIN_DIM = 2;
@@ -64,12 +67,12 @@ export async function authorizeTerminalCwd(input: string): Promise<string> {
   return cwd;
 }
 
-function terminalEnvironment(): Record<string, string> {
+function terminalEnvironment(timeZone?: string): Record<string, string> {
   const env: Record<string, string> = {};
   // Provider keys saved in Settings are part of a terminal's environment too:
   // this is where a user runs an engine's own login or setup command, and it
   // should see the same credentials the chat session does.
-  for (const [key, value] of Object.entries(engineChildEnv())) {
+  for (const [key, value] of Object.entries(engineChildEnv(undefined, { timeZone }))) {
     if (typeof value === "string") env[key] = value;
   }
   env.TERM = "xterm-256color";
@@ -156,7 +159,7 @@ export class TerminalManager {
     return [...this.terminals.values()].some((terminal) => terminal.cwd === normalized && !terminal.exited);
   }
 
-  create(cwd: string, name?: string, cols?: number, rows?: number, attach?: TerminalAttach): TerminalInfo {
+  create(cwd: string, name?: string, cols?: number, rows?: number, attach?: TerminalAttach, timeZone?: string): TerminalInfo {
     const requestedName = name?.trim();
     if (requestedName && !/^[\w .:+-]{1,80}$/.test(requestedName)) throw new Error("Invalid terminal name");
     // Server-authoritative first-terminal rule: only the FIRST live terminal
@@ -171,6 +174,7 @@ export class TerminalManager {
       exited: false,
       ...(attaching ? { attached: true } : {}),
       replay: "",
+      timeZone,
       listeners: new Set(),
     };
     this.spawn(record, cols, rows, { launchEngine: true, attach: attaching ? attach : undefined });
@@ -271,7 +275,7 @@ export class TerminalManager {
       cols: dimension(cols, 80),
       rows: dimension(rows, 24),
       cwd: record.cwd,
-      env: { ...terminalEnvironment(), ...shell.env },
+      env: { ...terminalEnvironment(record.timeZone), ...shell.env },
     });
     record.pty = child;
     child.onData((data) => {

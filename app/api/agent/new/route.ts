@@ -10,6 +10,7 @@ import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 
 import { getRequestUser } from "@/lib/auth/guard";
+import { zoneForMessage } from "@/lib/time-zone-prefs";
 import { setSessionOwner } from "@/lib/auth/session-owners";
 import { getHarness } from "@/lib/harness";
 import { engineSessionTitle, getEngineSession, upsertEngineSession } from "@/lib/harness/engine-sessions";
@@ -121,6 +122,10 @@ export async function POST(req: Request) {
     // Resolved before the spawn: the sidebar's context tools are handed this
     // account, and every session they read is gated by its ownership.
     const actor = getRequestUser(req);
+    // The new chat starts in the zone of the browser that opened it (or the
+    // person's own choice), and its first message carries that same zone.
+    const timeZone = zoneForMessage(actor, command.timeZone);
+    promptCommand.timeZone = timeZone;
     let started: Awaited<ReturnType<typeof startRpcSession>>;
     try {
       started = await startRpcSession(
@@ -135,6 +140,7 @@ export async function POST(req: Request) {
         // Sidebar only: its context tools read this account's sessions, and
         // default `read_session` to whichever main chat the panel is pointed at.
         kind === "sidebar" ? { contextSessionId: typeof contextSessionId === "string" ? contextSessionId : null, user: actor } : undefined,
+        { timeZone },
       );
     } catch (error) {
       // No session came of it, so its pre-spawn binding must not linger.

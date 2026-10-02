@@ -34,6 +34,7 @@ import type { UserRecord } from "./auth/users";
 import type { HostToolDefinition } from "./pi-types";
 import { buildSessionContext, getSessionEntries, listAllSessions, resolveSessionPath } from "./session-reader";
 import { clampForSidebar, resultCharBudget, type ClampedResult } from "./sidebar-context-budget";
+import { formatToolTime } from "./tool-time";
 import type { AgentMessage, SessionInfo } from "./types";
 
 /** The phase flags a live child reports without an RPC round trip. Asking the
@@ -74,6 +75,8 @@ export interface SessionToolContext {
    * `user: null` and see every account's conversations.
    */
   restrictToUnowned?: boolean;
+  /** IANA zone of the message the agent is answering; times in results are written in it. Omitted or invalid -> the server's zone. */
+  timeZone?: string;
 }
 
 export type SessionToolArgs = Record<string, unknown>;
@@ -190,7 +193,7 @@ async function listSessions(args: SessionToolArgs, ctx: SessionToolContext): Pro
 
   const capped = shown.slice(0, MAX_SESSION_LIST);
   const lines = capped.map((session) =>
-    `${session.id} | ${session.name ?? "(untitled)"} | ${session.cwd} | ${formatState(session.id, ctx)} | ${session.modified}`
+    `${session.id} | ${session.name ?? "(untitled)"} | ${session.cwd} | ${formatState(session.id, ctx)} | ${formatToolTime(session.modified, ctx.timeZone)}`
   );
   if (shown.length > MAX_SESSION_LIST) {
     lines.push(`\u2026 ${shown.length - MAX_SESSION_LIST} more not shown; narrow with workspace.`);
@@ -227,7 +230,7 @@ async function statusLine(session: SessionInfo, ctx: SessionToolContext): Promis
     header,
     `state: ${formatState(session.id, ctx)} \u2014 ${formatPhase(session.id, ctx)}`,
     `folder: ${session.cwd}`,
-    `last activity: ${session.modified}`,
+    `last activity: ${formatToolTime(session.modified, ctx.timeZone)}`,
   ];
   const latest = await newestMessage(session.id);
   if (latest) lines.push(`latest: ${latest}`);

@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getAgentDir } from "../omp/paths";
 import { isRecord } from "../type-guards";
+import { normalizeTimeZone } from "../time-zone";
 import { PROVIDER_CATALOG, PROVIDER_VARIABLE_NAMES, type ProviderDefinition } from "./provider-catalog";
 
 /**
@@ -155,8 +156,18 @@ const CODY_ONLY_VARIABLES: Record<string, true> = { OPENROUTER_MANAGEMENT_KEY: t
  * `pi /login` prompt exactly as it reaches a chat session.
  *
  * `CODY_ONLY_VARIABLES` are withheld — see that set for why.
+ *
+ * `options.timeZone` is the zone the child's clock runs in: it becomes `TZ`,
+ * so `date`, logs and scripts the agent runs read local time instead of the
+ * server's. It is applied before `extra`, so an adapter's own `TZ` would still
+ * win, and a value that is not a zone is ignored — the child then simply
+ * inherits the server's. This is the ONE place a zone reaches an engine
+ * process; callers pass the zone, they never assemble `TZ` themselves.
  */
-export function engineChildEnv(extra?: Record<string, string | undefined> | ReadonlyArray<{ name: string; value: string }>): NodeJS.ProcessEnv {
+export function engineChildEnv(
+  extra?: Record<string, string | undefined> | ReadonlyArray<{ name: string; value: string }>,
+  options?: { timeZone?: string | null },
+): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const [name, value] of Object.entries(readProviderKeys())) {
     if (!CODY_ONLY_VARIABLES[name]) env[name] = value;
@@ -164,6 +175,8 @@ export function engineChildEnv(extra?: Record<string, string | undefined> | Read
   // A Cody-only variable set on the CONTAINER is inherited through
   // `process.env` above, so it has to be removed explicitly too.
   for (const name of Object.keys(CODY_ONLY_VARIABLES)) delete env[name];
+  const timeZone = normalizeTimeZone(options?.timeZone);
+  if (timeZone) env.TZ = timeZone;
   if (Array.isArray(extra)) {
     for (const { name, value } of extra as ReadonlyArray<{ name: string; value: string }>) env[name] = value;
   } else if (extra) {

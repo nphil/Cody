@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authorizeTerminalCwd, getTerminalManager, type TerminalAttach } from "@/lib/terminal-manager";
 import { resolveSessionPathOr404 } from "@/lib/api-utils";
+import { getRequestUser } from "@/lib/auth/guard";
+import { effectiveTimeZone } from "@/lib/time-zone-prefs";
 
 export const dynamic = "force-dynamic";
 
@@ -43,6 +45,9 @@ export async function POST(request: NextRequest) {
     if (value.cols !== undefined && typeof value.cols !== "number") throw new Error("Invalid terminal dimensions");
     if (value.rows !== undefined && typeof value.rows !== "number") throw new Error("Invalid terminal dimensions");
     const attach = await resolveAttach(value, request);
-    return NextResponse.json(getTerminalManager().create(cwd, value.name as string | undefined, value.cols as number | undefined, value.rows as number | undefined, attach), { status: 201 });
+    // The shell runs in the zone of the browser that opened it; a bad or absent
+    // one falls back through the account's saved choice (lib/time-zone.ts).
+    const { zone } = effectiveTimeZone(getRequestUser(request), value.timeZone);
+    return NextResponse.json(getTerminalManager().create(cwd, value.name as string | undefined, value.cols as number | undefined, value.rows as number | undefined, attach, zone), { status: 201 });
   } catch (error) { return errorResponse(error); }
 }

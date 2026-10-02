@@ -58,7 +58,7 @@ export async function POST(
     // truncation below it is written even while a process owns the file —
     // through the live process, the same way PATCH routes a user rename, so its
     // in-memory title cannot clobber ours on the next flush.
-    const generated = isSessionLocalOnly(id) ? null : await generateSessionName(info?.firstMessage);
+    const generated = isSessionLocalOnly(id) ? null : await generateSessionName(info?.firstMessage, id);
     if (generated) {
       let persisted = false;
       if (running && typeof rpc?.send === "function") {

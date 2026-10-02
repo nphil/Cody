@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Keyboard, Play, Plus, RotateCw, X } from "lucide-react";
 import { Terminal, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { deviceTimeZoneField } from "@/lib/device-time-zone";
 import { useI18n } from "@/lib/i18n";
 import { STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
 import { normalizeTerminalPaste, readTerminalSoftKeyIds, TERMINAL_SOFT_KEYS, type TerminalSoftKeyId } from "@/lib/terminal-preferences";
@@ -188,7 +189,7 @@ export function TerminalPanel({ cwd, sessionId, onOpen, focusRequest }: Props) {
       const response = await fetch("/api/terminals", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd, ...(sessionId ? { sessionId, locale } : {}) }),
+        body: JSON.stringify({ cwd, ...deviceTimeZoneField(), ...(sessionId ? { sessionId, locale } : {}) }),
       });
       if (!response.ok) throw new Error(await responseError(response, t("terminal.createError")));
       const terminal = await response.json() as TerminalInfo;

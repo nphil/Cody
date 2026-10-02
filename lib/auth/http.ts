@@ -36,6 +36,20 @@ export function requireUser(request: Request): { user: UserRecord } | { response
   return { user: resolved.credential.user };
 }
 
+/**
+ * The signed-in account, or `null` on an OPEN instance (no accounts, no
+ * password) where whoever is looking acts for the instance itself — the same
+ * reading `requireAdminOrOpenInstance` gives a write. For per-person
+ * preferences that fall back to one instance-level record when there are no
+ * people (lib/time-zone-prefs.ts). Any other failure is the ready-to-return
+ * response.
+ */
+export function requireUserOrOpenInstance(request: Request): { user: UserRecord | null } | { response: NextResponse } {
+  const resolved = requireCredential(request);
+  if ("credential" in resolved) return { user: resolved.credential.user };
+  return resolved.response.status === 409 ? { user: null } : resolved;
+}
+
 /** The signed-in admin, or a ready-to-return 401/403. */
 export function requireAdmin(request: Request): { user: UserRecord } | { response: NextResponse } {
   const resolved = requireUser(request);

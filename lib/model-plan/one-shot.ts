@@ -40,6 +40,8 @@ export interface OneShotRequest {
    * reads an env var (e.g. `PI_CODING_AGENT_DIR`) without touching the
    * process's own environment. */
   extraEnv?: Record<string, string | undefined>;
+  /** IANA zone the child runs under (its `TZ`); absent leaves the server's. */
+  timeZone?: string;
 }
 
 /** The model's last answer, or the reason there is none — never both. */
@@ -294,7 +296,7 @@ function runOmpPrint(
     // `extraEnv` layers on top for a caller that needs the child to resolve
     // its OWN state (agent dir, MCP config, skills) somewhere other than the
     // real install — see research.ts's module doc for why.
-  ], { cwd: request.cwd ?? tmpdir(), stdio: ["ignore", "pipe", "pipe"], env: engineChildEnv(request.extraEnv) });
+  ], { cwd: request.cwd ?? tmpdir(), stdio: ["ignore", "pipe", "pipe"], env: engineChildEnv(request.extraEnv, { timeZone: request.timeZone }) });
 
   const reader = createFrameReader(hooks.onDelta, { onToolStart: hooks.onToolStart, onToolEnd: hooks.onToolEnd });
   let pending = "";

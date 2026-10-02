@@ -291,6 +291,44 @@ invalid_token_name`, `403 bearer_forbidden`, `403 token_limit`.
 token id that belongs to a different account, so the route cannot be used to
 probe other accounts. Revocation takes effect on the next request.
 
+## `GET|PUT /api/time-zone` — Incidental
+
+The time zone agents run in. The zone of a message is the zone of the BROWSER
+that sent it, read when it was sent (a tablet changes zones while its tab stays
+open); this route holds the two other things that decide it. Per account, or —
+on an instance with no accounts, where whoever is looking is the administrator —
+one instance-level record in `<accounts dir>/time-zone.json`.
+
+```json
+{"zone":"Europe/Paris","source":"explicit","explicit":"Europe/Paris",
+ "deviceZone":"Asia/Tokyo","serverZone":"America/New_York"}
+```
+
+- `explicit` is the zone the person chose in Settings → Preferences, or `null`
+  for **Automatic** (follow the sending device).
+- `deviceZone` is the last browser zone seen for them, saved without asking. It
+  is the fallback for a message that carries no zone of its own (a script, a
+  scheduled job, a child started with nobody typing).
+- `zone` is what such a message would use right now, and `source` says why:
+  `explicit`, `last-seen`, `server` (the server's `TZ`, then its system zone) or
+  `utc`. A message that does carry a browser zone resolves it live: chosen >
+  that browser > last seen > server > UTC.
+- `PUT {"timeZone"?: string | null, "deviceTimeZone"?: string}` answers the same
+  shape. `timeZone: null` returns to Automatic. A name the server does not know
+  is `400 invalid_time_zone` and changes nothing; a bad `deviceTimeZone` is
+  silently ignored (the page reports it unasked). An empty body is `400
+  invalid_body`. Zones are IANA names and are stored canonically (`asia/tokyo`
+  → `Asia/Tokyo`).
+
+Message-bearing agent commands (`prompt`, `steer`, `follow_up`,
+`abort_and_prompt`, and the first prompt of `POST /api/agent/new`) take an
+optional `"timeZone": "<IANA zone of the sending browser>"`; so does `POST
+/api/terminals`. The route resolves it as above and hands the session only the
+result — a value that is not a zone is ignored, never an error. A message from
+a new zone restarts an idle engine child before it is delivered (a child that
+is mid-turn is never restarted; the agent is told its shell still reports the
+old zone).
+
 ## `GET /api/engines` — Stable
 
 The engine roster, in one authenticated round trip.

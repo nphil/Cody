@@ -13,6 +13,7 @@ import {
   withDistillSlot,
 } from "@/lib/distill/runner";
 import { isRecord } from "@/lib/type-guards";
+import { effectiveTimeZone } from "@/lib/time-zone-prefs";
 import { isSessionLocalOnly } from "@/lib/local-model-routing";
 
 /**
@@ -134,7 +135,7 @@ export async function POST(request: Request) {
   const engine = distillEngine();
   if (engine.status === "unsupported") return errorEvent("unsupported", engine.reason);
   if (engine.status === "unavailable") return errorEvent("no_model", engine.reason);
-  const attempt = engineAttempt(engine.bin);
+  const attempt = engineAttempt(engine.bin, effectiveTimeZone(user).zone);
 
   // Only a FINISHED summary of an identified entry is worth storing: a live
   // thinking block is rewritten every few hundred milliseconds.

@@ -2,6 +2,7 @@ import { getHarness } from "./harness";
 import { runOneShotModel } from "./model-plan/one-shot";
 import { getOneShotAgentDir } from "./omp/isolated-agent-dir";
 import { readModelRoles } from "./omp/model-roles";
+import { ownerTimeZone } from "./time-zone-prefs";
 import { sanitizeSessionTitle } from "./session-title";
 
 /**
@@ -196,7 +197,7 @@ function namerModel(harnessId: string): string | undefined {
 }
 
 /** Ask a model for a short name for a session. Null means "use the fallback". */
-export async function generateSessionName(firstMessage: string | undefined): Promise<string | null> {
+export async function generateSessionName(firstMessage: string | undefined, sessionId: string): Promise<string | null> {
   const message = firstMessage?.trim();
   if (!message || message === "(no messages)") return null;
 
@@ -211,6 +212,7 @@ export async function generateSessionName(firstMessage: string | undefined): Pro
 
   const answer = await runOneShotModel({
     bin,
+    timeZone: ownerTimeZone(sessionId),
     model: namerModel(harness.id),
     systemPrompt: SYSTEM_PROMPT,
     prompt: [
