@@ -100,7 +100,7 @@ function OperationStartForm({ manager, devices, selectedInputId, sessionId }: Op
   const selectedCandidate = protocolCandidates.find((candidate) => `${candidate.interfaceNumber}:${candidate.alternateSetting}` === candidateKey);
   const [error, setError] = useState<string | null>(null);
   const input = selectedInputId ? deviceArtifacts.list(sessionId).find((artifact) => artifact.id === selectedInputId) : undefined;
-  const inputRequired = action === "flash" || action === "push";
+  const inputRequired = action === "flash" || action === "push" || action === "sideload";
 
   useEffect(() => {
     if (!devices.some((device) => device.id === deviceId)) setDeviceId(devices[0]?.id ?? "");
@@ -195,6 +195,7 @@ function RiskRows({ binding }: { binding: OperationRiskBinding }): React.ReactEl
 function ConfirmationCard({ manager, operation }: { manager: DeviceOperationManager; operation: DeviceOperationSnapshot }): React.ReactElement | null {
   const { t } = useI18n();
   const [error, setError] = useState<string | null>(null);
+  const [typedOverride, setTypedOverride] = useState("");
   const confirmation = operation.confirmation;
   if (!confirmation) return null;
   const unavailable = backupUnavailable(confirmation.binding.backup);
@@ -206,9 +207,10 @@ function ConfirmationCard({ manager, operation }: { manager: DeviceOperationMana
       <RiskRows binding={confirmation.binding} />
       {unavailable && <div role="alert" style={{ display: "flex", gap: 5, alignItems: "flex-start", fontSize: 11, lineHeight: 1.35, color: "var(--status-error)" }}><CircleAlert size={12} aria-hidden="true" style={{ flexShrink: 0, marginTop: 1 }} />{t("devices.backupUnavailable")}</div>}
       {error && <div role="alert" style={{ fontSize: 11, color: "var(--status-error)", overflowWrap: "anywhere" }}>{error}</div>}
+      {confirmation.binding.protectedOverride && <label style={{ display: "grid", gap: 4 }}>{t("devices.confirmProtectedOverride")}: <code>{confirmation.binding.protectedOverride}</code><input aria-label={t("devices.confirmProtectedOverride")} autoComplete="off" autoCapitalize="off" spellCheck={false} value={typedOverride} onChange={(event) => setTypedOverride(event.target.value)} style={{ minHeight: 48, fontSize: 16, background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)" }} /></label>}
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
         <button type="button" className="ui-focus-ring" style={actionStyle("danger")} onClick={() => { try { manager.cancel(operation.id); } catch (caught) { setError(errorText(caught)); } }}><X size={12} aria-hidden="true" />{t("devices.cancelOperation")}</button>
-        <button type="button" className="ui-focus-ring" style={actionStyle()} onClick={() => { try { manager.confirm(operation.id, confirmation.id, confirmation.binding); setError(null); } catch (caught) { setError(errorText(caught)); } }}><Check size={12} aria-hidden="true" />{t("devices.confirmOperation")}</button>
+        <button type="button" className="ui-focus-ring" disabled={Boolean(confirmation.binding.protectedOverride && typedOverride !== confirmation.binding.protectedOverride)} style={actionStyle()} onClick={() => { try { manager.confirm(operation.id, confirmation.id, confirmation.binding, typedOverride); setError(null); } catch (caught) { setError(errorText(caught)); } }}><Check size={12} aria-hidden="true" />{t("devices.confirmOperation")}</button>
       </div>
     </section>
   );

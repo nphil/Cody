@@ -1,5 +1,7 @@
 import type { OperationArtifacts } from "./operations";
 import { encodeFilePathForApi } from "@/lib/file-paths";
+import { hashBlob } from "./blob-stream";
+import type { StreamArtifact } from "./flasher";
 
 export type DeviceArtifactKind = "input" | "output";
 export type DeviceArtifactSource = "picker" | "drop" | "server-file" | "device";
@@ -73,10 +75,7 @@ function artifactKey(sessionId: string, artifactId: string): string {
   return `${sessionId}:${artifactId}`;
 }
 
-async function sha256(blob: Blob): Promise<string> {
-  const digest = await cryptoApi().subtle.digest("SHA-256", await blob.arrayBuffer());
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
+async function sha256(blob: Blob): Promise<string> { return hashBlob(blob); }
 
 function waitForTransaction<T>(transaction: IDBTransaction, request: IDBRequest<T>): Promise<T> {
   const { promise, resolve, reject } = Promise.withResolvers<T>();
@@ -206,6 +205,35 @@ export class DeviceArtifactStore implements OperationArtifacts {
     this.entries(sessionId).set(artifact.id, artifact);
     this.publish(sessionId);
     return artifactMetadata(artifact);
+  }
+
+  /** Spool to browser-private disk; commit the Blob to escrow before deleting
+   * the spool. No full-file JS array is ever constructed. */
+  async saveStream(sessionId: string, name: string, chunks: AsyncIterable<Uint8Array>, signal: AbortSignal): Promise<StreamArtifact> {
+    if (!navigator.storage?.getDirectory) throw new DeviceArtifactError("This browser has no streaming file storage (OPFS).");
+    const directory = await navigator.storage.getDirectory();
+    const temporary = "cody-transfer-" + cryptoApi().randomUUID();
+    const handle = await directory.getFileHandle(temporary, { create: true });
+    const writer = await handle.createWritable();
+    let closed = false;
+    try {
+      for await (const chunk of chunks) {
+        signal.throwIfAborted();
+        await writer.write(chunk as Uint8Array<ArrayBuffer>);
+      }
+      signal.throwIfAborted();
+      await writer.close();
+      closed = true;
+      const artifact = await this.add(sessionId, await handle.getFile(), name, { kind: "output", source: "device" });
+      // Keep the independently escrowed Blob, not a File backed by the spool.
+      const persisted = await this.persistence.get(sessionId, artifact.id);
+      if (!persisted) throw new DeviceArtifactError("Streamed artifact escrow could not be read back.");
+      this.entries(sessionId).set(artifact.id, persisted);
+      return { fileId: artifact.id, sha256: artifact.sha256, length: artifact.size };
+    } finally {
+      if (!closed) await writer.abort().catch(() => undefined);
+      await directory.removeEntry(temporary);
+    }
   }
 
   async addInput(sessionId: string, file: File, name = file.name, source: Extract<DeviceArtifactSource, "picker" | "drop"> = "picker"): Promise<DeviceArtifact> {

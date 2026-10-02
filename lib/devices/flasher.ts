@@ -2,7 +2,7 @@
  * not a fresh connection per packet. Implementations must never retry writes
  * implicitly: a lost acknowledgement makes completion unknown. */
 export type HardwareProtocol = "esp" | "adb" | "fastboot" | "gecko" | "stm32" | "stk500" | "dfu";
-export type HardwareAction = "detect" | "flash" | "dump" | "exec" | "push" | "pull" | "monitor";
+export type HardwareAction = "detect" | "flash" | "dump" | "exec" | "push" | "pull" | "monitor" | "sideload";
 
 export interface HardwareRequest {
   protocol: HardwareProtocol;
@@ -57,6 +57,8 @@ export interface HardwareResult {
   details?: Record<string, unknown>;
 }
 
+export interface StreamArtifact { fileId: string; sha256: string; length: number; }
+
 export interface HardwareContext {
   transport: HardwareTransport;
   signal: AbortSignal;
@@ -70,6 +72,7 @@ export interface HardwareContext {
   input?: Blob;
   /** Produces a session-scoped downloadable file and returns its opaque id. */
   save: (name: string, data: Blob) => Promise<string>;
+  saveStream?: (name: string, chunks: AsyncIterable<Uint8Array>) => Promise<StreamArtifact>;
   /** Explicit recovery after the caller verified a safe resume point. It never retries a write. */
   reacquireTransport?: () => Promise<HardwareTransport>;
   /** Request point-of-risk approval. Bound to the exact destination and digest;

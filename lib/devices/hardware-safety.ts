@@ -1,4 +1,5 @@
 import type { HardwareContext, HardwareProtocol, HardwareRequest } from "./flasher";
+import { hashBlob } from "./blob-stream";
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const INTRINSIC_SAFETY_BRAND: unique symbol = Symbol("intrinsic flash safety");
@@ -384,17 +385,9 @@ function assessIntrinsicFootprint(safety: FlashSafetyContext, offset: number, le
     ...(protection ? { protectedRegion: protection } : {}),
   };
 }
-/** SHA-256 in canonical lowercase hexadecimal. Web Crypto requires one ArrayBuffer copy of a Blob. */
+/** SHA-256 in canonical lowercase hexadecimal, with bounded working memory. */
 export async function sha256Blob(blob: Blob): Promise<string> {
-  const subtle = globalThis.crypto?.subtle;
-  if (!subtle) fail("SHA-256 is unavailable in this browser context.");
-
-  const digest = new Uint8Array(await subtle.digest("SHA-256", await blob.arrayBuffer()));
-  let hash = "";
-  for (let index = 0; index < digest.length; index += 1) {
-    hash += digest[index].toString(16).padStart(2, "0");
-  }
-  return hash;
+  return hashBlob(blob);
 }
 
 export function normalizeSha256(value: string, label = "SHA-256"): string {

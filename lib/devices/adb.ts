@@ -10,6 +10,7 @@ import {
 } from "@yume-chan/stream-extra";
 import type { Flasher, HardwareContext, HardwareRequest, HardwareResult, HardwareTransport } from "./flasher";
 import { hashFirmware, normalizeSha256, sha256Blob } from "./hardware-safety";
+import { sideloadAdb } from "./adb-sideload";
 
 const ADB_PACKET_READ_BYTES = 64 * 1024;
 const ADB_PROBE_READ_LIMIT_MS = 20_000;
@@ -367,30 +368,25 @@ function bytesStream(bytes: Uint8Array): AdbReadableStream<Uint8Array> {
   });
 }
 
-async function readBlob(stream: AdbReadableStream<Uint8Array>): Promise<Blob> {
-  const reader = stream.getReader();
-  const chunks: BlobPart[] = [];
+async function* remoteChunks(adb: Adb, path: string, context: HardwareContext): AsyncGenerator<Uint8Array> {
+  const sync = await adb.sync();
+  const reader = sync.read(path).getReader();
+  let completed = 0;
   try {
     for (;;) {
+      context.signal.throwIfAborted();
       const next = await reader.read();
-      if (next.done) break;
-      const copy = new Uint8Array(next.value.byteLength);
-      copy.set(next.value);
-      chunks.push(copy);
+      if (next.done) return;
+      completed += next.value.byteLength;
+      yield next.value;
+      context.progress({ phase: "adb.read", completed, message: "Streaming " + path });
     }
-  } finally {
-    reader.releaseLock();
-  }
-  return new Blob(chunks);
+  } finally { reader.releaseLock(); await sync.dispose(); }
 }
 
-async function pullRemote(adb: Adb, path: string): Promise<Blob> {
-  const sync = await adb.sync();
-  try {
-    return await readBlob(sync.read(path));
-  } finally {
-    await sync.dispose();
-  }
+async function saveRemote(adb: Adb, path: string, name: string, context: HardwareContext) {
+  if (!context.saveStream) throw new AdbProtocolError("Streaming artifact storage is required for ADB pulls and backups.");
+  return context.saveStream(name, remoteChunks(adb, path, context));
 }
 
 async function pushRemote(adb: Adb, path: string, data: Uint8Array): Promise<void> {
@@ -410,7 +406,7 @@ function safeDownloadName(path: string, fallback: string): string {
 async function escrowDestination(adb: Adb, target: string, context: HardwareContext): Promise<string> {
   if (!(await remoteExists(adb, target))) return "destination absent";
   await rejectSymlinkDestination(adb, target);
-  const fileId = await context.save(`adb-escrow-${safeDownloadName(target, "destination.bin")}`, await pullRemote(adb, target));
+  const { fileId } = await saveRemote(adb, target, `adb-escrow-${safeDownloadName(target, "destination.bin")}`, context);
   return `saved destination escrow ${fileId}`;
 }
 
@@ -729,10 +725,54 @@ async function queueTwrpOpenRecoveryScript(request: HardwareRequest, context: Ha
   return { summary: "TWRP OpenRecoveryScript queued and SHA-256 verified; it was not executed.", verified: true, sha256, details: { target, stagingDirectory: state.stagingDirectory, reconnects: state.reconnects } };
 }
 
+async function pushDirect(request: HardwareRequest, context: HardwareContext, adb: Adb, target: string): Promise<HardwareResult> {
+  if (!context.shellAccess?.()) throw new AdbProtocolError("Allow agent shell access before pushing to a device node or symlink.");
+  const input = context.input!;
+  const sha256 = await hashFirmware(input, request.sha256);
+  let backup: string;
+  try {
+    // Character devices can be infinite streams, so do not attempt a backup.
+    const character = await shellStatus(adb, "test -c " + shQuote(target));
+    if (character.status === 0) backup = "backup unavailable: character device is not finite storage";
+    else backup = "saved destination escrow " + (await saveRemote(adb, target, "adb-raw-backup-" + safeDownloadName(target, "storage.bin"), context)).fileId;
+  } catch (error) {
+    context.signal.throwIfAborted();
+    backup = "backup unavailable: " + (error instanceof Error ? error.message : String(error));
+  }
+  await context.confirm({ action: "adb.push.raw", target, sha256, length: input.size, backup, protectedOverride: "write:" + target, details: "Direct write to the exact device node or symlink. No atomic replacement and no automatic retry. This can overwrite boot/storage metadata." });
+  const reader = input.stream().getReader();
+  let completed = 0;
+  const file = new AdbReadableStream<Uint8Array>({
+    async pull(controller) {
+      context.signal.throwIfAborted();
+      const next = await reader.read();
+      if (next.done) { controller.close(); return; }
+      completed += next.value.byteLength;
+      controller.enqueue(next.value);
+      context.progress({ phase: "adb.push.raw", completed, total: input.size });
+    },
+    cancel: (reason) => reader.cancel(reason),
+  });
+  const sync = await adb.sync();
+  try { await sync.write({ filename: target, file, permission: 0o600 }); }
+  finally { reader.releaseLock(); await sync.dispose(); }
+  let readbackSha256: string | undefined;
+  try {
+    const capabilities = await shellCapabilities(adb);
+    const output = await shell(adb, "head -c " + input.size + " " + shQuote(target) + " | " + hashCommand(capabilities.hashTool, "-"), "Hashing direct-write readback");
+    readbackSha256 = output.match(/\b[0-9a-f]{64}\b/i)?.[0]?.toLowerCase();
+  } catch (error) { context.signal.throwIfAborted(); context.output?.("Readback unavailable: " + String(error)); }
+  if (readbackSha256 && readbackSha256 !== sha256) throw new AdbProtocolError("Direct-write readback SHA-256 does not match the input.");
+  return { summary: readbackSha256 ? "Direct ADB write verified for the payload byte range." : "Direct ADB write acknowledged; readback is unavailable.", verified: Boolean(readbackSha256), sha256, details: { target, length: input.size, backup, readbackSha256 } };
+}
+
 async function push(request: HardwareRequest, context: HardwareContext, adb: Adb): Promise<HardwareResult> {
   const target = requireTarget(request);
-  rejectRawStorageTarget(target);
-  if (!context.input) throw new AdbProtocolError("ADB push requires an operation input file.");
+  if (!context.shellAccess?.()) rejectRawStorageTarget(target);
+  if (!context.input?.size) throw new AdbProtocolError("ADB push requires a non-empty operation input file.");
+  const direct = await shellStatus(adb, "test -L " + shQuote(target) + " || { test -e " + shQuote(target) + " && test ! -f " + shQuote(target) + "; }");
+  if (direct.status === 0) return pushDirect(request, context, adb, target);
+  if (direct.status !== 1) throw new AdbProtocolError("Could not inspect the ADB push destination.");
   context.progress({ phase: "adb.push.hashing", completed: 0, total: context.input.size });
     const sha256 = await hashFirmware(context.input, request.sha256);
     context.progress({ phase: "adb.push.prehashed", completed: context.input.size, total: context.input.size });
@@ -758,14 +798,12 @@ async function push(request: HardwareRequest, context: HardwareContext, adb: Adb
 
 async function pull(request: HardwareRequest, context: HardwareContext, action: "pull" | "dump"): Promise<HardwareResult> {
   const target = requireTarget(request);
-  rejectRawStorageTarget(target);
+  if (!context.shellAccess?.()) rejectRawStorageTarget(target);
   const adb = await adbFor(context);
-  const data = await pullRemote(adb, target);
-  const sha256 = await sha256Blob(data);
   const name = typeof request.options?.name === "string" ? request.options.name : safeDownloadName(target, action === "dump" ? "dump.bin" : "pull.bin");
-  const fileId = await context.save(name, data);
-  context.progress({ phase: `adb.${action}.verified`, completed: data.size, total: data.size });
-  return { summary: `ADB ${action} completed.`, verified: true, sha256, fileId, details: { target, length: data.size } };
+  const result = await saveRemote(adb, target, name, context);
+  context.output?.("SHA-256 " + result.sha256 + " (" + result.length + " bytes): " + target);
+  return { summary: "ADB " + action + " completed; received bytes hashed and escrowed.", verified: true, ...result, details: { target, length: result.length } };
 }
 
 async function detect(context: HardwareContext): Promise<HardwareResult> {
@@ -799,10 +837,12 @@ function operationKind(request: HardwareRequest): string | undefined {
 
 export const adbFlasher: Flasher = {
   protocol: "adb",
-  actions: ["detect", "exec", "push", "pull", "dump", "monitor"],
+  actions: ["detect", "exec", "push", "pull", "dump", "monitor", "sideload"],
   async run(request, context) {
     try {
       switch (request.action) {
+        case "sideload":
+          return await sideloadAdb(request, context, await adbFor(context));
         case "monitor":
           return await terminal(context);
         case "detect":

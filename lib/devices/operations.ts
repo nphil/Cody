@@ -7,6 +7,8 @@ import type {
   HardwareRisk,
   HardwareTransport,
 } from "./flasher";
+import { hashBlob } from "./blob-stream";
+import type { StreamArtifact } from "./flasher";
 import { adbFlasher } from "./adb";
 import { deviceArtifacts } from "./artifacts";
 import { dfuFlasher } from "./dfu";
@@ -23,6 +25,7 @@ import { stk500Flasher } from "./stk500";
 export interface OperationArtifacts {
   getInput(sessionId: string, fileId: string): Promise<Blob | undefined>;
   save(sessionId: string, name: string, data: Blob): Promise<string>;
+  saveStream?(sessionId: string, name: string, chunks: AsyncIterable<Uint8Array>, signal: AbortSignal): Promise<StreamArtifact>;
 }
 
 /** The bridge owns this lease. No raw tool or RX pump may use it while a run is active. */
@@ -240,7 +243,7 @@ function validateRequest(request: DeviceOperationRequest): void {
     throw new Error("sha256 must be a 64-character hexadecimal digest.");
   }
   if (Boolean(request.fileId) !== Boolean(request.sha256)) throw new Error("An input file and its SHA-256 digest must be supplied together.");
-  if ((request.action === "flash" || request.action === "push") && !request.fileId) {
+  if ((request.action === "flash" || request.action === "push" || request.action === "sideload") && !request.fileId) {
     throw new Error(request.action + " requires a session artifact and its SHA-256 digest.");
   }
   validFiniteInteger(request.interfaceNumber, "interfaceNumber");
@@ -254,10 +257,7 @@ function randomId(prefix: string): string {
   return `${prefix}-${crypto.randomUUID()}`;
 }
 
-async function sha256(blob: Blob): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-}
+async function sha256(blob: Blob): Promise<string> { return hashBlob(blob); }
 
 function isAbort(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
@@ -452,13 +452,16 @@ export class DeviceOperationManager {
    * approval bit. Matching the one-use id and complete binding rejects stale
    * cards after a changed target, offset, or artifact digest.
    */
-  confirm(id: string, confirmationId: string, binding: OperationRiskBinding): DeviceOperationSnapshot {
+  confirm(id: string, confirmationId: string, binding: OperationRiskBinding, typedOverride?: string): DeviceOperationSnapshot {
     if (this.authorityRevokedReason) throw new Error(this.authorityRevokedReason);
     const record = this.requireRecord(id);
     const pending = record.pendingConfirmation;
     if (!pending || record.state !== "awaiting-confirmation") throw new Error("This operation is not awaiting confirmation.");
     if (pending.confirmation.id !== confirmationId || !sameBinding(pending.confirmation.binding, binding)) {
       throw new Error("This confirmation no longer matches the operation risk.");
+    }
+    if (pending.confirmation.binding.protectedOverride && typedOverride !== pending.confirmation.binding.protectedOverride) {
+      throw new Error("Type the exact protected-target override shown in the panel.");
     }
     record.pendingConfirmation = undefined;
     record.confirmation = undefined;
@@ -606,6 +609,10 @@ export class DeviceOperationManager {
       setTerminalInput: (send) => { record.terminalInput = send; },
       input,
       save: (name, data) => this.artifacts.save(this.sessionId, name, data),
+      saveStream: (name, chunks) => {
+        if (!this.artifacts.saveStream) throw new Error("Streaming artifact storage is unavailable.");
+        return this.artifacts.saveStream(this.sessionId, name, chunks, record.controller.signal);
+      },
       confirm: (risk) => this.awaitHumanConfirmation(record, risk),
     };
     context.reacquireTransport = async (): Promise<HardwareTransport> => this.reacquireTransport(record, context);

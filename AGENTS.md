@@ -2065,6 +2065,14 @@ shell commands only with that grant; without it the four read-only diagnostics
 remain available. `device_monitor` / `device_monitor_send` also support an ADB
 PTY. Requests/options cannot supply the grant or impersonate the panel.
 
+ADB transfers hash in bounded chunks (`blob-stream.ts`). Pull/backup uses an OPFS
+spool, commits the result to IndexedDB escrow, then removes the spool. Restricted
+paths require the shell grant; raw/symlink push uses direct sync, offers a backup,
+and requires typing `write:<exact path>` in the confirmation card. Regular-file
+push retains verified staging/atomic replacement. `device_sideload` serves AOSP
+`sideload-host` block requests; it reports the input SHA-256, not installation
+verification. All structured protected actions require an exact typed override.
+
 #### Verified flashing is intrinsic, never caller-designed
 
 A caller cannot supply a layout, geometry, protections, or approval in

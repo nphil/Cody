@@ -81,7 +81,7 @@ function requestFor(
   const sha256 = stringArg(args, "sha256")?.toLowerCase();
   if (fileId && !sha256) return "fileId requires the exact SHA-256 shown for that session artifact.";
   if (sha256 && !/^[a-f0-9]{64}$/.test(sha256)) return "sha256 must be a 64-character hexadecimal digest.";
-  if ((action === "flash" || action === "push") && (!fileId || !sha256)) {
+  if ((action === "flash" || action === "push" || action === "sideload") && (!fileId || !sha256)) {
     return action + " requires a session artifact and its exact SHA-256 digest.";
   }
   const descriptorCandidates = bridge.list().find((entry) => entry.id === device.deviceId)?.protocolCandidates
@@ -216,6 +216,7 @@ export const DEVICE_OPERATION_TOOLS: DeviceOperationToolDefinition[] = [
   startDefinition("device_exec", "exec", "Run a protocol command with streamed output. ADB arbitrary shell requires the user's connection-scoped shell grant in Devices; without it only id, uname -a, df -h, getprop [ro.*] work. Other state-changing commands require exact browser confirmation.", ["device", "protocol", "command"]),
   startDefinition("device_push", "push", "Start a resumable protocol file push using a session artifact."),
   startDefinition("device_pull", "pull", "Start a protocol file pull; output remains a session-owned browser artifact."),
+  startDefinition("device_sideload", "sideload", "Serve a session artifact to ADB recovery sideload. Requires direct approval; transfer completion does not verify installation."),
   startDefinition("device_monitor", "monitor", "Start an exclusive serial or ADB terminal. ADB needs the user's shell grant. Use device_monitor_send for interactive input."),
   {
     name: "device_operation_status",
