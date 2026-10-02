@@ -1,20 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronUp, RefreshCw } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
-import type { ChatInputHandle } from "@/components/ChatInput";
 import { TodoItemRow } from "./TodoItemRow";
 import { TodoQuickAdd } from "./TodoQuickAdd";
 import { useTodoDocument, type TodoItemChanges } from "./useTodoDocument";
 import type { TodoItem } from "@/lib/project-todo-types";
 import { toast } from "@/components/ui/toast";
-const ASK_AGENT_PROMPT = "Work through my to-do list in .cody/todo.json in order. Use the cody_todo tool if you have it, otherwise read the file. Complete each item only when it is actually done and leave a short note on anything you skip.";
 
 export interface TodoPanelProps {
   cwd: string | null;
   onOpenTerminalTask?: (title: string) => void;
-  chatInputRef?: RefObject<ChatInputHandle | null>;
   active?: boolean;
   openCommandsRequest?: number;
 }
@@ -22,7 +19,6 @@ export interface TodoPanelProps {
 export default function TodoPanel({
   cwd,
   onOpenTerminalTask,
-  chatInputRef,
   active = true,
   openCommandsRequest = 0,
 }: TodoPanelProps) {
@@ -155,10 +151,6 @@ export default function TodoPanel({
     });
   }, [doneItems, remove, add, t]);
 
-  const handleAskAgent = useCallback(() => {
-    chatInputRef?.current?.insertIfEmpty(ASK_AGENT_PROMPT);
-  }, [chatInputRef]);
-
   if (!cwd) {
     return (
       <div
@@ -189,29 +181,6 @@ export default function TodoPanel({
         <span style={{ flex: 1, fontSize: 14, fontWeight: 600 }}>
           {t("todo.title")}
         </span>
-        <button
-          type="button"
-          className="ui-focus-ring"
-          style={{
-            width: 28,
-            height: 28,
-            minWidth: 28,
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            border: "none",
-            borderRadius: "var(--radius-control)",
-            background: "transparent",
-            color: "var(--text-dim)",
-            cursor: "pointer",
-            padding: 0,
-          }}
-          title={t("todo.askAgent")}
-          aria-label={t("todo.askAgent")}
-          onClick={handleAskAgent}
-        >
-          <span style={{ fontSize: 11, fontWeight: 600 }}>✦</span>
-        </button>
         <button
           type="button"
           className="ui-focus-ring"

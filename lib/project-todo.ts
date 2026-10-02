@@ -7,7 +7,7 @@ export * from "./project-todo-types";
 import {
   MAX_TODO_FILE_BYTES, MAX_TODO_ITEMS, MAX_TODO_NOTES_LENGTH, MAX_TODO_TITLE_LENGTH,
   TODO_COLORS, TODO_FILE_RELATIVE_PATH, TODO_VERSION,
-  type TodoAgentAction, type TodoColor, type TodoDocument, type TodoItem, type TodoOperation, type TodoStatus,
+  type TodoColor, type TodoDocument, type TodoItem, type TodoOperation, type TodoStatus,
 } from "./project-todo-types";
 
 export type ProjectTodoReadResult =
@@ -25,7 +25,6 @@ export class ProjectTodoError extends Error {
 }
 
 const TODO_ID_RE = /^t_[A-Za-z0-9]{8}$/u;
-const MAX_AGENT_LINE_BYTES = 300;
 
 declare global {
   var __codyProjectTodoWrites: Map<string, Promise<void>> | undefined;
@@ -367,34 +366,6 @@ export function parseTodoOperation(value: unknown): TodoOperation {
   throw new ProjectTodoError("Unsupported to-do operation");
 }
 
-/** Validate the narrower tool vocabulary used by agents on both engine paths. */
-export function parseTodoAgentAction(value: unknown): TodoAgentAction {
-  if (!isRecord(value)) throw new ProjectTodoError("JSON object required");
-  const action = value.action;
-  if (action === "list") return { action };
-  if (action === "add") {
-    const result: Extract<TodoAgentAction, { action: "add" }> = { action, title: requireTitle(value.title) };
-    if (hasOwn(value, "notes")) result.notes = parseNotes(value.notes);
-    if (hasOwn(value, "color")) result.color = parseColor(value.color);
-    return result;
-  }
-  if (action === "complete" || action === "reopen") return { action, id: requireTodoId(value.id) };
-  if (action === "note") {
-    if (!hasOwn(value, "notes")) throw new ProjectTodoError("note requires notes");
-    return { action, id: requireTodoId(value.id), notes: parseNotes(value.notes) };
-  }
-  throw new ProjectTodoError("Unsupported to-do action");
-}
-
-export function todoAgentActionOperation(action: Exclude<TodoAgentAction, { action: "list" }>): TodoOperation {
-  switch (action.action) {
-    case "add": return { op: "add", title: action.title, ...(action.notes !== undefined ? { notes: action.notes } : {}), ...(action.color !== undefined ? { color: action.color } : {}) };
-    case "complete": return { op: "complete", id: action.id };
-    case "reopen": return { op: "reopen", id: action.id };
-    case "note": return { op: "update", id: action.id, notes: action.notes };
-  }
-}
-
 async function ensureTodoDirectory(projectRoot: string): Promise<string> {
   let project: fs.Stats;
   try {
@@ -463,38 +434,4 @@ export async function mutateProjectTodo(
     if (doc !== loaded.doc) await writeTodoDocument(projectRoot, doc);
     return doc;
   });
-}
-
-function oneLine(value: string): string {
-  return value.replace(/\s+/gu, " ").trim();
-}
-
-function truncateUtf8(value: string, maxBytes: number): string {
-  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
-  const suffix = "…";
-  const available = Math.max(0, maxBytes - Buffer.byteLength(suffix, "utf8"));
-  let bytes = 0;
-  let output = "";
-  for (const character of value) {
-    const length = Buffer.byteLength(character, "utf8");
-    if (bytes + length > available) break;
-    output += character;
-    bytes += length;
-  }
-  return `${output}${suffix}`;
-}
-
-/** A bounded, human-readable tool result: active items first, then completed items. */
-export function formatTodoForAgent(doc: TodoDocument): string {
-  const lines = orderedItems(doc.items)
-    .sort((left, right) => Number(left.status === "done") - Number(right.status === "done"))
-    .map((item) => {
-      const state = item.status === "done" ? "[x]" : "[ ]";
-      const color = item.color ?? "none";
-      const prefix = `${state} ${item.id} ${truncateUtf8(oneLine(item.title), 105)} (${color}) — `;
-      const notes = truncateUtf8(oneLine(item.notes ?? ""), Math.max(0, MAX_AGENT_LINE_BYTES - Buffer.byteLength(prefix, "utf8")));
-      return `${prefix}${notes}`;
-    });
-  if (lines.length === 0) lines.push("No to-do items.");
-  return lines.join("\n");
 }

@@ -43,10 +43,3 @@ export type TodoOperation =
   | { op: "reopen"; id: string }
   | { op: "delete"; id: string }
   | { op: "reorder"; ids: string[] };
-
-export type TodoAgentAction =
-  | { action: "list" }
-  | { action: "add"; title: string; notes?: string | null; color?: TodoColor | null }
-  | { action: "complete"; id: string }
-  | { action: "reopen"; id: string }
-  | { action: "note"; id: string; notes: string | null };

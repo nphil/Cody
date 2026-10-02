@@ -1674,7 +1674,6 @@
   "todo.add": "Add",
   "todo.addPlaceholder": "Add a to-do",
   "todo.addTitle": "Add a to-do",
-  "todo.askAgent": "Ask the agent",
   "todo.cancel": "Cancel",
   "todo.changeColor": "Change color for {title}",
   "todo.clearCompleted": "Clear completed",

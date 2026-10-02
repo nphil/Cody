@@ -17,7 +17,7 @@ import { listForgeHosts, matchForgeHostUrl, resolveForgeHost, type ForgeHost } f
  * Gitea, without a `gh` binary and without github.com.
  *
  * Only omp sessions get it. It rides the same `set_host_tools` registration as
- * `preview_screenshot` and `cody_todo` (lib/rpc-manager.ts) and settles inside
+ * `preview_screenshot` (lib/rpc-manager.ts) and settles inside
  * the Cody server process, where the tokens live. Cody's ACP engines (Claude
  * Code, Codex) reach Cody through `bin/cody-display-mcp.js`, a standalone
  * script that holds no Cody state and talks back over capability-scoped HTTP;

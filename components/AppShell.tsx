@@ -2222,7 +2222,6 @@ export function AppShell() {
               cwd={activeCwd}
               active={rightPanelMode === "tasks" && rightPanelOpen}
               openCommandsRequest={openCommandsRequest}
-              chatInputRef={chatInputRef}
               onOpenTerminalTask={(terminalId) => {
                 if (terminalId) setFocusTerminalRequest({ id: terminalId, token: ++focusTerminalTokenRef.current });
                 setRightPanelMode("terminal");

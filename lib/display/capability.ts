@@ -52,10 +52,6 @@ export function displayInternalEndpoint(): string {
   return internalEndpoint("/api/internal/display");
 }
 
-export function todoInternalEndpoint(): string {
-  return internalEndpoint("/api/internal/todo");
-}
-
 export function sessionsInternalEndpoint(): string {
   return internalEndpoint("/api/internal/sessions");
 }

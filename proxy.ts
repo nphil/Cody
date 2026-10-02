@@ -31,7 +31,6 @@ const PUBLIC_EXACT = new Set([
   "/icon-maskable-192.png",
   "/icon-maskable-512.png",
   "/api/internal/display",
-  "/api/internal/todo",
   "/api/internal/sessions",
   "/api/internal/devices",
 ]);

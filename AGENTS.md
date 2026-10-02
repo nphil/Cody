@@ -98,7 +98,6 @@ app/api/
   sidebar-chats/route.ts          GET list sidebar chats for workspace
   sidebar-chats/[id]/route.ts     DELETE a sidebar chat session by id
   internal/display/route.ts       POST publish from engine MCP servers (capability-token auth)
-  internal/todo/route.ts          POST project To-do MCP operations (capability-token auth)
   auth/**                         omp's provider list + login flow (via RPC); every
                                    route refuses `unsupported` unless omp is active
   cwd/validate/route.ts           POST validate/select a cwd
@@ -412,7 +411,7 @@ lib/
   thinking-level-labels.ts  the one raw-reasoning-level → label-key map shared
                        by the composer selector, its pending status, chat
                        notices and the subagent dialog
-  project-todo.ts      .cody/todo.json schema, atomic mutation/history + agent summary
+  project-todo.ts      .cody/todo.json schema, atomic mutation/history (human panel only)
   workspace-tasks.ts   .cody/tasks.json schema validation + grouping
   tool-presets.ts      PRESET_NONE/DEFAULT/FULL + getPresetFromTools()
   transcript-anchor.ts the reader pin's anchor: what a scrolled-up reader is
@@ -606,8 +605,8 @@ bin/
   cody-server.js           custom server; also WS upgrade for /api/display/socket
                            (stream frames + input) and native-gateway host routing;
                            mints the display capability secret at boot
-  cody-display-mcp.js      bundled stdio MCP server exposing open_preview and cody_todo to
-                           Claude/Codex engines (posts to /api/internal/display and /api/internal/todo)
+  cody-display-mcp.js      bundled stdio MCP server exposing open_preview (plus the session and
+                           device tools) to Claude/Codex engines (posts to /api/internal/*)
   cody-pi-login.mjs        pi's provider sign-in helper: imports the INSTALLED pi
                            package's AuthStorage/OAuth flows and speaks JSON
                            lines to lib/harness/pi-login.ts (list / login /
@@ -1750,10 +1749,10 @@ message, read when it was sent** — not the server's, not a saved setting.
   one server can serve a local webview and a remote tablet at the same time and
   each resolves correctly from the same candidate list.
 - **Capability tokens** (`capability.ts`): engine-side MCP servers post to
-  `/api/internal/display` and `/api/internal/todo` with an HMAC session-scoped token.
+  `/api/internal/display` with an HMAC session-scoped token.
   `CODY_INTERNAL_DISPLAY_SECRET`/`CODY_INTERNAL_DISPLAY_ORIGIN` are minted by
   `bin/cody-server.js` at boot and live only in the environment, never persisted.
-- **Per-engine wiring**: omp gets Cody-owned `open_preview` and `cody_todo` host
+- **Per-engine wiring**: omp gets a Cody-owned `open_preview` host
   tools. `lib/rpc-manager.ts` sends `set_host_tools` at session start, merges them
   into any browser-registered tool list, and routes their `host_tool_call`s to their
   server implementations. Every other engine gets the bundled stdio MCP server
@@ -1765,18 +1764,18 @@ message, read when it was sent** — not the server's, not a saved setting.
   server behind them, and a throw there aborts `session/new`: no bridge is a missing
   Preview button, a throw is a chat that will not open.
 
-- **Project To-do list is durable user intent, not an engine plan.** `.cody/todo.json`
+- **The project To-do list is human-only; agents have no access to it.** `.cody/todo.json`
   sits at the resolved project root so it is visible in the project and survives session
-  or engine changes. Cody writes it atomically and preserves unknown top-level keys.
-  omp reaches it through the RPC `cody_todo` host tool; Claude Code and Codex use the
-  bundled MCP server with a session-scoped capability token that resolves the session cwd.
-  Any engine without a tool bridge still reaches it as a plain file: the panel's
-  "Ask the agent" button drops a prompt into the composer that names the path and the tool,
-  so discoverability never depends on prompt injection Cody does not do. This remains
-  separate from an engine execution plan (`omp todo` to Composer `TodoList`): the To-do
-  tab (panel id `tasks`, renamed so the model never confuses it with the composer's task
-  list) calls the user-owned section To-do, while the legacy `.cody/tasks.json` runner is
-  its collapsed Commands section only when that file exists.
+  or engine changes. Cody writes it atomically and preserves unknown top-level keys,
+  and only the human does so, through `/api/todo` (the sidebar panel). Agents have no
+  tool, prompt, MCP bridge or internal route for it, so it behaves as if it did not
+  exist from their side. The file is NOT hidden: an agent listing the project's files
+  can still see `.cody/todo.json` (and could read or edit it with ordinary file tools),
+  which is accepted. Do not add an agent-facing path back: "update your todo list" means
+  the agent's OWN plan (omp `todo` → the composer's Tasks list), and a tool named after
+  the sidebar list made the wrong tool the obvious pick. The To-do tab (panel id
+  `tasks`) calls this section To-do; the legacy `.cody/tasks.json` runner is its
+  collapsed Commands section only when that file exists.
 - **Client**: `hooks/useDisplayRequests.ts` subscribes to the SSE route;
   `AppShell` auto-opens the right panel in `preview` mode on live requests —
   the explicit, server-driven trigger alongside the client-side URL sniffing
@@ -1992,7 +1991,7 @@ paged).
   smallest-window-assumption budget; both still report a continuation offset.
 - **ACP engines reach them over MCP** like the display tools:
   `POST /api/internal/sessions` (capability-token authenticated, on
-  `proxy.ts`'s `PUBLIC_EXACT` list for the same reason display/todo are) with
+  `proxy.ts`'s `PUBLIC_EXACT` list for the same reason display is) with
   the three tools declared in `bin/cody-display-mcp.js`. The route trusts
   `capability.sid` alone — a body may name any session id, but it must match
   the token, and the caller's identity is derived server-side from it.

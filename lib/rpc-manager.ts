@@ -20,8 +20,6 @@ import { readNativeSettings } from "./omp/settings-config";
 import { getSidebarChatsDir, getSessionDirNameForCwd } from "./omp/paths";
 import { linkIsolatedAgentDir } from "./omp/isolated-agent-dir";
 import { captureLoopbackScreenshot, ScreenshotError } from "./preview-screenshot";
-import { ProjectTodoError, type TodoDocument, formatTodoForAgent, mutateProjectTodo, parseTodoAgentAction, readProjectTodo, todoAgentActionOperation } from "./project-todo";
-import { resolveProject } from "./worktree";
 import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
 import { assistantReplyText, replyAsksUser } from "./reply-question";
 import { readRefusalPolicyConfig, writeRefusalPolicyConfig } from "./refusal/config";
@@ -339,8 +337,7 @@ export function sidebarAgentDir(): string {
  * Cody's Preview panel over SSE for any watching browser. read_app_logs hands
  * back the previewed app's own console and failed requests (lib/logs), so a
  * dev server throwing in the browser is something the model can read instead
- * of something only the user ever sees. cody_todo reads and updates the project-owned
- * manual list, deliberately separate from an engine execution plan. forge
+ * of something only the user ever sees. forge
  * (lib/forge/tool.ts) is the agent's access to the code host — GitHub or a
  * self-hosted Gitea — settled here because the tokens live in this process and
  * must never reach an engine child's environment.
@@ -392,20 +389,6 @@ const SERVER_HOST_TOOLS: HostToolDefinition[] = [{
       grep: { type: "string", description: "Case-insensitive regular expression the message or URL must match." },
       limit: { type: "number", description: `Newest N entries (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT}).` },
     },
-  },
-}, {
-  name: "cody_todo",
-  description: "The user's own project to-do list (.cody/todo.json). Separate from your task plan: it holds what the user asked to remember. Use list before working through it, complete an item only when its work is actually done, reopen if you completed it by mistake, note to leave a short note on an item. The user sees every change with your name in the list's history.",
-  parameters: {
-    type: "object",
-    properties: {
-      action: { type: "string", enum: ["list", "add", "complete", "reopen", "note"], description: "To-do action to perform." },
-      id: { type: "string", description: "To-do item id for complete, reopen, or note." },
-      title: { type: "string", description: "Title for a new to-do item." },
-      notes: { type: "string", description: "Optional notes for a new item or note text." },
-      color: { type: "string", enum: ["gray", "red", "orange", "yellow", "green", "blue", "purple", "pink"], description: "Optional color for a new item." },
-    },
-    required: ["action"],
   },
 },
 // Cross-session awareness. A main chat is regularly asked what ANOTHER
@@ -2482,36 +2465,6 @@ export class AgentSessionWrapper {
           ? error.message
           : `Code host request failed: ${error instanceof Error ? error.message : String(error)}`;
         this.sendHostToolResult({ type: "host_tool_result", id, isError: true, result: { content: [{ type: "text", text: message }] } });
-      }
-      return;
-    }
-    if (toolName === "cody_todo") {
-      try {
-        const action = parseTodoAgentAction(event.arguments);
-        const projectRoot = (await resolveProject(this.cwd)).projectRoot;
-        let doc: TodoDocument;
-        if (action.action === "list") {
-          const loaded = await readProjectTodo(projectRoot);
-          if (loaded.status === "invalid") throw new ProjectTodoError(loaded.reason);
-          doc = loaded.doc;
-        } else {
-          doc = await mutateProjectTodo(
-            projectRoot,
-            todoAgentActionOperation(action),
-          );
-        }
-        this.sendHostToolResult({
-          type: "host_tool_result",
-          id,
-          result: { content: [{ type: "text", text: formatTodoForAgent(doc) }] },
-        });
-      } catch (error) {
-        this.sendHostToolResult({
-          type: "host_tool_result",
-          id,
-          isError: true,
-          result: { content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to update the project to-do list" }] },
-        });
       }
       return;
     }

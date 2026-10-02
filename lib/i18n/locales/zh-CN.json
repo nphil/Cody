@@ -1674,7 +1674,6 @@
   "todo.add": "添加",
   "todo.addPlaceholder": "添加待办事项",
   "todo.addTitle": "添加待办事项",
-  "todo.askAgent": "让代理处理",
   "todo.cancel": "取消",
   "todo.changeColor": "更改 {title} 的颜色",
   "todo.clearCompleted": "清除已完成",
