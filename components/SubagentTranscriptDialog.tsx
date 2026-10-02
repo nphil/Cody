@@ -1,88 +1,19 @@
 "use client";
 
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
-import { Ban, Loader2, Send } from "lucide-react";
+import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
+import { Ban, ChevronRight, Info, Loader2, Send } from "lucide-react";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { useI18n } from "@/lib/i18n";
 import { formatCost, formatDuration, formatTokens, shortModel } from "@/lib/subagent-format";
 import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
 import { MarkdownBody } from "./MarkdownBody";
+import { BLOCK_LABEL_STYLE, SubagentTranscript, TEXT_BUTTON_STYLE } from "./SubagentTranscript";
 import { Dialog, DialogContent, DialogTitle } from "./ui/primitives";
 import { toast } from "./ui/toast";
 import type { SubagentInfo } from "@/hooks/useAgentSession";
 import { isUnsupportedCommandError, parseSubagentProgress } from "@/lib/subagent-types";
 import type { SubagentActivityEvent, SubagentProgress, SubagentSnapshotLike } from "@/lib/subagent-types";
-import type { AgentMessage, ToolResultMessage } from "@/lib/types";
-
-interface SubagentMessagesPage {
-  sessionFile: string;
-  fromByte: number;
-  nextByte: number;
-  reset?: boolean;
-  messages: AgentMessage[];
-  totalBytes?: number;
-  previousByte?: number;
-  hasEarlier?: boolean;
-}
-
-/** Compact, defensive row for one raw transcript message (content may be a
- * string, a block array, or absent — legacy pi / omp RPC shapes). Memoized:
- * transcript arrays only ever append immutably, so settled rows never
- * re-render while a stream is appending. */
-const SubagentTranscriptRow = memo(function SubagentTranscriptRow({ message }: { message: AgentMessage }) {
-  const label = message.role === "user" ? "U" : message.role === "assistant" ? "A" : "R";
-  const labelColor = message.role === "user" ? "var(--accent)" : message.role === "assistant" ? "var(--text-muted)" : "var(--text-dim)";
-  const rawContent = (message as ToolResultMessage).content;
-  const blocks: Array<{ type: string; text?: unknown }> = typeof rawContent === "string"
-    ? [{ type: "text", text: rawContent }]
-    : Array.isArray(rawContent)
-      ? rawContent as Array<{ type: string; text?: unknown }>
-      : [];
-  const text = blocks
-    .filter((block) => block.type === "text" && typeof block.text === "string")
-    .map((block) => block.text as string)
-    .join("\n")
-    .slice(0, 400);
-  const isError = (message as ToolResultMessage).isError === true;
-  return (
-    <div style={{ display: "flex", gap: 8, minWidth: 0 }}>
-      <span style={{ flexShrink: 0, fontSize: 10, fontFamily: "var(--font-mono)", color: labelColor, paddingTop: 2 }}>{label}</span>
-      <div
-        style={{
-          fontSize: message.role === "toolResult" || message.role === "assistant" ? 11.5 : 12.5,
-          lineHeight: 1.55,
-          minWidth: 0,
-          whiteSpace: "pre-wrap",
-          wordBreak: "break-word",
-          color: message.role === "toolResult" ? "var(--text-muted)" : "var(--text)",
-          fontFamily: message.role === "toolResult" ? "var(--font-mono)" : "inherit",
-        }}
-      >
-        {message.role === "assistant" && typeof rawContent !== "string" && Array.isArray(rawContent)
-          ? rawContent.map((block, i) => (
-              <div key={i}>
-                {block && typeof block === "object" && (block as { type?: unknown }).type === "toolCall"
-                  ? `→ ${(block as { toolName?: unknown }).toolName ?? "tool"} ${JSON.stringify((block as { input?: unknown }).input ?? {})}`
-                  : block && typeof block === "object" && (block as { type?: unknown }).type === "text"
-                    ? ((block as { text?: unknown }).text as string) ?? ""
-                    : ""}
-              </div>
-            ))
-          : text || (message.role === "user" || message.role === "assistant" ? "" : isError ? "(error)" : "(no output)")}
-      </div>
-    </div>
-  );
-});
-
-const BLOCK_LABEL_STYLE: React.CSSProperties = {
-  fontFamily: "var(--font-mono)",
-  fontSize: 10,
-  fontWeight: 700,
-  letterSpacing: 0.4,
-  textTransform: "uppercase",
-  color: "var(--text-dim)",
-};
 
 /** Recursive renderer for structured completions: string values keep their
  * line breaks (JSON.parse already unescapes them), arrays become bullet
@@ -127,69 +58,152 @@ function JsonValue({ value }: { value: unknown }) {
   return <span style={{ color: "var(--text-muted)", fontSize: 12 }}>{String(value)}</span>;
 }
 
-/** The subagent's assignment, rendered as markdown. Exported for SSR tests.
- * Memoized: markdown parsing is the most expensive subtree here and the task
- * string never changes while live frames stream in. */
-export const TaskBlock = memo(function TaskBlock({ task }: { task: string }) {
+/** The first line of the assignment with its markdown heading marks removed:
+ *  what the collapsed Task header shows. */
+function taskPreview(task: string): string {
+  const line = task.split("\n").find((candidate) => candidate.trim() !== "") ?? "";
+  return line.replace(/^\s*#{1,6}\s*/, "").trim();
+}
+
+/** The subagent's assignment, rendered as markdown. Collapsed by default: the
+ *  reader came for the result and the transcript, and the assignment is also
+ *  the first row of the transcript. The markdown is only parsed once opened.
+ *  Exported for SSR tests. Memoized: the task string never changes while live
+ *  frames stream in. */
+export const TaskBlock = memo(function TaskBlock({ task, defaultOpen = false }: { task: string; defaultOpen?: boolean }) {
   const { t } = useI18n();
+  const [open, setOpen] = useState(defaultOpen);
   if (!task) return null;
   return (
-    <section style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)", padding: "10px 12px" }}>
-      <span style={BLOCK_LABEL_STYLE}>{t("subagentTranscript.taskLabel")}</span>
-      <div style={{ marginTop: 6 }}>
-        <MarkdownBody className="markdown-subagent-text">{task}</MarkdownBody>
-      </div>
-    </section>
-  );
-});
-
-/** The subagent's final output (`<id>.md`). Exported for SSR tests. Memoized
- * for the same reason as TaskBlock: the completion only changes when the
- * settled output actually lands. */
-export const CompletionBlock = memo(function CompletionBlock({ completion, truncated }: { completion: string | null; truncated: boolean }) {
-  const { t } = useI18n();
-  let parsed: Record<string, unknown> | null = null;
-  if (completion) {
-    try {
-      const candidate = JSON.parse(completion) as unknown;
-      if (candidate !== null && typeof candidate === "object" && !Array.isArray(candidate)) {
-        parsed = candidate as Record<string, unknown>;
-      }
-    } catch {
-      parsed = null;
-    }
-  }
-  const keys = parsed ? Object.keys(parsed) : [];
-  const singleText = parsed && keys.length === 1 && typeof parsed[keys[0]] === "string" ? parsed[keys[0]] as string : null;
-  return (
-    <section style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", padding: "10px 12px" }}>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-        <span style={BLOCK_LABEL_STYLE}>{t("subagentTranscript.resultLabel")}</span>
-        {truncated && <span style={{ fontSize: 10.5, color: "var(--text-dim)" }}>{t("subagentTranscript.completionTruncated")}</span>}
-      </div>
-      {singleText ? (
-        <div style={{ marginTop: 6, whiteSpace: "pre-wrap", wordBreak: "break-word", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.55 }}>
-          {singleText}
-        </div>
-      ) : parsed ? (
-        <div style={{ marginTop: 6 }}>
-          <JsonValue value={parsed} />
-        </div>
-      ) : completion ? (
-        <div style={{ marginTop: 6 }}>
-          <MarkdownBody className="markdown-subagent-text">{completion}</MarkdownBody>
-        </div>
-      ) : (
-        <div style={{ marginTop: 6, fontSize: 12, color: "var(--text-dim)", fontStyle: "italic" }}>
-          {t("subagentTranscript.noCompletion")}
+    <section style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-subtle)" }}>
+      <button
+        type="button"
+        aria-expanded={open}
+        className="ui-focus-ring"
+        onClick={() => setOpen((value) => !value)}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          width: "100%",
+          minWidth: 0,
+          padding: "8px 12px",
+          background: "none",
+          border: "none",
+          borderRadius: "var(--radius-control)",
+          color: "inherit",
+          cursor: "pointer",
+          fontFamily: "inherit",
+          textAlign: "left",
+        }}
+      >
+        <ChevronRight
+          size={12}
+          aria-hidden="true"
+          style={{ flexShrink: 0, color: "var(--text-dim)", transform: open ? "rotate(90deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }}
+        />
+        <span style={BLOCK_LABEL_STYLE}>{t("subagentTranscript.taskLabel")}</span>
+        {!open && (
+          <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12, color: "var(--text-muted)" }}>
+            {taskPreview(task)}
+          </span>
+        )}
+      </button>
+      {open && (
+        <div style={{ padding: "0 12px 10px" }}>
+          <MarkdownBody className="markdown-subagent-text">{task}</MarkdownBody>
         </div>
       )}
     </section>
   );
 });
 
-/** Distance from the bottom edge (px) within which auto-follow re-engages. */
-const FOLLOW_REENGAGE_PX = 40;
+/** A result longer than this many characters or lines is folded to a few lines. */
+const RESULT_FOLD_CHARS = 700;
+const RESULT_FOLD_LINES = 9;
+const RESULT_FOLDED_STYLE: CSSProperties = {
+  maxHeight: 156,
+  overflow: "hidden",
+  WebkitMaskImage: "linear-gradient(to bottom, #000 72%, transparent)",
+  maskImage: "linear-gradient(to bottom, #000 72%, transparent)",
+};
+
+/** The subagent's final output (`<id>.md`), shown above the transcript once it
+ *  exists. A long one is folded to a few lines with a Show more toggle.
+ *  Exported for SSR tests. Memoized: the completion only changes when the
+ *  settled output actually lands. */
+export const CompletionBlock = memo(function CompletionBlock({ completion, truncated }: { completion: string | null; truncated: boolean }) {
+  const { t } = useI18n();
+  const [expanded, setExpanded] = useState(false);
+  if (!completion) return null;
+  let parsed: Record<string, unknown> | null = null;
+  // A completion that is one JSON string ("…") is plain prose the engine
+  // wrapped in quotes; show the prose, not the quotes.
+  let jsonText: string | null = null;
+  try {
+    const candidate = JSON.parse(completion) as unknown;
+    if (typeof candidate === "string") {
+      jsonText = candidate;
+    } else if (candidate !== null && typeof candidate === "object" && !Array.isArray(candidate)) {
+      parsed = candidate as Record<string, unknown>;
+    }
+  } catch {
+    parsed = null;
+  }
+  const keys = parsed ? Object.keys(parsed) : [];
+  const singleText = jsonText ?? (parsed && keys.length === 1 && typeof parsed[keys[0]] === "string" ? parsed[keys[0]] as string : null);
+  const shown = singleText ?? completion;
+  const foldable = shown.length > RESULT_FOLD_CHARS || shown.split("\n").length > RESULT_FOLD_LINES;
+  const folded = foldable && !expanded;
+  return (
+    <section data-testid="subagent-result" style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", padding: "10px 12px" }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+        <span style={BLOCK_LABEL_STYLE}>{t("subagentTranscript.resultLabel")}</span>
+        {truncated && <span style={{ fontSize: 10.5, color: "var(--text-dim)" }}>{t("subagentTranscript.completionTruncated")}</span>}
+        {foldable && (
+          <button type="button" aria-expanded={expanded} className="ui-focus-ring" onClick={() => setExpanded((value) => !value)} style={{ ...TEXT_BUTTON_STYLE, marginLeft: "auto" }}>
+            {expanded ? t("subagentTranscript.showLess") : t("subagentTranscript.showMore")}
+          </button>
+        )}
+      </div>
+      <div style={{ marginTop: 6, ...(folded ? RESULT_FOLDED_STYLE : null) }}>
+        {singleText ? (
+          <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.55 }}>
+            {singleText}
+          </div>
+        ) : parsed ? (
+          <JsonValue value={parsed} />
+        ) : (
+          <MarkdownBody className="markdown-subagent-text">{completion}</MarkdownBody>
+        )}
+      </div>
+    </section>
+  );
+});
+
+/** Newest-wins throttle: the returned value follows `value` at most once per
+ *  `ms`, with a trailing edge, so a continuous stream still flushes every
+ *  window instead of being re-armed forever the way a restart-debounce would. */
+function useThrottledValue<T>(value: T, ms: number): T {
+  const [throttled, setThrottled] = useState(value);
+  const latestRef = useRef(value);
+  latestRef.current = value;
+  const lastFiredRef = useRef(0);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (value === throttled || timerRef.current !== null) return;
+    const wait = Math.max(0, ms - (Date.now() - lastFiredRef.current));
+    timerRef.current = setTimeout(() => {
+      timerRef.current = null;
+      lastFiredRef.current = Date.now();
+      setThrottled(latestRef.current);
+    }, wait);
+  }, [value, throttled, ms]);
+  useEffect(() => () => {
+    if (timerRef.current !== null) clearTimeout(timerRef.current);
+  }, []);
+  return throttled;
+}
 
 /** Token-colored live-activity mark for the current action line: the house
  * Loader2 spin normally, a static dot under prefers-reduced-motion (a pulse
@@ -214,44 +228,48 @@ function ActivityIndicator({ reducedMotion }: { reducedMotion: boolean }) {
   );
 }
 
-/** The resolved model settings are status only: a running subagent cannot be steered. */
+/** The child's model, role and reasoning as ONE line under the title, with
+ *  the "why can't I change this" note behind a toggle. It sits in the fixed
+ *  header, so every pixel it takes is taken from the transcript — a boxed
+ *  three-row table cost a third of a phone screen. */
 export const ModelAndReasoningBlock = memo(function ModelAndReasoningBlock({ progress }: { progress?: SubagentProgress }) {
   const { t } = useI18n();
+  const [noteOpen, setNoteOpen] = useState(false);
   const none = t("subagentTranscript.none");
   const model = progress?.resolvedModel ?? none;
   const role = progress?.modelRole ?? none;
   const thinkingLevel = progress?.thinkingLevel ? thinkingLevelLabel(progress.thinkingLevel, t) : none;
+  const summary = `${t("subagentTranscript.model")}: ${model} · ${t("subagentTranscript.role")}: ${role} · ${t("subagentTranscript.reasoning")}: ${thinkingLevel}`;
 
   return (
-    <section
-      aria-label={t("subagentTranscript.modelReasoning")}
-      style={{
-        display: "grid",
-        gap: 7,
-        marginTop: 10,
-        padding: "8px 10px",
-        border: "1px solid var(--border)",
-        borderRadius: "var(--radius-control)",
-        background: "var(--bg-subtle)",
-      }}
-    >
-      <strong style={{ fontSize: 11, color: "var(--text-muted)" }}>{t("subagentTranscript.modelReasoning")}</strong>
-      <dl style={{ display: "grid", gridTemplateColumns: "auto minmax(0, 1fr)", columnGap: 8, rowGap: 4, margin: 0, fontSize: 11 }}>
-        <dt style={{ color: "var(--text-dim)" }}>{t("subagentTranscript.model")}</dt>
-        <dd style={{ minWidth: 0, margin: 0, overflowWrap: "anywhere", fontFamily: "var(--font-mono)", color: "var(--text)" }}>
-          {model}
-          {progress?.resolvedModelIsFallback && (
-            <span style={{ marginLeft: 6, color: "var(--status-warning)", fontFamily: "inherit" }}>({t("subagentTranscript.fallback")})</span>
-          )}
-        </dd>
-        <dt style={{ color: "var(--text-dim)" }}>{t("subagentTranscript.role")}</dt>
-        <dd style={{ minWidth: 0, margin: 0, overflowWrap: "anywhere", fontFamily: "var(--font-mono)", color: "var(--text)" }}>{role}</dd>
-        <dt style={{ color: "var(--text-dim)" }}>{t("subagentTranscript.reasoning")}</dt>
-        <dd style={{ minWidth: 0, margin: 0, overflowWrap: "anywhere", color: "var(--text)" }}>{thinkingLevel}</dd>
-      </dl>
-      <p style={{ margin: 0, fontSize: 10.5, lineHeight: 1.4, color: "var(--text-dim)" }}>
-        {t("subagentTranscript.modelReasoningExplanation")}
-      </p>
+    <section aria-label={t("subagentTranscript.modelReasoning")} style={{ marginTop: 4, minWidth: 0 }}>
+      <button
+        type="button"
+        aria-expanded={noteOpen}
+        title={summary}
+        onClick={() => setNoteOpen((open) => !open)}
+        className="ui-focus-ring"
+        style={{
+          display: "flex", alignItems: "center", gap: 6, maxWidth: "100%", minWidth: 0,
+          padding: 0, background: "none", border: "none", cursor: "pointer",
+          fontSize: 11, color: "var(--text-dim)", textAlign: "left",
+        }}
+      >
+        <span style={{ display: "flex", gap: 6, minWidth: 0, overflow: "hidden", whiteSpace: "nowrap" }}>
+          <span style={{ fontFamily: "var(--font-mono)", color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis" }}>{model}</span>
+          {progress?.resolvedModelIsFallback && <span style={{ color: "var(--status-warning)", flexShrink: 0 }}>({t("subagentTranscript.fallback")})</span>}
+          <span aria-hidden="true" style={{ flexShrink: 0 }}>·</span>
+          <span style={{ fontFamily: "var(--font-mono)", flexShrink: 0 }}>{role}</span>
+          <span aria-hidden="true" style={{ flexShrink: 0 }}>·</span>
+          <span style={{ flexShrink: 0 }}>{thinkingLevel}</span>
+        </span>
+        <Info size={11} strokeWidth={1.8} aria-hidden="true" style={{ flexShrink: 0 }} />
+      </button>
+      {noteOpen && (
+        <p style={{ margin: "4px 0 0", fontSize: 10.5, lineHeight: 1.4, color: "var(--text-dim)" }}>
+          {t("subagentTranscript.modelReasoningExplanation")}
+        </p>
+      )}
     </section>
   );
 });
@@ -524,116 +542,8 @@ export function SteerSubagentBox({ subagentId, onSend }: {
   );
 }
 
-/** Scrollable transcript list with stick-to-bottom follow. Memoized so live
- * status frames re-rendering the dialog shell never touch the (potentially
- * large) message list; rows render additively because the messages array only
- * ever appends (a server `reset` page legitimately replaces it).
- *
- * Follow contract: opening lands on the newest message; a manual scroll up
- * disengages following; returning within FOLLOW_REENGAGE_PX of the bottom
- * re-engages it. Programmatic scrolls coalesce into one rAF and jump
- * instantly (plain scrollTop assignment), so rapid streaming cannot hitch and
- * there is no smooth scroll to gate on prefers-reduced-motion. */
-const TranscriptPanel = memo(function TranscriptPanel({ messages, loading, error, exhausted, hasEarlier, followContent, reducedMotion, prependVersion, onLoadMore }: {
-  messages: AgentMessage[];
-  loading: boolean;
-  error: string | null;
-  exhausted: boolean;
-  hasEarlier: boolean;
-  followContent: boolean;
-  reducedMotion: boolean;
-  prependVersion: number;
-  onLoadMore: () => void;
-}) {
-  const { t } = useI18n();
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const pinnedRef = useRef(true);
-  const programmaticScrollRef = useRef(false);
-  const programmaticTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const followFrameRef = useRef<number | null>(null);
-  const previousHeightRef = useRef(0);
-  const previousPrependVersionRef = useRef(prependVersion);
-
-  const disengage = useCallback(() => {
-    pinnedRef.current = false;
-    programmaticScrollRef.current = false;
-  }, []);
-  const handleScroll = useCallback(() => {
-    if (programmaticScrollRef.current) return;
-    const el = scrollRef.current;
-    if (!el) return;
-    pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= FOLLOW_REENGAGE_PX;
-  }, []);
-
-  useLayoutEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    if (prependVersion !== previousPrependVersionRef.current) {
-      const delta = el.scrollHeight - previousHeightRef.current;
-      if (delta > 0) {
-        el.scrollTop += delta;
-        pinnedRef.current = false;
-      }
-      previousPrependVersionRef.current = prependVersion;
-    }
-    previousHeightRef.current = el.scrollHeight;
-  }, [messages, prependVersion]);
-
-  useEffect(() => {
-    if (!pinnedRef.current || followFrameRef.current !== null) return;
-    followFrameRef.current = requestAnimationFrame(() => {
-      followFrameRef.current = null;
-      const el = scrollRef.current;
-      if (!el || !pinnedRef.current) return;
-      programmaticScrollRef.current = true;
-      el.scrollTo({ top: el.scrollHeight, behavior: reducedMotion ? "auto" : "smooth" });
-      if (programmaticTimerRef.current) clearTimeout(programmaticTimerRef.current);
-      programmaticTimerRef.current = setTimeout(() => {
-        programmaticScrollRef.current = false;
-        programmaticTimerRef.current = null;
-      }, reducedMotion ? 40 : 500);
-    });
-  }, [messages, reducedMotion]);
-
-  useEffect(() => () => {
-    if (followFrameRef.current !== null) {
-      cancelAnimationFrame(followFrameRef.current);
-      followFrameRef.current = null;
-    }
-    if (programmaticTimerRef.current) clearTimeout(programmaticTimerRef.current);
-  }, []);
-
-  return (
-    <div
-      id="subagent-transcript-panel"
-      ref={scrollRef}
-      onScroll={handleScroll}
-      onWheel={disengage}
-      onTouchMove={disengage}
-      style={{
-        display: "grid", gap: 8, alignContent: "start", padding: "10px 12px",
-        border: "1px solid var(--border)", borderRadius: "var(--radius-card)",
-        background: "var(--bg-panel)", ...(followContent ? { height: "50dvh" } : { maxHeight: "50dvh" }),
-        overflowY: "auto",
-      }}
-    >
-      {error && <div style={{ fontSize: 12, color: "var(--status-error)" }}>{error}</div>}
-      {messages.length === 0 ? (
-        <div style={{ fontSize: 12, color: "var(--text-dim)", fontStyle: "italic" }}>{loading ? t("subagentTranscript.loading") : t("subagentTranscript.noMessages")}</div>
-      ) : messages.map((message, i) => <SubagentTranscriptRow key={i} message={message} />)}
-      {hasEarlier && (
-        <button type="button" disabled={loading} onClick={onLoadMore} style={{ justifySelf: "start", background: "none", border: "none", color: "var(--accent)", cursor: loading ? "default" : "pointer", fontSize: 12, fontFamily: "inherit", padding: 0, opacity: loading ? 0.5 : 1 }}>
-          {t("subagentTranscript.loadMore")}
-        </button>
-      )}
-      {!exhausted && !hasEarlier && messages.length > 0 && (
-        <button type="button" disabled={loading} onClick={onLoadMore} style={{ justifySelf: "start", background: "none", border: "none", color: "var(--accent)", cursor: loading ? "default" : "pointer", fontSize: 12, fontFamily: "inherit", padding: 0, opacity: loading ? 0.5 : 1 }}>
-          {t("subagentTranscript.loadMore")}
-        </button>
-      )}
-    </div>
-  );
-});
+/** How often a running child's frames may trigger a refetch (trailing edge). */
+const TRANSCRIPT_REFRESH_MS = 600;
 
 export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersion, events, onSteer, onClose }: {
   subagent: SubagentInfo | null;
@@ -659,27 +569,18 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
   }, []);
   const [completion, setCompletion] = useState<string | null>(null);
   const [completionTruncated, setCompletionTruncated] = useState(false);
-  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [transcriptOpen, setTranscriptOpen] = useState(false);
-  const [transcriptMessages, setTranscriptMessages] = useState<AgentMessage[]>([]);
-  const [transcriptNextByte, setTranscriptNextByte] = useState(0);
-  const [transcriptBeforeByte, setTranscriptBeforeByte] = useState(0);
-  const [transcriptHasEarlier, setTranscriptHasEarlier] = useState(false);
-  const [transcriptPrependVersion, setTranscriptPrependVersion] = useState(0);
-  const [transcriptLoading, setTranscriptLoading] = useState(false);
-  const [transcriptError, setTranscriptError] = useState<string | null>(null);
-  const [transcriptExhausted, setTranscriptExhausted] = useState(false);
-  // True once the first load settles: revalidation cycles triggered by live
+  // Set once the first load settles: revalidation cycles triggered by live
   // frames must never regress already-rendered content to a placeholder.
   const [loadedForSubagent, setLoadedForSubagent] = useState<string | null>(null);
+  // The dialog body that scrolls (the ONE scroll container) and the single
+  // element inside it that wraps its content. State, so the transcript's scroll
+  // layer binds the moment both exist.
+  const [scroller, setScroller] = useState<HTMLDivElement | null>(null);
+  const [content, setContent] = useState<HTMLDivElement | null>(null);
   const requestSeqRef = useRef(0);
-  const transcriptRequestSeqRef = useRef(0);
-  const refetchedVersionRef = useRef(0);
-  const refetchedTranscriptVersionRef = useRef(0);
-  const latestVersionRef = useRef(0);
-  const versionDebounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const versionLastFiredRef = useRef(0);
+  const refreshKey = useThrottledValue(transcriptVersion, TRANSCRIPT_REFRESH_MS);
+  const handledRefreshRef = useRef(refreshKey);
 
   const open = subagent !== null;
   const fromDisk = subagent?.source === "history";
@@ -693,79 +594,9 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
     return await res.json() as { completion: string | null; truncated: boolean };
   }, [sessionId, subagent?.id]);
 
-  // Full transcript page (RPC registry first, disk fallback) — mirrors the
-  // get_subagent_messages response shape so both sources are interchangeable.
-  const fetchTranscriptPage = useCallback(async (startByte: number, preferDisk: boolean, direction: "forward" | "before", tail = false): Promise<SubagentMessagesPage> => {
-    if (!sessionId || !subagent?.id) throw new Error("No session");
-    if (preferDisk) {
-      const params = new URLSearchParams(direction === "before" ? { beforeByte: String(startByte) } : { fromByte: String(startByte) });
-      if (tail) params.set("tail", "1");
-      const url = "/api/sessions/" + encodeURIComponent(sessionId) + "/subagents/" + encodeURIComponent(subagent.id) + "?" + params.toString();
-      const res = await fetch(url);
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      return await res.json() as SubagentMessagesPage;
-    }
-    if (direction === "before") throw new Error("Earlier transcript pages require the disk reader");
-    return await sendAgentCommand<SubagentMessagesPage>(sessionId, {
-      type: "get_subagent_messages",
-      subagentId: subagent.id,
-      sessionFile: subagent.sessionFile,
-      fromByte: startByte,
-    });
-  }, [sessionId, subagent?.id, subagent?.sessionFile]);
-
-  const loadTranscriptPage = useCallback(async (startByte: number, direction: "forward" | "before" = "forward", tail = false) => {
-    if (!sessionId || !subagent?.id) return;
-    const seq = ++transcriptRequestSeqRef.current;
-    setTranscriptLoading(true);
-    setTranscriptError(null);
-    try {
-      let page: SubagentMessagesPage;
-      try {
-        page = await fetchTranscriptPage(startByte, fromDisk || tail, direction, tail);
-      } catch (rpcError) {
-        if (fromDisk || direction === "before" || !subagent.id) throw rpcError;
-        page = await fetchTranscriptPage(startByte, false, direction, false);
-      }
-      if (seq !== transcriptRequestSeqRef.current) return;
-      if (page.reset) {
-        setTranscriptMessages(page.messages);
-      } else if (direction === "before") {
-        setTranscriptMessages((prev) => [...page.messages, ...prev]);
-      } else {
-        setTranscriptMessages((prev) => [...prev, ...page.messages]);
-      }
-      if (direction === "before") {
-        setTranscriptBeforeByte(page.fromByte);
-        setTranscriptHasEarlier(page.hasEarlier ?? page.fromByte > 0);
-        setTranscriptPrependVersion((version) => version + 1);
-      } else {
-        setTranscriptNextByte(page.nextByte);
-        if (tail || page.reset) setTranscriptHasEarlier(page.hasEarlier ?? page.fromByte > 0);
-        const complete = typeof page.totalBytes === "number" ? page.nextByte >= page.totalBytes : page.messages.length === 0;
-        setTranscriptExhausted(complete || page.nextByte <= page.fromByte);
-        if (tail || page.reset) setTranscriptBeforeByte(page.fromByte);
-      }
-    } catch (e) {
-      if (seq !== transcriptRequestSeqRef.current) return;
-      setTranscriptError(e instanceof Error ? e.message : String(e));
-    } finally {
-      if (seq === transcriptRequestSeqRef.current) setTranscriptLoading(false);
-    }
-  }, [sessionId, subagent?.id, fromDisk, fetchTranscriptPage]);
-
-  const handleLoadMore = useCallback(() => {
-    if (transcriptHasEarlier) {
-      void loadTranscriptPage(transcriptBeforeByte, "before");
-    } else {
-      void loadTranscriptPage(transcriptNextByte);
-    }
-  }, [loadTranscriptPage, transcriptBeforeByte, transcriptHasEarlier, transcriptNextByte]);
-
   const load = useCallback(async () => {
     if (!sessionId || !subagent?.id) return;
     const seq = ++requestSeqRef.current;
-    setLoading(true);
     setError(null);
     try {
       const found = await fetchCompletion();
@@ -784,82 +615,34 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
       if (seq !== requestSeqRef.current) return;
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      if (seq === requestSeqRef.current) {
-        setLoading(false);
-        setLoadedForSubagent(subagent.id);
-      }
+      if (seq === requestSeqRef.current) setLoadedForSubagent(subagent.id);
     }
   }, [sessionId, subagent?.id, live, fetchCompletion]);
 
-  // Load the completion whenever the dialog opens for a subagent.
+  // Load the completion whenever the dialog opens for a subagent. (The
+  // transcript fetches for itself: it only mounts while the dialog is open.)
   useEffect(() => {
     if (!open || !sessionId) return;
     requestSeqRef.current += 1;
-    transcriptRequestSeqRef.current += 1;
     setCompletion(null);
     setCompletionTruncated(false);
     setError(null);
     setDetail(null);
     setLoadedForSubagent(null);
-    setTranscriptOpen(false);
-    setTranscriptMessages([]);
-    setTranscriptNextByte(0);
-    setTranscriptBeforeByte(0);
-    setTranscriptHasEarlier(false);
-    setTranscriptPrependVersion(0);
-    setTranscriptExhausted(false);
-    setTranscriptError(null);
-    // The bumped seq invalidates an in-flight request whose finally will skip
-    // clearing this — reset it here or the next open shows Loading forever.
-    setTranscriptLoading(false);
-    refetchedVersionRef.current = 0;
-    refetchedTranscriptVersionRef.current = 0;
-    latestVersionRef.current = 0;
-    versionLastFiredRef.current = 0;
-    if (versionDebounceTimerRef.current) {
-      clearTimeout(versionDebounceTimerRef.current);
-      versionDebounceTimerRef.current = null;
-    }
     void load();
   }, [open, sessionId, load]);
 
-  // Live child events mean the final output may have just landed — refetch the
-  // completion and (when the transcript is open) append its next page. Bumps
-  // are THROTTLED (trailing edge): fetches coalesce to one per window, but a
-  // continuous stream still flushes every window instead of re-arming forever
-  // the way a restart-debounce would, so an open transcript keeps following.
-  // The latest version is never dropped — a bump mid-window re-arms the timer
-  // for the window remainder — and the already-processed guard prevents
-  // same-version loops.
+  // Live child frames mean the final output may have just landed (and refresh
+  // the header's live snapshot). Throttled: one refetch per window.
   useEffect(() => {
-    if (!open || !sessionId || transcriptVersion === 0) return;
-    const completionDone = transcriptVersion === refetchedVersionRef.current && transcriptVersion === latestVersionRef.current;
-    const transcriptDone = transcriptVersion === refetchedTranscriptVersionRef.current;
-    if (completionDone && transcriptDone) return;
-    latestVersionRef.current = transcriptVersion;
-    if (versionDebounceTimerRef.current) clearTimeout(versionDebounceTimerRef.current);
-    const sinceLastFire = Date.now() - versionLastFiredRef.current;
-    const delay = sinceLastFire >= 600 ? 0 : 600 - sinceLastFire;
-    versionDebounceTimerRef.current = setTimeout(() => {
-      versionDebounceTimerRef.current = null;
-      versionLastFiredRef.current = Date.now();
-      // Completion fetch: consume the version only when actually fired.
-      if (refetchedVersionRef.current !== latestVersionRef.current) {
-        refetchedVersionRef.current = latestVersionRef.current;
-        void load();
-      }
-      // Paging has its own sequence guard, so a busy request may safely be
-      // superseded by the newest coalesced version instead of re-running this
-      // timer whenever loading state changes.
-      if (transcriptOpen && refetchedTranscriptVersionRef.current !== latestVersionRef.current) {
-        refetchedTranscriptVersionRef.current = latestVersionRef.current;
-        void loadTranscriptPage(transcriptNextByte);
-      }
-    }, delay);
-    return () => {
-      if (versionDebounceTimerRef.current) clearTimeout(versionDebounceTimerRef.current);
-    };
-  }, [open, sessionId, transcriptVersion, transcriptOpen, load, loadTranscriptPage, transcriptNextByte]);
+    if (!open || !sessionId) {
+      handledRefreshRef.current = refreshKey;
+      return;
+    }
+    if (refreshKey === handledRefreshRef.current) return;
+    handledRefreshRef.current = refreshKey;
+    void load();
+  }, [open, sessionId, refreshKey, load]);
 
   const currentDetail = detail?.id === subagent?.id ? detail : null;
   const contentReady = loadedForSubagent === subagent?.id;
@@ -931,9 +714,12 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
           // The popup must not be the scroller, or the pinned close button
           // rides away with the transcript (see DialogContent's contract):
           // the header below is fixed and the body owns the scroll region.
+          // A fixed height, so the dialog never resizes as pages arrive, the
+          // Result block lands or the child finishes.
           style={{
             width: "min(94vw, 920px)",
             maxWidth: "min(94vw, 920px)",
+            height: "min(85dvh, 880px)",
             padding: 0,
             display: "flex",
             flexDirection: "column",
@@ -985,93 +771,73 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
                 )}
               </div>
             </div>
-            <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 18px 18px" }}>
-            {recentEvents && (
-              <div
-                aria-live="polite"
-                style={{
-                  display: "grid",
-                  gap: 2,
-                  marginBottom: 8,
-                  padding: "6px 10px",
-                  border: "1px solid var(--border)",
-                  borderRadius: "var(--radius-control)",
-                  background: "var(--bg-panel)",
-                }}
-              >
-                {recentEvents.map((event, i) => (
+            {/* The ONE scroll container. Native scroll anchoring is off: the
+                transcript holds the reader's row itself (lib/transcript-scroll),
+                the same way in every browser. `scroll-behavior: auto` keeps
+                every programmatic scroll instant. */}
+            <div
+              ref={setScroller}
+              data-testid="subagent-transcript-scroll"
+              style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowAnchor: "none", overscrollBehavior: "contain", scrollBehavior: "auto", padding: "0 18px 18px" }}
+            >
+              <div ref={setContent} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                {/* Errors render alongside whatever already loaded: a failed
+                    revalidation must not blank out rendered content. */}
+                {contentReady && error && (
+                  <div style={{ fontSize: 12, color: "var(--status-error)", padding: "8px 2px" }}>{error}</div>
+                )}
+                {contentReady && completion && <CompletionBlock completion={completion} truncated={completionTruncated} />}
+                <TaskBlock task={task} />
+                {sessionId && (
+                  <SubagentTranscript
+                    sessionId={sessionId}
+                    subagentId={subagent.id}
+                    sessionFile={currentDetail?.sessionFile ?? subagent.sessionFile}
+                    rpcFallback={live}
+                    active={subagentActive}
+                    refreshKey={refreshKey}
+                    scroller={scroller}
+                    content={content}
+                  />
+                )}
+                {recentEvents && (
                   <div
-                    key={i}
+                    aria-live="polite"
                     style={{
-                      display: "flex",
-                      gap: 6,
-                      fontSize: 11,
-                      fontFamily: "var(--font-mono)",
-                      color: event.kind === "tool"
-                        ? "var(--accent)"
-                        : event.kind === "retry_fallback_applied" ? "var(--status-warning)" : "var(--text-muted)",
-                      minWidth: 0,
+                      display: "grid",
+                      gap: 2,
+                      padding: "6px 10px",
+                      border: "1px solid var(--border)",
+                      borderRadius: "var(--radius-control)",
+                      background: "var(--bg-panel)",
                     }}
                   >
-                    <span style={{ color: "var(--text-dim)", flexShrink: 0 }}>
-                      {event.kind === "tool" ? "·" : event.kind === "retry_fallback_applied" ? "!" : "»"}
-                    </span>
-                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{subagentActivityLabel(event, t)}</span>
-                    {subagentActive && i === recentEvents.length - 1 && (
-                      <ActivityIndicator reducedMotion={reducedMotion} />
-                    )}
+                    {recentEvents.map((event, i) => (
+                      <div
+                        key={i}
+                        style={{
+                          display: "flex",
+                          gap: 6,
+                          fontSize: 11,
+                          fontFamily: "var(--font-mono)",
+                          color: event.kind === "tool"
+                            ? "var(--accent)"
+                            : event.kind === "retry_fallback_applied" ? "var(--status-warning)" : "var(--text-muted)",
+                          minWidth: 0,
+                        }}
+                      >
+                        <span style={{ color: "var(--text-dim)", flexShrink: 0 }}>
+                          {event.kind === "tool" ? "·" : event.kind === "retry_fallback_applied" ? "!" : "»"}
+                        </span>
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{subagentActivityLabel(event, t)}</span>
+                        {subagentActive && i === recentEvents.length - 1 && (
+                          <ActivityIndicator reducedMotion={reducedMotion} />
+                        )}
+                      </div>
+                    ))}
                   </div>
-                ))}
+                )}
               </div>
-            )}
-
-            {/* Errors render alongside whatever already loaded: a failed
-                revalidation must not blank out rendered content. */}
-            {contentReady && error && (
-              <div style={{ fontSize: 12, color: "var(--status-error)", padding: "8px 2px" }}>{error}</div>
-            )}
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              <TaskBlock task={task} />
-              <CompletionBlock completion={contentReady ? completion : null} truncated={contentReady && completionTruncated} />
-              {loading && !contentReady && <div style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("subagentTranscript.loading")}</div>}
-              <button
-                type="button"
-                aria-expanded={transcriptOpen}
-                aria-controls="subagent-transcript-panel"
-                onClick={() => {
-                  const next = !transcriptOpen;
-                  setTranscriptOpen(next);
-                  if (next && transcriptMessages.length === 0 && !transcriptLoading) {
-                    void loadTranscriptPage(0, "forward", true);
-                  }
-                }}
-                style={{
-                  alignSelf: "flex-start",
-                  background: "none",
-                  border: "none",
-                  color: "var(--accent)",
-                  cursor: "pointer",
-                  fontSize: 12,
-                  fontFamily: "inherit",
-                  padding: 0,
-                }}
-              >
-                {transcriptOpen ? t("subagentTranscript.hideTranscript") : t("subagentTranscript.showTranscript")}
-              </button>
-              {transcriptOpen && (
-                <TranscriptPanel
-                  messages={transcriptMessages}
-                  loading={transcriptLoading}
-                  error={transcriptError}
-                  exhausted={transcriptExhausted}
-                  hasEarlier={transcriptHasEarlier}
-                  followContent={subagentActive}
-                  reducedMotion={reducedMotion}
-                  prependVersion={transcriptPrependVersion}
-                  onLoadMore={handleLoadMore}
-                />
-              )}
-            </div>
             </div>
             {steerVisible && <SteerSubagentBox subagentId={subagent.id} onSend={steerSubagent} />}
           </>

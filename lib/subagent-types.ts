@@ -2,6 +2,7 @@
 // AgentProgress / SubagentLifecyclePayload / SingleResult, kept small and
 // defensive: every field is optional because payloads are parsed leniently).
 
+import type { AgentMessage } from "./types";
 import { asNumber, asString, isRecord } from "./type-guards";
 export type SubagentAgentSource = "bundled" | "user" | "project";
 
@@ -426,4 +427,33 @@ export function isUnsupportedCommandError(error: unknown): boolean {
   if (error && typeof error === "object" && (error as { code?: unknown }).code === "unsupported") return true;
   const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
   return /Unknown command/i.test(message) || /not supported by this engine/i.test(message);
+}
+
+/**
+ * One page of a subagent transcript. The disk reader
+ * (`/api/sessions/:id/subagents/:subagentId`, lib/subagent-history.ts) and omp's
+ * `get_subagent_messages` share the first block of fields; the optional rest is
+ * disk-only. A page is always whole JSONL lines: `fromByte` and `nextByte` are
+ * both line starts, so any returned offset is a valid cursor.
+ */
+export interface SubagentTranscriptPage {
+  sessionFile: string;
+  /** Byte offset of the first line in the page. */
+  fromByte: number;
+  /** Byte offset just past the last line in the page (the next page's `fromByte`). */
+  nextByte: number;
+  /** True when `fromByte` was past the end of the file and the read restarted at byte 0. */
+  reset: boolean;
+  messages: AgentMessage[];
+  /** Byte offset of the source line of each message, parallel to `messages`.
+   * Stable for the life of the file, so it is the row identity. */
+  offsets?: number[];
+  /** Size of the file when the page was read. */
+  totalBytes?: number;
+  /** End of the last COMPLETE line in the file when the page was read.
+   * `nextByte >= endByte` means there is nothing newer to fetch. */
+  endByte?: number;
+  /** Whether any line precedes `fromByte`. */
+  hasEarlier?: boolean;
+  error?: string;
 }

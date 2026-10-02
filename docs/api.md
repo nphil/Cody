@@ -347,7 +347,7 @@ notes are missing, and is what clients should key any "stale" caveat off.
 | `/api/sessions/<id>/export` | GET | transcript export |
 | `/api/sessions/<id>/auto-name` | POST | name a session: engine title, else a short model-written name, else a first-message truncation |
 | `/api/sessions/<id>/subagents` | GET | subagent roster |
-| `/api/sessions/<id>/subagents/<subagentId>` | GET | one subagent's transcript |
+| `/api/sessions/<id>/subagents/<subagentId>` | GET | one subagent's transcript, read by byte range (never the whole file): `?tail=1` newest page, `?beforeByte=N` the page before offset N, `?fromByte=N` the page from offset N; `?mode=completion` the final output |
 | `/api/sessions/<id>/media` | GET | attachments referenced by the transcript |
 | `/api/sessions/<id>/entries/<entryId>/thinking` | GET | expanded reasoning for one entry |
 | `/api/sessions/<id>/archive` | POST | archive the session and its artifacts |

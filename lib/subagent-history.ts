@@ -8,13 +8,13 @@
 // page reload without the live RPC registry (get_subagent_messages is
 // registry-gated and rejects unknown session files).
 
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from "fs";
+import { closeSync, existsSync, fstatSync, openSync, readdirSync, readSync, realpathSync, statSync } from "fs";
 import type { Dirent, Stats } from "fs";
 import { basename, dirname, join } from "path";
 import { getSessionEntries, entryToUiMessage } from "./session-reader";
 import { parseJsonlLenient } from "./omp/session-files";
 import { parseSubagentProgress } from "./subagent-types";
-import type { SubagentHistoryEntry, SubagentHistoryResult, SubagentAgentSource } from "./subagent-types";
+import type { SubagentHistoryEntry, SubagentHistoryResult, SubagentAgentSource, SubagentTranscriptPage } from "./subagent-types";
 import type { AgentMessage, SessionEntry } from "./types";
 import { asNumber, asString, isRecord } from "./type-guards";
 import { taskResultStructuredOutput, taskResultUsageCost } from "./task-result-details";
@@ -263,98 +263,398 @@ export function extractSubagentHistory(sessionFilePath: string): SubagentHistory
   return roster;
 }
 
-/** Cap on transcript bytes materialized for the dialog (files are small). */
-export const MAX_SUBAGENT_TRANSCRIPT_BYTES = 16 * 1024 * 1024;
-
-/** Bytes read per page call — the total cap above bounds the file, this
- * bounds the per-response window so large transcripts are delivered
- * incrementally instead of serialized whole. */
+/** Bytes of whole lines per page. A page is never padded past this, except to
+ * carry ONE line that is itself larger (see MAX_SUBAGENT_TRANSCRIPT_LINE_BYTES). */
 export const SUBAGENT_TRANSCRIPT_PAGE_BYTES = 256 * 1024;
 
-export interface SubagentTranscriptPage {
-  sessionFile: string;
-  fromByte: number;
-  nextByte: number;
-  reset: boolean;
-  messages: AgentMessage[];
-  error?: string;
-  /** Full file size — lets the dialog hide Load more once fully read. */
-  totalBytes?: number;
-  previousByte?: number;
-  hasEarlier?: boolean;
+/** Most JSONL lines in one page, however small they are. */
+export const SUBAGENT_TRANSCRIPT_PAGE_LINES = 200;
+
+/** Largest single line read into memory. A longer line is stepped over with a
+ * boundary scan and shown as one placeholder row. */
+export const MAX_SUBAGENT_TRANSCRIPT_LINE_BYTES = 8 * 1024 * 1024;
+
+/** Longest string the UI renders from one message field before it is cut. */
+export const MAX_SUBAGENT_MESSAGE_TEXT_CHARS = 64 * 1024;
+
+/** Longest base64 payload kept inline; bigger images become a text note. */
+export const MAX_SUBAGENT_INLINE_IMAGE_CHARS = 512 * 1024;
+
+/** Largest custom-message `details` (shown behind a toggle as JSON) kept. */
+export const MAX_SUBAGENT_CUSTOM_DETAILS_CHARS = 64 * 1024;
+
+/** How deep into a tool call's `input` strings are looked for. */
+const MAX_TOOL_INPUT_DEPTH = 6;
+
+/** Bytes per read while hunting for a newline. Nothing is retained. */
+const LINE_SCAN_CHUNK_BYTES = 64 * 1024;
+
+// Provider-side blobs that ride on persisted blocks and are never rendered
+// (`thinkingSignature` alone is over half of a real assistant line).
+const PROVIDER_BLOCK_KEYS = ["thinkingSignature", "textSignature", "thoughtSignature"] as const;
+
+/** Cut `text` to the display limit, never splitting a surrogate pair, and say
+ * how much was left out. Returns the same string when it already fits. */
+function cutText(text: string): string {
+  if (text.length <= MAX_SUBAGENT_MESSAGE_TEXT_CHARS) return text;
+  let cut = MAX_SUBAGENT_MESSAGE_TEXT_CHARS;
+  const last = text.charCodeAt(cut - 1);
+  if (last >= 0xd800 && last <= 0xdbff) cut -= 1;
+  const moreKb = Math.max(1, Math.round((text.length - cut) / 1024));
+  return `${text.slice(0, cut)}\n\n… truncated (${moreKb} KB more not shown)`;
 }
 
-interface TranscriptPageOptions {
-  tail?: boolean;
-  before?: boolean;
+/** Copy of `value` with every over-long string cut; `value` itself when
+ * nothing was. Never mutates its input. */
+function cutDeep(value: unknown, depth: number): unknown {
+  if (typeof value === "string") return cutText(value);
+  if (depth <= 0 || value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) {
+    let out: unknown[] | null = null;
+    for (let i = 0; i < value.length; i++) {
+      const next = cutDeep(value[i], depth - 1);
+      if (next !== value[i]) out ??= value.slice();
+      if (out) out[i] = next;
+    }
+    return out ?? value;
+  }
+  const record = value as Record<string, unknown>;
+  let out: Record<string, unknown> | null = null;
+  for (const key of Object.keys(record)) {
+    const next = cutDeep(record[key], depth - 1);
+    if (next !== record[key]) {
+      out ??= { ...record };
+      out[key] = next;
+    }
+  }
+  return out ?? value;
+}
+
+/** `src` with `patch` applied and `drop` keys removed; `src` when neither changes anything. */
+function rebuild<T extends Record<string, unknown>>(src: T, patch: Record<string, unknown>, drop: readonly string[]): T {
+  const dropped = drop.filter((key) => key in src);
+  if (dropped.length === 0 && Object.keys(patch).length === 0) return src;
+  const out: Record<string, unknown> = { ...src, ...patch };
+  for (const key of dropped) delete out[key];
+  return out as T;
+}
+
+function imageOmittedNote(block: Record<string, unknown>): { type: "text"; text: string } | null {
+  const source = isRecord(block.source) ? block.source : undefined;
+  const data = typeof block.data === "string" ? block.data : typeof source?.data === "string" ? source.data : "";
+  if (data.length <= MAX_SUBAGENT_INLINE_IMAGE_CHARS) return null;
+  const mime = typeof block.mimeType === "string" ? block.mimeType : typeof source?.media_type === "string" ? source.media_type : "";
+  const kb = Math.round((data.length * 3) / 4 / 1024);
+  return { type: "text", text: `[image omitted: ${mime ? `${mime}, ` : ""}~${kb} KB]` };
+}
+
+function slimBlock(block: unknown): unknown {
+  if (!isRecord(block)) return block;
+  switch (block.type) {
+    case "text":
+    case "thinking": {
+      const field = block.type === "text" ? "text" : "thinking";
+      const cut = cutDeep(block[field], 0); // only strings are ever cut at depth 0
+      return rebuild(block, cut !== block[field] ? { [field]: cut } : {}, PROVIDER_BLOCK_KEYS);
+    }
+    case "toolCall": {
+      const input = cutDeep(block.input, MAX_TOOL_INPUT_DEPTH);
+      return rebuild(block, input !== block.input ? { input } : {}, PROVIDER_BLOCK_KEYS);
+    }
+    case "image":
+      return imageOmittedNote(block) ?? block;
+    default:
+      return block;
+  }
+}
+
+/** String content is cut; block arrays are slimmed block by block. The same
+ * reference comes back when nothing changed. */
+function slimContent(content: unknown): unknown {
+  if (typeof content === "string") return cutText(content);
+  if (!Array.isArray(content)) return content;
+  let out: unknown[] | null = null;
+  for (let i = 0; i < content.length; i++) {
+    const next = slimBlock(content[i]);
+    if (next !== content[i]) out ??= content.slice();
+    if (out) out[i] = next;
+  }
+  return out ?? content;
+}
+
+function jsonChars(value: unknown): number {
+  try {
+    return JSON.stringify(value)?.length ?? 0;
+  } catch {
+    return 0;
+  }
 }
 
 /**
- * Byte-window transcript paging mirroring omp's readRpcSubagentTranscript:
- * parse complete lines from `fromByte`, return UI messages + nextByte.
+ * Bound one transcript message before it is serialized to the browser: drop
+ * provider blobs the UI never renders, cut over-long rendered strings with a
+ * visible marker, and replace huge inline images with a note. Pure — the input
+ * is never mutated and is returned as-is when nothing needs cutting.
  */
-export function readSubagentTranscriptPage(sessionFilePath: string, fromByte = 0, options: TranscriptPageOptions = {}): SubagentTranscriptPage {
-  const normalizedFrom = typeof fromByte === "number" && Number.isFinite(fromByte) ? Math.max(0, Math.trunc(fromByte)) : 0;
+export function slimSubagentMessage(message: AgentMessage): AgentMessage {
+  const msg = message as unknown as Record<string, unknown>;
+  const patch: Record<string, unknown> = {};
+  const drop: string[] = [];
+  const patchText = (key: string) => {
+    const value = msg[key];
+    if (typeof value === "string" && value.length > MAX_SUBAGENT_MESSAGE_TEXT_CHARS) patch[key] = cutText(value);
+  };
+  switch (msg.role) {
+    case "assistant":
+      drop.push("providerPayload");
+      break;
+    case "toolResult": {
+      if (isRecord(msg.details)) {
+        const detailsPatch: Record<string, unknown> = {};
+        for (const key of ["patch", "diff"] as const) {
+          const value = msg.details[key];
+          if (typeof value === "string" && value.length > MAX_SUBAGENT_MESSAGE_TEXT_CHARS) detailsPatch[key] = cutText(value);
+        }
+        if (Object.keys(detailsPatch).length > 0) patch.details = { ...msg.details, ...detailsPatch };
+      }
+      break;
+    }
+    case "custom":
+      if (msg.details !== undefined && jsonChars(msg.details) > MAX_SUBAGENT_CUSTOM_DETAILS_CHARS) drop.push("details");
+      break;
+    case "bashExecution":
+      patchText("output");
+      patchText("command");
+      return rebuild(msg, patch, drop) as unknown as AgentMessage;
+    case "user":
+    case "developer":
+      break;
+    default:
+      return message;
+  }
+  const content = slimContent(msg.content);
+  if (content !== msg.content) patch.content = content;
+  return rebuild(msg, patch, drop) as unknown as AgentMessage;
+}
+
+// Scratch space for range reads, reused across calls. The reader is
+// synchronous and decodes every line to a string before returning, so one
+// buffer of each kind is safe to share.
+let pageBuffer: Buffer | null = null;
+let scanBuffer: Buffer | null = null;
+
+function readExact(fd: number, buffer: Buffer, length: number, position: number): void {
+  let got = 0;
+  while (got < length) {
+    const n = readSync(fd, buffer, got, length - got, position + got);
+    if (n === 0) throw new Error("transcript ended while it was being read");
+    got += n;
+  }
+}
+
+/** Index of the last `\n` strictly before `pos`, or -1. Scans backward in
+ * fixed chunks and keeps nothing, however far the previous newline is. */
+function lastNewlineBefore(fd: number, pos: number): number {
+  const scan = (scanBuffer ??= Buffer.allocUnsafe(LINE_SCAN_CHUNK_BYTES));
+  let end = pos;
+  while (end > 0) {
+    const start = Math.max(0, end - LINE_SCAN_CHUNK_BYTES);
+    readExact(fd, scan, end - start, start);
+    const at = scan.lastIndexOf(0x0a, end - start - 1);
+    if (at >= 0) return start + at;
+    end = start;
+  }
+  return -1;
+}
+
+/** Index of the first `\n` in `[pos, limit)`, or -1. Chunked, retains nothing. */
+function firstNewlineFrom(fd: number, pos: number, limit: number): number {
+  const scan = (scanBuffer ??= Buffer.allocUnsafe(LINE_SCAN_CHUNK_BYTES));
+  let start = pos;
+  while (start < limit) {
+    const len = Math.min(LINE_SCAN_CHUNK_BYTES, limit - start);
+    readExact(fd, scan, len, start);
+    const at = scan.subarray(0, len).indexOf(0x0a);
+    if (at >= 0) return start + at;
+    start += len;
+  }
+  return -1;
+}
+
+/** Start of the line containing byte `pos` (`pos` itself when it already starts one). */
+function lineStartAtOrBefore(fd: number, pos: number): number {
+  return pos <= 0 ? 0 : lastNewlineBefore(fd, pos) + 1;
+}
+
+/** One decoded line; `text` is null for a line too large to read. */
+interface TranscriptLine {
+  offset: number;
+  end: number;
+  text: string | null;
+}
+
+/** The line `[start, end)` — `end` just past its `\n` — read whole, or marked
+ * unread when it exceeds the line cap. */
+function readSingleLine(fd: number, start: number, end: number): TranscriptLine {
+  const length = end - start;
+  if (length > MAX_SUBAGENT_TRANSCRIPT_LINE_BYTES) return { offset: start, end, text: null };
+  const buffer = length <= SUBAGENT_TRANSCRIPT_PAGE_BYTES + 1
+    ? (pageBuffer ??= Buffer.allocUnsafe(SUBAGENT_TRANSCRIPT_PAGE_BYTES + 1))
+    : Buffer.allocUnsafe(length);
+  readExact(fd, buffer, length, start);
+  return { offset: start, end, text: buffer.toString("utf8", 0, length - 1) };
+}
+
+/** Whole lines from `start` (a line start) that fit one page, at least one. */
+function readLinesForward(fd: number, start: number, endByte: number): TranscriptLine[] {
+  const buffer = (pageBuffer ??= Buffer.allocUnsafe(SUBAGENT_TRANSCRIPT_PAGE_BYTES + 1));
+  const windowLength = Math.min(SUBAGENT_TRANSCRIPT_PAGE_BYTES, endByte - start);
+  readExact(fd, buffer, windowLength, start);
+  const view = buffer.subarray(0, windowLength);
+  const lines: TranscriptLine[] = [];
+  let pos = 0;
+  while (lines.length < SUBAGENT_TRANSCRIPT_PAGE_LINES) {
+    const newline = view.indexOf(0x0a, pos);
+    if (newline < 0) break;
+    lines.push({ offset: start + pos, end: start + newline + 1, text: view.toString("utf8", pos, newline) });
+    pos = newline + 1;
+  }
+  if (lines.length === 0) {
+    // The first line is longer than the window: find its end past the window.
+    const newline = firstNewlineFrom(fd, start + windowLength, endByte);
+    if (newline < 0) throw new Error("transcript line has no terminator");
+    lines.push(readSingleLine(fd, start, newline + 1));
+  }
+  return lines;
+}
+
+/** Whole lines ending at `end` (a line start, > 0) that fit one page, at least
+ * one, oldest first. The line-count cap keeps the lines closest to `end`. */
+function readLinesBackward(fd: number, end: number): TranscriptLine[] {
+  const buffer = (pageBuffer ??= Buffer.allocUnsafe(SUBAGENT_TRANSCRIPT_PAGE_BYTES + 1));
+  const windowStart = Math.max(0, end - SUBAGENT_TRANSCRIPT_PAGE_BYTES);
+  // One byte before the window says whether the window starts on a line start.
+  const base = windowStart > 0 ? windowStart - 1 : 0;
+  readExact(fd, buffer, end - base, base);
+  const view = buffer.subarray(0, end - base);
+  const lines: TranscriptLine[] = [];
+  let lineEnd = end;
+  while (lines.length < SUBAGENT_TRANSCRIPT_PAGE_LINES && lineEnd > 0) {
+    const before = lineEnd - 2 - base; // last byte before this line's own `\n`
+    const newline = before >= 0 ? view.lastIndexOf(0x0a, before) : -1;
+    let start: number;
+    if (newline >= 0) start = base + newline + 1;
+    else if (base === 0) start = 0;
+    else break; // this line begins before the window
+    lines.push({ offset: start, end: lineEnd, text: view.toString("utf8", start - base, lineEnd - 1 - base) });
+    lineEnd = start;
+  }
+  if (lines.length === 0) {
+    lines.push(readSingleLine(fd, lastNewlineBefore(fd, end - 1) + 1, end));
+  }
+  return lines.reverse();
+}
+
+function formatLineSize(bytes: number): string {
+  const mb = bytes / (1024 * 1024);
+  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb.toFixed(1)} MB`;
+}
+
+function lineToMessage(line: TranscriptLine): AgentMessage | null {
+  if (line.text === null) {
+    return {
+      role: "custom",
+      customType: "Entry omitted",
+      content: `… entry too large to display (${formatLineSize(line.end - line.offset)})`,
+      display: true,
+    };
+  }
+  if (line.text.length === 0) return null;
+  try {
+    const entry: unknown = JSON.parse(line.text);
+    if (!isRecord(entry)) return null;
+    const message = entryToUiMessage(entry as unknown as SessionEntry, {});
+    return message ? slimSubagentMessage(message) : null;
+  } catch {
+    // A corrupt or torn line is skipped, never fatal.
+    return null;
+  }
+}
+
+/**
+ * One page of a subagent transcript, read from `sessionFilePath` by byte range
+ * without ever loading the whole file. Every page is whole JSONL lines, so each
+ * returned `fromByte` / `nextByte` is a valid cursor.
+ *
+ * - forward (default): lines from `fromByte` (aligned down to a line start;
+ *   past EOF restarts at 0 with `reset`).
+ * - `before`: the page that ENDS at `fromByte` (aligned down to a line start).
+ * - `tail`: the newest page, ending at the last complete line; `fromByte` is ignored.
+ *
+ * A trailing line without its `\n` is still being written and is never
+ * returned. Never throws: an unreadable file yields an empty page.
+ */
+export function readSubagentTranscriptPage(
+  sessionFilePath: string,
+  fromByte = 0,
+  options: { tail?: boolean; before?: boolean } = {},
+): SubagentTranscriptPage {
+  const normalized = typeof fromByte === "number" && Number.isFinite(fromByte) ? Math.max(0, Math.trunc(fromByte)) : 0;
   const empty: SubagentTranscriptPage = {
     sessionFile: sessionFilePath,
-    fromByte: normalizedFrom,
-    nextByte: normalizedFrom,
+    fromByte: normalized,
+    nextByte: normalized,
     reset: false,
     messages: [],
     hasEarlier: false,
   };
-  let size: number;
+  let fd: number | undefined;
   try {
-    size = statSync(sessionFilePath).size;
+    fd = openSync(sessionFilePath, "r");
+    const totalBytes = fstatSync(fd).size;
+    const endByte = totalBytes === 0 ? 0 : lastNewlineBefore(fd, totalBytes) + 1;
+    let reset = false;
+    let pageFrom: number;
+    let pageTo: number;
+    let lines: TranscriptLine[];
+    if (options.tail || options.before) {
+      pageTo = options.tail ? endByte : lineStartAtOrBefore(fd, Math.min(normalized, totalBytes));
+      lines = pageTo > 0 ? readLinesBackward(fd, pageTo) : [];
+      pageFrom = lines.length > 0 ? lines[0].offset : pageTo;
+    } else {
+      let start = normalized;
+      if (start > totalBytes) {
+        start = 0;
+        reset = true;
+      }
+      pageFrom = lineStartAtOrBefore(fd, start);
+      lines = pageFrom < endByte ? readLinesForward(fd, pageFrom, endByte) : [];
+      pageTo = lines.length > 0 ? lines[lines.length - 1].end : pageFrom;
+    }
+    const messages: AgentMessage[] = [];
+    const offsets: number[] = [];
+    for (const line of lines) {
+      const message = lineToMessage(line);
+      if (!message) continue;
+      messages.push(message);
+      offsets.push(line.offset);
+    }
+    return {
+      sessionFile: sessionFilePath,
+      fromByte: pageFrom,
+      nextByte: pageTo,
+      reset,
+      messages,
+      offsets,
+      totalBytes,
+      endByte,
+      hasEarlier: pageFrom > 0,
+    };
   } catch {
     return empty;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
-  let startByte = normalizedFrom;
-  let reset = false;
-  if (!options.before && startByte > size) {
-    startByte = 0;
-    reset = true;
-  }
-  if (size > MAX_SUBAGENT_TRANSCRIPT_BYTES) {
-    return { ...empty, fromByte: startByte, nextByte: startByte, reset, error: "Subagent transcript exceeds the readable size limit" };
-  }
-  let full: Buffer;
-  try {
-    full = readFileSync(sessionFilePath);
-  } catch {
-    return { ...empty, fromByte: startByte, nextByte: startByte, reset };
-  }
-  // Callers normally pass offsets returned by this helper, but normalize an
-  // arbitrary byte offset too: every decoded page starts at a complete JSONL
-  // record and therefore at a UTF-8 character boundary.
-  if (startByte > 0 && full[startByte - 1] !== 0x0a) {
-    startByte = full.lastIndexOf(0x0a, startByte - 1) + 1;
-  }
-  if (options.tail && startByte === 0 && size > SUBAGENT_TRANSCRIPT_PAGE_BYTES) {
-    const tailBoundary = full.lastIndexOf(0x0a, Math.max(0, size - SUBAGENT_TRANSCRIPT_PAGE_BYTES) - 1);
-    if (tailBoundary >= 0) startByte = tailBoundary + 1;
-  }
-  if (options.before) {
-    const requestedEnd = Math.min(size, startByte);
-    const endByte = requestedEnd > 0 && full[requestedEnd - 1] === 0x0a
-      ? requestedEnd
-      : full.lastIndexOf(0x0a, Math.max(0, requestedEnd - 1)) + 1;
-    const candidateStart = Math.max(0, endByte - SUBAGENT_TRANSCRIPT_PAGE_BYTES);
-    const breakAt = candidateStart === 0 ? -1 : full.lastIndexOf(0x0a, candidateStart - 1);
-    const pageStart = breakAt >= 0 ? breakAt + 1 : 0;
-    const body = full.subarray(pageStart, endByte).toString("utf8");
-    const entries = body.length > 0 ? parseJsonlLenient<SessionEntry>(body) : [];
-    const messages = entries.map((entry) => entryToUiMessage(entry, {})).filter((message): message is AgentMessage => message !== null);
-    return { sessionFile: sessionFilePath, fromByte: pageStart, nextByte: endByte, previousByte: pageStart, hasEarlier: pageStart > 0, reset: false, messages, totalBytes: size };
-  }
-  const windowEnd = options.tail && normalizedFrom === 0 ? size : Math.min(size, startByte + SUBAGENT_TRANSCRIPT_PAGE_BYTES);
-  let newline = full.lastIndexOf(0x0a, Math.max(startByte, windowEnd - 1));
-  if (newline < startByte) newline = full.indexOf(0x0a, startByte);
-  const endByte = newline >= startByte ? newline + 1 : startByte;
-  const completeText = full.subarray(startByte, endByte).toString("utf8");
-  const entries = completeText.length > 0 ? parseJsonlLenient<SessionEntry>(completeText) : [];
-  const messages = entries.map((entry) => entryToUiMessage(entry, {})).filter((message): message is AgentMessage => message !== null);
-  return { sessionFile: sessionFilePath, fromByte: startByte, nextByte: endByte, previousByte: startByte, hasEarlier: startByte > 0, reset, messages, totalBytes: size };
 }
 
 /**

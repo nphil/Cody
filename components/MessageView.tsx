@@ -132,6 +132,10 @@ interface Props {
   sessionId?: string;
   thinkingDefaultExpanded?: boolean;
   activityDisplayMode?: ActivityDisplayMode;
+  /** False for a transcript that is only being READ (the subagent viewer):
+   *  no reply or thinking summary is ever requested, so opening it can never
+   *  start a model call. Default true — the main chat distills. */
+  allowDistill?: boolean;
 }
 
 function formatTime(ts: number | undefined, locale: Locale): string | null {
@@ -161,13 +165,13 @@ function haveSameRelevantToolResults(
   return true;
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp, sessionId, thinkingDefaultExpanded = false, activityDisplayMode = "compact" }: Props) {
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp, sessionId, thinkingDefaultExpanded = false, activityDisplayMode = "compact", allowDistill = true }: Props) {
   if (!isVisibleTranscriptMessage(message, activityDisplayMode, toolResults)) return null;
   if (message.role === "user") {
     return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} onNavigate={onNavigate} prevAssistantEntryId={prevAssistantEntryId} onEditContent={onEditContent} />;
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} thinkingDefaultExpanded={thinkingDefaultExpanded} activityDisplayMode={activityDisplayMode} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} thinkingDefaultExpanded={thinkingDefaultExpanded} activityDisplayMode={activityDisplayMode} allowDistill={allowDistill} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -176,7 +180,9 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
   if (message.role === "custom") {
     if ((message as CustomMessage).customType === "xdev-mount-notice") return null;
     if ((message as CustomMessage).customType === "compaction") return <CompactionMessageView message={message as CustomMessage} />;
-    if ((message as CustomMessage).customType === TODO_REMINDER_CUSTOM_TYPE || (message as CustomMessage).customType === ENGINE_NOTE_CUSTOM_TYPE) {
+    // Hidden (display:false) messages are the engine's instructions to the
+    // model, not something said to the user: same slim row as a reminder.
+    if ((message as CustomMessage).customType === TODO_REMINDER_CUSTOM_TYPE || (message as CustomMessage).customType === ENGINE_NOTE_CUSTOM_TYPE || (message as CustomMessage).display === false) {
       return <EngineReminderRow message={message as CustomMessage} />;
     }
     return <CustomMessageView message={message as CustomMessage} cwd={cwd} onOpenFile={onOpenFile} activityDisplayMode={activityDisplayMode} />;
@@ -202,6 +208,7 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     && prev.prevTimestamp === next.prevTimestamp
     && prev.sessionId === next.sessionId
     && prev.thinkingDefaultExpanded === next.thinkingDefaultExpanded
+    && prev.allowDistill === next.allowDistill
     && prev.activityDisplayMode === next.activityDisplayMode;
 });
 
@@ -410,6 +417,7 @@ function AssistantMessageView({
   sessionId,
   entryId,
   thinkingDefaultExpanded,
+  allowDistill,
   activityDisplayMode,
 }: {
   message: AssistantMessage;
@@ -424,6 +432,7 @@ function AssistantMessageView({
   sessionId?: string;
   entryId?: string;
   thinkingDefaultExpanded: boolean;
+  allowDistill: boolean;
 }) {
   const { t, locale } = useI18n();
   const time = showTimestamp ? formatTime(message.timestamp, locale) : null;
@@ -513,7 +522,7 @@ function AssistantMessageView({
   const firstSeenEntryIdRef = useRef(entryId);
   const finalizedHere = firstSeenEntryIdRef.current === undefined && entryId !== undefined;
   const replyRequest = useMemo<DistillRequest | null>(() => {
-    if (!distill.supported || distill.replies === "off") return null;
+    if (!allowDistill || !distill.supported || distill.replies === "off") return null;
     if (isStreaming === true || !finalizedHere) return null;
     if (sessionId === undefined || entryId === undefined) return null;
     if (textContent.length < REPLY_DISTILL_MIN_CHARS) return null;
@@ -527,7 +536,7 @@ function AssistantMessageView({
       plain: distill.plainLanguage,
       final: true,
     };
-  }, [distill.supported, distill.replies, distill.plainLanguage, isStreaming, finalizedHere, sessionId, entryId, textContent]);
+  }, [allowDistill, distill.supported, distill.replies, distill.plainLanguage, isStreaming, finalizedHere, sessionId, entryId, textContent]);
   const replyState = useDistillState(replyRequest?.key ?? null);
   const [showFullReply, setShowFullReply] = useState(false);
   useEffect(() => {
@@ -537,7 +546,7 @@ function AssistantMessageView({
   const distilledReply = !showFullReply && distillShown !== "" && replyState.errorCode === null ? distillShown : null;
   // The thinking summary needs nothing per-block beyond this flag; sessionId,
   // entryId and the block index are already on their way down.
-  const distillThinking = distill.supported && distill.thinking;
+  const distillThinking = allowDistill && distill.supported && distill.thinking;
   const distillPlainLanguage = distill.plainLanguage;
   useEffect(() => {
     if (!isStreaming) {
@@ -1818,7 +1827,7 @@ function EngineReminderRow({ message }: { message: CustomMessage }) {
       })()
     : t("messageView.engineNote");
   const Icon = todo ? ListChecks : Info;
-  const note = todo ? "" : getMessageText(message.content);
+  const note = todo ? "" : getMessageText(message.content).replace(/<\/?system-reminder>/g, "").trim();
   return (
     <div className="chat-message" style={{ marginBottom: 10 }} data-testid="engine-reminder">
       <button

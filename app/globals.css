@@ -1728,6 +1728,19 @@ span.linenumber {
   animation: none;
 }
 
+/* Subagent transcript rows (components/SubagentTranscript.tsx): history read
+   inside a dialog, drawn by the same MessageView as the chat. Same rule as
+   .chat-turn — no entrance motion on rows that were not just produced, or
+   revealing an earlier page starts dozens of animations at once — but NOT
+   content-visibility: the data layer already bounds the window
+   (lib/subagent-transcript.ts), and exact row geometry is what the reader's
+   scroll anchor (lib/transcript-scroll.ts) is measured against. */
+.subagent-row .chat-message,
+.subagent-row .chat-message-card,
+.subagent-row .chat-block-in {
+  animation: none;
+}
+
 
 /* ── Collapsible message boxes (tool call / bash / thinking / extension) ──
    Collapsed boxes hug their header (width: fit-content); expanded boxes grow

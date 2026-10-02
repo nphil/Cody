@@ -407,6 +407,13 @@ lib/
                        looking at, by transcript identity (turn index / part /
                        block index + offset), captured on scroll and restored
                        after every commit — see "Chat scroll" below
+  transcript-scroll.ts the scroll rules of a transcript that is read AND
+                       followed: the pin/unpin decision for a scroll event
+                       and the row anchor (stable row key + offset) that holds
+                       a reader's place — used by the subagent transcript
+  subagent-transcript.ts  the open subagent transcript as a bounded window of
+                       pages: rows keyed by byte offset, prepend/append, and
+                       trimming that drops the page farthest from the reader
   types.ts             shared TypeScript types
   normalize.ts         normalizeToolCalls() — field name mismatch between file format and our types
   worktree.ts          project/worktree resolution and git worktree operations
@@ -427,7 +434,10 @@ components/
                       without the row the trigger rendered blank
   ComposerPanels.tsx  composer-attached todo + subagent panels (collapsible, live states)
   TodoList.tsx        todo phase grid with preview/show-all (used by ComposerPanels)
-  SubagentTranscriptDialog.tsx  task + final output summary dialog (wide, screen-adaptive)
+  SubagentTranscriptDialog.tsx  header + Result → Task → Transcript in ONE scroll container + steer footer (wide, fixed height)
+  SubagentTranscript.tsx the transcript section of that dialog: rows drawn by
+                      MessageView, the one "Show earlier" control, "Jump to
+                      latest", loading / error / empty states
   MessageView.tsx     renders one message (user/assistant/toolCall/toolResult)
   CommandPalette.tsx  ⌘K/Ctrl+K palette (cmdk): session switch, new session, theme
   ImageLightbox.tsx   click-to-preview lightbox for chat images (ClickableImage)
@@ -573,6 +583,9 @@ hooks/
                            to finish), the permanent `unsupported` latch and
                            the separate temporary 401/403 backoff
   useIsMobile.ts           responsive breakpoint hook
+  useSubagentTranscript.ts the open subagent transcript's data: newest page,
+                           earlier pages on request, live append, bounded window
+  useTranscriptScroll.ts   follow / reader anchor / edge auto-load for that scroller
   usePrefersReducedMotion.ts OS reduce-motion preference (SMIL-safe)
   useTheme.ts              theme state: saved per account (/api/accounts/me) and mirrored in localStorage "cody:theme"; first visit follows prefers-color-scheme
 
@@ -1053,7 +1066,7 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   every binary, because a cache HIT never expires and the companion CLI's bin
   name is not something the installer models.
 - **HarnessAdapter.verifiedVersion** is the exact engine version this Cody
-  build was last audited against — every adapter carries one (omp: 18.4.9,
+  build was last audited against — every adapter carries one (omp: 18.4.10,
   claude-agent-acp: 0.73.0, codex-acp: 1.8.0, pi: 0.73.1).
   It is shown verbatim on the System hub's engine roster card (Settings ›
   System › Engines) ("Built to vX.Y.Z", served through /api/engines), and
@@ -2175,7 +2188,10 @@ own last-line check says the agent asked something) by appending a
   collapsed line ("Reminded the agent about 26 open tasks (2 of 3)") with a
   chevron to expand the list; it is hidden in the "hidden" activity mode. Any
   other developer message (e.g. the post-compaction "Resume…" nudge) keeps the
-  plain labelled bubble.
+  plain labelled bubble. A `custom` message with `display:false` (omp's
+  hidden extension messages, e.g. the `eager-todo-prelude` nudge) is the
+  engine talking to the MODEL, so it renders as the same collapsed "Engine
+  note" row, never as a bubble.
 
 ### Approval prompts: inline, and the agent owns the buttons
 - An ACP engine (`lib/harness/acp-session.ts`) can stop mid-turn and ask
@@ -2859,15 +2875,72 @@ second Enter was silently ignored while the first was in flight.
   artifacts dir (`<session-dir>/<subagent-id>.jsonl`) and the parent file's
   task toolResults keep `progress[]`/`results[]` snapshots
   (`extractSubagentHistory` still reads them for the route's roster payload
-  and usage sum). The transcript route pages the sibling file byte-wise
-  (mirroring `get_subagent_messages`, which is RPC-registry-gated and
-  refuses files it doesn't know). The dialog initially reads the final output —
-  `<id>.md` via `?mode=completion` (bounded tail read that also works for
-  transcripts beyond the 16MB paging cap) with a live `get_subagents`
-  snapshot fallback for header enrichment. Show transcript opens a complete-line
-  tail page, supports earlier pages, and follows new output until manual scrolling.
+  and usage sum). The transcript route (`?tail=1` newest page,
+  `?beforeByte=N` the page before N, `?fromByte=N` forward) reads ONLY the
+  bytes a page needs (`readSubagentTranscriptPage`: fd range reads, 64 KB
+  newline scans, one reusable buffer) — never the whole file, so there is no
+  size cap any more (real transcripts are 14–21 MB; a page costs ~2–10 ms and
+  ~110 KB whatever the file size). Every page is whole JSONL lines:
+  `fromByte`/`nextByte` are line starts, `offsets[i]` names the line each
+  message came from, `endByte` is the end of the last COMPLETE line (a line
+  still being written is never returned). A page is ≤256 KB and ≤200 lines,
+  except that one longer line comes back whole up to 8 MB (beyond that: one
+  "Entry omitted" placeholder). `slimSubagentMessage` bounds each message
+  before it ships: `providerPayload` and `thinkingSignature` (over half of a
+  real assistant line, never rendered) are dropped, rendered strings over 64K
+  chars get a visible "… truncated" marker, inline images over 512 KB become a
+  note. `get_subagent_messages` (RPC-registry-gated, forward-only, starts at
+  the OLDEST page) is only a fallback for a running child whose file the disk
+  reader cannot find. The dialog reads the final output — `<id>.md` via
+  `?mode=completion` (bounded read) with a live `get_subagents` snapshot
+  fallback for header enrichment.
   IDs can be explicit task names with spaces/punctuation: validate a bounded safe
   filename component and retain realpath confinement, not an AdjectiveNoun regex.
+- **The transcript dialog** (`SubagentTranscriptDialog` → `SubagentTranscript`,
+  `useSubagentTranscript`, `useTranscriptScroll`). Top to bottom: fixed header,
+  Result (once `<id>.md` exists; folded when long), Task (collapsed), Transcript,
+  steer footer. The dialog body is the ONE scroll container (the old nested 50dvh
+  scroller and its height/maxHeight flip are gone) and the popup has a fixed
+  height, so nothing resizes when pages land or the child finishes. The
+  transcript mounts with the dialog and fetches only while it is open.
+  - **Same rows as the chat.** Rows are the main chat's `MessageView`
+    (`activityDisplayMode="compact"`, thinking collapsed, tool calls as the
+    normal cards with results attached by id; a toolResult is never a row of its
+    own). `allowDistill={false}` plus no session/entry id: a subagent row can
+    never request a summary or fetch anything. Row keys are the line's byte
+    offset, never an array index — pages are PREPENDED.
+  - **Bounded, not virtualized.** The window keeps at most `MAX_WINDOW_MESSAGES`
+    (400) messages; past that `trimWindow` drops the page farthest from the
+    reader (never the page under them) and "Show earlier" / the auto-load /
+    "Jump to latest" bring pages back. Chosen over `content-visibility: auto`
+    because a row's cost here is React script time, not layout (measured in dev
+    for 22 rows: layout 20 ms, style 18 ms, script 688 ms) — which
+    content-visibility cannot skip — and exact row geometry keeps the scroll
+    anchor exact. The 20 MB file never costs more than the window.
+  - **Paging.** ONE "Show earlier" control at the top, only while earlier
+    content exists; the previous page also loads on its own once the reader is
+    within 240 px of the top (rate-limited: 250 ms, 2 s for a flip of direction,
+    so a window that renders almost nothing cannot loop). There is no forward
+    button: a running child's new lines append through the throttled
+    `transcriptVersion` (600 ms, one more fetch ~1 s after the child settles),
+    and a trimmed window walks down by itself near its bottom.
+  - **Follow vs read** (`lib/transcript-scroll.ts`). Pinned: every commit and
+    every content resize re-pins the bottom with an INSTANT scroll. Reading:
+    nothing scrolls the reader; the row at the top edge is held (stable key +
+    offset) through a prepended page, a trimmed page or a row expanding above
+    them. Our own writes are told apart by VALUE (`pinnedAfterScroll`), so there
+    is no window in which the reader's scrolling is ignored; wheel up, a
+    downward finger drag, Up/PageUp/Home or a scrollbar drag unpin at once,
+    returning within 40 px re-pins, and a click on any control inside the
+    scroller (opening a card, "Show earlier") unpins too so growth never drags
+    the reader. "Jump to latest" shows when rows arrived while reading, or when
+    the window was trimmed away from the live end (it reloads the newest page).
+    The scroller sets `overflow-anchor: none` and `scroll-behavior: auto` so the
+    browser's own anchoring and smooth scrolling never fight this.
+  - **Entry point.** The dialog opens only from the live roster's composer
+    chips. A finished session has no chips (the roster is run-scoped) and
+    TaskResultPanel rows are not clickable, so past runs' transcripts have no
+    way in today.
 - **In-message task summary** (`components/MessageView.tsx` TaskResultPanel):
   the session reader allowlists a SIZE-BOUNDED subset of `task` toolResult
   details (telemetry only — no `output`/`stderr`, long text truncated to
