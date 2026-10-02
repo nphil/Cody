@@ -17,6 +17,7 @@ import { fastbootFlasher } from "./fastboot";
 import { geckoFlasher } from "./gecko";
 import { stm32Flasher } from "./stm32";
 import { stk500Flasher } from "./stk500";
+import { serialFlasher, serialSignals, type SerialSignals } from "./serial-monitor";
 
 /**
  * Browser-owned artifacts. A runner receives bytes only through this session
@@ -91,6 +92,7 @@ export interface OperationConfirmation {
 export interface OperationOutput {
   at: number;
   line: string;
+  kind: "terminal" | "log";
 }
 
 export interface OperationEvent {
@@ -159,6 +161,7 @@ interface OperationRecord {
   lease?: HardwareTransportLease;
   writeChain: Promise<void>;
   writeGeneration: number;
+  settled?: Promise<void>;
 }
 
 function cloneRequest(request: DeviceOperationRequest): DeviceOperationRequest {
@@ -307,18 +310,22 @@ export class DeviceOperationManager {
     for (const listener of this.shellListeners) listener();
   }
 
-  deviceDisconnected(deviceId: string): void {
+  async deviceDisconnected(deviceId: string): Promise<void> {
     this.setShellAccess(deviceId, false);
+    const settling: Promise<void>[] = [];
     for (const record of this.records.values()) {
-      if (record.request.deviceId === deviceId && !isTerminal(record.state)) this.cancel(record.id);
+      if (record.request.deviceId !== deviceId) continue;
+      if (!isTerminal(record.state)) this.cancel(record.id);
+      if (record.settled) settling.push(record.settled);
     }
+    await Promise.all(settling);
   }
 
   constructor(
     sessionId: string,
     transportProvider: HardwareTransportProvider,
     artifacts: OperationArtifacts,
-    flashers: readonly Flasher[] = [],
+    flashers: readonly Flasher[] = [serialFlasher],
   ) {
     this.sessionId = sessionId;
     this.transportProvider = transportProvider;
@@ -368,7 +375,7 @@ export class DeviceOperationManager {
     };
     this.records.set(record.id, record);
     this.emit(record, { type: "started", state: record.state });
-    void this.run(record);
+    record.settled = this.run(record);
     return { id: record.id, snapshot: frozenSnapshot(record) };
   }
 
@@ -407,6 +414,19 @@ export class DeviceOperationManager {
       this.emit(record, { type: "state", state: record.state });
     }
     return frozenSnapshot(record);
+  }
+
+  async setSignalsUser(id:string,value:SerialSignals):Promise<void> {
+    const signals=serialSignals(value), record=this.requireRecord(id);
+    if(record.request.action!=="monitor" || record.request.protocol!=="serial") throw new Error("Line controls require a serial terminal.");
+    const pending=record.writeChain.then(async()=>{
+      if(record.state!=="running" || record.controller.signal.aborted || !record.lease) throw new Error("The terminal is closed.");
+      const transport=record.lease.transport;
+      if(!transport.setSignals) throw new Error("This adapter does not expose DTR/RTS/break control.");
+      await transport.setSignals(signals, record.controller.signal);
+      this.addOutput(record,"User changed serial signals: "+JSON.stringify(signals));
+    });
+    record.writeChain=pending.catch(()=>undefined); await pending;
   }
 
   /**
@@ -522,11 +542,11 @@ export class DeviceOperationManager {
     this.emit(record, { type: "progress", progress: record.progress });
   }
 
-  private addOutput(record: OperationRecord, line: string): void {
+  private addOutput(record: OperationRecord, line: string, kind: "terminal" | "log" = "log"): void {
     const clipped = line.length > MAX_MONITOR_LINE_CHARS
       ? `${line.slice(0, MAX_MONITOR_LINE_CHARS)} …[line truncated]`
       : line;
-    const output: OperationOutput = { at: Date.now(), line: clipped };
+    const output: OperationOutput = { at: Date.now(), line: clipped, kind };
     record.output.push(output);
     record.outputChars += clipped.length;
     while (record.output.length > MAX_OPERATION_OUTPUT_LINES || record.outputChars > MAX_OPERATION_OUTPUT_CHARS) {
@@ -550,9 +570,7 @@ export class DeviceOperationManager {
       if (record.controller.signal.aborted) throw new DOMException("Operation cancelled.", "AbortError");
       record.state = "running";
       this.emit(record, { type: "state", state: record.state });
-      const result = record.request.action === "monitor" && record.request.protocol !== "adb"
-        ? await this.runSerialMonitor(record, record.lease.transport)
-        : await this.runFlasher(record, record.lease.transport, input);
+      const result = await this.runFlasher(record, record.lease.transport, input);
       if (record.controller.signal.aborted) throw new DOMException("Operation cancelled.", "AbortError");
       record.result = cloneResult(result);
       completed = true;
@@ -605,7 +623,7 @@ export class DeviceOperationManager {
       signal: record.controller.signal,
       progress: (progress) => this.reportProgress(record, progress),
       shellAccess: () => !record.controller.signal.aborted && (record.origin === "user" || this.hasShellAccess(record.request.deviceId)),
-      output: (text) => this.addOutput(record, text),
+      output: (text) => this.addOutput(record, text, record.request.action === "monitor" ? "terminal" : "log"),
       setTerminalInput: (send) => { record.terminalInput = send; },
       input,
       save: (name, data) => this.artifacts.save(this.sessionId, name, data),
@@ -711,36 +729,7 @@ export class DeviceOperationManager {
     };
   }
 
-  private async runSerialMonitor(record: OperationRecord, transport: HardwareTransport): Promise<HardwareResult> {
-    if (transport.kind !== "serial") throw new Error("Monitor requires a serial transport.");
-    if (record.request.baudRate !== undefined) {
-      if (!transport.setBaudRate) throw new Error("This serial transport cannot change its baud rate.");
-      await transport.setBaudRate(record.request.baudRate);
-    }
-    this.reportProgress(record, { phase: "monitoring", message: "Serial monitor connected" });
-    const decoder = new TextDecoder();
-    let partial = "";
-    while (!record.controller.signal.aborted) {
-      const bytes = await transport.read(4096, 1_000, record.controller.signal);
-      if (!bytes) continue;
-      partial = this.consumeMonitorText(record, partial, decoder.decode(bytes, { stream: true }));
-    }
-    const finalText = partial + decoder.decode();
-    if (finalText) this.addOutput(record, finalText);
-    throw new DOMException("Operation cancelled.", "AbortError");
-  }
 
-  private consumeMonitorText(record: OperationRecord, partial: string, text: string): string {
-    let pending = partial + text;
-    const lines = pending.split(/\r?\n/);
-    pending = lines.pop() ?? "";
-    for (const line of lines) this.addOutput(record, line);
-    if (pending.length > MAX_MONITOR_LINE_CHARS) {
-      this.addOutput(record, pending.slice(0, MAX_MONITOR_LINE_CHARS));
-      return pending.slice(MAX_MONITOR_LINE_CHARS);
-    }
-    return pending;
-  }
 }
 
 function sameBinding(left: OperationRiskBinding, right: OperationRiskBinding): boolean {
@@ -889,6 +878,7 @@ export function createDefaultPageOperationDelegate(
   transportProvider: HardwareTransportProvider,
 ): PageOperationDelegate {
   return createPageOperationDelegate(sessionId, transportProvider, deviceArtifacts, [
+    serialFlasher,
     espFlasher,
     adbFlasher,
     fastbootFlasher,

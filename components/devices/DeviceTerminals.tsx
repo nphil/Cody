@@ -12,11 +12,13 @@ export function DeviceTerminals({ manager, devices, input }: { manager: DeviceOp
   return <>{devices.map((device) => {
     const candidates = device.protocolCandidates?.filter((candidate) => candidate.protocol === "adb") ?? [];
     const fastboot = device.protocolCandidates?.filter((candidate) => candidate.protocol === "fastboot") ?? [];
-    if (!candidates.length && !fastboot.length) return null;
+    const serial = device.protocolCandidates?.filter((candidate) => candidate.protocol === "serial") ?? [];
+    if (!candidates.length && !fastboot.length && device.kind !== "serial" && !serial.length) return null;
     return <div key={device.id} style={{ display: "grid", gap: 12 }}>
       {candidates.length > 0 && <ShellAccessControl manager={manager} deviceId={device.id} label={device.label} />}
       {candidates.map((candidate) => <DeviceTerminal key={candidate.interfaceNumber + ":" + candidate.alternateSetting} manager={manager} deviceId={device.id} label={device.label} interfaceNumber={candidate.interfaceNumber} alternateSetting={candidate.alternateSetting} />)}
       {fastboot.map((candidate) => <FastbootCommand key={candidate.interfaceNumber+":"+candidate.alternateSetting} manager={manager} deviceId={device.id} label={device.label} interfaceNumber={candidate.interfaceNumber} alternateSetting={candidate.alternateSetting} input={input} />)}
+      {device.kind === "serial" ? <DeviceTerminal manager={manager} deviceId={device.id} label={device.label} protocol="serial" /> : serial.map((candidate) => <DeviceTerminal key={candidate.interfaceNumber+":"+candidate.alternateSetting} manager={manager} deviceId={device.id} label={device.label} protocol="serial" interfaceNumber={candidate.interfaceNumber} alternateSetting={candidate.alternateSetting} />)}
     </div>;
   })}</>;
 }

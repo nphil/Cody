@@ -1,7 +1,7 @@
 /** Page-side protocol boundary. A transport is an exclusive session/device lease,
  * not a fresh connection per packet. Implementations must never retry writes
  * implicitly: a lost acknowledgement makes completion unknown. */
-export type HardwareProtocol = "esp" | "adb" | "fastboot" | "gecko" | "stm32" | "stk500" | "dfu";
+export type HardwareProtocol = "esp" | "adb" | "fastboot" | "gecko" | "stm32" | "stk500" | "dfu" | "serial";
 export type HardwareAction = "detect" | "flash" | "dump" | "exec" | "push" | "pull" | "monitor" | "sideload" | "verify";
 
 export interface HardwareRequest {
@@ -32,8 +32,8 @@ export interface HardwareTransport {
    * this transport instead of an abandoned Promise.race consuming them. */
   read(length: number, timeoutMs: number, signal: AbortSignal): Promise<Uint8Array | null>;
   write(bytes: Uint8Array, signal: AbortSignal): Promise<void>;
-  setBaudRate?(baudRate: number): Promise<void>;
-  setSignals?(signals: { dtr?: boolean; rts?: boolean; brk?: boolean }): Promise<void>;
+  setBaudRate?(baudRate: number, signal?: AbortSignal): Promise<void>;
+  setSignals?(signals: { dtr?: boolean; rts?: boolean; brk?: boolean }, signal?: AbortSignal): Promise<void>;
   controlIn?(setup: USBControlTransferParameters, length: number, signal: AbortSignal): Promise<Uint8Array>;
   controlOut?(setup: USBControlTransferParameters, bytes: Uint8Array, signal: AbortSignal): Promise<void>;
   /** esptool-js owns the reader while borrowed; the console pump is suspended. */

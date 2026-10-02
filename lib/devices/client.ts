@@ -33,6 +33,7 @@ import { stableUsbIdentity, USB_REGRANT_MESSAGE } from "./usb-identity";
 import { SessionConnectionPool, type RetainedSessionConnection } from "./session-connections";
 import { reconnectDelayMs } from "@/lib/stream-recovery";
 import { NO_CAPABILITIES, type BleServiceInfo, type BleTraceEvent, type DeviceActivity, type DeviceCapabilities, type DeviceClientFrame, type DeviceInfo, type DeviceKind, type DeviceOpName, type DeviceProtocolCandidate, type DeviceServerFrame, type UsbOpenResult } from "./protocol";
+import { cdcControlInterface, cdcSerialTransport } from "./cdc";
 
 /**
  * TypeScript's bundled DOM lib does not yet ship the User-Agent Client Hints
@@ -206,6 +207,7 @@ function usbProtocolCandidates(device: USBDevice): readonly DeviceProtocolCandid
           if (alternate.interfaceProtocol === 0x03) protocol = "fastboot";
         }
         if (alternate.interfaceClass === 0xfe && alternate.interfaceSubclass === 0x01 && alternate.interfaceProtocol === 0x02) protocol = "dfu";
+        if (alternate.interfaceClass === 0x0a && alternate.endpoints.some(endpoint => endpoint.type === "bulk" && endpoint.direction === "in") && alternate.endpoints.some(endpoint => endpoint.type === "bulk" && endpoint.direction === "out")) protocol = "serial";
         if (protocol) candidates.push({ protocol, interfaceNumber: iface.interfaceNumber, alternateSetting: alternate.alternateSetting });
       }
     }
@@ -1781,7 +1783,9 @@ export class DeviceBridgeConnection implements PageOperationBridge {
       write: async (bytes, signal) => {
         await ensureReady();
         await runUsbAbortable(ready, signal, async () => {
-          await ready.device.transferOut(requireEndpoint("out"), webUsbBytes(bytes));
+          const result = await ready.device.transferOut(requireEndpoint("out"), webUsbBytes(bytes));
+          if (result.status !== "ok") throw new Error(`USB bulk write failed: ${result.status}.`);
+          if (result.bytesWritten !== bytes.byteLength) throw new Error(`USB bulk write was incomplete (${result.bytesWritten}/${bytes.byteLength} bytes).`);
         });
       },
       controlIn: async (setup, length, signal) => {
@@ -1792,12 +1796,20 @@ export class DeviceBridgeConnection implements PageOperationBridge {
       controlOut: async (setup, bytes, signal) => {
         await ensureReady();
         await runUsbAbortable(ready, signal, async () => {
-          await ready.device.controlTransferOut(setup, webUsbBytes(bytes));
+          const result = await ready.device.controlTransferOut(setup, webUsbBytes(bytes));
+          if (result.status !== "ok") throw new Error(`USB control write failed: ${result.status}.`);
+          if (result.bytesWritten !== bytes.byteLength) throw new Error(`USB control write was incomplete (${result.bytesWritten}/${bytes.byteLength} bytes).`);
         });
       },
     };
+    let protocolTransport = transport;
+    if (selectedAlternate?.interfaceClass === 0x0a && interfaceNumber !== undefined) {
+      const control = await cdcControlInterface(ready.device, interfaceNumber);
+      if (!ready.device.configuration?.interfaces.find(iface => iface.interfaceNumber === control)?.claimed) await ready.device.claimInterface(control);
+      protocolTransport = cdcSerialTransport(transport, control);
+    }
     return {
-      transport,
+      transport: protocolTransport,
       identity: ready.stableIdentity ?? undefined,
       release: async () => {
         if (released) return;
@@ -1822,7 +1834,7 @@ export class DeviceBridgeConnection implements PageOperationBridge {
   }
 
   async disconnectDevice(id: string): Promise<void> {
-    this.operationManager?.deviceDisconnected(id);
+    await this.operationManager?.deviceDisconnected(id);
     const rawLease = deviceLeases.claimForRawOperation(this.sessionId, id);
     try {
       this.lifecycleUnsubs.get(id)?.();

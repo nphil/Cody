@@ -15,6 +15,7 @@ import { deviceArtifacts } from "@/lib/devices/artifacts";
 import type { DeviceInfo } from "@/lib/devices/protocol";
 import type { HardwareAction, HardwareProtocol } from "@/lib/devices/flasher";
 import type { DeviceOperationManager, DeviceOperationSnapshot, OperationRiskBinding, OperationState } from "@/lib/devices/operations";
+import { serialFlasher } from "@/lib/devices/serial-monitor";
 
 interface OperationPanelProps {
   sessionId: string;
@@ -70,7 +71,7 @@ function backupUnavailable(backup: string): boolean {
   return value.includes("backup unavailable") || value.includes("backup not available") || value.startsWith("unavailable:");
 }
 
-const SHIPPED_FLASHERS = [espFlasher, adbFlasher, fastbootFlasher, geckoFlasher, stm32Flasher, stk500Flasher, dfuFlasher] as const;
+const SHIPPED_FLASHERS = [serialFlasher, espFlasher, adbFlasher, fastbootFlasher, geckoFlasher, stm32Flasher, stk500Flasher, dfuFlasher] as const;
 
 /** The same protocol declarations used by the page operation delegate. Geometry-dependent actions remain unavailable until protocol detection can bind an intrinsic plan. */
 const ACTIONS_BY_PROTOCOL = Object.fromEntries(SHIPPED_FLASHERS.map((flasher) => [
@@ -101,6 +102,7 @@ function OperationStartForm({ manager, devices, selectedInputId, sessionId }: Op
   const [error, setError] = useState<string | null>(null);
   const input = selectedInputId ? deviceArtifacts.list(sessionId).find((artifact) => artifact.id === selectedInputId) : undefined;
   const inputRequired = action === "flash" || action === "push" || action === "sideload" || action === "verify";
+  const commandUsesImage = protocol === "fastboot" && action === "exec" && /^(?:boot|download|flash)(?:$|[:\s])/.test(command.trim().replace(/^fastboot\s+/, ""));
 
   useEffect(() => {
     if (!devices.some((device) => device.id === deviceId)) setDeviceId(devices[0]?.id ?? "");
@@ -140,7 +142,7 @@ function OperationStartForm({ manager, devices, selectedInputId, sessionId }: Op
         ...(needsRange && parsedLength !== undefined ? { length: parsedLength } : {}),
         ...(needsBaudRate && parsedBaudRate !== undefined ? { baudRate: parsedBaudRate } : {}),
         ...(needsCommand ? { command: command.trim() } : {}),
-        ...(input && (inputRequired || action === "exec") ? { fileId: input.id, sha256: input.sha256 } : {}),
+        ...(input && (inputRequired || commandUsesImage) ? { fileId: input.id, sha256: input.sha256 } : {}),
         ...(Object.keys(options).length > 0 ? { options } : {}),
       });
       setError(null);

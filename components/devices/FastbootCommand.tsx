@@ -9,7 +9,15 @@ export function FastbootCommand({manager,deviceId,label,interfaceNumber,alternat
   const {t}=useI18n();const [command,setCommand]=useState("getvar all"),[operation,setOperation]=useState<DeviceOperationSnapshot>(),[error,setError]=useState("");
   useEffect(()=>manager.subscribe(snapshot=>{if(snapshot.id===operation?.id)setOperation(snapshot);}),[manager,operation?.id]);
   const active=operation&&!['succeeded','failed','cancelled'].includes(operation.state);
-  const start=()=>{try{const result=manager.startUser({deviceId,protocol:"fastboot",action:"exec",command,interfaceNumber,alternateSetting,...(input?{fileId:input.id,sha256:input.sha256}:{})});setOperation(manager.status(result.id));setError("");}catch(caught){setError(String(caught));}};
+  const start = () => {
+    try {
+      const usesImage = /^(?:boot|download|flash)(?:$|[:\s])/.test(command.trim().replace(/^fastboot\s+/, ""));
+      const result = manager.startUser({ deviceId, protocol: "fastboot", action: "exec", command, interfaceNumber, alternateSetting,
+        ...(input && usesImage ? { fileId: input.id, sha256: input.sha256 } : {}) });
+      setOperation(manager.status(result.id));
+      setError("");
+    } catch (caught) { setError(String(caught)); }
+  };
   return <section aria-label={t("devices.fastbootTerminal",{device:label})} style={{display:"grid",minWidth:0,gap:8}}>
     <strong>{t("devices.fastbootTerminal",{device:label})}</strong>
     <form onSubmit={event=>{event.preventDefault();if(!active)start();}} style={{display:"flex",flexWrap:"wrap",gap:8}}>

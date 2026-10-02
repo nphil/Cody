@@ -38,7 +38,7 @@ export async function setBaudRate(context: HardwareContext, baudRate: number | u
   if (!Number.isSafeInteger(baudRate) || baudRate <= 0) throw new SerialProtocolError("baudRate must be a positive integer.");
   if (!context.transport.setBaudRate) throw new SerialProtocolError("The selected serial transport cannot change baud rate.");
   throwIfAborted(context.signal);
-  await context.transport.setBaudRate(baudRate);
+  await context.transport.setBaudRate(baudRate, context.signal);
 }
 
 /**
@@ -51,7 +51,7 @@ export async function readExact(
   length: number,
   until: ProtocolDeadline,
   signal: AbortSignal,
-): Promise<Uint8Array> {
+): Promise<Uint8Array<ArrayBuffer>> {
   if (!Number.isSafeInteger(length) || length < 0) throw new SerialProtocolError("Read length must be a non-negative integer.");
   const output = new Uint8Array(length);
   let received = 0;

@@ -1,4 +1,6 @@
 {
+  "devices.serialTerminal": "Serial terminal — {device}",
+  "devices.terminalEnding": "Line ending",
   "devices.fastbootTerminal": "Fastboot command — {device}",
   "devices.shellAllow": "Allow the agent to run shell commands on {device} until disconnect",
   "devices.shellRevoke": "Revoke agent shell access on {device}",

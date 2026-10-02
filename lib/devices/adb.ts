@@ -264,11 +264,12 @@ async function shellStatus(adb: Adb, command: string): Promise<ShellResult> {
   let stdout: string;
   let stderr = "";
   if (shell) {
-    const result = await shell.spawnWaitText(["sh", "-c", wrapped]);
+    // ya-webadb joins argv literally; adbd already invokes the device shell.
+    const result = await shell.spawnWaitText([wrapped]);
     stdout = result.stdout;
     stderr = result.stderr;
   } else {
-    stdout = await adb.subprocess.noneProtocol.spawnWaitText(["sh", "-c", wrapped]);
+    stdout = await adb.subprocess.noneProtocol.spawnWaitText([wrapped]);
   }
   const marker = new RegExp(`\\n${SHELL_STATUS_PREFIX}(\\d+)\\n`, "g");
   let match: RegExpExecArray | null = null;
@@ -653,13 +654,13 @@ async function runShellCommand(command: string, context: HardwareContext, adb: A
   context.output?.("> adb shell: " + command);
   const protocol = adb.subprocess.shellProtocol;
   if (protocol) {
-    const process = await protocol.spawn(["sh", "-c", command], context.signal);
+    const process = await protocol.spawn([command], context.signal);
     const [stdout, stderr, exitCode] = await Promise.all([streamShellOutput(process.stdout, context), streamShellOutput(process.stderr, context), process.exited]);
     if (exitCode !== 0) throw new AdbProtocolError("ADB shell exited with status " + exitCode + ".");
     return { summary: "ADB shell command completed.", details: { output: (stdout + stderr).slice(-64 * 1024), exitCode } };
   }
   const wrapped = `(${command}); c=$?; printf '\\n${SHELL_STATUS_PREFIX}%s\\n' "$c"; exit "$c"`;
-  const process = await adb.subprocess.noneProtocol.spawn(["sh", "-c", wrapped], context.signal);
+  const process = await adb.subprocess.noneProtocol.spawn([wrapped], context.signal);
   const output = await streamShellOutput(process.output, context);
   const match = output.match(/\n__CODY_ADB_STATUS__(\d+)\r?\n?$/);
   if (!match) throw new AdbProtocolError("ADB shell ended without a command status; completion is unknown.");

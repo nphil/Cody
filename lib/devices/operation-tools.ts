@@ -17,6 +17,7 @@ export type DeviceOperationToolHandler = (
 export type DeviceOperationToolDefinition = HostToolDefinition & { handler: DeviceOperationToolHandler };
 
 const PROTOCOLS: Record<HardwareProtocol, true> = {
+  serial: true,
   esp: true,
   adb: true,
   fastboot: true,
@@ -64,7 +65,7 @@ function requestFor(
   const device = resolveDeviceId(args, bridge);
   if ("error" in device) return device.error;
   const protocol = stringArg(args, "protocol");
-  if (!protocol || !PROTOCOLS[protocol as HardwareProtocol]) return "protocol must be one of esp, adb, fastboot, gecko, stm32, stk500, or dfu.";
+  if (!protocol || !PROTOCOLS[protocol as HardwareProtocol]) return "protocol must be one of esp, adb, fastboot, gecko, stm32, stk500, dfu, or serial.";
   const offset = optionalInteger(args, "offset");
   if (typeof offset === "string") return offset;
   const length = optionalInteger(args, "length");
@@ -156,7 +157,7 @@ function startingHandler(action: HardwareAction): DeviceOperationToolHandler {
 
 const OPERATION_PROPERTIES = {
   device: { type: "string", description: "Exact browser device id from device_list." },
-  protocol: { type: "string", enum: ["esp", "adb", "fastboot", "gecko", "stm32", "stk500", "dfu"], description: "Protocol implementation to run." },
+  protocol: { type: "string", enum: ["esp", "adb", "fastboot", "gecko", "stm32", "stk500", "dfu", "serial"], description: "Protocol implementation to run. Use serial for an interactive CDC/UART console." },
   target: { type: "string", description: "Exact destination, partition, path, or address used by the protocol." },
   offset: { type: "number", description: "Exact byte offset, when supported." },
   length: { type: "number", description: "Exact byte length, when supported." },

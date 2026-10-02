@@ -35,5 +35,5 @@ export async function sideloadAdb(request: HardwareRequest, context: HardwareCon
         context.progress({ phase: "adb.sideload", completed: Math.min(input.size, transferred), total: input.size, message: "Served " + transferred + " bytes (recovery may reread blocks)" });
       }
     }
-  } finally { reader.releaseLock(); writer.releaseLock(); await socket.close().catch(() => undefined); }
+  } finally { reader.releaseLock(); writer.releaseLock(); await Promise.resolve(socket.close()).catch(() => undefined); }
 }

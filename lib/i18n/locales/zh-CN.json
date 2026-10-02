@@ -1,4 +1,6 @@
 {
+  "devices.serialTerminal": "串口终端 — {device}",
+  "devices.terminalEnding": "行尾",
   "devices.fastbootTerminal": "Fastboot 命令 — {device}",
   "devices.shellAllow": "允许代理在 {device} 上运行 shell 命令，直到断开连接",
   "devices.shellRevoke": "撤销代理在 {device} 上的 shell 权限",

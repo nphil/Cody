@@ -232,7 +232,7 @@ function protectedOverride(target:string):string|undefined {
 
 async function backupPartition(context:HardwareContext,target:string) {
   const info=await inspectPartition(context,target);
-  if (!info.capability) return {...info,backup:"Backup unavailable: this bootloader does not support exact fetch readback. Back up with TWRP/ADB before continuing."};
+  if (!info.capability) return {...info,backupId:undefined,backup:"Backup unavailable: this bootloader does not support exact fetch readback. Back up with TWRP/ADB before continuing."};
   const saved=await saveFetch(context,target,0,info.capability.partitionSize,info.capability,target+".preflash.bin");
   return {...info,backupId:saved.fileId,backup:"Saved full "+target+" backup as "+saved.fileId+" (sha256 "+saved.sha256+")."};
 }

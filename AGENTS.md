@@ -2038,8 +2038,8 @@ re-use a grant across sessions.
 
 Use high-level operation tools for supported work:
 `device_detect`, `device_dump`, `device_flash`, `device_exec`,
-`device_push`, `device_pull`, `device_monitor`,
-`device_monitor_send`, `device_operation_status`, and
+`device_push`, `device_pull`, `device_sideload`, `device_verify`,
+`device_monitor`, `device_monitor_send`, `device_operation_status`, and
 `device_operation_cancel`. Start requests name the exact browser `device`,
 `protocol`, and where relevant target, offset, interface, and artifact
 `fileId` with its displayed SHA-256. The operation runs independently in the
@@ -2064,6 +2064,22 @@ is user-driven and does not grant agent access. `device_exec` streams arbitrary
 shell commands only with that grant; without it the four read-only diagnostics
 remain available. `device_monitor` / `device_monitor_send` also support an ADB
 PTY. Requests/options cannot supply the grant or impersonate the panel.
+
+Serial consoles use protocol serial and the same user terminal surface as ADB.
+Both use xterm for ANSI/control characters plus mobile input/line-ending controls.
+Serial supports baud selection and DTR/RTS/break. Android can use the existing
+CDC polyfill or a descriptor-bound raw WebUSB CDC data/control interface pair;
+CDC Union descriptors disambiguate composite devices. Stalled/short USB writes
+fail instead of reporting delivery. Prompt chunks appear without waiting for a
+newline. Explicit disconnect waits for the borrowed operation lease to finish.
+
+For an agent-run TWRP command, the user first taps the connection-scoped shell
+grant, then device_exec accepts protocol adb and the exact command without a
+regex filter or per-command prompt. No total shell-command timeout is imposed;
+a missing initial daemon response is bounded, but quiet established connections
+stay alive. Output is streamed into bounded logs and nonzero exit status fails.
+A reboot/disconnect before status arrives means unknown completion, not success.
+The user must close an interactive terminal before another exclusive ADB job.
 
 ADB transfers hash in bounded chunks (`blob-stream.ts`). Pull/backup uses an OPFS
 spool, commits the result to IndexedDB escrow, then removes the spool. Restricted
@@ -2122,18 +2138,17 @@ as expanded-image hashes.
   merges, writes, and exact-reads every touched sector without manifestation or
   reset before proof. Generic bcdDFU `0x0110` remains detect/dump/exec only;
   flash rejects. No caller descriptor option creates a capability.
-- **ADB:** `detect`, `push`, `pull`/`dump`, typed reboot, and a narrow
-  `exec` surface are authenticated with Cody's persistent browser IndexedDB
-  RSA credential. CNXN validates framing; only a bounded legacy existing-stream
-  OPEN/OKAY/CLSE probe is the fallback, not modern feature negotiation. Push
-  hashes and escrows the old target, confirms the exact target/digest, transfers
-  content-addressed 4 MiB staged chunks, validates its prefix after reconnect,
-  verifies the stage, and atomically replaces only then; a final disconnect
-  hashes the target before any rebuild/move. Exec permits literal `id`,
-  `uname -a`, `df -h`, and `getprop ro.*`; TWRP ORS queues only literal
-  backup/print lines in confirmation details and never executes them. New ADB
-  authorization or a different USB mode needs user re-grant; raw partition,
-  fuse, mount, and shell bypasses refuse.
+- **ADB:** detection, shell/PTY, push, pull/dump, recovery sideload and raw-image
+  readback verification use Cody's persistent browser IndexedDB RSA credential.
+  Without a shell grant only literal diagnostics are available; a user-granted
+  connection permits arbitrary shell, including mount/dd and recovery scripts.
+  User terminals do not grant the agent access. Normal file push retains verified
+  staged chunks and atomic replacement; direct block/symlink push instead offers
+  a backup and requires an exact typed write override. Pull streams into escrow.
+  Reboot mode and queued TWRP OpenRecoveryScript remain the original bounded
+  helpers in this checkpoint; arbitrary commands use the granted shell path.
+  A new USB mode needs the user's new grant. Port forward/reverse and MTK
+  download-agent support are not implemented in this checkpoint.
 - **Serial bootloaders:** Gecko provides detection/XMODEM framing only until a
   verified readback-capable flash profile exists. STM32 flash is limited to ROM
   PID `0x0410` (STM32F103 medium-density), factory-size discovery, and 1 KiB

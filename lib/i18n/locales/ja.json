@@ -1,4 +1,6 @@
 {
+  "devices.serialTerminal": "シリアルターミナル — {device}",
+  "devices.terminalEnding": "改行コード",
   "devices.fastbootTerminal": "Fastboot コマンド — {device}",
   "devices.shellAllow": "切断するまで、エージェントが {device} でシェルコマンドを実行することを許可",
   "devices.shellRevoke": "{device} のエージェントのシェル権限を取り消す",

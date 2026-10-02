@@ -55,8 +55,9 @@ Complete one record per attempt before checking any acceptance item:
 - [ ] **UNVERIFIED** The protocol can read back the exact written byte range
   after flashing. A delivery ACK, device “OK”, progress bar, or transfer CRC is
   not accepted as verification.
-- [ ] **UNVERIFIED** If exact readback is unavailable, the UI refuses flash
-  before confirmation/write and explains the unavailable capability.
+- [ ] **UNVERIFIED** Fastboot without fetch presents an UNVERIFIED-write warning,
+  backup-unavailable reason, and recovery verification instructions before approval.
+  Other protocols retain their documented readback requirements.
 - [ ] **UNVERIFIED** Disconnect, timeout, and cancelled-transfer behavior is
   recorded as unknown completion; no automatic write retry occurs.
 ## Session, identity, and exclusive-interface checks
@@ -121,16 +122,15 @@ item remains **UNVERIFIED** until its permitted evidence is completed.
 
 - [ ] **UNVERIFIED** The device’s actual fastboot identity, lock state, product,
   and partition information are captured before any write.
-- [ ] **UNVERIFIED** A readback mechanism (for example, a supported fastboot
-  fetch extension for the exact partition/range) is positively detected before
-  the UI permits flash.
-- [ ] **UNVERIFIED** The exact target range is fetched to persistent backup,
-  then fetched again after one flash and SHA-256-compared with input.
-- [ ] **UNVERIFIED** A fastboot target without trustworthy exact readback is
-  refused before confirmation/write, regardless of a successful delivery ACK.
-- [ ] **UNVERIFIED** Every detected partition is protocol-classified; an
-  unclassified partition is marked `unknown`, requires `allow-unknown`, and
-  reports its exact name with role/topology unknown at confirmation.
+- [ ] **UNVERIFIED** Fetch support and partition size are probed. With fetch, the
+  full partition is backed up and raw/sparse image-defined bytes are verified.
+- [ ] **UNVERIFIED** Without fetch, no download/write occurs until the explicit
+  UNVERIFIED warning is approved. An OKAY response never becomes verified=true.
+- [ ] **UNVERIFIED** After booting TWRP, device_verify compares the written raw
+  image range against its expected SHA-256. Sparse files require expanded-image
+  verification; their file digest is not a raw-partition digest.
+- [ ] **UNVERIFIED** Preloader/LK/TEE/RPMB/GPT/boot0/boot1/eFuse targets require
+  typing write:<exact target>. OEM/security commands require the exact command.
 - [ ] **UNVERIFIED** The device boots or returns to fastboot as expected after
   test flash and after verified restore.
 
@@ -173,7 +173,7 @@ item remains **UNVERIFIED** until its permitted evidence is completed.
 - [ ] **UNVERIFIED** Cancellation during an actual transfer produces no retry;
   device state and recovery result are recorded.
 
-### ADB authenticated file operations
+### ADB authenticated shell and file operations
 
 - [ ] **UNVERIFIED** The physical device shows a deliberate authenticated ADB
   trust prompt and the observed key/device identity is recorded.
@@ -182,8 +182,15 @@ item remains **UNVERIFIED** until its permitted evidence is completed.
   atomic replacement path.
 - [ ] **UNVERIFIED** The exact destination, digest, offset where applicable,
   and backup/rollback path appear in point-of-risk confirmation.
-- [ ] **UNVERIFIED** Raw partition, fuse, mount, or command bypass attempts are
-  refused; file operations do not become a shell escape.
+- [ ] **UNVERIFIED** Arbitrary shell and raw paths are blocked until the user
+  grants this connection shell access; revoke/disconnect removes that authority.
+- [ ] **UNVERIFIED** A granted recovery script streams output and reports its
+  actual exit status. Keep the tablet awake; a disconnect before status means
+  unknown completion and never triggers automatic command replay.
+- [ ] **UNVERIFIED** The user can open an ADB terminal without granting the agent
+  shell access. Close that exclusive terminal before starting an agent command.
+- [ ] **UNVERIFIED** Raw block/symlink push offers a backup and requires the
+  exact typed target override rather than pretending to be an atomic file push.
 - [ ] **UNVERIFIED** Interrupted push/pull recovery preserves the original
   destination or restores it from escrow.
 - [ ] **UNVERIFIED** A file of at least 100 MB is interrupted after a recorded
@@ -216,4 +223,5 @@ are **UNVERIFIED** and do not authorize deployment:
 
 Do not mark a protocol hardware-verified until every applicable item has dated
 evidence, including the pre-write backup and exact post-write readback hash.
-A protocol with no trustworthy post-write readback remains flash-disabled.
+An approved no-fetch Fastboot write remains explicitly UNVERIFIED until a
+separate recovery readback succeeds. This checklist does not certify hardware.
