@@ -63,8 +63,10 @@ export const ompHarness: HarnessAdapter = {
   binaryName: "omp",
   tagline: "The oh-my-pi coding agent. Cody's founding engine, every surface enabled.",
   installSpec: "@oh-my-pi/pi-coding-agent@latest",
-  // Audited against OMP 18.3.2's changelog and installed source, including the
-  // registry-based settings schema and RPC prompt lifecycle. OMP 18.2 remains
+  // Audited against OMP 18.4.9's changelog and installed source, including the
+  // registry-based settings schema and RPC prompt lifecycle. OMP 18.3.x
+  // stays supported: every 18.4 RPC command Cody adds degrades to today's
+  // behavior when the engine answers "Unknown command". 18.2 remains
   // supported through its legacy schema and prompt_result behavior.
   // Exercised through Cody's RPC bring-up checks and the Settings schema tests.
   //
@@ -84,7 +86,7 @@ export const ompHarness: HarnessAdapter = {
   // schema like any other, and the auto-redeem consent prompt arrives as an
   // ordinary rpc-ui select. It also needs Bun >= 1.3.14, which the image's
   // `oven/bun:1` satisfies.
-  verifiedVersion: "18.3.2",
+  verifiedVersion: "18.4.9",
   capabilities: {
     liveSessions: true,
     models: true,

@@ -44,6 +44,9 @@ import {
 import { FolderIcon, getFileIcon } from "./FileIcons";
 import { InputDock } from "./InputDock";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
+import { useWordCompletion } from "@/hooks/useWordCompletion";
+import { ComposerGhostText } from "./ComposerGhostText";
 import { useResetCredits, useUsage } from "@/hooks/useUsage";
 import { useOpenRouterAccount } from "@/hooks/useOpenRouterAccount";
 import { ModelIcon, ProviderIcon } from "./ProviderIcon";
@@ -1595,6 +1598,38 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       : Math.max(0, slashActiveIndex - 1);
   }, [filteredSlashCommands.length, slashActiveIndex]);
 
+  // Inline word completion (omp 18.4 `predict_word`): ghost text after the
+  // caret, Tab / Right-arrow to accept. Touch devices have no Tab key, and
+  // every open menu (slash, @, history) owns Tab and the arrows already.
+  const isCoarsePointer = useIsCoarsePointer();
+  const [caret, setCaret] = useState(-1);
+  const [composing, setComposing] = useState(false);
+  const wordCompletion = useWordCompletion({
+    sessionId,
+    enabled:
+      engine?.id === OMP_ENGINE_ID && !isCoarsePointer && !sendPreparing && !composing && !bashMode &&
+      !slashMenuOpen && !atMenuOpen && !historyMenuOpen,
+    textareaRef,
+    value,
+    caret,
+  });
+  const trackCaret = useCallback((el: HTMLTextAreaElement) => {
+    setCaret(el.selectionStart === el.selectionEnd ? el.selectionStart : -1);
+  }, []);
+  const acceptWordCompletion = useCallback((withSpace: boolean) => {
+    const accepted = wordCompletion.accept(withSpace);
+    if (!accepted) return false;
+    // insertText goes through the browser's own edit path, so Ctrl+Z undoes
+    // the completion; it also fires the input event React's onChange reads.
+    if (document.execCommand("insertText", false, accepted.inserted)) return true;
+    setValue(accepted.value);
+    setHistoryMenuOpen(false);
+    updateAtQuery(accepted.value, accepted.cursor);
+    requestAnimationFrame(() => textareaRef.current?.setSelectionRange(accepted.cursor, accepted.cursor));
+    scheduleAutosize();
+    return true;
+  }, [wordCompletion.accept, updateAtQuery, scheduleAutosize]);
+
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
       const nativeEvent = e.nativeEvent;
@@ -1690,6 +1725,25 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }
       }
 
+      // Word-completion ghost text. Only reached with every menu closed (they
+      // return above), and only while a suggestion is actually showing, so
+      // Tab and Right-arrow behave as they always did the rest of the time.
+      if (wordCompletion.shown && !isComposing) {
+        const plain = !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey;
+        if (plain && (e.key === "Tab" || e.key === "ArrowRight") && acceptWordCompletion(e.key === "Tab")) {
+          e.preventDefault();
+          return;
+        }
+        if (e.key === "Escape") {
+          wordCompletion.reject();
+          // While a turn runs, Esc still stops it (below).
+          if (!(isStreaming && onAbort)) {
+            e.preventDefault();
+            return;
+          }
+        }
+      }
+
       if (e.key === "ArrowUp" && !isComposing && !isStreaming && inputHistory.length > 0 && value.trim().length === 0) {
         e.preventDefault();
         setSlashMenuOpen(false);
@@ -1716,7 +1770,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         void handleSend();
       }
     },
-    [isStreaming, onAbort, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value]
+    [isStreaming, onAbort, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value, wordCompletion.shown, wordCompletion.reject, acceptWordCompletion]
   );
 
   const handleInput = useCallback(() => {
@@ -2820,12 +2874,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             Nothing a user typed is ever silently dropped. */}
         {outbox.filter((entry) => entry.status !== "delivered").map((entry, index) => {
           const failed = entry.status === "failed";
-          // Only a message Cody's server still holds can be taken back; once
-          // the engine has it, omp offers no way to pull it out again.
-          const editable = entry.status === "queued" && entry.held === true;
-          // A steer the engine has but has not read yet (the agent is still
-          // thinking or writing): "Steer" cuts that reply short so it is read now.
-          const steerable = editable || (entry.status === "queued" && entry.held !== true && entry.behavior === "steer");
+          // A row Cody's server still holds is shown as an editable follow-up.
+          const held = entry.status === "queued" && entry.held === true;
+          // Delete, Edit and Steer are offered on every queued row: a held one is
+          // simply taken back, and one the engine already has is asked back out of
+          // omp's own queue (omp 18.4.4+; moving a follow-up ahead needs 18.4.6+).
+          // An older omp's refusal comes back as the existing "already handed to
+          // the agent" warning, so the buttons are safe to show everywhere.
+          const actionable = entry.status === "queued";
           return (
             <div
               key={entry.id}
@@ -2846,7 +2902,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             >
               {failed
                 ? <AlertTriangle size={11} strokeWidth={2.2} style={{ flexShrink: 0, color: "var(--status-error)" }} aria-hidden="true" />
-                : editable
+                : held
                   ? <Clock size={11} strokeWidth={2.2} style={{ flexShrink: 0, color: "var(--text-dim)" }} aria-hidden="true" />
                   : <Loader2 size={11} strokeWidth={2.2} style={{ flexShrink: 0, animation: "spin 0.8s linear infinite" }} aria-hidden="true" />}
               <span style={{
@@ -2858,7 +2914,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 color: failed ? "var(--status-error)" : "var(--text-muted)",
               }}>
                 {failed ? t("chatInput.outboxFailed")
-                  : editable ? t("chatInput.queuedFollowUp")
+                  : held ? t("chatInput.queuedFollowUp")
                   : entry.status === "queued" ? t("chatInput.outboxHandedOver")
                   : entry.status === "started" ? t("chatInput.outboxStarted")
                   : t("chatInput.outboxSending")}
@@ -2877,7 +2933,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               >
                 {entry.text}
               </span>
-              {editable && (
+              {actionable && (
                 <>
                   <QueuedActionButton onClick={() => onEditQueuedMessage?.(entry.id)} title={t("chatInput.queuedEditTitle")}>
                     {t("chatInput.queuedEdit")}
@@ -2887,7 +2943,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   </QueuedActionButton>
                 </>
               )}
-              {steerable && (
+              {actionable && (
                 <QueuedActionButton onClick={() => onSteerQueuedNow?.(entry.id)} title={t("chatInput.queuedSteerTitle")} accent>
                   {t("chatInput.queuedSteerAction")}
                 </QueuedActionButton>
@@ -2954,6 +3010,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               </button>
             </div>
           )}
+          <div style={{ position: "relative" }}>
           <textarea
             ref={textareaRef}
             className="composer-textarea"
@@ -2962,17 +3019,22 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               setValue(e.target.value);
               setHistoryMenuOpen(false);
               updateAtQuery(e.target.value, e.target.selectionStart);
+              trackCaret(e.target);
             }}
             onSelect={(e) => {
               const el = e.currentTarget;
               updateAtQuery(el.value, el.selectionStart);
+              trackCaret(el);
             }}
             onKeyDown={handleKeyDown}
+            onBlur={wordCompletion.clear}
             onCompositionStart={() => {
               isComposingRef.current = true;
+              setComposing(true);
             }}
             onCompositionEnd={(e) => {
               isComposingRef.current = false;
+              setComposing(false);
               lastCompositionEndAtRef.current = Date.now();
               const el = e.currentTarget;
               updateAtQuery(el.value, el.selectionStart);
@@ -2987,6 +3049,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               : isMobile ? t("chatInput.placeholderShort") : t("chatInput.placeholder")}
             rows={1}
             style={{
+              display: "block",
               width: "100%",
               background: "none",
               border: "none",
@@ -3001,6 +3064,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               overflow: "auto",
             }}
           />
+          {wordCompletion.suggestion && (
+            <ComposerGhostText
+              textareaRef={textareaRef}
+              suggestion={wordCompletion.suggestion}
+              visible={wordCompletion.shown !== null}
+              onFit={wordCompletion.reportFit}
+            />
+          )}
+          </div>
 
           {/* Toolbar: attachment · model · settings · reasoning · fast · context ring · send/stop */}
           {/* On a phone this row used to wrap: Stop and the context ring fell

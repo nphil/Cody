@@ -177,7 +177,7 @@ export const CURATED_ONLY: readonly CuratedOnlySetting[] = [
   {
     key: "advisor.subagents",
     label: "Review Subagents",
-    description: "Apply Advisor passive review to subagent tasks. Newer engines store this per agent (task.agentAdvisor), so a value set from a terminal may not show here.",
+    description: "Apply Advisor passive review to subagents that run as the generic task agent. Stored as the engine's per-agent override (task.agentAdvisor); overrides for other agents are managed in a terminal.",
     section: "advisor",
     field: "subagents",
     type: "boolean",

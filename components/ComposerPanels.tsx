@@ -10,6 +10,7 @@ import { useI18n } from "@/lib/i18n";
 import type { SubagentInfo } from "@/hooks/useAgentSession";
 import type { PlanOverlay, TodoPhase } from "@/lib/pi-types";
 import { countNestedSubagents, formatCost, formatDuration, formatTokens, shortModel } from "@/lib/subagent-format";
+import { subagentActivityIntent } from "@/lib/subagent-types";
 import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
 import { TodoList } from "./TodoList";
 import { SubagentStatusIcon } from "./SubagentStatusIcon";
@@ -63,9 +64,10 @@ function SubagentActivityLine({ subagent }: { subagent: SubagentInfo }) {
       </SubagentMetric>,
     );
   } else if (subagent.status === "started") {
+    const intent = subagentActivityIntent(progress);
     const activity = progress?.currentTool
-      ? `${progress.currentTool}${progress.lastIntent ? `: ${progress.lastIntent}` : ""}`
-      : progress?.lastIntent;
+      ? `${progress.currentTool}${intent ? `: ${intent}` : ""}`
+      : intent;
     if (activity) {
       parts.push(
         <SubagentMetric key="activity" icon={progress?.currentTool ? Wrench : Activity} label={activity}>

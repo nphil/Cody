@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { authApi } from "./cody-omp-auth-api.mjs";
 console.log = (...args) => console.error(...args);
 console.info = console.log;
 console.debug = console.log;
@@ -77,7 +78,7 @@ async function loadStorage(packageRoot, agentDir) {
   try { aiPath = require.resolve("@oh-my-pi/pi-ai/auth-storage.js"); utilsPath = require.resolve("@oh-my-pi/pi-utils/dirs.js"); } catch { throw new Error("OMP's installed reset-credit modules are unavailable."); }
   const ai = await import(pathToFileURL(aiPath).href); const utils = await import(pathToFileURL(utilsPath).href);
   if (typeof ai.AuthStorage?.create !== "function" || typeof utils.getAgentDbPath !== "function") throw new Error("Installed OMP does not expose AuthStorage reset-credit support.");
-  const storage = await ai.AuthStorage.create(utils.getAgentDbPath()); await storage.reload(); return storage;
+  const api = authApi(await ai.AuthStorage.create(utils.getAgentDbPath())); await api.reload(); return api;
 }
 async function list(storage) {
   const lists = await Promise.all(PROVIDERS.map(async (provider) => {
@@ -135,6 +136,6 @@ async function main() {
       const message = reason ?? (outcome === "error" || code === "ineligible" ? OUTCOME_MESSAGES[code] : null);
       return emit({ type: "redeem", outcome, ...(code ? { code } : {}), ...(message ? { message } : {}) });
     } catch (error) { return emit({ type: "redeem", outcome: "error", code: "unsupported", message: error instanceof Error ? error.message : String(error) }); }
-  } finally { await storage.close?.(); }
+  } finally { await storage.close(); }
 }
 main().catch((error) => fail("error", "unsupported", error instanceof Error ? error.message : String(error)));

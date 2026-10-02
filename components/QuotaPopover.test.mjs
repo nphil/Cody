@@ -205,6 +205,26 @@ test("the ring and the account list follow the account this conversation is on",
   assert.equal(unused.accounts[0].label, "Secondary");
 });
 
+// The Kestrel report: omp recorded the pin, but Cody could not match it to an
+// account (its credential read failed after an engine update). The
+// conversation HAS used Claude, so a headroom guess — the idle sibling at 0%
+// — is the one wrong answer; the account that last served a request stands in.
+test("a pin Cody cannot match falls back to the account that last served, never to headroom", () => {
+  const snapshot = usageSnapshot({
+    accounts: [
+      usageAccount({ id: "primary", lastServedAt: "2026-10-01T23:32:37.290Z", windows: [usageWindow({ id: "anthropic:5h", label: "5-hour window", utilization: 42, resetsAt: "2026-10-02T01:20:00.000Z" })] }),
+      usageAccount({ id: "secondary", lastServedAt: null, windows: [usageWindow({ id: "anthropic:5h", label: "5-hour window", utilization: 0, resetsAt: null })] }),
+    ],
+    sessionAccounts: { anthropic: { accountId: null, since: "2026-10-01T20:28:49.614Z" } },
+  });
+  const view = buildQuotaView(snapshot, false, false, { provider: "anthropic", modelId: "claude-opus-5-5" });
+
+  assert.equal(view.percent, 42);
+  assert.match(view.label, /Primary/);
+  assert.deepEqual(view.accounts.map((a) => [a.label, a.state]), [["Primary", "in_use"], ["Secondary", "standby"]]);
+  assert.equal(view.accountsBasis, "recent");
+});
+
 test("buildQuotaView paints an exhausted low-percentage window as exhausted", () => {
   // omp reports status "rejected" at 12% used: the provider is refusing work
   // on this window regardless of the number, so it binds AND it must not be

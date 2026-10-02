@@ -5,6 +5,7 @@ import { ChevronDown, ChevronLeft, ChevronRight, CircleHelp } from "lucide-react
 import { useI18n } from "@/lib/i18n";
 import { PermissionRequestCard } from "./PermissionRequestCard";
 import { ExtensionInputCard } from "./ExtensionDialog";
+import { AskDialogForm } from "./AskDialogForm";
 import type { PendingInput, PendingInputResponse, RefusalDecision } from "@/lib/pending-input";
 
 export interface InputDockProps {
@@ -23,7 +24,12 @@ function inputKey(item: PendingInput): string {
 
 function requestTitle(item: PendingInput, t: ReturnType<typeof useI18n>["t"]): string {
   switch (item.kind) {
-    case "extension": return item.request.title;
+    case "extension": {
+      const request = item.request;
+      if (request.method !== "ask") return request.title;
+      const first = request.questions[0];
+      return first ? first.header || first.question : "";
+    }
     case "permission": return t("permissionRequest.heading");
     case "refusal": return t("refusal.title");
   }
@@ -255,7 +261,14 @@ export function InputDock({ pendingInputs, onRespond, composerRef }: InputDockPr
             </button>
           </div>
           <div style={{ maxHeight: "calc(40vh - 56px)", overflowY: "auto", overscrollBehavior: "contain", padding: "0 4px 2px", minWidth: 0 }}>
-            {item.kind === "extension" && (
+            {item.kind === "extension" && item.request.method === "ask" && (
+              <AskDialogForm
+                key={item.request.id}
+                request={item.request}
+                onRespond={(response) => respond({ kind: "extension", response })}
+              />
+            )}
+            {item.kind === "extension" && item.request.method !== "ask" && (
               <ExtensionInputCard
                 key={item.request.id}
                 request={item.request}

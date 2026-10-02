@@ -6,6 +6,7 @@ import { ChevronDown, ShieldAlert, TriangleAlert, X } from "lucide-react";
 import type { ActivityDisplayMode, AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, ImageContent, SessionInfo, SessionTreeNode, TextContent, ToolCallContent, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
 import { countToolCallBlocks, getDisplayableAssistantBlocks, isVisibleTranscriptMessage, groupHasThinking, splitFinalAssistantBlocks } from "@/lib/message-display";
+import { isReminderCustomType } from "@/lib/system-reminder";
 import { estimateTurnHeight, type TurnContentSignal } from "@/lib/turn-height-estimate";
 import { imageSource, MessageView } from "./MessageView";
 import { ClickableImage } from "./ImageLightbox";
@@ -214,9 +215,12 @@ function collectMessageText(content: string | (TextContent | ImageContent)[]): {
  *  module for why this only has to be roughly right, not exact. */
 function turnContentSignal(message: AgentMessage): TurnContentSignal {
   switch (message.role) {
+    case "custom":
+      // Reminder rows render as one collapsed line whatever their body holds.
+      if (isReminderCustomType(message.customType)) return {};
+      return collectMessageText(message.content);
     case "user":
     case "developer":
-    case "custom":
     case "toolResult":
       return collectMessageText(message.content);
     case "assistant": {

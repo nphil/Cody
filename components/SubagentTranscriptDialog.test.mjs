@@ -8,7 +8,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { TaskBlock, CompletionBlock, ModelAndReasoningBlock, CancelSubtaskButton, cancelSubtaskSteerText, subagentActivityLabel } = await jiti.import("./SubagentTranscriptDialog.tsx");
+const { TaskBlock, CompletionBlock, ModelAndReasoningBlock, CancelSubtaskButton, SteerSubagentBox, runSubtaskCancel, resetSubagentControlSupport, cancelSubtaskSteerText, subagentActivityLabel } = await jiti.import("./SubagentTranscriptDialog.tsx");
 const { translate } = await jiti.import("../lib/i18n/index.tsx");
 
 test("renders the task as markdown with its label", () => {
@@ -129,4 +129,54 @@ test("the cancel steer names the subagent id, agent, and a one-line summary", ()
   const summary = /\(task: ([^)]*)\)/.exec(long)[1];
   assert.ok(summary.length <= 160, `summary is ${summary.length} chars`);
   assert.match(summary, /…$/);
+});
+
+const cancelSubject = { id: "task_abc123", agent: "reviewer", task: "Review the diff" };
+
+test("cancel kills the child itself when the engine can, and says so when it already finished", async () => {
+  const steers = [];
+  const steer = async (message) => { steers.push(message); };
+  const asked = [];
+  const ask = (answer) => async (id) => { asked.push(id); return answer; };
+  const unsupported = () => assert.fail("engine supports the command");
+
+  assert.equal(await runSubtaskCancel({ subagent: cancelSubject, cancelSubagent: ask({ cancelled: true }), steer, onCancelUnsupported: unsupported }), "cancelled");
+  assert.equal(await runSubtaskCancel({ subagent: cancelSubject, cancelSubagent: ask({ cancelled: false }), steer, onCancelUnsupported: unsupported }), "already_finished");
+  assert.deepEqual(asked, ["task_abc123", "task_abc123"]);
+  assert.deepEqual(steers, []);
+});
+
+test("cancel falls back to steering the parent only for an engine that does not know the command", async () => {
+  const steers = [];
+  const steer = async (message) => { steers.push(message); };
+  let marked = 0;
+  const old = async () => { throw new Error("Unknown command: cancel_subagent"); };
+
+  assert.equal(await runSubtaskCancel({ subagent: cancelSubject, cancelSubagent: old, steer, onCancelUnsupported: () => { marked += 1; } }), "parent_steered");
+  assert.equal(marked, 1);
+  assert.equal(steers.length, 1);
+  assert.equal(steers[0], cancelSubtaskSteerText(cancelSubject));
+
+  // Any other failure is the user's to see; the parent is not bothered.
+  const refused = async () => { throw new Error("Subagent event bus is unavailable"); };
+  await assert.rejects(runSubtaskCancel({ subagent: cancelSubject, cancelSubagent: refused, steer, onCancelUnsupported: () => { marked += 1; } }), /event bus/);
+  assert.equal(marked, 1);
+  assert.equal(steers.length, 1);
+
+  // Old engine and nobody to steer: the original error surfaces.
+  await assert.rejects(runSubtaskCancel({ subagent: cancelSubject, cancelSubagent: old, onCancelUnsupported: () => {} }), /Unknown command/);
+});
+
+test("a native cancel is offered even when the parent cannot be steered, until the engine says it cannot", () => {
+  resetSubagentControlSupport();
+  const native = { ...cancelProps, status: "started", canSteer: false, onSteer: undefined, onCancelSubagent: async () => ({ cancelled: true }) };
+  assert.match(renderToStaticMarkup(React.createElement(CancelSubtaskButton, native)), /aria-label="Cancel subtask"/);
+  assert.equal(renderToStaticMarkup(React.createElement(CancelSubtaskButton, { ...native, status: "completed" })), "");
+});
+
+test("the subagent message box shows a labelled input and a send button that waits for text", () => {
+  resetSubagentControlSupport();
+  const html = renderToStaticMarkup(React.createElement(SteerSubagentBox, { subagentId: "task_abc123", onSend: async () => {} }));
+  assert.match(html, /placeholder="Message this subagent"/);
+  assert.match(html, /aria-label="Send message to this subagent"[^>]*disabled|disabled[^>]*aria-label="Send message to this subagent"/);
 });

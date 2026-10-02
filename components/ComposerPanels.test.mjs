@@ -258,6 +258,24 @@ test("retrying chips surface retry state instead of the activity line", () => {
   assert.doesNotMatch(html, />retrying 2\/5</);
 });
 
+test("a chip prefers the running call's own intent over the last intent seen (omp 18.4)", () => {
+  const html = renderToStaticMarkup(React.createElement(ComposerPanels, {
+    todoPhases: [],
+    subagents: [{
+      id: "s1",
+      agent: "scout",
+      status: "started",
+      task: "Map the surface",
+      index: 0,
+      progress: { currentTool: "grep", lastIntent: "Inspect foo.ts", currentToolIntent: "Find leftovers" },
+    }],
+    onSelectSubagent: noop,
+    defaultExpanded: true,
+  }));
+  assert.match(html, /grep: Find leftovers/);
+  assert.doesNotMatch(html, /Inspect foo\.ts/);
+});
+
 test("history chips render terminal telemetry without pulsing state", () => {
   const html = renderToStaticMarkup(React.createElement(ComposerPanels, {
     todoPhases: [],

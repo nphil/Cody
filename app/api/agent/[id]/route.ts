@@ -94,6 +94,14 @@ export async function POST(
       return NextResponse.json({ error: "command type is required", code: "command_type_required" }, { status: 400 });
     }
 
+    // Word completion is a keystroke-rate query about the composer, never a
+    // reason to start an engine: with no live session there is nothing to ask,
+    // and "no suggestion" is the honest answer. (A live session falls through
+    // to the fast path below, which forwards the command verbatim.)
+    if ((body.type === "predict_word" || body.type === "predict_word_feedback") && !getRpcSession(id)?.isAlive()) {
+      return NextResponse.json(body.type === "predict_word" ? { success: true, data: { suffix: null } } : { success: true });
+    }
+
     // Fast path: already-running session
     const existing = getRpcSession(id);
     if (existing?.isAlive()) {

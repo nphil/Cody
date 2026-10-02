@@ -5,6 +5,7 @@ import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { authApi } from "./cody-omp-auth-api.mjs";
 console.log = (...args) => console.error(...args);
 console.info = console.log;
 console.debug = console.log;
@@ -24,7 +25,7 @@ async function loadStorage(packageRoot, agentDir) {
   try { aiPath = require.resolve("@oh-my-pi/pi-ai/auth-storage.js"); utilsPath = require.resolve("@oh-my-pi/pi-utils/dirs.js"); } catch { throw new Error("OMP's installed credential modules are unavailable."); }
   const ai = await import(pathToFileURL(aiPath).href); const utils = await import(pathToFileURL(utilsPath).href);
   if (typeof ai.AuthStorage?.create !== "function" || typeof utils.getAgentDbPath !== "function") throw new Error("Installed OMP does not expose AuthStorage credential support.");
-  const storage = await ai.AuthStorage.create(utils.getAgentDbPath()); await storage.reload(); return storage;
+  const api = authApi(await ai.AuthStorage.create(utils.getAgentDbPath())); await api.reload(); return api;
 }
 
 /**
@@ -86,10 +87,10 @@ function blockedUntilFor(credentialId, blocks) {
 /** Every stored credential row, active and disabled, allow-listing exactly
  * the fields Cody's UI needs — never the credential object itself, so a
  * token/refresh/api key can never leak through a spread. */
-async function listCredentials(storage, hasher) {
-  const active = storage.listStoredCredentials();
-  const disabled = await storage.listDisabledCredentials();
-  const blocks = storage.listCredentialBlocks([...active.map((row) => row.id), ...disabled.map((row) => row.id)]);
+async function listCredentials(api, hasher) {
+  const active = api.list();
+  const disabled = await api.listDisabled();
+  const blocks = api.listBlocks([...active.map((row) => row.id), ...disabled.map((row) => row.id)]);
   const activeRows = active.map((row) => ({
     id: row.id,
     provider: row.provider,
@@ -124,16 +125,10 @@ async function listCredentials(storage, hasher) {
  * another provider while that quota sat unused). Clearing it is safe: if
  * the provider really is still limiting, the next request writes it again.
  */
-function unblockCredential(storage, credentialId) {
-  const blocks = storage.listCredentialBlocks([credentialId]);
+function unblockCredential(api, credentialId) {
+  const blocks = api.listBlocks([credentialId]);
   const active = blocks.filter((block) => typeof block.blockedUntilMs === "number" && block.blockedUntilMs > Date.now());
-  if (typeof storage.deleteCredentialBlocks === "function") {
-    storage.deleteCredentialBlocks(credentialId);
-  } else if (typeof storage.deleteCredentialBlock === "function") {
-    for (const block of blocks) storage.deleteCredentialBlock(credentialId, block.providerKey, block.blockScope ?? "");
-  } else {
-    throw new Error("Installed OMP does not expose credential block removal.");
-  }
+  api.deleteBlocks(credentialId, blocks);
   return active.map((block) => ({ scope: block.blockScope || null, until: isoFromEpochMs(block.blockedUntilMs) }));
 }
 
@@ -155,11 +150,11 @@ async function main() {
       return emit({ type: "unblock", ok: true, cleared });
     }
     if (request.operation === "remove") {
-      let removed; try { removed = await storage.removeCredential(request.provider, request.credentialId); } catch (error) { return fail("remove", "credential_remove_failed", error instanceof Error ? error.message : String(error)); }
+      let removed; try { removed = await storage.removeById(request.provider, request.credentialId); } catch (error) { return fail("remove", "credential_remove_failed", error instanceof Error ? error.message : String(error)); }
       // Recount rather than trust an in-memory tally: the authoritative
       // "anything left" answer is another read of the same store the removal
       // just went through.
-      const providerRemoved = removed ? storage.listStoredCredentials(request.provider).length === 0 : false;
+      const providerRemoved = removed ? storage.list(request.provider).length === 0 : false;
       return emit({ type: "remove", ok: true, removed, providerRemoved });
     }
     // remove_provider: storage.remove() itself returns void, so "removed"
@@ -167,10 +162,10 @@ async function main() {
     // `remove`'s providerRemoved uses.
     let removed;
     try {
-      removed = storage.listStoredCredentials(request.provider).length > 0;
-      await storage.remove(request.provider);
+      removed = storage.list(request.provider).length > 0;
+      await storage.removeProvider(request.provider);
     } catch (error) { return fail("remove_provider", "credential_remove_failed", error instanceof Error ? error.message : String(error)); }
     return emit({ type: "remove_provider", ok: true, removed });
-  } finally { await storage.close?.(); }
+  } finally { await storage.close(); }
 }
 main().catch((error) => fail("error", "unsupported", error instanceof Error ? error.message : String(error)));

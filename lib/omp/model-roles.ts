@@ -18,8 +18,14 @@ export const FALLBACK_MODEL_ROLE_IDS: readonly string[] = [
   "plan",
   "commit",
   "tiny",
+  "memory",
   "task",
   "advisor",
+  "image",
+  "web",
+  "speech",
+  "dictation",
+  "judge",
 ];
 
 let cachedRoleIds: { key: string; ids: readonly string[] } | null = null;

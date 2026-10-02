@@ -29,20 +29,102 @@ const FENCE_RE = /^\s*(?:```|~~~)/;
 const CODE_LIKE_RE = /\?:|:\/\/|\bwww\./;
 const INLINE_CODE_RE = /`[^`]*`/g;
 
-/** True when any prose line of `text` is a user-directed question or a
- * response cue ("please confirm…"). Fenced code and code-looking lines are
- * ignored. */
-export function replyAsksUser(text: string): boolean {
+/** Emphasis markers (`**bold**`, `*em*`, `~~strike~~`, `_em_` at word edges)
+ * carry no meaning for cue matching; snake_case underscores are kept. */
+function stripEmphasis(line: string): string {
+  return line.replace(/[*~]+/g, "").replace(/(?<![A-Za-z0-9])_+|_+(?![A-Za-z0-9])/g, "");
+}
+/** Quoted text is somebody else's words (a prompt template, a dialog
+ * caption): blank its contents but keep the quote marks, so `say "next"`
+ * still reads as an instruction while `says "tell me more"` does not. */
+function blankQuotes(line: string): string {
+  return line.replace(/"[^"]*"|\u201c[^\u201d]*\u201d/g, '""');
+}
+
+/** Where a hand-off cue may start inside a line: line start, after sentence
+ * punctuation, a dash, or a conjunction/politeness word ("…, then tell me").
+ * Mid-clause matches like "it will tell me" or "to let me know" are therefore
+ * not hand-offs. */
+const CUE_BOUNDARY =
+  String.raw`(?:^|[.!?;:,\u2014\u2013(]\s*|\s[-\u2013\u2014]\s+|\b(?:and|or|then|so|just|please|kindly|now|also|otherwise|ok|okay|if you(?:'d| would)? (?:like|want)(?: me to)?,?|feel free to|you can|you could|you may|go ahead and|when ready,?|once ready,?)\s+)`;
+const HANDOFF_CUE_RE = new RegExp(
+  CUE_BOUNDARY +
+    String.raw`(?:tell me\b|let me know\b|(?:reply|respond|answer)\s+(?:with|to me|yes\b|no\b|["\u201c'\u2018])|say\s+(?:if|whether|so)\b|(?:say|type)\s+["\u201c])`,
+  "i",
+);
+/** Phrases that address the user directly wherever they sit in a sentence. */
+const ANYWHERE_CUE_RE = new RegExp(
+  String.raw`\b(?:do you want|would you like|which (?:do|would) you (?:prefer|like|want)|up to you)\b|(?:` +
+    CUE_BOUNDARY +
+    String.raw`|\byou\s+)want me to\b|\b[Ss]hould I\b|\b[Ss]hall I\b|\byour call\b|\b(?:it'?s|that'?s|this is) your (?:choice|decision)\b`,
+  "i",
+);
+
+/** "What you need to do:", "Your turn", "Action needed" … as a section label,
+ * with or without bold/heading markers. Group 1 = text after the label. */
+const USER_SECTION_RE =
+  /^(?:#{1,6}\s*)?(?:what you(?: still)? need to do|what i need from you|your turn|next steps? for you|actions? (?:needed|required)|your action|your next step)(?: (?:next|now))?\s*(?:[:\uff1a\u2014\u2013-]\s*(.*)|())$/i;
+const SECTION_END_RE = /^(?:#{1,6}\s|\*\*[^*]+\*\*:?\s*$)/;
+/** Section content that says there is nothing to do. */
+const NOTHING_TO_DO_RE = /^(?:nothing|none|n\/a|no (?:action|further|manual|step)|not (?:needed|required)|nope)\b|^[-\u2013\u2014]+\s*$/i;
+
+interface ProseLine {
+  /** Line with inline code removed; "" for blank lines. */
+  text: string;
+  /** Inside a fenced block (kept only so a section followed by a code block
+   * counts as having content). */
+  fenced: boolean;
+}
+
+function proseLines(text: string): ProseLine[] {
+  const out: ProseLine[] = [];
   let fenced = false;
   for (const raw of text.split(/\r?\n/)) {
     if (FENCE_RE.test(raw)) {
       fenced = !fenced;
+      out.push({ text: "`code`", fenced: true });
       continue;
     }
-    if (fenced) continue;
-    const line = raw.replace(INLINE_CODE_RE, "").trim();
-    if (!line || CODE_LIKE_RE.test(line)) continue;
-    const unprefixed = line.replace(MARKDOWN_PREFIX_RE, "").trim();
+    if (fenced) {
+      out.push({ text: raw.trim() ? "`code`" : "", fenced: true });
+      continue;
+    }
+    out.push({ text: raw.replace(INLINE_CODE_RE, "").trim(), fenced: false });
+  }
+  return out;
+}
+
+/** A user-action section label followed by real content. */
+function userSectionAt(lines: ProseLine[], index: number): boolean {
+  const line = lines[index];
+  if (line.fenced || !line.text) return false;
+  const label = stripEmphasis(line.text.replace(MARKDOWN_PREFIX_RE, "")).trim();
+  const match = USER_SECTION_RE.exec(label);
+  if (!match) return false;
+  const inline = (match[1] ?? "").trim();
+  if (inline) return !NOTHING_TO_DO_RE.test(inline);
+  for (let i = index + 1; i < lines.length; i++) {
+    const next = lines[i];
+    if (!next.text) continue;
+    if (!next.fenced && SECTION_END_RE.test(next.text)) return false;
+    const content = next.fenced ? next.text : stripEmphasis(next.text.replace(MARKDOWN_PREFIX_RE, "")).trim();
+    return content !== "" && !NOTHING_TO_DO_RE.test(content);
+  }
+  return false;
+}
+
+/** True when any prose line of `text` is a user-directed question, a response
+ * cue ("please confirm…", "…then tell me …"), or a user-action section
+ * ("What you need to do:" with something under it). Fenced code and
+ * code-looking lines are ignored. */
+export function replyAsksUser(text: string): boolean {
+  const lines = proseLines(text);
+  for (let i = 0; i < lines.length; i++) {
+    const { text: line, fenced } = lines[i];
+    if (fenced || !line || CODE_LIKE_RE.test(line)) continue;
+    if (userSectionAt(lines, i)) return true;
+    const raw = line.replace(MARKDOWN_PREFIX_RE, "").trim();
+    const unprefixed = stripEmphasis(raw).trim();
     const candidate = unprefixed.replace(PROMPT_LABEL_RE, "").trim();
     const labelled = candidate !== unprefixed;
     if (ENDS_WITH_QUESTION_MARK_RE.test(candidate)) {
@@ -50,7 +132,11 @@ export function replyAsksUser(text: string): boolean {
         return true;
       }
     }
-    if (RESPONSE_CUE_RE.test(candidate.replace(TRAILING_PUNCTUATION_RE, "").trim())) return true;
+    // A bare leading cue ("Answer — …") only counts unemphasised: a bold label
+    // like "**Answer** — yes/no" is a heading, not a request.
+    if (RESPONSE_CUE_RE.test(raw.replace(PROMPT_LABEL_RE, "").replace(TRAILING_PUNCTUATION_RE, "").trim())) return true;
+    const plain = blankQuotes(unprefixed);
+    if (HANDOFF_CUE_RE.test(plain) || ANYWHERE_CUE_RE.test(plain)) return true;
   }
   return false;
 }

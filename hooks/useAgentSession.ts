@@ -12,13 +12,14 @@ import type {
   SteerNowResult,
 } from "@/lib/types";
 import { normalizeToolCalls } from "@/lib/normalize";
+import { foldSystemReminder } from "@/lib/system-reminder";
 import {
   readPermissionRequest,
   readPermissionRequests,
   type AgentPermissionRequest,
 } from "@/lib/permission-request";
 import type { RefusalDecision } from "@/lib/pending-input";
-import type { PendingInput, PendingInputResponse, RewoundDraft } from "@/lib/pending-input";
+import type { ExtensionDialogRequest, ExtensionDialogResponse, PendingInput, PendingInputResponse, RewoundDraft } from "@/lib/pending-input";
 import { extractLoopbackUrls, normalizePreviewUrl } from "@/lib/preview-url";
 import { derivePersistedContextUsage, type ContextUsageValue } from "@/lib/context-usage";
 import type { ThinkingModelMeta } from "@/lib/thinking-levels";
@@ -43,6 +44,7 @@ import {
   type OutboxImage,
   type ServerDeliveryStatus,
 } from "@/lib/outbox";
+import { clearDraft, getDraft, setDraft } from "@/lib/draft-store";
 import { engineSupports } from "@/lib/engine-capabilities";
 import { translate } from "@/lib/i18n";
 import { describeEngineError, errorDedupeKey, type ErrorKind } from "@/lib/error-text";
@@ -416,17 +418,53 @@ function clearPersistedSmartModel(sessionId: string | null): void {
   }
 }
 
+/**
+ * A session the engine moved to a new file is the same conversation under a new
+ * id, so what this tab keeps per session id moves with it: sends not yet
+ * confirmed (a row left under the frozen original would be resumed against a
+ * session that no longer runs), the Smart pick, the active goal and the unsent
+ * composer draft. Moved rather than copied for the same reason.
+ */
+function carrySessionClientState(fromId: string, toId: string): void {
+  const unsent = readPersistedOutbox(fromId);
+  if (unsent.length > 0) {
+    mutatePersistedOutbox(toId, (current) => [...unsent.map((entry) => ({ ...entry, sessionId: toId })), ...current]);
+    persistOutbox(fromId, []);
+  }
+  const smart = readPersistedSmartModel(fromId);
+  if (smart) {
+    persistSmartModel({ ...smart, forSession: toId });
+    clearPersistedSmartModel(fromId);
+  }
+  const draft = getDraft(fromId);
+  if (draft) {
+    setDraft(toId, draft);
+    clearDraft(fromId);
+  }
+  try {
+    const goal = sessionStorage.getItem(`${SESSION_STORAGE_PREFIXES.goal}${fromId}`);
+    if (goal !== null) {
+      sessionStorage.setItem(`${SESSION_STORAGE_PREFIXES.goal}${toId}`, goal);
+      sessionStorage.removeItem(`${SESSION_STORAGE_PREFIXES.goal}${fromId}`);
+    }
+  } catch {
+    // Best-effort only (quota exceeded, private mode, SSR).
+  }
+}
+
 /** Narrow the live state's model (OmpModel: id-based) to the composer's shape. */
 function toThinkingModelMeta(model: { provider?: string; id?: string; name?: string; reasoning?: boolean; thinking?: { efforts?: string[] } } | null | undefined): ThinkingModelMeta | null {
   if (!model?.provider || !model.id) return null;
   return { provider: model.provider, modelId: model.id, name: model.name, reasoning: model.reasoning, thinking: model.thinking };
 }
 
-type ExtensionUiDialogRequest = Extract<ExtensionUiRequest, { method: "select" | "confirm" | "input" | "editor" }>;
+type ExtensionUiDialogRequest = ExtensionDialogRequest;
 type ExtensionUiCustomRequest = Extract<ExtensionUiRequest, { method: "custom" }>;
 // omp's rpc-ui frames add open_url (OAuth) and cancel on top of lib/types' union.
+// omp 18.4 adds `ask` (after set_ask_dialog) — carried inside ExtensionDialogRequest.
 type IncomingExtensionUiRequest =
   | ExtensionUiRequest
+  | Extract<ExtensionDialogRequest, { method: "ask" }>
   | { type: "extension_ui_request"; id: string; method: "open_url"; url: string; launchUrl?: string; instructions?: string }
   | { type: "extension_ui_request"; id: string; method: "cancel"; targetId: string };
 export type NoticeType = "info" | "success" | "warning" | "error";
@@ -2322,7 +2360,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const respondToExtensionUi = useCallback(async (
     request: ExtensionUiDialogRequest,
-    response: { value: string } | { confirmed: boolean } | { cancelled: true },
+    response: ExtensionDialogResponse,
   ) => {
     const sid = sessionIdRef.current;
     setExtensionDialog((current) => current?.id === request.id ? null : current);
@@ -2806,6 +2844,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "confirm":
       case "input":
       case "editor":
+      case "ask":
         setExtensionDialog(request);
         break;
       case "cancel":
@@ -3193,9 +3232,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
     if (status === "delivered" || status === "failed" || status === "withdrawn") outboxOptimisticRunIdRef.current.delete(id);
   }, []);
-  /** Take a queued message back from the server's hold (Delete, or Edit).
-   *  Only a message Cody still holds can be taken back — omp offers no way to
-   *  pull one out of its own queue — so an already-handed-over one says so
+  /** Take a queued message back (Delete, or Edit). The server drops one it
+   *  still holds and asks omp to remove one the engine already has (omp
+   *  18.4.4+); a build without that, or a message omp already read, says so
    *  instead of pretending. The row disappears on the server's `withdrawn`. */
   const withdrawQueuedMessage = useCallback(async (id: string): Promise<{ text: string; images: OutboxImage[] } | null> => {
     const sid = sessionIdRef.current;
@@ -3328,6 +3367,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
         break;
       }
+      case "cody_session_moved": {
+        // omp moved this live session to a NEW file under a NEW id (another
+        // process had the original open for writing) and the server has
+        // already re-keyed it. Adopt the new id the way a fork's is adopted:
+        // the next send, the transcript and the stream must use the file
+        // being written, not the frozen original. The adoption remounts this
+        // page's chat, so the explanation is a global toast, which outlives it.
+        const movedTo = typeof event.sessionId === "string" ? event.sessionId : "";
+        const movedFrom = sessionIdRef.current;
+        if (movedTo && movedFrom && movedTo !== movedFrom && onSessionForked) {
+          carrySessionClientState(movedFrom, movedTo);
+          toast.info(translate("agentSession.sessionMovedTitle"), translate("agentSession.sessionMovedBody"), { clamp: true });
+          onSessionForked(movedTo);
+        }
+        break;
+      }
       case "agent_start":
         interruptReplyPendingRef.current = false;
         // A run this page did not start (a held follow-up the server handed
@@ -3454,6 +3509,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const message = (event.message as string | undefined)?.trim() ?? "";
         if (/^xd:\/\/:\s*mounted\s+mcp__/i.test(message)) {
           toast.info("MCP tools updated", message, { clamp: true });
+        } else if (event.source === "session-persistence" && level === "warning") {
+          // omp moved this live session to a new file (cody_session_moved
+          // adopts the new id): worth saying, but not an engine failure.
+          addNotice({ type: "info", message });
         } else if (level === "error" || level === "warning") {
           // This is the one choke point every ACP engine's raw notice text
           // (`lib/harness/acp-session.ts`, e.g. "Claude Code: Error: 429
@@ -3638,7 +3697,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             const hasContent = Array.isArray(completed.content) ? completed.content.length > 0 : Boolean(completed.content);
             if (hasContent) setMessages((prev) => [...prev, normalizeToolCalls(completed)]);
           } else if (completed) {
-            setMessages((prev) => [...prev, normalizeToolCalls(completed)]);
+            // omp's own `<system-reminder>` developer nudges render as slim rows
+            // (same fold the session-file reader applies).
+            const folded = completed.role === "developer" ? foldSystemReminder(completed) : null;
+            setMessages((prev) => [...prev, folded ?? normalizeToolCalls(completed)]);
             if (completed.role === "assistant" && onPreviewUrlsSeen) {
               // Loopback URLs in a live assistant reply are candidates for
               // auto-opening the Preview panel; the shell probes reachability
@@ -3962,7 +4024,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as unknown as IncomingExtensionUiRequest);
         break;
     }
-  }, [addNotice, addEngineErrorNotice, announceFallbackApplied, announceFallbackSucceeded, applyAuthoritativeModel, adoptFastModeState, adoptThinkingLevel, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities, applyOutboxDelivery, beginAuthoritativeModelSync, dispatchPendingModelSwitch, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, holdTailForReader, loadSession, maybeAutoNameSession, mergeSubagents, onAgentEnd, onPreviewUrlsSeen, opts.chatInputRef, publishRewoundDraft, reconcileAgentState, refreshTodoState, resetSubagentActivityState]);
+  }, [addNotice, addEngineErrorNotice, announceFallbackApplied, announceFallbackSucceeded, applyAuthoritativeModel, adoptFastModeState, adoptThinkingLevel, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities, applyOutboxDelivery, beginAuthoritativeModelSync, dispatchPendingModelSwitch, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, holdTailForReader, loadSession, maybeAutoNameSession, mergeSubagents, onAgentEnd, onPreviewUrlsSeen, onSessionForked, opts.chatInputRef, publishRewoundDraft, reconcileAgentState, refreshTodoState, resetSubagentActivityState]);
   handleAgentEventRef.current = handleAgentEvent;
 
   /** Shared recovery for a send that never actually started a run: undo the

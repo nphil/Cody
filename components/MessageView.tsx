@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback, useContext, type ComponentProps, type TransitionEvent } from "react";
-import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, Brain } from "lucide-react";
+import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, Brain, ListChecks, Info } from "lucide-react";
 import { MarkdownBody } from "./MarkdownBody";
 import { ClickableImage } from "./ImageLightbox";
 import { TranscriptViewportContext } from "./TranscriptViewportContext";
@@ -9,6 +9,7 @@ import { anchorIsInsideOpenBlock } from "@/lib/transcript-anchor";
 import { translate, useI18n, type Locale } from "@/lib/i18n";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { isEmptyThinkingBlock, isVisibleTranscriptMessage } from "@/lib/message-display";
+import { ENGINE_NOTE_CUSTOM_TYPE, isTodoReminderDetails, TODO_REMINDER_CUSTOM_TYPE } from "@/lib/system-reminder";
 import { estimateTokensFromChars, estimateTokensPerSecond, messageTokenRate, tokenRateTier, MIN_RATE_OUTPUT_TOKENS } from "@/lib/message-rate";
 import { parseUnifiedPatch, type SplitDiffCell } from "@/lib/patch";
 import { Tooltip, Collapsible, CollapsibleTrigger, CollapsiblePanel } from "./ui/primitives";
@@ -175,6 +176,9 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
   if (message.role === "custom") {
     if ((message as CustomMessage).customType === "xdev-mount-notice") return null;
     if ((message as CustomMessage).customType === "compaction") return <CompactionMessageView message={message as CustomMessage} />;
+    if ((message as CustomMessage).customType === TODO_REMINDER_CUSTOM_TYPE || (message as CustomMessage).customType === ENGINE_NOTE_CUSTOM_TYPE) {
+      return <EngineReminderRow message={message as CustomMessage} />;
+    }
     return <CustomMessageView message={message as CustomMessage} cwd={cwd} onOpenFile={onOpenFile} activityDisplayMode={activityDisplayMode} />;
   }
   if (message.role === "bashExecution") {
@@ -1794,6 +1798,82 @@ function CompactionMessageView({ message }: { message: CustomMessage }) {
           <CompactionFileMetadata readFiles={parsedSummary.readFiles} modifiedFiles={parsedSummary.modifiedFiles} />
         </div>
       </div>
+    </div>
+  );
+}
+
+/** omp's own `<system-reminder>` nudges (todo reminder, tool-use reminders):
+ *  addressed to the model, so they show as one quiet collapsed line — the
+ *  person reading only needs to know a nudge happened. */
+function EngineReminderRow({ message }: { message: CustomMessage }) {
+  const { t, tn } = useI18n();
+  const [expanded, setExpanded] = useState(false);
+  const todo = message.customType === TODO_REMINDER_CUSTOM_TYPE && isTodoReminderDetails(message.details) ? message.details : null;
+  const label = todo
+    ? (() => {
+        const tasks = tn("messageView.todoReminderTasks", todo.count);
+        return todo.attempt !== undefined && todo.max !== undefined
+          ? t("messageView.todoReminderAttempt", { tasks, attempt: todo.attempt, max: todo.max })
+          : t("messageView.todoReminder", { tasks });
+      })()
+    : t("messageView.engineNote");
+  const Icon = todo ? ListChecks : Info;
+  const note = todo ? "" : getMessageText(message.content);
+  return (
+    <div className="chat-message" style={{ marginBottom: 10 }} data-testid="engine-reminder">
+      <button
+        type="button"
+        onClick={() => setExpanded((open) => !open)}
+        aria-expanded={expanded}
+        aria-label={`${label} — ${expanded ? t("messageView.collapse") : t("messageView.expand")}`}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          maxWidth: "100%",
+          padding: "2px 4px",
+          background: "none",
+          border: "none",
+          color: "var(--text-dim)",
+          cursor: "pointer",
+          fontSize: 12,
+          textAlign: "left",
+        }}
+      >
+        <Icon size={12} strokeWidth={1.8} aria-hidden="true" style={{ flexShrink: 0 }} />
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
+        <ChevronRight
+          size={10}
+          strokeWidth={1.6}
+          aria-hidden="true"
+          style={{
+            flexShrink: 0,
+            transform: expanded ? "rotate(90deg)" : "none",
+            transition: "transform var(--dur-fast) var(--ease-out-warm)",
+          }}
+        />
+      </button>
+      {expanded && (
+        <div
+          style={{
+            margin: "4px 0 0 4px",
+            padding: "6px 10px",
+            borderLeft: "2px solid var(--border)",
+            color: "var(--text-muted)",
+            fontSize: 12,
+          }}
+        >
+          {todo ? (
+            <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+              {todo.items.map((item, index) => (
+                <li key={index} style={{ paddingLeft: item.depth * 14, fontWeight: item.depth === 0 ? 600 : 400 }}>{item.text}</li>
+              ))}
+            </ul>
+          ) : (
+            <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontFamily: "var(--font-mono)", fontSize: 11 }}>{note}</div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

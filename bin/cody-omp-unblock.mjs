@@ -12,6 +12,7 @@
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { authApi } from "./cody-omp-auth-api.mjs";
 console.log = (...args) => console.error(...args);
 console.info = console.log;
 console.debug = console.log;
@@ -28,12 +29,11 @@ async function openStorage(packageRoot, agentDir) {
   const ai = await import(pathToFileURL(aiPath).href); const utils = await import(pathToFileURL(utilsPath).href);
   if (typeof ai.AuthStorage?.create !== "function" || typeof utils.getAgentDbPath !== "function") throw new Error("Installed OMP does not expose AuthStorage.");
   // Deliberately no reload(): that is the call that reads credential rows.
-  return ai.AuthStorage.create(utils.getAgentDbPath());
+  return authApi(await ai.AuthStorage.create(utils.getAgentDbPath()));
 }
 
-function activeBlocks(storage, credentialId) {
-  if (typeof storage.listCredentialBlocks !== "function") throw new Error("Installed OMP does not expose credential blocks.");
-  return storage.listCredentialBlocks([credentialId])
+function activeBlocks(api, credentialId) {
+  return api.listBlocks([credentialId])
     .filter((block) => block?.credentialId === credentialId && typeof block.blockedUntilMs === "number" && block.blockedUntilMs > Date.now());
 }
 
@@ -46,16 +46,7 @@ async function main() {
   try {
     const blocks = activeBlocks(storage, request.credentialId);
     if (blocks.length === 0) return emit({ type: "unblock", ok: true, outcome: "not_blocked", cleared: [] });
-    // Highest level first: the whole-credential delete is one store call and
-    // bumps AuthStorage's generation for snapshot waiters. The per-scope
-    // delete is the fallback for a build that only has that one.
-    if (typeof storage.deleteCredentialBlocks === "function") {
-      storage.deleteCredentialBlocks(request.credentialId);
-    } else if (typeof storage.deleteCredentialBlock === "function") {
-      for (const block of blocks) storage.deleteCredentialBlock(request.credentialId, block.providerKey, block.blockScope ?? "");
-    } else {
-      return fail("unsupported", "Installed OMP does not expose credential block removal.");
-    }
+    storage.deleteBlocks(request.credentialId, blocks);
     if (activeBlocks(storage, request.credentialId).length > 0) return fail("unblock_failed", "The block is still recorded after removal.");
     return emit({ type: "unblock", ok: true, outcome: "lifted", cleared: blocks.map((block) => ({ scope: block.blockScope || null, until: iso(block.blockedUntilMs) })) });
   } catch (error) {

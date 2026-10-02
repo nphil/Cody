@@ -13,6 +13,17 @@ export interface SubagentRetryState {
   startedAtMs: number;
 }
 
+/** One finished tool call in a child's rolling window. `intent`, `argsKey` and
+ * `isError` arrive with omp 18.4+; an older engine sends only tool/args/endMs. */
+export interface SubagentRecentTool {
+  tool: string;
+  args: string;
+  endMs: number;
+  intent?: string;
+  argsKey?: string;
+  isError?: boolean;
+}
+
 /** Live per-subagent progress snapshot (oh-my-pi AgentProgress). */
 export interface SubagentProgress {
   index?: number;
@@ -27,7 +38,13 @@ export interface SubagentProgress {
   currentTool?: string;
   currentToolArgs?: string;
   currentToolStartMs?: number;
-  recentTools?: Array<{ tool: string; args: string; endMs: number }>;
+  /** omp 18.4+: the model-written intent of the tool call running NOW. Unlike
+   * `lastIntent` (the most recent intent of any call) it is cleared for a
+   * call that carries none, so it never labels a tool with a stale intent. */
+  currentToolIntent?: string;
+  /** omp 18.4+: which argument `currentToolArgs` previews (e.g. "path"). */
+  currentToolArgsKey?: string;
+  recentTools?: SubagentRecentTool[];
   recentOutput?: string[];
   toolCount?: number;
   requests?: number;
@@ -138,6 +155,19 @@ function splitResolvedModel(value: string): { resolvedModel: string; thinkingLev
     : { resolvedModel: value };
 }
 
+function parseRecentTool(value: unknown): SubagentRecentTool | undefined {
+  if (!isRecord(value)) return undefined;
+  const tool = asString(value.tool);
+  if (!tool) return undefined;
+  const out: SubagentRecentTool = { tool, args: asString(value.args) ?? "", endMs: asNumber(value.endMs) ?? 0 };
+  const intent = asString(value.intent)?.trim();
+  if (intent) out.intent = intent;
+  const argsKey = asString(value.argsKey);
+  if (argsKey) out.argsKey = argsKey;
+  if (typeof value.isError === "boolean") out.isError = value.isError;
+  return out;
+}
+
 /** Defensively copy an AgentProgress-shaped object into a SubagentProgress. */
 export function parseSubagentProgress(value: unknown): SubagentProgress | undefined {
   if (!isRecord(value)) return undefined;
@@ -166,7 +196,14 @@ export function parseSubagentProgress(value: unknown): SubagentProgress | undefi
   if (currentToolArgs !== undefined) out.currentToolArgs = currentToolArgs;
   const currentToolStartMs = asNumber(value.currentToolStartMs);
   if (currentToolStartMs !== undefined) out.currentToolStartMs = currentToolStartMs;
-  if (Array.isArray(value.recentTools)) out.recentTools = value.recentTools as SubagentProgress["recentTools"];
+  const currentToolIntent = asString(value.currentToolIntent)?.trim();
+  if (currentToolIntent) out.currentToolIntent = currentToolIntent;
+  const currentToolArgsKey = asString(value.currentToolArgsKey);
+  if (currentToolArgsKey) out.currentToolArgsKey = currentToolArgsKey;
+  if (Array.isArray(value.recentTools)) {
+    const recentTools = value.recentTools.map(parseRecentTool).filter((x): x is SubagentRecentTool => x !== undefined);
+    out.recentTools = recentTools;
+  }
   if (Array.isArray(value.recentOutput)) out.recentOutput = value.recentOutput.filter((x): x is string => typeof x === "string");
   const toolCount = asNumber(value.toolCount);
   if (toolCount !== undefined) out.toolCount = toolCount;
@@ -304,7 +341,7 @@ export function activityFromProgressChange(
   const events: SubagentActivityEvent[] = [];
   const tool = next.currentTool;
   if (tool && (tool !== previous?.currentTool || next.currentToolStartMs !== previous?.currentToolStartMs)) {
-    const intent = next.lastIntent?.trim();
+    const intent = (next.currentToolIntent ?? next.lastIntent)?.trim();
     const args = next.currentToolArgs?.trim();
     const label = intent
       ? "→ " + tool + ": " + intent
@@ -371,4 +408,22 @@ export function withModelHandoff(existing: SubagentInfo, incoming: SubagentInfo)
   const to = incoming.progress?.resolvedModel;
   if (!from || !to || from === to) return merged;
   return { ...merged, modelHandoff: { from, to, at: new Date().toISOString() } };
+}
+
+/** What a running child is doing, for a chip or activity line: the intent of
+ * the call running now when the engine reports one (omp 18.4+), otherwise the
+ * last intent seen (older engines). */
+export function subagentActivityIntent(progress: SubagentProgress | undefined): string | undefined {
+  const intent = (progress?.currentToolIntent ?? progress?.lastIntent)?.trim();
+  return intent || undefined;
+}
+
+/** True when an RPC failure means "this engine does not know the command":
+ * omp 18.3 answers `Unknown command: <type>`, and the wrapper's own refusal
+ * for a restricted-vocabulary engine says "not supported by this engine".
+ * Callers use it to fall back to what worked before the command existed. */
+export function isUnsupportedCommandError(error: unknown): boolean {
+  if (error && typeof error === "object" && (error as { code?: unknown }).code === "unsupported") return true;
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  return /Unknown command/i.test(message) || /not supported by this engine/i.test(message);
 }

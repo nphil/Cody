@@ -237,6 +237,24 @@ export interface SessionStatsInfo {
   contextUsage?: ContextUsage;
 }
 
+/** One question of omp's `ask` dialog (omp >= 18.4, after `set_ask_dialog`).
+ *  Options never include "Other" — the host always offers free text.
+ *  `recommended` is the INDEX of the recommended option. */
+export interface OmpAskQuestion {
+  id: string;
+  question: string;
+  header?: string;
+  options: Array<{ label: string; description?: string; preview?: string }>;
+  multi?: boolean;
+  recommended?: number;
+}
+
+/** Positional presentation metadata for a `select` option (omp >= 18.4):
+ *  `optionDetails[i]` describes `options[i]`; entries without a description are `{}`. */
+export interface OmpSelectOptionDetail {
+  description?: string;
+}
+
 /**
  * omp's rpc-ui extension UI request frames, including the methods missing from
  * the browser-facing union in lib/types.ts (`open_url`, `cancel`). The wrapper
@@ -244,10 +262,11 @@ export interface SessionStatsInfo {
  * expire stale dialogs.
  */
 export type OmpExtensionUiRequest =
-  | { type: "extension_ui_request"; id: string; method: "select"; title: string; options: string[]; timeout?: number; expiresAt?: number }
+  | { type: "extension_ui_request"; id: string; method: "select"; title: string; options: string[]; optionDetails?: OmpSelectOptionDetail[]; timeout?: number; expiresAt?: number }
   | { type: "extension_ui_request"; id: string; method: "confirm"; title: string; message: string; timeout?: number; expiresAt?: number }
   | { type: "extension_ui_request"; id: string; method: "input"; title: string; placeholder?: string; timeout?: number; expiresAt?: number }
   | { type: "extension_ui_request"; id: string; method: "editor"; title: string; prefill?: string; promptStyle?: boolean; timeout?: number; expiresAt?: number }
+  | { type: "extension_ui_request"; id: string; method: "ask"; questions: OmpAskQuestion[]; timeout?: number; expiresAt?: number }
   | { type: "extension_ui_request"; id: string; method: "cancel"; targetId: string }
   | { type: "extension_ui_request"; id: string; method: "notify"; message: string; notifyType?: "info" | "warning" | "error" }
   | { type: "extension_ui_request"; id: string; method: "setStatus"; statusKey: string; statusText: string | undefined }

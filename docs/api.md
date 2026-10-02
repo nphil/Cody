@@ -428,6 +428,12 @@ every `data` payload are the **engine's** RPC vocabulary, forwarded verbatim.
 Treat the whole of it as Incidental; discover what a session supports by
 creating it with `ensure_session` and asking, rather than hardcoding a list.
 
+Commands a newer omp adds are forwarded the same way, and an older omp answers
+them with an ordinary command error whose message is `Unknown command: <type>`
+— read that as "this engine predates it" and fall back. Today that covers
+`cancel_subagent`, `steer_subagent`, `predict_word`, `predict_word_feedback`,
+`remove_queued_message` and `promote_queued_message`.
+
 A `type: "prompt"` command takes a workspace checkpoint before the agent runs,
 so "restore to before that message" works. Checkpoint failure never blocks a
 send.
@@ -460,8 +466,11 @@ Wire format, all **Stable**:
   `false`, so a client that believed a turn was in flight must treat it as
   lost rather than keep waiting (additive field: absent means unknown, infer
   nothing).
-- `{"type":"notice","level":"error"|"warn"|"info","message":"…"}` reports
+- `{"type":"notice","level":"error"|"warning"|"info","message":"…"}` reports
   failures that are not tied to a message, including a failed engine spawn.
+  The engine may add a `source` (omp: `session-persistence`, `agent-end`);
+  `session-persistence` at `warning` means the live session moved to a new
+  file — see `cody_session_moved` below.
 - Opening this stream **starts the session** if it is not already running. It is
   not a passive observer.
 - Backpressure: while a consumer is behind, consecutive `message_update` frames
@@ -481,6 +490,31 @@ it is the engine's. For reference, what the web client currently handles:
 `auto_compaction_start`, `auto_compaction_end`, `subagent_lifecycle`,
 `subagent_progress`, `subagent_event`, `host_tool_call`, `host_uri_request`,
 `extension_ui_request`.
+
+omp 18.4.4+ also emits `queue_update` (`{steering:[…], followUp:[…]}`, the
+queued message *text*, only when it changes) and 18.4.5+ emits
+`cache_warming_start` / `cache_warming_end` while an idle session's prompt cache
+is refreshed. The web client ignores both, and neither ever changes a
+session's running state.
+
+Frames the **server** adds are prefixed `cody_`; ignore the ones you do not
+know. One matters to any client that stays attached to a session:
+
+```json
+{"type":"cody_session_moved","sessionId":"01a0fa0e-1752-7167-aed4-8ff6846f584d",
+ "previousSessionId":"01a0f9f9-0000-7000-8000-0000000000aa",
+ "sessionFile":"/data/agent/sessions/--work--/2026-10-02T00-40-22-610Z_01a0fa0e-….jsonl"}
+```
+
+omp (18.4.9) moved this live session to a **new file under a new id** because
+another omp process had the original open for writing; the original is left
+untouched as a frozen copy. The server has already re-keyed the live session
+and its owner, so **switch to `sessionId` now**: send commands to it, reopen
+this stream on it and load its transcript — the old id would only ever show the
+frozen file. It is sent once to every attached stream, after the new file
+exists, and follows omp's own `notice` (`source:"session-persistence"`). A
+fork's new id is not announced this way: the `fork` command's answer carries
+`newSessionId`.
 
 Ignore unknown types silently — that is the only forward-compatible policy, and
 a lesser engine simply never emits most of them. Two shapes worth knowing

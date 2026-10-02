@@ -26,7 +26,7 @@ import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
 import { assistantReplyText, replyAsksUser } from "./reply-question";
 import { readRefusalPolicyConfig, writeRefusalPolicyConfig } from "./refusal/config";
 import { PlanKeeper } from "./plan-keeper/keeper";
-import { readPlanOverlay } from "./plan-keeper/overlay";
+import { readPlanOverlay, writePlanOverlay } from "./plan-keeper/overlay";
 import { materializeLocalModelProfile, resolveLocalModelPromptProfile, type LocalModelProfileLaunch, type ModelProfileTarget, type ResolvedLocalModelProfile } from "./local-model-profile-runtime";
 import { copySessionLocalRouting, materializeLocalRoutingOverlay, readLocalRoutingIntent, renameSessionLocalRouting, validateLocalRoutingModelSelection } from "./local-model-routing";
 import { copySessionPreset, renameSessionPreset, sessionPresetOverlay } from "./model-presets/overlay";
@@ -182,6 +182,13 @@ export interface ServerDeliveryLedgerEntry {
   acceptedAt: number;
   updatedAt: number;
   error?: string;
+  /** The message exactly as it was handed to the engine, kept only while it
+   *  can still sit in a queue (`queued`). omp finds a queued message by the
+   *  text as submitted — `text` above is trimmed — and taking one back for
+   *  Edit has to return its attachments. Cleared on every other status so a
+   *  long-lived wrapper never holds an old image payload, and never part of a
+   *  snapshot (see getDeliveryLedger). */
+  submitted?: { message: string; images: unknown[] };
 }
 
 /** A message Cody holds while a run is active (see AgentSessionWrapper.heldQueue). */
@@ -197,7 +204,7 @@ interface HeldMessage {
 const STEER_CONTINUATION_GRACE_MS = 3_000;
 
 export type ServerDeliveryLedgerSnapshot =
-  | (Omit<ServerDeliveryLedgerEntry, "status"> & { status: ServerDeliveryStatus })
+  | (Omit<ServerDeliveryLedgerEntry, "status" | "submitted"> & { status: ServerDeliveryStatus })
   | { clientMessageId: string; status: "unknown" };
 
 type EventListener = (event: AgentEvent) => void;
@@ -419,12 +426,23 @@ const SERVER_HOST_TOOL_NAMES = new Set([
 const MAIN_SESSION_RESULT_CHARS = 24_000;
 const MCP_LIST_TIMEOUT_MS = 15_000;
 /** Cap on the *acknowledgement* of a prompt frame — not on model execution.
- * omp acks a prompt as soon as it accepts it and the run then reports through
- * events (agent_start/agent_end), so an ack that never arrives means the child
- * is wedged: without this the API request (and the UI spinner behind it) would
- * stay pending forever. Generous enough to cover slow local startup work the
- * child does before acking. */
+ * omp (18.4.6+) acks a prompt once it has ADMITTED it, and the turn's own
+ * work (provider call, tools) then reports through events (agent_start /
+ * agent_end); earlier builds ack on receipt. Either way an ack that never
+ * arrives means the child is wedged: without this cap the API request (and
+ * the UI spinner behind it) would stay pending forever. Admission is not
+ * instant — on an idle session omp first normalizes attached images and, for
+ * a text-only model, asks a vision model to describe them (capped at 20 s
+ * upstream) before it admits — which is what IMAGE_PROMPT_ACK_TIMEOUT_MS is
+ * for. */
 const PROMPT_ACK_TIMEOUT_MS = 30_000;
+/** The same cap for a prompt that carries images: vision description plus
+ * normalization can legitimately run ~20 s before omp admits the prompt, and
+ * timing out then would recycle a child that was about to accept it. */
+const IMAGE_PROMPT_ACK_TIMEOUT_MS = 60_000;
+/** How long a session move waits for the new session file to land on disk
+ * before the page is told to adopt it (see announceSessionMove). */
+const SESSION_MOVE_FILE_WAIT_MS = 3_000;
 const CLIENT_MESSAGE_ID_TTL_MS = 60 * 60 * 1000;
 const CLIENT_MESSAGE_ID_CAP = 500;
 const DELIVERY_LEDGER_TTL_MS = 60 * 60 * 1000;
@@ -455,9 +473,12 @@ export class WebRpcError extends Error {
 
 // Extension UI methods that stay pending until the client answers (replayed to
 // newly-attached SSE listeners so dialogs survive reconnects).
-const PENDING_UI_METHODS = new Set(["select", "confirm", "input", "editor", "open_url"]);
+const PENDING_UI_METHODS = new Set(["select", "confirm", "input", "editor", "open_url", "ask"]);
 
 // Commands forwarded to omp verbatim (request shape already matches rpc-types).
+// An omp that predates one answers `Unknown command: <type>` — an ordinary
+// failed response, so the caller sees a normal command error whose message it
+// can match, and falls back to the behavior it had before the command existed.
 const PASSTHROUGH_COMMANDS = new Set([
   "abort",
   "abort_and_prompt",
@@ -483,6 +504,13 @@ const PASSTHROUGH_COMMANDS = new Set([
   "set_subagent_subscription",
   "get_login_providers",
   "login",
+  // omp 18.4.x: per-subagent control, composer word completion, queue editing.
+  "cancel_subagent",
+  "steer_subagent",
+  "predict_word",
+  "predict_word_feedback",
+  "remove_queued_message",
+  "promote_queued_message",
 ]);
 
 /** Read-only, argument-free snapshots. omp answers commands one at a time,
@@ -509,7 +537,7 @@ const LOCAL_WRAPPER_COMMANDS = new Set([
 // pi-web commands with no omp RPC equivalent. The UI tolerates these failing.
 const UNSUPPORTED_COMMANDS: Record<string, string> = {
   navigate_tree: "Branch navigation is not supported over the omp RPC protocol",
-  clear_queue: "Recalling queued messages is not supported over the omp RPC protocol",
+  clear_queue: "Clearing the whole queue at once is not supported over the omp RPC protocol; withdraw_queued takes back one message by id",
   get_tools: "Per-session tool listing is not supported over the omp RPC protocol",
   set_tools: "Changing tools on a running session is not supported over the omp RPC protocol; tool presets apply to new sessions",
   extension_ui_input: "Extension custom UI is not supported over the omp RPC protocol",
@@ -746,6 +774,13 @@ function toImageContents(value: unknown): Array<{ type: "image"; data: string; m
   return images?.length ? images : undefined;
 }
 
+/** omp answers a command it predates with an ordinary failed response
+ *  (`Unknown command: <type>`), so a feature that needs a newer omp tells
+ *  "too old" apart from a real failure by this message. */
+function isUnknownCommandError(error: unknown): boolean {
+  return error instanceof RpcCommandError && /unknown command/i.test(error.message);
+}
+
 function normalizeDeliveryText(text: string): string {
   return text.trim();
 }
@@ -928,10 +963,14 @@ export class AgentSessionWrapper {
   private stopLatch: { aborting: boolean } | null = null;
   /**
    * Follow-ups sent while a run is live are held HERE, not in the engine's
-   * queue: omp's RPC has no way to take a message back out of its queue, so
-   * only a message Cody still holds can really be edited, deleted, or handed
-   * back on Stop. They go to the engine when the run is over, in the order
-   * sent — exactly when omp would have read them anyway.
+   * queue, so they can be edited, deleted and handed back on Stop on every
+   * engine build — and a held message costs the engine nothing. (omp 18.4.4+
+   * can also take a message back out of its own queue and 18.4.6+ can promote
+   * one to a steer, which is what withdrawQueued and steerNow use for a
+   * message already handed over; older builds answer `Unknown command` and
+   * keep the old rule: handed over means final.)
+   * They go to the engine when the run is over, in the order sent — exactly
+   * when omp would have read them anyway.
    *
    * Steers are never held. A steer is an interruption: omp delivers it into
    * the reply it is streaming (live steering), cuts a running tool batch
@@ -980,6 +1019,10 @@ export class AgentSessionWrapper {
    *  of staying open on a dead child (see onClose). */
   private closeListeners = new Set<() => void>();
   private onIdentityChangeCallback: ((oldId: string, newId: string) => void) | null = null;
+  /** Session commands (fork, new_session, switch_session) in flight. While one
+   *  is, an id change belongs to it — its own response tells the page — so the
+   *  move announcement below stays quiet (see noteIdentityChange). */
+  private requestedIdentityChanges = 0;
   private unsubscribeFrames: (() => void) | null = null;
   private initPromise: Promise<void> | null = null;
   private restarting = false;
@@ -1426,6 +1469,8 @@ export class AgentSessionWrapper {
     if (this.engine.rpcUi.subagentEvents) {
       await this.proc.sendCommand({ type: "set_subagent_subscription", level: SUBAGENT_SUBSCRIPTION_LEVEL }).catch(() => {});
     }
+    // Structured `ask` dialogs (omp 18.4.9+) are opt-in per child process.
+    await this.enableAskDialog(this.proc);
     // Publish host tools before the first turn. Minimal profiles publish an
     // empty set to clear registrations retained by a resumed engine session;
     // engines without this surface are never asked.
@@ -1434,6 +1479,26 @@ export class AgentSessionWrapper {
     }
     const state = await this.proc.sendCommand<RpcSessionState>({ type: "get_state" });
     this.applyIdentity(state);
+  }
+
+  /** Whether this engine's RPC dialect has `type`. A restricted one (pi)
+   *  answers an unknown command with an id-less error that can never settle
+   *  the request, so a command outside its vocabulary is never sent to it. */
+  private engineHasCommand(type: string): boolean {
+    const commands = this.engine.rpcUi.commands;
+    return !commands || commands.has(type);
+  }
+
+  /**
+   * Opt this child in to structured `ask` dialogs: the browser answers an ask
+   * tool call with a form instead of omp's select/editor fallback. The flag
+   * lives in the child process, so every spawn AND every restart sends it.
+   * An omp that predates it answers `Unknown command` — that build keeps the
+   * fallback, and nothing here may fail the start.
+   */
+  private async enableAskDialog(proc: RpcProcess): Promise<void> {
+    if (!this.engineHasCommand("set_ask_dialog")) return;
+    await proc.sendCommand({ type: "set_ask_dialog", enabled: true }).catch(() => {});
   }
 
   /**
@@ -1473,6 +1538,73 @@ export class AgentSessionWrapper {
     if (this._sessionFile) cacheSessionPath(this._sessionId, this._sessionFile);
   }
 
+  /**
+   * The id this wrapper answers to is no longer `previousId`, and the child
+   * kept running. Called right after every id write that can happen on a live
+   * wrapper — never at startup (nothing is filed under an earlier id yet) and
+   * never for a restart, which relaunches the same file.
+   *
+   * Always: the registry re-keys (the callback a session command fires too).
+   * The rest is for the change no command asked for — omp moved the live
+   * session to a NEW sibling file under a NEW id because another process had
+   * the original open for writing (a `session-persistence` notice; the old
+   * file is left untouched, so what was filed under the old id is COPIED, as
+   * for a fork): owner, preset, Local-only snapshot, the plan keeper's subtask
+   * checklist and the preview stream follow, and every attached page is told
+   * to adopt the new id. While a session command (fork, new_session,
+   * switch_session) is in flight the change is its own: its response already
+   * tells the page.
+   */
+  private noteIdentityChange(previousId: string): void {
+    const sessionId = this._sessionId;
+    if (!previousId || previousId === sessionId) return;
+    if (this._sessionFile) cacheSessionPath(sessionId, this._sessionFile);
+    this.onIdentityChangeCallback?.(previousId, sessionId);
+    invalidateSessionListCache();
+    if (this.requestedIdentityChanges === 0) {
+      this.carrySessionState(previousId, sessionId);
+      // The checklist belongs to the conversation, which carries on in the new
+      // file with its todo list intact (a fork is a different conversation).
+      const planOverlay = readPlanOverlay(previousId);
+      if (planOverlay) writePlanOverlay(sessionId, planOverlay);
+      aliasDisplaySession(previousId, sessionId);
+      void this.announceSessionMove(previousId, sessionId, this._sessionFile);
+    }
+    notifyRunningChange({ refreshSessionList: true });
+  }
+
+  /** What was filed under `fromId` follows a session that continues as
+   *  `toId`: its owner (a session with no owner is visible to every account),
+   *  its pinned preset and its frozen Local-only snapshot. `fromId` stays
+   *  valid — a fork's parent, or the untouched file a session move leaves
+   *  behind — so these are copied, never moved. */
+  private carrySessionState(fromId: string, toId: string): void {
+    copySessionLocalRouting(fromId, toId);
+    copySessionPreset(fromId, toId);
+    const owner = getSessionOwner(fromId);
+    if (owner) setSessionOwner(toId, owner);
+  }
+
+  /**
+   * Tell every attached page the live session now answers to `sessionId`, so
+   * its next send, its transcript and its stream use the file omp is writing.
+   * Waits for that file first: omp publishes the whole transcript to it with
+   * the write that caused the move, a moment after its notice, and the page
+   * reloads by id at once. A page that never hears this would keep sending to
+   * the old id, whose file is frozen.
+   */
+  private async announceSessionMove(previousId: string, sessionId: string, sessionFile: string): Promise<void> {
+    const deadline = Date.now() + SESSION_MOVE_FILE_WAIT_MS;
+    while (sessionFile && !existsSync(sessionFile) && Date.now() < deadline) {
+      await new Promise<void>((resolve) => { setTimeout(resolve, 50).unref?.(); });
+      if (!this._alive || this._sessionId !== sessionId) return;
+    }
+    if (!this._alive || this._sessionId !== sessionId) return;
+    invalidateSessionListCache();
+    this.emit({ type: "cody_session_moved", sessionId, previousSessionId: previousId, sessionFile });
+    notifyRunningChange({ refreshSessionList: true });
+  }
+
   handleProcessExit(stderrTail: string): void {
     // A restart disposes the old child on purpose — not a crash.
     if (!this._alive || this.restarting) return;
@@ -1490,8 +1622,16 @@ export class AgentSessionWrapper {
   }
 
   private handleFrame(frame: RpcFrame): void {
-    this.resetIdleTimer();
     const event = frame as AgentEvent;
+    // omp keeps the provider's prompt cache warm while a session sits idle
+    // (providers.cacheWarming). That is not agent activity: it must never keep
+    // an unattended child alive (resetIdleTimer), flip the running state or
+    // refresh the sidebar. Forwarded as the informational frame it is.
+    if (event.type === "cache_warming_start" || event.type === "cache_warming_end") {
+      this.emit(event);
+      return;
+    }
+    this.resetIdleTimer();
     let refreshSessionList = false;
     if (event.type === "permission_request" && typeof event.requestId === "string") {
       this.pendingPermissionRequests.add(event.requestId);
@@ -1607,7 +1747,7 @@ export class AgentSessionWrapper {
           this.emit({
             type: "notice",
             level: "info",
-            message: "Paused for your answer. The engine's todo reminder would have continued without it.",
+            message: "Waiting for your reply — the agent's task list is on hold.",
           });
         }
         break;
@@ -1700,6 +1840,12 @@ export class AgentSessionWrapper {
         if (typeof event.title === "string") this._sessionName = event.title;
         invalidateSessionListCache();
         refreshSessionList = true;
+        break;
+      case "notice":
+        // A `session-persistence` warning is omp moving this live session to a
+        // new file under a new id (see noteIdentityChange). Forwarded like any
+        // notice; the identity is re-read at once.
+        if (event.source === "session-persistence" && event.level === "warning") void this.followSessionMove();
         break;
       case "response": {
         // Unsolicited failed responses surface async prompt failures (omp
@@ -2662,8 +2808,11 @@ export class AgentSessionWrapper {
     this.compacting = state.isCompacting;
     this._sessionName = state.sessionName;
     if (state.sessionId) {
+      const previousId = this._sessionId;
       this.setSessionId(state.sessionId);
       this._sessionFile = state.sessionFile ?? this._sessionFile;
+      // A state poll can be the first to see a session move (noteIdentityChange).
+      this.noteIdentityChange(previousId);
     }
     const webState: WebSessionState = {
       sessionId: state.sessionId,
@@ -2711,17 +2860,30 @@ export class AgentSessionWrapper {
     return webState;
   }
 
-  /** After branch/new_session/switch_session the child is on a different
-   * session file — re-read identity and re-register in the registry. */
+  /** After branch/new_session/switch_session — or an omp-announced session
+   * move — the child is on a different session file: re-read identity and
+   * re-register in the registry. */
   private async refreshIdentityAfterSessionChange(): Promise<string> {
-    const oldId = this._sessionId;
     const state = await this.proc.sendCommand<RpcSessionState>({ type: "get_state" });
+    if (!this._alive) return this._sessionId;
+    // Compared with the id held NOW, after the round trip: a state poll may
+    // have applied this very change already, and a change runs its path once.
+    const previousId = this._sessionId;
     this.applyIdentity(state);
-    if (oldId && oldId !== this._sessionId) {
-      this.onIdentityChangeCallback?.(oldId, this._sessionId);
-    }
+    this.noteIdentityChange(previousId);
     invalidateSessionListCache();
     return this._sessionId;
+  }
+
+  /** omp just moved this live session to a new file: read the new identity
+   *  now instead of at the next state poll (which would take the same path). */
+  private async followSessionMove(): Promise<void> {
+    try {
+      await this.refreshIdentityAfterSessionChange();
+    } catch {
+      // The child is exiting or too busy to answer; the next get_state poll
+      // sees the new id and runs the same path from buildWebState.
+    }
   }
 
   /** Full restart of the child process against the same session file. */
@@ -2760,6 +2922,7 @@ export class AgentSessionWrapper {
         if (this.engine.rpcUi.subagentEvents) {
           await proc.sendCommand({ type: "set_subagent_subscription", level: SUBAGENT_SUBSCRIPTION_LEVEL }).catch(() => {});
         }
+        await this.enableAskDialog(proc);
         if (this.engine.rpcUi.hostTools) {
           await this.publishHostTools({ force: true }).catch(() => {});
           if (this.hostUriSchemeEntries.length) {
@@ -2824,7 +2987,8 @@ export class AgentSessionWrapper {
     return clientMessageIds.map((clientMessageId): ServerDeliveryLedgerSnapshot => {
       const entry = this.deliveryLedger.get(clientMessageId);
       if (!entry || entry.status === "sending") return { clientMessageId, status: "unknown" };
-      return { ...entry, status: entry.status };
+      const { submitted: _submitted, ...visible } = entry;
+      return { ...visible, status: entry.status };
     });
   }
 
@@ -2848,6 +3012,7 @@ export class AgentSessionWrapper {
       status: "sending",
       acceptedAt: now,
       updatedAt: now,
+      submitted: { message: typeof command.message === "string" ? command.message : "", images },
     });
     this.pruneDeliveryLedger();
   }
@@ -2876,6 +3041,7 @@ export class AgentSessionWrapper {
       held: status === "queued" ? entry.held : false,
       updatedAt: now,
       error: status === "failed" ? (error ?? entry.error) : undefined,
+      submitted: status === "queued" ? entry.submitted : undefined,
     };
     this.deliveryLedger.set(clientMessageId, updated);
     // A remembered outcome must outlive the ledger row it answers for.
@@ -2960,16 +3126,41 @@ export class AgentSessionWrapper {
     }
   }
 
-  /** Take back a message Cody still holds (Delete, or Edit, which returns its
-   *  content to the composer). One the engine already has cannot be taken
-   *  back — omp offers no way to — and says so. */
-  withdrawQueued(clientMessageId: string): { withdrawn: true; text: string; images: unknown[] } | { withdrawn: false; reason: "already_sent" | "unknown" } {
-    const index = this.heldQueue.findIndex((held) => held.clientMessageId === clientMessageId);
+  /**
+   * Take a message back before the agent reads it (Delete, or Edit, which
+   * returns its content to the composer). One Cody still holds is simply
+   * dropped from the hold. One the engine already has is asked back out of
+   * omp's own queue (omp 18.4.4+, `remove_queued_message`); a build that
+   * predates that, or a message omp read in the meantime, cannot be taken
+   * back, and the answer says so.
+   */
+  async withdrawQueued(clientMessageId: string): Promise<{ withdrawn: true; text: string; images: unknown[] } | { withdrawn: false; reason: "already_sent" | "unknown" }> {
     const entry = this.deliveryLedger.get(clientMessageId);
-    if (index === -1 || !entry?.held) return { withdrawn: false, reason: entry ? "already_sent" : "unknown" };
-    const [held] = this.heldQueue.splice(index, 1);
+    if (!entry) return { withdrawn: false, reason: "unknown" };
+    const index = this.heldQueue.findIndex((held) => held.clientMessageId === clientMessageId);
+    if (index !== -1 && entry.held) {
+      const [held] = this.heldQueue.splice(index, 1);
+      this.transitionDelivery(clientMessageId, "withdrawn");
+      return { withdrawn: true, text: held.message, images: Array.isArray(held.images) ? held.images : [] };
+    }
+    // Only a message the engine acknowledged into its queue can still be there.
+    const submitted = entry.submitted;
+    if (entry.status !== "queued" || entry.held || !submitted || !this.engineHasCommand("remove_queued_message")) {
+      return { withdrawn: false, reason: "already_sent" };
+    }
+    try {
+      const result = await this.proc.sendCommand<{ removed?: boolean } | undefined>({
+        type: "remove_queued_message",
+        message: submitted.message,
+        queue: entry.behavior === "steer" ? "steering" : "followUp",
+      });
+      if (result?.removed !== true) return { withdrawn: false, reason: "already_sent" };
+    } catch (error) {
+      if (isUnknownCommandError(error)) return { withdrawn: false, reason: "already_sent" };
+      throw error;
+    }
     this.transitionDelivery(clientMessageId, "withdrawn");
-    return { withdrawn: true, text: held.message, images: Array.isArray(held.images) ? held.images : [] };
+    return { withdrawn: true, text: submitted.message, images: submitted.images };
   }
 
   /**
@@ -2981,8 +3172,11 @@ export class AgentSessionWrapper {
    * continues straight into it. Only the reply is interrupted — while a tool
    * is running nothing is aborted (omp already lands the steer when the tool
    * batch ends and asks backgroundable tools to detach), and subagents are
-   * separate sessions an abort never touches. A queued follow-up is not
-   * interrupted for: after an abort omp would leave it waiting.
+   * separate sessions an abort never touches. A follow-up the engine already
+   * holds is first moved to the end of omp's steering queue (omp 18.4.6+,
+   * `promote_queued_message`), which makes it an ordinary queued steer; a
+   * build without that cannot, and after an abort it would leave the
+   * follow-up waiting, so there it stays refused (`not_steer`).
    */
   async steerNow(clientMessageId: string): Promise<SteerNowResult> {
     let entry = this.deliveryLedger.get(clientMessageId);
@@ -3001,7 +3195,25 @@ export class AgentSessionWrapper {
     if (entry.status === "sending") return { steered: false, reason: "sending" };
     // Started a run of its own, or already in the conversation: being read.
     if (entry.status !== "queued") return { steered: false, reason: "already_read" };
-    if (entry.behavior !== "steer") return { steered: false, reason: "not_steer" };
+    if (entry.behavior !== "steer") {
+      if (!this.engineHasCommand("promote_queued_message")) return { steered: false, reason: "not_steer" };
+      let promoted = false;
+      try {
+        const result = await this.proc.sendCommand<{ promoted?: boolean } | undefined>({
+          type: "promote_queued_message",
+          message: entry.submitted?.message ?? entry.text,
+        });
+        promoted = result?.promoted === true;
+      } catch (error) {
+        if (isUnknownCommandError(error)) return { steered: false, reason: "not_steer" };
+        throw error;
+      }
+      // omp no longer holds it: it was read while this request was on its way.
+      if (!promoted) return { steered: false, reason: "already_read" };
+      entry = this.deliveryLedger.get(clientMessageId);
+      if (!entry || entry.status !== "queued") return { steered: false, reason: entry ? "already_read" : "unknown" };
+      this.deliveryLedger.set(clientMessageId, { ...entry, behavior: "steer", updatedAt: Date.now() });
+    }
     if (!this.isRunning() || this.compacting || this.stopLatch || this.steerInterrupt || this.runningToolCalls.size > 0) {
       return { steered: true, mode: "next_step" };
     }
@@ -3219,13 +3431,18 @@ export class AgentSessionWrapper {
           // a stale flag read — after the HTTP route may have already
           // answered 202 for this very send.
           const useAckTimeout = !streamingBehavior;
+          const images = toImageContents(command.images);
+          // Images lengthen admission (normalization, and a vision description
+          // for a text-only model), so their bound is wider: a child about to
+          // accept the prompt must not be recycled for being slow to admit it.
+          const ackTimeoutMs = images ? IMAGE_PROMPT_ACK_TIMEOUT_MS : PROMPT_ACK_TIMEOUT_MS;
           try {
             const pending = this.sendTrackedCommand<{ agentInvoked?: boolean } | undefined>({
               type: "prompt",
               message: command.message as string,
-              ...(toImageContents(command.images) ? { images: toImageContents(command.images) } : {}),
+              ...(images ? { images } : {}),
               ...(streamingBehavior ? { streamingBehavior } : {}),
-            }, useAckTimeout ? PROMPT_ACK_TIMEOUT_MS : undefined);
+            }, useAckTimeout ? ackTimeoutMs : undefined);
             // omp 18.3 correlates this prompt's single prompt_result by the
             // RPC id, which is how the ledger settles it without text matching.
             this.attachDeliveryRpcId(clientMessageId, pending.id);
@@ -3364,29 +3581,34 @@ export class AgentSessionWrapper {
           throw new Error("Cannot fork while a shell command is running");
         }
         const parentSessionId = this._sessionId;
-        const result = await this.proc.sendCommand<{ text: string; cancelled: boolean }>({
-          type: "branch",
-          entryId: command.entryId as string,
-        });
-        if (result.cancelled) return { cancelled: true };
-        const newSessionId = await this.refreshIdentityAfterSessionChange();
-        // A branch keeps its parent resumable, so clone rather than move the
-        // frozen Local-only snapshot and account ownership sidecars.
-        copySessionLocalRouting(parentSessionId, newSessionId);
-        copySessionPreset(parentSessionId, newSessionId);
-        const owner = getSessionOwner(parentSessionId);
-        if (owner) setSessionOwner(newSessionId, owner);
-        return { cancelled: false, newSessionId };
+        this.requestedIdentityChanges += 1;
+        try {
+          const result = await this.proc.sendCommand<{ text: string; cancelled: boolean }>({
+            type: "branch",
+            entryId: command.entryId as string,
+          });
+          if (result.cancelled) return { cancelled: true };
+          const newSessionId = await this.refreshIdentityAfterSessionChange();
+          // A branch keeps its parent resumable, so clone rather than move the
+          // frozen Local-only snapshot and account ownership sidecars.
+          this.carrySessionState(parentSessionId, newSessionId);
+          return { cancelled: false, newSessionId };
+        } finally {
+          this.requestedIdentityChanges -= 1;
+        }
       }
 
       case "new_session":
       case "switch_session": {
-        const result = await this.proc.sendCommand<{ cancelled: boolean }>(command as { type: string });
-        if (!result.cancelled) {
+        this.requestedIdentityChanges += 1;
+        try {
+          const result = await this.proc.sendCommand<{ cancelled: boolean }>(command as { type: string });
+          if (result.cancelled) return result;
           const newSessionId = await this.refreshIdentityAfterSessionChange();
           return { cancelled: false, newSessionId };
+        } finally {
+          this.requestedIdentityChanges -= 1;
         }
-        return result;
       }
 
       case "compact": {

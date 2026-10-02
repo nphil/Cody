@@ -1,17 +1,22 @@
+import type { AskAnswer } from "@/lib/ask-dialog";
 import type { AgentPermissionRequest } from "@/lib/permission-request";
 import type { OutboxImage } from "@/lib/outbox";
 import type { ExtensionUiRequest } from "@/lib/types";
-import type { RefusalDecision } from "@/lib/pi-types";
+import type { OmpExtensionUiRequest, RefusalDecision } from "@/lib/pi-types";
 export type { RefusalDecision } from "@/lib/pi-types";
 
-export type ExtensionDialogRequest = Extract<
-  ExtensionUiRequest,
-  { method: "select" | "confirm" | "input" | "editor" }
->;
+/** omp >= 18.4's multi-question `ask` dialog (after `set_ask_dialog`). */
+export type ExtensionAskRequest = Extract<OmpExtensionUiRequest, { method: "ask" }>;
+
+export type ExtensionDialogRequest =
+  | Extract<ExtensionUiRequest, { method: "confirm" | "input" | "editor" }>
+  | Extract<OmpExtensionUiRequest, { method: "select" }>
+  | ExtensionAskRequest;
 
 export type ExtensionDialogResponse =
   | { value: string }
   | { confirmed: boolean }
+  | { answers: AskAnswer[] }
   | { cancelled: true };
 
 

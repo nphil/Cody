@@ -42,9 +42,13 @@ async function sessionAccounts(
   if (!filePath) return result;
   for (const [provider, pin] of await readSessionCredentialPins(filePath)) {
     const credential = credentialForPin(pin.hash);
-    if (!credential || credential.provider !== provider) continue;
-    const account = snapshot.accounts.find((candidate) => candidate.provider === provider && candidate.credentialId === credential.credentialId);
-    if (account) result[provider] = { accountId: account.id, since: pin.timestamp };
+    const account = credential && credential.provider === provider
+      ? snapshot.accounts.find((candidate) => candidate.provider === provider && candidate.credentialId === credential.credentialId)
+      : undefined;
+    // An unmatched pin still proves this conversation used the provider:
+    // report it with no account rather than dropping it, which would read as
+    // "never used" and route the gauge onto whichever sibling is idlest.
+    result[provider] = { accountId: account?.id ?? null, since: pin.timestamp };
   }
   return result;
 }

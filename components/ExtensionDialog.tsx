@@ -13,7 +13,7 @@ export function ExtensionInputCard({
   onSelectOption,
   onRespond,
 }: {
-  request: ExtensionDialogRequest;
+  request: Exclude<ExtensionDialogRequest, { method: "ask" }>;
   selectedOptionIndex: number;
   onSelectOption: (index: number) => void;
   onRespond: (response: ExtensionDialogResponse) => void;
@@ -59,23 +59,31 @@ export function ExtensionInputCard({
       )}
       {request.method === "select" && (
         <div role="group" aria-label={request.title} style={{ display: "grid", gap: 6, maxHeight: "32vh", overflowY: "auto", overscrollBehavior: "contain" }}>
-          {request.options.map((option, index) => (
-            <button
-              key={option}
-              type="button"
-              data-input-choice="true"
-              aria-pressed={selectedOptionIndex === index}
-              onFocus={() => onSelectOption(index)}
-              onClick={() => respond({ value: option })}
-              style={{
-                ...buttonStyle,
-                borderColor: selectedOptionIndex === index ? "var(--accent)" : "var(--border)",
-                background: selectedOptionIndex === index ? "var(--bg-hover)" : "var(--bg-panel)",
-              }}
-            >
-              {option}
-            </button>
-          ))}
+          {request.options.map((option, index) => {
+            const description = request.optionDetails?.[index]?.description;
+            return (
+              <button
+                key={option}
+                type="button"
+                data-input-choice="true"
+                aria-pressed={selectedOptionIndex === index}
+                onFocus={() => onSelectOption(index)}
+                onClick={() => respond({ value: option })}
+                style={{
+                  ...buttonStyle,
+                  borderColor: selectedOptionIndex === index ? "var(--accent)" : "var(--border)",
+                  background: selectedOptionIndex === index ? "var(--bg-hover)" : "var(--bg-panel)",
+                }}
+              >
+                {option}
+                {typeof description === "string" && description !== "" && (
+                  <span style={{ display: "block", marginTop: 2, color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+                    {description}
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </div>
       )}
       {request.method === "input" && (

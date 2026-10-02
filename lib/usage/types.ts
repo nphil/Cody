@@ -76,8 +76,13 @@ export type UsageInUseBasis = "session" | "recent" | "expected";
 
 /** The account one conversation's most recent reply used, per provider. */
 export interface UsageSessionAccount {
-  /** `UsageAccount.id` of that account. */
-  accountId: string;
+  /** `UsageAccount.id` of that account — or null when omp recorded a pin
+   *  Cody cannot match to an account (the credential store could not be
+   *  read, or the account was since removed). The conversation HAS used the
+   *  provider, so the reader falls back to the account that most recently
+   *  served a request, and says so; it never guesses by headroom, which picks
+   *  the idle sibling precisely because the account in use is burning quota. */
+  accountId: string | null;
   /** When omp recorded it (the pin's timestamp), or null if unrecorded. */
   since: string | null;
 }

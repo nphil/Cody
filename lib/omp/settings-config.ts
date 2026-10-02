@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
 import { dirname } from "path";
-import { isMap, parseDocument, stringify } from "yaml";
+import { type Document, isMap, parseDocument, stringify } from "yaml";
 import { getSettingsPath } from "./paths";
 import { isRecord } from "../type-guards";
 
@@ -10,6 +10,10 @@ export type NativeSettings = {
   externalThinking?: boolean;
   textVerbosity?: "low" | "medium" | "high";
   personality?: "default" | "friendly" | "pragmatic" | "none";
+  /** Cody's logical "review subagents" switch. omp has no `advisor.subagents`
+   * key (it migrates a legacy one into `task.agentAdvisor.task` while loading),
+   * so this is read from and written to that real key; see
+   * `readAdvisorSubagents` / `writeAdvisorSubagents`. */
   advisor?: { enabled?: boolean; subagents?: boolean; syncBacklog?: "off" | "1" | "3" | "5"; immuneTurns?: number };
   tools?: { approvalMode?: "always-ask" | "write" | "yolo"; approval?: { bash?: "allow" | "prompt" | "deny"; extension?: "allow" | "prompt" } };
   enabledModels?: string[];
@@ -30,7 +34,7 @@ export type NativeSettings = {
     fallbackChains?: Record<string, string[]>;
   };
   compaction?: { enabled?: boolean; midTurnEnabled?: boolean; methodOrder?: CompactionMethod[]; autoContinue?: boolean; keepRecentTokens?: number };
-  memory?: { backend?: "off" | "local" | "mnemopi" | "hindsight" };
+  memory?: { backend?: "off" | "local" | "mnemopi" | "hindsight" | "sharpshooter" };
   autolearn?: { enabled?: boolean; autoContinue?: boolean; minToolCalls?: number };
   mnemopi?: { scoping?: "global" | "per-project" | "per-project-tagged"; autoRecall?: boolean; autoRetain?: boolean; noEmbeddings?: boolean };
   mcp?: { enableProjectConfig?: boolean; renderMarkdownResults?: boolean; notifications?: boolean; notificationDebounceMs?: number };
@@ -57,7 +61,7 @@ export type CompactionMethod = "remote" | "snapcompact" | "handoff" | "shake" | 
 export const COMPACTION_METHODS: readonly CompactionMethod[] = ["remote", "snapcompact", "handoff", "shake", "soft"];
 export const DEFAULT_COMPACTION_METHOD_ORDER: readonly CompactionMethod[] = ["remote", "snapcompact", "handoff", "shake", "soft"];
 const COMPACTION_METHOD_SET: ReadonlySet<string> = new Set(COMPACTION_METHODS);
-const MEMORY_BACKENDS = new Set(["off", "local", "mnemopi", "hindsight"]);
+const MEMORY_BACKENDS = new Set(["off", "local", "mnemopi", "hindsight", "sharpshooter"]);
 const MEMORY_SCOPES = new Set(["global", "per-project", "per-project-tagged"]);
 
 function configPath(): string {
@@ -105,6 +109,35 @@ function readCompactionMethodOrder(compaction: Record<string, unknown>): Compact
   }
 }
 
+/** The real config key behind the "review subagents" switch: the per-agent
+ * advisor override of omp's generic `task` agent. Values are "on", "off" or a
+ * model pattern; early omp builds persisted booleans. */
+const ADVISOR_SUBAGENTS_PATH = ["task", "agentAdvisor", "task"] as const;
+
+/** Effective "review subagents" value: `task.agentAdvisor.task` wins; a legacy
+ * `advisor.subagents` boolean (not yet migrated by omp) is read as a fallback
+ * but never written. A model pattern means advisor review is on. */
+function readAdvisorSubagents(data: Record<string, unknown>, advisor: Record<string, unknown>): boolean | undefined {
+  const task = isRecord(data.task) ? data.task : {};
+  const agentAdvisor = isRecord(task.agentAdvisor) ? task.agentAdvisor : {};
+  const current = agentAdvisor.task;
+  if (typeof current === "boolean") return current;
+  if (current === "on") return true;
+  if (current === "off") return false;
+  if (typeof current === "string" && current.trim()) return true;
+  return typeof advisor.subagents === "boolean" ? advisor.subagents : undefined;
+}
+
+function writeAdvisorSubagents(doc: Document, enabled: boolean): void {
+  const existing = doc.getIn([...ADVISOR_SUBAGENTS_PATH]);
+  // Turning review on must not discard a model pattern the user chose.
+  const keepPattern = enabled && typeof existing === "string" && existing.trim() !== "" && existing !== "on" && existing !== "off";
+  if (!keepPattern) doc.setIn([...ADVISOR_SUBAGENTS_PATH], enabled ? "on" : "off");
+  // omp consumed the legacy key into the real one; leaving it behind would
+  // only re-trigger that migration on every load.
+  if (doc.hasIn(["advisor", "subagents"])) doc.deleteIn(["advisor", "subagents"]);
+}
+
 function readDocument() {
   const path = configPath();
   const doc = parseDocument(existsSync(path) ? readFileSync(path, "utf8") : "");
@@ -140,10 +173,10 @@ export function readNativeSettings(): { path: string; settings: NativeSettings }
       ...(typeof data.externalThinking === "boolean" ? { externalThinking: data.externalThinking } : {}),
       ...(TEXT_VERBOSITIES.has(data.textVerbosity as string) ? { textVerbosity: data.textVerbosity as NativeSettings["textVerbosity"] } : {}),
       ...(PERSONALITIES.has(data.personality as string) ? { personality: data.personality as NativeSettings["personality"] } : {}),
-      ...(Object.keys(advisor).length ? {
+      ...(Object.keys(advisor).length || readAdvisorSubagents(data, advisor) !== undefined ? {
         advisor: {
           ...(typeof advisor.enabled === "boolean" ? { enabled: advisor.enabled } : {}),
-          ...(typeof advisor.subagents === "boolean" ? { subagents: advisor.subagents } : {}),
+          ...(readAdvisorSubagents(data, advisor) !== undefined ? { subagents: readAdvisorSubagents(data, advisor) } : {}),
           ...(BACKLOGS.has(advisor.syncBacklog as string) ? { syncBacklog: advisor.syncBacklog as "off" | "1" | "3" | "5" } : {}),
           ...(typeof advisor.immuneTurns === "number" && Number.isInteger(advisor.immuneTurns) ? { immuneTurns: advisor.immuneTurns } : {}),
         },
@@ -176,7 +209,7 @@ export function readNativeSettings(): { path: string; settings: NativeSettings }
         ...(typeof compaction.autoContinue === "boolean" ? { autoContinue: compaction.autoContinue } : {}),
         ...(typeof compaction.keepRecentTokens === "number" && Number.isInteger(compaction.keepRecentTokens) ? { keepRecentTokens: compaction.keepRecentTokens } : {}),
       } } : {}),
-      ...(Object.keys(memory).length ? { memory: { ...(MEMORY_BACKENDS.has(memory.backend as string) ? { backend: memory.backend as "off" | "local" | "mnemopi" | "hindsight" } : {}) } } : {}),
+      ...(Object.keys(memory).length ? { memory: { ...(MEMORY_BACKENDS.has(memory.backend as string) ? { backend: memory.backend as NonNullable<NativeSettings["memory"]>["backend"] } : {}) } } : {}),
       ...(Object.keys(autolearn).length ? { autolearn: {
         ...(typeof autolearn.enabled === "boolean" ? { enabled: autolearn.enabled } : {}),
         ...(typeof autolearn.autoContinue === "boolean" ? { autoContinue: autolearn.autoContinue } : {}),
@@ -267,8 +300,15 @@ export function writeNativeSettings(settings: NativeSettings): void {
   const { path, doc } = readDocument();
   mkdirSync(dirname(path), { recursive: true });
   if (doc.contents === null) {
+    const { advisor, ...rest } = settings;
+    const { subagents, ...advisorRest } = advisor ?? {};
+    const fresh = {
+      ...rest,
+      ...(Object.keys(advisorRest).length ? { advisor: advisorRest } : {}),
+      ...(subagents !== undefined ? { task: { agentAdvisor: { task: subagents ? "on" : "off" } } } : {}),
+    };
     const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
-    writeFileSync(temp, stringify(settings), "utf8");
+    writeFileSync(temp, stringify(fresh), "utf8");
     renameSync(temp, path);
     return;
   }
@@ -278,7 +318,8 @@ export function writeNativeSettings(settings: NativeSettings): void {
   if (settings.externalThinking !== undefined) doc.set("externalThinking", settings.externalThinking);
   if (settings.textVerbosity !== undefined) doc.set("textVerbosity", settings.textVerbosity);
   if (settings.personality !== undefined) doc.set("personality", settings.personality);
-  for (const [key, value] of Object.entries(settings.advisor ?? {})) doc.setIn(["advisor", key], value);
+  for (const [key, value] of Object.entries(settings.advisor ?? {})) if (key !== "subagents") doc.setIn(["advisor", key], value);
+  if (settings.advisor?.subagents !== undefined) writeAdvisorSubagents(doc, settings.advisor.subagents);
   if (settings.tools?.approvalMode !== undefined) doc.setIn(["tools", "approvalMode"], settings.tools.approvalMode);
   if (settings.tools?.approval?.bash !== undefined) doc.setIn(["tools", "approval", "bash"], settings.tools.approval.bash);
   if (settings.tools?.approval?.extension !== undefined) doc.setIn(["tools", "approval", "extension"], settings.tools.approval.extension);
@@ -347,10 +388,26 @@ function deleteDocumentPaths(paths: string[][]): string[] {
   const { path, doc } = readDocument();
   if (doc.contents === null) return [];
   if (!isMap(doc.contents)) throw new Error(`${path} must contain a YAML mapping`);
-  const removed = paths.filter((parts) => (parts.length === 1 ? doc.delete(parts[0]) : doc.deleteIn(parts)));
+  const removed = paths.filter((parts) => {
+    // deleteIn throws when an ancestor is absent; absent means nothing to drop.
+    const hit = parts.length === 1 ? doc.delete(parts[0]) : doc.hasIn(parts) && doc.deleteIn(parts);
+    // "Review subagents" lives under the per-agent override omp migrates it to.
+    return parts.join(".") === "advisor.subagents" ? removeAdvisorSubagentsOverride(doc) || hit : hit;
+  });
   if (removed.length === 0) return [];
   const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
   writeFileSync(temp, doc.toString(), "utf8");
   renameSync(temp, path);
   return removed.map((parts) => parts.join("."));
+}
+
+/** Drop `task.agentAdvisor.task`, then the `agentAdvisor`/`task` maps if that
+ * left them empty, so a reset does not leave empty shells in config.yml. */
+function removeAdvisorSubagentsOverride(doc: Document): boolean {
+  if (!doc.hasIn([...ADVISOR_SUBAGENTS_PATH]) || !doc.deleteIn([...ADVISOR_SUBAGENTS_PATH])) return false;
+  for (const parent of [["task", "agentAdvisor"], ["task"]]) {
+    const node = doc.getIn(parent);
+    if (isMap(node) && node.items.length === 0) doc.deleteIn(parent);
+  }
+  return true;
 }

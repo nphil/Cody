@@ -1,7 +1,7 @@
 "use client";
 
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Ban, Loader2 } from "lucide-react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
+import { Ban, Loader2, Send } from "lucide-react";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { useI18n } from "@/lib/i18n";
@@ -11,7 +11,7 @@ import { MarkdownBody } from "./MarkdownBody";
 import { Dialog, DialogContent, DialogTitle } from "./ui/primitives";
 import { toast } from "./ui/toast";
 import type { SubagentInfo } from "@/hooks/useAgentSession";
-import { parseSubagentProgress } from "@/lib/subagent-types";
+import { isUnsupportedCommandError, parseSubagentProgress } from "@/lib/subagent-types";
 import type { SubagentActivityEvent, SubagentProgress, SubagentSnapshotLike } from "@/lib/subagent-types";
 import type { AgentMessage, ToolResultMessage } from "@/lib/types";
 
@@ -287,24 +287,86 @@ export function cancelSubtaskSteerText(subagent: Pick<SubagentInfo, "id" | "agen
     + "Continue without its result; do not wait for or use anything it produces.";
 }
 
-/** Header icon button that steers the parent model to cancel a running
- * subtask. Renders nothing unless the child is still live AND the parent can
- * be steered; a first click arms it, a second within four seconds sends the
- * steer. It never claims the child was killed: the parent decides. Mirrors
- * the DialogContent close button's geometry so the pair reads as one row.
+/** Per-subagent controls that older omp (18.3) does not answer. Once the
+ * engine says "Unknown command" the answer cannot change until it is
+ * updated, so the verdict lives for the page session: every dialog and
+ * button reads the same store instead of re-asking on each click. */
+type SubagentControl = "cancel" | "steer";
+const unsupportedControls: Record<SubagentControl, boolean> = { cancel: false, steer: false };
+const unsupportedListeners = new Set<() => void>();
+
+function markControlUnsupported(control: SubagentControl): boolean {
+  if (unsupportedControls[control]) return false;
+  unsupportedControls[control] = true;
+  for (const listener of unsupportedListeners) listener();
+  return true;
+}
+
+function useControlUnsupported(control: SubagentControl): boolean {
+  return useSyncExternalStore(
+    (listener) => { unsupportedListeners.add(listener); return () => { unsupportedListeners.delete(listener); }; },
+    () => unsupportedControls[control],
+    () => false,
+  );
+}
+
+/** Test-only: forget what the engine said it could not do. */
+export function resetSubagentControlSupport(): void {
+  unsupportedControls.cancel = false;
+  unsupportedControls.steer = false;
+}
+
+export type SubtaskCancelOutcome = "cancelled" | "already_finished" | "parent_steered";
+
+/** One cancel attempt. omp 18.4+ kills the child itself (`cancel_subagent`);
+ * an engine that answers "Unknown command" (18.3) is remembered via
+ * `onCancelUnsupported` and the request falls back to steering the parent,
+ * which is the only lever that engine has. Any other failure propagates.
+ * Exported for tests. */
+export async function runSubtaskCancel({ subagent, cancelSubagent, steer, onCancelUnsupported }: {
+  subagent: Pick<SubagentInfo, "id" | "agent" | "task" | "description" | "assignment">;
+  cancelSubagent?: (subagentId: string) => Promise<{ cancelled?: boolean } | undefined>;
+  steer?: (message: string) => Promise<void>;
+  onCancelUnsupported: () => void;
+}): Promise<SubtaskCancelOutcome> {
+  let unsupported: unknown;
+  if (cancelSubagent) {
+    try {
+      const result = await cancelSubagent(subagent.id);
+      return result?.cancelled === true ? "cancelled" : "already_finished";
+    } catch (error) {
+      if (!isUnsupportedCommandError(error)) throw error;
+      unsupported = error;
+      onCancelUnsupported();
+    }
+  }
+  if (!steer) throw unsupported ?? new Error("Cannot cancel this subtask");
+  await steer(cancelSubtaskSteerText(subagent));
+  return "parent_steered";
+}
+
+/** Header icon button that cancels a running subtask. Renders nothing unless
+ * the child is still live AND either the engine can cancel one subagent or
+ * the parent can be steered to do it; a first click arms it, a second within
+ * four seconds sends. On omp 18.4+ the child really stops; on an older engine
+ * the button only asks the parent, and says so. Mirrors the DialogContent
+ * close button's geometry so the pair reads as one row.
  * Exported for SSR tests. */
-export function CancelSubtaskButton({ subagent, status, canSteer, requested, onRequested, onSteer }: {
+export function CancelSubtaskButton({ subagent, status, canSteer, requested, onRequested, onSteer, onCancelSubagent }: {
   subagent: Pick<SubagentInfo, "id" | "agent" | "task" | "description" | "assignment">;
   status: string | undefined;
   canSteer: boolean;
   requested: boolean;
   onRequested: (subagentId: string) => void;
   onSteer?: (message: string) => Promise<void>;
+  /** Per-subagent kill (omp 18.4+). Absent when there is no session to ask. */
+  onCancelSubagent?: (subagentId: string) => Promise<{ cancelled?: boolean } | undefined>;
 }) {
   const { t } = useI18n();
   const [armed, setArmed] = useState(false);
   const [sending, setSending] = useState(false);
   const disarmTimerRef = useRef<number | undefined>(undefined);
+  const cancelUnsupported = useControlUnsupported("cancel");
 
   // A new subagent in the same mounted button must not inherit an armed
   // state; the cleanup also covers unmount.
@@ -314,7 +376,9 @@ export function CancelSubtaskButton({ subagent, status, canSteer, requested, onR
   }, [subagent.id]);
 
   const live = status === "started" || status === "pending" || status === "running";
-  if (!live || !canSteer || !onSteer) return null;
+  const nativeCancel = onCancelSubagent !== undefined && !cancelUnsupported;
+  const parentSteer = canSteer && onSteer !== undefined;
+  if (!live || (!nativeCancel && !parentSteer)) return null;
 
   const handleClick = async () => {
     if (requested || sending) return;
@@ -327,12 +391,19 @@ export function CancelSubtaskButton({ subagent, status, canSteer, requested, onR
     setArmed(false);
     setSending(true);
     try {
-      await onSteer(cancelSubtaskSteerText(subagent));
+      const outcome = await runSubtaskCancel({
+        subagent,
+        cancelSubagent: nativeCancel ? onCancelSubagent : undefined,
+        steer: parentSteer ? onSteer : undefined,
+        onCancelUnsupported: () => { markControlUnsupported("cancel"); },
+      });
       onRequested(subagent.id);
-      toast.info(t("subagentTranscript.cancelRequestedToast"));
+      if (outcome === "cancelled") toast.success(t("subagentTranscript.cancelledToast"));
+      else if (outcome === "already_finished") toast.info(t("subagentTranscript.cancelAlreadyFinished"));
+      else toast.info(t("subagentTranscript.cancelRequestedToast"));
     } catch (error) {
-      // A rejected steer (engine without the command, dropped session) is the
-      // whole story: the button stays available so the user can retry.
+      // A rejected cancel (dropped session, engine refusal) is the whole
+      // story: the button stays available so the user can retry.
       toast.error(t("subagentTranscript.cancelFailed"), error instanceof Error ? error.message : String(error));
     } finally {
       setSending(false);
@@ -371,6 +442,85 @@ export function CancelSubtaskButton({ subagent, status, canSteer, requested, onR
     >
       {sending ? <Loader2 size={16} aria-hidden="true" className="icon-spin" /> : <Ban size={16} aria-hidden="true" />}
     </button>
+  );
+}
+
+/** Footer input that messages ONE running subagent (`steer_subagent`, omp
+ * 18.4+), unlike the composer which steers the parent. Hidden for the rest of
+ * the page session once the engine answers "Unknown command", after telling
+ * the user once why. Disabled while a send is in flight (omp holds the reply
+ * until the child accepts the message); cleared only on success so a refused
+ * message is not lost. Exported for SSR tests. */
+export function SteerSubagentBox({ subagentId, onSend }: {
+  subagentId: string;
+  onSend: (subagentId: string, message: string) => Promise<void>;
+}) {
+  const { t } = useI18n();
+  const [text, setText] = useState("");
+  const [sending, setSending] = useState(false);
+  const unsupported = useControlUnsupported("steer");
+
+  // A different child must not inherit a half-typed message for another.
+  useEffect(() => { setText(""); }, [subagentId]);
+
+  if (unsupported) return null;
+
+  const message = text.trim();
+  const send = async () => {
+    if (!message || sending) return;
+    setSending(true);
+    try {
+      await onSend(subagentId, message);
+      setText("");
+    } catch (error) {
+      if (isUnsupportedCommandError(error)) {
+        if (markControlUnsupported("steer")) toast.info(t("subagentTranscript.steerUnsupported"));
+      } else {
+        toast.error(t("subagentTranscript.steerFailed"), error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <form
+      data-steer-subagent
+      onSubmit={(e) => { e.preventDefault(); void send(); }}
+      style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0, padding: "10px 18px", borderTop: "1px solid var(--border)" }}
+    >
+      <input
+        type="text"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        disabled={sending}
+        placeholder={t("subagentTranscript.steerPlaceholder")}
+        aria-label={t("subagentTranscript.steerLabel")}
+        maxLength={4000}
+        className="ui-focus-ring"
+        style={{
+          flex: 1, minWidth: 0, height: 34, padding: "0 10px", fontSize: 13, fontFamily: "inherit",
+          color: "var(--text)", background: "var(--bg-panel)",
+          border: "1px solid var(--border)", borderRadius: "var(--radius-control)",
+        }}
+      />
+      <button
+        type="submit"
+        disabled={sending || !message}
+        aria-label={t("subagentTranscript.steerSend")}
+        title={t("subagentTranscript.steerSend")}
+        className="ui-focus-ring"
+        style={{
+          width: 34, height: 34, minWidth: 34, display: "flex", alignItems: "center", justifyContent: "center",
+          background: "transparent", border: "1px solid var(--border)", borderRadius: "var(--radius-control)",
+          color: message && !sending ? "var(--accent)" : "var(--text-dim)",
+          cursor: sending ? "wait" : message ? "pointer" : "default",
+          touchAction: "manipulation",
+        }}
+      >
+        {sending ? <Loader2 size={16} aria-hidden="true" className="icon-spin" /> : <Send size={16} aria-hidden="true" />}
+      </button>
+    </form>
   );
 }
 
@@ -498,6 +648,8 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
 }) {
   const { t } = useI18n();
   const reducedMotion = usePrefersReducedMotion();
+  const cancelUnsupported = useControlUnsupported("cancel");
+  const steerUnsupported = useControlUnsupported("steer");
   const [detail, setDetail] = useState<SubagentSnapshotLike | null>(null);
   // Subagent ids whose cancel steer was sent, for the life of this mounted
   // dialog: reopening the same child must not offer a second cancel.
@@ -758,7 +910,15 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
   const subagentActive = live && !completion
     && (currentStatus === "started" || currentStatus === "pending" || currentStatus === "running");
   const recentEvents = events && events.length > 0 ? events.slice(-4) : null;
-  const cancelVisible = subagentActive && onSteer !== undefined;
+  const cancelVisible = subagentActive && (onSteer !== undefined || (sessionId !== null && !cancelUnsupported));
+  const steerVisible = subagentActive && sessionId !== null && !steerUnsupported;
+  const cancelSubagent = useCallback(
+    (subagentId: string) => sendAgentCommand<{ cancelled?: boolean }>(sessionId as string, { type: "cancel_subagent", subagentId }),
+    [sessionId],
+  );
+  const steerSubagent = useCallback(async (subagentId: string, message: string) => {
+    await sendAgentCommand(sessionId as string, { type: "steer_subagent", subagentId, message });
+  }, [sessionId]);
 
   return (
     <Dialog open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
@@ -785,10 +945,11 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
               <CancelSubtaskButton
                 subagent={subagent}
                 status={currentStatus}
-                canSteer={cancelVisible}
+                canSteer={onSteer !== undefined}
                 requested={cancelRequestedIds.has(subagent.id)}
                 onRequested={markCancelRequested}
                 onSteer={onSteer}
+                onCancelSubagent={sessionId ? cancelSubagent : undefined}
               />
             )}
             <div style={{ display: "flex", alignItems: "flex-start", gap: 10, flexShrink: 0, padding: "16px 18px 12px", paddingRight: cancelVisible ? 80 : 44 }}>
@@ -912,6 +1073,7 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
               )}
             </div>
             </div>
+            {steerVisible && <SteerSubagentBox subagentId={subagent.id} onSend={steerSubagent} />}
           </>
         </DialogContent>
       )}

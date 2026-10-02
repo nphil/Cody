@@ -2,7 +2,9 @@ export interface ModelsData {
   models: Record<string, string>;
   /** `unpriced`: omp reports every rate as zero or absent — a local model, a
    *  free tier, or a model omp's catalog does not know yet
-   *  (lib/model-price-fill.ts decides which). */
+   *  (lib/model-price-fill.ts decides which). Not set when omp 18.4.5+ tags the
+   *  zeros deliberate (`pricingStatus` free/included/variable); that tag is
+   *  rare on the wire, so the bundled-catalog judgement still does most work. */
   modelList: { id: string; name: string; provider: string; supportsFastMode?: boolean; contextWindow?: number; unpriced?: true }[];
   defaultModel: { provider: string; modelId: string } | null;
   thinkingLevels: Record<string, string[]>;

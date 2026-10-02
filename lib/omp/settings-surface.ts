@@ -64,6 +64,15 @@ const TERMINAL_ONLY_KEYS = new Set([
   // Cody measures its own from the engine's per-message numbers and draws it
   // on the message (lib/message-rate.ts), so this one reaches nothing here.
   "composer.tokenRate",
+  // omp 18.4.4: TUI composer input behaviour (input-controller.ts) — bare
+  // `exit`/`quit`/`q` on an empty session and bare slash-command words.
+  // Cody's composer has neither.
+  "input.bareExitOnEmptySession",
+  "input.bareSlashCommands",
+  // omp 18.4.4: inside a Tern terminal pane (TERM_PROGRAM=tern) the browser
+  // tool opens tabs as picture-in-pictures over omp's pane. Cody's rpc-ui child
+  // never runs in one, so it only matters to a CLI started in a Tern terminal.
+  "browser.tern",
 ]);
 
 /** Dotted-path prefixes (matched at a segment boundary) that are terminal-only
@@ -75,9 +84,10 @@ const TERMINAL_ONLY_PREFIXES = [
   "tui.",
   "display.",
   "startup.",
-  // The macOS prompt-editor spelling features (omp 18: typo detection, word
-  // autocomplete, autocorrect) act on the TUI composer; Cody's composer has
-  // the browser's own spellcheck.
+  // The macOS prompt-editor spelling features (omp 18: typo detection,
+  // autocorrect) act on the TUI composer; Cody's composer has the browser's
+  // own spellcheck. `spelling.autocomplete` is the exception: Cody's composer
+  // shows the same inline word completion (predict_word, omp 18.4+).
   "spelling.",
   // omp 18.2.5: `omp stream` livestreams the TERMINAL screen to a stream
   // server. Cody draws no such screen, but the CLI a user runs in a Cody
@@ -88,6 +98,7 @@ const TERMINAL_ONLY_PREFIXES = [
 /** Whether a setting configures the harness's terminal UI and therefore has no
  * effect while working in Cody. */
 export function isTerminalOnlySetting(key: string): boolean {
+  if (key === "spelling.autocomplete") return false;
   if (TERMINAL_ONLY_KEYS.has(key)) return true;
   return TERMINAL_ONLY_PREFIXES.some((prefix) => key.startsWith(prefix));
 }
@@ -130,6 +141,28 @@ const SETTING_NOTES: Record<string, string> = {
   // session, subagents included, for 3 min 14 s. Grows with every memory.
   "mnemopi.proactiveLinking":
     "Slows down as memories pile up: after every reply the engine compares the new memory with every stored one, and the whole session (subagents included) is frozen while it does. On an install with ~10,000 memories this took over 3 minutes per reply and grew the memory database to 5 GB. Leave this off.",
+  // omp 18.3.5 session/cache-warmer.ts + sdk.ts (refresh cost counted in session
+  // usage since 18.4.5): the main agent loop replays
+  // its last request (1-token output budget) just before the prompt-cache
+  // entry expires. Default "idle" (no `protocolDefault`, so `--mode rpc-ui` is
+  // NOT pinned off). Only models whose catalog entry declares a `promptCache`
+  // lifetime are warmed, and each refresh must clear an expected-savings
+  // floor of $0.05 (0.15 continuation probability × miss cost − warm cost), so
+  // small prompts are never warmed. Idle warming stops 30 min after the real
+  // request (streaming 60 min); a 1h cache entry is only warmed during a run.
+  // Refreshes are real provider calls counted in session usage. Cody keeps an
+  // engine alive while any tab is attached (rpc-manager resetIdleTimer), so
+  // the 30-minute window runs to its end while the tab stays open; a session
+  // nobody has open is closed after 10 minutes, which also ends warming.
+  "providers.cacheWarming":
+    "Default \"Idle\". After a reply the engine re-sends the whole conversation to the provider just before its prompt cache would expire, to keep it cheap to continue. That is a real provider request each time and it spends quota or money. It only happens for models with a known cache lifetime, only when the saving beats the cost (about $0.05, so long conversations), and for at most 30 minutes after the last reply (60 while a run is active). Cody keeps a session you have open alive, so warming keeps running while its tab is open; a session nobody has open is closed after 10 minutes and warming ends with it. Set to Off to never spend on this.",
+  // omp 18.4.3 speculation/host.ts + task/index.ts: with `task.batch` the
+  // task tool starts each tasks[] item's subagent while the call is still
+  // streaming. Vetoed (falls back to the normal launch) when the task tool's
+  // approval is not auto-allow or any extension has tool_call/tool_result/
+  // tool_approval_* handlers. Cody's own extension registers none of those.
+  "task.speculativeLaunch":
+    "Subagents of a batch task call start as soon as each item has streamed in, so they can appear in Cody before the assistant has finished writing the call. It does not apply when the task tool needs your approval or an extension watches tool calls; the call then launches normally.",
 };
 
 /** The Cody-specific caveat for a setting, when one applies. */

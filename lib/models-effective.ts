@@ -29,9 +29,15 @@ function thinkingLevelsFor(model: OmpModel, fallbackEfforts: boolean): string[] 
   return ["off", ...efforts];
 }
 
-/** Every rate zero or absent. What that means (local, free, or not yet in
- *  omp's catalog) is lib/model-price-fill.ts's call, not this projection's. */
-function isUnpriced(cost: OmpModel["cost"]): boolean {
+/** Every rate zero or absent, and nothing says that is deliberate. omp 18.4.5+
+ *  tags a zero-rate model `free` / `included` / `variable` when the zeros are
+ *  the real price, so those are never "unpriced". Without a status (older
+ *  engine) or with `unknown`, the zeros may be missing data, and what to do
+ *  about that (local model, or not yet in omp's catalog) stays
+ *  lib/model-price-fill.ts's call, not this projection's. */
+export function isUnpriced(model: OmpModel): boolean {
+  const { cost, pricingStatus } = model;
+  if (pricingStatus === "free" || pricingStatus === "included" || pricingStatus === "variable") return false;
   if (!cost) return true;
   return [cost.input, cost.output, cost.cacheRead, cost.cacheWrite].every((rate) => !(typeof rate === "number" && rate > 0));
 }
@@ -103,7 +109,7 @@ export async function loadEffectiveModels(harness: HarnessAdapter): Promise<Mode
         && model.contextWindow > 0
         ? { contextWindow: model.contextWindow }
         : {}),
-      ...(isUnpriced(model.cost) ? { unpriced: true as const } : {}),
+      ...(isUnpriced(model) ? { unpriced: true as const } : {}),
     }))
     .sort(compareModelEntries);
   // Provider login state is an omp surface (agent.db credentials); engines

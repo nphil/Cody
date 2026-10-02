@@ -352,10 +352,15 @@ const ACCOUNT_BASIS_NOTE_KEYS: Record<UsageInUseBasis, string> = {
 
 /** What this conversation says about which account serves `provider`: the
  *  account omp recorded for its latest reply, if it has used the provider.
- *  Otherwise nothing — omp routes a conversation's first request by quota
- *  headroom, so another conversation's account is no evidence here. */
+ *  A recorded pin Cody could not match still proves the provider was used,
+ *  so the account that most recently served a request stands in — labelled
+ *  as that, never as this conversation's. With no pin at all, nothing: omp
+ *  routes a conversation's first request by quota headroom, so another
+ *  conversation's account is no evidence here. */
 function sessionEvidence(snapshot: UsageSnapshot, provider: string): AccountEvidence {
-  return { inUseAccountId: snapshot.sessionAccounts?.[provider]?.accountId ?? null };
+  const entry = snapshot.sessionAccounts?.[provider];
+  if (!entry) return {};
+  return entry.accountId ? { inUseAccountId: entry.accountId } : { recent: true };
 }
 
 function isSelectedModel(active: SessionActiveModel, selected: ModelRef): boolean {
@@ -777,6 +782,13 @@ function AccountRow({
       />
       <span style={{ flex: 1, minWidth: 0, fontSize: 12, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         {account.label}
+        {/* Which account is serving has to read at a glance, not from a dot's
+            hover title; limited/disabled already say so on the right. */}
+        {(account.state === "in_use" || account.state === "standby") && (
+          <span data-testid="quota-account-state" style={{ marginLeft: 6, fontSize: 11, color: account.state === "in_use" ? tone : "var(--text-dim)" }}>
+            {t(ACCOUNT_STATE_LABEL_KEYS[account.state])}
+          </span>
+        )}
       </span>
       {canUseReset && (
         <button

@@ -43,6 +43,9 @@ export interface OmpModel {
   contextWindow?: number | null;
   maxTokens?: number | null;
   cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+  /** How to read an all-zero `cost` (omp 18.4.5+; absent on older engines and
+   * on models with a rate card). */
+  pricingStatus?: "fixed" | "free" | "included" | "variable" | "unknown";
 }
 
 /** Entry of the get_login_providers response (modes/rpc/rpc-types.ts). */

@@ -25,6 +25,7 @@ import { isRecord } from "./type-guards";
 import { taskResultRetryFailure, taskResultStructuredOutput, taskResultUsageCost } from "./task-result-details";
 import type { TodoPhase } from "./pi-types";
 import { sessionPathKey } from "./session-path";
+import { foldSystemReminder } from "./system-reminder";
 import { resolveProject, type ProjectInfo } from "./worktree";
 
 export { getAgentDir };
@@ -873,6 +874,10 @@ export function entryToUiMessage(
       // omp-only roles are folded into displayable custom messages so the
       // existing role-keyed UI renders them without new components.
       if (raw.role === "developer") {
+        // omp's own `<system-reminder>` nudges become slim collapsed rows;
+        // any other developer instruction keeps its labelled bubble.
+        const reminder = foldSystemReminder({ content: raw.content, timestamp: raw.timestamp as number | undefined });
+        if (reminder) return reminder;
         return {
           role: "custom",
           customType: "developer",
