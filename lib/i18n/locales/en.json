@@ -1,4 +1,5 @@
 {
+  "devices.fastbootTerminal": "Fastboot command — {device}",
   "devices.shellAllow": "Allow the agent to run shell commands on {device} until disconnect",
   "devices.shellRevoke": "Revoke agent shell access on {device}",
   "devices.shellGranted": "Agent shell access is on. Commands and output appear in the operation log. Revoking cancels active agent ADB operations, but cannot undo commands already run.",

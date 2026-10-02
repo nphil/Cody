@@ -242,7 +242,7 @@ function validateRequest(request: DeviceOperationRequest): void {
   if (request.sha256 !== undefined && !/^[a-f0-9]{64}$/i.test(request.sha256)) {
     throw new Error("sha256 must be a 64-character hexadecimal digest.");
   }
-  if (Boolean(request.fileId) !== Boolean(request.sha256)) throw new Error("An input file and its SHA-256 digest must be supplied together.");
+  if (Boolean(request.fileId) !== Boolean(request.sha256) && !(request.action === "verify" && request.sha256 && !request.fileId)) throw new Error("An input file and its SHA-256 digest must be supplied together.");
   if ((request.action === "flash" || request.action === "push" || request.action === "sideload") && !request.fileId) {
     throw new Error(request.action + " requires a session artifact and its SHA-256 digest.");
   }

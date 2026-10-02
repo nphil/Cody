@@ -9,6 +9,7 @@ import type { DeviceActivity, DeviceCapabilities, DeviceInfo, DeviceKind, Device
 import { ArtifactPanel } from "@/components/devices/ArtifactPanel";
 import { OperationPanel } from "@/components/devices/OperationPanel";
 import { DeviceTerminals } from "@/components/devices/DeviceTerminals";
+import { deviceArtifacts } from "@/lib/devices/artifacts";
 
 export interface DevicePanelProps {
   sessionId: string | null;
@@ -353,7 +354,7 @@ export function DevicePanel({ sessionId }: DevicePanelProps): React.ReactElement
               </div>
             )}
 
-            <DeviceTerminals manager={operationManager} devices={devices} />
+            <DeviceTerminals manager={operationManager} devices={devices} input={sessionId && selectedInputId ? deviceArtifacts.list(sessionId).find((artifact) => artifact.id === selectedInputId) : undefined} />
             <ArtifactPanel sessionId={sessionId} selectedInputId={selectedInputId} onSelectInput={setSelectedInputId} />
             <OperationPanel sessionId={sessionId} manager={operationManager} devices={devices} selectedInputId={selectedInputId} />
           </>

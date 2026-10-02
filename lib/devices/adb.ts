@@ -806,6 +806,21 @@ async function pull(request: HardwareRequest, context: HardwareContext, action: 
   return { summary: "ADB " + action + " completed; received bytes hashed and escrowed.", verified: true, ...result, details: { target, length: result.length } };
 }
 
+async function verifyWrittenRange(request:HardwareRequest,context:HardwareContext):Promise<HardwareResult> {
+  if(!context.shellAccess?.()) throw new AdbProtocolError("Allow agent shell access before verifying device storage.");
+  const target=requireTarget(request), length=request.length??context.input?.size;
+  const expected=request.sha256?.toLowerCase();
+  if(!expected || !/^[a-f0-9]{64}$/.test(expected) || !Number.isSafeInteger(length) || !length || length<1) throw new AdbProtocolError("ADB verify needs an expected SHA-256 and the exact byte length of the raw image.");
+  if((request.offset??0)!==0) throw new AdbProtocolError("ADB verify currently verifies the prefix of the exact path; use a partition path rather than a whole-disk offset.");
+  const adb=await adbFor(context), capabilities=await shellCapabilities(adb);
+  const output=await shell(adb,"head -c "+length+" "+shQuote(target)+" | "+hashCommand(capabilities.hashTool,"-"),"ADB storage verification");
+  const digest=output.match(/\b[0-9a-f]{64}\b/i)?.[0]?.toLowerCase();
+  if(!digest) throw new AdbProtocolError("The device did not return a readback SHA-256.");
+  context.output?.("Readback SHA-256 "+digest+" ("+length+" bytes): "+target);
+  if(digest!==expected) throw new AdbProtocolError("ADB readback SHA-256 does not match the image. Do not boot it; restore the saved backup or write the correct image.");
+  return {summary:"ADB readback matches the raw image SHA-256.",verified:true,sha256:digest,details:{target,length}};
+}
+
 async function detect(context: HardwareContext): Promise<HardwareResult> {
   const adb = await adbFor(context);
   const [model, device, release] = await Promise.all([
@@ -837,10 +852,12 @@ function operationKind(request: HardwareRequest): string | undefined {
 
 export const adbFlasher: Flasher = {
   protocol: "adb",
-  actions: ["detect", "exec", "push", "pull", "dump", "monitor", "sideload"],
+  actions: ["detect", "exec", "push", "pull", "dump", "monitor", "sideload", "verify"],
   async run(request, context) {
     try {
       switch (request.action) {
+        case "verify":
+          return await verifyWrittenRange(request, context);
         case "sideload":
           return await sideloadAdb(request, context, await adbFor(context));
         case "monitor":

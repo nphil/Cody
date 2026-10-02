@@ -91,8 +91,8 @@ function OperationStartForm({ manager, devices, selectedInputId, sessionId }: Op
   const [expectedChip, setExpectedChip] = useState("");
   const [protectedOverride, setProtectedOverride] = useState("");
   const selectedDevice = devices.find((device) => device.id === deviceId);
-  const needsTarget = action === "flash" || action === "dump" || action === "push" || action === "pull";
-  const needsRange = action === "flash" || action === "dump";
+  const needsTarget = action === "flash" || action === "dump" || action === "push" || action === "pull" || action === "verify";
+  const needsRange = action === "flash" || action === "dump" || action === "verify";
   const needsCommand = action === "exec";
   const needsBaudRate = action === "monitor" && selectedDevice?.kind === "serial";
   const protocolCandidates = useMemo(() => selectedDevice?.protocolCandidates?.filter((candidate) => candidate.protocol === protocol) ?? [], [protocol, selectedDevice]);
@@ -100,7 +100,7 @@ function OperationStartForm({ manager, devices, selectedInputId, sessionId }: Op
   const selectedCandidate = protocolCandidates.find((candidate) => `${candidate.interfaceNumber}:${candidate.alternateSetting}` === candidateKey);
   const [error, setError] = useState<string | null>(null);
   const input = selectedInputId ? deviceArtifacts.list(sessionId).find((artifact) => artifact.id === selectedInputId) : undefined;
-  const inputRequired = action === "flash" || action === "push" || action === "sideload";
+  const inputRequired = action === "flash" || action === "push" || action === "sideload" || action === "verify";
 
   useEffect(() => {
     if (!devices.some((device) => device.id === deviceId)) setDeviceId(devices[0]?.id ?? "");
@@ -122,7 +122,7 @@ function OperationStartForm({ manager, devices, selectedInputId, sessionId }: Op
       if (needsTarget && !target.trim()) throw new Error(t("devices.operationTargetRequired"));
       if (needsCommand && !command.trim()) throw new Error(t("devices.operationCommandRequired"));
       const parsedOffset = offset.trim() ? Number(offset) : undefined;
-      const parsedLength = length.trim() ? Number(length) : undefined;
+      const parsedLength = length.trim() ? Number(length) : action === "verify" ? input?.size : undefined;
       const parsedBaudRate = baudRate.trim() ? Number(baudRate) : undefined;
       for (const [value, label, minimum] of [[parsedOffset, "offset", 0], [parsedLength, "length", 1], [parsedBaudRate, "baud rate", 1]] as const) {
         if (value !== undefined && (!Number.isSafeInteger(value) || value < minimum)) throw new Error(`${label} must be a safe integer of at least ${minimum}.`);
@@ -140,7 +140,7 @@ function OperationStartForm({ manager, devices, selectedInputId, sessionId }: Op
         ...(needsRange && parsedLength !== undefined ? { length: parsedLength } : {}),
         ...(needsBaudRate && parsedBaudRate !== undefined ? { baudRate: parsedBaudRate } : {}),
         ...(needsCommand ? { command: command.trim() } : {}),
-        ...(inputRequired && input ? { fileId: input.id, sha256: input.sha256 } : {}),
+        ...(input && (inputRequired || action === "exec") ? { fileId: input.id, sha256: input.sha256 } : {}),
         ...(Object.keys(options).length > 0 ? { options } : {}),
       });
       setError(null);

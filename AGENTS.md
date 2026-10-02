@@ -2073,24 +2073,23 @@ push retains verified staging/atomic replacement. `device_sideload` serves AOSP
 `sideload-host` block requests; it reports the input SHA-256, not installation
 verification. All structured protected actions require an exact typed override.
 
-#### Verified flashing is intrinsic, never caller-designed
+#### Human-confirmed flashing and honest verification
 
-A caller cannot supply a layout, geometry, protections, or approval in
-`options`. The selected protocol must first detect the device and produce its
-own intrinsic plan. Unknown geometry, a mismatched target/offset/chip, missing
-exact readback, or a partial/unknown destructive footprint refuses before a
-write. For an accepted flash, Cody hashes the original payload, expands to the
-complete erase/program footprint, backs up that complete footprint to committed
-artifact escrow, presents exactly one direct browser confirmation, writes once,
-and exact-reads the complete footprint back for SHA-256 verification. The
-confirmation distinguishes the payload digest/range from the actual program
-digest/erase range and names an exact protected-region override when one is
-allowed. ACKs, progress, CRCs, or a successful command are not verification.
+Caller options cannot supply authority, device geometry, or approval. Each
+structured mutation binds its real target, input digest, and backup status to
+one direct browser confirmation. Protected destinations require typing the
+exact override displayed by the panel. Unknown readback is not a write veto:
+Fastboot explicitly warns, writes once if approved, and reports UNVERIFIED.
+An ACK, progress counter, CRC or successful command is never readback proof.
+A transport timeout is unknown completion, never permission to replay a write.
 
-Protected region matching is classifier-enforced; only the exact named override
-for the matched protected class is accepted. A lost acknowledgement is unknown
-completion, never permission to retry. This applies to every supported flashing
-protocol and is intentionally stricter than vendor command-line behavior.
+Protocols with intrinsic erase geometry preserve and verify their whole erase
+footprint. Fastboot addresses named partitions: when fetch is available it
+backs up the whole partition and verifies raw bytes or sparse RAW/FILL extents;
+sparse DONT_CARE bytes and bytes beyond the image are explicitly unverified.
+Without fetch, boot recovery and use ADB device_verify with the raw image's
+exact target path, byte length, and SHA-256. Sparse file hashes cannot be used
+as expanded-image hashes.
 
 #### Supported protocol boundaries
 
@@ -2104,14 +2103,15 @@ protocol and is intentionally stricter than vendor command-line behavior.
   once, uses esptool device MD5, then reads the full footprint back and
   SHA-256-verifies it. Erase and eFuse actions are refused; detect does not
   promise secure-boot or encryption discovery.
-- **Fastboot:** `detect`, `dump`, `flash`, and narrowly bounded `exec`
-  are supported. Flash has no inferred eMMC topology: it accepts only a whole
-  named partition at offset zero after exact partition/fetch size discovery,
-  full fetched backup, and full fetch readback hash verification. Every
-  partition is conservatively protected and needs the exact shown override.
-  Erase and partial/unknown-readback flashes refuse. `exec` supports volatile
-  `download` (unverified), readback-verified `set_active`, and reboot/reboot-
-  bootloader (unverified); it is not vendor CLI parity.
+- **Fastboot:** detection, arbitrary getvar, streamed dump/backup, raw/sparse
+  named-partition flash, volatile download/boot, set_active, erase, reboot modes,
+  OEM/flashing commands, and arbitrary vendor commands are available. Missing
+  fetch permits a confirmed UNVERIFIED flash; available fetch keeps full backup
+  and image-defined readback. Preloader/LK/TEE/RPMB/GPT/boot0/boot1/eFuse targets
+  require exact typed overrides. Vendor/security commands require typing the
+  entire command. FastbootCommand uses the selected artifact for boot/flash.
+  Host filesystem generation (format) and automatic sparse splitting above
+  the bootloader's download limit are not implemented.
 - **USB DFU:** `detect`, `dump`, verified `flash`, and confirmed
   `abort`/`clear_status` maintenance are descriptor-bound. Flash is allowed
   only for bcdDFU `0x011a` on the actual selected `@Internal Flash` DfuSe

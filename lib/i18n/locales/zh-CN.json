@@ -1,4 +1,5 @@
 {
+  "devices.fastbootTerminal": "Fastboot 命令 — {device}",
   "devices.shellAllow": "允许代理在 {device} 上运行 shell 命令，直到断开连接",
   "devices.shellRevoke": "撤销代理在 {device} 上的 shell 权限",
   "devices.shellGranted": "代理的 shell 权限已开启。命令和输出会显示在操作日志中。撤销权限会取消正在运行的代理 ADB 操作，但无法撤销已执行的命令。",

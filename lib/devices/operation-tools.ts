@@ -84,6 +84,7 @@ function requestFor(
   if ((action === "flash" || action === "push" || action === "sideload") && (!fileId || !sha256)) {
     return action + " requires a session artifact and its exact SHA-256 digest.";
   }
+  if (action === "verify" && (!sha256 || !length || !target)) return "verify requires target, length, and the expected raw-image SHA-256.";
   const descriptorCandidates = bridge.list().find((entry) => entry.id === device.deviceId)?.protocolCandidates
     ?.filter((candidate) => candidate.protocol === protocol) ?? [];
   if (interfaceNumber === undefined && descriptorCandidates.length === 1) {
@@ -211,12 +212,13 @@ const monitorSend: DeviceOperationToolHandler = async (args, context) => {
 
 export const DEVICE_OPERATION_TOOLS: DeviceOperationToolDefinition[] = [
   startDefinition("device_detect", "detect", "Start a browser-hosted protocol detection operation."),
-  startDefinition("device_flash", "flash", "Start a verified flashing operation. Destructive writes pause for direct browser UI approval bound to the exact target, digest, and offset."),
+  startDefinition("device_flash", "flash", "Start browser-hosted flashing. Writes pause for direct confirmation with exact target, hash and backup status. Fastboot without fetch can write after an UNVERIFIED warning; verify in ADB recovery afterwards. Protected destinations require an exact typed override."),
   startDefinition("device_dump", "dump", "Start a device dump or backup operation; resulting bytes remain a session-owned browser artifact."),
   startDefinition("device_exec", "exec", "Run a protocol command with streamed output. ADB arbitrary shell requires the user's connection-scoped shell grant in Devices; without it only id, uname -a, df -h, getprop [ro.*] work. Other state-changing commands require exact browser confirmation.", ["device", "protocol", "command"]),
   startDefinition("device_push", "push", "Start a resumable protocol file push using a session artifact."),
   startDefinition("device_pull", "pull", "Start a protocol file pull; output remains a session-owned browser artifact."),
   startDefinition("device_sideload", "sideload", "Serve a session artifact to ADB recovery sideload. Requires direct approval; transfer completion does not verify installation."),
+  startDefinition("device_verify", "verify", "After a Fastboot write without fetch support, compare an exact raw-image byte range in ADB recovery with the expected SHA-256. Needs target, length, sha256 and the shell grant.", ["device", "protocol", "target", "length", "sha256"]),
   startDefinition("device_monitor", "monitor", "Start an exclusive serial or ADB terminal. ADB needs the user's shell grant. Use device_monitor_send for interactive input."),
   {
     name: "device_operation_status",
