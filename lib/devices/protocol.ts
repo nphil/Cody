@@ -40,7 +40,7 @@ import type {
   PageOperationResultFrame,
   PageOperationSnapshotFrame,
 } from "./operations";
-
+import { parseTunnelMessage, type TunnelFrame } from "./tunnel";
 export type DeviceKind = "serial" | "usb" | "ble";
 
 /** How a serial port is actually reached, which decides what can be expected
@@ -273,7 +273,7 @@ export interface DeviceOperationRequestFrame {
   command: PageOperationCommand;
 }
 
-export type DeviceServerFrame = DeviceRequestFrame | DeviceActivityFrame | DeviceOperationRequestFrame;
+export type DeviceServerFrame = DeviceRequestFrame | DeviceActivityFrame | DeviceOperationRequestFrame | TunnelFrame;
 
 /** How often the activity feed is pushed while a link is busy. Faster than a
  * person reads a changing number, slow enough to cost nothing next to the
@@ -296,7 +296,9 @@ export type DeviceClientFrame =
   | PageOperationSnapshotFrame
   | PageOperationResultFrame
   /** The page lost the device (unplugged, GATT disconnect, permission revoked). */
-  | { type: "gone"; deviceId: string; reason?: string };
+  | { type: "gone"; deviceId: string; reason?: string }
+  /** A port-forward relay message (see ./tunnel.ts). */
+  | TunnelFrame;
 
 /** Bytes the server holds per device before the agent reads them. A serial
  * console left running produces output forever; keeping the newest window is
@@ -377,6 +379,7 @@ export function isDeviceClientFrame(value: unknown): value is DeviceClientFrame 
     return isOperationUpdate(record);
   }
   if (record.type === "artifacts") return isArtifactList(record.artifacts);
+  if (record.type === "tunnel") return parseTunnelMessage(record.message) !== null;
   if (record.type !== "result") return record.type === "hello" || record.type === "devices" || record.type === "data" || record.type === "gone";
   if (typeof record.id !== "string") return false;
   return record.status === "ok" || record.status === "no-data" || record.status === "cancelled" || (record.status === "error" && typeof record.error === "string");

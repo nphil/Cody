@@ -10,6 +10,7 @@ import type {
 import { hashBlob } from "./blob-stream";
 import type { StreamArtifact } from "./flasher";
 import { adbFlasher } from "./adb";
+import type { TunnelChannel } from "./tunnel";
 import { deviceArtifacts } from "./artifacts";
 import { dfuFlasher } from "./dfu";
 import { espFlasher } from "./esp";
@@ -47,6 +48,8 @@ export interface OperationArtifacts {
     identity: string,
     options: { interfaceNumber?: number; alternateSetting?: number; signal: AbortSignal },
   ): Promise<HardwareTransportLease>;
+  /** Browser-to-server relay for ADB port forwarding, when this page has one. */
+  readonly tunnels?: TunnelChannel;
  }
 
 /** The request is intentionally unable to carry an approval. Approval is a separate UI-only action. */
@@ -236,6 +239,34 @@ function validFiniteInteger(value: number | undefined, name: string, minimum = 0
   if (!Number.isSafeInteger(value) || value < minimum) throw new Error(`${name} must be a safe integer at least ${minimum}.`);
 }
 
+interface SharedAdbLease {
+  users: number;
+  options: { interfaceNumber?: number; alternateSetting?: number };
+  pending: Promise<HardwareTransportLease>;
+  closing?: Promise<void>;
+}
+
+/** ADB work that only opens more streams on the already authenticated connection. */
+function sharesAdbConnection(request: DeviceOperationRequest): boolean {
+  if (request.protocol !== "adb") return false;
+  switch (request.action) {
+    case "detect":
+    case "pull":
+    case "dump":
+    case "verify":
+    case "monitor":
+    case "forward":
+    case "reverse":
+      return true;
+    case "exec": {
+      const kind = request.options?.kind;
+      return kind === undefined || kind === "shell" || kind === "reverse-list" || kind === "reverse-remove" || kind === "reverse-remove-all";
+    }
+    default:
+      return false;
+  }
+}
+
 function validateRequest(request: DeviceOperationRequest): void {
   if (!request.deviceId.trim()) throw new Error("A device id is required.");
   if (!request.protocol) throw new Error("A protocol is required.");
@@ -246,6 +277,9 @@ function validateRequest(request: DeviceOperationRequest): void {
     throw new Error("sha256 must be a 64-character hexadecimal digest.");
   }
   if (Boolean(request.fileId) !== Boolean(request.sha256) && !(request.action === "verify" && request.sha256 && !request.fileId)) throw new Error("An input file and its SHA-256 digest must be supplied together.");
+  if ((request.action === "forward" || request.action === "reverse") && !request.target?.trim()) {
+    throw new Error(`${request.action} requires the device-side address as target, for example tcp:8080.`);
+  }
   if ((request.action === "flash" || request.action === "push" || request.action === "sideload") && !request.fileId) {
     throw new Error(request.action + " requires a session artifact and its SHA-256 digest.");
   }
@@ -331,6 +365,67 @@ export class DeviceOperationManager {
     this.transportProvider = transportProvider;
     this.artifacts = artifacts;
     for (const flasher of flashers) this.registerFlasher(flasher);
+  }
+
+  /** Browser-hosted connections that several ADB operations on one device share. */
+  private readonly sharedAdb = new Map<string, SharedAdbLease>();
+
+  /**
+   * One exclusive lease per device, except that ADB operations which only open
+   * more streams on the same authenticated connection (port rules, shells,
+   * pulls, terminals) join the lease already held for that device, as several
+   * `adb` commands share one connection on a PC. The device is released only
+   * when the last of them finishes; anything that rewrites the connection or
+   * the device (push staging, sideload, reboot) still needs the lease alone.
+   */
+  private async acquireLease(record: OperationRecord): Promise<HardwareTransportLease> {
+    const { request } = record;
+    const options = { interfaceNumber: request.interfaceNumber, alternateSetting: request.alternateSetting };
+    if (!sharesAdbConnection(request)) return this.transportProvider.borrowHardwareTransport(request.deviceId, options);
+    const deviceId = request.deviceId;
+    let shared = this.sharedAdb.get(deviceId);
+    while (shared?.closing) {
+      await shared.closing.catch(() => undefined);
+      shared = this.sharedAdb.get(deviceId);
+    }
+    if (shared && (shared.options.interfaceNumber !== options.interfaceNumber || shared.options.alternateSetting !== options.alternateSetting)) {
+      return this.transportProvider.borrowHardwareTransport(deviceId, options);
+    }
+    if (!shared) {
+      const created: SharedAdbLease = { users: 0, options, pending: this.transportProvider.borrowHardwareTransport(deviceId, options) };
+      shared = created;
+      this.sharedAdb.set(deviceId, created);
+      created.pending.catch(() => {
+        if (this.sharedAdb.get(deviceId) === created && created.users === 0) this.sharedAdb.delete(deviceId);
+      });
+    }
+    const entry = shared;
+    entry.users += 1;
+    let base: HardwareTransportLease;
+    try {
+      base = await entry.pending;
+    } catch (error) {
+      entry.users -= 1;
+      if (entry.users === 0 && this.sharedAdb.get(deviceId) === entry) this.sharedAdb.delete(deviceId);
+      throw error;
+    }
+    let released = false;
+    return {
+      transport: base.transport,
+      identity: base.identity,
+      release: async () => {
+        if (released) return;
+        released = true;
+        entry.users -= 1;
+        if (entry.users > 0) return;
+        entry.closing = base.release();
+        try {
+          await entry.closing;
+        } finally {
+          if (this.sharedAdb.get(deviceId) === entry) this.sharedAdb.delete(deviceId);
+        }
+      },
+    };
   }
 
   registerFlasher(flasher: Flasher): void {
@@ -563,10 +658,7 @@ export class DeviceOperationManager {
       const input = await this.resolveInput(record);
       if (record.controller.signal.aborted) throw new DOMException("Operation cancelled.", "AbortError");
       this.reportProgress(record, { phase: "acquiring", message: "Acquiring exclusive hardware lease" });
-      record.lease = await this.transportProvider.borrowHardwareTransport(record.request.deviceId, {
-        interfaceNumber: record.request.interfaceNumber,
-        alternateSetting: record.request.alternateSetting,
-      });
+      record.lease = await this.acquireLease(record);
       if (record.controller.signal.aborted) throw new DOMException("Operation cancelled.", "AbortError");
       record.state = "running";
       this.emit(record, { type: "state", state: record.state });
@@ -632,6 +724,8 @@ export class DeviceOperationManager {
         return this.artifacts.saveStream(this.sessionId, name, chunks, record.controller.signal);
       },
       confirm: (risk) => this.awaitHumanConfirmation(record, risk),
+      operation: { id: record.id, deviceId: record.request.deviceId },
+      tunnels: this.transportProvider.tunnels,
     };
     context.reacquireTransport = async (): Promise<HardwareTransport> => this.reacquireTransport(record, context);
     return flasher.run(record.request, context);

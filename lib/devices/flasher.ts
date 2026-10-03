@@ -1,8 +1,10 @@
+import type { TunnelChannel } from "./tunnel";
+
 /** Page-side protocol boundary. A transport is an exclusive session/device lease,
  * not a fresh connection per packet. Implementations must never retry writes
  * implicitly: a lost acknowledgement makes completion unknown. */
 export type HardwareProtocol = "esp" | "adb" | "fastboot" | "gecko" | "stm32" | "stk500" | "dfu" | "serial";
-export type HardwareAction = "detect" | "flash" | "dump" | "exec" | "push" | "pull" | "monitor" | "sideload" | "verify";
+export type HardwareAction = "detect" | "flash" | "dump" | "exec" | "push" | "pull" | "monitor" | "sideload" | "verify" | "forward" | "reverse";
 
 export interface HardwareRequest {
   protocol: HardwareProtocol;
@@ -75,6 +77,10 @@ export interface HardwareContext {
   saveStream?: (name: string, chunks: AsyncIterable<Uint8Array>) => Promise<StreamArtifact>;
   /** Explicit recovery after the caller verified a safe resume point. It never retries a write. */
   reacquireTransport?: () => Promise<HardwareTransport>;
+  /** The durable operation running this protocol: identity for relay rules. */
+  operation?: { id: string; deviceId: string };
+  /** Browser-to-server relay for port forwarding; absent when no relay is attached. */
+  tunnels?: TunnelChannel;
   /** Request point-of-risk approval. Bound to the exact destination and digest;
    * protocols call this before every destructive action, including shell exec. */
   confirm: (risk: HardwareRisk) => Promise<void>;

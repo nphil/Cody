@@ -271,6 +271,39 @@ async function main() {
       }
     });
   }
+  const tunnelInput = {
+    device: z.string().describe("Exact browser device id from device_list."),
+    target: z.string().describe("Device-side address such as tcp:8080, localabstract:NAME, or (forward only) jdwp:PID."),
+    local: z.string().describe("Host address on the machine running Cody: tcp:PORT (forward may use tcp:0 for any free port, 1024 or above)."),
+  };
+  const tunnelTools = [
+    ["device_forward", "adb forward: listen on 127.0.0.1 of the machine running Cody and relay each connection to the device service through the browser's ADB connection. Long-running; pauses for the user's direct confirmation; ends with device_operation_cancel or device_tunnels remove."],
+    ["device_reverse", "adb reverse: the device listens on target and each connection is relayed through the browser to 127.0.0.1:PORT of the machine running Cody. Long-running; pauses for the user's direct confirmation; ends with device_operation_cancel or device_tunnels remove."],
+  ];
+  for (const [name, description] of tunnelTools) {
+    server.registerTool(name, { description, inputSchema: tunnelInput }, async (input) => {
+      try {
+        const text = await callDeviceTool(name, input);
+        return { content: [{ type: "text", text }] };
+      } catch (error) {
+        return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to start the port rule" }] };
+      }
+    });
+  }
+  server.registerTool("device_tunnels", {
+    description: "List, remove, or remove all adb forward/reverse port rules of this session.",
+    inputSchema: {
+      action: z.enum(["list", "remove", "remove_all"]).optional().describe("Defaults to list."),
+      operationId: z.string().optional().describe("The forward/reverse operation to remove; required for remove."),
+    },
+  }, async (input) => {
+    try {
+      const text = await callDeviceTool("device_tunnels", input);
+      return { content: [{ type: "text", text }] };
+    } catch (error) {
+      return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to manage port rules" }] };
+    }
+  });
   server.registerTool("device_operation_status", {
     description: "Read the bounded snapshot and recent output for an operation id.",
     inputSchema: { operationId: z.string() },

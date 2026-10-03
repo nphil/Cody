@@ -34,6 +34,8 @@ import { SessionConnectionPool, type RetainedSessionConnection } from "./session
 import { reconnectDelayMs } from "@/lib/stream-recovery";
 import { NO_CAPABILITIES, type BleServiceInfo, type BleTraceEvent, type DeviceActivity, type DeviceCapabilities, type DeviceClientFrame, type DeviceInfo, type DeviceKind, type DeviceOpName, type DeviceProtocolCandidate, type DeviceServerFrame, type UsbOpenResult } from "./protocol";
 import { cdcControlInterface, cdcSerialTransport } from "./cdc";
+import { TunnelClient } from "./tunnel-client";
+import { parseTunnelMessage } from "./tunnel";
 
 /**
  * TypeScript's bundled DOM lib does not yet ship the User-Agent Client Hints
@@ -754,6 +756,10 @@ function parseServerFrame(raw: unknown): DeviceServerFrame | null {
     }
     return { type: "op", id: candidate.id, op: candidate.op, deviceId: candidate.deviceId, params: candidate.params, timeoutMs: candidate.timeoutMs };
   }
+  if (candidate.type === "tunnel") {
+    const message = parseTunnelMessage(candidate.message);
+    return message ? { type: "tunnel", message } : null;
+  }
   if (candidate.type !== "activity" || !Array.isArray(candidate.devices) || !candidate.devices.every(isDeviceActivity)) return null;
   return { type: "activity", devices: candidate.devices };
 }
@@ -1383,6 +1389,8 @@ export class DeviceBridgeConnection implements PageOperationBridge {
   private operationDelegate: PageOperationDelegate | null = null;
   private operationUnsubscribe: (() => void) | null = null;
   private usbConnectListener: ((event: USBConnectionEvent) => void) | null = null;
+  /** adb forward/reverse relay to the Cody server for this session. */
+  readonly tunnels = new TunnelClient((message) => this.send({ type: "tunnel", message }));
 
   constructor(sessionId: string) {
     this.sessionId = sessionId;
@@ -1482,6 +1490,7 @@ export class DeviceBridgeConnection implements PageOperationBridge {
     this.clearActivity();
     this.listeners.clear();
     this.activityListeners.clear();
+    this.tunnels.dropAll("Device connection closed.");
     this.socket?.close();
     this.socket = null;
   }
@@ -1502,6 +1511,7 @@ export class DeviceBridgeConnection implements PageOperationBridge {
           if (this.socket !== socket) return;
           this.socket = null;
           this.clearActivity();
+          this.tunnels.dropAll("The connection to the Cody server closed.");
           const replaced = event.code === 4001 && event.reason === "Device host authority replaced.";
           if (replaced) {
             this.authorityRevoked = true;
@@ -1588,6 +1598,10 @@ export class DeviceBridgeConnection implements PageOperationBridge {
     if (!frame) return;
     if (frame.type === "activity") {
       this.publishActivity(frame.devices);
+      return;
+    }
+    if (frame.type === "tunnel") {
+      this.tunnels.receive(frame.message);
       return;
     }
     if (frame.type === "operation") {

@@ -188,7 +188,8 @@ item remains **UNVERIFIED** until its permitted evidence is completed.
   actual exit status. Keep the tablet awake; a disconnect before status means
   unknown completion and never triggers automatic command replay.
 - [ ] **UNVERIFIED** The user can open an ADB terminal without granting the agent
-  shell access. Close that exclusive terminal before starting an agent command.
+  shell access. The terminal shares the device's ADB connection with shells and
+  port rules; push staging, sideload, and reboot still need it closed first.
 - [ ] **UNVERIFIED** Raw block/symlink push offers a backup and requires the
   exact typed target override rather than pretending to be an atomic file push.
 - [ ] **UNVERIFIED** Interrupted push/pull recovery preserves the original
@@ -198,6 +199,33 @@ item remains **UNVERIFIED** until its permitted evidence is completed.
   file and local source have matching SHA-256.
 - [ ] **UNVERIFIED** Switching Cody sessions during that 100 MB+ transfer does
   not resume or complete the original operation in the new session.
+
+### ADB port forward and reverse
+
+Use a recoverable, non-critical device and a throwaway service on each side
+(for example `python3 -m http.server` on the Cody server, and a listener on
+the device). None of this writes device storage; it opens network paths.
+
+- [ ] **UNVERIFIED** `device_forward` shows a confirmation card naming the
+  device service, the Cody-server loopback port, and that every process on the
+  Cody server can then connect. Nothing listens before the tap (check with
+  `ss -ltn` on the server); declining leaves nothing behind.
+- [ ] **UNVERIFIED** After the tap, a client on the **Cody server** reaches the
+  device service (HTTP request returns the device's real response). Record the
+  port, device model, and Android release.
+- [ ] **UNVERIFIED** A multi-megabyte download through the forward matches its
+  source SHA-256 while a second client connects at the same time.
+- [ ] **UNVERIFIED** `device_reverse` card names the device address and Cody
+  server port; an app or `nc` on the device reaches the Cody-server service.
+  `device_exec` `reverse-list` shows the rule; after removal it is gone.
+- [ ] **UNVERIFIED** While both are live, a diagnostic `device_exec "id"` and a
+  Devices-panel terminal still work on the same connection, and cancelling the
+  forward leaves the reverse working (`device_tunnels` agrees).
+- [ ] **UNVERIFIED** Cancel, the card's Cancel button, unplugging the USB
+  cable, closing the tab, and a second tab taking over each remove the
+  listener (port refused on the server) and any device-side reverse rule.
+- [ ] **UNVERIFIED** A reverse to Cody's own port, and a forward below 1024,
+  are refused with the stated reason.
 
 ## Optional local helper (not shipped)
 

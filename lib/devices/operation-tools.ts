@@ -3,6 +3,7 @@ import { numberArg, stringArg } from "../session-tools";
 import { isRecord } from "../type-guards";
 import { matchDevice, type DeviceBridge } from "./bus";
 import type { HardwareAction, HardwareProtocol } from "./flasher";
+import { parseDeviceSpec, parseHostSpec } from "./tunnel";
 import type { DeviceOperationRequest, DeviceOperationSnapshot } from "./operations";
 
 export interface DeviceOperationToolContext {
@@ -64,7 +65,7 @@ function requestFor(
 ): DeviceOperationRequest | string {
   const device = resolveDeviceId(args, bridge);
   if ("error" in device) return device.error;
-  const protocol = stringArg(args, "protocol");
+  const protocol = stringArg(args, "protocol") ?? (action === "forward" || action === "reverse" ? "adb" : undefined);
   if (!protocol || !PROTOCOLS[protocol as HardwareProtocol]) return "protocol must be one of esp, adb, fastboot, gecko, stm32, stk500, dfu, or serial.";
   const offset = optionalInteger(args, "offset");
   if (typeof offset === "string") return offset;
@@ -103,12 +104,25 @@ function requestFor(
     return "USB interface " + interfaceNumber + " alternate setting " + (alternateSetting ?? "(required)") + " does not advertise " + protocol + " on this device.";
   }
   if (command && command.length > MAX_OPERATION_TEXT) return "command is too large.";
-  if (action === "exec" && !command?.trim()) return "device_exec requires command.";
   const suppliedOptions = args.options;
   if (suppliedOptions !== undefined && !isRecord(suppliedOptions)) return "options must be an object.";
   if (suppliedOptions && ("approval" in suppliedOptions || "approved" in suppliedOptions || "confirm" in suppliedOptions)) {
     return "Operation options cannot carry an approval; destructive actions require direct browser UI confirmation.";
   }
+  const deviceSideKind = DEVICE_SIDE_EXEC_KINDS.includes(String(suppliedOptions?.kind));
+  if (action === "exec" && !command?.trim() && !deviceSideKind) return "device_exec requires command.";
+  const local = stringArg(args, "local");
+  const tunnel = action === "forward" || action === "reverse";
+  if (tunnel) {
+    if (protocol !== "adb") return action + " is an ADB feature: use protocol adb.";
+    try {
+      parseDeviceSpec(target, action);
+      parseHostSpec(local, action);
+    } catch (error) {
+      return operationError(error);
+    }
+  }
+  const options = tunnel ? { ...suppliedOptions, local } : suppliedOptions ? { ...suppliedOptions } : undefined;
   return {
     protocol: protocol as HardwareProtocol,
     action,
@@ -122,7 +136,7 @@ function requestFor(
     ...(baudRate === undefined ? {} : { baudRate }),
      ...(interfaceNumber === undefined ? {} : { interfaceNumber }),
     ...(alternateSetting === undefined ? {} : { alternateSetting }),
-    ...(suppliedOptions ? { options: { ...suppliedOptions } } : {}),
+    ...(options ? { options } : {}),
   };
 }
 
@@ -211,16 +225,116 @@ const monitorSend: DeviceOperationToolHandler = async (args, context) => {
   }
 };
 
+const DEVICE_SIDE_EXEC_KINDS = ["reverse-list", "reverse-remove", "reverse-remove-all"];
+
+const TUNNEL_PROPERTIES = {
+  device: OPERATION_PROPERTIES.device,
+  target: { type: "string", description: "Device-side address, for example tcp:8080." },
+  local: { type: "string", description: "Host address on the Cody server, tcp:PORT." },
+} as const;
+
+function tunnelDefinition(name: string, action: "forward" | "reverse", description: string): DeviceOperationToolDefinition {
+  const start = startingHandler(action);
+  return {
+    name,
+    description,
+    parameters: { type: "object", properties: TUNNEL_PROPERTIES, required: ["device", "target", "local"] },
+    handler: async (args, context) => {
+      const text = await start(args, context);
+      return text.startsWith("Operation ")
+        ? `${text} A port rule waits for the user's confirmation in the Devices panel first; once it is running, device_operation_status shows the bound host port and device_tunnels lists every rule.`
+        : text;
+    },
+  };
+}
+
+function isTunnelOperation(snapshot: DeviceOperationSnapshot): boolean {
+  return snapshot.request.protocol === "adb" && (snapshot.request.action === "forward" || snapshot.request.action === "reverse");
+}
+
+function isFinished(snapshot: DeviceOperationSnapshot): boolean {
+  return snapshot.state === "succeeded" || snapshot.state === "failed" || snapshot.state === "cancelled";
+}
+
+function describeRule(snapshot: DeviceOperationSnapshot, port: number | undefined): string {
+  const local = typeof snapshot.request.options?.local === "string" ? snapshot.request.options.local : "?";
+  const host = port === undefined ? local : `tcp:${port} (127.0.0.1)`;
+  return snapshot.request.action === "forward"
+    ? `forward ${host} -> device ${snapshot.request.target}`
+    : `reverse device ${snapshot.request.target} -> ${host}`;
+}
+
+const tunnelsHandler: DeviceOperationToolHandler = async (args, context) => {
+  const action = stringArg(args, "action") ?? "list";
+  const { bridge } = context;
+  const live = bridge.tunnels.list();
+  const open = bridge.operationSnapshots().filter((snapshot) => isTunnelOperation(snapshot) && !isFinished(snapshot));
+  if (action === "list") {
+    if (open.length === 0) return "No adb forward or reverse rules are active in this session.";
+    const lines = open.map((snapshot) => {
+      const rule = live.find((entry) => entry.operationId === snapshot.id);
+      const traffic = rule
+        ? `${rule.connections} open connection(s), ${rule.bytesToDevice} B to the device, ${rule.bytesFromDevice} B from it`
+        : `not established yet (${snapshot.confirmation ? "waiting for the user's confirmation" : snapshot.state})`;
+      return `- operation ${snapshot.id}: ${describeRule(snapshot, rule?.port)}; device ${snapshot.request.deviceId}; ${traffic}.`;
+    });
+    return ["Active port rules:", ...lines].join("\n");
+  }
+  if (action === "remove") {
+    const id = operationId(args);
+    if (!id) return "operationId is required.";
+    const snapshot = bridge.operationStatus(id);
+    if (!snapshot || !isTunnelOperation(snapshot)) return "That operation is not a forward/reverse rule in this session.";
+    if (isFinished(snapshot)) return "That rule has already ended.";
+    try {
+      await bridge.cancelOperation(id);
+      return `Removal was sent for ${describeRule(snapshot, live.find((entry) => entry.operationId === id)?.port)}. It stays listed until the browser reports it ended.`;
+    } catch (error) {
+      return `Could not remove the rule: ${operationError(error)}`;
+    }
+  }
+  if (action === "remove_all") {
+    if (open.length === 0) return "No adb forward or reverse rules are active in this session.";
+    const failures: string[] = [];
+    for (const snapshot of open) {
+      try {
+        await bridge.cancelOperation(snapshot.id);
+      } catch (error) {
+        failures.push(`${snapshot.id}: ${operationError(error)}`);
+      }
+    }
+    return failures.length === 0
+      ? `Removal was sent for ${open.length} rule(s).`
+      : `Removal was sent for ${open.length - failures.length} of ${open.length} rule(s). Failed: ${failures.join("; ")}`;
+  }
+  return "action must be list, remove, or remove_all.";
+};
+
 export const DEVICE_OPERATION_TOOLS: DeviceOperationToolDefinition[] = [
   startDefinition("device_detect", "detect", "Start a browser-hosted protocol detection operation."),
   startDefinition("device_flash", "flash", "Start browser-hosted flashing. Writes pause for direct confirmation with exact target, hash and backup status. Fastboot without fetch can write after an UNVERIFIED warning; verify in ADB recovery afterwards. Protected destinations require an exact typed override."),
   startDefinition("device_dump", "dump", "Start a device dump or backup operation; resulting bytes remain a session-owned browser artifact."),
-  startDefinition("device_exec", "exec", "Run a protocol command with streamed output. ADB arbitrary shell requires the user's connection-scoped shell grant in Devices; without it only id, uname -a, df -h, getprop [ro.*] work. Other state-changing commands require exact browser confirmation.", ["device", "protocol", "command"]),
+  startDefinition("device_exec", "exec", "Run a protocol command with streamed output. ADB arbitrary shell requires the user's connection-scoped shell grant in Devices; without it only id, uname -a, df -h, getprop [ro.*] work. Other state-changing commands require exact browser confirmation. ADB also takes options.kind: reverse-list (adb reverse --list), reverse-remove with target tcp:PORT, or reverse-remove-all; these need no command.", ["device", "protocol"]),
   startDefinition("device_push", "push", "Start a resumable protocol file push using a session artifact."),
   startDefinition("device_pull", "pull", "Start a protocol file pull; output remains a session-owned browser artifact."),
   startDefinition("device_sideload", "sideload", "Serve a session artifact to ADB recovery sideload. Requires direct approval; transfer completion does not verify installation."),
   startDefinition("device_verify", "verify", "After a Fastboot write without fetch support, compare an exact raw-image byte range in ADB recovery with the expected SHA-256. Needs target, length, sha256 and the shell grant.", ["device", "protocol", "target", "length", "sha256"]),
-  startDefinition("device_monitor", "monitor", "Start an exclusive serial or ADB terminal. ADB needs the user's shell grant. Use device_monitor_send for interactive input."),
+  startDefinition("device_monitor", "monitor", "Start a serial or ADB terminal. ADB needs the user's shell grant; it shares the device's ADB connection with port rules, shells and pulls. Use device_monitor_send for interactive input."),
+  tunnelDefinition("device_forward", "forward", "adb forward: make a device service reachable on the Cody server. Starts a long-running operation that listens on 127.0.0.1:PORT of the machine running Cody (NOT the tablet or PC holding the device) and relays each connection to the device service through the browser's ADB connection. Requires the user's direct confirmation; the rule lives until device_operation_cancel, device_tunnels remove, or a disconnect. target is the device service (tcp:PORT, localabstract:NAME, localreserved:NAME, localfilesystem:PATH, dev:PATH, jdwp:PID); local is tcp:PORT or tcp:0 for any free port, 1024 or above."),
+  tunnelDefinition("device_reverse", "reverse", "adb reverse: let apps on the device reach a service on the Cody server. Starts a long-running operation; the device listens on target (tcp:PORT, tcp:0, localabstract:NAME, localreserved:NAME, localfilesystem:PATH) and each connection is relayed through the browser to 127.0.0.1:PORT of the machine running Cody, given as local (tcp:PORT). Requires the user's direct confirmation and never reaches Cody's own port. The rule lives until device_operation_cancel, device_tunnels remove, or a disconnect."),
+  {
+    name: "device_tunnels",
+    description: "adb forward/reverse --list, --remove and --remove-all for this session: list the live port rules (host port, device address, connections, bytes), remove one by its operationId, or remove them all. Rules created by other programs on the device are reached with device_exec options.kind reverse-list, reverse-remove, or reverse-remove-all.",
+    parameters: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["list", "remove", "remove_all"], description: "Defaults to list." },
+        operationId: { type: "string", description: "The forward/reverse operation to remove; required for remove." },
+      },
+      required: [],
+    },
+    handler: tunnelsHandler,
+  },
   {
     name: "device_operation_status",
     description: "Read the bounded current snapshot and recent output for a device operation id.",

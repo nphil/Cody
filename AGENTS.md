@@ -2039,7 +2039,8 @@ re-use a grant across sessions.
 Use high-level operation tools for supported work:
 `device_detect`, `device_dump`, `device_flash`, `device_exec`,
 `device_push`, `device_pull`, `device_sideload`, `device_verify`,
-`device_monitor`, `device_monitor_send`, `device_operation_status`, and
+`device_monitor`, `device_monitor_send`, `device_forward`, `device_reverse`,
+`device_tunnels`, `device_operation_status`, and
 `device_operation_cancel`. Start requests name the exact browser `device`,
 `protocol`, and where relevant target, offset, interface, and artifact
 `fileId` with its displayed SHA-256. The operation runs independently in the
@@ -2079,7 +2080,62 @@ regex filter or per-command prompt. No total shell-command timeout is imposed;
 a missing initial daemon response is bounded, but quiet established connections
 stay alive. Output is streamed into bounded logs and nonzero exit status fails.
 A reboot/disconnect before status arrives means unknown completion, not success.
-The user must close an interactive terminal before another exclusive ADB job.
+Port rules, shells, pulls, detection, and terminals share one ADB connection per
+device; push staging, sideload, reboot, and the TWRP script still need the device
+lease alone, so they fail with a lease-busy error while any of those is open.
+
+#### ADB port forward and reverse
+
+`device_forward` (`adb forward`), `device_reverse` (`adb reverse`), and
+`device_tunnels` (`--list` / `--remove` / `--remove-all` for this session) are
+real, relay-backed ADB features, not a local shell helper. The browser cannot
+listen on a TCP port, and the server cannot reach the device, so the rule is
+split: the page owns the authenticated ADB connection and the server owns the
+TCP endpoint, joined by `{ type: "tunnel" }` frames on the existing device
+socket (`lib/devices/tunnel.ts` vocabulary, `tunnel-host.ts` server half,
+`tunnel-client.ts` page half, `adb.ts` forward/reverse).
+
+- **"Host" means the machine running Cody.** A forward listens on
+  `127.0.0.1:PORT` of the Cody server (what an agent calls `localhost`), never
+  on the tablet or PC holding the device, and never on a LAN address. A reverse
+  dials `127.0.0.1:PORT` of the Cody server. Browsers cannot listen or open raw
+  TCP, so the tablet's own `localhost` is unreachable by design.
+- **Grammar.** Forward device side: `tcp:`, `localabstract:`, `localreserved:`,
+  `localfilesystem:`, `dev:`, `jdwp:`. Reverse device side: `tcp:` (also
+  `tcp:0`), `localabstract:`, `localreserved:`, `localfilesystem:`. Host side is
+  always `tcp:PORT` (forward: 1024+ or `tcp:0`). `;` and control characters are
+  refused (`parseDeviceSpec` / `parseHostSpec`).
+- **One rule = one long-running operation.** It follows the normal operation
+  path: request -> the page's confirmation card (action `adb.forward` /
+  `adb.reverse`, exact target, host port, who can then connect) -> running until
+  `device_operation_cancel`, `device_tunnels remove`, the card's Cancel, a
+  disconnect, or a lost connection. Nothing listens and the device is not
+  touched before the tap. Cancelling removes the listener, closes every
+  connection, and (reverse) asks the device to `killforward` before the
+  connection is closed.
+- **The server verifies; it does not trust the page blindly.** A `listen` or
+  `reverse` claim is accepted only for an operation of this session whose
+  snapshot is `running` and records a confirmation event; one rule per
+  operation, 16 per session, 64 connections per rule; privileged ports and
+  Cody's own port (`PORT`, `CODY_INTERNAL_DISPLAY_ORIGIN`) are refused for both
+  listening and dialing; page-minted connection ids must start `p-`. Rules die
+  with the page socket, a replacing page, the device's `gone`, or the
+  operation's terminal snapshot (`TunnelHost.closeAll/closeDevice/closeOperation`).
+- **Credit-based flow control**, not unbounded buffering: 48 KiB chunks, a
+  512 KiB window per connection, acknowledged only after the far sink accepted
+  the bytes. Half-close does not exist in ADB, so (like a PC) the first end
+  closes the stream after the bytes already sent.
+- **Shared ADB connection.** Forward/reverse, `detect`, `pull`/`dump`,
+  `verify`, terminals and read/shell `exec` join the lease already held for the
+  device (`DeviceOperationManager.acquireLease`, one real `borrowHardwareTransport`)
+  and one authenticated session (`adb.ts` `AdbHold`): the connection is bound
+  to the hold, not to one operation's signal, and torn down only when the last
+  operation leaves or every remaining one is cancelled. Cancelling one rule
+  never drops another. Anything that rewrites the device or connection (push
+  staging/reacquire, sideload, reboot, TWRP script) keeps the exclusive lease.
+- `device_exec` with `options.kind` `reverse-list`, `reverse-remove`, or
+  `reverse-remove-all` manages rules *on the device* (including ones other
+  programs made); remove and remove-all need a confirmation.
 
 ADB transfers hash in bounded chunks (`blob-stream.ts`). Pull/backup uses an OPFS
 spool, commits the result to IndexedDB escrow, then removes the spool. Restricted
@@ -2147,8 +2203,10 @@ as expanded-image hashes.
   a backup and requires an exact typed write override. Pull streams into escrow.
   Reboot mode and queued TWRP OpenRecoveryScript remain the original bounded
   helpers in this checkpoint; arbitrary commands use the granted shell path.
-  A new USB mode needs the user's new grant. Port forward/reverse and MTK
-  download-agent support are not implemented in this checkpoint.
+  A new USB mode needs the user's new grant. `adb forward` / `adb reverse` are
+  supported through the server relay (see "ADB port forward and reverse"). MTK
+  preloader/BROM/download-agent support is **not implemented** (parked); see
+  `docs/hardware-parity.md` for every tool's command-by-command status.
 - **Serial bootloaders:** Gecko provides detection/XMODEM framing only until a
   verified readback-capable flash profile exists. STM32 flash is limited to ROM
   PID `0x0410` (STM32F103 medium-density), factory-size discovery, and 1 KiB

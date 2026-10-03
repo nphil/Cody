@@ -10,6 +10,7 @@
 
 import { getDeviceBridge } from "./bus";
 import { ACTIVITY_FEED_MS, isDeviceClientFrame, type DeviceCapabilities, type DeviceInfo, type DeviceServerFrame } from "./protocol";
+import { parseTunnelMessage } from "./tunnel";
 /** The subset of a `ws` socket this module uses, so the launcher can hand one
  * over without this file importing `ws` (and Next bundling it). */
 export interface DeviceSocket {
@@ -161,6 +162,11 @@ export function attachDeviceSocket(sessionId: string, socket: DeviceSocket): voi
       case "operation.result":
         if (parsed.snapshot.sessionId === sessionId) bridge.receiveOperationResult(parsed);
         break;
+      case "tunnel": {
+        const message = parseTunnelMessage(parsed.message);
+        if (message) bridge.tunnels.receive(message);
+        break;
+      }
       case "gone":
         if (typeof parsed.deviceId === "string") bridge.removeDevice(parsed.deviceId);
         break;

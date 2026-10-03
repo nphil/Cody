@@ -1,4 +1,4 @@
-import { Adb, AdbCommand, AdbDaemonTransport, AdbPacket, AdbPacketSerializeStream, calculateChecksum, type AdbPacketData, type AdbPacketInit } from "@yume-chan/adb";
+import { Adb, AdbCommand, AdbDaemonTransport, AdbPacket, AdbPacketSerializeStream, calculateChecksum, type AdbPacketData, type AdbPacketInit, type AdbSocket } from "@yume-chan/adb";
 import type { StructDeserializer } from "@yume-chan/struct";
 import AdbWebCredentialStore from "@yume-chan/adb-credential-web";
 import {
@@ -9,6 +9,7 @@ import {
   WritableStream as AdbWritableStream,
 } from "@yume-chan/stream-extra";
 import type { Flasher, HardwareContext, HardwareRequest, HardwareResult, HardwareTransport } from "./flasher";
+import { parseDeviceSpec, parseHostSpec, type DeviceSpec, type ForwardLease, type HostSpec, type ReverseLease, type TunnelChannel, type TunnelConnection } from "./tunnel";
 import { hashFirmware, normalizeSha256, sha256Blob } from "./hardware-safety";
 import { sideloadAdb } from "./adb-sideload";
 
@@ -124,9 +125,12 @@ function credentials(): AdbWebCredentialStore {
 async function adbFor(context: HardwareContext): Promise<Adb> {
   const existing = adbSessions.get(context.transport);
   if (existing) return existing;
+  // The connection outlives any single operation when several share it, so it
+  // is bound to the hold's own signal, never to one operation's.
+  const sessionSignal = adbHolds.get(context.transport)?.controller.signal ?? context.signal;
 
   let initialProbeFailed = false;
-    const connection = createAdbHardwareConnection(context.transport, context.signal, () => { initialProbeFailed = true; });
+    const connection = createAdbHardwareConnection(context.transport, sessionSignal, () => { initialProbeFailed = true; });
   const pending = AdbDaemonTransport.authenticate({
     serial: "cody-browser",
     connection,
@@ -141,7 +145,7 @@ async function adbFor(context: HardwareContext): Promise<Adb> {
   } catch (error) {
     adbSessions.delete(context.transport);
     const message = error instanceof Error ? error.message : String(error);
-    if (initialProbeFailed || message.includes("bounded initial protocol probe")) { const existing = await attachExistingDaemon(context);
+    if (initialProbeFailed || message.includes("bounded initial protocol probe")) { const existing = await attachExistingDaemon(context, sessionSignal);
     if (existing) {
       const restored = Promise.resolve(existing);
       adbSessions.set(context.transport, restored);
@@ -155,6 +159,8 @@ async function adbFor(context: HardwareContext): Promise<Adb> {
   }
 }
 
+/** Close the cached ADB session for a transport. Callers go through `AdbHold`
+ * so a connection shared by several operations is closed only by the last. */
 async function closeCachedAdb(transport: HardwareTransport): Promise<void> {
   const pending = adbSessions.get(transport);
   adbSessions.delete(transport);
@@ -165,6 +171,88 @@ async function closeCachedAdb(transport: HardwareTransport): Promise<void> {
     // A disconnected transport cannot make protocol cleanup a second failure.
   }
 }
+
+/**
+ * ADB multiplexes streams over one authenticated connection, so port rules,
+ * shells and pulls on one device share it instead of queuing for the lease.
+ * The connection is bound to the hold's own signal and closed by the last
+ * operation to leave; it is torn down early only when EVERY remaining operation
+ * has been cancelled, so cancelling one forward never drops another.
+ */
+interface AdbHold {
+  /** Operations using the connection, and those among them not yet cancelled. */
+  users: number;
+  active: number;
+  /** Operations that need the live connection to clean up after their own cancel. */
+  retained: number;
+  controller: AbortController;
+}
+
+const adbHolds = new WeakMap<HardwareTransport, AdbHold>();
+
+function abortIfAbandoned(hold: AdbHold): void {
+  if (hold.users > 0 && hold.active === 0 && hold.retained === 0) hold.controller.abort();
+}
+
+function enterAdbHold(context: HardwareContext): () => Promise<void> {
+  const { transport, signal } = context;
+  let hold = adbHolds.get(transport);
+  if (!hold) {
+    hold = { users: 0, active: 0, retained: 0, controller: new AbortController() };
+    adbHolds.set(transport, hold);
+  }
+  const entered = hold;
+  entered.users += 1;
+  let counted = !signal.aborted;
+  const onAbort = (): void => {
+    if (!counted) return;
+    counted = false;
+    entered.active -= 1;
+    abortIfAbandoned(entered);
+  };
+  if (counted) {
+    entered.active += 1;
+    signal.addEventListener("abort", onAbort, { once: true });
+  } else abortIfAbandoned(entered);
+  let left = false;
+  return async () => {
+    if (left) return;
+    left = true;
+    signal.removeEventListener("abort", onAbort);
+    if (counted) {
+      counted = false;
+      entered.active -= 1;
+    }
+    entered.users -= 1;
+    if (entered.users > 0) {
+      abortIfAbandoned(entered);
+      return;
+    }
+    if (adbHolds.get(transport) === entered) adbHolds.delete(transport);
+    try {
+      await closeCachedAdb(transport);
+      // A resumed push swaps context.transport for a reacquired one.
+      if (context.transport !== transport) await closeCachedAdb(context.transport);
+    } finally {
+      entered.controller.abort();
+    }
+  };
+}
+
+/** Keep the connection alive past this operation's own cancellation, so it can
+ * undo what it set up on the device (a reverse rule). Returns the release. */
+function retainAdbSession(context: HardwareContext): () => void {
+  const hold = adbHolds.get(context.transport);
+  if (!hold) return () => undefined;
+  hold.retained += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    hold.retained -= 1;
+    abortIfAbandoned(hold);
+  };
+}
 const EXISTING_DAEMON_PROBE_ID = 0x43504459;
 const EXISTING_DAEMON_PROBE_MS = 5_000;
 
@@ -172,10 +260,10 @@ function adbPacket(command: number, arg0: number, arg1: number, payload: Uint8Ar
   return { command, arg0, arg1, payload, checksum: calculateChecksum(payload), magic: command ^ -1 };
 }
 
-async function attachExistingDaemon(context: HardwareContext): Promise<Adb | undefined> { const controller = new AbortController();
-const abortFromContext = () => controller.abort(context.signal.reason);
-if (context.signal.aborted) abortFromContext();
-else context.signal.addEventListener("abort", abortFromContext, { once: true });
+async function attachExistingDaemon(context: HardwareContext, signal: AbortSignal): Promise<Adb | undefined> { const controller = new AbortController();
+const abortFromContext = () => controller.abort(signal.reason);
+if (signal.aborted) abortFromContext();
+else signal.addEventListener("abort", abortFromContext, { once: true });
 const timer = setTimeout(() => controller.abort(new AdbProtocolError("ADB existing-stream probe timed out.")), EXISTING_DAEMON_PROBE_MS);
 const connection = createAdbHardwareConnection(context.transport, controller.signal);
 const reader = connection.readable.getReader();
@@ -210,7 +298,7 @@ try {
   }
 } finally {
   clearTimeout(timer);
-  context.signal.removeEventListener("abort", abortFromContext);
+  signal.removeEventListener("abort", abortFromContext);
   reader.releaseLock();
   writer.releaseLock();
   if (!reusable) controller.abort();
@@ -844,6 +932,250 @@ async function detect(context: HardwareContext): Promise<HardwareResult> {
   };
 }
 
+const TUNNEL_CLEANUP_MS = 3_000;
+
+/** Bound an orderly cleanup step: a device that stopped answering must not keep a cancelled rule alive. */
+async function withinCleanupWindow(work: Promise<unknown>): Promise<void> {
+  const timeout = Promise.withResolvers<void>();
+  const timer = setTimeout(timeout.resolve, TUNNEL_CLEANUP_MS);
+  try {
+    await Promise.race([work.then(() => undefined, () => undefined), timeout.promise]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Host ports with an active reverse rule, per connection: a second rule to
+ * the same host address would silently replace the first one's handler. */
+const activeReverseHosts = new WeakMap<Adb, Set<string>>();
+
+function requireTunnels(context: HardwareContext): { tunnels: TunnelChannel; operation: { id: string; deviceId: string } } {
+  if (!context.tunnels || !context.operation) {
+    throw new AdbProtocolError("Port forwarding needs Cody's browser-to-server relay, which is not attached to this page. Reload the Devices panel and retry.");
+  }
+  return { tunnels: context.tunnels, operation: context.operation };
+}
+
+function closeAdbSocket(socket: AdbSocket): void {
+  void Promise.resolve(socket.close()).catch(() => undefined);
+}
+
+/**
+ * Move bytes between one ADB stream and one relay connection until either
+ * side ends. ADB has no half-close, exactly like `adb forward` on a PC: when
+ * the host client finishes, the device stream is closed after what it already
+ * sent; when the device finishes, the host client gets an orderly end.
+ */
+async function pumpTunnel(socket: AdbSocket, connection: TunnelConnection): Promise<void> {
+  const writer = socket.writable.getWriter();
+  const reader = socket.readable.getReader();
+  const fail = (error: unknown): void => {
+    connection.reset(error instanceof Error ? error.message : String(error));
+    closeAdbSocket(socket);
+  };
+  void connection.closed.then(() => closeAdbSocket(socket));
+  const toDevice = (async () => {
+    for (;;) {
+      const chunk = await connection.read();
+      if (!chunk) break;
+      await writer.write(chunk);
+      connection.consumed(chunk.length);
+    }
+    closeAdbSocket(socket);
+  })().catch(fail);
+  const toHost = (async () => {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      await connection.write(next.value);
+    }
+    connection.end();
+  })().catch(fail);
+  await Promise.all([toDevice, toHost]);
+  // Wait for the CLOSE to be sent: the connection may be closed right after.
+  await Promise.resolve(socket.close()).catch(() => undefined);
+}
+
+async function relayForwardConnection(adb: Adb, remote: DeviceSpec, connection: TunnelConnection): Promise<void> {
+  let socket: AdbSocket;
+  try {
+    socket = await adb.createSocket(remote.text);
+  } catch (error) {
+    connection.reset(`The device refused ${remote.text}: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+  connection.opened();
+  await pumpTunnel(socket, connection);
+}
+
+type TunnelEnd = { reason: "aborted" } | { reason: "relay"; detail: string } | { reason: "device" };
+
+/** Wait for the first thing that ends a port rule, then turn it into the
+ * operation's outcome: cancel, or a failure that says which side went away. */
+async function untilTunnelEnds(adb: Adb, lost: Promise<string>, signal: AbortSignal, what: string): Promise<never> {
+  const { promise: aborted, resolve: abort } = Promise.withResolvers<TunnelEnd>();
+  const onAbort = (): void => abort({ reason: "aborted" });
+  if (signal.aborted) onAbort();
+  else signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    const end = await Promise.race<TunnelEnd>([
+      aborted,
+      lost.then((detail) => ({ reason: "relay", detail })),
+      adb.disconnected.then(() => ({ reason: "device" }), () => ({ reason: "device" })),
+    ]);
+    if (end.reason === "aborted") throw new DOMException("Operation cancelled.", "AbortError");
+    if (end.reason === "device") throw new AdbProtocolError(`${what} ended because the ADB connection to the device was lost.`);
+    throw new AdbProtocolError(`${what} ended: ${end.detail}`);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
+}
+
+async function forward(request: HardwareRequest, context: HardwareContext): Promise<HardwareResult> {
+  const { tunnels, operation } = requireTunnels(context);
+  let remote: DeviceSpec;
+  let host: HostSpec;
+  try {
+    remote = parseDeviceSpec(request.target, "forward");
+    host = parseHostSpec(request.options?.local, "forward");
+  } catch (error) {
+    throw new AdbProtocolError(error instanceof Error ? error.message : String(error));
+  }
+  const listening = host.port === 0 ? "a free port" : `port ${host.port}`;
+  await context.confirm({
+    action: "adb.forward",
+    target: request.target as string,
+    details: `Cody server loopback ${listening} -> device ${remote.text}. Every process on the Cody server can then connect to that device service until the forward is removed.`,
+    backup: "not applicable: no device storage is written",
+  });
+  const adb = await adbFor(context);
+  // Closing the device's streams needs the connection even after a cancel.
+  const finishCleanup = retainAdbSession(context);
+  let lease: ForwardLease | undefined;
+  const relays = new Set<Promise<void>>();
+  let served = 0;
+  try {
+    const rule = await tunnels.listen({ operationId: operation.id, deviceId: operation.deviceId, port: host.port }, context.signal);
+    lease = rule;
+    rule.onConnection((connection) => {
+      served += 1;
+      const relay = relayForwardConnection(adb, remote, connection).finally(() => relays.delete(relay));
+      relays.add(relay);
+    });
+    context.output?.(`Forwarding 127.0.0.1:${rule.port} -> device ${remote.text}`);
+    context.progress({ phase: "forwarding", message: `127.0.0.1:${rule.port} -> ${remote.text}` });
+    return await untilTunnelEnds(adb, rule.lost, context.signal, `Forward 127.0.0.1:${rule.port} -> ${remote.text}`);
+  } finally {
+    lease?.release();
+    await withinCleanupWindow(Promise.allSettled([...relays]));
+    finishCleanup();
+    if (lease) context.output?.(`Forward 127.0.0.1:${lease.port} -> ${remote.text} removed after ${served} connection(s).`);
+  }
+}
+
+async function reverse(request: HardwareRequest, context: HardwareContext): Promise<HardwareResult> {
+  const { tunnels, operation } = requireTunnels(context);
+  let remote: DeviceSpec;
+  let host: HostSpec;
+  try {
+    remote = parseDeviceSpec(request.target, "reverse");
+    host = parseHostSpec(request.options?.local, "reverse");
+  } catch (error) {
+    throw new AdbProtocolError(error instanceof Error ? error.message : String(error));
+  }
+  await context.confirm({
+    action: "adb.reverse",
+    target: request.target as string,
+    details: `Device ${remote.text} -> Cody server loopback port ${host.port}. Apps on the device can then reach whatever listens on that port on the Cody server until the rule is removed.`,
+    backup: "not applicable: no device storage is written",
+  });
+  const adb = await adbFor(context);
+  const hosts = activeReverseHosts.get(adb) ?? new Set<string>();
+  activeReverseHosts.set(adb, hosts);
+  if (hosts.has(host.text)) throw new AdbProtocolError(`A reverse rule to ${host.text} is already active on this device connection.`);
+  hosts.add(host.text);
+  const finishCleanup = retainAdbSession(context);
+  let lease: ReverseLease | undefined;
+  let deviceAddress: string | undefined;
+  let served = 0;
+  const relays = new Set<Promise<void>>();
+  try {
+    lease = await tunnels.reverse({ operationId: operation.id, deviceId: operation.deviceId, port: host.port }, context.signal);
+    const rule = lease;
+    deviceAddress = await adb.reverse.add(remote.text, (socket) => {
+      served += 1;
+      const relay = (async () => {
+        let connection: TunnelConnection;
+        try {
+          connection = await rule.connect();
+        } catch {
+          closeAdbSocket(socket);
+          return;
+        }
+        await pumpTunnel(socket, connection);
+      })().finally(() => relays.delete(relay));
+      relays.add(relay);
+    }, host.text);
+    context.output?.(`Reverse: device ${deviceAddress} -> Cody server 127.0.0.1:${host.port}`);
+    context.progress({ phase: "reversing", message: `device ${deviceAddress} -> 127.0.0.1:${host.port}` });
+    return await untilTunnelEnds(adb, rule.lost, context.signal, `Reverse device ${deviceAddress} -> 127.0.0.1:${host.port}`);
+  } finally {
+    // Undo the device-side rule while the connection is still alive, then
+    // drop the server-side one. A dead connection takes the rule with it.
+    if (deviceAddress) {
+      const timeout = Promise.withResolvers<void>();
+      const timer = setTimeout(timeout.resolve, TUNNEL_CLEANUP_MS);
+      try {
+        await Promise.race([adb.reverse.remove(deviceAddress), timeout.promise]);
+      } catch {
+        context.output?.(`Could not remove ${deviceAddress} on the device; it disappears when the ADB connection ends.`);
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    lease?.release();
+    await withinCleanupWindow(Promise.allSettled([...relays]));
+    hosts.delete(host.text);
+    finishCleanup();
+    if (deviceAddress) context.output?.(`Reverse ${deviceAddress} -> 127.0.0.1:${host.port} removed after ${served} connection(s).`);
+  }
+}
+
+async function reverseList(context: HardwareContext, adb: Adb): Promise<HardwareResult> {
+  const rules = await adb.reverse.list();
+  for (const rule of rules) context.output?.(`${rule.deviceSerial} ${rule.localName} ${rule.remoteName}`);
+  if (rules.length === 0) context.output?.("No reverse rules are set on the device.");
+  return { summary: `${rules.length} reverse rule(s) on the device.`, details: { rules } };
+}
+
+async function reverseRemove(request: HardwareRequest, context: HardwareContext, adb: Adb): Promise<HardwareResult> {
+  let spec: DeviceSpec;
+  try {
+    spec = parseDeviceSpec(request.target, "reverse");
+  } catch (error) {
+    throw new AdbProtocolError(error instanceof Error ? error.message : String(error));
+  }
+  await context.confirm({
+    action: "adb.reverse-remove",
+    target: request.target as string,
+    details: `Remove the device's reverse rule for ${spec.text}, whoever created it.`,
+    backup: "not applicable: no device storage is written",
+  });
+  await adb.reverse.remove(spec.text);
+  return { summary: `Reverse rule ${spec.text} removed.` };
+}
+
+async function reverseRemoveAll(context: HardwareContext, adb: Adb): Promise<HardwareResult> {
+  await context.confirm({
+    action: "adb.reverse-remove-all",
+    target: "all reverse rules on the device",
+    details: "Remove every reverse rule on the device, including rules other programs created.",
+    backup: "not applicable: no device storage is written",
+  });
+  await adb.reverse.removeAll();
+  return { summary: "All reverse rules removed from the device." };
+}
+
 function operationKind(request: HardwareRequest): string | undefined {
   const kind = request.options?.kind;
   if (kind === undefined) return undefined;
@@ -853,8 +1185,9 @@ function operationKind(request: HardwareRequest): string | undefined {
 
 export const adbFlasher: Flasher = {
   protocol: "adb",
-  actions: ["detect", "exec", "push", "pull", "dump", "monitor", "sideload", "verify"],
+  actions: ["detect", "exec", "push", "pull", "dump", "monitor", "sideload", "verify", "forward", "reverse"],
   async run(request, context) {
+    const leave = enterAdbHold(context);
     try {
       switch (request.action) {
         case "verify":
@@ -869,6 +1202,10 @@ export const adbFlasher: Flasher = {
           return await pull(request, context, "pull");
         case "dump":
           return await pull(request, context, "dump");
+        case "forward":
+          return await forward(request, context);
+        case "reverse":
+          return await reverse(request, context);
         case "push": {
           const adb = await adbFor(context);
           return await push(request, context, adb);
@@ -879,6 +1216,12 @@ export const adbFlasher: Flasher = {
               return await reboot(request, context, await adbFor(context));
             case "twrp-openrecoveryscript":
               return await queueTwrpOpenRecoveryScript(request, context, await adbFor(context));
+            case "reverse-list":
+              return await reverseList(context, await adbFor(context));
+            case "reverse-remove":
+              return await reverseRemove(request, context, await adbFor(context));
+            case "reverse-remove-all":
+              return await reverseRemoveAll(context, await adbFor(context));
             case undefined:
             case "shell": {
               const command = shellCommand(request, context);
@@ -892,7 +1235,7 @@ export const adbFlasher: Flasher = {
           throw new AdbProtocolError(`ADB does not support '${request.action}'.`);
       }
     } finally {
-      await closeCachedAdb(context.transport);
+      await leave();
     }
   },
 };

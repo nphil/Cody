@@ -91,8 +91,10 @@ function OperationStartForm({ manager, devices, selectedInputId, sessionId }: Op
   const [command, setCommand] = useState("");
   const [expectedChip, setExpectedChip] = useState("");
   const [protectedOverride, setProtectedOverride] = useState("");
+  const [host, setHost] = useState("");
   const selectedDevice = devices.find((device) => device.id === deviceId);
-  const needsTarget = action === "flash" || action === "dump" || action === "push" || action === "pull" || action === "verify";
+  const needsTarget = action === "flash" || action === "dump" || action === "push" || action === "pull" || action === "verify" || action === "forward" || action === "reverse";
+  const needsHost = action === "forward" || action === "reverse";
   const needsRange = action === "flash" || action === "dump" || action === "verify";
   const needsCommand = action === "exec";
   const needsBaudRate = action === "monitor" && selectedDevice?.kind === "serial";
@@ -122,6 +124,7 @@ function OperationStartForm({ manager, devices, selectedInputId, sessionId }: Op
       if (protocolCandidates.length > 1 && !selectedCandidate) throw new Error(t("devices.operationInterfaceRequired"));
       if (inputRequired && !input) throw new Error(t("devices.operationInputRequired"));
       if (needsTarget && !target.trim()) throw new Error(t("devices.operationTargetRequired"));
+      if (needsHost && !host.trim()) throw new Error(t("devices.operationHostAddressRequired"));
       if (needsCommand && !command.trim()) throw new Error(t("devices.operationCommandRequired"));
       const parsedOffset = offset.trim() ? Number(offset) : undefined;
       const parsedLength = length.trim() ? Number(length) : action === "verify" ? input?.size : undefined;
@@ -133,6 +136,7 @@ function OperationStartForm({ manager, devices, selectedInputId, sessionId }: Op
       const options: Record<string, string> = {};
       if (expectedChip.trim()) options.expectedChip = expectedChip.trim();
       if (protectedOverride) options.protectedOverride = protectedOverride;
+      if (needsHost) options.local = host.trim();
       manager.startUser({
         deviceId, protocol, action,
         ...(selectedCandidate ? { interfaceNumber: selectedCandidate.interfaceNumber } : {}),
@@ -160,6 +164,7 @@ function OperationStartForm({ manager, devices, selectedInputId, sessionId }: Op
         <label style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 10, color: "var(--text-dim)" }}>{t("devices.operationAction")}<Select aria-label={t("devices.operationAction")} value={action} onChange={setAction} options={ACTIONS_BY_PROTOCOL[protocol].map((value) => ({ value, label: value }))} size="sm" /></label>
         {protocolCandidates.length > 1 && <label style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 10, color: "var(--text-dim)" }}>{t("devices.operationInterface")}<Select aria-label={t("devices.operationInterface")} value={candidateKey || null} onChange={setCandidateKey} placeholder={t("devices.operationInterfaceRequired")} options={protocolCandidates.map((candidate) => ({ value: `${candidate.interfaceNumber}:${candidate.alternateSetting}`, label: t("devices.operationInterfaceTuple", { interfaceNumber: candidate.interfaceNumber, alternateSetting: candidate.alternateSetting }) }))} size="sm" /></label>}
         {needsTarget && <label style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 10, color: "var(--text-dim)" }}>{t("devices.operationTarget")}<input value={target} onChange={(event) => setTarget(event.target.value)} placeholder={t("devices.operationTargetPlaceholder")} style={{ height: 24, minWidth: 0, padding: "0 7px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 11 }} /></label>}
+        {needsHost && <label style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 10, color: "var(--text-dim)" }}>{t("devices.operationHostAddress")}<input value={host} onChange={(event) => setHost(event.target.value)} placeholder={t("devices.operationHostAddressPlaceholder")} style={{ height: 24, minWidth: 0, padding: "0 7px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 11 }} /></label>}
         {needsRange && <><label style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 10, color: "var(--text-dim)" }}>{t("devices.operationOffset")}<input type="number" min="0" value={offset} onChange={(event) => setOffset(event.target.value)} style={{ height: 24, minWidth: 0, padding: "0 7px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 11 }} /></label><label style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 10, color: "var(--text-dim)" }}>{t("devices.operationLength")}<input type="number" min="1" value={length} onChange={(event) => setLength(event.target.value)} style={{ height: 24, minWidth: 0, padding: "0 7px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 11 }} /></label></>}
         {needsBaudRate && <label style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 10, color: "var(--text-dim)" }}>{t("devices.operationBaudRate")}<input type="number" min="1" value={baudRate} onChange={(event) => setBaudRate(event.target.value)} style={{ height: 24, minWidth: 0, padding: "0 7px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 11 }} /></label>}
         {needsCommand && <label style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 10, color: "var(--text-dim)" }}>{t("devices.operationCommand")}<input value={command} onChange={(event) => setCommand(event.target.value)} style={{ height: 24, minWidth: 0, padding: "0 7px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 11 }} /></label>}

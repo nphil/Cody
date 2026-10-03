@@ -37,7 +37,17 @@ import type {
   PageOperationCommand,
 } from "./operations";
 
+import { TunnelHost } from "./tunnel-host";
+
 type Sender = (frame: DeviceServerFrame) => void;
+
+/** Cody's own listener: a reverse rule must never let a device reach it. */
+function reservedLoopbackPorts(): number[] {
+  const origin = /:(\d{1,5})(?:\/|$)/.exec(process.env.CODY_INTERNAL_DISPLAY_ORIGIN ?? "");
+  return [process.env.PORT, origin?.[1]]
+    .map(Number)
+    .filter((port) => Number.isInteger(port) && port > 0 && port <= 65535);
+}
 
 interface Pending {
   resolve: (value: unknown) => void;
@@ -191,6 +201,28 @@ export class DeviceBridge {
   /** Bounded replayable summaries from the page operation manager. */
   private operations = new Map<string, DeviceOperationSnapshot>();
   private operationListeners = new Set<(snapshot: DeviceOperationSnapshot, event?: OperationEvent) => void>();
+
+  /** adb forward/reverse rules served by this session's relay. */
+  readonly tunnels = new TunnelHost({
+    send: (message) => {
+      if (!this.send) throw new Error("No browser is attached to this session.");
+      this.send({ type: "tunnel", message });
+    },
+    operationActive: (operationId, deviceId) => {
+      const snapshot = this.operations.get(operationId);
+      if (!snapshot || snapshot.request.deviceId !== deviceId || snapshot.request.protocol !== "adb") return false;
+      if (snapshot.request.action !== "forward" && snapshot.request.action !== "reverse") return false;
+      // Only after the page recorded the user's confirmation, and only while the run is live.
+      return snapshot.state === "running" && snapshot.events.some((entry) => entry.type === "confirmation");
+    },
+    traffic: (deviceId, direction, bytes) => {
+      const record = this.activityFor(deviceId);
+      record.record(direction === "toDevice" ? "out" : "in", bytes);
+      record.touch();
+    },
+    reservedPorts: reservedLoopbackPorts,
+    changed: () => this.notify(),
+  });
   private hostLossTimer: ReturnType<typeof setTimeout> | null = null;
 
   get attached(): boolean {
@@ -211,6 +243,7 @@ export class DeviceBridge {
     // its successor becomes authoritative.
     if (previousRevoke) {
       this.failAllPending("Device host authority was replaced by another browser page.");
+      this.tunnels.closeAll("Device host authority was replaced by another browser page.");
       this.markOperationsCompletionUnknown("Device host authority was replaced before operation completion.");
       previousRevoke();
     }
@@ -222,6 +255,7 @@ export class DeviceBridge {
       this.devices.clear();
       this.activity.clear();
       this.failAllPending("The browser holding this device disconnected.");
+      this.tunnels.closeAll("The browser holding this device disconnected.");
       this.scheduleHostLoss();
       this.notify();
     }) as (() => void) & { isCurrent(): boolean };
@@ -289,6 +323,7 @@ export class DeviceBridge {
       if (sourceDevice(key) === deviceId) this.buffers.delete(key);
     }
     this.activity.delete(deviceId);
+    this.tunnels.closeDevice(deviceId, "The device was disconnected.");
     this.wake(deviceId);
     this.notify();
   }
@@ -582,6 +617,9 @@ export class DeviceBridge {
     if (event && event.sequence <= previousSequence) return;
     if (!event && previous && snapshot.updatedAt <= previous.updatedAt && snapshot.state === previous.state) return;
     this.operations.set(snapshot.id, snapshot);
+    if (snapshot.state === "succeeded" || snapshot.state === "failed" || snapshot.state === "cancelled") {
+      this.tunnels.closeOperation(snapshot.id, "The operation behind this port rule ended.");
+    }
     this.pruneOperations();
     if (event || terminal) {
       for (const listener of this.operationListeners) {
