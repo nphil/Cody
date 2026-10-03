@@ -206,8 +206,17 @@ async function enterAdbHold(context: HardwareContext): Promise<() => Promise<voi
   // new operation authenticates its own: two live ADB sessions on one USB
   // transport would steal each other's packets, and the old session's abort
   // would cancel the new one's reads.
+  // The wait is cancellable: a stalled teardown must not pin a cancelled operation.
+  signal.throwIfAborted();
   while (hold && (hold.closing || hold.controller.signal.aborted)) {
-    await hold.done;
+    const { promise: cancelled, reject } = Promise.withResolvers<never>();
+    const onAbort = (): void => reject(new DOMException("Operation cancelled.", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      await Promise.race([hold.done, cancelled]);
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+    }
     hold = adbHolds.get(transport);
   }
   if (!hold) {
@@ -976,7 +985,13 @@ const REVERSE_REGISTER_MS = 15_000;
  * connection) forever. Give up on cancel or timeout, and undo the rule if it
  * turns out to have been installed after all.
  */
-async function untilRegistered(registration: Promise<string>, adb: Adb, signal: AbortSignal): Promise<string> {
+async function untilRegistered(
+  registration: Promise<string>,
+  adb: Adb,
+  signal: AbortSignal,
+  /** Called with the late registration's cleanup when this gives up on it. */
+  abandoned: (settled: Promise<void>) => void,
+): Promise<string> {
   const { promise: gaveUp, resolve: giveUp } = Promise.withResolvers<"aborted" | "timeout">();
   const onAbort = (): void => giveUp("aborted");
   if (signal.aborted) onAbort();
@@ -985,7 +1000,7 @@ async function untilRegistered(registration: Promise<string>, adb: Adb, signal: 
   try {
     const outcome = await Promise.race([registration.then((address) => ({ address })), gaveUp.then((reason) => ({ reason }))]);
     if ("address" in outcome) return outcome.address;
-    void registration.then((address) => adb.reverse.remove(address).catch(() => undefined), () => undefined);
+    abandoned(registration.then(async (address) => { await adb.reverse.remove(address).catch(() => undefined); }, () => undefined));
     if (outcome.reason === "aborted") throw new DOMException("Operation cancelled.", "AbortError");
     throw new AdbProtocolError("The device did not answer the reverse registration in time.");
   } finally {
@@ -1147,6 +1162,8 @@ async function reverse(request: HardwareRequest, context: HardwareContext): Prom
   hosts.add(host.text);
   if (claimsDevice) devices.add(remote.text);
   let finishCleanup: (() => void) | undefined;
+  /** Set when registration was abandoned while the device might still install the rule. */
+  let lateCleanup: Promise<void> | undefined;
   let lease: ReverseLease | undefined;
   let deviceAddress: string | undefined;
   let served = 0;
@@ -1168,7 +1185,7 @@ async function reverse(request: HardwareRequest, context: HardwareContext): Prom
       })().finally(() => relays.delete(relay));
       relays.add(relay);
     }, host.text);
-    deviceAddress = await untilRegistered(registration, adb, context.signal);
+    deviceAddress = await untilRegistered(registration, adb, context.signal, (settled) => { lateCleanup = settled; });
     // Only a live rule needs the connection kept past a cancel, to remove it.
     finishCleanup = retainAdbSession(context);
     context.output?.(`Reverse: device ${deviceAddress} -> Cody server 127.0.0.1:${host.port}`);
@@ -1190,8 +1207,15 @@ async function reverse(request: HardwareRequest, context: HardwareContext): Prom
     }
     lease?.release();
     await withinCleanupWindow(Promise.allSettled([...relays]));
-    hosts.delete(host.text);
-    if (claimsDevice) devices.delete(remote.text);
+    // An abandoned registration may still land on the device, and its cleanup
+    // removes by address, so the addresses stay reserved until it has settled:
+    // otherwise a replacement rule could claim them and be deleted by it.
+    const release = (): void => {
+      hosts.delete(host.text);
+      if (claimsDevice) devices.delete(remote.text);
+    };
+    if (lateCleanup) void lateCleanup.then(release);
+    else release();
     finishCleanup?.();
     if (deviceAddress) context.output?.(`Reverse ${deviceAddress} -> 127.0.0.1:${host.port} removed after ${served} connection(s).`);
   }

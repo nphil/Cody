@@ -2127,7 +2127,9 @@ socket (`lib/devices/tunnel.ts` vocabulary, `tunnel-host.ts` server half,
   is refused; otherwise cancelling the first would delete the second's listener.
   `tcp:0` always gets a fresh device port. Reverse registration is bounded
   (15 s) and cancellable; a rule that is installed after the operation gave up
-  is removed again.
+  is removed again, and its device and host addresses stay reserved until that
+  late answer has settled and been cleaned up, so a replacement rule cannot be
+  deleted by it. Waiting for a closing ADB connection is cancellable too.
 - **Directional EOF.** The device ending its stream and the host client closing
   are separate events; the page always hears the host side finish (`end` after
   an ordinary close, `reset` after an abrupt one), so short-lived requests do
