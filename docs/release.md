@@ -56,6 +56,16 @@ Everything is driven by `.github/workflows/docker.yml`:
   first `/api/usage` poll reconciled routing and rewrote the owner's
   `modelRoles`. A throwaway instance MUST set `PI_CODING_AGENT_DIR` to a
   scratch directory; isolating accounts alone is not isolation.
+- **A `release` job that dies on its very first step with `unable to find
+  user root: no matching entries in passwd file` is the runner, not the
+  workflow.** v0.47.0 hit it once: the job container started from the
+  runner image without a usable root filesystem (the `bash` probe failed,
+  the step fell back to `sh`, then the exec could not resolve `root`) before
+  any workflow line ran. Nothing in `docker.yml` causes or can fix that, and
+  the same image starts cleanly on every manual attempt. The image had
+  already published. The `release` job is idempotent (it PATCHes an existing
+  release), so recovery is to re-run that job from the run page; confirm
+  with `forge op=releases` that the Release carries its notes.
 
 ## Cutting a release
 
