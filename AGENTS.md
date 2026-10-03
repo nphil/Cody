@@ -2116,11 +2116,22 @@ socket (`lib/devices/tunnel.ts` vocabulary, `tunnel-host.ts` server half,
 - **The server verifies; it does not trust the page blindly.** A `listen` or
   `reverse` claim is accepted only for an operation of this session whose
   snapshot is `running` and records a confirmation event; one rule per
-  operation, 16 per session, 64 connections per rule; privileged ports and
+  operation, 16 per session (both reserved before the listener binds, so
+  concurrent claims cannot overshoot), 64 connections per rule; privileged ports and
   Cody's own port (`PORT`, `CODY_INTERNAL_DISPLAY_ORIGIN`) are refused for both
   listening and dialing; page-minted connection ids must start `p-`. Rules die
   with the page socket, a replacing page, the device's `gone`, or the
   operation's terminal snapshot (`TunnelHost.closeAll/closeDevice/closeOperation`).
+- **One device listening address, one rule.** adbd rebinds silently, so a second
+  reverse rule on the same `tcp:PORT` (or the same host port) on one connection
+  is refused; otherwise cancelling the first would delete the second's listener.
+  `tcp:0` always gets a fresh device port. Reverse registration is bounded
+  (15 s) and cancellable; a rule that is installed after the operation gave up
+  is removed again.
+- **Directional EOF.** The device ending its stream and the host client closing
+  are separate events; the page always hears the host side finish (`end` after
+  an ordinary close, `reset` after an abrupt one), so short-lived requests do
+  not leave connection objects in the browser.
 - **Credit-based flow control**, not unbounded buffering: 48 KiB chunks, a
   512 KiB window per connection, acknowledged only after the far sink accepted
   the bytes. Half-close does not exist in ADB, so (like a PC) the first end
@@ -2130,7 +2141,9 @@ socket (`lib/devices/tunnel.ts` vocabulary, `tunnel-host.ts` server half,
   device (`DeviceOperationManager.acquireLease`, one real `borrowHardwareTransport`)
   and one authenticated session (`adb.ts` `AdbHold`): the connection is bound
   to the hold, not to one operation's signal, and torn down only when the last
-  operation leaves or every remaining one is cancelled. Cancelling one rule
+  operation leaves or every remaining one is cancelled. A new operation waits
+  for a closing or aborted connection to be fully gone before it authenticates,
+  so two ADB sessions never overlap on one USB transport. Cancelling one rule
   never drops another. Anything that rewrites the device or connection (push
   staging/reacquire, sideload, reboot, TWRP script) keeps the exclusive lease.
 - `device_exec` with `options.kind` `reverse-list`, `reverse-remove`, or

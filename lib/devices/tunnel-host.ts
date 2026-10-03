@@ -65,8 +65,12 @@ interface Connection {
   pending: number;
   chain: Promise<void>;
   openTimer?: ReturnType<typeof setTimeout>;
-  /** We already told the page this connection ended, or it told us. */
-  peerDone: boolean;
+  /** We told the page the host side ended (TCP FIN), so it needs no more notice of that. */
+  endSent: boolean;
+  /** The page ended its direction; our socket is being half-closed. */
+  pageEnded: boolean;
+  /** A reset was exchanged, so neither side expects another message. */
+  resetDone: boolean;
   forgotten: boolean;
 }
 
@@ -85,6 +89,8 @@ function describeError(error: unknown): string {
 export class TunnelHost {
   private readonly rules = new Map<string, Rule>();
   private readonly connections = new Map<string, Connection>();
+  /** Operations whose claim passed validation but whose rule is not registered yet. */
+  private readonly claiming = new Map<string, { deviceId: string }>();
   private nextRule = 1;
   private nextConnection = 1;
 
@@ -143,11 +149,13 @@ export class TunnelHost {
 
   /** The page is gone or replaced: nothing can be told, so just tear down. */
   closeAll(reason: string): void {
+    this.claiming.clear();
     for (const rule of [...this.rules.values()]) this.closeRule(rule, reason, false);
   }
 
   /** The device left (unplugged, revoked): its rules cannot work any more. */
   closeDevice(deviceId: string, reason: string): void {
+    for (const [operationId, claim] of this.claiming) if (claim.deviceId === deviceId) this.claiming.delete(operationId);
     for (const rule of [...this.rules.values()]) {
       if (rule.deviceId === deviceId) this.closeRule(rule, reason, true);
     }
@@ -155,6 +163,7 @@ export class TunnelHost {
 
   /** The operation behind a rule finished; tell the page in case it is still listening. */
   closeOperation(operationId: string, reason: string): void {
+    this.claiming.delete(operationId);
     for (const rule of [...this.rules.values()]) {
       if (rule.operationId === operationId) this.closeRule(rule, reason, true);
     }
@@ -174,11 +183,11 @@ export class TunnelHost {
       fail("No running confirmed operation in this session owns that rule.");
       return;
     }
-    if ([...this.rules.values()].some((rule) => rule.operationId === message.operationId)) {
+    if (this.claiming.has(message.operationId) || [...this.rules.values()].some((rule) => rule.operationId === message.operationId)) {
       fail("This operation already holds a port rule.");
       return;
     }
-    if (this.rules.size >= MAX_TUNNELS_PER_SESSION) {
+    if (this.rules.size + this.claiming.size >= MAX_TUNNELS_PER_SESSION) {
       fail(`A session may hold at most ${MAX_TUNNELS_PER_SESSION} port rules.`);
       return;
     }
@@ -195,6 +204,23 @@ export class TunnelHost {
       fail("A reverse rule needs the host port of an existing service.");
       return;
     }
+    // Hold the operation and its quota slot across the asynchronous bind, so
+    // concurrent claims cannot all pass the checks above against an empty map.
+    const reservation = { deviceId: message.deviceId };
+    this.claiming.set(message.operationId, reservation);
+    try {
+      await this.register(message, kind, reservation, fail);
+    } finally {
+      if (this.claiming.get(message.operationId) === reservation) this.claiming.delete(message.operationId);
+    }
+  }
+
+  private async register(
+    message: Extract<TunnelMessage, { kind: "listen" | "reverse" }>,
+    kind: "forward" | "reverse",
+    reservation: { deviceId: string },
+    fail: (error: string) => void,
+  ): Promise<void> {
     const rule: Rule = {
       id: `tunnel-${this.nextRule++}`,
       kind,
@@ -227,8 +253,8 @@ export class TunnelHost {
       server.on("error", (error) => this.closeRule(rule, `The listener failed: ${describeError(error)}.`, true));
       server.on("connection", (socket) => this.accept(rule, socket));
     }
-    // The operation could have finished while the bind was in flight.
-    if (!this.deps.operationActive(message.operationId, message.deviceId)) {
+    // The operation, device, or page could have gone while the bind was in flight.
+    if (this.claiming.get(message.operationId) !== reservation || !this.deps.operationActive(message.operationId, message.deviceId)) {
       rule.server?.close();
       fail("The operation finished before its port rule was ready.");
       return;
@@ -248,7 +274,9 @@ export class TunnelHost {
       acked: 0,
       pending: 0,
       chain: Promise.resolve(),
-      peerDone: false,
+      endSent: false,
+      pageEnded: false,
+      resetDone: false,
       forgotten: false,
     };
     this.connections.set(id, connection);
@@ -315,7 +343,7 @@ export class TunnelHost {
     clearTimeout(connection.openTimer);
     connection.state = "open";
     socket.on("data", (chunk: Buffer) => {
-      if (connection.peerDone) return;
+      if (connection.resetDone) return;
       const rule = this.rules.get(connection.ruleId);
       for (let offset = 0; offset < chunk.length; offset += TUNNEL_CHUNK_BYTES) {
         const part = chunk.subarray(offset, offset + TUNNEL_CHUNK_BYTES);
@@ -329,8 +357,8 @@ export class TunnelHost {
       if (connection.sent - connection.acked >= TUNNEL_WINDOW_BYTES) socket.pause();
     });
     socket.on("end", () => {
-      if (connection.peerDone) return;
-      connection.peerDone = true; // nothing more goes to the page after our end
+      if (connection.resetDone || connection.endSent) return;
+      connection.endSent = true;
       this.post({ kind: "end", connectionId: connection.id });
     });
     socket.resume();
@@ -383,7 +411,9 @@ export class TunnelHost {
   private peerEnded(connectionId: string): void {
     const connection = this.connections.get(connectionId);
     if (!connection) return;
-    connection.peerDone = true;
+    // Only the page's direction ended. The host side may still be talking, and
+    // its eventual FIN or close must still reach the page.
+    connection.pageEnded = true;
     connection.chain = connection.chain.then(() => {
       if (!connection.socket.destroyed) connection.socket.end();
     });
@@ -392,14 +422,14 @@ export class TunnelHost {
   private peerReset(connectionId: string): void {
     const connection = this.connections.get(connectionId);
     if (!connection) return;
-    connection.peerDone = true;
+    connection.resetDone = true;
     connection.socket.destroy();
   }
 
   /** Tear one connection down and tell the page, unless it already knows. */
   private finish(connection: Connection, reason: string): void {
-    if (!connection.peerDone) {
-      connection.peerDone = true;
+    if (!connection.resetDone) {
+      connection.resetDone = true;
       this.post({ kind: "reset", connectionId: connection.id, reason });
     }
     connection.socket.destroy();
@@ -413,9 +443,16 @@ export class TunnelHost {
     this.rules.get(connection.ruleId)?.connections.delete(connection.id);
     // A socket that closed without a protocol-level end must not leave the
     // page's side open forever.
-    if (!connection.peerDone) {
-      connection.peerDone = true;
-      this.post({ kind: "reset", connectionId: connection.id, reason: "The host connection closed." });
+    if (!connection.resetDone && !connection.endSent) {
+      // The page still waits for the host side to finish. A close after the page
+      // ended its own direction is an ordinary full close; otherwise it is abrupt.
+      if (connection.pageEnded) {
+        connection.endSent = true;
+        this.post({ kind: "end", connectionId: connection.id });
+      } else {
+        connection.resetDone = true;
+        this.post({ kind: "reset", connectionId: connection.id, reason: "The host connection closed." });
+      }
     }
     this.deps.changed();
   }
@@ -426,7 +463,7 @@ export class TunnelHost {
     for (const id of [...rule.connections]) {
       const connection = this.connections.get(id);
       if (!connection) continue;
-      connection.peerDone = true; // the rule's own `released` covers the page
+      connection.resetDone = true; // the rule's own `released` covers the page
       connection.socket.destroy();
     }
     if (notifyPage) this.post({ kind: "released", tunnelId: rule.id, reason });

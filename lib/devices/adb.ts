@@ -186,6 +186,11 @@ interface AdbHold {
   /** Operations that need the live connection to clean up after their own cancel. */
   retained: number;
   controller: AbortController;
+  /** The last user left and the connection is being closed. */
+  closing: boolean;
+  /** Settles once the connection is fully closed and the hold is gone. */
+  done: Promise<void>;
+  finish(): void;
 }
 
 const adbHolds = new WeakMap<HardwareTransport, AdbHold>();
@@ -194,11 +199,20 @@ function abortIfAbandoned(hold: AdbHold): void {
   if (hold.users > 0 && hold.active === 0 && hold.retained === 0) hold.controller.abort();
 }
 
-function enterAdbHold(context: HardwareContext): () => Promise<void> {
+async function enterAdbHold(context: HardwareContext): Promise<() => Promise<void>> {
   const { transport, signal } = context;
   let hold = adbHolds.get(transport);
+  // A connection that is closing or already aborted must be fully gone before a
+  // new operation authenticates its own: two live ADB sessions on one USB
+  // transport would steal each other's packets, and the old session's abort
+  // would cancel the new one's reads.
+  while (hold && (hold.closing || hold.controller.signal.aborted)) {
+    await hold.done;
+    hold = adbHolds.get(transport);
+  }
   if (!hold) {
-    hold = { users: 0, active: 0, retained: 0, controller: new AbortController() };
+    const { promise, resolve } = Promise.withResolvers<void>();
+    hold = { users: 0, active: 0, retained: 0, controller: new AbortController(), closing: false, done: promise, finish: resolve };
     adbHolds.set(transport, hold);
   }
   const entered = hold;
@@ -228,13 +242,15 @@ function enterAdbHold(context: HardwareContext): () => Promise<void> {
       abortIfAbandoned(entered);
       return;
     }
-    if (adbHolds.get(transport) === entered) adbHolds.delete(transport);
+    entered.closing = true;
     try {
       await closeCachedAdb(transport);
       // A resumed push swaps context.transport for a reacquired one.
       if (context.transport !== transport) await closeCachedAdb(context.transport);
     } finally {
       entered.controller.abort();
+      if (adbHolds.get(transport) === entered) adbHolds.delete(transport);
+      entered.finish();
     }
   };
 }
@@ -948,6 +964,35 @@ async function withinCleanupWindow(work: Promise<unknown>): Promise<void> {
 /** Host ports with an active reverse rule, per connection: a second rule to
  * the same host address would silently replace the first one's handler. */
 const activeReverseHosts = new WeakMap<Adb, Set<string>>();
+/** Device listening addresses held by Cody rules, per connection: adbd rebinds
+ * silently, so a second rule would steal the first one's listener and then be
+ * deleted by the first one's cleanup. `tcp:0` picks a fresh port each time. */
+const activeReverseDevices = new WeakMap<Adb, Set<string>>();
+const REVERSE_REGISTER_MS = 15_000;
+
+/**
+ * The library's `reverse.add` has no signal or timeout, so a daemon that takes
+ * the request and never answers would pin the operation (and the shared
+ * connection) forever. Give up on cancel or timeout, and undo the rule if it
+ * turns out to have been installed after all.
+ */
+async function untilRegistered(registration: Promise<string>, adb: Adb, signal: AbortSignal): Promise<string> {
+  const { promise: gaveUp, resolve: giveUp } = Promise.withResolvers<"aborted" | "timeout">();
+  const onAbort = (): void => giveUp("aborted");
+  if (signal.aborted) onAbort();
+  else signal.addEventListener("abort", onAbort, { once: true });
+  const timer = setTimeout(() => giveUp("timeout"), REVERSE_REGISTER_MS);
+  try {
+    const outcome = await Promise.race([registration.then((address) => ({ address })), gaveUp.then((reason) => ({ reason }))]);
+    if ("address" in outcome) return outcome.address;
+    void registration.then((address) => adb.reverse.remove(address).catch(() => undefined), () => undefined);
+    if (outcome.reason === "aborted") throw new DOMException("Operation cancelled.", "AbortError");
+    throw new AdbProtocolError("The device did not answer the reverse registration in time.");
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener("abort", onAbort);
+  }
+}
 
 function requireTunnels(context: HardwareContext): { tunnels: TunnelChannel; operation: { id: string; deviceId: string } } {
   if (!context.tunnels || !context.operation) {
@@ -1093,8 +1138,15 @@ async function reverse(request: HardwareRequest, context: HardwareContext): Prom
   const hosts = activeReverseHosts.get(adb) ?? new Set<string>();
   activeReverseHosts.set(adb, hosts);
   if (hosts.has(host.text)) throw new AdbProtocolError(`A reverse rule to ${host.text} is already active on this device connection.`);
+  const devices = activeReverseDevices.get(adb) ?? new Set<string>();
+  activeReverseDevices.set(adb, devices);
+  const claimsDevice = remote.text !== "tcp:0";
+  if (claimsDevice && devices.has(remote.text)) {
+    throw new AdbProtocolError(`A reverse rule listening on device ${remote.text} is already active on this device connection; remove it first.`);
+  }
   hosts.add(host.text);
-  const finishCleanup = retainAdbSession(context);
+  if (claimsDevice) devices.add(remote.text);
+  let finishCleanup: (() => void) | undefined;
   let lease: ReverseLease | undefined;
   let deviceAddress: string | undefined;
   let served = 0;
@@ -1102,7 +1154,7 @@ async function reverse(request: HardwareRequest, context: HardwareContext): Prom
   try {
     lease = await tunnels.reverse({ operationId: operation.id, deviceId: operation.deviceId, port: host.port }, context.signal);
     const rule = lease;
-    deviceAddress = await adb.reverse.add(remote.text, (socket) => {
+    const registration = adb.reverse.add(remote.text, (socket) => {
       served += 1;
       const relay = (async () => {
         let connection: TunnelConnection;
@@ -1116,6 +1168,9 @@ async function reverse(request: HardwareRequest, context: HardwareContext): Prom
       })().finally(() => relays.delete(relay));
       relays.add(relay);
     }, host.text);
+    deviceAddress = await untilRegistered(registration, adb, context.signal);
+    // Only a live rule needs the connection kept past a cancel, to remove it.
+    finishCleanup = retainAdbSession(context);
     context.output?.(`Reverse: device ${deviceAddress} -> Cody server 127.0.0.1:${host.port}`);
     context.progress({ phase: "reversing", message: `device ${deviceAddress} -> 127.0.0.1:${host.port}` });
     return await untilTunnelEnds(adb, rule.lost, context.signal, `Reverse device ${deviceAddress} -> 127.0.0.1:${host.port}`);
@@ -1136,7 +1191,8 @@ async function reverse(request: HardwareRequest, context: HardwareContext): Prom
     lease?.release();
     await withinCleanupWindow(Promise.allSettled([...relays]));
     hosts.delete(host.text);
-    finishCleanup();
+    if (claimsDevice) devices.delete(remote.text);
+    finishCleanup?.();
     if (deviceAddress) context.output?.(`Reverse ${deviceAddress} -> 127.0.0.1:${host.port} removed after ${served} connection(s).`);
   }
 }
@@ -1187,7 +1243,7 @@ export const adbFlasher: Flasher = {
   protocol: "adb",
   actions: ["detect", "exec", "push", "pull", "dump", "monitor", "sideload", "verify", "forward", "reverse"],
   async run(request, context) {
-    const leave = enterAdbHold(context);
+    const leave = await enterAdbHold(context);
     try {
       switch (request.action) {
         case "verify":
