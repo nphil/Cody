@@ -2084,6 +2084,32 @@ Port rules, shells, pulls, detection, and terminals share one ADB connection per
 device; push staging, sideload, reboot, and the TWRP script still need the device
 lease alone, so they fail with a lease-busy error while any of those is open.
 
+#### Devices panel layout (connect -> device -> actions)
+
+`components/DevicePanel.tsx` reads top to bottom as the job does. `ConnectCard`
+offers the three ways a browser is handed hardware (USB, serial, Bluetooth) and
+states what this browser can do; it shrinks to one row once a device exists.
+`DeviceCard` is one card per granted device: identity, current mode, state, and
+tabs holding only the actions that mode has. `ArtifactPanel` ("Files &
+backups") is the session-level file library the action forms draw their input
+from. Operations appear in the card of the device they ran on; those of
+disconnected devices are listed in a closed disclosure at the bottom.
+
+`lib/devices/ui-model.ts` is the single table behind it: the mode from the USB
+descriptors (`deviceMode`), the protocols offered (`offeredProtocols`), the
+groups for those protocols (`availableGroups`) and which `(protocol, action)`
+pairs each group exposes. A new flasher action MUST be added to a group there;
+`ui-model.test.mjs` fails when any action a shipped flasher declares is
+unreachable. Terminal-shaped actions (`adb` monitor, `serial` monitor,
+`fastboot` exec) are covered by `DeviceTerminal` / `FastbootCommand`, not by
+the generic `ActionForm`. A device in a mode Cody cannot read (`unknown-usb`),
+or a card with "Show every protocol" on, offers every protocol. The
+confirmation card (`OperationList`) keeps the exact-binding rows and the typed
+protected-override gate unchanged; only its presentation is the panel's.
+Every control is at least 44 px (`components/devices/ui.tsx`); the panel is
+used with a finger, and the right panel can be as narrow as 300 px, so layouts
+wrap rather than scroll sideways.
+
 #### ADB port forward and reverse
 
 `device_forward` (`adb forward`), `device_reverse` (`adb reverse`), and

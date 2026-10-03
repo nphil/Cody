@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { useI18n } from "@/lib/i18n";
 import type { DeviceOperationManager, DeviceOperationSnapshot } from "@/lib/devices/operations";
 import type { SerialSignals } from "@/lib/devices/serial-monitor";
 import { HardwareTerminalView } from "./HardwareTerminalView";
+import { Button, inputStyle, Notice, TOUCH } from "./ui";
 
 export interface DeviceTerminalProps {
   manager: DeviceOperationManager;
@@ -13,13 +14,16 @@ export interface DeviceTerminalProps {
   protocol?: "adb" | "serial";
   interfaceNumber?: number;
   alternateSetting?: number;
+  /** Shown above the terminal; only needed when one device has several. */
+  showTitle?: boolean;
 }
-const control: React.CSSProperties = { minHeight: 48, padding: 8, border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)" };
 const endings = { LF: "\n", CR: "\r", CRLF: "\r\n", None: "" };
+const SPECIAL_KEYS: readonly (readonly [string, string])[] = [["Ctrl+C", "\x03"], ["Esc", "\x1b"], ["Tab", "\t"], ["↑", "\x1b[A"], ["↓", "\x1b[B"]];
 
 /** User terminal ownership never implicitly grants the agent ADB shell authority. */
-export function DeviceTerminal({ manager, deviceId, label, protocol = "adb", interfaceNumber, alternateSetting }: DeviceTerminalProps) {
+export function DeviceTerminal({ manager, deviceId, label, protocol = "adb", interfaceNumber, alternateSetting, showTitle = false }: DeviceTerminalProps) {
   const { t } = useI18n();
+  const inputId = useId();
   const [operation, setOperation] = useState<DeviceOperationSnapshot>();
   const [input, setInput] = useState("");
   const [error, setError] = useState("");
@@ -51,23 +55,33 @@ export function DeviceTerminal({ manager, deviceId, label, protocol = "adb", int
       setError("");
     } catch (caught) { setError(String(caught)); }
   };
-  return <section aria-label={title} style={{ display: "grid", minWidth: 0, gap: 8 }}>
-    <strong>{title}</strong>
-    {protocol === "serial" && <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-      <label>{t("devices.operationBaudRate")}<input type="number" min="1" value={baudRate} disabled={!!active} onChange={event => setBaudRate(event.target.value)} style={{ ...control, display: "block", width: 140, fontSize: 16 }} /></label>
-      {(["dtr", "rts", "brk"] as const).map(key => <label key={key} style={{ ...control, display: "flex", alignItems: "center", gap: 8 }}><input type="checkbox" checked={!!signals[key]} disabled={!!active && !ready} onChange={event => void setSignal(key, event.target.checked)} />{key === "brk" ? "Break" : key.toUpperCase()}</label>)}
+  return <section aria-label={title} style={{ display: "grid", minWidth: 0, gap: 10 }}>
+    {showTitle && <strong style={{ fontSize: 13 }}>{title}</strong>}
+    {protocol === "serial" && <div style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-end", gap: 8 }}>
+      <label style={{ display: "grid", gap: 4, fontSize: 12, fontWeight: 600, color: "var(--text-muted)" }}>{t("devices.operationBaudRate")}
+        <input type="number" min="1" inputMode="numeric" className="ui-focus-ring" value={baudRate} disabled={!!active} onChange={event => setBaudRate(event.target.value)} style={{ ...inputStyle, width: 140 }} />
+      </label>
+      {(["dtr", "rts", "brk"] as const).map(key => <label key={key} style={{ display: "flex", alignItems: "center", gap: 8, minHeight: TOUCH, padding: "0 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", fontSize: 13, cursor: "pointer" }}>
+        <input type="checkbox" checked={!!signals[key]} disabled={!!active && !ready} onChange={event => void setSignal(key, event.target.checked)} style={{ width: 20, height: 20 }} />{key === "brk" ? "Break" : key.toUpperCase()}
+      </label>)}
     </div>}
-    <button className="ui-focus-ring" type="button" style={control} onClick={() => active ? manager.cancel(operation.id) : start()}>{t(active ? "devices.terminalStop" : "devices.terminalStart")}</button>
+    <div>
+      <Button tone={active ? "normal" : "primary"} onClick={() => active ? manager.cancel(operation.id) : start()}>{t(active ? "devices.terminalStop" : "devices.terminalStart")}</Button>
+    </div>
     {operation && <>
       <HardwareTerminalView manager={manager} operationId={operation.id} label={t("devices.operationOutput")} onError={setError} />
-      <form onSubmit={event => { event.preventDefault(); if (ready && (input || endings[ending])) void send(input + endings[ending]); }} style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-        <label style={{ flex: "1 1 160px", minWidth: 0 }}>{t("devices.terminalInput")}<input value={input} onChange={event => setInput(event.target.value)} autoCapitalize="off" autoCorrect="off" spellCheck={false} style={{ ...control, width: "100%", fontSize: 16 }} /></label>
-        <label>{t("devices.terminalEnding")}<select value={ending} onChange={event => setEnding(event.target.value as keyof typeof endings)} style={{ ...control, display: "block" }}>{Object.keys(endings).map(key => <option key={key}>{key}</option>)}</select></label>
-        <button className="ui-focus-ring" type="submit" disabled={!ready} style={control}>{t("devices.terminalSend")}</button>
+      <form onSubmit={event => { event.preventDefault(); if (ready && (input || endings[ending])) void send(input + endings[ending]); }} style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-end", gap: 8 }}>
+        <label htmlFor={inputId} style={{ flex: "1 1 160px", minWidth: 0, display: "grid", gap: 4, fontSize: 12, fontWeight: 600, color: "var(--text-muted)" }}>{t("devices.terminalInput")}
+          <input id={inputId} className="ui-focus-ring" value={input} onChange={event => setInput(event.target.value)} autoCapitalize="off" autoCorrect="off" spellCheck={false} style={inputStyle} />
+        </label>
+        <label style={{ display: "grid", gap: 4, fontSize: 12, fontWeight: 600, color: "var(--text-muted)" }}>{t("devices.terminalEnding")}
+          <select className="ui-focus-ring" value={ending} onChange={event => setEnding(event.target.value as keyof typeof endings)} style={{ ...inputStyle, width: "auto", background: "var(--bg-panel)" }}>{Object.keys(endings).map(key => <option key={key}>{key}</option>)}</select>
+        </label>
+        <Button type="submit" tone="primary" disabled={!ready}>{t("devices.terminalSend")}</Button>
       </form>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>{[["Ctrl+C", "\x03"], ["Esc", "\x1b"], ["Tab", "\t"], ["↑", "\x1b[A"], ["↓", "\x1b[B"]].map(([key, data]) => <button key={key} className="ui-focus-ring" type="button" disabled={!ready} style={control} onClick={() => void send(data)}>{key}</button>)}</div>
-      <span role="status">{operation.state === "cancelled" ? t("devices.operationStateCancelled") : operation.error || operation.result?.summary || operation.progress?.message}</span>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>{SPECIAL_KEYS.map(([key, data]) => <Button key={key} disabled={!ready} onClick={() => void send(data)}>{key}</Button>)}</div>
+      <span role="status" style={{ fontSize: 12, color: "var(--text-muted)", overflowWrap: "anywhere" }}>{operation.state === "cancelled" ? t("devices.operationStateCancelled") : operation.error || operation.result?.summary || operation.progress?.message}</span>
     </>}
-    {error && <p role="alert">{error}</p>}
+    {error && <Notice tone="error" role="alert">{error}</Notice>}
   </section>;
 }

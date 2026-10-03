@@ -1,14 +1,29 @@
 "use client";
+
 import { useEffect, useState } from "react";
 import { useI18n } from "@/lib/i18n";
 import type { DeviceOperationManager, DeviceOperationSnapshot } from "@/lib/devices/operations";
 import type { DeviceArtifact } from "@/lib/devices/artifacts";
-export interface FastbootCommandProps { manager:DeviceOperationManager; deviceId:string; label:string; interfaceNumber?:number; alternateSetting?:number; input?:DeviceArtifact }
-const control:React.CSSProperties={minHeight:48,padding:8,border:"1px solid var(--border)",borderRadius:"var(--radius-control)",background:"var(--bg-panel)",color:"var(--text)"};
-export function FastbootCommand({manager,deviceId,label,interfaceNumber,alternateSetting,input}:FastbootCommandProps) {
-  const {t}=useI18n();const [command,setCommand]=useState("getvar all"),[operation,setOperation]=useState<DeviceOperationSnapshot>(),[error,setError]=useState("");
-  useEffect(()=>manager.subscribe(snapshot=>{if(snapshot.id===operation?.id)setOperation(snapshot);}),[manager,operation?.id]);
-  const active=operation&&!['succeeded','failed','cancelled'].includes(operation.state);
+import { Button, Notice, TextField } from "./ui";
+
+export interface FastbootCommandProps {
+  manager: DeviceOperationManager;
+  deviceId: string;
+  label: string;
+  interfaceNumber?: number;
+  alternateSetting?: number;
+  input?: DeviceArtifact;
+  /** Shown above the box; only needed when one device has several. */
+  showTitle?: boolean;
+}
+
+export function FastbootCommand({ manager, deviceId, label, interfaceNumber, alternateSetting, input, showTitle = false }: FastbootCommandProps) {
+  const { t } = useI18n();
+  const [command, setCommand] = useState("getvar all");
+  const [operation, setOperation] = useState<DeviceOperationSnapshot>();
+  const [error, setError] = useState("");
+  useEffect(() => manager.subscribe(snapshot => { if (snapshot.id === operation?.id) setOperation(snapshot); }), [manager, operation?.id]);
+  const active = operation && !["succeeded", "failed", "cancelled"].includes(operation.state);
   const start = () => {
     try {
       const usesImage = /^(?:boot|download|flash)(?:$|[:\s])/.test(command.trim().replace(/^fastboot\s+/, ""));
@@ -18,16 +33,19 @@ export function FastbootCommand({manager,deviceId,label,interfaceNumber,alternat
       setError("");
     } catch (caught) { setError(String(caught)); }
   };
-  return <section aria-label={t("devices.fastbootTerminal",{device:label})} style={{display:"grid",minWidth:0,gap:8}}>
-    <strong>{t("devices.fastbootTerminal",{device:label})}</strong>
-    <form onSubmit={event=>{event.preventDefault();if(!active)start();}} style={{display:"flex",flexWrap:"wrap",gap:8}}>
-      <label style={{flex:"1 1 180px",minWidth:0}}>{t("devices.operationCommand")}<input value={command} onChange={event=>setCommand(event.target.value)} autoCapitalize="off" autoCorrect="off" spellCheck={false} style={{...control,width:"100%",fontSize:16}}/></label>
-      <button type="submit" className="ui-focus-ring" style={control} disabled={!!active}>{t("devices.terminalSend")}</button>
-      {active&&<button type="button" className="ui-focus-ring" style={control} onClick={()=>manager.cancel(operation.id)}>{t("devices.cancelOperation")}</button>}
+  const title = t("devices.fastbootTerminal", { device: label });
+  return <section aria-label={title} style={{ display: "grid", minWidth: 0, gap: 10 }}>
+    {showTitle && <strong style={{ fontSize: 13 }}>{title}</strong>}
+    <form onSubmit={event => { event.preventDefault(); if (!active) start(); }} style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-end", gap: 8 }}>
+      <div style={{ flex: "1 1 180px", minWidth: 0 }}>
+        <TextField label={t("devices.operationCommand")} value={command} onChange={event => setCommand(event.target.value)} mono />
+      </div>
+      <Button type="submit" tone="primary" disabled={!!active}>{t("devices.terminalSend")}</Button>
+      {active && <Button tone="danger" onClick={() => manager.cancel(operation.id)}>{t("devices.cancelOperation")}</Button>}
     </form>
-    {input&&<small style={{overflowWrap:"anywhere"}}>{t("devices.operationSelectedInput")}: {input.name} — SHA-256 {input.sha256}</small>}
-    {operation&&<pre aria-label={t("devices.operationOutput")} style={{margin:0,maxHeight:240,overflow:"auto",whiteSpace:"pre-wrap",overflowWrap:"anywhere"}}>{operation.output.map(item=>item.line).join("\n")}
-{operation.error||operation.result?.summary||operation.progress?.message}</pre>}
-    {error&&<p role="alert">{error}</p>}
+    {input && <small style={{ overflowWrap: "anywhere", color: "var(--text-muted)" }}>{t("devices.operationSelectedInput")}: {input.name} — SHA-256 {input.sha256}</small>}
+    {operation && <pre aria-label={t("devices.operationOutput")} style={{ margin: 0, padding: 8, maxHeight: 240, overflow: "auto", borderRadius: "var(--radius-control)", background: "var(--bg)", fontSize: 12, lineHeight: 1.45, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{operation.output.map(item => item.line).join("\n")}
+{operation.error || operation.result?.summary || operation.progress?.message}</pre>}
+    {error && <Notice tone="error" role="alert">{error}</Notice>}
   </section>;
 }

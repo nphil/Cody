@@ -3431,3 +3431,30 @@ span.linenumber {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
+/* Devices panel. Every control is at least 44px: the panel is used with a
+   finger on a tablet. The Select trigger sets its own height inline, so the
+   panel rule needs !important like the settings-shell touch rules above. */
+.device-panel .ui-select-trigger {
+  height: 44px !important;
+  font-size: 14px !important;
+}
+.dv-btn {
+  transition: background-color var(--dur-fast) var(--ease-out-warm), border-color var(--dur-fast) var(--ease-out-warm);
+}
+.dv-btn:hover:not(:disabled) { background: var(--bg-hover) !important; }
+.dv-btn--primary:hover:not(:disabled) { background: var(--accent-hover) !important; }
+.dv-disclosure > summary::-webkit-details-marker { display: none; }
+.dv-disclosure > summary::after {
+  content: "";
+  margin-left: auto;
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid var(--text-muted);
+  border-bottom: 2px solid var(--text-muted);
+  transform: rotate(45deg);
+  transition: transform var(--dur-fast) var(--ease-out-warm);
+}
+.dv-disclosure[open] > summary::after { transform: rotate(-135deg); }
+@media (prefers-reduced-motion: reduce) {
+  .dv-btn, .dv-disclosure > summary::after { transition: none; }
+}

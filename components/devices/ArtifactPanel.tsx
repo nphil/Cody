@@ -1,10 +1,11 @@
 "use client";
 
-import { Copy, Download, FileDown, FileUp, FolderInput, Trash2, TriangleAlert, Upload } from "lucide-react";
+import { Copy, Download, FileDown, FileUp, FolderInput, Trash2, Upload } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { formatBytes } from "@/lib/format-bytes";
 import { useI18n } from "@/lib/i18n";
 import { deviceArtifacts, type DeviceArtifact, type DeviceArtifactSource } from "@/lib/devices/artifacts";
+import { Button, cardStyle, Notice, sectionHeadingStyle, TOUCH } from "./ui";
 
 interface ArtifactPanelProps {
   sessionId: string;
@@ -14,21 +15,6 @@ interface ArtifactPanelProps {
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function actionStyle(disabled = false): React.CSSProperties {
-  return {
-    height: 24,
-    padding: "0 7px",
-    border: "1px solid var(--border)",
-    borderRadius: "var(--radius-control)",
-    background: "var(--bg-panel)",
-    color: disabled ? "var(--text-dim)" : "var(--text)",
-    cursor: disabled ? "default" : "pointer",
-    fontSize: 11,
-    fontWeight: 600,
-    opacity: disabled ? 0.6 : 1,
-  };
 }
 
 function sourceLabel(source: DeviceArtifactSource, t: (key: string) => string): string {
@@ -99,11 +85,11 @@ export function ArtifactPanel({ sessionId, selectedInputId, onSelectInput }: Art
   };
 
   return (
-    <section aria-label={t("devices.artifacts")} style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-      <div style={{ fontSize: 11, fontWeight: 600, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--text-dim)" }}>
-        {t("devices.artifacts")}
+    <section id="device-files" aria-label={t("devices.artifacts")} style={cardStyle}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <h3 style={sectionHeadingStyle}>{t("devices.artifacts")}</h3>
+        <p role="note" style={{ margin: 0, fontSize: 12, lineHeight: 1.45, color: "var(--text-muted)" }}>{t("devices.artifactEscrowNotice")}</p>
       </div>
-      <div role="note" style={{ fontSize: 10, lineHeight: 1.35, color: "var(--text-muted)" }}>{t("devices.artifactEscrowNotice")}</div>
       <div
         onDragEnter={(event) => { event.preventDefault(); setDragging(true); }}
         onDragOver={(event) => event.preventDefault()}
@@ -116,11 +102,11 @@ export function ArtifactPanel({ sessionId, selectedInputId, onSelectInput }: Art
         style={{
           display: "flex",
           flexDirection: "column",
-          gap: 7,
-          padding: 8,
+          gap: 10,
+          padding: 12,
           border: `1px dashed ${dragging ? "var(--accent)" : "var(--border)"}`,
           borderRadius: "var(--radius-control)",
-          background: dragging ? "var(--bg-selected)" : "var(--bg-panel)",
+          background: dragging ? "var(--bg-selected)" : "var(--bg)",
         }}
       >
         <input
@@ -132,63 +118,57 @@ export function ArtifactPanel({ sessionId, selectedInputId, onSelectInput }: Art
             event.currentTarget.value = "";
           }}
         />
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <Upload size={14} aria-hidden="true" style={{ color: "var(--text-muted)", flexShrink: 0 }} />
-          <span style={{ flex: 1, minWidth: 0, fontSize: 11, lineHeight: 1.35, color: "var(--text-muted)" }}>{t("devices.dropFirmware")}</span>
-          <button type="button" className="ui-focus-ring" disabled={busy} onClick={() => picker.current?.click()} style={actionStyle(busy)}>
+        <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10 }}>
+          <Upload size={18} aria-hidden="true" style={{ color: "var(--text-muted)", flexShrink: 0 }} />
+          <span style={{ flex: "1 1 160px", minWidth: 0, fontSize: 12, lineHeight: 1.4, color: "var(--text-muted)" }}>{t("devices.dropFirmware")}</span>
+          <button id="device-files-choose" type="button" className="ui-focus-ring dv-btn dv-btn--primary" disabled={busy} onClick={() => picker.current?.click()} style={{ minHeight: TOUCH, padding: "0 16px", borderRadius: "var(--radius-control)", border: "1px solid var(--accent)", background: "var(--accent)", color: "var(--on-accent)", fontSize: 13, fontWeight: 600, opacity: busy ? 0.55 : 1, cursor: busy ? "default" : "pointer" }}>
             {t("devices.chooseFile")}
           </button>
         </div>
-        <div style={{ display: "flex", gap: 5 }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
           <label htmlFor="device-local-artifact" className="sr-only">{t("devices.localPath")}</label>
           <input
             id="device-local-artifact"
+            className="ui-focus-ring"
             value={path}
             onChange={(event) => setPath(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "Enter" && path.trim() && !busy) void importLocalPath();
             }}
             placeholder={t("devices.localPathPlaceholder")}
-            style={{ minWidth: 0, flex: 1, height: 24, padding: "0 7px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)", color: "var(--text)", fontSize: 11 }}
+            style={{ minWidth: 0, flex: "1 1 160px", minHeight: TOUCH, padding: "0 12px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", fontSize: 16 }}
           />
-          <button type="button" className="ui-focus-ring" disabled={busy || !path.trim()} onClick={() => void importLocalPath()} style={actionStyle(busy || !path.trim())}>
-            <FolderInput size={12} aria-hidden="true" /> {t("devices.importPath")}
-          </button>
+          <Button disabled={busy || !path.trim()} icon={<FolderInput size={16} />} onClick={() => void importLocalPath()}>{t("devices.importPath")}</Button>
         </div>
-        <div style={{ fontSize: 10, lineHeight: 1.35, color: "var(--text-dim)" }}>{t("devices.authorizedPathHint")}</div>
+        <div style={{ fontSize: 12, lineHeight: 1.4, color: "var(--text-dim)" }}>{t("devices.authorizedPathHint")}</div>
       </div>
 
-      {error && (
-        <div role="alert" style={{ display: "flex", alignItems: "flex-start", gap: 6, padding: "6px 7px", border: "1px solid color-mix(in srgb, var(--status-error) 55%, var(--border))", borderRadius: "var(--radius-control)", color: "var(--status-error)", fontSize: 11, lineHeight: 1.35 }}>
-          <TriangleAlert size={12} aria-hidden="true" style={{ flexShrink: 0, marginTop: 1 }} />
-          <span>{error}</span>
-        </div>
-      )}
+      {error && <Notice tone="error" role="alert">{error}</Notice>}
 
       {artifacts.length === 0 ? (
-        <div style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("devices.artifactsEmpty")}</div>
+        <div style={{ fontSize: 12, color: "var(--text-dim)" }}>{t("devices.artifactsEmpty")}</div>
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {artifacts.map((artifact) => {
             const selected = artifact.id === selectedInputId;
             return (
-              <div key={artifact.id} style={{ display: "flex", flexDirection: "column", gap: 4, padding: 7, border: `1px solid ${selected ? "var(--accent)" : "var(--border)"}`, borderRadius: "var(--radius-control)", background: selected ? "var(--bg-selected)" : "var(--bg-panel)" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  {artifact.kind === "input" ? <FileUp size={13} aria-hidden="true" /> : <FileDown size={13} aria-hidden="true" />}
-                  <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)", fontSize: 11, fontWeight: 600 }} title={artifact.name}>{artifact.name}</span>
-                  <button type="button" className="ui-focus-ring" aria-pressed={selected} onClick={() => onSelectInput(selected ? null : artifact.id)} style={actionStyle()}>
+              <div key={artifact.id} style={{ display: "flex", flexDirection: "column", gap: 8, padding: 10, border: `1px solid ${selected ? "var(--accent)" : "var(--border)"}`, borderRadius: "var(--radius-control)", background: selected ? "var(--bg-selected)" : "var(--bg)" }}>
+                <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+                  {artifact.kind === "input" ? <FileUp size={16} aria-hidden="true" /> : <FileDown size={16} aria-hidden="true" />}
+                  <span style={{ minWidth: 0, flex: "1 1 120px", overflowWrap: "anywhere", color: "var(--text)", fontSize: 13, fontWeight: 600 }} title={artifact.name}>{artifact.name}</span>
+                  <Button pressed={selected} tone={selected ? "primary" : "normal"} onClick={() => onSelectInput(selected ? null : artifact.id)}>
                     {selected ? t("devices.inputSelected") : t("devices.useInput")}
-                  </button>
+                  </Button>
                 </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 10, lineHeight: 1.3, color: "var(--text-muted)" }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 12, lineHeight: 1.35, color: "var(--text-muted)" }}>
                   <span>{artifact.kind === "input" ? t("devices.artifactInput") : t("devices.artifactOutput")} · {sourceLabel(artifact.source, t)} · {formatBytes(artifact.size)}</span>
                   <code style={{ overflowWrap: "anywhere", color: "var(--text-dim)" }}>{artifact.id}</code>
                   <code style={{ overflowWrap: "anywhere", color: "var(--text-dim)" }}>{artifact.sha256}</code>
                 </div>
-                <div style={{ display: "flex", justifyContent: "flex-end", gap: 5 }}>
-                  <button type="button" className="ui-focus-ring" onClick={() => { if (!navigator.clipboard) { setError(t("devices.clipboardUnavailable")); return; } void navigator.clipboard.writeText(artifact.id + "\n" + artifact.sha256).then(() => setError(null)).catch((caught: unknown) => setError(errorText(caught))); }} style={actionStyle()}><Copy size={12} aria-hidden="true" /> {t("devices.copyArtifactReference")}</button>
-                  <button type="button" className="ui-focus-ring" onClick={() => deviceArtifacts.download(sessionId, artifact.id)} style={actionStyle()}><Download size={12} aria-hidden="true" /> {t("devices.downloadArtifact")}</button>
-                  <button type="button" className="ui-focus-ring" onClick={() => { void deviceArtifacts.remove(sessionId, artifact.id).then((removed) => { if (removed && selected) onSelectInput(null); }).catch((cause: unknown) => setError(errorText(cause))); }} style={actionStyle()}><Trash2 size={12} aria-hidden="true" /> {t("devices.removeArtifact")}</button>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                  <Button icon={<Copy size={16} />} onClick={() => { if (!navigator.clipboard) { setError(t("devices.clipboardUnavailable")); return; } void navigator.clipboard.writeText(artifact.id + "\n" + artifact.sha256).then(() => setError(null)).catch((caught: unknown) => setError(errorText(caught))); }}>{t("devices.copyArtifactReference")}</Button>
+                  <Button icon={<Download size={16} />} onClick={() => deviceArtifacts.download(sessionId, artifact.id)}>{t("devices.downloadArtifact")}</Button>
+                  <Button tone="danger" icon={<Trash2 size={16} />} onClick={() => { void deviceArtifacts.remove(sessionId, artifact.id).then((removed) => { if (removed && selected) onSelectInput(null); }).catch((cause: unknown) => setError(errorText(cause))); }}>{t("devices.removeArtifact")}</Button>
                 </div>
               </div>
             );
