@@ -12,6 +12,7 @@ import type { Flasher, HardwareContext, HardwareRequest, HardwareResult, Hardwar
 import { parseDeviceSpec, parseHostSpec, type DeviceSpec, type ForwardLease, type HostSpec, type ReverseLease, type TunnelChannel, type TunnelConnection } from "./tunnel";
 import { hashFirmware, normalizeSha256, sha256Blob } from "./hardware-safety";
 import { sideloadAdb } from "./adb-sideload";
+import { openZip } from "./zip-archive";
 
 const ADB_PACKET_READ_BYTES = 64 * 1024;
 const ADB_PROBE_READ_LIMIT_MS = 20_000;
@@ -946,7 +947,7 @@ async function detect(context: HardwareContext): Promise<HardwareResult> {
     summary: `ADB daemon detected for ${model || device || adb.serial}.`,
     details: {
       serial: adb.serial,
-      banner: String(adb.banner),
+      banner: bannerText(adb.banner),
       model,
       device,
       androidRelease: release,
@@ -1256,6 +1257,216 @@ async function reverseRemoveAll(context: HardwareContext, adb: Adb): Promise<Har
   return { summary: "All reverse rules removed from the device." };
 }
 
+// ============================================================================
+// install, adbd restarts, wait-for-device
+// ============================================================================
+
+/** `adb install` flags in the order they are passed; each is a plain on/off choice. */
+const INSTALL_FLAGS: Readonly<Record<string, string>> = { replace: "-r", downgrade: "-d", grantPermissions: "-g", testOnly: "-t" };
+
+function installFlags(options: Record<string, unknown> | undefined): string[] {
+  const unknown = Object.keys(options ?? {}).find((name) => name !== "kind" && !Object.hasOwn(INSTALL_FLAGS, name));
+  if (unknown) throw new AdbProtocolError(`Unknown install option ${JSON.stringify(unknown)}. Supported: ${Object.keys(INSTALL_FLAGS).join(", ")}.`);
+  const flags: string[] = [];
+  for (const [name, flag] of Object.entries(INSTALL_FLAGS)) {
+    const value = options?.[name];
+    if (value === undefined) continue;
+    if (typeof value !== "boolean") throw new AdbProtocolError(`Install option ${name} must be true or false.`);
+    if (value) flags.push(flag);
+  }
+  return flags;
+}
+
+/**
+ * `adb install`: the APK is copied to /data/local/tmp by the same hash-verified,
+ * resumable staging a push uses, `pm install` runs on exactly that file, and the
+ * copy and its staging files are removed whether or not the install succeeded.
+ * The command line is built only from the validated flags and a path derived
+ * from the file's SHA-256, so no shell grant is needed; the confirmation is the gate.
+ */
+async function install(request: HardwareRequest, context: HardwareContext, adb: Adb): Promise<HardwareResult> {
+  const input = context.input;
+  if (!input?.size) throw new AdbProtocolError("ADB install requires a non-empty APK artifact.");
+  const flags = installFlags(request.options);
+  const apk = await openZip(input).catch(() => undefined);
+  if (!apk?.find("AndroidManifest.xml")) throw new AdbProtocolError("This file is not an APK: it has no AndroidManifest.xml. App bundles and split APKs are not supported; select one .apk file.");
+  const sha256 = await hashFirmware(input, request.sha256);
+  const capabilities = await shellCapabilities(adb);
+  const staged = `/data/local/tmp/cody-install-${sha256.slice(0, 16)}.apk`;
+  const command = ["pm", "install", ...flags, shQuote(staged)].join(" ");
+  await context.confirm({
+    action: "adb.install",
+    target: "pm install",
+    sha256,
+    length: input.size,
+    backup: flags.includes("-r") ? "not applicable: -r replaces the installed app's code (its data is kept); Cody does not back up the old APK" : "not applicable: without -r an app that is already installed is not replaced",
+    details: `Copy the APK to ${staged} (hash-checked on the device), run \`${command}\`, then delete the copy and its staging files. An installed app can request permissions and run code on the device.`,
+  });
+  const state = await stateFor(context, input, staged, sha256);
+  await resumeVerifiedStagedPush({ input, state, io: stagingIo(adb, capabilities), progress: context.progress, reconnect: () => reconnectStaging(context), isConnectionFailure });
+  const live = await adbFor(context);
+  context.progress({ phase: "adb.install", message: "Running pm install" });
+  const installed = await shellStatus(live, command).finally(() => live.rm([staged, state.stagingDirectory], { recursive: true, force: true }).then(() => undefined, () => undefined));
+  const output = abbreviatedOutput(installed.output);
+  if (installed.status !== 0 || !/^Success\b/m.test(installed.output)) throw new AdbProtocolError(`pm install failed: ${output || `status ${installed.status}`}. The staged copy was removed.`);
+  context.output?.(output);
+  return {
+    summary: `Installed the APK (${input.size} bytes): the file matched its SHA-256 on the device and the package manager reported Success.`,
+    verified: true,
+    sha256,
+    details: { command, flags, packageManager: output },
+  };
+}
+
+interface AdbdRestart {
+  readonly service: string;
+  readonly restarts: RegExp;
+  /** The reply of an adbd that is already in the requested state. */
+  readonly unchanged?: RegExp;
+}
+
+/** adbd's own replies (AOSP adb/daemon/services.cpp) to the services that restart it. */
+const ADBD_RESTARTS: Readonly<Record<"root" | "unroot" | "tcpip" | "usb", AdbdRestart>> = {
+  root: { service: "root:", restarts: /^restarting adbd as root$/, unchanged: /^adbd is already running as root$/ },
+  unroot: { service: "unroot:", restarts: /^restarting adbd as non root$/, unchanged: /^adbd not running as root$/ },
+  tcpip: { service: "tcpip:", restarts: /^restarting in TCP mode port: \d+$/ },
+  usb: { service: "usb:", restarts: /^restarting in USB mode$/ },
+};
+
+/**
+ * `adb root`, `unroot`, `tcpip PORT`, `usb`. adbd restarts and drops the
+ * connection, so the operation reacquires the same device, reconnects, and
+ * checks the state the device itself reports.
+ */
+async function restartAdbd(kind: "root" | "unroot" | "tcpip" | "usb", request: HardwareRequest, context: HardwareContext, adb: Adb): Promise<HardwareResult> {
+  const spec = ADBD_RESTARTS[kind];
+  let service = spec.service;
+  let port: number | undefined;
+  if (kind === "tcpip") {
+    const raw = request.options?.port;
+    if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 1024 || raw > 65535) throw new AdbProtocolError("tcpip needs options.port, an integer from 1024 to 65535 (5555 is the usual choice).");
+    port = raw;
+    service = `tcpip:${port}`;
+  }
+  const effects = {
+    root: "Restart adbd with root privileges. The ADB connection drops and Cody reconnects. Only debuggable builds allow it.",
+    unroot: "Restart adbd without root privileges. The ADB connection drops and Cody reconnects.",
+    usb: "Restart adbd in USB mode, turning TCP/IP listening off. The ADB connection drops and Cody reconnects.",
+    tcpip: `Restart adbd listening for TCP/IP on port ${port}. The ADB connection drops and Cody reconnects. A browser cannot open raw TCP, so Cody keeps using USB: this is for a PC on the network that will run adb connect to the device.`,
+  };
+  await context.confirm({ action: `adb.${kind}`, target: service, backup: "not applicable: no device storage is written", details: effects[kind] });
+  const answer = (await adb.createSocketAndWait(service)).trim();
+  context.output?.(answer);
+  const restarted = spec.restarts.test(answer);
+  if (!restarted && !spec.unchanged?.test(answer)) throw new AdbProtocolError(`adbd refused ${service}: ${answer || "no answer"}`);
+  if (!restarted) return { summary: `adbd answered "${answer}"; nothing was restarted.`, verified: true, details: { answer, restarted: false } };
+  await closeCachedAdb(context.transport);
+  let after: Adb;
+  try {
+    if (!context.reacquireTransport) throw new AdbProtocolError("this runner cannot reacquire the device");
+    await context.reacquireTransport();
+    after = await adbFor(context);
+  } catch (error) {
+    context.signal.throwIfAborted();
+    return { summary: `adbd answered "${answer}" and is restarting, but Cody could not reconnect to check it (${error instanceof Error ? error.message : String(error)}). If the device re-enumerated, select it again in Devices.`, verified: false, details: { answer, restarted: true } };
+  }
+  let verified: boolean;
+  let observed: Record<string, unknown>;
+  if (kind === "root" || kind === "unroot") {
+    const flag = (await after.getProp("service.adb.root")).trim();
+    verified = kind === "root" ? flag === "1" : flag !== "1";
+    observed = { "service.adb.root": flag };
+  } else {
+    const listening = await after.tcpip.getListenAddresses();
+    verified = kind === "tcpip" ? listening.servicePort === port : listening.servicePort === undefined;
+    observed = { ...listening };
+  }
+  return {
+    summary: verified ? `adbd restarted (${kind}) and the reconnected device confirms it.` : `adbd restarted (${kind}) but the reconnected device does not report the requested state.`,
+    verified,
+    details: { answer, restarted: true, observed },
+  };
+}
+
+export interface AdbWaitOptions {
+  readonly timeoutMs: number;
+  readonly pollMs: number;
+  readonly state: "device" | "recovery" | "sideload";
+}
+
+/** The banner as adbd sent it: the state, then the properties Cody reads. yume's AdbBanner object has no string form of its own. */
+function bannerText(banner: Adb["banner"]): string {
+  const properties = [["ro.product.name", banner.product], ["ro.product.model", banner.model], ["ro.product.device", banner.device], ["features", banner.features.join(",")]]
+    .filter(([, value]) => value)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(";");
+  return `${banner.state ?? ""}::${properties}`;
+}
+
+/** The wait window of an `adb wait-for-device` request; undefined for every other request. */
+export function adbWaitOptions(request: HardwareRequest): AdbWaitOptions | undefined {
+  if (request.protocol !== "adb" || request.action !== "exec" || request.options?.kind !== "wait-for-device") return undefined;
+  const { timeoutSeconds = 60, pollMs = 1000, state = "device" } = request.options;
+  if (typeof timeoutSeconds !== "number" || !Number.isInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 600) throw new AdbProtocolError("wait-for-device timeoutSeconds must be an integer from 1 to 600.");
+  if (typeof pollMs !== "number" || !Number.isInteger(pollMs) || pollMs < 100 || pollMs > 5000) throw new AdbProtocolError("wait-for-device pollMs must be an integer from 100 to 5000.");
+  if (state !== "device" && state !== "recovery" && state !== "sideload") throw new AdbProtocolError('wait-for-device state must be "device", "recovery", or "sideload".');
+  return { timeoutMs: timeoutSeconds * 1000, pollMs, state };
+}
+
+function pause(milliseconds: number, signal: AbortSignal): Promise<void> {
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  const cancelled = (): Error => (signal.reason instanceof Error ? signal.reason : new DOMException("Operation cancelled.", "AbortError"));
+  if (signal.aborted) {
+    reject(cancelled());
+    return promise;
+  }
+  const onAbort = (): void => {
+    clearTimeout(timer);
+    reject(cancelled());
+  };
+  const timer = setTimeout(() => {
+    signal.removeEventListener("abort", onAbort);
+    resolve();
+  }, milliseconds);
+  signal.addEventListener("abort", onAbort, { once: true });
+  return promise;
+}
+
+/**
+ * `adb wait-for-device` (and `-recovery` / `-sideload`): authenticates until the
+ * daemon answers in the wanted state or the window ends. The manager already
+ * retries acquiring a device that is not attached yet.
+ */
+async function waitForDevice(request: HardwareRequest, context: HardwareContext): Promise<HardwareResult> {
+  const wait = adbWaitOptions(request)!;
+  const deadline = Date.now() + wait.timeoutMs;
+  let last = "the device has not answered yet";
+  for (;;) {
+    try {
+      const adb = await adbFor(context);
+      const state = adb.banner.state;
+      if (state === wait.state) {
+        const [model, release] = await Promise.all([adb.getProp("ro.product.model"), adb.getProp("ro.build.version.release")]).catch(() => ["", ""]);
+        return { summary: `The device is online (${state})${model ? `: ${model}` : ""}.`, verified: true, details: { state, banner: bannerText(adb.banner), model, androidRelease: release } };
+      }
+      last = `the device is in ${state ?? "an unknown"} state, waiting for ${wait.state}`;
+      await closeCachedAdb(context.transport);
+    } catch (error) {
+      context.signal.throwIfAborted();
+      last = error instanceof Error ? error.message : String(error);
+    }
+    if (Date.now() >= deadline) throw new AdbProtocolError(`The device did not reach the ${wait.state} state within ${wait.timeoutMs / 1000} s (${last}).`);
+    context.progress({ phase: "adb.wait", message: `Waiting for the device: ${last}` });
+    await pause(wait.pollMs, context.signal);
+    try {
+      await context.reacquireTransport?.();
+    } catch (error) {
+      context.signal.throwIfAborted();
+      last = error instanceof Error ? error.message : String(error);
+    }
+  }
+}
+
 function operationKind(request: HardwareRequest): string | undefined {
   const kind = request.options?.kind;
   if (kind === undefined) return undefined;
@@ -1265,7 +1476,7 @@ function operationKind(request: HardwareRequest): string | undefined {
 
 export const adbFlasher: Flasher = {
   protocol: "adb",
-  actions: ["detect", "exec", "push", "pull", "dump", "monitor", "sideload", "verify", "forward", "reverse"],
+  actions: ["detect", "exec", "push", "pull", "dump", "monitor", "sideload", "verify", "forward", "reverse", "install"],
   async run(request, context) {
     const leave = await enterAdbHold(context);
     try {
@@ -1290,6 +1501,8 @@ export const adbFlasher: Flasher = {
           const adb = await adbFor(context);
           return await push(request, context, adb);
         }
+        case "install":
+          return await install(request, context, await adbFor(context));
         case "exec": {
           switch (operationKind(request)) {
             case "reboot":
@@ -1302,6 +1515,16 @@ export const adbFlasher: Flasher = {
               return await reverseRemove(request, context, await adbFor(context));
             case "reverse-remove-all":
               return await reverseRemoveAll(context, await adbFor(context));
+            case "root":
+              return await restartAdbd("root", request, context, await adbFor(context));
+            case "unroot":
+              return await restartAdbd("unroot", request, context, await adbFor(context));
+            case "tcpip":
+              return await restartAdbd("tcpip", request, context, await adbFor(context));
+            case "usb":
+              return await restartAdbd("usb", request, context, await adbFor(context));
+            case "wait-for-device":
+              return await waitForDevice(request, context);
             case undefined:
             case "shell": {
               const command = shellCommand(request, context);

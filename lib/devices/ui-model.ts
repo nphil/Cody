@@ -45,7 +45,7 @@ const GROUP_ACTIONS: Readonly<Record<ActionGroup, Readonly<Partial<Record<Hardwa
   terminal: { adb: ["monitor", "exec"] },
   commands: { fastboot: ["exec"], dfu: ["exec"], esp: ["exec"] },
   serial: { serial: ["monitor", "exec"] },
-  files: { adb: ["push", "pull", "sideload"] },
+  files: { adb: ["push", "pull", "sideload", "install"] },
   flash: { esp: ["flash"], fastboot: ["flash"], dfu: ["flash"], stm32: ["flash"], stk500: ["flash"] },
   backup: { esp: ["dump"], adb: ["dump", "verify"], fastboot: ["dump"], dfu: ["dump"], stm32: ["dump"], stk500: ["dump"] },
   ports: { adb: ["forward", "reverse"] },

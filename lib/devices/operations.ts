@@ -9,7 +9,7 @@ import type {
 } from "./flasher";
 import { hashBlob } from "./blob-stream";
 import type { StreamArtifact } from "./flasher";
-import { adbFlasher } from "./adb";
+import { adbFlasher, adbWaitOptions } from "./adb";
 import type { TunnelChannel } from "./tunnel";
 import { deviceArtifacts } from "./artifacts";
 import { dfuFlasher } from "./dfu";
@@ -280,7 +280,7 @@ function validateRequest(request: DeviceOperationRequest): void {
   if ((request.action === "forward" || request.action === "reverse") && !request.target?.trim()) {
     throw new Error(`${request.action} requires the device-side address as target, for example tcp:8080.`);
   }
-  if ((request.action === "flash" || request.action === "push" || request.action === "sideload") && !request.fileId) {
+  if ((request.action === "flash" || request.action === "push" || request.action === "sideload" || request.action === "install") && !request.fileId) {
     throw new Error(request.action + " requires a session artifact and its SHA-256 digest.");
   }
   validFiniteInteger(request.interfaceNumber, "interfaceNumber");
@@ -652,13 +652,40 @@ export class DeviceOperationManager {
     this.emit(record, { type: "output", output });
   }
 
+  /**
+   * `adb wait-for-device`: the device may not be attached yet (it is rebooting or
+   * re-enumerating), so acquiring its lease is retried until the wait window
+   * ends. Every other operation fails at once when the device is missing.
+   */
+  private async acquireLeaseForRun(record: OperationRecord): Promise<HardwareTransportLease> {
+    const wait = adbWaitOptions(record.request);
+    if (!wait) return this.acquireLease(record);
+    const deadline = Date.now() + wait.timeoutMs;
+    let announced = false;
+    for (;;) {
+      try {
+        return await this.acquireLease(record);
+      } catch (error) {
+        if (record.controller.signal.aborted) throw new DOMException("Operation cancelled.", "AbortError");
+        if (Date.now() >= deadline) throw new Error(`The device did not become available within ${wait.timeoutMs / 1000} s: ${errorMessage(error)}`);
+        if (!announced) {
+          announced = true;
+          this.reportProgress(record, { phase: "waiting", message: "Waiting for the device to appear." });
+        }
+        const { promise: pollElapsed, resolve: pollDone } = Promise.withResolvers<void>();
+        setTimeout(pollDone, wait.pollMs);
+        await pollElapsed;
+      }
+    }
+  }
+
   private async run(record: OperationRecord): Promise<void> {
     let completed = false;
     try {
       const input = await this.resolveInput(record);
       if (record.controller.signal.aborted) throw new DOMException("Operation cancelled.", "AbortError");
       this.reportProgress(record, { phase: "acquiring", message: "Acquiring exclusive hardware lease" });
-      record.lease = await this.acquireLease(record);
+      record.lease = await this.acquireLeaseForRun(record);
       if (record.controller.signal.aborted) throw new DOMException("Operation cancelled.", "AbortError");
       record.state = "running";
       this.emit(record, { type: "state", state: record.state });

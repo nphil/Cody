@@ -83,7 +83,7 @@ function requestFor(
   const sha256 = stringArg(args, "sha256")?.toLowerCase();
   if (fileId && !sha256) return "fileId requires the exact SHA-256 shown for that session artifact.";
   if (sha256 && !/^[a-f0-9]{64}$/.test(sha256)) return "sha256 must be a 64-character hexadecimal digest.";
-  if ((action === "flash" || action === "push" || action === "sideload") && (!fileId || !sha256)) {
+  if ((action === "flash" || action === "push" || action === "sideload" || action === "install") && (!fileId || !sha256)) {
     return action + " requires a session artifact and its exact SHA-256 digest.";
   }
   if (action === "verify" && (!sha256 || !length || !target)) return "verify requires target, length, and the expected raw-image SHA-256.";
@@ -225,7 +225,7 @@ const monitorSend: DeviceOperationToolHandler = async (args, context) => {
   }
 };
 
-const DEVICE_SIDE_EXEC_KINDS = ["reverse-list", "reverse-remove", "reverse-remove-all"];
+const DEVICE_SIDE_EXEC_KINDS = ["reverse-list", "reverse-remove", "reverse-remove-all", "root", "unroot", "tcpip", "usb", "wait-for-device"];
 
 const TUNNEL_PROPERTIES = {
   device: OPERATION_PROPERTIES.device,
@@ -314,10 +314,11 @@ export const DEVICE_OPERATION_TOOLS: DeviceOperationToolDefinition[] = [
   startDefinition("device_detect", "detect", "Start a browser-hosted protocol detection operation."),
   startDefinition("device_flash", "flash", "Start browser-hosted flashing. Writes pause for direct confirmation with exact target, hash and backup status. Fastboot without fetch can write after an UNVERIFIED warning; verify in ADB recovery afterwards. Protected destinations require an exact typed override."),
   startDefinition("device_dump", "dump", "Start a device dump or backup operation; resulting bytes remain a session-owned browser artifact."),
-  startDefinition("device_exec", "exec", "Run a protocol command with streamed output. ADB arbitrary shell requires the user's connection-scoped shell grant in Devices; without it only id, uname -a, df -h, getprop [ro.*] work. Other state-changing commands require exact browser confirmation. ADB also takes options.kind: reverse-list (adb reverse --list), reverse-remove with target tcp:PORT, or reverse-remove-all; these need no command. ESP takes esptool-style commands: chip_id, read_mac, flash_id, get_security_info, efuse_summary, efuse_dump (read-only), and erase_flash / erase_region ADDRESS SIZE (backs the range up first, then needs the user's typed override). Fastboot also takes stage and get_staged, and update / flashall with a package ZIP as the artifact.", ["device", "protocol"]),
+  startDefinition("device_exec", "exec", "Run a protocol command with streamed output. ADB arbitrary shell requires the user's connection-scoped shell grant in Devices; without it only id, uname -a, df -h, getprop [ro.*] work. Other state-changing commands require exact browser confirmation. ADB also takes options.kind: reverse-list (adb reverse --list), reverse-remove with target tcp:PORT, or reverse-remove-all; these need no command. ADB options.kind root, unroot, tcpip (with options.port), and usb restart adbd; the connection drops and the operation reconnects and checks. options.kind wait-for-device waits for the device to be online (options.timeoutSeconds 1-600, options.state device, recovery, or sideload). ESP takes esptool-style commands: chip_id, read_mac, flash_id, get_security_info, efuse_summary, efuse_dump (read-only), and erase_flash / erase_region ADDRESS SIZE (backs the range up first, then needs the user's typed override). Fastboot also takes stage and get_staged, and update / flashall with a package ZIP as the artifact. DFU takes abort, clear_status, reset, and leave ADDRESS (DfuSe).", ["device", "protocol"]),
   startDefinition("device_push", "push", "Start a resumable protocol file push using a session artifact."),
   startDefinition("device_pull", "pull", "Start a protocol file pull; output remains a session-owned browser artifact."),
   startDefinition("device_sideload", "sideload", "Serve a session artifact to ADB recovery sideload. Requires direct approval; transfer completion does not verify installation."),
+  startDefinition("device_install", "install", "adb install: copy an APK (a session artifact) to the device, hash-check it there, and run pm install on it. Requires direct approval. options may set replace, downgrade, grantPermissions, testOnly (true/false). Split APKs and app bundles are not supported. No shell grant is needed."),
   startDefinition("device_verify", "verify", "After a Fastboot write without fetch support, compare an exact raw-image byte range in ADB recovery with the expected SHA-256. Needs target, length, sha256 and the shell grant.", ["device", "protocol", "target", "length", "sha256"]),
   startDefinition("device_monitor", "monitor", "Start a serial or ADB terminal. ADB needs the user's shell grant; it shares the device's ADB connection with port rules, shells and pulls. Use device_monitor_send for interactive input."),
   tunnelDefinition("device_forward", "forward", "adb forward: make a device service reachable on the Cody server. Starts a long-running operation that listens on 127.0.0.1:PORT of the machine running Cody (NOT the tablet or PC holding the device) and relays each connection to the device service through the browser's ADB connection. Requires the user's direct confirmation; the rule lives until device_operation_cancel, device_tunnels remove, or a disconnect. target is the device service (tcp:PORT, localabstract:NAME, localreserved:NAME, localfilesystem:PATH, dev:PATH, jdwp:PID); local is tcp:PORT or tcp:0 for any free port, 1024 or above."),

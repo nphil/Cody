@@ -42,7 +42,8 @@ meaning (the browser's device grant is the selection).
 | `adb logcat` | `device_exec "logcat ..."` (shell grant); runs until cancelled | Composed | none dedicated; streamed shell output is `adb-shell.test.mjs` |
 | `adb push` | `device_push` (verified staging + atomic replace; raw/symlink direct push needs backup + typed `write:<path>`) | Done | `adb-transfer.test.mjs`, `adb.test.mjs` (resume) |
 | `adb pull`, partition dumps (`dd` over shell) | `device_pull`, `device_dump` (stream to a session artifact with SHA-256) | Done | `adb-transfer.test.mjs` |
-| `adb install`, `install-multiple`, `uninstall` | `device_push` the APK to `/data/local/tmp`, then `device_exec "pm install ..."` | Composed | push/shell tests above; no dedicated install test |
+| `adb install` | `device_install`: the APK (a session artifact) is staged to `/data/local/tmp` with the push path's chunked, hash-verified, resumable copy, `pm install [-r] [-d] [-g] [-t]` runs on exactly that file, and the copy and staging files are removed even when the install fails; needs the typed approval but no shell grant; a file with no `AndroidManifest.xml` is refused | **Done** (implemented, host-tested; hardware evidence pending) | `adb-admin.test.mjs` (real `/bin/sh` for the staging shell commands over an emulated adbd: ordering, flags, failure, cleanup, refusals, decline) |
+| `adb install-multiple`, split APKs / bundles, `uninstall` | `device_exec "pm uninstall PACKAGE"` / `pm install-*` through the shell grant | Composed | none |
 | `adb sideload` | `device_sideload` (AOSP `sideload-host`; reports the input hash, not installation) | Done | `adb-transfer.test.mjs` |
 | `adb reboot [recovery\|bootloader\|sideload\|fastboot]` | `device_exec` with `options.kind: "reboot"`, `options.mode` | Done | none (code path only) |
 | **`adb forward [--no-rebind] LOCAL REMOTE`** | **`device_forward`** (`target` = device service, `local` = `tcp:PORT`/`tcp:0`) | **Done** | `tunnel-relay.test.mjs`, `tunnel.test.mjs` |
@@ -51,9 +52,10 @@ meaning (the browser's device grant is the selection).
 | **`adb reverse --list` / `--remove` / `--remove-all`** | **`device_exec`** `options.kind` `reverse-list` / `reverse-remove` / `reverse-remove-all`; `device_tunnels` for this session's rules | **Done** | `tunnel-relay.test.mjs` (list), `operation-tools.test.mjs` |
 | `adb jdwp` (list), `forward tcp:N jdwp:PID` | forward to `jdwp:PID` is accepted; listing PIDs is `device_exec "ps"` | Done / Composed | `tunnel.test.mjs` (address grammar); never run against a debuggable app |
 | `adb backup` / `restore`, `bugreport` | `device_exec "bugreport"` writes on the device and `device_pull` fetches it; `adb backup` is not wrapped | Composed | none |
-| `adb root`, `unroot`, `remount`, `disable-verity`, `tcpip`, `usb` | Run the equivalent commands through the shell grant where the ROM permits (`su`, `mount -o remount`, `setprop`); the `root:` / `tcpip:` services are not wrapped | Not implemented | none |
+| `adb root`, `unroot`, `tcpip PORT`, `usb` | `device_exec` with `options.kind` `root` / `unroot` / `tcpip` (+ `options.port`, 1024-65535) / `usb`: asks first, sends adbd's own service, reconnects to the same device after the restart, and checks the state the device reports (`service.adb.root`, `service.adb.tcp.port`); an adbd that is already in the state, or refuses, is reported as such | **Done** (implemented, host-tested; hardware evidence pending). `tcpip` only switches the device for a PC on the network: a browser cannot open raw TCP, so Cody keeps using USB | `adb-admin.test.mjs` (restart, verify, wrong state, unverified when it cannot reconnect, refusals) |
+| `adb remount`, `disable-verity` | through the shell grant where the ROM permits | Not implemented | none |
 | `adb connect` / `pair` / `disconnect` (ADB over Wi-Fi/TCP) | none | **Browser limit** | A web page cannot open a raw TCP socket to the device. USB (WebUSB) only. |
-| `adb wait-for-device` | A new USB mode appears as a new device needing a fresh grant; re-run `device_detect` | Not implemented | none |
+| `adb wait-for-device` (`-recovery`, `-sideload`) | `device_exec` with `options.kind: "wait-for-device"` (`timeoutSeconds` 1-600, `state` device / recovery / sideload). The manager keeps trying to acquire a device that is not attached yet; the flasher keeps authenticating until the daemon answers in the wanted state. A mode change that re-enumerates under a different USB identity still needs a fresh grant. | **Done** (implemented, host-tested; hardware evidence pending) | `adb-admin.test.mjs` (manager retry, timeout, wrong state, cancel) |
 
 ### Forward / reverse: exactly what matches a PC and what cannot
 
@@ -152,15 +154,20 @@ exposes once running (ADB, fastboot) from the rows above.
 
 1. **MediaTek** (preloader/BROM, DA, GPT read, partition read/write) behind the
    existing confirmation model, with a recorded licensing/DA-provenance decision.
-2. ~~dfu-util plain DFU 1.1 download, `:leave`/`-R`~~ closed below (implemented,
-   host-tested; hardware evidence pending).
-3. **adb**: dedicated `install`, `root`, `unroot`, `tcpip`, `usb` and
-   `wait-for-device` actions (all currently reachable only through the shell
-   grant). Not started.
-4. **Hardware evidence** for every "Done" row via `docs/hardware-checklist.md`,
-   including the erase, eFuse, sparse-split, `update` and `stage` items.
+   Parked by the owner; nothing here claims it.
+2. **Hardware evidence** for every row marked "implemented, host-tested" via
+   `docs/hardware-checklist.md`, including the erase, eFuse, sparse-split,
+   `update`, `stage`, DFU download/`leave`/`reset`, and adb
+   `install`/`root`/`tcpip`/`wait-for-device` items.
+3. Smaller non-MediaTek gaps that remain: `adb uninstall`, `install-multiple`
+   and split APKs, `remount` / `disable-verity`, DFU `-e` detach / `-E` /
+   `:unprotect` / `:mass-erase`, `.dfu` container files, fastboot `format`,
+   `gsi`, `wipe-super`, esptool `load_ram` / `read_mem` family, eFuse burning
+   (refused on purpose: irreversible).
 
 Closed since the previous revision (implemented and host-tested; hardware
 evidence pending): esptool `erase_flash` / `erase_region`, `read_mac`, eFuse and
 security-info reads; fastboot automatic sparse splitting, `update` / `flashall`
-from a ZIP, and `stage` / `get_staged`.
+from a ZIP, and `stage` / `get_staged`; dfu-util plain DFU 1.1 download,
+DfuSe `:leave`, and `-R` reset; adb `install`, `root` / `unroot`, `tcpip` /
+`usb`, and `wait-for-device`.

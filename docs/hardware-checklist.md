@@ -233,6 +233,23 @@ item remains **UNVERIFIED** until its permitted evidence is completed.
 - [ ] **UNVERIFIED** Switching Cody sessions during that 100 MB+ transfer does
   not resume or complete the original operation in the new session.
 
+### ADB install, adbd restarts and wait-for-device
+
+- [ ] **UNVERIFIED** `device_install` of a real debug APK on a recoverable
+  device: the confirmation shows the digest and the `pm install` command line;
+  the app appears; `/data/local/tmp` holds no `cody-install-*` file or
+  `.cody-adb-stage-*` directory afterwards. A downgrade without `-d` and a
+  reinstall without `-r` fail with the package manager's own message.
+- [ ] **UNVERIFIED** `adb root` on a userdebug build restarts adbd and the
+  operation reconnects and reports `service.adb.root` 1; the same request on a
+  production build is refused with adbd's message. `unroot` returns it.
+- [ ] **UNVERIFIED** `tcpip 5555` makes `adb connect <device>:5555` work from a
+  PC on the same network and `usb` turns it off; record whether the USB
+  identity changed and whether a fresh grant was needed.
+- [ ] **UNVERIFIED** `wait-for-device` started while the device reboots (after
+  `device_exec` reboot) returns once adbd answers; with the cable pulled it ends
+  at its timeout; Cancel ends it at once.
+
 ### ADB port forward and reverse
 
 Use a recoverable, non-critical device and a throwaway service on each side

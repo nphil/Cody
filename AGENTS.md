@@ -2272,7 +2272,16 @@ as expanded-image hashes.
   Reboot mode and queued TWRP OpenRecoveryScript remain the original bounded
   helpers in this checkpoint; arbitrary commands use the granted shell path.
   A new USB mode needs the user's new grant. `adb forward` / `adb reverse` are
-  supported through the server relay (see "ADB port forward and reverse"). MTK
+  supported through the server relay (see "ADB port forward and reverse").
+  `device_install` (`install` in adb.ts) stages an APK with the push path's
+  verified chunks, runs `pm install` with validated flags on that exact file, and
+  always removes the copy. `device_exec` `options.kind` `root`, `unroot`, `tcpip`
+  (with `options.port`) and `usb` restart adbd, reconnect through
+  `reacquireTransport`, and verify the state the device reports;
+  `wait-for-device` (`adbWaitOptions`) makes the manager retry acquiring a device
+  that is not attached yet, then authenticates until the daemon answers in the
+  wanted state. yume's `AdbBanner` has no string form: use `banner.state`
+  (`bannerText` builds the `state::props` text). MTK
   preloader/BROM/download-agent support is **not implemented** (parked); see
   `docs/hardware-parity.md` for every tool's command-by-command status.
 - **Serial bootloaders:** Gecko provides detection/XMODEM framing only until a
