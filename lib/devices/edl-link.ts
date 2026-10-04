@@ -52,6 +52,12 @@ export const edlTimeouts = {
   nopQuiet: 600,
   /** The longest a device may keep sending while its in-flight data is being cleared away, however quietly it dribbles. */
   drain: 15_000,
+  /** The programmer's verdict on a block it was sent: it programs flash before it answers. */
+  writeAck: 60_000,
+  /** One `erase` command (at most 32 MiB of sectors): flash erases are slow. */
+  erase: 120_000,
+  /** After a cancel, how long the block in flight may take to finish before the transfer is cut. */
+  cancelGrace: 10_000,
 };
 
 export type EdlErrorKind =
@@ -88,7 +94,31 @@ export class EdlLink {
   private received = 0;
   private sent = 0;
 
-  constructor(readonly transport: HardwareTransport, readonly signal: AbortSignal) {}
+  private activeSignal: AbortSignal;
+
+  constructor(readonly transport: HardwareTransport, signal: AbortSignal) {
+    this.activeSignal = signal;
+  }
+
+  /** The signal that ends this link's transfers right now. */
+  get signal(): AbortSignal { return this.activeSignal; }
+
+  /**
+   * Runs `body` with `signal` ending the link's transfers instead of the operation's
+   * own, and puts the operation's back afterwards. A write phase uses it so that a
+   * cancel waits for the block in flight to finish instead of cutting a raw transfer
+   * in two (a programmer left waiting for the rest of a block takes the next command
+   * it is sent for sector data).
+   */
+  async using<T>(signal: AbortSignal, body: () => Promise<T>): Promise<T> {
+    const outer = this.activeSignal;
+    this.activeSignal = signal;
+    try {
+      return await body();
+    } finally {
+      this.activeSignal = outer;
+    }
+  }
 
   /** Bytes received from the device so far, whether or not they were consumed. */
   get bytesReceived(): number { return this.received; }
@@ -125,10 +155,10 @@ export class EdlLink {
    * zero-length packet) or `null` when nothing arrived in `timeoutMs`.
    */
   async pull(timeoutMs: number): Promise<number | null> {
-    throwIfAborted(this.signal);
+    throwIfAborted(this.activeSignal);
     const wait = Math.max(1, Math.min(MAX_TRANSPORT_TIMEOUT_MS, Math.ceil(timeoutMs)));
-    const chunk = await this.transport.read(EDL_READ_REQUEST_BYTES, wait, this.signal);
-    throwIfAborted(this.signal);
+    const chunk = await this.transport.read(EDL_READ_REQUEST_BYTES, wait, this.activeSignal);
+    throwIfAborted(this.activeSignal);
     if (!chunk) return null;
     if (chunk.byteLength === 0) return 0;
     if (this.buffered + chunk.byteLength > MAX_BUFFERED_BYTES) throw new EdlError("The device sent far more data than the protocol allows at this point.");
@@ -175,11 +205,17 @@ export class EdlLink {
   /** Writes to the device in bulk-sized pieces; stops at once when the operation is cancelled. */
   async write(bytes: Uint8Array): Promise<void> {
     for (let offset = 0; offset < bytes.byteLength; offset += EDL_WRITE_CHUNK_BYTES) {
-      throwIfAborted(this.signal);
+      throwIfAborted(this.activeSignal);
       const piece = bytes.subarray(offset, Math.min(bytes.byteLength, offset + EDL_WRITE_CHUNK_BYTES));
-      await this.transport.write(piece, this.signal);
+      await this.transport.write(piece, this.activeSignal);
       this.sent += piece.byteLength;
     }
+  }
+
+  /** A zero-length packet: the end of a bulk transfer whose length is a multiple of the packet size. */
+  async writeZlp(): Promise<void> {
+    throwIfAborted(this.activeSignal);
+    await this.transport.write(new Uint8Array(0), this.activeSignal);
   }
 
   /**
