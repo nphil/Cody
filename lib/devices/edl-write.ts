@@ -389,3 +389,62 @@ export async function erasePartition(run: EdlRun): Promise<HardwareResult> {
     details: { partition: name, firstSector: part.firstLba, sectors: part.sectors, sectorSize, state, readbackSha256: back.sha256, protectedPartition: kind.level === "protected", backup: escrow.saved },
   };
 }
+
+/**
+ * `setbootablestoragedrive N`: asks the programmer to make drive N the one the boot ROM starts from. It changes no
+ * partition, but it can change what the unit boots, and nothing in the protocol lets Cody read the setting before or
+ * after: there is no saved copy to offer and the result is UNVERIFIED however the programmer answers. The typed override
+ * `set-bootable:<N>` is the user's explicit acceptance of that.
+ */
+export async function setBootableDrive(run: EdlRun): Promise<HardwareResult> {
+  const { context, request, say } = run;
+  const target = request.target;
+  if (target === undefined || !/^[0-7]$/.test(target)) {
+    throw new EdlError("setbootablestoragedrive needs the drive number, a single digit from 0 to 7, as its target. Nothing was sent.", "refused");
+  }
+  if (request.offset !== undefined || request.length !== undefined || context.input || request.fileId || request.sha256) {
+    throw new EdlError("setbootablestoragedrive takes a drive number only: no file, offset or length. Nothing was sent.", "refused");
+  }
+  if (request.options && Object.keys(request.options).length > 0) {
+    throw new EdlError("setbootablestoragedrive takes no options. Approvals are given in the panel, never in options. Nothing was sent.", "refused");
+  }
+  const drive = Number(target);
+
+  const opened = await openFirehose(run, { identity: "try", loader: "never" }, undefined);
+  const override = `set-bootable:${drive}`;
+  const grant = await grantWrites(context, {
+    action: "edl setbootablestoragedrive",
+    target,
+    protectedOverride: override,
+    backup: "Backup unavailable: the programmer cannot report which drive the boot ROM starts from, so there is no saved copy of the current setting and no automatic way to put it back.",
+    details: [
+      `Tell the programmer to set the bootable storage drive to ${drive} (Firehose setbootablestoragedrive).`,
+      "It is the programmer's way of choosing the storage drive the boot ROM starts from; what a given number means is up to the programmer, and Cody does not know what it means on this unit. No partition is read or changed.",
+      "Cody cannot read the setting before or after, so the change is UNVERIFIED and the previous value is unknown. A wrong value can leave the unit unable to start; putting it into EDL mode again is the way back.",
+      `${describeStorage(opened)}.`,
+      `Type ${override} to approve.`,
+    ].join("\n"),
+  }, { label: `set the bootable storage drive to ${drive}`, sectorSize: opened.storage.sectorSize, kinds: ["set-bootable"], drive });
+
+  const sentBefore = opened.link.bytesSent;
+  try {
+    await opened.firehose.setBootableDrive(grant, drive);
+  } catch (error) {
+    const sent = opened.link.bytesSent > sentBefore;
+    if (error instanceof FirehoseRejection) {
+      throw new EdlError(`${error.message} The programmer did not apply it, so the boot drive setting is as it was.`, "rejected");
+    }
+    if (!sent) throw error;
+    const cause = (run.context.transport.connected?.() === false ? "the device left the USB bus" : isCancel(error, run) ? "the operation was cancelled" : messageOf(error)).replace(/[.\s]+$/, "");
+    const note = `POSSIBLY CHANGED: setbootablestoragedrive ${drive} was sent, but the programmer's answer did not arrive (${cause}). Whether the boot drive changed is unknown, and Cody cannot read it back. If the unit does not start as expected, put it into EDL mode again.`;
+    say(note);
+    if (isCancel(error, run)) throw error;
+    throw new EdlError(note, error instanceof EdlError ? error.kind : "protocol");
+  } finally {
+    grant.revoke();
+  }
+
+  const summary = `UNVERIFIED: the programmer acknowledged setbootablestoragedrive ${drive}. Cody cannot read this setting back, so whether the unit will now start from drive ${drive} is not known, and the previous value was not known either. Use Reset to leave EDL and watch what the unit does; putting it into EDL mode again is the way back.`;
+  say(summary);
+  return { summary, verified: false, details: { drive, readback: "not possible: the protocol has no way to read the setting", previous: "unknown" } };
+}

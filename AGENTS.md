@@ -2479,7 +2479,7 @@ as expanded-image hashes.
   the `state::props` text). MTK
   preloader/BROM/download-agent support is **not implemented** (parked); see
   `docs/hardware-parity.md` for every tool's command-by-command status.
-- **Qualcomm EDL (USB `05c6:9008`, `edl*.ts`) — read-only commands plus guarded `flash`, `erase`, backup sets and restore; the boot-drive change is NOT built yet.** Implemented
+- **Qualcomm EDL (USB `05c6:9008`, `edl*.ts`) — read-only commands plus guarded `flash`, `erase`, backup sets, restore and the boot-drive change.** Implemented
   from the Sahara/Firehose wire format; the GPLv3 `edl` tool was read as a
   behavioural reference only and none of its code or tables are used (Cody is
   MIT). Cody ships no loader: the user chooses one as a session artifact.
@@ -2519,7 +2519,7 @@ as expanded-image hashes.
     other than reset and unknown tags are refused under any grant; `patch` is
     deliberately not shipped (a same-unit GPT restore writes the saved sectors
     byte for byte, so nothing needs it). `parseEdlCommand` accepts connect,
-    printgpt, check, erase, backup, restore and reset.
+    printgpt, check, erase, backup, restore, setbootablestoragedrive and reset.
   - **Flash and erase** (`edl-write.ts`). Target = exact GPT partition name. A
     flash needs an image of exactly the partition's size, or `options.pad`
     `zero`|`ff` to fill the rest (the partition is always written whole). Before
@@ -2538,6 +2538,13 @@ as expanded-image hashes.
     reports what the partition reads as afterwards (all zero, all 0xFF,
     unchanged, mixed) and never claims a value. Neither sends a loader: run
     Connect first. Flash/erase are emulator-tested only.
+  - **Boot drive** (`setBootableDrive` in `edl-write.ts`). `exec setbootablestoragedrive`
+    takes the drive number 0-7 as its target (nothing else is accepted), needs a
+    running programmer, and asks once with the typed override `set-bootable:<N>`.
+    The confirmation says plainly that there is no saved copy (the protocol cannot
+    report the setting) and the result is always `verified: false` / UNVERIFIED: a
+    NAK is quoted and means it was not applied, a verdict that never arrives after
+    the command went out is POSSIBLY CHANGED. Emulator-tested only.
   - **Backup sets and restore** (`edl-backup.ts`, `edl-manifest.ts`). `exec backup`
     (no target; read-only) needs the span check to pass, then saves the primary
     table region (sectors 0 .. end of its entry array), every partition (one

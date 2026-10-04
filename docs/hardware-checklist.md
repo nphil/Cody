@@ -192,13 +192,13 @@ item remains **UNVERIFIED** until its permitted evidence is completed.
 - [ ] **UNVERIFIED** Device recovery/re-enumeration is recorded after refusal,
   test flash, and restore.
 
-### Qualcomm EDL (reads, flash and erase of one named partition, backup sets and restore)
+### Qualcomm EDL (reads, flash and erase of one named partition, backup sets, restore and the boot drive)
 
 Device in mind: Lenovo Smart Display 10" SD-X701B (APQ8053) with the loader
 `amber_bluebbery_prog_emmc_firehose_8953_ddr.mbn` (374,900 bytes; record its
 SHA-256). Per `notes/hw/lenovo-sd-x701b.md` no contact with a unit is authorised
 by these notes: each session needs a coordinated go-ahead. The read items come
-first and write nothing; the flash, erase and restore items at the end write storage. The
+first and write nothing; the flash, erase, restore and boot drive items at the end change the unit. The
 PC tool's output is the reference to compare with.
 
 - [ ] **UNVERIFIED** The browser (Android Chrome, over USB-C OTG) offers the
@@ -278,6 +278,11 @@ Backup sets and restore (emulator-tested only; the backup items only read, the r
 - [ ] **UNVERIFIED** After one ordinary partition (for example `cache`) was changed, `restore` rewrites only that partition, asks for the typed override `restore:<first 8 characters of the manifest SHA-256>` (and refuses without it), reads it back identical, and leaves every other region alone. Compare the result with the PC tool's reads.
 - [ ] **UNVERIFIED** The programmer accepts `program` for the sectors that hold the partition tables at BOTH ends of the disk (sectors 0-33 and the last 33). Factory flash scripts write them with `program` and then fix them with `patch`; Cody writes the saved tables byte for byte and ships no `patch`. Record any NAK text and whether the unit still boots and lists the same partitions afterwards.
 - [ ] **UNVERIFIED** A restore interrupted by Cancel or an unplug between regions leaves the unit able to re-enter EDL, and the output names the regions done, the one in doubt and those never started. The saved copies of overwritten partitions can be flashed back with `device_flash`; no command writes saved partition tables back.
+
+Boot drive (emulator-tested only; changes what the unit may start from, so it needs a coordinated go-ahead and the PC tool at hand to put it back):
+
+- [ ] **UNVERIFIED** The programmer lists `setbootablestoragedrive` among its functions and accepts `setbootablestoragedrive` with a single `value` attribute. Record what the number means on this unit (UFS logical unit or eMMC boot partition) and the programmer's answer.
+- [ ] **UNVERIFIED** The panel's confirmation demands the typed override `set-bootable:<N>`, shows that there is no saved copy, and the result reads UNVERIFIED whatever the programmer answers. Record what the unit does after `Reset`, and the PC tool's reading of the setting, if it has one.
 
 ### CMSIS-DAP / DAPLink (not shipped)
 

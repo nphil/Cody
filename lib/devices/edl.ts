@@ -15,7 +15,7 @@ import type { GptPartition, GptTable } from "./edl-gpt";
 import { EdlError } from "./edl-link";
 import { saharaLeave } from "./edl-sahara";
 import { describeIdentity, discoverDevice, inspectDevice, openFirehose, type EdlRun } from "./edl-session";
-import { erasePartition, flashPartition } from "./edl-write";
+import { erasePartition, flashPartition, setBootableDrive } from "./edl-write";
 import type { Flasher, HardwareContext, HardwareRequest, HardwareResult, HardwareTransport } from "./flasher";
 import { throwIfAborted } from "./serial";
 
@@ -33,6 +33,8 @@ import { throwIfAborted } from "./serial";
  *                 the unit they came from (edl-backup.ts)
  *   exec restore  put such a set back on the same unit: matched by chip serial, public-key hash, eMMC serial and disk GUID,
  *                 what it overwrites saved first, one typed approval, partition tables last, every region read back
+ *   exec setbootablestoragedrive  choose the storage drive the boot ROM starts from (target = the drive number), only
+ *                 with a typed approval, and always UNVERIFIED: nothing can read the setting back
  *   dump NAME     one GPT partition into a session file with its SHA-256
  *   dump user-area  the whole user area, only with an explicit sector count and
  *                 only when `check` passes in the same operation
@@ -86,7 +88,7 @@ async function detect(run: EdlRun): Promise<HardwareResult> {
 
 // ---- exec ------------------------------------------------------------------
 
-type EdlCommand = "connect" | "printgpt" | "check" | "reset" | "erase" | "backup" | "restore";
+type EdlCommand = "connect" | "printgpt" | "check" | "reset" | "erase" | "backup" | "restore" | "setbootablestoragedrive";
 
 const COMMAND_NAMES: Readonly<Record<string, EdlCommand>> = {
   connect: "connect",
@@ -101,12 +103,13 @@ const COMMAND_NAMES: Readonly<Record<string, EdlCommand>> = {
   erase: "erase",
   backup: "backup",
   restore: "restore",
+  setbootablestoragedrive: "setbootablestoragedrive",
 };
 
 export function parseEdlCommand(command: string | undefined): EdlCommand {
   const word = (command ?? "").trim().replace(/^edl\s+/i, "").toLowerCase();
   const found = Object.hasOwn(COMMAND_NAMES, word) ? COMMAND_NAMES[word] : undefined;
-  if (!found) throw new EdlError(`"${(command ?? "").trim().slice(0, 40)}" is not an EDL command Cody offers. Use connect, printgpt, check, erase (the partition name goes in target), backup, restore (options.manifestSha256 names the set) or reset.`, "refused");
+  if (!found) throw new EdlError(`"${(command ?? "").trim().slice(0, 40)}" is not an EDL command Cody offers. Use connect, printgpt, check, erase (the partition name goes in target), backup, restore (options.manifestSha256 names the set), setbootablestoragedrive (the drive number goes in target) or reset.`, "refused");
   return found;
 }
 
@@ -221,6 +224,7 @@ async function exec(run: EdlRun): Promise<HardwareResult> {
     case "erase": return erasePartition(run);
     case "backup": return backupSet(run);
     case "restore": return restoreSet(run);
+    case "setbootablestoragedrive": return setBootableDrive(run);
   }
 }
 
