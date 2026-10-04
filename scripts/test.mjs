@@ -17,6 +17,7 @@ const SUITES = [
   "lib/harness/*.test.mjs",
   "lib/i18n/*.test.mjs",
   "lib/model-plan/*.test.mjs",
+  "lib/notifications/*.test.mjs",
   "lib/omp/*.test.mjs",
   "lib/openrouter/*.test.mjs",
   "lib/routing/*.test.mjs",

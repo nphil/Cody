@@ -33,6 +33,9 @@ const PUBLIC_EXACT = new Set([
   "/api/internal/display",
   "/api/internal/sessions",
   "/api/internal/devices",
+  // The ntfy app's answer buttons post here with no cookie and no login: the
+  // signed single-use token in the body is the credential (lib/notifications/answer.ts).
+  "/api/notifications/action",
 ]);
 
 function isPublicPath(pathname: string): boolean {

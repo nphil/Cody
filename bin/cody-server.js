@@ -18,6 +18,7 @@ const { attachDeviceSocket } = jiti("../lib/devices/socket.ts");
 const { closeNativeGateway, proxyNativeHttp, proxyNativeUpgrade } = jiti("../lib/display/native-gateway.ts");
 const { getTerminalManager } = jiti("../lib/terminal-manager.ts");
 const { startEngineHousekeeping, stopEngineHousekeeping } = jiti("../lib/harness/housekeeping.ts");
+const { startQuotaWatch, stopQuotaWatch } = jiti("../lib/notifications/quota-watch.ts");
 
 function parseArgs(argv) {
   const options = { dev: false, hostname: "127.0.0.1", port: 3000 };
@@ -165,6 +166,7 @@ async function main(argv = process.argv.slice(2)) {
   const shutdown = () => {
     getTerminalManager().dispose();
     stopEngineHousekeeping();
+    stopQuotaWatch();
     terminalWs.close();
     void disposeDisplayProviders();
     closeNativeGateway();
@@ -176,6 +178,7 @@ async function main(argv = process.argv.slice(2)) {
   server.listen(options.port, options.hostname, () => {
     console.log(`Cody server Ready at http://${options.hostname}:${options.port}`);
     startEngineHousekeeping();
+    startQuotaWatch();
   });
   return server;
 }

@@ -1,13 +1,14 @@
 "use client";
 
 /**
- * Every id Settings can be opened with. The eight HUB ids (accounts, general,
- * forge, providers, models, engine, extensions, system) are the
+ * Every id Settings can be opened with. The nine HUB ids (accounts, general,
+ * notifications, forge, providers, models, engine, extensions, system) are the
  * sections `components/settings/registry.ts` renders.
  */
 export type SettingsTab =
   | "accounts"
   | "general"
+  | "notifications"
   | "forge"
   | "models"
   | "providers"

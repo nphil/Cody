@@ -24,6 +24,7 @@ import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
 import { assistantReplyText, replyAsksUser } from "./reply-question";
 import { readRefusalPolicyConfig, writeRefusalPolicyConfig } from "./refusal/config";
 import { PlanKeeper } from "./plan-keeper/keeper";
+import { observeSessionForNotifications } from "./notifications/observer";
 import { readPlanOverlay, writePlanOverlay } from "./plan-keeper/overlay";
 import { materializeLocalModelProfile, resolveLocalModelPromptProfile, type LocalModelProfileLaunch, type ModelProfileTarget, type ResolvedLocalModelProfile } from "./local-model-profile-runtime";
 import { copySessionLocalRouting, materializeLocalRoutingOverlay, readLocalRoutingIntent, renameSessionLocalRouting, validateLocalRoutingModelSelection } from "./local-model-routing";
@@ -937,6 +938,14 @@ export interface WrapperEngineContext {
 
 export class AgentSessionWrapper {
   private listeners: EventListener[] = [];
+  /**
+   * Server-side observers (lib/notifications): told everything emit() sends
+   * and a few internal signals no stream carries (see observeEvents). Kept in
+   * a set of its own ON PURPOSE — `listeners.length` decides whether the child
+   * may idle out and whether host tools are routed to a page, and an observer
+   * must never keep a session alive or be mistaken for a page that can answer.
+   */
+  private observers = new Set<(event: AgentEvent) => void>();
   private pendingUiRequests = new Map<string, AgentEvent>();
   private pendingRefusalDecision: PendingRefusalRequest | null = null;
   /** omp announces a fallback (`retry_fallback_applied`) a few milliseconds
@@ -1685,6 +1694,7 @@ export class AgentSessionWrapper {
     this.emit({
       type: "notice",
       level: "error",
+      reason: "engine_exit",
       message: `The ${this.engine.label} process for this session exited unexpectedly${detail ? `: ${detail}` : "."}`,
     });
     // Terminal agent_end so a client mid-stream stops spinning immediately
@@ -1827,6 +1837,7 @@ export class AgentSessionWrapper {
           this.emit({
             type: "notice",
             level: "info",
+            reason: "awaiting_reply",
             message: "Waiting for your reply — the agent's task list is on hold.",
           });
         }
@@ -2017,19 +2028,23 @@ export class AgentSessionWrapper {
 
   /** Forget a pending dialog and its expiry timer. */
   private forgetPendingUiRequest(id: string): void {
-    this.pendingUiRequests.delete(id);
+    const wasPending = this.pendingUiRequests.delete(id);
     const timer = this.uiExpiryTimers.get(id);
     if (timer) {
       clearTimeout(timer);
       this.uiExpiryTimers.delete(id);
     }
+    // Answered, cancelled, expired or replaced: nothing waits on it any more.
+    if (wasPending) this.notifyObservers({ type: "cody_ui_request_resolved", id });
   }
 
   private clearPendingUiRequests(): void {
+    const hadPending = this.pendingUiRequests.size > 0 || this.pendingPermissionRequests.size > 0;
     for (const timer of this.uiExpiryTimers.values()) clearTimeout(timer);
     this.uiExpiryTimers.clear();
     this.pendingUiRequests.clear();
     this.pendingPermissionRequests.clear();
+    if (hadPending) this.notifyObservers({ type: "cody_ui_requests_cleared" });
     if (!this.clearPendingRefusalDecision()) notifyRunningChange();
   }
   hasPendingRefusalDecision(): boolean {
@@ -2129,6 +2144,7 @@ export class AgentSessionWrapper {
     const latch = this.stopLatch;
     if (!latch) return;
     latch.aborting = true;
+    this.notifyObservers({ type: "cody_run_stopped" });
     const requestedAt = Date.now();
     void this.proc.sendCommand({ type: "abort" })
       .catch(() => {})
@@ -2695,6 +2711,18 @@ export class AgentSessionWrapper {
         // notifyRunningChange apply to their listener sets.
       }
     }
+    // Last, so an observer sees the session as every listener left it.
+    this.notifyObservers(event);
+  }
+
+  private notifyObservers(event: AgentEvent): void {
+    for (const observer of this.observers) {
+      try {
+        observer(event);
+      } catch {
+        // An observer is a side channel; it must never reach into the session.
+      }
+    }
   }
 
   private sessionFileSignalTimer: NodeJS.Timeout | null = null;
@@ -2758,6 +2786,41 @@ export class AgentSessionWrapper {
         this.rejectPendingHostUris("The web UI disconnected while the agent was waiting for this URI request");
       }
     };
+  }
+
+  /**
+   * Watch this session without attaching to it. Unlike onEvent, an observer
+   * replays nothing, never counts as a viewer (the child still idles out, host
+   * tools are still refused when no page is attached) and cannot answer
+   * anything. It receives every frame emit() sends, plus these that exist only
+   * for it: `cody_ui_request_resolved {id}` when a dialog stops waiting
+   * (answered, cancelled, expired or replaced — omp emits no frame for most of
+   * those), `cody_ui_requests_cleared` when a restart or close wipes them all,
+   * and `cody_run_stopped` the moment the user presses Stop.
+   */
+  observeEvents(observer: (event: AgentEvent) => void): () => void {
+    this.observers.add(observer);
+    return () => {
+      this.observers.delete(observer);
+    };
+  }
+
+  /**
+   * The dialog still waiting on this id, or null — answered, cancelled and
+   * timed-out dialogs are gone, expired ones included (the same rule onEvent
+   * applies to a page that attaches late). What an answer from outside the
+   * browser must check first, because `extension_ui_response` forwards any id
+   * to the engine without asking whether it is still open.
+   */
+  getPendingUiRequest(id: string): AgentEvent | null {
+    const event = this.pendingUiRequests.get(id);
+    if (!event) return null;
+    const expiresAt = event.expiresAt;
+    if (typeof expiresAt === "number" && expiresAt <= Date.now()) {
+      this.forgetPendingUiRequest(id);
+      return null;
+    }
+    return event;
   }
 
   onDestroy(cb: () => void): void {
@@ -3594,6 +3657,7 @@ export class AgentSessionWrapper {
         // sends again (stopLatch); subagents are never aborted from here.
         const requestedAt = Date.now();
         this.stopLatch = { aborting: false };
+        this.notifyObservers({ type: "cody_run_stopped" });
         this.clearSteerInterrupt();
         this.returnHeldOnStop();
         await this.withFinalRunningNotification(async () => {
@@ -4155,6 +4219,7 @@ async function startEngineSession(
     }
   });
   registry.set(realSessionId, created);
+  observeSessionForNotifications(created);
   notifyRunningChange();
   return { session: created, realSessionId };
 }
@@ -4283,6 +4348,7 @@ export async function startRpcSession(
       registry.set(newId, created);
     });
     registry.set(realSessionId, created);
+    observeSessionForNotifications(created, { kind });
     return { session: created, realSessionId };
   })().finally(() => locks.delete(sessionId));
 

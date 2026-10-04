@@ -43,6 +43,7 @@ const PANELS_DIR = join(SETTINGS_DIR, "panels");
 const PANEL_TABS = {
   "AccountPanel.tsx": "accounts",
   "PreferencesPanel.tsx": "general",
+  "NotificationsPanel.tsx": "notifications",
   "ForgePanel.tsx": "forge",
   "ProvidersPanel.tsx": "providers",
   "ModelsPanel.tsx": "models",

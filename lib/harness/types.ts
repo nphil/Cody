@@ -386,6 +386,23 @@ export interface EngineSession {
   isRunning(): boolean;
   /** True while this session has a user response outstanding. */
   hasPendingInput?(): boolean;
+  /**
+   * Watch this session without attaching to it (lib/notifications). Unlike
+   * `onEvent` an observer is NOT a viewer: it replays nothing, never keeps the
+   * session from idling out and never makes host tools route to a page that
+   * does not exist. It receives what the session emits, plus a few internal
+   * signals no stream carries. Returns the unsubscribe. Optional: an engine
+   * without it simply sends no notifications.
+   */
+  observeEvents?(observer: (event: EngineEvent) => void): () => void;
+  /**
+   * The dialog (omp `extension_ui_request`) still waiting on this id, or null
+   * once it was answered, cancelled or timed out. For an answer that arrives
+   * from outside the browser, which must not answer a request that is gone.
+   */
+  getPendingUiRequest?(id: string): EngineEvent | null;
+  /** The approval (ACP `permission_request`) still waiting on this id, or null. */
+  getPendingPermission?(requestId: string): { requestId: string; toolCall: unknown; options: unknown[] } | null;
   start(): void;
   /** Resolves once identity is known and the session accepts commands. */
   waitUntilReady(): Promise<void>;

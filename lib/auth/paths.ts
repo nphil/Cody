@@ -48,3 +48,25 @@ export function getSessionOwnersPath(): string {
 export function getInstanceTimeZonePath(): string {
   return path.join(getAccountsDir(), "time-zone.json");
 }
+
+/** Push-notification (ntfy) settings: one record per account plus one for an
+ * OPEN instance (lib/notifications/store.ts). Written 0600 — it holds ntfy
+ * access tokens. It sits in the accounts directory so a deployment that
+ * persists accounts persists it too, and a test that redirects
+ * CODY_ACCOUNTS_DIR redirects it. */
+export function getNotificationsPath(): string {
+  return path.join(getAccountsDir(), "notifications.json");
+}
+
+/** HMAC key signing the answer buttons on a notification (lib/notifications/
+ * tokens.ts). Written 0600; losing it only makes outstanding buttons stop
+ * working. */
+export function getNotificationsSecretPath(): string {
+  return path.join(getAccountsDir(), "notifications-secret");
+}
+
+/** What the quota watcher has already announced, so a window that stays past
+ * its threshold is announced once (lib/notifications/quota-watch.ts). */
+export function getNotificationsStatePath(): string {
+  return path.join(getAccountsDir(), "notifications-state.json");
+}

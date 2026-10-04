@@ -329,6 +329,36 @@ a new zone restarts an idle engine child before it is delivered (a child that
 is mid-turn is never restarted; the agent is told its shell still reports the
 old zone).
 
+## `/api/notifications` — Incidental
+
+Push notifications to the account's own ntfy topic (Settings › Notifications).
+Every route but `action` needs the usual credential; on an open instance (no
+accounts) they act for the instance. Responses are `Cache-Control: no-store`.
+
+- `GET /api/notifications` → `{prefs, defaults}`: the settings
+  (`server`, `topic`, `codyUrl`, `enabled`, `answerButtons`, `skipWhenViewing`,
+  `finishedMinSeconds`, `quotaLowPercent`, `events: {<kind>: {enabled, priority}}`)
+  and what Reset restores. The ntfy access token is write-only: it is reported
+  as `hasToken` and never returned.
+- `PUT /api/notifications` — any subset of the settings; `token`: a string stores
+  it, `null` clears it, absent keeps it; `events` merges per kind and per field.
+  Answers `{prefs}`. Anything invalid is `400 {error, code:
+  "invalid_notification_settings"}` and nothing is saved. Body ≤ 8 KB.
+- `POST /api/notifications/test` → `{ok:true}` or `{ok:false, error, status?}`
+  (HTTP 200 either way): sends "Test from Cody" to the SAVED server and topic,
+  ignoring the master switch, and reports ntfy's own refusal (`forbidden` / 403
+  means the topic wants a token).
+- `POST /api/notifications/presence` `{sessionId: string | null}` → `{ok:true}`:
+  the chat on screen (≤ 200 chars) or null. Body ≤ 1 KB, any content type (a
+  `sendBeacon` is accepted).
+- `POST /api/notifications/action` `{t: "<token>"}` — PUBLIC (no cookie, no
+  login; CORS `*`, `OPTIONS` answered): what an answer button on a notification
+  posts. `200 {ok:true}` answered; `401 invalid_token` (altered, expired or
+  already used); `403 forbidden` (the person it was issued to no longer may);
+  `410 gone` (the request is no longer waiting, or has changed); `503
+  session_restarting` (tap again). A token is single-use and answers one request
+  with one answer; it is never issued for an "always" option.
+
 ## `GET /api/engines` — Stable
 
 The engine roster, in one authenticated round trip.

@@ -191,6 +191,12 @@ app/api/
                                   with no file yet (mid-turn) is allowed
   distill/config/route.ts         GET/PUT the Distill model chain; 400 `unsupported`
                                   under an ACP engine, PUT admin-or-open-instance
+  notifications/route.ts          GET/PUT this account's push-notification settings
+                                   (the ntfy token is write-only: GET says hasToken)
+  notifications/test/route.ts     POST send a test push with the saved settings
+  notifications/presence/route.ts POST {sessionId|null}: the chat this tab shows
+  notifications/action/route.ts   POST {t} PUBLIC: an ntfy answer button; the signed
+                                   single-use token is the only credential (CORS *)
 
 lib/
   omp/                 shared omp foundations (paths, CLI probe, RpcProcess,
@@ -210,6 +216,15 @@ lib/
                        an open instance), `zoneForMessage`, `ownerTimeZone`
   tool-time.ts         `formatToolTime()`: how a host tool writes a time the
                        model reads
+  notifications/       push notifications to the owner's ntfy topic ("Push
+                       notifications" below). `catalog.ts` is the shared,
+                       browser-safe vocabulary (kinds, prefs, bounds); the rest
+                       is server only: `store.ts` (per-account settings, 0600),
+                       `recipients.ts`, `presence.ts`, `observer.ts` (per-chat
+                       state machine), `compose.ts` (text, answer buttons,
+                       digests), `dispatch.ts`, `ntfy.ts` (client), `tokens.ts`
+                       (answer-button tokens), `answer.ts` (what a button tap
+                       does), `quota-watch.ts`
   device-time-zone.ts  browser: `deviceTimeZoneField()`, the zone to spread into
                        a request body, read fresh on every call
   draft-store.ts       composer drafts: in-memory per session key, with the TEXT
@@ -544,10 +559,13 @@ components/
                         paste box, device code, prompt, progress, success/
                         error), used by providers/ProviderDetail and the
                         setup wizard's provider step
-    panels/             one file per hub (Account, Preferences, Providers,
-                        Models, Engine [= Behavior], Extensions, Memory,
-                        System), each a thin composition of the pieces above
-                        plus that hub's own SEARCH_ENTRIES export
+    panels/             one file per hub (Account, Preferences, Notifications,
+                        Code hosts [= Forge], Providers, Models, Engine
+                        [= Behavior], Extensions, System), each a thin
+                        composition of the pieces above plus that hub's own
+                        SEARCH_ENTRIES export. NotificationsPanel edits the
+                        ntfy settings (`/api/notifications`), English-only
+                        like every Settings panel
     providers/          the Providers hub: ProviderDirectory (the Connected /
                         Discovered list), ProviderDetail (the sign-in / keys /
                         custom-endpoint drawer), AddProviderPicker,
@@ -587,6 +605,11 @@ hooks/
   useAudio.ts              completion sound + browser AudioContext unlock
   useDragDrop.ts           shared drag/drop state
   useDisplayRequests.ts    display-request SSE → snapshot/live request state
+  useNotificationPresence.ts  tells the server which chat this tab is showing
+                           (POST /api/notifications/presence: on change, on
+                           visible, every 30 s while visible, null on hide /
+                           pagehide via sendBeacon) so push notifications skip
+                           the chat you are looking at
   useDistill.ts            the client store over POST /api/distill: SSE framing,
                            per-key in-memory cache, FIFO queue capped at two
                            concurrent streams (a queued request for a key is
@@ -1107,10 +1130,10 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
 
 ## Settings shell (`components/settings/`)
 
-Settings is one dialog built from a single table, not eight ad hoc panels.
-Eight hubs exist today: **Account**, **Preferences** (`you`); **Providers**,
-**Models**, **Behavior**, **Extensions**, **Memory** (the active engine, named
-by its short name); **System** (the server).
+Settings is one dialog built from a single table, not ad hoc panels. Nine
+hubs exist today: **Account**, **Preferences**, **Notifications**, **Code
+hosts** (`you`); **Providers**, **Models**, **Behavior**, **Extensions** (the
+active engine, named by its short name); **System** (the server).
 
 - **`registry.ts`** is the source of truth: `SETTINGS_SECTIONS`, one entry per
   hub with its label, `group`, icon, `needsCapability` gate (ANY-of over a
@@ -1530,6 +1553,61 @@ must name the panel that fixes it.
   Those frames are forwarded but never reset the idle timer, flip the running
   state or signal the sidebar, so an unattended child still idles out after 10
   minutes (warming costs real provider calls until the child is gone).
+
+### Push notifications (`lib/notifications/`)
+
+When a chat needs the owner, finishes, fails or quota runs low, Cody publishes
+to the owner's ntfy topic (server, topic, optional Bearer token and Cody's own
+address are per-account settings, never hardcoded). Settings › Notifications
+edits them; `app/api/notifications/{route,test,presence,action}`.
+- **Settings** live in `<accounts dir>/notifications.json` (0600, atomic),
+  keyed by account id plus `__instance` for an open instance. Reads degrade
+  value by value to the defaults; writes are strict (`400
+  invalid_notification_settings`). The token is write-only: GET returns
+  `hasToken`. A deleted account's record is dropped on the next save.
+- **Recipients**: a chat's owner (read at send time — the stamp is written after
+  spawn); an unowned chat goes to the instance record on an open instance, else
+  to every administrator. Quota goes to every account (or the instance record).
+- **The observer channel is NOT a listener.** `AgentSessionWrapper` and
+  `AcpEngineSession` have `observeEvents(fn)` in a set of its own: listeners
+  gate the idle destroy and host-tool routing, so a permanent listener would
+  keep every child alive and hang host tools. Observers also get three signals
+  no stream carries: `cody_ui_request_resolved {id}` (omp emits nothing when a
+  dialog is answered or times out), `cody_ui_requests_cleared` (restart/close)
+  and `cody_run_stopped` (the instant Stop is pressed). The todo-pause and crash
+  notices carry `reason: "awaiting_reply"` / `"engine_exit"`; the client ignores
+  the extra field. Registered in `startRpcSession` (not for `kind: "sidebar"`)
+  and `startEngineSession`; read `session.sessionId` fresh every time.
+- **Answer buttons** are ntfy `http` actions posting a signed token to the
+  PUBLIC `/api/notifications/action` (proxy.ts `PUBLIC_EXACT`; CORS `*`, no
+  cookie is ever read). A token answers ONE request with ONE answer for ONE
+  recipient, once, within 24 h / the request's own deadline, and carries a digest
+  of the request so a reused id (ACP `perm-1` after a restart) is never answered.
+  Select ≤ 3, single non-multi ask ≤ 3, confirm Allow/Deny; ACP only the
+  agent's first `allow_once`/`reject_once` — NEVER an `*_always`. Turning
+  buttons or notifications off, or changing the chat's owner, kills buttons
+  already on a phone (403). The route rebuilds the command from the pending
+  request (`getPendingUiRequest` / `getPendingPermission`), never from the token.
+- **Pending-input notifications** carry a sequence id (`cody-` + 24 hex of
+  sha256(session, request)) and are cleared (PUT `/<topic>/<seq>/clear`, after
+  their publish settles) on resolve, cancel, expiry, restart and close.
+- **Presence**: the browser POSTs the visible chat (30 s heartbeat, null on
+  hide); a report < 75 s old suppresses that chat's notifications for that
+  person when `skipWhenViewing`.
+- **Quota** (`quota-watch.ts`): reads the shared usage snapshot only when the
+  usage reader exists and someone has a quota kind on — 60 s after a run ends
+  (≥ 3 min apart) and every 10 min while a chat is live; started/stopped from
+  `bin/cody-server.js`. Announced windows are remembered by a hash in
+  `notifications-state.json` and pruned as they reset. Messages never name an
+  account's email (`UsageAccount.label` can contain one) — provider, "account
+  n/m", window, reset time in the recipient's zone.
+- **Traps**: nothing here may use `@/` (the custom server loads it through bare
+  jiti — `lib/server-import-graph.test.mjs`); shared state (presence, spent
+  nonces, log throttle, watcher) is on `globalThis`; every ntfy call is
+  fire-and-forget with a 10 s timeout and never throws into a session; a
+  redirect is never followed (a redirected POST becomes a 200 page that looks
+  like success); what a non-ntfy server answers is never echoed back. Tests that
+  need an open instance must `delete process.env.CODY_REQUIRE_ACCOUNTS`.
 
 ### Time zones: the device that sent the message decides (`lib/time-zone.ts`, `lib/time-zone-prefs.ts`)
 

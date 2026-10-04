@@ -24,6 +24,7 @@ import { useVisualViewportHeight } from "@/hooks/useVisualViewportHeight";
 import { useDeviceTimeZone } from "@/hooks/useDeviceTimeZone";
 import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
 import { useDisplayRequests } from "@/hooks/useDisplayRequests";
+import { useNotificationPresence } from "@/hooks/useNotificationPresence";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { copyText } from "@/lib/clipboard";
 import { getFileName } from "@/lib/file-paths";
@@ -624,6 +625,7 @@ export function AppShell() {
     if (isMobile) setSidebarOpen(false);
   }, [isMobile, setRightPanelMode]);
   const displayRequest = useDisplayRequests(selectedSession?.id ?? null, handleLiveDisplayRequest);
+  useNotificationPresence(selectedSession?.id ?? null);
   // Restore the last-used tool after mount (localStorage is unavailable during SSR).
   useEffect(() => {
     try {

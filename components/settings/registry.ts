@@ -10,11 +10,11 @@
  */
 import dynamic from "next/dynamic";
 import { createElement, type ComponentType, type CSSProperties } from "react";
-import { Cable, Cpu, GitBranch, KeyRound, RefreshCw, Settings2, SlidersHorizontal, UserRound } from "lucide-react";
+import { Bell, Cable, Cpu, GitBranch, KeyRound, RefreshCw, Settings2, SlidersHorizontal, UserRound } from "lucide-react";
 import { isSubscriptionLogin } from "@/lib/provider-directory";
 import type { ActiveEngineInfo, EngineCapabilities, SettingsTab } from "../SettingsTabs";
 
-export type SettingsSectionId = "accounts" | "general" | "forge" | "providers" | "models" | "engine" | "extensions" | "system";
+export type SettingsSectionId = "accounts" | "general" | "notifications" | "forge" | "providers" | "models" | "engine" | "extensions" | "system";
 
 /** Eyebrow the row sits under: "You" (the human's own things), the active
  * engine's short name (its providers, models, behavior, extensions)
@@ -77,6 +77,7 @@ const PanelLoading = () => createElement("div", { role: "status", style: { flex:
 const AccountPanel = dynamic(() => import("./panels/AccountPanel").then((m) => m.AccountPanel), { loading: PanelLoading });
 const ForgePanel = dynamic(() => import("./panels/ForgePanel").then((m) => m.ForgePanel), { loading: PanelLoading });
 const PreferencesPanel = dynamic(() => import("./panels/PreferencesPanel").then((m) => m.PreferencesPanel), { loading: PanelLoading });
+const NotificationsPanel = dynamic(() => import("./panels/NotificationsPanel").then((m) => m.NotificationsPanel), { loading: PanelLoading });
 const ProvidersPanel = dynamic(() => import("./panels/ProvidersPanel").then((m) => m.ProvidersPanel), { loading: PanelLoading });
 const ModelsPanel = dynamic(() => import("./panels/ModelsPanel").then((m) => m.ModelsPanel), { loading: PanelLoading });
 const EnginePanel = dynamic(() => import("./panels/EnginePanel").then((m) => m.EnginePanel), { loading: PanelLoading });
@@ -118,6 +119,24 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     phoneOrder: 1,
     statusLine: ({ local }) => ({ text: `${local.localeLabel} · ${local.themeName} · sound ${local.soundEnabled ? "on" : "off"}` }),
     panel: PreferencesPanel,
+  },
+  {
+    id: "notifications",
+    label: "Notifications",
+    group: "you",
+    Icon: Bell,
+    phoneOrder: 7,
+    statusRoutes: ["/api/notifications"],
+    statusLine: ({ routes }) => {
+      const prefs = asRecord(asRecord(routes["/api/notifications"])?.prefs);
+      if (!prefs) return null;
+      const server = typeof prefs.server === "string" ? prefs.server : "";
+      const topic = typeof prefs.topic === "string" ? prefs.topic : "";
+      if (!server || !topic) return { text: "Not set up" };
+      if (prefs.enabled !== true) return { text: "Off" };
+      return { text: `On · ${server.replace(/^https?:\/\//, "")}/${topic}`, tone: "accent" };
+    },
+    panel: NotificationsPanel,
   },
   {
     id: "forge",

@@ -529,6 +529,8 @@ export class AcpEngineSession implements EngineSession {
   private child: ChildProcess | null = null;
   private connection: ClientConnection | null = null;
   private listeners: Array<(event: EngineEvent) => void> = [];
+  /** Server-side observers (lib/notifications). A set of its own, never `listeners`: an observer is not a viewer. */
+  private observers = new Set<(event: EngineEvent) => void>();
   private messages: AcpMessage[] = [];
   private onDestroyCallback: (() => void) | null = null;
   private closeListeners = new Set<() => void>();
@@ -616,6 +618,19 @@ export class AcpEngineSession implements EngineSession {
       const index = this.listeners.indexOf(listener);
       if (index !== -1) this.listeners.splice(index, 1);
     };
+  }
+
+  observeEvents(observer: (event: EngineEvent) => void): () => void {
+    this.observers.add(observer);
+    return () => {
+      this.observers.delete(observer);
+    };
+  }
+
+  /** The approval the agent is still blocked on under this id, or null once it was answered, cancelled or the turn ended. */
+  getPendingPermission(requestId: string): { requestId: string; toolCall: unknown; options: unknown[] } | null {
+    const pending = this.pendingPermissions.get(requestId);
+    return pending ? { requestId: pending.requestId, toolCall: pending.toolCall, options: pending.options } : null;
   }
 
   onDestroy(cb: () => void): void {
@@ -1311,6 +1326,13 @@ export class AcpEngineSession implements EngineSession {
         listener(event);
       } catch {
         // One bad subscriber must not stop the rest of the stream.
+      }
+    }
+    for (const observer of this.observers) {
+      try {
+        observer(event);
+      } catch {
+        // An observer is a side channel; it must never reach into the session.
       }
     }
   }

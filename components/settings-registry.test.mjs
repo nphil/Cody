@@ -27,18 +27,18 @@ const { ALL_CAPABILITIES } = await jiti.import("./SettingsTabs.tsx");
 const { SettingsSidebar } = await jiti.import("./settings/SettingsSidebar.tsx");
 const { getHarnessById } = await jiti.import("../lib/harness/index.ts");
 
-test("the eight hubs sit in the spec's order under You / engine / Server", () => {
+test("the nine hubs sit in the spec's order under You / engine / Server", () => {
   assert.deepEqual(
     SETTINGS_SECTIONS.map((section) => section.id),
-    ["accounts", "general", "forge", "providers", "models", "engine", "extensions", "system"],
+    ["accounts", "general", "notifications", "forge", "providers", "models", "engine", "extensions", "system"],
   );
   assert.deepEqual(
     SETTINGS_SECTIONS.map((section) => section.label),
-    ["Account", "Preferences", "Code hosts", "Providers", "Models", "Behavior", "Extensions", "System"],
+    ["Account", "Preferences", "Notifications", "Code hosts", "Providers", "Models", "Behavior", "Extensions", "System"],
   );
   assert.deepEqual(
     SETTINGS_SECTIONS.map((section) => section.group),
-    ["you", "you", "you", "engine", "engine", "engine", "engine", "server"],
+    ["you", "you", "you", "you", "engine", "engine", "engine", "engine", "server"],
   );
   assert.equal(new Set(SETTINGS_SECTIONS.map((section) => section.id)).size, SETTINGS_SECTIONS.length, "ids are unique");
   assert.equal(new Set(SETTINGS_SECTIONS.map((section) => section.phoneOrder)).size, SETTINGS_SECTIONS.length, "phone order is a total order");
@@ -53,17 +53,18 @@ test("rows per engine follow each adapter's real capability set", () => {
   // Read the flags off the adapters themselves so this test moves with them
   // rather than with a copy of them.
   const rows = (engineId) => getVisibleSections(getHarnessById(engineId).capabilities).map((section) => section.id);
-  // Code hosts has no capability gate: every engine's sessions reach the same
-  // GitHub/Gitea configuration, and Cody's own update check reads it too.
-  assert.deepEqual(rows("omp"), ["accounts", "general", "forge", "providers", "models", "engine", "extensions", "system"], "omp: 8 rows");
-  assert.deepEqual(rows("pi"), ["accounts", "general", "forge", "providers", "models", "engine", "extensions", "system"], "pi: 8 rows (schema settings + skills)");
-  assert.deepEqual(rows("claude"), ["accounts", "general", "forge", "providers", "models", "system"], "claude: 6 rows");
-  assert.deepEqual(rows("codex"), ["accounts", "general", "forge", "providers", "models", "system"], "codex: 6 rows");
+  // Code hosts and Notifications have no capability gate: every engine's
+  // sessions reach the same GitHub/Gitea configuration, and the push settings
+  // belong to the account, not to an engine.
+  assert.deepEqual(rows("omp"), ["accounts", "general", "notifications", "forge", "providers", "models", "engine", "extensions", "system"], "omp: 9 rows");
+  assert.deepEqual(rows("pi"), ["accounts", "general", "notifications", "forge", "providers", "models", "engine", "extensions", "system"], "pi: 9 rows (schema settings + skills)");
+  assert.deepEqual(rows("claude"), ["accounts", "general", "notifications", "forge", "providers", "models", "system"], "claude: 7 rows");
+  assert.deepEqual(rows("codex"), ["accounts", "general", "notifications", "forge", "providers", "models", "system"], "codex: 7 rows");
   // The spec's shorthand for pi, pinned as well so a flag flip is noticed.
   const piShorthand = { ...Object.fromEntries(Object.keys(ALL_CAPABILITIES).map((key) => [key, false])), liveSessions: true, skills: true, nativeSettings: true, chatExtras: true, providerLogin: true };
-  assert.equal(getVisibleSections(piShorthand).length, 8);
+  assert.equal(getVisibleSections(piShorthand).length, 9);
   const acpShorthand = { ...Object.fromEntries(Object.keys(ALL_CAPABILITIES).map((key) => [key, false])), liveSessions: true, providerLogin: true };
-  assert.equal(getVisibleSections(acpShorthand).length, 6);
+  assert.equal(getVisibleSections(acpShorthand).length, 7);
 });
 
 test("gates use ANY semantics and sub-views gate individually", () => {
@@ -82,12 +83,12 @@ test("gates use ANY semantics and sub-views gate individually", () => {
 test("the phone list groups by eyebrow with Preferences first and Code hosts last", () => {
   const groups = groupSections(getVisibleSections(ALL_CAPABILITIES), "phone");
   assert.deepEqual(groups.map((group) => group.group), ["you", "engine", "server"]);
-  assert.deepEqual(groups[0].sections.map((section) => section.id), ["general", "accounts", "forge"]);
+  assert.deepEqual(groups[0].sections.map((section) => section.id), ["general", "notifications", "accounts", "forge"]);
   assert.deepEqual(groups[1].sections.map((section) => section.id), ["providers", "models", "engine", "extensions"]);
   assert.deepEqual(groups[2].sections.map((section) => section.id), ["system"]);
   // Desktop keeps registry order.
   const desktop = groupSections(getVisibleSections(ALL_CAPABILITIES), "desktop");
-  assert.deepEqual(desktop[0].sections.map((section) => section.id), ["accounts", "general", "forge"]);
+  assert.deepEqual(desktop[0].sections.map((section) => section.id), ["accounts", "general", "notifications", "forge"]);
 });
 
 test("the desktop rail keeps the settings-tab-<id> tablist contract and names its eyebrows", () => {
