@@ -2607,6 +2607,8 @@ as expanded-image hashes.
     data is also watched by its USB framing (`RawMessageWatch`): any stretch
     between two ends of the device's transfers - the start and the end of the
     data count - that is nothing but the programmer's own log lines and answers
+    (read with the reader's own rule for what may precede a document,
+    `leadBeforeDocument`, so a leading newline or stray byte does not hide one)
     is a message taken for sector bytes and refuses the read, wherever it sits,
     however long (up to the 256 KiB a document may be) and even when no disk byte
     arrived at all, while the same text inside a transfer of data is still

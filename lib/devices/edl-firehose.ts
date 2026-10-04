@@ -1,5 +1,5 @@
 import { EdlError, edlTimeouts, type EdlLink } from "./edl-link";
-import { answerBeganInsideData, cleanDeviceText, FIREHOSE_XML_LIMITS, parseFirehoseDocument, RawMessageWatch, scanFirehoseFrame } from "./edl-xml";
+import { answerBeganInsideData, cleanDeviceText, FIREHOSE_XML_LIMITS, isPaddingByte, parseFirehoseDocument, RawMessageWatch, scanFirehoseFrame } from "./edl-xml";
 import type { HardwareContext, HardwareRisk } from "./flasher";
 import { throwIfAborted } from "./serial";
 
@@ -485,7 +485,7 @@ export class FirehoseSession {
     let padding = 0;
     if (rest > 0 && rest <= MAX_TRAILING_PADDING) {
       const tail = this.link.view().subarray(end, end + rest);
-      if (tail.every((byte) => byte === 0x00 || byte === 0x09 || byte === 0x0a || byte === 0x0d || byte === 0x20)) padding = rest;
+      if (tail.every(isPaddingByte)) padding = rest;
     }
     this.link.consume(end + padding);
   }

@@ -212,6 +212,45 @@ function indexOfBytes(bytes: Uint8Array, needle: Uint8Array, from: number): numb
 
 const closerBytes = new TextEncoder().encode(CLOSER);
 
+/** White space: all a strict read tolerates before a document, and what pads one. */
+function isWhiteSpaceByte(byte: number): boolean {
+  return byte === 0x20 || byte === 0x0a || byte === 0x0d || byte === 0x09;
+}
+
+/** Padding around a document: white space, and the NUL bytes some programmers fill a transfer out with. */
+export function isPaddingByte(byte: number): boolean {
+  return byte === 0x00 || isWhiteSpaceByte(byte);
+}
+
+export type LeadBeforeDocument =
+  /** The document's `<` stands after `length` tolerated bytes. */
+  | { readonly kind: "found"; readonly length: number }
+  /** Only tolerated bytes so far, and no `<` yet: more may come. */
+  | { readonly kind: "waiting" }
+  /** More than the allowed number of bytes come before the `<`. */
+  | { readonly kind: "too-long"; readonly length: number }
+  /** A strict read met a byte that is not white space before the `<`. */
+  | { readonly kind: "not-white-space" };
+
+/**
+ * THE rule for what may stand before a document's `<`, used by the reader (`scanFirehoseFrame`) and by everything that must
+ * recognise what the reader would read as a message (`RawMessageWatch`), so that the two cannot disagree. A `strict` read, of
+ * the answer that must follow raw sector data, tolerates a few bytes of white space; any other read tolerates a stray byte
+ * or two (anything but `<`, up to `leadingJunkBytes`).
+ */
+export function leadBeforeDocument(bytes: Uint8Array, strict: boolean): LeadBeforeDocument {
+  const allowed = strict ? FIREHOSE_XML_LIMITS.strictLeadingBytes : FIREHOSE_XML_LIMITS.leadingJunkBytes;
+  let first = 0;
+  while (first < bytes.length && bytes[first] !== 0x3c) first += 1;
+  if (first > allowed) return { kind: "too-long", length: first };
+  if (strict) {
+    for (let index = 0; index < first; index += 1) {
+      if (!isWhiteSpaceByte(bytes[index]!)) return { kind: "not-white-space" };
+    }
+  }
+  return first >= bytes.length ? { kind: "waiting" } : { kind: "found", length: first };
+}
+
 /**
  * Looks for one complete document at the start of `bytes`. `incomplete` means
  * "wait for more"; anything that can never become a document throws.
@@ -221,23 +260,17 @@ const closerBytes = new TextEncoder().encode(CLOSER);
  */
 export function scanFirehoseFrame(bytes: Uint8Array, strict = false): FirehoseFrame {
   const limits = FIREHOSE_XML_LIMITS;
-  let first = 0;
-  while (first < bytes.length && bytes[first] !== 0x3c) first += 1;
-  const allowed = strict ? limits.strictLeadingBytes : limits.leadingJunkBytes;
-  if (first > allowed) {
+  const lead = leadBeforeDocument(bytes, strict);
+  if (lead.kind === "too-long") {
     throw new EdlError(strict
-      ? `The Firehose programmer's answer did not follow the sector data directly (${first} unexpected byte(s) came first). The data stream is misaligned, so nothing read from it can be trusted.`
-      : `Expected Firehose XML but the device sent ${first} bytes of something else first.`);
+      ? `The Firehose programmer's answer did not follow the sector data directly (${lead.length} unexpected byte(s) came first). The data stream is misaligned, so nothing read from it can be trusted.`
+      : `Expected Firehose XML but the device sent ${lead.length} bytes of something else first.`);
   }
-  if (strict) {
-    for (let index = 0; index < first; index += 1) {
-      const byte = bytes[index]!;
-      if (byte !== 0x20 && byte !== 0x0a && byte !== 0x0d && byte !== 0x09) {
-        throw new EdlError("The Firehose programmer's answer did not follow the sector data directly (unexpected bytes came first). The data stream is misaligned, so nothing read from it can be trusted.");
-      }
-    }
+  if (lead.kind === "not-white-space") {
+    throw new EdlError("The Firehose programmer's answer did not follow the sector data directly (unexpected bytes came first). The data stream is misaligned, so nothing read from it can be trusted.");
   }
-  if (first >= bytes.length) return { kind: "incomplete" };
+  if (lead.kind === "waiting") return { kind: "incomplete" };
+  const first = lead.length;
   const close = indexOfBytes(bytes, closerBytes, first);
   if (close === -1) {
     if (bytes.length - first > limits.documentBytes) throw malformed(`a document is longer than ${limits.documentBytes} bytes without ending`);
@@ -293,28 +326,36 @@ export function answerBeganInsideData(tail: Uint8Array, answer: Uint8Array): num
 const ANSWER_ELEMENTS: readonly string[] = ["data", "log", "response"];
 /** The most data one stretch may hold to be examined: a few exchanges' worth of the programmer's own text. A longer stretch is not a message. */
 const MAX_STRETCH_BYTES = 2 * 1024 * 1024;
-/** How much of the start of a stretch says whether it can be a message. */
-const HEAD_BYTES = 16;
+/** How much of the start of a stretch settles whether it can be a message: the lead a reader tolerates, then the start of a document. */
+const HEAD_BYTES = FIREHOSE_XML_LIMITS.leadingJunkBytes + Math.max(...ANSWER_STARTS.map((start) => start.length));
+const latin1 = new TextDecoder("latin1");
 
-/** Whether what is known of a stretch's first bytes could still be the start of a programmer document. */
-function couldBeginAnAnswer(head: Uint8Array): boolean {
-  const text = new TextDecoder("latin1").decode(head.subarray(0, HEAD_BYTES));
+/**
+ * Whether a stretch that begins with `head` can still be a message: what comes before its first `<` is what the reader
+ * tolerates before a document (`leadBeforeDocument`, the reader's own rule), and what follows could be the start of one of the
+ * programmer's documents. Undecided - only tolerated bytes so far, or a start cut short - counts as yes.
+ */
+function canOpenAMessage(head: Uint8Array): boolean {
+  const lead = leadBeforeDocument(head, false);
+  if (lead.kind === "waiting") return true;
+  if (lead.kind !== "found") return false;
+  const text = latin1.decode(head.subarray(lead.length, lead.length + HEAD_BYTES));
   return ANSWER_STARTS.some((start) => {
     const shared = Math.min(start.length, text.length);
     return text.slice(0, shared) === start.slice(0, shared);
   });
 }
 
-/** Whether `bytes` is nothing but complete programmer documents - log lines and answers - with only padding between and after them. */
+/** Whether `bytes` is nothing but complete programmer documents - log lines and answers - each read as the reader reads it, with only padding after the last. */
 function onlyProgrammerMessages(bytes: Uint8Array): boolean {
   let at = 0;
   let documents = 0;
   for (;;) {
-    while (at < bytes.length && (bytes[at] === 0x20 || bytes[at] === 0x0a || bytes[at] === 0x0d || bytes[at] === 0x09 || bytes[at] === 0x00)) at += 1;
-    if (at >= bytes.length) return documents > 0;
-    if (bytes[at] !== 0x3c) return false;
+    let rest = at;
+    while (rest < bytes.length && isPaddingByte(bytes[rest]!)) rest += 1;
+    if (rest >= bytes.length) return documents > 0;
     try {
-      const frame = scanFirehoseFrame(bytes.subarray(at), true);
+      const frame = scanFirehoseFrame(bytes.subarray(at), false);
       if (frame.kind !== "document" || frame.document.extras !== 0 || frame.document.strayText) return false;
       if (!frame.document.elements.every((element) => ANSWER_ELEMENTS.includes(element.name))) return false;
       documents += 1;
@@ -343,9 +384,10 @@ export interface SwallowedMessage {
  * The raw data of one read is fed in order, with the offsets (within each chunk) at which the device ended a transfer. The
  * start of the data counts as the start of a stretch - the announcing answer was a transfer of its own - and the end of the
  * data as the end of one, so a message that is ALL the data (not one disk byte arrived) is found too. A stretch that is
- * nothing but complete `data`, `log` and `response` documents, with padding, is reported, however long it is and
- * wherever it sits. Text that is only part of a transfer of data is data, and so is a stretch longer than 2 MiB.
- * What cannot be seen is a message that shares a USB transfer with real data.
+ * nothing but complete `data`, `log` and `response` documents, read the way the reader reads them (including what it
+ * tolerates in front of a document and the padding after one), is reported, however long it is and wherever it sits. Text
+ * that is only part of a transfer of data is data, and so is a stretch longer than 2 MiB. What cannot be seen is a message
+ * that shares a USB transfer with real data.
  */
 export class RawMessageWatch {
   private offset = 0;
@@ -372,13 +414,15 @@ export class RawMessageWatch {
   private extend(bytes: Uint8Array): void {
     if (this.alive && bytes.length > 0) {
       if (this.held + bytes.length > MAX_STRETCH_BYTES) this.alive = false;
-      else if (this.held === 0 && bytes.length >= HEAD_BYTES && !couldBeginAnAnswer(bytes)) this.alive = false;
       else {
-        this.parts.push(Uint8Array.from(bytes));
-        this.held += bytes.length;
-        if (!this.judged && this.held >= HEAD_BYTES) {
-          this.judged = true;
-          if (!couldBeginAnAnswer(this.text())) this.alive = false;
+        if (!this.judged) {
+          const head = this.held === 0 ? bytes.subarray(0, HEAD_BYTES) : this.head(bytes);
+          if (!canOpenAMessage(head)) this.alive = false;
+          else if (this.held + bytes.length >= HEAD_BYTES) this.judged = true;
+        }
+        if (this.alive) {
+          this.parts.push(Uint8Array.from(bytes));
+          this.held += bytes.length;
         }
       }
       if (!this.alive) {
@@ -387,6 +431,19 @@ export class RawMessageWatch {
       }
     }
     this.offset += bytes.length;
+  }
+
+  /** The first bytes of the stretch so far followed by `next`, as many as settle whether it can be a message. */
+  private head(next: Uint8Array): Uint8Array {
+    const out = new Uint8Array(Math.min(HEAD_BYTES, this.held + next.length));
+    let at = 0;
+    for (const part of [...this.parts, next]) {
+      if (at >= out.length) break;
+      const take = Math.min(part.length, out.length - at);
+      out.set(part.subarray(0, take), at);
+      at += take;
+    }
+    return out;
   }
 
   private text(): Uint8Array {
@@ -401,10 +458,7 @@ export class RawMessageWatch {
 
   private close(): SwallowedMessage | null {
     let found: SwallowedMessage | null = null;
-    if (this.alive && this.held > 0) {
-      const text = this.text();
-      if (couldBeginAnAnswer(text) && onlyProgrammerMessages(text)) found = { at: this.begun, length: this.held };
-    }
+    if (this.alive && this.held > 0 && onlyProgrammerMessages(this.text())) found = { at: this.begun, length: this.held };
     this.begun = this.offset;
     this.parts = [];
     this.held = 0;
