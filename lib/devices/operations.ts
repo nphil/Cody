@@ -144,6 +144,13 @@ const MAX_MONITOR_LINE_CHARS = 8 * 1024;
 const PROGRESS_PUBLISH_MS = 200;
 /** How long a reacquisition after an announced adbd restart waits to SEE the device leave the bus before it assumes this device restarts without re-enumerating. */
 const RESTART_DISCONNECT_GRACE_MS = 4_000;
+/**
+ * A reacquisition tells the provider how long it has (`timeoutMs`), and a provider that
+ * honours that reports its own, more specific, timeout. The runner's cut-off for one that
+ * does not (opening the device is not covered by it) comes this much later, so it never
+ * pre-empts the provider's message in a photo finish.
+ */
+const PROVIDER_TIMEOUT_GRACE_MS = 250;
 const textEncoder = new TextEncoder();
 interface PendingConfirmation {
   confirmation: OperationConfirmation;
@@ -327,6 +334,38 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
+/** A lease acquisition that was still pending when its deadline passed. */
+class LeaseDeadlineError extends Error {}
+
+/**
+ * Waits for a lease acquisition, but not past `deadline` (an absolute time, when there is
+ * one) and not past a cancel: a provider that is slow to open the device (WebUSB open,
+ * configure, claim) must not keep a bounded wait, or a Cancel, waiting. An acquisition left
+ * behind this way does not leak: should it ever produce a lease, that lease is released at once.
+ */
+function awaitLease(acquisition: Promise<HardwareTransportLease>, signal: AbortSignal, deadline: number | undefined, whenLate: string): Promise<HardwareTransportLease> {
+  const { promise, resolve, reject } = Promise.withResolvers<HardwareTransportLease>();
+  let settled = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const finish = (done: () => void): boolean => {
+    if (settled) return false;
+    settled = true;
+    clearTimeout(timer);
+    signal.removeEventListener("abort", onAbort);
+    done();
+    return true;
+  };
+  const onAbort = (): void => { finish(() => reject(new DOMException("Operation cancelled.", "AbortError"))); };
+  if (signal.aborted) onAbort();
+  else signal.addEventListener("abort", onAbort, { once: true });
+  if (!settled && deadline !== undefined) timer = setTimeout(() => { finish(() => reject(new LeaseDeadlineError(whenLate))); }, Math.max(0, deadline - Date.now()));
+  acquisition.then(
+    (lease) => { if (!finish(() => resolve(lease))) void lease.release().catch(() => undefined); },
+    (error: unknown) => { finish(() => reject(error)); },
+  );
+  return promise;
+}
+
 /**
  * Browser page runner for a session. The page keeps this object alive across
  * host-tool/eval lifetimes, so a start response can return immediately while
@@ -372,27 +411,46 @@ export class DeviceOperationManager {
   /**
    * The browser reports that the device left the USB bus, or the user
    * disconnected it (`forgotten`). Shell access is always revoked and every
-   * operation on the device is cancelled - except one that announced it was
-   * restarting the device's own daemon and is waiting for exactly this (see
-   * expectDeviceRestart). A device the user disconnected on purpose is never
-   * expected back.
+   * operation on the device is cancelled - except one for which the departure is
+   * part of what it is doing (see `departureExpected`): an operation that
+   * announced it was restarting the device (expectDeviceRestart), and a
+   * wait-for-device, which exists to ride out a device that leaves and returns.
+   * A device the user disconnected on purpose is never expected back.
    */
   async deviceDisconnected(deviceId: string, cause: "left-bus" | "forgotten" = "left-bus"): Promise<void> {
-    const expected = (record: OperationRecord): boolean => cause === "left-bus" && record.restart !== undefined && Date.now() < record.restart.expiresAt;
+    const expected = (record: OperationRecord): boolean => cause === "left-bus" && this.departureExpected(record);
     this.revokeShellAccess(deviceId, expected);
     for (const listener of this.shellListeners) listener();
     const settling: Promise<void>[] = [];
     for (const record of this.records.values()) {
       if (record.request.deviceId !== deviceId) continue;
       if (!isTerminal(record.state) && expected(record)) {
-        record.restart!.disconnected = true;
-        this.addOutput(record, "The device left the USB bus, as expected while adbd restarts. Waiting for the same device to return.");
+        if (record.restart) {
+          record.restart.disconnected = true;
+          this.addOutput(record, "The device left the USB bus, as expected after what this operation just did. The operation goes on.");
+        } else {
+          this.addOutput(record, "The device left the USB bus. This wait goes on until the same device is back or its time is up.");
+        }
         continue;
       }
       if (!isTerminal(record.state)) this.cancel(record.id);
       if (record.settled) settling.push(record.settled);
     }
     await Promise.all(settling);
+  }
+
+  /**
+   * Whether the record's device leaving the bus is part of what the operation is doing:
+   * it announced a departure (an adbd restart, a DFU manifestation, leave or reset) and
+   * that window is still open, or it is a wait-for-device inside its own deadline. A
+   * wait is for a device that may be rebooting, re-enumerating, or in the wrong mode
+   * until it changes; only the same granted identity is ever taken again, and the deadline
+   * is the only thing that ends the wait besides the user.
+   */
+  private departureExpected(record: OperationRecord): boolean {
+    const now = Date.now();
+    if (record.restart !== undefined && now < record.restart.expiresAt) return true;
+    return record.waitDeadline !== undefined && now < record.waitDeadline;
   }
 
   constructor(
@@ -696,8 +754,10 @@ export class DeviceOperationManager {
    * `adb wait-for-device`: the device may not be attached yet (it is rebooting or
    * re-enumerating), so acquiring its lease is retried until the wait window
    * ends. The window starts here and is handed to the flasher as its deadline, so
-   * one deadline covers acquisition, authentication and every reacquisition.
-   * Cancelling ends a poll at once and no new acquisition begins afterwards.
+   * one deadline covers acquisition, authentication and every reacquisition. Each
+   * acquisition is itself bounded by that deadline and by Cancel (a provider can take
+   * as long as it likes to open a device), and a lease that arrives after the wait gave
+   * up is released. Cancelling ends a poll at once and no new acquisition begins afterwards.
    * Every other operation fails at once when the device is missing.
    */
   private async acquireLeaseForRun(record: OperationRecord): Promise<HardwareTransportLease> {
@@ -709,11 +769,11 @@ export class DeviceOperationManager {
     for (;;) {
       if (record.controller.signal.aborted) throw new DOMException("Operation cancelled.", "AbortError");
       try {
-        return await this.acquireLease(record);
+        return await awaitLease(this.acquireLease(record), record.controller.signal, deadline, "its USB connection was still being opened when the wait ended");
       } catch (error) {
         if (record.controller.signal.aborted) throw new DOMException("Operation cancelled.", "AbortError");
         const remaining = deadline - Date.now();
-        if (remaining <= 0) throw new Error(`The device did not become available within ${wait.timeoutMs / 1000} s: ${errorMessage(error)}`);
+        if (error instanceof LeaseDeadlineError || remaining <= 0) throw new Error(`The device did not become available within ${wait.timeoutMs / 1000} s: ${errorMessage(error)}`);
         if (!announced) {
           announced = true;
           this.reportProgress(record, { phase: "waiting", message: "Waiting for the device to appear." });
@@ -847,13 +907,15 @@ export class DeviceOperationManager {
       interfaceNumber: record.request.interfaceNumber,
       alternateSetting: record.request.alternateSetting,
     };
-    const replacement = record.request.protocol === "adb"
-      ? await reacquire!.call(this.transportProvider, record.request.deviceId, identity!, {
+    const acquisition = record.request.protocol === "adb"
+      ? reacquire!.call(this.transportProvider, record.request.deviceId, identity!, {
         ...requested,
         signal: record.controller.signal,
         ...(options.deadline === undefined ? {} : { timeoutMs: Math.max(1, options.deadline - Date.now()) }),
       })
-      : await this.transportProvider.borrowHardwareTransport(record.request.deviceId, requested);
+      : this.transportProvider.borrowHardwareTransport(record.request.deviceId, requested);
+    // A provider's own limit does not cover opening the device, so the caller's deadline (and Cancel) is enforced here as a backstop.
+    const replacement = await awaitLease(acquisition, record.controller.signal, options.deadline === undefined ? undefined : options.deadline + PROVIDER_TIMEOUT_GRACE_MS, "the device was still being opened when the deadline passed");
     if (record.controller.signal.aborted) {
       await replacement.release();
       throw new DOMException("Operation cancelled.", "AbortError");

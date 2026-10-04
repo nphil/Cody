@@ -250,8 +250,10 @@ item remains **UNVERIFIED** until its permitted evidence is completed.
   options, `usb` must report `verified: false` ("not USB-only") and a paired PC
   can still connect over TLS; switched OFF, `usb` verifies.
 - [ ] **UNVERIFIED** `wait-for-device` started while the device reboots (after
-  `device_exec` reboot) returns once adbd answers; with the cable pulled it ends
-  at its timeout; Cancel ends it at once.
+  `device_exec` reboot) returns once adbd answers, even though the browser
+  reports the device leaving and returning (same USB identity); with the cable
+  pulled it ends at its timeout; Cancel ends it at once, also while the browser
+  is still opening the device.
 
 ### ADB port forward and reverse
 

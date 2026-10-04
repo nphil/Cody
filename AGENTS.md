@@ -2324,7 +2324,16 @@ as expanded-image hashes.
   `context.deadline`), authentication (`adbFor(context, { deadline })`), queries
   and every reacquisition; a failed reacquisition leaves no lease and nothing is
   authenticated until one succeeds; `pause()` (pause.ts) makes every poll
-  cancellable. The server (`DeviceBridge.departedDevice`) remembers the ids of
+  cancellable. A wait is never cancelled by its device leaving the bus
+  (`DeviceOperationManager.departureExpected`: an announced restart window OR a
+  `record.waitDeadline` still ahead; shell access is still revoked, only the
+  same granted identity is ever taken again, and `disconnectDevice`'s
+  `"forgotten"` still cancels). `awaitLease` (operations.ts) races every wait
+  acquisition and every reacquisition against the deadline and Cancel (a
+  reacquisition's backstop is `PROVIDER_TIMEOUT_GRACE_MS` later, so a provider's
+  own `timeoutMs` error wins a photo finish) and releases a lease that arrives
+  after the wait gave up; WebUSB open/configure/claim can take as long as it
+  likes. The server (`DeviceBridge.departedDevice`) remembers the ids of
   devices that left the page (15 min, 16 at most, cleared when another page takes
   over, never for a roster drop) and `device_exec` accepts them for
   `wait-for-device` by exact id only. Call `reacquireHardwareTransport` on its
@@ -2332,7 +2341,8 @@ as expanded-image hashes.
   `adb-lifecycle.test.mjs` (manager level) and `adb-browser-lifecycle.test.mjs`,
   which drives the real `DeviceBridgeConnection` with `fakeBrowser()` /
   `fakeUsbAdbDevice()` from `usb-adb.test-helper.mjs` (a `disconnect` event, then
-  the device returning as a NEW USB object with the same vendor/product/serial).
+  the device returning as a NEW USB object with the same vendor/product/serial;
+  a `device.open` replaced by a held promise for the slow-open cases).
   yume's `AdbBanner` has no string form: use `banner.state` (`bannerText` builds
   the `state::props` text). MTK
   preloader/BROM/download-agent support is **not implemented** (parked); see

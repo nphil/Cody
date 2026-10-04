@@ -82,16 +82,21 @@ export interface HardwareContext {
   /**
    * Explicit recovery after the caller verified a safe resume point. It never
    * retries a write. `deadline` (an absolute time) bounds how long the same
-   * device is awaited; without one the runner applies its own limit.
+   * device is awaited, opening it included: a provider that is slow to open the
+   * device is not waited for past it. Without one the runner applies its own
+   * limit. Cancelling the operation ends the wait at once.
    */
   reacquireTransport?: (options?: { deadline?: number }) => Promise<HardwareTransport>;
   /**
-   * For an operation that is about to make the device restart its own daemon: the
-   * device will leave the USB bus on purpose, so the runner must not treat that
-   * one disconnect as a reason to cancel this operation. Returns a function that
-   * ends the exception; it also ends by itself after `windowMs`. Shell access is
-   * revoked by the disconnect all the same, and only the same device identity may
-   * come back.
+   * For an operation that is about to make the device leave the USB bus on
+   * purpose (an adbd restart, a DFU manifestation, leave or reset): the runner
+   * must not treat that one disconnect as a reason to cancel the operation.
+   * Returns a function that ends the exception; it also ends by itself after
+   * `windowMs`. An operation whose device may be reported gone only after the
+   * operation has returned (the browser's disconnect event can trail the transfer
+   * that failed) leaves the window to expire instead of closing it. Shell access
+   * is revoked by the disconnect all the same, only the same device identity may
+   * come back, and a disconnect the user makes on purpose still cancels.
    */
   expectDeviceRestart?: (windowMs: number) => () => void;
   /** The absolute time at which a bounded wait gives up, counted from when the operation began waiting (so it covers lease acquisition). */
