@@ -2038,9 +2038,9 @@ re-use a grant across sessions.
 
 Use high-level operation tools for supported work:
 `device_detect`, `device_dump`, `device_flash`, `device_exec`,
-`device_push`, `device_pull`, `device_sideload`, `device_verify`,
-`device_monitor`, `device_monitor_send`, `device_forward`, `device_reverse`,
-`device_tunnels`, `device_operation_status`, and
+`device_push`, `device_pull`, `device_sideload`, `device_install`,
+`device_verify`, `device_monitor`, `device_monitor_send`, `device_forward`,
+`device_reverse`, `device_tunnels`, `device_operation_status`, and
 `device_operation_cancel`. Start requests name the exact browser `device`,
 `protocol`, and where relevant target, offset, interface, and artifact
 `fileId` with its displayed SHA-256. The operation runs independently in the
@@ -2049,6 +2049,13 @@ argument. Phase/state/confirmation/terminal events are immediate; live
 progress and output are coalesced at 200 ms. Status deliberately retains only
 128 terminal records, each bounded to 256 events, 512 output lines, and 64 KiB
 of output.
+
+Engines launched through the MCP bridge (`displayMcpAcpServer()`,
+`claudeDisplayMcpConfig()`) get their device tools from the hard-coded copy in
+`bin/cody-display-mcp.js`, not from `DEVICE_OPERATION_TOOLS`. Adding or
+changing an operation tool means changing both; `bin/cody-display-mcp.test.mjs`
+starts the real bridge and fails when a tool is missing or takes different
+arguments.
 
 Input uploads (picker, drop, or an authorized local-path import) and device
 outputs are browser-owned session artifacts. `DeviceArtifactStore` hashes each
@@ -2239,12 +2246,18 @@ as expanded-image hashes.
   most 1 GiB each) that are flashed in turn; a failed piece stops with no retry.
   `stage` / `get_staged` move data to and from the bootloader's staging buffer.
   `update` / `flashall` flash the images of a package ZIP (`zip-archive.ts`,
-  `android-info.ts`): its `android-info.txt` must be met by the device, every
-  partition is backed up before ONE approval typed as `update:<first 8 hex of the
-  package SHA-256>`, and each partition is written once and read back before the
-  next. Logical partitions need fastbootd; bootloader/radio/super/userdata images,
-  `-w`, and mode switches are not part of it. Host filesystem generation
-  (format) is not implemented.
+  `android-info.ts`): its `android-info.txt` must be met by the device (it is
+  read under its own bound, 64 KiB and 256 requirements, refused on its recorded
+  size before it is opened; `partition-exists` also needs that image in the
+  package, and like AOSP only its first value names the partition), stored and
+  deflated members are CRC-checked when opened, every partition is backed up
+  before ONE approval typed as `update:<first 8 hex of the package SHA-256>`,
+  and each partition is written once and read back before the next. A failed
+  update names four states: written and verified, written but not verifiable,
+  POSSIBLY MODIFIED (a `flash:` command was sent; with its backup id), and
+  untouched. Logical partitions need fastbootd; bootloader/radio/super/userdata
+  images, `-w`, and mode switches are not part of it. Host filesystem
+  generation (format) is not implemented.
 - **USB DFU:** `detect`, `dump`, verified `flash`, and confirmed
   `abort`/`clear_status` maintenance are descriptor-bound. Flash is allowed
   only for bcdDFU `0x011a` on the actual selected `@Internal Flash` DfuSe
@@ -2259,9 +2272,14 @@ as expanded-image hashes.
   role the alternate's name implies); the current image is escrowed when the
   device can upload; the image is sent as numbered blocks plus the zero-length
   block; a manifestation-tolerant device is read back and SHA-256-compared, an
-  intolerant one restarts itself and is reported UNVERIFIED. `exec` also takes
-  `reset` (USB reset through `HardwareTransport.reset`) and, for DfuSe,
-  `leave ADDRESS`. No caller descriptor option creates a capability.
+  intolerant one restarts itself and is reported UNVERIFIED. A backup the device
+  uploaded but Cody could not save refuses the write; only a device that will
+  not upload downgrades to the UNVERIFIED warning. `exec` also takes `reset`
+  (USB reset through `HardwareTransport.reset`; a failed reset is an error
+  unless `HardwareTransport.connected()` shows the device left the bus) and, for
+  DfuSe, `leave ADDRESS`. The Devices form offers `allow-unknown` for DFU
+  through `flashOverrideChoices` (ui-model.ts). No caller descriptor option
+  creates a capability.
 - **ADB:** detection, shell/PTY, push, pull/dump, recovery sideload and raw-image
   readback verification use Cody's persistent browser IndexedDB RSA credential.
   Without a shell grant only literal diagnostics are available; a user-granted
@@ -2275,13 +2293,42 @@ as expanded-image hashes.
   supported through the server relay (see "ADB port forward and reverse").
   `device_install` (`install` in adb.ts) stages an APK with the push path's
   verified chunks, runs `pm install` with validated flags on that exact file, and
-  always removes the copy. `device_exec` `options.kind` `root`, `unroot`, `tcpip`
-  (with `options.port`) and `usb` restart adbd, reconnect through
-  `reacquireTransport`, and verify the state the device reports;
-  `wait-for-device` (`adbWaitOptions`) makes the manager retry acquiring a device
-  that is not attached yet, then authenticates until the daemon answers in the
-  wanted state. yume's `AdbBanner` has no string form: use `banner.state`
-  (`bannerText` builds the `state::props` text). MTK
+  removes the copy and its staging files on every exit (copy failure, `pm`
+  failure, and cancel: it keeps the connection for that cleanup, and
+  `stagingIo(adb, capabilities, signal)` stops at the next step when cancelled).
+  Replacement is off unless `options.replace`: `-R` on Android 9+ (API read from
+  `ro.build.version.sdk`; unreadable counts as modern), nothing on older Android,
+  where `-R` is an unknown option and refusing is already the default. The
+  approval is typed (`install:<first 8 hex of the APK SHA-256>`).
+  `device_exec` `options.kind` `root`, `unroot`, `tcpip` (with `options.port`)
+  and `usb` restart adbd, and the device usually leaves the USB bus. The flasher
+  calls `context.expectDeviceRestart(windowMs)` after the approval; while that
+  window is open `DeviceOperationManager.deviceDisconnected` does not cancel THAT
+  operation (shell access is still revoked; `disconnectDevice` passes
+  `"forgotten"` and still cancels everything), the manager waits up to 4 s to see
+  the disconnect before reacquiring, and `reacquireTransport` retries (it needs no
+  current lease: `OperationRecord.identity` says which device) until
+  `options.timeoutSeconds` (default 45) for the SAME stable USB identity.
+  `tcpip` and `usb` verify adbd's effective listeners with `adbTcpListeners`
+  (fixed `service.adb.listen_addrs`, then `service.adb.tcp.port` even when `0`,
+  then `persist.adb.tcp.port`), refuse before approval when fixed addresses make
+  the request impossible, and report `verified: false` when a property overrides
+  the result. `wait-for-device` (`adbWaitOptions`) uses ONE deadline for lease
+  acquisition (`record.waitDeadline`, handed to the flasher as
+  `context.deadline`), authentication (`adbFor(context, { deadline })`), queries
+  and every reacquisition; a failed reacquisition leaves no lease and nothing is
+  authenticated until one succeeds; `pause()` (pause.ts) makes every poll
+  cancellable. The server (`DeviceBridge.departedDevice`) remembers the ids of
+  devices that left the page (15 min, 16 at most, cleared when another page takes
+  over, never for a roster drop) and `device_exec` accepts them for
+  `wait-for-device` by exact id only. Call `reacquireHardwareTransport` on its
+  provider (`.call`): the browser implementation uses `this`. Tests:
+  `adb-lifecycle.test.mjs` (manager level) and `adb-browser-lifecycle.test.mjs`,
+  which drives the real `DeviceBridgeConnection` with `fakeBrowser()` /
+  `fakeUsbAdbDevice()` from `usb-adb.test-helper.mjs` (a `disconnect` event, then
+  the device returning as a NEW USB object with the same vendor/product/serial).
+  yume's `AdbBanner` has no string form: use `banner.state` (`bannerText` builds
+  the `state::props` text). MTK
   preloader/BROM/download-agent support is **not implemented** (parked); see
   `docs/hardware-parity.md` for every tool's command-by-command status.
 - **Serial bootloaders:** Gecko provides detection/XMODEM framing only until a
