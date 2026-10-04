@@ -142,7 +142,7 @@ arbitrary code on the device, so loading one is the one thing here that asks for
 a confirmation bound to the file's SHA-256; the boot ROM itself refuses a loader
 that was not signed for the device. **This stage reads, and can flash or erase one
 named partition under the write gate described below, save a whole-disk backup set
-with a manifest, restore such a set onto the same unit, and set the boot drive (always UNVERIFIED).**
+with a manifest, restore such a set onto the same unit, and set the boot drive (always UNVERIFIED).** The panel has cards for flash and erase (Flash tab) and for a partition, the whole area, a backup set and a restore (Backup tab); the boot drive is reached through the agent tools only.
 
 | PC command | Cody | Status | Evidence |
 |------------|------|--------|----------|

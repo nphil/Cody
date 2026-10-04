@@ -11,7 +11,7 @@ import { ActionForm } from "./ActionForm";
 import { ActivityLine } from "./ActivityLine";
 import { DeviceTerminal } from "./DeviceTerminal";
 import { FastbootCommand } from "./FastbootCommand";
-import { EdlBackup, EdlCommands } from "./EdlWorkflow";
+import { EdlBackup, EdlBackupSets, EdlCommands, EdlFlash } from "./EdlWorkflow";
 import { isTerminalState, OperationList } from "./OperationList";
 import { ShellAccessControl } from "./ShellAccessControl";
 import { Button, cardStyle, Chip, Disclosure, Notice, sectionHeadingStyle, TOUCH } from "./ui";
@@ -178,7 +178,7 @@ export function DeviceCard({ sessionId, manager, device, activity, operations, s
             {protocols.includes("fastboot") && (fastbootCandidates.length > 0 ? fastbootCandidates : [undefined]).map((candidate) => (
               <FastbootCommand key={candidate ? `${candidate.interfaceNumber}:${candidate.alternateSetting}` : "fastboot"} manager={manager} deviceId={device.id} label={device.label} interfaceNumber={candidate?.interfaceNumber} alternateSetting={candidate?.alternateSetting} input={input} showTitle={fastbootCandidates.length > 1} />
             ))}
-            {protocols.includes("edl") && <EdlCommands manager={manager} deviceId={device.id} operations={operations} interfaceNumber={edlCandidate?.interfaceNumber} alternateSetting={edlCandidate?.alternateSetting} input={input} onChooseFile={onChooseFile} />}
+            {protocols.includes("edl") && <EdlCommands manager={manager} sessionId={sessionId} deviceId={device.id} operations={operations} interfaceNumber={edlCandidate?.interfaceNumber} alternateSetting={edlCandidate?.alternateSetting} input={input} onChooseFile={onChooseFile} />}
             {protocols.some((protocol) => formActions("commands", protocol).length > 0) && form("commands")}
           </>
         );
@@ -200,6 +200,7 @@ export function DeviceCard({ sessionId, manager, device, activity, operations, s
           <>
             <Notice tone="warning">{t("devices.flashWarning")}</Notice>
             {form("flash")}
+            {protocols.includes("edl") && <EdlFlash manager={manager} sessionId={sessionId} deviceId={device.id} operations={operations} interfaceNumber={edlCandidate?.interfaceNumber} alternateSetting={edlCandidate?.alternateSetting} input={input} onChooseFile={onChooseFile} />}
           </>
         );
       case "backup":
@@ -207,7 +208,8 @@ export function DeviceCard({ sessionId, manager, device, activity, operations, s
           <>
             <Notice>{t("devices.backupRestoreNote")}</Notice>
             {form("backup")}
-            {protocols.includes("edl") && <EdlBackup manager={manager} deviceId={device.id} operations={operations} interfaceNumber={edlCandidate?.interfaceNumber} alternateSetting={edlCandidate?.alternateSetting} input={input} onChooseFile={onChooseFile} />}
+            {protocols.includes("edl") && <EdlBackup manager={manager} sessionId={sessionId} deviceId={device.id} operations={operations} interfaceNumber={edlCandidate?.interfaceNumber} alternateSetting={edlCandidate?.alternateSetting} input={input} onChooseFile={onChooseFile} />}
+            {protocols.includes("edl") && <EdlBackupSets manager={manager} sessionId={sessionId} deviceId={device.id} operations={operations} interfaceNumber={edlCandidate?.interfaceNumber} alternateSetting={edlCandidate?.alternateSetting} input={input} onChooseFile={onChooseFile} />}
           </>
         );
       case "ports":

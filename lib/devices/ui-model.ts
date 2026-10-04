@@ -64,7 +64,7 @@ export const TERMINAL_COVERED: Readonly<Partial<Record<HardwareProtocol, readonl
   adb: ["monitor"],
   serial: ["monitor"],
   fastboot: ["exec"],
-  // The EDL workflow cards (connect, partition table, check, flash, backup) stand in for generic forms.
+  // The EDL workflow cards (connect, partition table, check, flash and erase, backup set, restore) stand in for generic forms.
   edl: ["exec", "dump", "flash"],
 };
 

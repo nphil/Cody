@@ -2187,9 +2187,10 @@ pairs each group exposes. A new flasher action MUST be added to a group there;
 `ui-model.test.mjs` fails when any action a shipped flasher declares is
 unreachable. Terminal-shaped actions (`adb` monitor, `serial` monitor,
 `fastboot` exec) are covered by `DeviceTerminal` / `FastbootCommand`, and EDL's
-exec and dump by `EdlWorkflow` (connect, partition tables, check, a partition
-picked from the last table read, the whole-area backup offered only after a
-passing check), not by the generic `ActionForm`. A device in a mode Cody cannot read (`unknown-usb`),
+exec, dump and flash by `EdlWorkflow` (connect, partition tables, check, flash and
+erase of a partition picked from the last table read, the whole-area backup
+offered only after a passing check, a backup set and its restore), not by the
+generic `ActionForm`. A device in a mode Cody cannot read (`unknown-usb`),
 or a card with "Show every protocol" on, offers every protocol. The
 confirmation card (`OperationList`) keeps the exact-binding rows and the typed
 protected-override gate unchanged; only its presentation is the panel's.
@@ -2502,10 +2503,16 @@ as expanded-image hashes.
   are refused, protected or ordinary), `edl-write.ts` (flash and erase),
   `edl-manifest.ts` (the backup-set manifest: format, strict parser, and every
   check a restore makes against the saved tables), `edl-backup.ts` (backup and
-  restore) and `edl.ts` (the flasher). Components: `components/devices/EdlWorkflow.tsx` (no
-  flash/erase card in the panel yet: the Flash tab exists, the agent tools
-  `device_flash` / `device_exec erase` work, and the confirmation card is the
-  generic one).
+  restore) and `edl.ts` (the flasher). Components: `components/devices/EdlWorkflow.tsx`
+  (Commands tab: connect, partition tables, check, reset; Flash tab: `EdlFlash`,
+  a partition from the last table read or typed, the chosen file as the image
+  with a pad choice, flash and erase; Backup tab: one partition, the whole area
+  after a passing check, `EdlBackupSets` for a backup set and a restore from the
+  manifests in the session). Every confirmation, including the typed override,
+  is the generic confirmation card; `setbootablestoragedrive` has no card and is
+  reached through the agent tools. `adviseFlash` is the one decision the Flash
+  card makes (protected/refused name, size against the partition, pad); the
+  flasher checks it all again.
   - **Writes only inside a grant.** Firehose commands exist only as the closed
     union `FirehoseCommand`, built from validated integers and fixed words, and
     `assertFirehoseXml` parses every document about to be sent. Reading
