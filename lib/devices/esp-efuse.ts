@@ -78,8 +78,7 @@ const PURPOSES_C3_C6: Readonly<Record<number, string>> = {
 const PURPOSES_H2: Readonly<Record<number, string>> = {
   ...PURPOSES_C3_C6,
   1: "ECDSA_KEY",
-  2: "XTS_AES_256_KEY_1",
-  3: "XTS_AES_256_KEY_2",
+  2: "RESERVED",
 };
 
 /** The ESP32-S2/S3/C3/C6/H2 family shares one block map and one key-purpose map; only the base address differs. */

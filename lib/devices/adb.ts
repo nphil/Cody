@@ -1274,6 +1274,9 @@ function installFlags(options: Record<string, unknown> | undefined): string[] {
     if (typeof value !== "boolean") throw new AdbProtocolError(`Install option ${name} must be true or false.`);
     if (value) flags.push(flag);
   }
+  // Android's package manager permits replacement by default; -R is the
+  // explicit no-replace mode required when the user did not approve it.
+  if (options?.replace !== true) flags.push("-R");
   return flags;
 }
 
@@ -1296,26 +1299,27 @@ async function install(request: HardwareRequest, context: HardwareContext, adb: 
   const command = ["pm", "install", ...flags, shQuote(staged)].join(" ");
   await context.confirm({
     action: "adb.install",
-    target: "pm install",
+    target: command,
     sha256,
     length: input.size,
-    backup: flags.includes("-r") ? "not applicable: -r replaces the installed app's code (its data is kept); Cody does not back up the old APK" : "not applicable: without -r an app that is already installed is not replaced",
+    protectedOverride: `install:${sha256.slice(0, 8)}`,
+    backup: flags.includes("-r") ? "not applicable: -r replaces the installed app's code (its data is kept); Cody does not back up the old APK" : "not applicable: -R refuses to replace an app that is already installed",
     details: `Copy the APK to ${staged} (hash-checked on the device), run \`${command}\`, then delete the copy and its staging files. An installed app can request permissions and run code on the device.`,
   });
   const state = await stateFor(context, input, staged, sha256);
-  await resumeVerifiedStagedPush({ input, state, io: stagingIo(adb, capabilities), progress: context.progress, reconnect: () => reconnectStaging(context), isConnectionFailure });
-  const live = await adbFor(context);
-  context.progress({ phase: "adb.install", message: "Running pm install" });
-  const installed = await shellStatus(live, command).finally(() => live.rm([staged, state.stagingDirectory], { recursive: true, force: true }).then(() => undefined, () => undefined));
-  const output = abbreviatedOutput(installed.output);
-  if (installed.status !== 0 || !/^Success\b/m.test(installed.output)) throw new AdbProtocolError(`pm install failed: ${output || `status ${installed.status}`}. The staged copy was removed.`);
-  context.output?.(output);
-  return {
-    summary: `Installed the APK (${input.size} bytes): the file matched its SHA-256 on the device and the package manager reported Success.`,
-    verified: true,
-    sha256,
-    details: { command, flags, packageManager: output },
-  };
+  try {
+    await resumeVerifiedStagedPush({ input, state, io: stagingIo(adb, capabilities), progress: context.progress, reconnect: () => reconnectStaging(context), isConnectionFailure });
+    const live = await adbFor(context);
+    context.progress({ phase: "adb.install", message: "Running pm install" });
+    const installed = await shellStatus(live, command);
+    const output = abbreviatedOutput(installed.output);
+    if (installed.status !== 0 || !/^Success\b/m.test(installed.output)) throw new AdbProtocolError(`pm install failed: ${output || `status ${installed.status}`}. The staged copy was removed.`);
+    context.output?.(output);
+    return { summary: `Installed the APK (${input.size} bytes): the file matched its SHA-256 on the device and the package manager reported Success.`, verified: true, sha256, details: { command, flags, packageManager: output } };
+  } finally {
+    const live = await adbFor(context).catch(() => undefined);
+    if (live) await live.rm([staged, state.stagingDirectory], { recursive: true, force: true }).catch(() => undefined);
+  }
 }
 
 interface AdbdRestart {

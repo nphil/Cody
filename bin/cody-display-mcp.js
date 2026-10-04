@@ -259,6 +259,7 @@ async function main() {
     ["device_exec", "Start a protocol command. State-changing commands pause for direct browser UI confirmation."],
     ["device_push", "Start a resumable file push from a session artifact."],
     ["device_pull", "Start a file pull into a session-owned browser artifact."],
+    ["device_install", "Install an APK from a session artifact after direct typed browser confirmation."],
     ["device_monitor", "Start an exclusive serial monitor. Use device_monitor_send with its operation id for input."],
   ];
   for (const [name, description] of startOperationTools) {

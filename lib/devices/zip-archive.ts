@@ -202,6 +202,16 @@ export async function openZip(archive: Blob): Promise<ZipArchive> {
     const compressed = archive.slice(start, start + entry.compressedSize);
     if (entry.method === 0) {
       if (entry.compressedSize !== entry.size) throw new ZipError(`${entry.name} is stored but its sizes disagree.`);
+      let crc = 0;
+      const reader = compressed.stream().getReader();
+      try {
+        for (;;) {
+          const next = await reader.read();
+          if (next.done) break;
+          crc = crc32(next.value, crc);
+        }
+      } finally { reader.releaseLock(); }
+      if (crc !== entry.crc32) throw new ZipError(`${entry.name} failed its CRC-32 check: the archive is damaged.`);
       return compressed;
     }
     if (entry.method !== 8) throw new ZipError(`${entry.name} uses ZIP compression method ${entry.method}; only stored and deflate are supported.`);

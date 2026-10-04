@@ -379,6 +379,14 @@ async function updateFromPackage(context:HardwareContext):Promise<HardwareResult
   const unmet=(await checkRequirements(info,product,(name)=>optionalGetvar(context,name))).filter((outcome)=>!outcome.met);
   if (unmet.length>0) throw new FastbootProtocolError(`This package is not for this device, so nothing was written: ${unmet.map((outcome)=>`${outcome.line} (${outcome.detail})`).join("; ")}.`);
   const present=UPDATE_IMAGES.flatMap((image)=>{const entry=zip.find(image.file);return entry ? [{partition:image.partition,entry}] : [];});
+  // AOSP treats partition-exists as a package requirement too: it cannot be
+  // satisfied by merely discovering the partition on the device.
+  for (const requirement of info.requirements.filter((item) => item.name === "partition-exists")) {
+    for (const partition of requirement.options) {
+      if (!UPDATE_IMAGES.some((image) => image.partition === partition)) throw new FastbootProtocolError(`The package requires unsupported partition ${partition}; nothing was written.`);
+      if (!present.some((image) => image.partition === partition)) throw new FastbootProtocolError(`The package requires partition ${partition}, but contains no ${partition}.img; nothing was written.`);
+    }
+  }
   if (present.length===0) {
     const nested=zip.entries.find((entry)=>/^image-.*\.zip$/.test(entry.name));
     throw new FastbootProtocolError(nested ? `The package holds no partition images, but it contains ${nested.name}: that inner ZIP is what fastboot update flashes. Extract it and select it instead.` : "The package holds none of the images fastboot update flashes (boot.img, system.img, vendor.img, ...).");
