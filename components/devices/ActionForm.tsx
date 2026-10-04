@@ -224,7 +224,7 @@ export function ActionForm({ sessionId, manager, device, group, protocols, selec
                   { value: "allow-fuses", label: "allow-fuses" },
                   { value: "allow-bootloader", label: "allow-bootloader" },
                   { value: "allow-spi-boot", label: "allow-spi-boot" },
-                  ...(activeProtocol === "fastboot" ? [{ value: "allow-unknown", label: t("devices.operationUnknownOverride"), description: t("devices.operationUnknownOverrideDescription") }] : []),
+                  ...(activeProtocol === "fastboot" || activeProtocol === "dfu" ? [{ value: "allow-unknown", label: t("devices.operationUnknownOverride"), description: t("devices.operationUnknownOverrideDescription") }] : []),
                 ]}
               />
             )}
