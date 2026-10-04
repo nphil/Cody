@@ -9,6 +9,7 @@ import {
   locatePartition,
   paddedSource,
   partitionWriteProblem,
+  readsDisagree,
   streamToArtifact,
   summarizeRegion,
   unitTag,
@@ -168,24 +169,45 @@ function parseFlashOptions(options: Record<string, unknown> | undefined): FlashO
   throw new EdlError('options.pad must be "zero" or "ff".', "refused");
 }
 
+/** What saving a range first needs to know besides where it is. */
+export interface EscrowOptions {
+  /** `erased` when what is saved is about to be erased rather than overwritten. */
+  readonly outcome?: "written" | "erased";
+  /** What the progress line says while the range is read to be saved. */
+  readonly message?: string;
+  /** The SHA-256 of an EARLIER read of the same sectors, to be compared with the saved copy; without it the range is read a second time here. */
+  readonly earlierSha256?: string;
+}
+
 /**
- * Saves what is in sectors `first` .. `first + sectors - 1` now. A copy that cannot be saved or does not match what was read
- * refuses the change. `what` names the range in the refusal ("boot_a", "the primary partition table").
+ * Saves what is in sectors `first` .. `first + sectors - 1` now, and keeps it only if the device gives the same bytes twice. A
+ * copy that cannot be saved, does not match what was read, or that a second read disagrees with refuses the change: it would be
+ * the only way back, so it is not taken on one read's word. `what` names the range in the refusal ("boot_a", "the primary
+ * partition table").
  */
-export async function escrowRange(run: EdlRun, opened: OpenedEdl, what: string, first: number, sectors: number, fileName: string, outcome: "written" | "erased" = "written", message?: string): Promise<StreamedRead> {
+export async function escrowRange(run: EdlRun, opened: OpenedEdl, what: string, first: number, sectors: number, fileName: string, options: EscrowOptions = {}): Promise<StreamedRead> {
+  const outcome = options.outcome ?? "written";
+  let copy: StreamedRead;
+  let later: string;
   try {
-    return await streamToArtifact(run, opened, first, sectors, fileName, "escrow", message);
+    copy = await streamToArtifact(run, opened, first, sectors, fileName, "escrow", options.message);
+    later = options.earlierSha256 === undefined
+      ? (await summarizeRegion(run, opened, first, sectors, "escrow", `Reading ${what} a second time to compare`)).sha256
+      : copy.saved.sha256;
   } catch (error) {
     // A cancel, or the device going away, is the caller's to report; anything else means there is no saved copy.
     const deviceOrCancel = error instanceof DOMException && /^(AbortError|NotFoundError|NetworkError)$/.test(error.name);
     if (deviceOrCancel || isCancel(error, run)) throw error;
     throw new EdlError(`The current contents of ${what} could not be saved (${messageOf(error)}). Nothing was ${outcome}: Cody never ${outcome === "written" ? "writes" : "erases"} without a saved copy of what it ${outcome === "written" ? "overwrites" : "erases"}.`, error instanceof EdlError ? error.kind : "refused");
   }
+  const earlier = options.earlierSha256 ?? copy.saved.sha256;
+  if (earlier !== later) throw readsDisagree(what, earlier, later, `Nothing was ${outcome}.`);
+  return copy;
 }
 
 /** Saves what is in `part` now. */
 export function escrowPartition(run: EdlRun, opened: OpenedEdl, part: GptPartition, suffix: string, outcome: "written" | "erased" = "written"): Promise<StreamedRead> {
-  return escrowRange(run, opened, part.name, part.firstLba, part.sectors, `edl-${unitTag(opened)}-${fileNamePart(part.name)}.${suffix}.bin`, outcome);
+  return escrowRange(run, opened, part.name, part.firstLba, part.sectors, `edl-${unitTag(opened)}-${fileNamePart(part.name)}.${suffix}.bin`, { outcome });
 }
 
 export async function flashPartition(run: EdlRun): Promise<HardwareResult> {

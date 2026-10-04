@@ -9,6 +9,7 @@ import {
   partitionWriteProblem,
   progressReporter,
   readLiveDiskGuid,
+  readsDisagree,
   saveSmall,
   storageNote,
   streamToArtifact,
@@ -133,6 +134,7 @@ export async function backupSet(run: EdlRun): Promise<HardwareResult> {
         ? `Unit: chip serial 0x${identity.serial}, public-key hash ${identity.pkHash ?? "not available"}, eMMC serial ${unit.emmcSerial ?? "not reported"}.`
         : "WARNING: a programmer was already running, so the boot ROM's identity (chip serial, public-key hash) was not read. The set is saved, but Cody will NOT restore a set it cannot match to a unit. To get one it can restore, put the device into EDL mode again and take the set from there, with the loader chosen.",
       problems.length > 0 ? `NOT RESTORABLE: ${problems.slice(0, 3).join(" ")}${problems.length > 3 ? ` (and ${problems.length - 3} more)` : ""}` : "",
+      "Every region is read a second time and must hash the same as the first read, or the set is refused, so reading takes about twice as long.",
       "A set holds the partitions and both partition tables. Bytes outside them, the eMMC boot areas and RPMB are not part of it.",
       await storageNote(totalBytes),
     ]),
@@ -143,21 +145,29 @@ export async function backupSet(run: EdlRun): Promise<HardwareResult> {
   const partitions: SetPartition[] = [];
   const primaryName = `edl-${tag}-set-gpt-primary.bin`;
   const backupName = `edl-${tag}-set-gpt-backup.bin`;
+  // A set is only as good as its weakest copy: each region is read a second time and must hash the same as the first read.
+  const readAgain = async (what: string, first: number, sectors: number, sha256: string): Promise<void> => {
+    const again = await summarizeRegion(run, opened, first, sectors, "check", `Reading ${what} a second time to compare`);
+    if (again.sha256 !== sha256) throw readsDisagree(what, sha256, again.sha256, "No manifest was written, so there is no usable set.");
+  };
   try {
     const primaryFile = await saveSmall(context, primaryName, primary.region);
     savedCount += 1;
     say(`Saved the primary partition table (sectors 0-${primary.regionSectors - 1}) as ${primaryFile.fileId}.`);
+    await readAgain("the primary partition table", 0, primary.regionSectors, primaryFile.sha256);
     for (const [position, part] of parts.entries()) {
       const fileName = `edl-${tag}-set-p${part.index}-${fileNamePart(part.name)}.bin`;
       const label = part.name || `partition ${part.index}`;
       const { saved } = await streamToArtifact(run, opened, part.firstLba, part.sectors, fileName, "read", `Reading ${label} (${position + 1} of ${parts.length})`);
       savedCount += 1;
       say(`Saved ${label} (${describeRange(part.firstLba, part.sectors, sectorSize)}) as ${saved.fileId}, SHA-256 ${saved.sha256}.`);
+      await readAgain(label, part.firstLba, part.sectors, saved.sha256);
       partitions.push({ index: part.index, name: part.name.replace(/[\u0000-\u001f\u007f]/g, "\uFFFD"), firstLba: part.firstLba, sectors: part.sectors, sha256: saved.sha256, fileName });
     }
     const backupFile = await saveSmall(context, backupName, backupRegion);
     savedCount += 1;
     say(`Saved the backup partition table at the end of the disk (sectors ${backupFirst}-${totalSectors - 1}) as ${backupFile.fileId}.`);
+    await readAgain("the backup partition table", backupFirst, backupSectors, backupFile.sha256);
     const manifest = buildManifest({
       createdAt: new Date().toISOString(),
       unit,
@@ -375,10 +385,7 @@ export async function restoreSet(run: EdlRun): Promise<HardwareResult> {
     throwIfAborted(context.signal);
     const { region } = check;
     const fileName = `edl-${tag}-restore-${short}-${region.slug}.pre.bin`;
-    const { saved } = await escrowRange(run, opened, region.label, region.firstLba, region.sectors, fileName, "written", `Saving ${region.label} (${position + 1} of ${differing.length})`);
-    if (saved.sha256 !== check.current) {
-      throw new EdlError(`${region.label} read back as different bytes the second time (SHA-256 ${check.current}, then ${saved.sha256}), so the saved copy cannot be trusted. Nothing was written.`);
-    }
+    const { saved } = await escrowRange(run, opened, region.label, region.firstLba, region.sectors, fileName, { message: `Saving ${region.label} (${position + 1} of ${differing.length})`, earlierSha256: check.current });
     toWrite.push({ ...check, escrow: saved });
   }
   if (identical.length > 0) say(`Already identical, left alone: ${listed(identical.map((check) => check.region.label))}.`);

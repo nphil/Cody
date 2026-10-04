@@ -2530,8 +2530,9 @@ as expanded-image hashes.
   - **Flash and erase** (`edl-write.ts`). Target = exact GPT partition name. A
     flash needs an image of exactly the partition's size, or `options.pad`
     `zero`|`ff` to fill the rest (the partition is always written whole). Before
-    anything is written the partition is saved and the saved file is checked to
-    hold exactly those bytes (no saved copy = no write); one confirmation carries
+    anything is written the partition is saved, the saved file is checked to
+    hold exactly those bytes and the partition is read a second time to agree
+    with it (no saved copy = no write); one confirmation carries
     the exact sectors and the backup, plus the typed override `write:<name>` for
     the protected boot-chain / radio / identity / partition-table names
     (`edl-protect.ts`). Names like boot0/boot1/rpmb/mmcblk*boot* and partitions
@@ -2561,7 +2562,8 @@ as expanded-image hashes.
   - **Backup sets and restore** (`edl-backup.ts`, `edl-manifest.ts`). `exec backup`
     (no target; read-only) needs the span check to pass, then saves the primary
     table region (sectors 0 .. end of its entry array), every partition (one
-    file each) and the backup table region at the end of the disk, plus a JSON
+    file each) and the backup table region at the end of the disk, each read a
+    second time and required to hash the same, plus a JSON
     manifest that names each by SHA-256 and records the unit: chip serial,
     public-key hash (boot ROM only), eMMC serial and product, disk GUID, sector
     size, measured capacity. The result's SHA-256 is the manifest's: the set's
@@ -2601,20 +2603,33 @@ as expanded-image hashes.
     (confirmed; announces the departure), `dump NAME` (one GPT partition) and
     `dump user-area` (only with `options.sectors` equal to the verified count and
     only when the check passes IN THE SAME OPERATION).
-  - **Data integrity.** Reads are segmented (16 MiB per `read`), the raw bytes
-    are counted exactly, the answer after them must follow directly (a data
-    stream that is off by one byte is reported as misaligned, never saved; the
-    data is also watched by its USB framing (`RawMessageWatch`): any stretch
-    between two ends of the device's transfers - the start and the end of the
-    data count - that is nothing but the programmer's own log lines and answers
-    (read with the reader's own rule for what may precede a document,
-    `leadBeforeDocument`, so a leading newline or stray byte does not hide one)
-    is a message taken for sector bytes and refuses the read, wherever it sits,
-    however long (up to the 256 KiB a document may be) and even when no disk byte
-    arrived at all, while the same text inside a transfer of data is still
-    data), the SHA-256 is computed on the wire and compared with the artifact store's, and a
-    failed or cancelled read saves nothing. A cancelled read leaves data in
-    flight: the next operation's `discover` discards it.
+  - **Data integrity.** Reads are segmented (16 MiB per `read`) and the raw bytes
+    are counted exactly, and three independent guards decide whether a read can
+    be trusted. (1) *Alignment* (`FirehoseSession.requireDataEnd`): the last
+    byte of the data must coincide with the end of a USB transfer the link
+    actually saw (a short packet, or the zero-length packet that follows a
+    transfer that filled the read request), so the closing answer is a transfer
+    of its own. Data that ends inside a transfer, or whose count was made up with
+    the first bytes of the next one (white space in front of the answer, its XML
+    declaration, a log line), is refused without looking at what the bytes say. A
+    programmer that ends its data transfers with neither a short nor a
+    zero-length packet cannot be read from (Cody asks for them with
+    `ZLPAwareHost`), and the refusal says so. (2) *Messages taken for data*
+    (`RawMessageWatch`): alignment cannot see a log line or answer that arrives
+    as a transfer of its own and completes the byte count, because it ends on a
+    transfer end (and it can repeat on every read), so any stretch between two
+    ends of the device's transfers - the start and the end of the data count -
+    that is nothing but such documents (read with the reader's own rule for what
+    may precede one, `leadBeforeDocument`) refuses the read, wherever it sits and
+    even when no disk byte arrived, while the same text inside a transfer of data
+    is still data. (3) *Two reads*: a copy that later justifies a write - the
+    preflash and pre-erase copies, each region a restore overwrites, every region
+    of a backup set - is read a second time and the two SHA-256s must agree
+    before the user is asked anything (for a set: before the manifest is
+    written); `readsDisagree` is the one refusal. A plain `dump` is read once.
+    On top of that the SHA-256 is computed on the wire and compared with the
+    artifact store's, and a failed or cancelled read saves nothing. A cancelled
+    read leaves data in flight: the next operation's `discover` discards it.
   - **What only hardware can prove.** Everything is emulator evidence. Open
     questions are listed in `docs/hardware-checklist.md` ("Qualcomm EDL"): whether
     the ROM's HELLO survives Cody closing and re-opening the USB device, whether

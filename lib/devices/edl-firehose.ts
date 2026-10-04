@@ -1,5 +1,5 @@
 import { EdlError, edlTimeouts, type EdlLink } from "./edl-link";
-import { answerBeganInsideData, cleanDeviceText, FIREHOSE_XML_LIMITS, isPaddingByte, parseFirehoseDocument, RawMessageWatch, scanFirehoseFrame } from "./edl-xml";
+import { cleanDeviceText, FIREHOSE_XML_LIMITS, isPaddingByte, parseFirehoseDocument, RawMessageWatch, scanFirehoseFrame } from "./edl-xml";
 import type { HardwareContext, HardwareRisk } from "./flasher";
 import { throwIfAborted } from "./serial";
 
@@ -44,8 +44,6 @@ const MAX_KEPT_LOGS = 300;
 const MAX_COMMAND_BYTES = 1024;
 /** Bytes after a document's `</data>`, in the same transfer, that are padding rather than the start of raw data. */
 const MAX_TRAILING_PADDING = 16;
-/** How much of the end of a read's data is kept to check it against the answer that closes it. */
-const DATA_TAIL_BYTES = 1024;
 const MAX_GRANTED_RANGES = 4096;
 const MAX_SECTOR = 2 ** 40;
 
@@ -62,16 +60,6 @@ export type FirehoseCommand =
 function integer(value: number, name: string, minimum: number, maximum: number): number {
   if (!Number.isSafeInteger(value) || value < minimum || value > maximum) throw new EdlError(`${name} must be a whole number from ${minimum} to ${maximum}.`, "refused");
   return value;
-}
-
-/** The last `limit` bytes of `previous` followed by `next`, as a copy that stays valid when the caller reuses `next`. */
-function lastBytes(previous: Uint8Array, next: Uint8Array, limit: number): Uint8Array {
-  if (next.byteLength >= limit) return Uint8Array.from(next.subarray(next.byteLength - limit));
-  const keep = Math.min(previous.byteLength, limit - next.byteLength);
-  const out = new Uint8Array(keep + next.byteLength);
-  out.set(previous.subarray(previous.byteLength - keep), 0);
-  out.set(next, keep);
-  return out;
 }
 
 /** The XML for one command. Only numbers and fixed words go in; there is no free text. */
@@ -383,11 +371,6 @@ interface CollectOptions {
   readonly quietMs?: number;
   /** The answer must follow raw sector data directly. */
   readonly strict?: boolean;
-  /**
-   * With `strict`: the last bytes of the sector data this answer closes. A first document that is really the continuation of
-   * data that came up short (its start was taken for sector bytes) is refused. `what` names the read in the message.
-   */
-  readonly dataTail?: { readonly bytes: Uint8Array; readonly what: string };
   /** `quiet` only: wait the whole timeout for the FIRST document instead of one quiet window. */
   readonly patient?: boolean;
 }
@@ -519,12 +502,6 @@ export class FirehoseSession {
       if (this.link.buffered > 0) {
         const frame = scanFirehoseFrame(this.link.view(), options.strict === true && documents === 0);
         if (frame.kind === "document") {
-          if (options.dataTail && documents === 0) {
-            const short = answerBeganInsideData(options.dataTail.bytes, this.link.view().subarray(0, frame.end));
-            if (short !== null) {
-              throw new EdlError(`${options.dataTail.what}: the programmer's closing answer began inside the sector data (the data is ${short} byte(s) short), so the last ${short} byte(s) delivered are the programmer's own text, not the disk's. Nothing from this read can be trusted.`);
-            }
-          }
           documents += 1;
           for (const line of frame.document.logs) {
             if (logs.length < MAX_KEPT_LOGS) logs.push(cleanDeviceText(line, 1024));
@@ -658,8 +635,10 @@ export class FirehoseSession {
   /**
    * Reads `sectors` sectors from `startSector` of the user area as a stream of
    * byte chunks, in segments of at most `FIREHOSE_SEGMENT_BYTES`. Each segment
-   * must end with the programmer's own ACK directly after the exact number of
-   * bytes promised; anything else throws and nothing past that point is trusted.
+   * must end with the programmer's own ACK as a transfer of its own, directly after
+   * the exact number of bytes promised, and the data must end where the device ended
+   * a transfer (`requireDataEnd`); anything else throws and nothing past that point
+   * is trusted.
    */
   async *readSectors(startSector: number, sectors: number, sectorSize: number): AsyncGenerator<Uint8Array> {
     integer(sectors, "sectors", 1, 2 ** 40);
@@ -673,7 +652,6 @@ export class FirehoseSession {
       this.requireAck(announced, label, "true");
       const owed = count * sectorSize;
       let remaining = owed;
-      let tail: Uint8Array = new Uint8Array(0);
       const watch = new RawMessageWatch();
       while (remaining > 0) {
         const ends: number[] = [];
@@ -685,12 +663,32 @@ export class FirehoseSession {
         if (message) {
           throw new EdlError(`${label}: ${message.length} byte(s) of the sector data, starting at byte ${message.at} of ${owed}, are a complete message from the programmer (a log line or an answer) that arrived as a transfer of its own, so the data is that many bytes short and those bytes are not the disk's. Nothing from this read can be trusted.`);
         }
-        tail = lastBytes(tail, chunk, DATA_TAIL_BYTES);
         yield chunk;
       }
-      const closing = await this.collect({ label: `${label}, closing answer`, timeoutMs: edlTimeouts.command, until: "response", strict: true, dataTail: { bytes: tail, what: label } });
+      await this.requireDataEnd(label);
+      const closing = await this.collect({ label: `${label}, closing answer`, timeoutMs: edlTimeouts.command, until: "response", strict: true });
       this.requireAck(closing, label, "false");
     }
+  }
+
+  /**
+   * The data of a read must END where the device ended a transfer, and the closing answer must be a transfer of its own. A byte
+   * count cannot tell data that is exactly as long as promised from data that came up short and was made up with the first
+   * bytes of what follows it (white space in front of the answer, its XML declaration, a log line), so what is checked is
+   * where the transfers ended, whatever the bytes say. A transfer that ended in a short packet is known at once; one that
+   * filled the read request ended there only if a zero-length packet follows, which is waited for. A programmer that ends its
+   * data transfers with neither cannot be read from, and the refusal says so.
+   */
+  private async requireDataEnd(label: string): Promise<void> {
+    if (this.link.endsTransferHere()) return;
+    const carried = this.link.buffered;
+    if (carried === 0) {
+      const added = await this.link.pull(edlTimeouts.command);
+      if (added === null) throw new EdlError(`${label}, closing answer timed out waiting for the programmer's answer.`, "timeout");
+      if (this.link.endsTransferHere()) return;
+    }
+    const detail = carried > 0 ? `its transfer carried on for ${carried} more byte(s) past the last byte of data` : "the data filled a whole read without a short or zero-length packet after it";
+    throw new EdlError(`${label}: the sector data did not end where the programmer ended a transfer (${detail}), so the programmer's answer did not follow the sector data directly. The data stream is misaligned - the data came up short and was made up with the first bytes of what follows it, or it ran on, or this programmer does not end its transfers with a short or zero-length packet (Cody asks for zero-length packets with ZLPAwareHost) - and nothing read from it can be trusted.`);
   }
 
   // ---- changing the device: each of these sends only under a live WriteGrant that covers it -------------------

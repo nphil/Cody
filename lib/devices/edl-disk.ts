@@ -359,6 +359,11 @@ export async function summarizeRegion(run: EdlRun, opened: OpenedEdl, startSecto
   }
 }
 
+/** The refusal for a region that two reads gave different bytes for: whatever was saved from it cannot justify a write. */
+export function readsDisagree(what: string, earlier: string, later: string, consequence: string): EdlError {
+  return new EdlError(`${what} read back as different bytes the second time (SHA-256 ${earlier}, then ${later}), so the saved copy cannot be trusted. ${consequence}`);
+}
+
 export interface LocatedPartition {
   readonly primary: PrimaryGpt;
   readonly part: GptPartition;

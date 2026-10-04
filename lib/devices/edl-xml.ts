@@ -281,47 +281,8 @@ export function scanFirehoseFrame(bytes: Uint8Array, strict = false): FirehoseFr
   return { kind: "document", end, document: parseFirehoseDocument(decoder.decode(bytes.subarray(first, end))) };
 }
 
-/** How far back into the sector data an answer that began early can have started. A closing answer is about a hundred bytes. */
-const MAX_ANSWER_OVERLAP_BYTES = 1024;
+/** How a programmer's documents begin. */
 const ANSWER_STARTS = ["<?xml", "<data", "<response", "<log"];
-
-function startsLikeAnswer(bytes: Uint8Array): boolean {
-  const head = new TextDecoder("latin1").decode(bytes.subarray(0, 16));
-  return ANSWER_STARTS.some((start) => head.startsWith(start));
-}
-
-/**
- * Raw sector data and the programmer's closing answer are separate messages, but
- * a byte stream does not show where one ends. A programmer that delivers FEWER
- * bytes than it promised makes the host take the first bytes of its closing
- * answer for the missing data, and when what is swallowed is exactly the XML
- * declaration, what is left still reads as a complete answer.
- *
- * `tail` is the end of the data as received, `answer` the complete document that
- * followed it. Returns the number of bytes at the end of `tail` that are really
- * the start of that document (how short the data came up), or `null` when the
- * answer begins where the data ended. Data that merely looks like the start of an
- * answer does not count: the document has to run on INTO the answer, as a single
- * well-formed document with no second declaration, for the check to fire.
- */
-export function answerBeganInsideData(tail: Uint8Array, answer: Uint8Array): number | null {
-  const longest = Math.min(tail.length, MAX_ANSWER_OVERLAP_BYTES);
-  for (let overlap = 1; overlap <= longest; overlap += 1) {
-    const start = tail.length - overlap;
-    if (tail[start] !== 0x3c) continue;
-    const joined = new Uint8Array(overlap + answer.length);
-    joined.set(tail.subarray(start), 0);
-    joined.set(answer, overlap);
-    if (!startsLikeAnswer(joined)) continue;
-    try {
-      const frame = scanFirehoseFrame(joined, true);
-      if (frame.kind === "document" && frame.end > overlap && frame.document.extras === 0 && !frame.document.strayText) return overlap;
-    } catch {
-      // Not a document that begins in the data; keep looking.
-    }
-  }
-  return null;
-}
 
 const ANSWER_ELEMENTS: readonly string[] = ["data", "log", "response"];
 /** The most data one stretch may hold to be examined: a few exchanges' worth of the programmer's own text. A longer stretch is not a message. */
@@ -388,6 +349,9 @@ export interface SwallowedMessage {
  * tolerates in front of a document and the padding after one), is reported, however long it is and wherever it sits. Text
  * that is only part of a transfer of data is data, and so is a stretch longer than 2 MiB. What cannot be seen is a message
  * that shares a USB transfer with real data.
+ *
+ * This is not the alignment rule's job and cannot be: a message that is a transfer of its own and completes the byte count ends
+ * exactly where a transfer ends, so the data looks aligned (and it can repeat on every read, so a second read agrees).
  */
 export class RawMessageWatch {
   private offset = 0;

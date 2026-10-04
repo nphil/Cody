@@ -93,6 +93,8 @@ export class EdlLink {
   private transferEnds: number[] = [];
   /** Absolute stream offsets at which the DEVICE ended a transfer (a short read, or a zero-length packet), ascending. A read that merely filled the request is not one. */
   private deviceEnds: number[] = [];
+  /** Absolute stream offset of the latest end of a device transfer. Unlike `deviceEnds` it is not forgotten when the bytes before it are consumed. */
+  private lastDeviceEnd = -1;
   private received = 0;
   private sent = 0;
 
@@ -157,6 +159,7 @@ export class EdlLink {
 
   private noteDeviceEnd(): void {
     const at = this.position + this.buffered;
+    this.lastDeviceEnd = at;
     if (this.deviceEnds[this.deviceEnds.length - 1] === at) return;
     this.deviceEnds.push(at);
     // Only recent boundaries are ever asked about; a device that sends nothing but tiny transfers must not grow this without end.
@@ -170,6 +173,14 @@ export class EdlLink {
    */
   deviceEndsWithin(count: number): number[] {
     return this.deviceEnds.filter((at) => at >= this.position && at <= this.position + count).map((at) => at - this.position);
+  }
+
+  /**
+   * Whether the device ended a transfer exactly at the next unconsumed byte: the byte just before it was the last of a transfer,
+   * and whatever arrives next starts a transfer of its own. A zero-length packet that follows counts once it has been read.
+   */
+  endsTransferHere(): boolean {
+    return this.lastDeviceEnd === this.position;
   }
 
   /**

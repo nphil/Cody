@@ -235,6 +235,13 @@ PC tool's output is the reference to compare with.
   nothing but programmer-style log or answer XML is refused as a message. Record any
   read that fails with "are a complete message from the programmer" on a unit whose
   partition really holds such text.
+- [ ] **UNVERIFIED** Every raw read ends where the programmer ended a USB transfer: the
+  last byte of the data is followed by a short packet or a zero-length packet, and the
+  closing answer is a transfer of its own. Cody refuses a read otherwise ("did not end
+  where the programmer ended a transfer"), so a programmer that sends no zero-length
+  packets (Cody configures ZLPAwareHost=1) cannot be read from at all. Record whether any
+  read on the real unit is refused that way; if every read is, the assumption is wrong.
+  Also record how long a backup set takes: every region is read twice.
 - [ ] **UNVERIFIED** `printgpt` lists the same partitions as the PC tool; the
   saved primary region equals sectors 0-33 read by the PC tool and the saved
   backup region equals the last 33 sectors. Record the disk GUID, the span the
