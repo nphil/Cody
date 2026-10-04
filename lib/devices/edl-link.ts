@@ -50,6 +50,8 @@ export const edlTimeouts = {
   greetingQuiet: 500,
   /** Silence that ends its answer to a `nop` (which has no closing marker). */
   nopQuiet: 600,
+  /** The longest a device may keep sending while its in-flight data is being cleared away, however quietly it dribbles. */
+  drain: 15_000,
 };
 
 export type EdlErrorKind =
@@ -182,18 +184,29 @@ export class EdlLink {
 
   /**
    * Throws away whatever the device had in flight (the unread end of a cancelled
-   * transfer) until it has been quiet for `quietMs`. A device that never stops
-   * is reported instead of drained forever.
+   * transfer) until it has been quiet for `quietMs`. A device that never stops is
+   * reported instead of drained for ever, whether it sends data (the byte limit),
+   * a stream of empty packets (the empty-packet limit, as for `fill`), or a trickle
+   * that stays under both (the absolute deadline, `edlTimeouts.drain`).
    */
   async drain(quietMs: number, maxBytes: number): Promise<number> {
+    const deadline = Date.now() + edlTimeouts.drain;
     let discarded = this.buffered;
     this.consume(this.buffered);
+    let empty = 0;
     for (;;) {
       const added = await this.pull(quietMs);
       if (added === null) return discarded;
+      if (added === 0) {
+        empty += 1;
+        if (empty > MAX_CONSECUTIVE_EMPTY_READS) throw new EdlError("The device keeps sending empty packets and never goes quiet, so what it had in flight cannot be cleared. Unplug it and put it into EDL mode again.", "protocol");
+      } else {
+        empty = 0;
+      }
       discarded += added;
       this.consume(this.buffered);
-      if (discarded > maxBytes) throw new EdlError(`The device keeps sending data nobody asked for (${discarded} bytes discarded).`, "protocol");
+      if (discarded > maxBytes) throw new EdlError(`The device keeps sending data nobody asked for (${discarded} bytes discarded). Unplug it and put it into EDL mode again.`, "protocol");
+      if (Date.now() > deadline) throw new EdlError(`The device is still sending after ${edlTimeouts.drain} ms (${discarded} bytes discarded) and never goes quiet, so what it had in flight cannot be cleared. Unplug it and put it into EDL mode again.`, "timeout");
     }
   }
 
