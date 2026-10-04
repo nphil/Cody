@@ -163,17 +163,24 @@ function parseFlashOptions(options: Record<string, unknown> | undefined): FlashO
   throw new EdlError('options.pad must be "zero" or "ff".', "refused");
 }
 
-/** Saves what is in `part` now. A copy that cannot be saved or does not match what was read refuses the change. */
-export async function escrowPartition(run: EdlRun, opened: OpenedEdl, part: GptPartition, suffix: string, outcome: "written" | "erased" = "written"): Promise<StreamedRead> {
-  const fileName = `edl-${unitTag(opened)}-${fileNamePart(part.name)}.${suffix}.bin`;
+/**
+ * Saves what is in sectors `first` .. `first + sectors - 1` now. A copy that cannot be saved or does not match what was read
+ * refuses the change. `what` names the range in the refusal ("boot_a", "the primary partition table").
+ */
+export async function escrowRange(run: EdlRun, opened: OpenedEdl, what: string, first: number, sectors: number, fileName: string, outcome: "written" | "erased" = "written", message?: string): Promise<StreamedRead> {
   try {
-    return await streamToArtifact(run, opened, part.firstLba, part.sectors, fileName, "escrow");
+    return await streamToArtifact(run, opened, first, sectors, fileName, "escrow", message);
   } catch (error) {
     // A cancel, or the device going away, is the caller's to report; anything else means there is no saved copy.
     const deviceOrCancel = error instanceof DOMException && /^(AbortError|NotFoundError|NetworkError)$/.test(error.name);
     if (deviceOrCancel || isCancel(error, run)) throw error;
-    throw new EdlError(`The current contents of ${part.name} could not be saved (${messageOf(error)}). Nothing was ${outcome}: Cody never ${outcome === "written" ? "writes" : "erases"} without a saved copy of what it ${outcome === "written" ? "overwrites" : "erases"}.`, error instanceof EdlError ? error.kind : "refused");
+    throw new EdlError(`The current contents of ${what} could not be saved (${messageOf(error)}). Nothing was ${outcome}: Cody never ${outcome === "written" ? "writes" : "erases"} without a saved copy of what it ${outcome === "written" ? "overwrites" : "erases"}.`, error instanceof EdlError ? error.kind : "refused");
   }
+}
+
+/** Saves what is in `part` now. */
+export function escrowPartition(run: EdlRun, opened: OpenedEdl, part: GptPartition, suffix: string, outcome: "written" | "erased" = "written"): Promise<StreamedRead> {
+  return escrowRange(run, opened, part.name, part.firstLba, part.sectors, `edl-${unitTag(opened)}-${fileNamePart(part.name)}.${suffix}.bin`, outcome);
 }
 
 export async function flashPartition(run: EdlRun): Promise<HardwareResult> {

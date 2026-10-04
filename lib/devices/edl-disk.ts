@@ -9,6 +9,7 @@ import {
   parseGptEntries,
   parseGptHeader,
   type BackupGpt,
+  type GptHeader,
   type GptPartition,
   type GptTable,
   type SpanReport,
@@ -107,14 +108,29 @@ export interface BackupRead extends BackupGpt {
 
 type TailCopy = Omit<BackupRead, "pointer">;
 
+/** Sectors the primary table occupies (protective MBR, header, entry array), once its header has passed the placement checks. */
+function primaryExtent(header: GptHeader, sectorSize: number): number {
+  if (header.myLba !== 1) throw new EdlError(`The primary partition table header says it is at sector ${header.myLba}, not sector 1.`);
+  if (header.entriesLba < 2 || header.entriesLba > MAX_PRIMARY_ENTRIES_LBA) throw new EdlError(`The primary partition entry array starts at sector ${header.entriesLba}; Cody expects it right after the header.`);
+  return header.entriesLba + gptEntrySectors(header, sectorSize);
+}
+
 export async function readPrimaryGpt(opened: OpenedEdl): Promise<PrimaryGpt> {
   const sectorSize = opened.storage.sectorSize;
   const head = await readRegion(opened, 0, 2);
   const header = parseGptHeader(head.subarray(sectorSize, 2 * sectorSize), sectorSize);
-  if (header.myLba !== 1) throw new EdlError(`The primary partition table header says it is at sector ${header.myLba}, not sector 1.`);
-  if (header.entriesLba < 2 || header.entriesLba > MAX_PRIMARY_ENTRIES_LBA) throw new EdlError(`The primary partition entry array starts at sector ${header.entriesLba}; Cody expects it right after the header.`);
-  const end = header.entriesLba + gptEntrySectors(header, sectorSize);
+  const end = primaryExtent(header, sectorSize);
   const region = await readRegion(opened, 0, end);
+  const table = parseGptEntries(header, region.subarray(header.entriesLba * sectorSize, end * sectorSize), sectorSize);
+  return { table, region, regionSectors: end };
+}
+
+/** The primary table of a SAVED region (sectors 0 .. end of the entry array), checked the way a live read is. */
+export function parsePrimaryRegion(region: Uint8Array, sectorSize: number): PrimaryGpt {
+  if (region.byteLength < 2 * sectorSize) throw new EdlError(`The saved primary table is only ${region.byteLength} bytes long.`, "refused");
+  const header = parseGptHeader(region.subarray(sectorSize, 2 * sectorSize), sectorSize);
+  const end = primaryExtent(header, sectorSize);
+  if (region.byteLength !== end * sectorSize) throw new EdlError(`The saved primary table is ${region.byteLength / sectorSize} sectors long but its header describes ${end}.`, "refused");
   const table = parseGptEntries(header, region.subarray(header.entriesLba * sectorSize, end * sectorSize), sectorSize);
   return { table, region, regionSectors: end };
 }
@@ -189,6 +205,49 @@ export async function readBackupGpt(opened: OpenedEdl, primary: PrimaryGpt): Pro
   return { ...copy, pointer: { lba, agrees, there: agrees ? "" : await describeStrayPointer(opened, lba) } };
 }
 
+/** The backup table of a SAVED region (the entry array and, in the last sector, the header), parsed the way a live read parses it. */
+export function parseBackupRegion(region: Uint8Array, sectorSize: number): { readonly header: GptHeader; readonly table: GptTable; readonly sectors: number } {
+  if (region.byteLength < 2 * sectorSize || region.byteLength % sectorSize !== 0) throw new EdlError(`The saved backup table is ${region.byteLength} bytes, not a whole number of sectors holding an entry array and a header.`, "refused");
+  const sectors = region.byteLength / sectorSize;
+  const header = parseGptHeader(region.subarray((sectors - 1) * sectorSize), sectorSize);
+  const count = gptEntrySectors(header, sectorSize);
+  if (header.entriesLba >= header.myLba || header.myLba - header.entriesLba + 1 !== sectors || count > sectors - 1) {
+    throw new EdlError(`The saved backup table does not fit its own header: the entry array is at sector ${header.entriesLba}, the header at ${header.myLba}, and ${sectors} sectors were saved.`, "refused");
+  }
+  return { header, table: parseGptEntries(header, region.subarray(0, count * sectorSize), sectorSize), sectors };
+}
+
+export interface LiveDiskGuid {
+  /** The disk GUID of the primary table, when that table is intact. */
+  readonly primary: string | null;
+  /** The disk GUID of the backup table in the last sector, when that table is intact. */
+  readonly backup: string | null;
+  /** Why a table could not be used. */
+  readonly notes: readonly string[];
+}
+
+/**
+ * Whose disk this is, as the tables on the device say it: the GUID of each table whose checksums are valid. A damaged
+ * or unreadable table says nothing. A device that goes away or a cancel is not a finding and propagates.
+ */
+export async function readLiveDiskGuid(opened: OpenedEdl): Promise<LiveDiskGuid> {
+  const notes: string[] = [];
+  let primary: string | null = null;
+  let backup: string | null = null;
+  try {
+    const found = await readPrimaryGpt(opened);
+    if (found.table.header.headerCrcValid && found.table.entriesCrcValid) primary = found.table.header.diskGuid;
+    else notes.push("The primary partition table on the device is damaged (its checksums do not match).");
+  } catch (error) {
+    if (!(error instanceof EdlError)) throw error;
+    notes.push(`The primary partition table on the device cannot be read: ${error.message}`);
+  }
+  const tail = await readTailCopy(opened, opened.storage.totalSectors - 1);
+  if (tail.header && tail.table && tail.header.headerCrcValid && tail.table.entriesCrcValid) backup = tail.header.diskGuid;
+  else notes.push(tail.problem ?? "The backup partition table at the end of the device is damaged (its checksums do not match).");
+  return { primary, backup, notes };
+}
+
 export interface DiskReport {
   readonly primary: PrimaryGpt;
   readonly backup: BackupRead;
@@ -231,13 +290,13 @@ export interface StreamedRead {
  * Reads sectors into a session file and checks, before calling it good, that the file
  * holds exactly the bytes that came off the wire. `phase` is what progress calls it.
  */
-export async function streamToArtifact(run: EdlRun, opened: OpenedEdl, startSector: number, sectors: number, name: string, phase = "read"): Promise<StreamedRead> {
+export async function streamToArtifact(run: EdlRun, opened: OpenedEdl, startSector: number, sectors: number, name: string, phase = "read", message = `Reading ${name}`): Promise<StreamedRead> {
   const { context } = run;
   const total = sectors * opened.storage.sectorSize;
   const hash = incrementalSha256.create();
   let received = 0;
-  const report = progressReporter(context, phase, total, `Reading ${name}`);
-  context.progress({ phase, completed: 0, total, message: `Reading ${name}` });
+  const report = progressReporter(context, phase, total, message);
+  context.progress({ phase, completed: 0, total, message });
   async function* chunks(): AsyncGenerator<Uint8Array> {
     for await (const chunk of opened.firehose.readSectors(startSector, sectors, opened.storage.sectorSize)) {
       hash.update(chunk);

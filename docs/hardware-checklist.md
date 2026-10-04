@@ -192,13 +192,13 @@ item remains **UNVERIFIED** until its permitted evidence is completed.
 - [ ] **UNVERIFIED** Device recovery/re-enumeration is recorded after refusal,
   test flash, and restore.
 
-### Qualcomm EDL (reads, plus flash and erase of one named partition)
+### Qualcomm EDL (reads, flash and erase of one named partition, backup sets and restore)
 
 Device in mind: Lenovo Smart Display 10" SD-X701B (APQ8053) with the loader
 `amber_bluebbery_prog_emmc_firehose_8953_ddr.mbn` (374,900 bytes; record its
 SHA-256). Per `notes/hw/lenovo-sd-x701b.md` no contact with a unit is authorised
 by these notes: each session needs a coordinated go-ahead. The read items come
-first and write nothing; the flash and erase items at the end write storage. The
+first and write nothing; the flash, erase and restore items at the end write storage. The
 PC tool's output is the reference to compare with.
 
 - [ ] **UNVERIFIED** The browser (Android Chrome, over USB-C OTG) offers the
@@ -268,6 +268,16 @@ go-ahead on a real unit and a saved copy of every partition touched):
 - [ ] **UNVERIFIED** The typed override `write:<name>` is demanded in the panel's
   confirmation for a protected partition (for example `persist`) and the write is
   refused without it; `boot0`, `boot1` and `rpmb` are refused outright.
+
+Backup sets and restore (emulator-tested only; the backup items only read, the restore items write and need a coordinated go-ahead and a set taken from the same unit beforehand):
+
+- [ ] **UNVERIFIED** `backup` from a unit freshly put into EDL mode (loader chosen, nothing connected before) saves a set whose manifest records the chip serial and public-key hash `detect` printed, the eMMC serial and product `getstorageinfo` reports, and the disk GUID `printgpt` lists. Every partition file's SHA-256 equals the PC tool's `r NAME` of the same partition; the primary and backup table files equal sectors 0-33 and the last 33 sectors. Record the time and the browser storage the whole set used.
+- [ ] **UNVERIFIED** The programmer reports an eMMC `serial_num` in `getstorageinfo`. If it does not, the set records none and says NOT RESTORABLE; record that.
+- [ ] **UNVERIFIED** A set taken after `Connect` (programmer already running) says NOT RESTORABLE and `restore` refuses it, because the boot ROM's public-key hash cannot be read any more.
+- [ ] **UNVERIFIED** `restore` is refused for a manifest edited to carry another chip serial or public-key hash BEFORE any loader is sent, and for another eMMC serial or disk GUID after `configure` with nothing written. The manifest's SHA-256 changes with every edit, so the edited copy is a new file.
+- [ ] **UNVERIFIED** After one ordinary partition (for example `cache`) was changed, `restore` rewrites only that partition, asks for the typed override `restore:<first 8 characters of the manifest SHA-256>` (and refuses without it), reads it back identical, and leaves every other region alone. Compare the result with the PC tool's reads.
+- [ ] **UNVERIFIED** The programmer accepts `program` for the sectors that hold the partition tables at BOTH ends of the disk (sectors 0-33 and the last 33). Factory flash scripts write them with `program` and then fix them with `patch`; Cody writes the saved tables byte for byte and ships no `patch`. Record any NAK text and whether the unit still boots and lists the same partitions afterwards.
+- [ ] **UNVERIFIED** A restore interrupted by Cancel or an unplug between regions leaves the unit able to re-enter EDL, and the output names the regions done, the one in doubt and those never started. The saved copies of overwritten partitions can be flashed back with `device_flash`; no command writes saved partition tables back.
 
 ### CMSIS-DAP / DAPLink (not shipped)
 

@@ -263,6 +263,22 @@ export class DeviceArtifactStore implements OperationArtifacts {
     return persisted.blob;
   }
 
+  /**
+   * A file of this session whose bytes have the given SHA-256 (any case), looked up in memory first and then in the
+   * persisted escrow. The digest is the store's own record from when the file was added; callers that rely on the bytes hash
+   * them again.
+   */
+  async findBySha256(sessionId: string, sha256: string): Promise<Blob | undefined> {
+    const wanted = sha256.toLowerCase();
+    const entries = this.entries(sessionId);
+    for (const artifact of entries.values()) if (artifact.sha256.toLowerCase() === wanted) return artifact.blob;
+    const persisted = (await this.persistence.list(sessionId)).find((artifact) => artifact.sha256.toLowerCase() === wanted);
+    if (!persisted) return undefined;
+    entries.set(persisted.id, persisted);
+    this.publish(sessionId);
+    return persisted.blob;
+  }
+
   async save(sessionId: string, name: string, blob: Blob): Promise<string> {
     const artifact = await this.add(sessionId, blob, name, { kind: "output", source: "device" });
     return artifact.id;

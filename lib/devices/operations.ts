@@ -30,6 +30,8 @@ export interface OperationArtifacts {
   getInput(sessionId: string, fileId: string): Promise<Blob | undefined>;
   save(sessionId: string, name: string, data: Blob): Promise<string>;
   saveStream?(sessionId: string, name: string, chunks: AsyncIterable<Uint8Array>, signal: AbortSignal): Promise<StreamArtifact>;
+  /** A file of this session by its SHA-256, for a job (a backup-set restore) that names its parts by digest. */
+  findBySha256?(sessionId: string, sha256: string): Promise<Blob | undefined>;
 }
 
 /** The bridge owns this lease. No raw tool or RX pump may use it while a run is active. */
@@ -856,6 +858,7 @@ export class DeviceOperationManager {
         if (!this.artifacts.saveStream) throw new Error("Streaming artifact storage is unavailable.");
         return this.artifacts.saveStream(this.sessionId, name, chunks, record.controller.signal);
       },
+      ...(this.artifacts.findBySha256 ? { findArtifact: (digest: string) => this.artifacts.findBySha256!(this.sessionId, digest) } : {}),
       confirm: (risk) => this.awaitHumanConfirmation(record, risk),
       operation: { id: record.id, deviceId: record.request.deviceId },
       tunnels: this.transportProvider.tunnels,

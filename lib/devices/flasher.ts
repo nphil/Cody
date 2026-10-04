@@ -80,6 +80,12 @@ export interface HardwareContext {
   save: (name: string, data: Blob) => Promise<string>;
   saveStream?: (name: string, chunks: AsyncIterable<Uint8Array>) => Promise<StreamArtifact>;
   /**
+   * A file of this operation's session found by its SHA-256, or undefined when the session has none. For a job whose request
+   * names one file but whose work needs several (a restore finds each saved part of a backup set this way). The lookup is a
+   * convenience, not a proof: the caller hashes what it gets before it relies on it.
+   */
+  findArtifact?: (sha256: string) => Promise<Blob | undefined>;
+  /**
    * Explicit recovery after the caller verified a safe resume point. It never
    * retries a write. `deadline` (an absolute time) bounds how long the same
    * device is awaited, opening it included: a provider that is slow to open the

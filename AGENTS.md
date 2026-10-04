@@ -2479,7 +2479,7 @@ as expanded-image hashes.
   the `state::props` text). MTK
   preloader/BROM/download-agent support is **not implemented** (parked); see
   `docs/hardware-parity.md` for every tool's command-by-command status.
-- **Qualcomm EDL (USB `05c6:9008`, `edl*.ts`) — read-only commands plus a guarded `flash` and `erase` of one named partition; backup-set/restore and the boot-drive change are NOT built yet.** Implemented
+- **Qualcomm EDL (USB `05c6:9008`, `edl*.ts`) — read-only commands plus guarded `flash`, `erase`, backup sets and restore; the boot-drive change is NOT built yet.** Implemented
   from the Sahara/Firehose wire format; the GPLv3 `edl` tool was read as a
   behavioural reference only and none of its code or tables are used (Cody is
   MIT). Cody ships no loader: the user chooses one as a session artifact.
@@ -2499,8 +2499,10 @@ as expanded-image hashes.
   `evaluateSpan`), `edl-session.ts` (what state is the device in: boot ROM or
   programmer, the recovery ladder, the confirmed loader upload), `edl-disk.ts`
   (shared reads/saves/hashes and partition lookup), `edl-protect.ts` (which names
-  are refused, protected or ordinary), `edl-write.ts` (flash and erase) and
-  `edl.ts` (the flasher). Components: `components/devices/EdlWorkflow.tsx` (no
+  are refused, protected or ordinary), `edl-write.ts` (flash and erase),
+  `edl-manifest.ts` (the backup-set manifest: format, strict parser, and every
+  check a restore makes against the saved tables), `edl-backup.ts` (backup and
+  restore) and `edl.ts` (the flasher). Components: `components/devices/EdlWorkflow.tsx` (no
   flash/erase card in the panel yet: the Flash tab exists, the agent tools
   `device_flash` / `device_exec erase` work, and the confirmation card is the
   generic one).
@@ -2517,7 +2519,7 @@ as expanded-image hashes.
     other than reset and unknown tags are refused under any grant; `patch` is
     deliberately not shipped (a same-unit GPT restore writes the saved sectors
     byte for byte, so nothing needs it). `parseEdlCommand` accepts connect,
-    printgpt, check, erase and reset.
+    printgpt, check, erase, backup, restore and reset.
   - **Flash and erase** (`edl-write.ts`). Target = exact GPT partition name. A
     flash needs an image of exactly the partition's size, or `options.pad`
     `zero`|`ff` to fill the rest (the partition is always written whole). Before
@@ -2536,6 +2538,37 @@ as expanded-image hashes.
     reports what the partition reads as afterwards (all zero, all 0xFF,
     unchanged, mixed) and never claims a value. Neither sends a loader: run
     Connect first. Flash/erase are emulator-tested only.
+  - **Backup sets and restore** (`edl-backup.ts`, `edl-manifest.ts`). `exec backup`
+    (no target; read-only) needs the span check to pass, then saves the primary
+    table region (sectors 0 .. end of its entry array), every partition (one
+    file each) and the backup table region at the end of the disk, plus a JSON
+    manifest that names each by SHA-256 and records the unit: chip serial,
+    public-key hash (boot ROM only), eMMC serial and product, disk GUID, sector
+    size, measured capacity. The result's SHA-256 is the manifest's: the set's
+    id. A set taken while a programmer was already running has no public-key
+    hash and says NOT RESTORABLE, as does one holding a partition Cody would
+    never write. Bytes outside the tables and partitions, the eMMC boot areas
+    and RPMB are not in a set. `exec restore` takes the LOADER as the request's
+    file and the manifest as `options.manifestSha256` (a confirmation's digest
+    must be the request's own, so the loader owns that slot). It finds every
+    saved file with `context.findArtifact(sha256)` (`DeviceArtifactStore.findBySha256`),
+    hashes each again, parses the saved tables and requires the manifest to agree
+    with them, all before the device is touched. It needs a boot ROM it can
+    identify in this very operation (a running programmer is refused): chip
+    serial and public-key hash are compared before the loader is confirmed;
+    after `configure` the eMMC serial and product, sector size, capacity and the
+    disk GUID of an intact table on the device (primary, else backup; neither
+    intact = refused) must match as well. Every region the set covers is then
+    read and saved (a region that already holds the set's bytes is left alone),
+    ONE confirmation carries the merged ranges and the typed override
+    `restore:<first 8 of the manifest SHA-256>`, partitions are written in disk
+    order, then the backup table, then the primary table last, and each region is
+    read back and compared before the next starts. The first mismatch, or a
+    programmer that will not read back, stops the restore and the tables are
+    written only if every partition verified. An interruption names the regions
+    that are done, the one in doubt and those never started. Saved copies of
+    overwritten partitions can be flashed back; no command writes saved
+    partition tables back. Emulator-tested only.
   - **Actions.** `detect` (Sahara identity; leaves the ROM's re-offered HELLO
     unread so the next operation finds an ordinary device), `exec connect`
     (loader only if the device is still in the boot ROM, after a confirmation
