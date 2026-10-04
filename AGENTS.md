@@ -2257,9 +2257,15 @@ as expanded-image hashes.
   POSSIBLY MODIFIED (a `flash:` command was sent; with its backup id), and
   untouched. A cancel (Cancel, or the browser reporting the USB device gone,
   which cancels) leaves no error in the operation record, so the same accounting
-  is published line by line to the operation's retained output BEFORE the
-  cancellation is rethrown (`updateFromPackage`'s catch; the tests drive it
-  through `DeviceOperationManager` and read `snapshot.output`). Logical
+  (preceded by one line naming every partition and the backup taken of it) is
+  published line by line to the operation's retained output BEFORE the
+  cancellation is rethrown (`updateFromPackage`'s catch). The loop also checks
+  the signal after each partition is recorded: a cancel that lands while the
+  last readback is only being compared locally (a raw image's `hashBlob`, a
+  fill extent) throws nothing by itself and the manager discards the result of a
+  cancelled run, so without that check the accounting would be lost. The tests
+  drive it through `DeviceOperationManager` (`managedUpdate`, which can cancel
+  from a progress report) and read `snapshot.output`). Logical
   partitions need fastbootd; bootloader/radio/super/userdata
   images, `-w`, and mode switches are not part of it. Host filesystem
   generation (format) is not implemented.
@@ -2324,12 +2330,24 @@ as expanded-image hashes.
   `exited`; its own `spawnWaitText` takes no signal, so it is not used), `pm
   install` and every staging step receive the operation's signal, and a cancelled
   operation is never classified as a connection failure (it would reconnect and
-  close the connection the cleanup needs). `removeRemote` runs the cleanup within
-  `ADB_CLEANUP_MS` so a silent device cannot keep the exclusive lease, and the
+  close the connection the cleanup needs). ya-webadb waits for the daemon's
+  acknowledgement of a subprocess's OPEN without any limit and looks at the
+  signal only afterwards, so `untilAborted` races that wait against the signal
+  (a stream that opens late is closed). `adbFor(context, { signal })` makes the
+  AUTHENTICATION of a replacement connection (after a lost connection mid-copy)
+  cancellable without tying an authenticated connection to the signal: the
+  connection still lives as long as the hold, the signal stops reaching it once
+  it is up. `removeRemote` is the cleanup: waiting for the connection, opening
+  the stream and running `rm` are all under one limit (`adbLimits.cleanupMs`,
+  10 s, exported only so tests can shorten it), it never starts a new
+  authentication (no cached session means nothing to clean over), and when the
+  limit passes the retained count is released so the lease comes back. The
   operation tells the operator `pm` may still finish installing. The sandbox
   device (`adb-device.test-helper.mjs`) can hold `pm` silent (`pm: () => undefined`),
-  speak the shell v2 protocol (`features: "shell_v2"`), share storage between two
-  connections (`root`) and report a lost connection (`syncFault: "disconnect"`).
+  stay silent before an OPEN acknowledgement (`silentOpen`), speak the shell v2
+  protocol (`features: "shell_v2"`), share storage between two connections
+  (`root`) and report a lost connection (`syncFault: "disconnect"`);
+  `mutedTransport()` is a daemon that answers nothing, not even the CONNECT.
   Replacement is off unless `options.replace`: `-R` on Android 9+ (API read from
   `ro.build.version.sdk`; unreadable counts as modern), nothing on older Android,
   where `-R` is an unknown option and refusing is already the default. The

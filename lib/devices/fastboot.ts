@@ -446,6 +446,9 @@ async function updateFromPackage(context:HardwareContext):Promise<HardwareResult
       if (flash.backup.capability) await verifyImage(context,flash.target,flash.image,flash.footprint,flash.backup.capability);
       written.push(flash);
       inFlight=undefined;
+      // A cancel that arrived while the last readback was being hashed leaves the loop with nothing thrown: without this
+      // check the operation would end as if the update had not happened, with no accounting and the result discarded.
+      throwIfAborted(context.signal);
     }
   } catch (error) {
     const names=(flashes:readonly PartitionFlash[])=>flashes.map((flash)=>flash.target).join(", ")||"none";
@@ -468,6 +471,7 @@ async function updateFromPackage(context:HardwareContext):Promise<HardwareResult
     // A cancel (the user's, or a USB disconnect, which cancels) leaves no error in the operation's record, and it is exactly
     // when the operator may need to recover a partition: the accounting goes to the retained output before the cancel goes on.
     if (cancelled) {
+      context.output?.(`Partitions of this update and the backup taken of each before it was written: ${prepared.map((flash)=>`${flash.target} (${flash.backup.backupId ? `backup ${flash.backup.backupId}` : "no backup, this bootloader cannot read partitions"})`).join(", ")}.`);
       for (const line of account) context.output?.(line);
       throwIfAborted(context.signal);
     }

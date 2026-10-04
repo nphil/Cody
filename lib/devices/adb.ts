@@ -128,47 +128,76 @@ function credentials(): AdbWebCredentialStore {
 }
 
 /**
- * The authenticated ADB connection for the context's transport. `deadline` (an
- * absolute time) bounds a bounded attempt end to end: authentication waiting for
- * a CNXN a device is still deciding on, the quiet reads that wait with it, and
- * the existing-daemon probe all end when it passes. A connection that comes out
- * of a bounded attempt lives only until that deadline.
+ * Time limits an operation's own recovery work runs under. Exported only so a test can shorten them.
  */
-async function adbFor(context: HardwareContext, options?: { deadline?: number }): Promise<Adb> {
-  const existing = adbSessions.get(context.transport);
+export const adbLimits = { cleanupMs: 10_000 };
+
+/**
+ * The authenticated ADB connection for the context's transport.
+ *
+ * `deadline` (an absolute time) bounds a bounded attempt end to end: authentication
+ * waiting for a CNXN a device is still deciding on, the quiet reads that wait with
+ * it, and the existing-daemon probe all end when it passes. A connection that comes
+ * out of a bounded attempt lives only until that deadline.
+ *
+ * `signal` ends only the AUTHENTICATION. An operation that keeps its connection past
+ * its own cancel (to clean up what it staged) must still be able to give up on a
+ * connection that is not established yet, while an authenticated connection lives as
+ * long as the hold, never as long as the signal: once it is up the signal no longer
+ * reaches it.
+ */
+async function adbFor(context: HardwareContext, options?: { deadline?: number; signal?: AbortSignal }): Promise<Adb> {
+  // The transport this connection is made on: `context.transport` is replaced when the device is reacquired, and what a
+  // connection does when it ends (forget itself) must never touch the cache entry of the connection that replaced it.
+  const transport = context.transport;
+  const existing = adbSessions.get(transport);
   if (existing) return existing;
+  const cancel = options?.signal;
+  cancel?.throwIfAborted();
   // The connection outlives any single operation when several share it, so it
   // is bound to the hold's own signal, never to one operation's.
   const holdSignal = contextHolds.get(context)?.controller.signal ?? context.signal;
-  const sessionSignal = options?.deadline === undefined ? holdSignal : AbortSignal.any([holdSignal, AbortSignal.timeout(Math.max(1, options.deadline - Date.now()))]);
+  const authentication = new AbortController();
+  const sessionSignal = AbortSignal.any([holdSignal, authentication.signal, ...(options?.deadline === undefined ? [] : [AbortSignal.timeout(Math.max(1, options.deadline - Date.now()))])]);
+  const stop = (): void => authentication.abort(cancel?.reason);
+  cancel?.addEventListener("abort", stop, { once: true });
 
   let initialProbeFailed = false;
-  const connection = createAdbHardwareConnection(context.transport, sessionSignal, () => { initialProbeFailed = true; });
+  const connection = createAdbHardwareConnection(transport, sessionSignal, () => { initialProbeFailed = true; });
   const pending = AdbDaemonTransport.authenticate({
     serial: "cody-browser",
     connection,
     credentialStore: credentials(),
-  }).then((transport) => new Adb(transport));
-  adbSessions.set(context.transport, pending);
+  }).then((daemon) => new Adb(daemon));
+  adbSessions.set(transport, pending);
+  const forget = (session: Promise<Adb>): void => { if (adbSessions.get(transport) === session) adbSessions.delete(transport); };
   try {
     const adb = await pending;
-    const forget = () => { adbSessions.delete(context.transport); };
-    void adb.disconnected.then(forget, forget);
+    cancel?.removeEventListener("abort", stop);
+    if (authentication.signal.aborted) {
+      // Cancelled in the instant authentication finished: the connection is being torn down with it.
+      void adb.close().catch(() => undefined);
+      throw cancel?.reason ?? new DOMException("Operation cancelled.", "AbortError");
+    }
+    void adb.disconnected.then(() => forget(pending), () => forget(pending));
     return adb;
   } catch (error) {
-    adbSessions.delete(context.transport);
+    forget(pending);
+    // Cancelled while authenticating: the operation is over, whatever the transport said about being aborted.
+    if (cancel?.aborted) throw cancel.reason instanceof Error ? cancel.reason : new DOMException("Operation cancelled.", "AbortError");
     const message = error instanceof Error ? error.message : String(error);
     if (initialProbeFailed || message.includes("bounded initial protocol probe")) { const existing = await attachExistingDaemon(context, sessionSignal);
     if (existing) {
       const restored = Promise.resolve(existing);
-      adbSessions.set(context.transport, restored);
-      const forget = () => { adbSessions.delete(context.transport); };
-      void existing.disconnected.then(forget, forget);
+      adbSessions.set(transport, restored);
+      void existing.disconnected.then(() => forget(restored), () => forget(restored));
       return existing;
     } }
     throw new AdbProtocolError(
       `ADB connection was not established: ${message}. If the device displays a new Cody RSA authorization prompt, approve it and run a fresh operation; screenless devices do not auto-authorize a new key.`,
     );
+  } finally {
+    cancel?.removeEventListener("abort", stop);
   }
 }
 
@@ -398,13 +427,42 @@ function streamText(stream: AdbReadableStream<Uint8Array>): Promise<string> {
 }
 
 /**
+ * Waits for `promise`, but not past `signal`: when the signal ends first the caller gets
+ * its reason at once. Whatever `promise` produces afterwards goes to `discard`, and a
+ * failure after that point is nobody's to handle.
+ */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal | undefined, discard: (late: T) => unknown): Promise<T> {
+  if (!signal) return promise;
+  const { promise: raced, resolve, reject } = Promise.withResolvers<T>();
+  let over = false;
+  const onAbort = (): void => { over = true; reject(signal.reason); };
+  if (signal.aborted) onAbort();
+  else signal.addEventListener("abort", onAbort, { once: true });
+  promise.then(
+    (value) => {
+      signal.removeEventListener("abort", onAbort);
+      if (over) void Promise.resolve(discard(value)).catch(() => undefined);
+      else resolve(value);
+    },
+    (error: unknown) => {
+      signal.removeEventListener("abort", onAbort);
+      if (!over) reject(error);
+    },
+  );
+  return raced;
+}
+
+/**
  * Runs `command` through the device shell and returns what it printed and the exit
  * status it ended with (a marker line carries it, so it survives every protocol).
- * `signal` cancels THIS subprocess only: its stream is closed and the call fails with
- * the signal's reason while the connection stays up, which matters to an operation
- * that keeps the connection past its own cancel to clean up. ya-webadb's
- * spawnWaitText takes no signal, and the abort listener it adds to one is never
- * removed, so the signal is passed on as a dependent one that goes away with the call.
+ * `signal` cancels THIS subprocess only, while it is being opened as well as while it
+ * runs: the call fails with the signal's reason at once and the connection stays up,
+ * which matters to an operation that keeps the connection past its own cancel to clean
+ * up. ya-webadb waits for the daemon's acknowledgement of the OPEN without any limit
+ * and looks at the signal only afterwards, so the wait is raced against it here, and a
+ * stream that opens late is closed. Its spawnWaitText takes no signal, and the abort
+ * listener it adds to one is never removed, so the signal is passed on as a dependent
+ * one that goes away with the call.
  */
 async function shellStatus(adb: Adb, command: string, signal?: AbortSignal): Promise<ShellResult> {
   const wrapped = `(${command}); c=$?; printf '\\n${SHELL_STATUS_PREFIX}%s\\n' "$c"; exit "$c"`;
@@ -415,10 +473,10 @@ async function shellStatus(adb: Adb, command: string, signal?: AbortSignal): Pro
   let stderr = "";
   if (shell) {
     // ya-webadb joins argv literally; adbd already invokes the device shell.
-    const process = await shell.spawn([wrapped], call);
+    const process = await untilAborted(shell.spawn([wrapped], call), signal, (late) => late.kill());
     [stdout, stderr] = await Promise.all([streamText(process.stdout), streamText(process.stderr), process.exited]);
   } else {
-    const process = await adb.subprocess.noneProtocol.spawn([wrapped], call);
+    const process = await untilAborted(adb.subprocess.noneProtocol.spawn([wrapped], call), signal, (late) => late.kill());
     [stdout] = await Promise.all([streamText(process.output), process.exited]);
   }
   const marker = new RegExp(`\\n${SHELL_STATUS_PREFIX}(\\d+)\\n`, "g");
@@ -781,7 +839,7 @@ async function reconnectStaging(context: HardwareContext, signal?: AbortSignal):
   await closeCachedAdb(previousTransport);
   await reacquire.call(context);
 
-  const adb = await adbFor(context);
+  const adb = await adbFor(context, { signal });
   return stagingIo(adb, await shellCapabilities(adb, signal), signal);
 }
 
@@ -1409,18 +1467,22 @@ async function install(request: HardwareRequest, context: HardwareContext, adb: 
   }
 }
 
-/** How long removing what an operation staged may take: after a cancel the device may be silent, and the exclusive lease has to come back regardless. */
-const ADB_CLEANUP_MS = 10_000;
-
 /**
- * Removes files over the connection the operation kept for that, within `ADB_CLEANUP_MS`. A
- * connection that is already gone cannot be cleaned over; what was staged has content-addressed
- * names, so a later run of the same install reuses or replaces it.
+ * Removes files over the connection the operation kept for that, within `adbLimits.cleanupMs`.
+ * Waiting for the connection, opening the stream and running the command are all under that one
+ * limit, so a device that went silent cannot keep the operation, or the exclusive lease behind it,
+ * alive. Cleanup never starts a new authentication: when no authenticated connection is left (it
+ * dropped, or a replacement was still authenticating when the operation was cancelled) there is
+ * nothing to clean over, and what was staged has content-addressed names, so the next run of the
+ * same install reuses or replaces it.
  */
 async function removeRemote(context: HardwareContext, paths: readonly string[]): Promise<void> {
+  const session = adbSessions.get(context.transport);
+  if (!session) return;
+  const limit = AbortSignal.timeout(adbLimits.cleanupMs);
   try {
-    const live = await adbFor(context, { deadline: Date.now() + ADB_CLEANUP_MS });
-    await shellStatus(live, `rm -r -f ${paths.map(shQuote).join(" ")} </dev/null`, AbortSignal.timeout(ADB_CLEANUP_MS));
+    const live = await untilAborted(session, limit, () => undefined);
+    await shellStatus(live, `rm -r -f ${paths.map(shQuote).join(" ")} </dev/null`, limit);
   } catch {
     // Nothing more can be done over a connection that is gone or silent.
   }

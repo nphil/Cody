@@ -144,8 +144,9 @@ item remains **UNVERIFIED** until its permitted evidence is completed.
 - [ ] **UNVERIFIED** `update` refuses logical partitions from the bootloader and
   accepts them from fastbootd.
 - [ ] **UNVERIFIED** Cancelling an `update` (or pulling the cable) between and
-  during partitions leaves the operation's output naming which partitions were
-  written and verified, the one possibly modified (with its backup id) and the
+  during partitions, and during the last partition's readback, leaves the
+  operation's output naming each partition with its backup, which were written
+  and verified, the one possibly modified (with its backup id) and the
   untouched ones, and nothing is written again; the named backup restores the
   possibly modified partition.
 - [ ] **UNVERIFIED** `stage` followed by an OEM command that consumes staged
@@ -253,7 +254,11 @@ item remains **UNVERIFIED** until its permitted evidence is completed.
   ends the wait at once; `/data/local/tmp` holds no `cody-install-*` file or
   `.cody-adb-stage-*` directory afterwards, the operation says the package
   manager may still finish installing, and the device can be used again
-  immediately. Record whether the app was installed anyway.
+  immediately. Also cancel while the device is silent: after the cable is
+  pulled and replugged mid-copy (the replacement connection waiting for the
+  RSA prompt), and with the device frozen so it never answers the stream
+  `pm install` opens; Cancel ends the install within about 10 s and the device
+  is released. Record whether the app was installed anyway.
 - [ ] **UNVERIFIED** `adb root` on a userdebug build restarts adbd and the
   operation reconnects and reports `service.adb.root` 1; the same request on a
   production build is refused with adbd's message. `unroot` returns it.
