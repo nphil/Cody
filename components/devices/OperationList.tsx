@@ -296,13 +296,3 @@ export function OperationCard({ manager, operation, deviceLabel }: { manager: De
     </article>
   );
 }
-
-/** The operations to show (newest first as the manager reports them), each with its own progress, confirmation and result. */
-export function OperationList({ manager, operations, deviceLabel }: { manager: DeviceOperationManager; operations: readonly DeviceOperationSnapshot[]; deviceLabel?: string }): React.ReactElement | null {
-  if (operations.length === 0) return null;
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      {operations.map((operation) => <OperationCard key={operation.id} manager={manager} operation={operation} deviceLabel={deviceLabel ?? operation.request.deviceId} />)}
-    </div>
-  );
-}

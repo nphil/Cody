@@ -2213,7 +2213,7 @@ erase of a partition picked from the last table read, the whole-area backup
 offered only after a passing check, a backup set and its restore), not by the
 generic `ActionForm`. A device in a mode Cody cannot read (`unknown-usb`),
 or a card with "Show every protocol" on, offers every protocol. The
-confirmation card (`OperationList`) keeps the exact-binding rows and the typed
+confirmation card (`OperationList.tsx`) keeps the exact-binding rows and the typed
 protected-override gate unchanged, and adds the device it is for and the choice of
 when to send; once approved it becomes a countdown card with its own Cancel
 (`ArmedCard`). The activity under each device is `ActivityFeed`, not a flat list.

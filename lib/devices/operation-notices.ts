@@ -109,8 +109,12 @@ export function noticeForOperation(
     };
   }
 
-  // A finish arrives as a snapshot with no event; it counts only as the step from running to finished.
-  if (event !== undefined || !isFinished(snapshot.state) || !previous || isFinished(previous.state)) return null;
+  // A finish arrives as a snapshot with no event. It is news when it is the step from running to finished, and
+  // also when it CORRECTS a finish already filed: the bridge records "completion unknown" as a failure when a page
+  // goes quiet, and the real outcome (it succeeded, or failed some other way) arrives later. Only a repeat of the
+  // state already announced is silent - and so is a snapshot the bridge never saw start (a restarted server being
+  // replayed to).
+  if (event !== undefined || !isFinished(snapshot.state) || !previous || previous.state === snapshot.state) return null;
 
   const what = `${describeOperation(snapshot)}${onDevice(deviceLabel)}`;
   const long = runMillis(snapshot) >= LONG_OPERATION_MS;
@@ -170,17 +174,22 @@ export class DeviceNoticeBatcher {
       return;
     }
     const now = this.now();
-    if (now >= this.windowEndsAt) {
+    // A window is open while its timer is pending and its time is not up. Once it is not, settle it BEFORE starting
+    // the next: its timer may not have fired yet (a busy event loop, a clock that jumped), and what it held back is
+    // summarised, not thrown away with it.
+    if (this.cancelWindow === undefined || now >= this.windowEndsAt) {
+      this.closeWindow();
       this.windowEndsAt = now + this.windowMs;
-      this.held = [];
-      this.cancelWindow = this.schedule(() => this.close(), this.windowMs);
+      this.cancelWindow = this.schedule(() => this.closeWindow(), this.windowMs);
       this.emit(notice);
       return;
     }
     this.held.push(notice);
   }
 
-  private close(): void {
+  /** Ends the open window: cancels its timer and says, once, how many failures it held back. */
+  private closeWindow(): void {
+    this.cancelWindow?.();
     this.cancelWindow = undefined;
     const held = this.held;
     this.held = [];

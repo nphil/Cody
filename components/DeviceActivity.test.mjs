@@ -120,7 +120,8 @@ test("a wait the agent asked for is pre-selected and said, and added to the choi
   assert.match(standard, /aria-checked="true"[^>]*>In 30 s/);
 });
 
-test("an approved command shows its exact action, a live countdown and a Cancel that stops it; its other buttons are gone", () => {
+test("an approved command shows its exact action, a live countdown and a Cancel that stops it; its other buttons are gone", (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 1_700_000_000_000 }); // the countdown is read off the clock: a frozen one cannot tick past a boundary mid-render
   const releaseAt = Date.now() + 30_000;
   const armed = operation({
     state: "armed",
@@ -149,7 +150,8 @@ test("a cancel the system made shows its reason as a warning, not as a failure",
   assert.doesNotMatch(markup, /color:var\(--status-error\)[^>]*>[^<]*left the USB bus/);
 });
 
-test("every new card and entry reads in English, Japanese and Chinese with real words: no key left bare, no placeholder unfilled", () => {
+test("every new card and entry reads in English, Japanese and Chinese with real words: no key left bare, no placeholder unfilled", (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 1_700_000_000_000 });
   const reads = [operation(), operation(), operation({ state: "failed", error: "No such variable", result: undefined })];
   const releaseAt = Date.now() + 45_000;
   const armed = operation({ state: "armed", result: undefined, approvalAsked: true, request: { command: "reboot-bootloader" }, armed: { approvedAt: releaseAt - 45_000, releaseAt, expiresAt: releaseAt + 10_000, binding, device: { id: "usb-1" } } });
