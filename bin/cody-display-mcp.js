@@ -241,14 +241,15 @@ async function main() {
 
   const operationInput = {
     device: z.string().describe("Exact browser device id from device_list."),
-    protocol: z.enum(["esp", "adb", "fastboot", "gecko", "stm32", "stk500", "dfu"]).describe("Protocol implementation to run."),
+    protocol: z.enum(["esp", "adb", "fastboot", "gecko", "stm32", "stk500", "dfu", "serial"]).describe("Protocol implementation to run. Use serial for an interactive CDC/UART console."),
     target: z.string().optional().describe("Exact destination, path, partition, or address."),
     offset: z.number().int().nonnegative().optional(),
     length: z.number().int().positive().optional(),
     fileId: z.string().optional().describe("Session artifact id displayed in Cody's Devices panel."),
     sha256: z.string().regex(/^[a-fA-F0-9]{64}$/).optional().describe("Exact artifact SHA-256; required with fileId."),
     baudRate: z.number().int().positive().optional(),
-    interfaceNumber: z.number().int().nonnegative().optional(),
+    interfaceNumber: z.number().int().nonnegative().optional().describe("USB interface number for an exclusive operation lease."),
+    alternateSetting: z.number().int().nonnegative().optional().describe("USB alternate setting paired with interfaceNumber from device_detect."),
     command: z.string().max(16 * 1024).optional(),
     options: z.object({}).passthrough().optional().describe("Protocol-specific validated configuration, such as safety or DFU descriptor data. It cannot approve a risk."),
   };
@@ -259,7 +260,9 @@ async function main() {
     ["device_exec", "Start a protocol command. State-changing commands pause for direct browser UI confirmation."],
     ["device_push", "Start a resumable file push from a session artifact."],
     ["device_pull", "Start a file pull into a session-owned browser artifact."],
+    ["device_sideload", "Serve a session artifact to ADB recovery sideload. Requires direct approval; transfer completion does not verify installation."],
     ["device_install", "Install an APK from a session artifact after direct typed browser confirmation."],
+    ["device_verify", "After a Fastboot write without fetch support, compare an exact raw-image byte range in ADB recovery with the expected SHA-256. Needs target, length, sha256 and the shell grant."],
     ["device_monitor", "Start an exclusive serial monitor. Use device_monitor_send with its operation id for input."],
   ];
   for (const [name, description] of startOperationTools) {

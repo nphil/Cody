@@ -705,36 +705,45 @@ async function stateFor(context: HardwareContext, input: Blob, target: string, s
   return state;
 }
 
-function stagingIo(adb: Adb, capabilities: ShellCapabilities): AdbStagingIo {
+/**
+ * The shell and sync steps staging is made of. A caller that must stop at the
+ * very next step when its operation is cancelled passes that signal: the
+ * connection may be kept alive past the cancel (for the caller's own cleanup),
+ * so it will not fail the step for it.
+ */
+function stagingIo(adb: Adb, capabilities: ShellCapabilities, signal?: AbortSignal): AdbStagingIo {
+  const step = <Args extends unknown[], Result>(call: (...args: Args) => Promise<Result>) => (...args: Args): Promise<Result> => {
+    signal?.throwIfAborted();
+    return call(...args);
+  };
   return {
-    writeFile: (path, data) => pushRemote(adb, path, data),
-    exists: (path) => remoteExists(adb, path),
-    length: (path) => remoteLength(adb, path),
-    sha256: (path) => remoteSha256(adb, capabilities, path),
-    makeDirectory: (path) => shell(adb, `mkdir -p ${shQuote(path)}`, `Creating staging directory '${path}'`).then(() => undefined),
-    async concatenate(parts, destination) {
+    writeFile: step((path: string, data: Uint8Array) => pushRemote(adb, path, data)),
+    exists: step((path: string) => remoteExists(adb, path)),
+    length: step((path: string) => remoteLength(adb, path)),
+    sha256: step((path: string) => remoteSha256(adb, capabilities, path)),
+    makeDirectory: step((path: string) => shell(adb, `mkdir -p ${shQuote(path)}`, `Creating staging directory '${path}'`).then(() => undefined)),
+    concatenate: step(async (parts: readonly string[], destination: string) => {
       await shell(adb, `: > ${shQuote(destination)}`, `Creating staged aggregate '${destination}'`);
       for (const part of parts) {
+        signal?.throwIfAborted();
         await shell(adb, `cat ${shQuote(part)} >> ${shQuote(destination)}`, `Appending staged chunk '${part}'`);
       }
-    },
-    moveReplace: (source, destination) => shell(adb, `mv -f ${shQuote(source)} ${shQuote(destination)}`, `Atomically replacing '${destination}'`).then(() => undefined),
+    }),
+    moveReplace: step((source: string, destination: string) => shell(adb, `mv -f ${shQuote(source)} ${shQuote(destination)}`, `Atomically replacing '${destination}'`).then(() => undefined)),
   };
 }
 
-
-
-async function reconnectStaging(context: HardwareContext): Promise<AdbStagingIo> {
+async function reconnectStaging(context: HardwareContext, signal?: AbortSignal): Promise<AdbStagingIo> {
   const reacquire = context.reacquireTransport;
   if (!reacquire) {
     throw new AdbProtocolError("ADB transport disconnected. This runner cannot reacquire the exclusive hardware lease; start a fresh operation to resume from verified chunks.");
   }
   const previousTransport = context.transport;
   await closeCachedAdb(previousTransport);
-    await reacquire.call(context);
-  
+  await reacquire.call(context);
+
   const adb = await adbFor(context);
-  return stagingIo(adb, await shellCapabilities(adb));
+  return stagingIo(adb, await shellCapabilities(adb), signal);
 }
 
 
@@ -1264,37 +1273,65 @@ async function reverseRemoveAll(context: HardwareContext, adb: Adb): Promise<Har
 /** `adb install` flags in the order they are passed; each is a plain on/off choice. */
 const INSTALL_FLAGS: Readonly<Record<string, string>> = { replace: "-r", downgrade: "-d", grantPermissions: "-g", testOnly: "-t" };
 
-function installFlags(options: Record<string, unknown> | undefined): string[] {
+/**
+ * Android 9 (API 28) made replacing an installed app the package manager's
+ * default, ignores `-r`, and added `-R` to turn replacement off. Before it,
+ * replacement needs `-r`, an absent flag already means "do not replace", and `-R`
+ * is an unknown option that makes `pm install` fail.
+ */
+const PM_REPLACES_BY_DEFAULT_FROM_API = 28;
+
+function installChoices(options: Record<string, unknown> | undefined): Record<string, boolean> {
   const unknown = Object.keys(options ?? {}).find((name) => name !== "kind" && !Object.hasOwn(INSTALL_FLAGS, name));
   if (unknown) throw new AdbProtocolError(`Unknown install option ${JSON.stringify(unknown)}. Supported: ${Object.keys(INSTALL_FLAGS).join(", ")}.`);
-  const flags: string[] = [];
-  for (const [name, flag] of Object.entries(INSTALL_FLAGS)) {
+  const choices: Record<string, boolean> = {};
+  for (const name of Object.keys(INSTALL_FLAGS)) {
     const value = options?.[name];
-    if (value === undefined) continue;
-    if (typeof value !== "boolean") throw new AdbProtocolError(`Install option ${name} must be true or false.`);
-    if (value) flags.push(flag);
+    if (value !== undefined && typeof value !== "boolean") throw new AdbProtocolError(`Install option ${name} must be true or false.`);
+    choices[name] = value === true;
   }
-  // Android's package manager permits replacement by default; -R is the
-  // explicit no-replace mode required when the user did not approve it.
-  if (options?.replace !== true) flags.push("-R");
+  return choices;
+}
+
+/**
+ * Replacement happens only when the user approved it. An API level that cannot
+ * be read is treated as modern: `-R` is then an error on an old device (nothing
+ * is installed) instead of a silent replacement on a new one.
+ */
+function installFlags(choices: Record<string, boolean>, apiLevel: number | undefined): string[] {
+  const flags = Object.entries(INSTALL_FLAGS).filter(([name]) => choices[name]).map(([, flag]) => flag);
+  if (!choices.replace && (apiLevel === undefined || apiLevel >= PM_REPLACES_BY_DEFAULT_FROM_API)) flags.push("-R");
   return flags;
+}
+
+async function androidApiLevel(adb: Adb, context: HardwareContext): Promise<number | undefined> {
+  try {
+    const value = (await adb.getProp("ro.build.version.sdk")).trim();
+    return /^\d{1,3}$/.test(value) ? Number(value) : undefined;
+  } catch {
+    context.signal.throwIfAborted();
+    return undefined;
+  }
 }
 
 /**
  * `adb install`: the APK is copied to /data/local/tmp by the same hash-verified,
  * resumable staging a push uses, `pm install` runs on exactly that file, and the
- * copy and its staging files are removed whether or not the install succeeded.
- * The command line is built only from the validated flags and a path derived
- * from the file's SHA-256, so no shell grant is needed; the confirmation is the gate.
+ * copy and its staging files are removed whether or not the copy or the install
+ * succeeded, and even when the user cancels. The command line is built only from
+ * the validated flags and a path derived from the file's SHA-256, so no shell
+ * grant is needed; the typed confirmation is the gate.
  */
 async function install(request: HardwareRequest, context: HardwareContext, adb: Adb): Promise<HardwareResult> {
   const input = context.input;
   if (!input?.size) throw new AdbProtocolError("ADB install requires a non-empty APK artifact.");
-  const flags = installFlags(request.options);
+  const choices = installChoices(request.options);
   const apk = await openZip(input).catch(() => undefined);
   if (!apk?.find("AndroidManifest.xml")) throw new AdbProtocolError("This file is not an APK: it has no AndroidManifest.xml. App bundles and split APKs are not supported; select one .apk file.");
   const sha256 = await hashFirmware(input, request.sha256);
   const capabilities = await shellCapabilities(adb);
+  const apiLevel = await androidApiLevel(adb, context);
+  const flags = installFlags(choices, apiLevel);
   const staged = `/data/local/tmp/cody-install-${sha256.slice(0, 16)}.apk`;
   const command = ["pm", "install", ...flags, shQuote(staged)].join(" ");
   await context.confirm({
@@ -1303,22 +1340,29 @@ async function install(request: HardwareRequest, context: HardwareContext, adb: 
     sha256,
     length: input.size,
     protectedOverride: `install:${sha256.slice(0, 8)}`,
-    backup: flags.includes("-r") ? "not applicable: -r replaces the installed app's code (its data is kept); Cody does not back up the old APK" : "not applicable: -R refuses to replace an app that is already installed",
-    details: `Copy the APK to ${staged} (hash-checked on the device), run \`${command}\`, then delete the copy and its staging files. An installed app can request permissions and run code on the device.`,
+    backup: choices.replace ? "not applicable: -r replaces the installed app's code (its data is kept); Cody does not back up the old APK" : "not applicable: this install will not replace an app that is already installed",
+    details: `Copy the APK to ${staged} (hash-checked on the device), run \`${command}\`, then delete the copy and its staging files. ${choices.replace ? "An installed copy of the app is replaced." : "An installed copy of the app is left alone and the install fails instead."} An installed app can request permissions and run code on the device.`,
   });
   const state = await stateFor(context, input, staged, sha256);
+  // The staging files must be removable after a cancel too, which needs the live connection.
+  const finishCleanup = retainAdbSession(context);
   try {
-    await resumeVerifiedStagedPush({ input, state, io: stagingIo(adb, capabilities), progress: context.progress, reconnect: () => reconnectStaging(context), isConnectionFailure });
+    await resumeVerifiedStagedPush({ input, state, io: stagingIo(adb, capabilities, context.signal), progress: context.progress, reconnect: () => reconnectStaging(context, context.signal), isConnectionFailure });
     const live = await adbFor(context);
+    context.signal.throwIfAborted();
     context.progress({ phase: "adb.install", message: "Running pm install" });
     const installed = await shellStatus(live, command);
     const output = abbreviatedOutput(installed.output);
     if (installed.status !== 0 || !/^Success\b/m.test(installed.output)) throw new AdbProtocolError(`pm install failed: ${output || `status ${installed.status}`}. The staged copy was removed.`);
     context.output?.(output);
-    return { summary: `Installed the APK (${input.size} bytes): the file matched its SHA-256 on the device and the package manager reported Success.`, verified: true, sha256, details: { command, flags, packageManager: output } };
+    return { summary: `Installed the APK (${input.size} bytes): the file matched its SHA-256 on the device and the package manager reported Success.`, verified: true, sha256, details: { command, flags, apiLevel, packageManager: output } };
   } finally {
-    const live = await adbFor(context).catch(() => undefined);
-    if (live) await live.rm([staged, state.stagingDirectory], { recursive: true, force: true }).catch(() => undefined);
+    try {
+      const live = await adbFor(context).catch(() => undefined);
+      if (live) await live.rm([staged, state.stagingDirectory], { recursive: true, force: true }).catch(() => undefined);
+    } finally {
+      finishCleanup();
+    }
   }
 }
 

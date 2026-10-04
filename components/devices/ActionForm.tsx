@@ -6,7 +6,7 @@ import { deviceArtifacts } from "@/lib/devices/artifacts";
 import type { HardwareAction, HardwareProtocol } from "@/lib/devices/flasher";
 import type { DeviceOperationManager } from "@/lib/devices/operations";
 import type { DeviceInfo } from "@/lib/devices/protocol";
-import { formActions, type ActionGroup } from "@/lib/devices/ui-model";
+import { flashOverrideChoices, formActions, type ActionGroup } from "@/lib/devices/ui-model";
 import { useI18n } from "@/lib/i18n";
 import { Button, Chip, Field, Notice, Segmented, TextField } from "./ui";
 
@@ -218,13 +218,9 @@ export function ActionForm({ sessionId, manager, device, group, protocols, selec
                 onChange={(value) => setProtectedOverride(value === "none" ? "" : value)}
                 options={[
                   { value: "none", label: t("devices.none") },
-                  { value: "allow-preloader", label: "allow-preloader" },
-                  { value: "allow-lk", label: "allow-lk" },
-                  { value: "allow-tee", label: "allow-tee" },
-                  { value: "allow-fuses", label: "allow-fuses" },
-                  { value: "allow-bootloader", label: "allow-bootloader" },
-                  { value: "allow-spi-boot", label: "allow-spi-boot" },
-                  ...(activeProtocol === "fastboot" || activeProtocol === "dfu" ? [{ value: "allow-unknown", label: t("devices.operationUnknownOverride"), description: t("devices.operationUnknownOverrideDescription") }] : []),
+                  ...flashOverrideChoices(activeProtocol).map((value) => (value === "allow-unknown"
+                    ? { value, label: t("devices.operationUnknownOverride"), description: t("devices.operationUnknownOverrideDescription") }
+                    : { value, label: value })),
                 ]}
               />
             )}

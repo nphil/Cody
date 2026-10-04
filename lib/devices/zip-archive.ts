@@ -45,7 +45,14 @@ export interface ZipArchive {
   find(name: string): ZipEntry | undefined;
   /** The entry's bytes. Stored entries are slices of the archive. */
   open(entry: ZipEntry): Promise<Blob>;
-  text(entry: ZipEntry): Promise<string>;
+  /**
+   * The entry decoded as UTF-8 text, for small metadata only. An entry whose
+   * recorded size exceeds `maxBytes` is refused BEFORE it is opened, so a tiny
+   * compressed member cannot make the tab inflate gigabytes into a string. An
+   * inflated member can never exceed its recorded size (the inflater enforces
+   * it), so the bound holds for deflated entries too.
+   */
+  text(entry: ZipEntry, maxBytes: number): Promise<string>;
 }
 
 const CRC_TABLE = (() => {
@@ -224,6 +231,10 @@ export async function openZip(archive: Blob): Promise<ZipArchive> {
     entries,
     find: (name) => byName.get(name),
     open,
-    text: async (entry) => (await open(entry)).text(),
+    text: async (entry, maxBytes) => {
+      if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) throw new ZipError("A text read needs a byte limit.");
+      if (entry.size > maxBytes) throw new ZipError(`${entry.name} is ${entry.size} bytes, over the ${maxBytes}-byte limit for metadata read as text.`);
+      return (await open(entry)).text();
+    },
   };
 }

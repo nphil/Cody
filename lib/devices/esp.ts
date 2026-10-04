@@ -532,16 +532,14 @@ function intrinsicEspSafety(
     throw new EspProtocolError(`ESP target ${request.target} is not an intrinsic flash target.`);
   }
 
-  const isEsp8266 = chip === "ESP8266";
-  // Zero is a reviewed boot boundary on several RISC-V ESP chips; its initial
-  // application-sized range remains protected just as it does on ESP8266.
+  // Zero is a reviewed boot boundary on several chips (ESP8266, and the RISC-V
+  // ESP32-C2/C3/C6/H2 and ESP32-S3): they have no separate second-stage
+  // boundary, and their offset-zero images still contain boot material. The
+  // initial application-sized range is therefore protected from offset zero.
   if (bootOffset < 0 || bootOffset >= ESP_APPLICATION_OFFSET || bootOffset % eraseBlock !== 0) {
     throw new EspProtocolError(`Detected ${chip} SPI boot boundary is not a known erase-aligned profile.`);
   }
-  // ESP8266 reports a zero BOOTLOADER_FLASH_OFFSET because it has no separate
-  // second-stage boundary. Its offset-zero images still contain boot material,
-  // so protect the initial range rather than treating it as unprotected.
-  const protectedBootStart = bootOffset === 0 ? 0 : bootOffset;
+  const protectedBootStart = bootOffset;
   const regions: FlashLayout["regions"] = [
     ...(protectedBootStart > 0 ? [{ name: "flash-prefix", offset: 0, length: protectedBootStart }] : []),
     { name: "spi-boot", offset: protectedBootStart, length: ESP_APPLICATION_OFFSET - protectedBootStart, protection: "spi-boot" },

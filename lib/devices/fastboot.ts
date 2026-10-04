@@ -3,7 +3,7 @@ import { classifyProtectedRegionName, parseFlashSafety } from "./hardware-safety
 import { hashBlob } from "./blob-stream";
 import { buildSparsePiece, imageFootprint, planImageSplit, type ImageFootprint, type SparseSplit } from "./sparse-image";
 import { openZip, type ZipEntry } from "./zip-archive";
-import { checkRequirements, parseAndroidInfo, SKIPPED_BY_UPDATE, UPDATE_IMAGES } from "./android-info";
+import { checkRequirements, MAX_ANDROID_INFO_BYTES, MAX_ANDROID_INFO_REQUIREMENTS, parseAndroidInfo, SKIPPED_BY_UPDATE, UPDATE_IMAGES } from "./android-info";
 import { sha256 as incrementalSha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { deadline, readExact, throwIfAborted } from "./serial";
@@ -299,14 +299,20 @@ async function prepareFlash(context:HardwareContext,target:string,image:Blob,lim
   return {target,image,digest,footprint,backup,split};
 }
 
-/** Sends the image (as one download, or as sparse pieces in turn) and flashes it. A failed piece is never retried. */
-async function writeFlash(context:HardwareContext,flash:PartitionFlash):Promise<void> {
-  if (!flash.split) { await download(context,flash.image); await command(context,"flash:"+flash.target); return; }
+/**
+ * Sends the image (as one download, or as sparse pieces in turn) and flashes it.
+ * A failed piece is never retried. `onFlashSent` runs just before each `flash:`
+ * command goes out: from then on the partition may be modified, whatever the
+ * bootloader answers or fails to answer.
+ */
+async function writeFlash(context:HardwareContext,flash:PartitionFlash,onFlashSent:()=>void=()=>undefined):Promise<void> {
+  if (!flash.split) { await download(context,flash.image); onFlashSent(); await command(context,"flash:"+flash.target); return; }
   const {layout,pieces}=flash.split;
   for (let index=0;index<pieces.length;index+=1) {
     const label=`piece ${index+1} of ${pieces.length}`;
     try {
       await download(context,buildSparsePiece(flash.image,layout,pieces[index]!),label);
+      onFlashSent();
       await command(context,"flash:"+flash.target);
     } catch (error) {
       throwIfAborted(context.signal);
@@ -374,18 +380,22 @@ async function updateFromPackage(context:HardwareContext):Promise<HardwareResult
   const zip=await openZip(archive).catch((error:unknown)=>{throw new FastbootProtocolError(`The selected file is not an update package: ${error instanceof Error ? error.message : String(error)}`);});
   const infoEntry=zip.find("android-info.txt");
   if (!infoEntry) throw new FastbootProtocolError("The package has no android-info.txt, so Cody cannot confirm its images are for this device (fastboot update refuses this too). Flash single images with device_flash instead.");
-  const info=parseAndroidInfo(await zip.text(infoEntry));
+  // The package metadata is read into a string before anything is approved, so it
+  // gets its own small bound (never the firmware-image limits) and a cap on how
+  // many requirements the device will be asked about.
+  const info=parseAndroidInfo(await zip.text(infoEntry,MAX_ANDROID_INFO_BYTES).catch((error:unknown)=>{throw new FastbootProtocolError(`The package's android-info.txt cannot be read: ${error instanceof Error ? error.message : String(error)} Nothing was written.`);}));
+  if (info.requirements.length>MAX_ANDROID_INFO_REQUIREMENTS) throw new FastbootProtocolError(`The package's android-info.txt lists ${info.requirements.length} requirements; Cody reads at most ${MAX_ANDROID_INFO_REQUIREMENTS} (a real one has a handful). Nothing was written.`);
   const product=(await optionalGetvar(context,"product"))?.trim();
   const unmet=(await checkRequirements(info,product,(name)=>optionalGetvar(context,name))).filter((outcome)=>!outcome.met);
   if (unmet.length>0) throw new FastbootProtocolError(`This package is not for this device, so nothing was written: ${unmet.map((outcome)=>`${outcome.line} (${outcome.detail})`).join("; ")}.`);
   const present=UPDATE_IMAGES.flatMap((image)=>{const entry=zip.find(image.file);return entry ? [{partition:image.partition,entry}] : [];});
   // AOSP treats partition-exists as a package requirement too: it cannot be
-  // satisfied by merely discovering the partition on the device.
+  // satisfied by merely discovering the partition on the device. Like its
+  // HandlePartitionExists, only the first value names the partition.
   for (const requirement of info.requirements.filter((item) => item.name === "partition-exists")) {
-    for (const partition of requirement.options) {
-      if (!UPDATE_IMAGES.some((image) => image.partition === partition)) throw new FastbootProtocolError(`The package requires unsupported partition ${partition}; nothing was written.`);
-      if (!present.some((image) => image.partition === partition)) throw new FastbootProtocolError(`The package requires partition ${partition}, but contains no ${partition}.img; nothing was written.`);
-    }
+    const partition = requirement.options[0]!;
+    if (!UPDATE_IMAGES.some((image) => image.partition === partition)) throw new FastbootProtocolError(`The package requires unsupported partition ${partition}; nothing was written.`);
+    if (!present.some((image) => image.partition === partition)) throw new FastbootProtocolError(`The package requires partition ${partition}, but contains no ${partition}.img; nothing was written.`);
   }
   if (present.length===0) {
     const nested=zip.entries.find((entry)=>/^image-.*\.zip$/.test(entry.name));
@@ -424,18 +434,34 @@ async function updateFromPackage(context:HardwareContext):Promise<HardwareResult
       `Not flashed by update: ${SKIPPED_BY_UPDATE.filter((name)=>zip.find(name)).join(", ")||"nothing"} (flash those separately if you want them).`,
     ].join("\n"),
   });
-  const written:string[]=[];
+  // Three states, never two: written (and read back when the bootloader can),
+  // untouched, and the one partition a flash command was sent to but that has
+  // not been verified - the one that most needs recovery if the update stops.
+  const written:PartitionFlash[]=[];
+  let inFlight:PartitionFlash|undefined;
   try {
     for (const flash of prepared) {
       context.progress({phase:"flash",completed:written.length,total:prepared.length,message:`Flashing ${flash.target}`});
-      await writeFlash(context,flash);
+      await writeFlash(context,flash,()=>{inFlight=flash;});
       if (flash.backup.capability) await verifyImage(context,flash.target,flash.image,flash.footprint,flash.backup.capability);
-      written.push(flash.target);
+      written.push(flash);
+      inFlight=undefined;
     }
   } catch (error) {
     throwIfAborted(context.signal);
-    const pending=prepared.map((flash)=>flash.target).filter((target)=>!written.includes(target));
-    throw new FastbootProtocolError(`The update stopped at ${pending[0]}: ${error instanceof Error ? error.message : String(error)} Written: ${written.join(", ")||"none"}. Not written: ${pending.join(", ")}. Nothing was retried.`);
+    const names=(flashes:readonly PartitionFlash[])=>flashes.map((flash)=>flash.target).join(", ")||"none";
+    // Assigned inside writeFlash's callback, which control-flow analysis cannot see.
+    const suspect=inFlight as PartitionFlash|undefined;
+    const untouched=prepared.filter((flash)=>flash!==suspect && !written.includes(flash));
+    const unverifiable=written.filter((flash)=>!flash.backup.capability);
+    throw new FastbootProtocolError([
+      `The update stopped at ${suspect?.target??untouched[0]?.target}: ${error instanceof Error ? error.message : String(error)}`,
+      `Written and verified: ${names(written.filter((flash)=>flash.backup.capability))}.`,
+      ...(unverifiable.length>0 ? [`Written but not verifiable (no fetch readback): ${names(unverifiable)}.`] : []),
+      ...(suspect ? [`POSSIBLY MODIFIED (a flash command was sent and the result is not verified): ${suspect.target}; ${suspect.backup.backupId ? `its previous contents are saved as ${suspect.backup.backupId}` : "no backup of it exists, because this bootloader cannot read partitions"}.`] : []),
+      `Untouched: ${names(untouched)}.`,
+      "Nothing was retried.",
+    ].join(" "));
   }
   return {
     summary:unbacked.length===0 ? `Flashed ${prepared.length} partition(s) from the package and verified each by readback.` : `Flashed ${prepared.length} partition(s) from the package; ${unbacked.join(", ")} could not be read back and are UNVERIFIED.`,
