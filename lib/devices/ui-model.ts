@@ -15,6 +15,7 @@ import { espFlasher } from "./esp";
 import { fastbootFlasher } from "./fastboot";
 import type { HardwareAction, HardwareProtocol } from "./flasher";
 import { geckoFlasher } from "./gecko";
+import { PROTECTED_REGION_OVERRIDES, type ProtectedRegionOverride } from "./hardware-safety";
 import type { DeviceInfo, DeviceProtocolCandidate } from "./protocol";
 import { serialFlasher } from "./serial-monitor";
 import { stk500Flasher } from "./stk500";
@@ -43,9 +44,9 @@ export const GROUP_ORDER: readonly ActionGroup[] = ["overview", "terminal", "com
 const GROUP_ACTIONS: Readonly<Record<ActionGroup, Readonly<Partial<Record<HardwareProtocol, readonly HardwareAction[]>>>>> = {
   overview: { esp: ["detect"], adb: ["detect"], fastboot: ["detect"], gecko: ["detect"], stm32: ["detect"], stk500: ["detect"], dfu: ["detect"] },
   terminal: { adb: ["monitor", "exec"] },
-  commands: { fastboot: ["exec"], dfu: ["exec"] },
+  commands: { fastboot: ["exec"], dfu: ["exec"], esp: ["exec"] },
   serial: { serial: ["monitor", "exec"] },
-  files: { adb: ["push", "pull", "sideload"] },
+  files: { adb: ["push", "pull", "sideload", "install"] },
   flash: { esp: ["flash"], fastboot: ["flash"], dfu: ["flash"], stm32: ["flash"], stk500: ["flash"] },
   backup: { esp: ["dump"], adb: ["dump", "verify"], fastboot: ["dump"], dfu: ["dump"], stm32: ["dump"], stk500: ["dump"] },
   ports: { adb: ["forward", "reverse"] },
@@ -117,6 +118,22 @@ export function availableGroups(protocols: readonly HardwareProtocol[]): ActionG
 export function formActions(group: ActionGroup, protocol: HardwareProtocol): readonly HardwareAction[] {
   const covered = TERMINAL_COVERED[protocol] ?? [];
   return groupActions(group, protocol).filter((action) => !covered.includes(action));
+}
+
+/**
+ * Protocols whose flash is addressed by a name Cody cannot always tie to a
+ * role: a Fastboot partition, or a plain DFU 1.1 alternate. Both are refused
+ * unless the user types `allow-unknown`, so the form must offer it for exactly
+ * these protocols - a choice the user needs but is not shown is a dead end.
+ */
+const UNNAMED_ROLE_FLASH_PROTOCOLS: readonly HardwareProtocol[] = ["fastboot", "dfu"];
+
+/** The typed overrides the flash form lets the user pick for a protocol, in the order they are listed. */
+export function flashOverrideChoices(protocol: HardwareProtocol): readonly ProtectedRegionOverride[] {
+  const named = (Object.keys(PROTECTED_REGION_OVERRIDES) as Array<keyof typeof PROTECTED_REGION_OVERRIDES>)
+    .filter((kind) => kind !== "unknown")
+    .map((kind) => PROTECTED_REGION_OVERRIDES[kind]);
+  return UNNAMED_ROLE_FLASH_PROTOCOLS.includes(protocol) ? [...named, PROTECTED_REGION_OVERRIDES.unknown] : named;
 }
 
 /** Reads the ADB banner prefix (`device::`, `recovery::`, `sideload::`, ...) a detect result reports. */

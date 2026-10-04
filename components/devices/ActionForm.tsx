@@ -6,7 +6,7 @@ import { deviceArtifacts } from "@/lib/devices/artifacts";
 import type { HardwareAction, HardwareProtocol } from "@/lib/devices/flasher";
 import type { DeviceOperationManager } from "@/lib/devices/operations";
 import type { DeviceInfo } from "@/lib/devices/protocol";
-import { formActions, type ActionGroup } from "@/lib/devices/ui-model";
+import { flashOverrideChoices, formActions, type ActionGroup } from "@/lib/devices/ui-model";
 import { useI18n } from "@/lib/i18n";
 import { Button, Chip, Field, Notice, Segmented, TextField } from "./ui";
 
@@ -23,9 +23,12 @@ interface ActionFormProps {
 
 const ACTIONS_NEEDING_TARGET: readonly HardwareAction[] = ["flash", "dump", "push", "pull", "verify", "forward", "reverse"];
 const ACTIONS_NEEDING_RANGE: readonly HardwareAction[] = ["flash", "dump", "verify"];
-const ACTIONS_NEEDING_INPUT: readonly HardwareAction[] = ["flash", "push", "sideload", "verify"];
+const ACTIONS_NEEDING_INPUT: readonly HardwareAction[] = ["flash", "push", "sideload", "verify", "install"];
 /** Writes to the device, or can change what it does next: these get the cautious button. */
-const RISKY_ACTIONS: readonly HardwareAction[] = ["flash", "push", "sideload", "forward", "reverse"];
+const RISKY_ACTIONS: readonly HardwareAction[] = ["flash", "push", "sideload", "forward", "reverse", "install"];
+type AdbExecKind = "shell" | "root" | "unroot" | "tcpip" | "usb" | "wait-for-device";
+const ADB_EXEC_KINDS: readonly AdbExecKind[] = ["shell", "root", "unroot", "tcpip", "usb", "wait-for-device"];
+const INSTALL_OPTIONS = ["replace", "downgrade", "grantPermissions", "testOnly"] as const;
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -62,6 +65,9 @@ export function ActionForm({ sessionId, manager, device, group, protocols, selec
   const [host, setHost] = useState("");
   const [candidateKey, setCandidateKey] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [installFlags, setInstallFlags] = useState<Record<string, boolean>>({});
+  const [execKind, setExecKind] = useState<AdbExecKind>("shell");
+  const [tcpPort, setTcpPort] = useState("");
 
   const activeProtocol = usable.includes(protocol) ? protocol : usable[0];
   const actions = formActions(group, activeProtocol);
@@ -74,7 +80,7 @@ export function ActionForm({ sessionId, manager, device, group, protocols, selec
   const protocolCandidates = useMemo(() => device.protocolCandidates?.filter((candidate) => candidate.protocol === activeProtocol) ?? [], [activeProtocol, device]);
   const selectedCandidate = protocolCandidates.find((candidate) => `${candidate.interfaceNumber}:${candidate.alternateSetting}` === candidateKey);
   const input = selectedInputId ? deviceArtifacts.list(sessionId).find((artifact) => artifact.id === selectedInputId) : undefined;
-  const commandUsesImage = activeProtocol === "fastboot" && activeAction === "exec" && /^(?:boot|download|flash)(?:$|[:\s])/.test(command.trim().replace(/^fastboot\s+/, ""));
+  const commandUsesImage = activeProtocol === "fastboot" && activeAction === "exec" && /^(?:boot|download|stage|flash|update|flashall)(?:$|[:\s])/.test(command.trim().replace(/^fastboot\s+/, ""));
   const keys = targetKeys(activeAction);
 
   useEffect(() => {
@@ -93,18 +99,24 @@ export function ActionForm({ sessionId, manager, device, group, protocols, selec
       if (protocolCandidates.length > 1 && !selectedCandidate) throw new Error(t("devices.operationInterfaceRequired"));
       if (inputRequired && !input) throw new Error(t("devices.operationInputRequired"));
       if (needsTarget && !target.trim()) throw new Error(t("devices.operationTargetRequired"));
+      const kindOnly = activeProtocol === "adb" && activeAction === "exec" && execKind !== "shell";
       if (needsHost && !host.trim()) throw new Error(t("devices.operationHostAddressRequired"));
-      if (needsCommand && !command.trim()) throw new Error(t("devices.operationCommandRequired"));
+      if (needsCommand && !kindOnly && !command.trim()) throw new Error(t("devices.operationCommandRequired"));
       const parsedOffset = offset.trim() ? Number(offset) : undefined;
       const parsedLength = length.trim() ? Number(length) : activeAction === "verify" ? input?.size : undefined;
       for (const [value, label, minimum] of [[parsedOffset, "offset", 0], [parsedLength, "length", 1]] as const) {
         if (value !== undefined && (!Number.isSafeInteger(value) || value < minimum)) throw new Error(`${label} must be a safe integer of at least ${minimum}.`);
       }
       if (activeAction === "dump" && (parsedOffset === undefined || parsedLength === undefined)) throw new Error(t("devices.operationRangeRequired"));
-      const options: Record<string, string> = {};
+      const options: Record<string, string | number | boolean> = {};
       if (expectedChip.trim()) options.expectedChip = expectedChip.trim();
       if (protectedOverride) options.protectedOverride = protectedOverride;
       if (needsHost) options.local = host.trim();
+      if (activeProtocol === "adb" && activeAction === "install") for (const [name, on] of Object.entries(installFlags)) if (on) options[name] = true;
+      if (kindOnly) {
+        options.kind = execKind;
+        if (execKind === "tcpip") options.port = Number(tcpPort);
+      }
       manager.startUser({
         deviceId: device.id,
         protocol: activeProtocol,
@@ -114,7 +126,7 @@ export function ActionForm({ sessionId, manager, device, group, protocols, selec
         ...(needsTarget ? { target: target.trim() } : {}),
         ...(needsRange && parsedOffset !== undefined ? { offset: parsedOffset } : {}),
         ...(needsRange && parsedLength !== undefined ? { length: parsedLength } : {}),
-        ...(needsCommand ? { command: command.trim() } : {}),
+        ...(needsCommand && !kindOnly ? { command: command.trim() } : {}),
         ...(input && (inputRequired || commandUsesImage) ? { fileId: input.id, sha256: input.sha256 } : {}),
         ...(Object.keys(options).length > 0 ? { options } : {}),
       });
@@ -174,6 +186,14 @@ export function ActionForm({ sessionId, manager, device, group, protocols, selec
         )
       )}
 
+      {activeProtocol === "adb" && activeAction === "install" && (
+        <div role="group" style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          {INSTALL_OPTIONS.map((name) => (
+            <Button key={name} pressed={Boolean(installFlags[name])} onClick={() => setInstallFlags((current) => ({ ...current, [name]: !current[name] }))}>{t(`devices.installOption.${name}`)}</Button>
+          ))}
+        </div>
+      )}
+
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 200px), 1fr))", gap: 10 }}>
         {needsTarget && <TextField id={`${formId}-target`} label={t(keys.label)} value={target} onChange={(event) => setTarget(event.target.value)} placeholder={t(keys.placeholder)} />}
         {needsHost && <TextField id={`${formId}-host`} label={t("devices.operationHostAddress")} value={host} onChange={(event) => setHost(event.target.value)} placeholder={t("devices.operationHostAddressPlaceholder")} />}
@@ -181,7 +201,13 @@ export function ActionForm({ sessionId, manager, device, group, protocols, selec
           <TextField id={`${formId}-offset`} label={t("devices.operationOffset")} type="number" min="0" inputMode="numeric" value={offset} onChange={(event) => setOffset(event.target.value)} />
           <TextField id={`${formId}-length`} label={t("devices.operationLength")} type="number" min="1" inputMode="numeric" value={length} onChange={(event) => setLength(event.target.value)} />
         </>}
-        {needsCommand && <TextField id={`${formId}-command`} label={t("devices.operationCommand")} value={command} onChange={(event) => setCommand(event.target.value)} />}
+        {needsCommand && activeProtocol === "adb" && (
+          <Field label={t("devices.execKindLabel")}>
+            {() => <Segmented label={t("devices.execKindLabel")} value={execKind} options={ADB_EXEC_KINDS.map((value) => ({ value, label: t(`devices.execKind.${value}`) }))} onChange={setExecKind} />}
+          </Field>
+        )}
+        {needsCommand && !(activeProtocol === "adb" && execKind !== "shell") && <TextField id={`${formId}-command`} label={t("devices.operationCommand")} value={command} onChange={(event) => setCommand(event.target.value)} />}
+        {needsCommand && activeProtocol === "adb" && execKind === "tcpip" && <TextField id={`${formId}-tcp-port`} label={t("devices.fieldTcpPort")} type="number" min="1024" max="65535" inputMode="numeric" value={tcpPort} onChange={(event) => setTcpPort(event.target.value)} placeholder="5555" />}
         {activeAction === "flash" && <>
           <TextField id={`${formId}-chip`} label={t("devices.operationExpectedChip")} value={expectedChip} onChange={(event) => setExpectedChip(event.target.value)} />
           <Field label={t("devices.operationProtectedOverride")}>
@@ -192,13 +218,9 @@ export function ActionForm({ sessionId, manager, device, group, protocols, selec
                 onChange={(value) => setProtectedOverride(value === "none" ? "" : value)}
                 options={[
                   { value: "none", label: t("devices.none") },
-                  { value: "allow-preloader", label: "allow-preloader" },
-                  { value: "allow-lk", label: "allow-lk" },
-                  { value: "allow-tee", label: "allow-tee" },
-                  { value: "allow-fuses", label: "allow-fuses" },
-                  { value: "allow-bootloader", label: "allow-bootloader" },
-                  { value: "allow-spi-boot", label: "allow-spi-boot" },
-                  ...(activeProtocol === "fastboot" ? [{ value: "allow-unknown", label: t("devices.operationUnknownOverride"), description: t("devices.operationUnknownOverrideDescription") }] : []),
+                  ...flashOverrideChoices(activeProtocol).map((value) => (value === "allow-unknown"
+                    ? { value, label: t("devices.operationUnknownOverride"), description: t("devices.operationUnknownOverrideDescription") }
+                    : { value, label: value })),
                 ]}
               />
             )}

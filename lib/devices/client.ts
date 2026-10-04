@@ -30,6 +30,7 @@ import type { DeviceOperationManager, HardwareTransportLease, PageOperationBridg
 import { DeviceLeaseBook, type DeviceBorrowLease, type DeviceRawLease } from "./device-leases";
 import { QuietReadGate, assertQuietReadTimeout, isAbortError } from "./quiet-read";
 import { stableUsbIdentity, USB_REGRANT_MESSAGE } from "./usb-identity";
+import { pause } from "./pause";
 import { SessionConnectionPool, type RetainedSessionConnection } from "./session-connections";
 import { reconnectDelayMs } from "@/lib/stream-recovery";
 import { NO_CAPABILITIES, type BleServiceInfo, type BleTraceEvent, type DeviceActivity, type DeviceCapabilities, type DeviceClientFrame, type DeviceInfo, type DeviceKind, type DeviceOpName, type DeviceProtocolCandidate, type DeviceServerFrame, type UsbOpenResult } from "./protocol";
@@ -629,6 +630,8 @@ const DEFAULT_BAUD_RATE = 115_200;
 const DEFAULT_USB_IN_LENGTH = 64;
 /** Raw bridge reads must never wait indefinitely or outlive their exclusive reservation. */
 const DEFAULT_RAW_USB_IN_TIMEOUT_MS = 5_000;
+/** How long a reacquisition waits for the same USB device to appear again unless its caller sets a deadline. */
+const USB_REACQUIRE_WINDOW_MS = 30_000;
 
 function baudRateOf(value: number): number {
   if (!Number.isInteger(value) || value <= 0) throw new Error("baudRate must be a positive integer.");
@@ -1638,6 +1641,8 @@ export class DeviceBridgeConnection implements PageOperationBridge {
     const unsubscribe = watchDeviceLifecycle(id, {
       onGone: (reason) => {
         this.operationManager?.deviceDisconnected(id);
+        // The listener on the old handle is done: adoption registers a fresh one for the device that returns.
+        this.lifecycleUnsubs.get(id)?.();
         this.lifecycleUnsubs.delete(id);
         if (!deviceLeases.isBorrowed(id)) deviceLeases.releaseGoneDevice(id);
         this.send({ type: "gone", deviceId: id, reason });
@@ -1653,6 +1658,9 @@ export class DeviceBridgeConnection implements PageOperationBridge {
     try {
       const entry = registry.get(deviceId);
       if (!entry) throw new Error(`No such device: ${deviceId}. It may have been unplugged or disconnected.`);
+      // A granted USB device that left the bus and is back may not be adopted again yet (its
+      // connect event can be missed, or arrive after this call): look for it before giving up.
+      if (entry.kind === "usb" && entry.needsNewGrant) await this.adoptPermitted();
       if (entry.kind === "serial") return await this.borrowSerialTransport(entry, ownership);
       if (entry.kind === "usb") return await this.borrowUsbTransport(entry, ownership, options);
       throw new Error("Bluetooth devices cannot be borrowed as a byte transport.");
@@ -1662,10 +1670,11 @@ export class DeviceBridgeConnection implements PageOperationBridge {
     }
   }
 
-  async reacquireHardwareTransport(deviceId: string, identity: string, options: { interfaceNumber?: number; alternateSetting?: number; signal: AbortSignal }): Promise<HardwareTransportLease> {
+  async reacquireHardwareTransport(deviceId: string, identity: string, options: { interfaceNumber?: number; alternateSetting?: number; signal: AbortSignal; timeoutMs?: number }): Promise<HardwareTransportLease> {
     const initial = registry.get(deviceId);
     if (initial?.kind !== "usb" || initial.stableIdentity !== identity) throw new Error("USB recovery identity does not match the originally leased device.");
-    const deadline = Date.now() + 30_000;
+    const windowMs = options.timeoutMs ?? USB_REACQUIRE_WINDOW_MS;
+    const deadline = Date.now() + windowMs;
     while (Date.now() < deadline) {
       if (options.signal.aborted) throw cancelledError();
       await this.adoptPermitted();
@@ -1673,9 +1682,9 @@ export class DeviceBridgeConnection implements PageOperationBridge {
       if (current?.kind === "usb" && current.stableIdentity === identity && !current.invalidatedReason && !current.needsNewGrant) {
         return this.borrowHardwareTransport(deviceId, options);
       }
-      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      await pause(Math.min(100, Math.max(0, deadline - Date.now())), options.signal);
     }
-    throw new Error("The same USB device did not reappear within 30 seconds. Reconnect it and grant it again if its USB identity changed.");
+    throw new Error(`The same USB device did not reappear within ${Math.max(1, Math.round(windowMs / 1000))} seconds. Reconnect it and grant it again if its USB identity changed.`);
   }
   private async borrowSerialTransport(entry: SerialEntry, ownership: DeviceBorrowLease): Promise<HardwareTransportLease> {
     await stopSerialPump(entry);
@@ -1815,6 +1824,11 @@ export class DeviceBridgeConnection implements PageOperationBridge {
           if (result.bytesWritten !== bytes.byteLength) throw new Error(`USB control write was incomplete (${result.bytesWritten}/${bytes.byteLength} bytes).`);
         });
       },
+      reset: async (signal) => {
+        await ensureReady();
+        await runUsbAbortable(ready, signal, () => ready.device.reset());
+      },
+      connected: () => ready.device.opened,
     };
     let protocolTransport = transport;
     if (selectedAlternate?.interfaceClass === 0x0a && interfaceNumber !== undefined) {
@@ -1848,7 +1862,7 @@ export class DeviceBridgeConnection implements PageOperationBridge {
   }
 
   async disconnectDevice(id: string): Promise<void> {
-    await this.operationManager?.deviceDisconnected(id);
+    await this.operationManager?.deviceDisconnected(id, "forgotten");
     const rawLease = deviceLeases.claimForRawOperation(this.sessionId, id);
     try {
       this.lifecycleUnsubs.get(id)?.();

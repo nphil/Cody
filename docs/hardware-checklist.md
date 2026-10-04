@@ -117,6 +117,41 @@ item remains **UNVERIFIED** until its permitted evidence is completed.
 - [ ] **UNVERIFIED** An ESP32 user selects/uploads a test image through Cody,
   sees the exact confirmation/backup/readback evidence, and the console resumes
   exclusive ownership after flashing to capture the expected boot output.
+- [ ] **UNVERIFIED** `erase_region` on a recoverable board: the confirmation
+  shows the exact range and a backup reference; after approval the range reads
+  back blank (device MD5 and a `read_flash` of it), and restoring the backup
+  with `device_flash` returns the original bytes.
+- [ ] **UNVERIFIED** `erase_flash` is refused on a ROM-only connection, needs
+  `allow-spi-boot` (and `allow-fuses` on a chip with secure boot or flash
+  encryption burned), and never runs when the flash ID does not map to a
+  recognised size.
+- [ ] **UNVERIFIED** `efuse_summary` and `efuse_dump` agree with
+  `espefuse.py summary` / `dump` on the same board for each reviewed chip, and
+  key blocks never appear in the operation log.
+
+### Fastboot: large images, packages and staging
+
+- [ ] **UNVERIFIED** An image larger than the device's real `max-download-size`
+  is flashed as sparse pieces on a recoverable device: every `download:` is
+  within the limit, the bootloader accepts every piece, and the readback matches
+  the whole image. Record the limit the device reported and the piece count.
+- [ ] **UNVERIFIED** A bootloader that reports `max-download-size` in decimal
+  rather than `0x` hex is split the way `fastboot` splits it.
+- [ ] **UNVERIFIED** `update` with a real factory ZIP on a recoverable A/B
+  device: the requirements pass, only the current slot is written, the typed
+  `update:<hash>` approval is required, and each partition's readback matches.
+  A ZIP for another product is refused before any write.
+- [ ] **UNVERIFIED** `update` refuses logical partitions from the bootloader and
+  accepts them from fastbootd.
+- [ ] **UNVERIFIED** Cancelling an `update` (or pulling the cable) between and
+  during partitions, and during the last partition's readback, leaves the
+  operation's output naming each partition with its backup, which were written
+  and verified, the one possibly modified (with its backup id) and the
+  untouched ones, and nothing is written again; the named backup restores the
+  possibly modified partition.
+- [ ] **UNVERIFIED** `stage` followed by an OEM command that consumes staged
+  data, and `get_staged` after an OEM command that stages output, on a device
+  that supports `upload`.
 
 ### Fastboot
 
@@ -144,8 +179,16 @@ item remains **UNVERIFIED** until its permitted evidence is completed.
   reads every touched sector; it remains in DFU with no manifestation/reset
   before the readback hash matches.
 - [ ] **UNVERIFIED** The conservative whole-internal-flash `allow-bootloader`
-  confirmation is recorded. A generic bcdDFU `0x0110` device remains
-  detect/dump/exec only and refuses flash.
+  confirmation is recorded. A generic bcdDFU `0x0110` flash needs the typed
+  `allow-unknown` override, escrows the current image when the device can upload,
+  and is read back only when the device returns to DFU idle after manifesting.
+- [ ] **UNVERIFIED** `dfu reset` and DfuSe `leave ADDRESS` make a real device run
+  its application and re-enumerate, and the operation still ends as completed
+  (UNVERIFIED), not cancelled, although the browser reports the disconnect. A
+  plain DFU image whose device leaves the bus while it manifests is likewise an
+  unverified write, and a `leave` the device answers with a DFU error status
+  fails because the device did not leave. Record the new USB identity and
+  whether a fresh grant was needed.
 - [ ] **UNVERIFIED** Device recovery/re-enumeration is recorded after refusal,
   test flash, and restore.
 
@@ -199,6 +242,37 @@ item remains **UNVERIFIED** until its permitted evidence is completed.
   file and local source have matching SHA-256.
 - [ ] **UNVERIFIED** Switching Cody sessions during that 100 MB+ transfer does
   not resume or complete the original operation in the new session.
+
+### ADB install, adbd restarts and wait-for-device
+
+- [ ] **UNVERIFIED** `device_install` of a real debug APK on a recoverable
+  device: the confirmation shows the digest and the `pm install` command line;
+  the app appears; `/data/local/tmp` holds no `cody-install-*` file or
+  `.cody-adb-stage-*` directory afterwards. A downgrade without `-d` and a
+  reinstall without `-r` fail with the package manager's own message.
+- [ ] **UNVERIFIED** Cancel while `pm install` of a large debug APK is running
+  ends the wait at once; `/data/local/tmp` holds no `cody-install-*` file or
+  `.cody-adb-stage-*` directory afterwards, the operation says the package
+  manager may still finish installing, and the device can be used again
+  immediately. Also cancel while the device is silent: after the cable is
+  pulled and replugged mid-copy (the replacement connection waiting for the
+  RSA prompt), and with the device frozen so it never answers the stream
+  `pm install` opens; Cancel ends the install within about 10 s and the device
+  is released. Record whether the app was installed anyway.
+- [ ] **UNVERIFIED** `adb root` on a userdebug build restarts adbd and the
+  operation reconnects and reports `service.adb.root` 1; the same request on a
+  production build is refused with adbd's message. `unroot` returns it.
+- [ ] **UNVERIFIED** `tcpip 5555` makes `adb connect <device>:5555` work from a
+  PC on the same network and `usb` turns that legacy listener off (the same
+  `adb connect` is refused); record whether the USB identity changed and whether
+  a fresh grant was needed. With Wireless debugging switched ON in Developer
+  options, `usb` must report `verified: false` ("not USB-only") and a paired PC
+  can still connect over TLS; switched OFF, `usb` verifies.
+- [ ] **UNVERIFIED** `wait-for-device` started while the device reboots (after
+  `device_exec` reboot) returns once adbd answers, even though the browser
+  reports the device leaving and returning (same USB identity); with the cable
+  pulled it ends at its timeout; Cancel ends it at once, also while the browser
+  is still opening the device.
 
 ### ADB port forward and reverse
 

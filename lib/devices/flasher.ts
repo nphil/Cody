@@ -4,7 +4,7 @@ import type { TunnelChannel } from "./tunnel";
  * not a fresh connection per packet. Implementations must never retry writes
  * implicitly: a lost acknowledgement makes completion unknown. */
 export type HardwareProtocol = "esp" | "adb" | "fastboot" | "gecko" | "stm32" | "stk500" | "dfu" | "serial";
-export type HardwareAction = "detect" | "flash" | "dump" | "exec" | "push" | "pull" | "monitor" | "sideload" | "verify" | "forward" | "reverse";
+export type HardwareAction = "detect" | "flash" | "dump" | "exec" | "push" | "pull" | "monitor" | "sideload" | "verify" | "forward" | "reverse" | "install";
 
 export interface HardwareRequest {
   protocol: HardwareProtocol;
@@ -38,6 +38,10 @@ export interface HardwareTransport {
   setSignals?(signals: { dtr?: boolean; rts?: boolean; brk?: boolean }, signal?: AbortSignal): Promise<void>;
   controlIn?(setup: USBControlTransferParameters, length: number, signal: AbortSignal): Promise<Uint8Array>;
   controlOut?(setup: USBControlTransferParameters, bytes: Uint8Array, signal: AbortSignal): Promise<void>;
+  /** USB port reset (`dfu-util -R`); the device may re-enumerate. */
+  reset?(signal: AbortSignal): Promise<void>;
+  /** Browser bridge observation after a reset failure. False proves a disconnect. */
+  connected?(): boolean;
   /** esptool-js owns the reader while borrowed; the console pump is suspended. */
   serialPort?: SerialPort;
   interfaceNumber?: number;
@@ -75,8 +79,28 @@ export interface HardwareContext {
   /** Produces a session-scoped downloadable file and returns its opaque id. */
   save: (name: string, data: Blob) => Promise<string>;
   saveStream?: (name: string, chunks: AsyncIterable<Uint8Array>) => Promise<StreamArtifact>;
-  /** Explicit recovery after the caller verified a safe resume point. It never retries a write. */
-  reacquireTransport?: () => Promise<HardwareTransport>;
+  /**
+   * Explicit recovery after the caller verified a safe resume point. It never
+   * retries a write. `deadline` (an absolute time) bounds how long the same
+   * device is awaited, opening it included: a provider that is slow to open the
+   * device is not waited for past it. Without one the runner applies its own
+   * limit. Cancelling the operation ends the wait at once.
+   */
+  reacquireTransport?: (options?: { deadline?: number }) => Promise<HardwareTransport>;
+  /**
+   * For an operation that is about to make the device leave the USB bus on
+   * purpose (an adbd restart, a DFU manifestation, leave or reset): the runner
+   * must not treat that one disconnect as a reason to cancel the operation.
+   * Returns a function that ends the exception; it also ends by itself after
+   * `windowMs`. An operation whose device may be reported gone only after the
+   * operation has returned (the browser's disconnect event can trail the transfer
+   * that failed) leaves the window to expire instead of closing it. Shell access
+   * is revoked by the disconnect all the same, only the same device identity may
+   * come back, and a disconnect the user makes on purpose still cancels.
+   */
+  expectDeviceRestart?: (windowMs: number) => () => void;
+  /** The absolute time at which a bounded wait gives up, counted from when the operation began waiting (so it covers lease acquisition). */
+  deadline?: number;
   /** The durable operation running this protocol: identity for relay rules. */
   operation?: { id: string; deviceId: string };
   /** Browser-to-server relay for port forwarding; absent when no relay is attached. */
