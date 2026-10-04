@@ -39,6 +39,10 @@ import type {
 
 import { TunnelHost } from "./tunnel-host";
 
+/** How long, and how many, devices that left the page stay addressable for a wait-for-device. */
+const DEPARTED_RETENTION_MS = 15 * 60_000;
+const DEPARTED_MAX = 16;
+
 type Sender = (frame: DeviceServerFrame) => void;
 
 /** Cody's own listener: a reverse rule must never let a device reach it. */
@@ -198,6 +202,17 @@ export class DeviceBridge {
   /** Byte/op accounting per device, kept across a device's whole grant. */
   private activity = new Map<string, ActivityRecord>();
 
+  /**
+   * Devices that left the page (unplugged, rebooting, re-enumerating) and may
+   * come back, by id. The page reported a granted device in its roster and then
+   * said it was gone; that is the only way an id gets here, so `wait-for-device`
+   * can address a device that is absent right now without any other unlisted id
+   * becoming valid. A device the user disconnects on purpose never enters, and
+   * one that reappears in the roster leaves. The page still validates the id
+   * against its own grants when the wait reaches it.
+   */
+  private departed = new Map<string, { info: DeviceInfo; at: number }>();
+
   /** Bounded replayable summaries from the page operation manager. */
   private operations = new Map<string, DeviceOperationSnapshot>();
   private operationListeners = new Set<(snapshot: DeviceOperationSnapshot, event?: OperationEvent) => void>();
@@ -245,6 +260,8 @@ export class DeviceBridge {
       this.failAllPending("Device host authority was replaced by another browser page.");
       this.tunnels.closeAll("Device host authority was replaced by another browser page.");
       this.markOperationsCompletionUnknown("Device host authority was replaced before operation completion.");
+      // Another page has its own grants: ids remembered from the old one mean nothing there.
+      this.departed.clear();
       previousRevoke();
     }
     this.notify();
@@ -306,7 +323,10 @@ export class DeviceBridge {
 
   setDevices(devices: DeviceInfo[]): void {
     const next = new Map<string, DeviceInfo>();
-    for (const device of devices) next.set(device.id, device);
+    for (const device of devices) {
+      next.set(device.id, device);
+      this.departed.delete(device.id);
+    }
     this.devices = next;
     for (const id of [...this.buffers.keys()]) {
       if (!next.has(sourceDevice(id))) this.buffers.delete(id);
@@ -317,7 +337,24 @@ export class DeviceBridge {
     this.notify();
   }
 
+  /** The last roster entry of a device that left the page and may return, by exact id; undefined for any other id. */
+  departedDevice(deviceId: string): DeviceInfo | undefined {
+    const entry = this.departed.get(deviceId);
+    if (!entry) return undefined;
+    if (Date.now() - entry.at > DEPARTED_RETENTION_MS) {
+      this.departed.delete(deviceId);
+      return undefined;
+    }
+    return { ...entry.info };
+  }
+
   removeDevice(deviceId: string): void {
+    const known = this.devices.get(deviceId);
+    if (known) {
+      this.departed.delete(deviceId);
+      this.departed.set(deviceId, { info: known, at: Date.now() });
+      while (this.departed.size > DEPARTED_MAX) this.departed.delete(this.departed.keys().next().value!);
+    }
     this.devices.delete(deviceId);
     for (const key of [...this.buffers.keys()]) {
       if (sourceDevice(key) === deviceId) this.buffers.delete(key);

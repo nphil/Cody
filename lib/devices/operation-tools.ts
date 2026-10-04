@@ -34,11 +34,14 @@ function operationError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function resolveDeviceId(args: DeviceOperationToolArgs, bridge: DeviceBridge): { deviceId: string } | { error: string } {
+function resolveDeviceId(args: DeviceOperationToolArgs, bridge: DeviceBridge, options: { allowDeparted?: boolean } = {}): { deviceId: string } | { error: string } {
   const query = stringArg(args, "device");
   const match = matchDevice(bridge.list(), query);
   if (match.kind === "one") return { deviceId: match.device.id };
   if (!bridge.attached) return { error: "No browser is attached to this session. Open Cody's Devices panel and connect a device." };
+  // Only a wait-for-device may name a device that is absent right now (it is rebooting or
+  // re-enumerating), and only by the exact id this session was granted it under.
+  if (options.allowDeparted && query && bridge.departedDevice(query)) return { deviceId: query };
   if (match.kind === "many") return { error: `Multiple devices match ${query ? `"${query}"` : "this request"}; pass an exact device id.` };
   return { error: query ? `No device matches "${query}".` : "Pass the exact device id from device_list." };
 }
@@ -63,7 +66,8 @@ function requestFor(
   args: DeviceOperationToolArgs,
   bridge: DeviceBridge,
 ): DeviceOperationRequest | string {
-  const device = resolveDeviceId(args, bridge);
+  const waitsForDevice = action === "exec" && stringArg(args, "protocol") === "adb" && isRecord(args.options) && args.options.kind === "wait-for-device";
+  const device = resolveDeviceId(args, bridge, { allowDeparted: waitsForDevice });
   if ("error" in device) return device.error;
   const protocol = stringArg(args, "protocol") ?? (action === "forward" || action === "reverse" ? "adb" : undefined);
   if (!protocol || !PROTOCOLS[protocol as HardwareProtocol]) return "protocol must be one of esp, adb, fastboot, gecko, stm32, stk500, dfu, or serial.";
@@ -87,7 +91,8 @@ function requestFor(
     return action + " requires a session artifact and its exact SHA-256 digest.";
   }
   if (action === "verify" && (!sha256 || !length || !target)) return "verify requires target, length, and the expected raw-image SHA-256.";
-  const descriptorCandidates = bridge.list().find((entry) => entry.id === device.deviceId)?.protocolCandidates
+  const known = bridge.list().find((entry) => entry.id === device.deviceId) ?? bridge.departedDevice(device.deviceId);
+  const descriptorCandidates = known?.protocolCandidates
     ?.filter((candidate) => candidate.protocol === protocol) ?? [];
   if (interfaceNumber === undefined && descriptorCandidates.length === 1) {
     interfaceNumber = descriptorCandidates[0].interfaceNumber;
@@ -314,7 +319,7 @@ export const DEVICE_OPERATION_TOOLS: DeviceOperationToolDefinition[] = [
   startDefinition("device_detect", "detect", "Start a browser-hosted protocol detection operation."),
   startDefinition("device_flash", "flash", "Start browser-hosted flashing. Writes pause for direct confirmation with exact target, hash and backup status. Fastboot without fetch can write after an UNVERIFIED warning; verify in ADB recovery afterwards. Protected destinations require an exact typed override."),
   startDefinition("device_dump", "dump", "Start a device dump or backup operation; resulting bytes remain a session-owned browser artifact."),
-  startDefinition("device_exec", "exec", "Run a protocol command with streamed output. ADB arbitrary shell requires the user's connection-scoped shell grant in Devices; without it only id, uname -a, df -h, getprop [ro.*] work. Other state-changing commands require exact browser confirmation. ADB also takes options.kind: reverse-list (adb reverse --list), reverse-remove with target tcp:PORT, or reverse-remove-all; these need no command. ADB options.kind root, unroot, tcpip (with options.port), and usb restart adbd; the connection drops and the operation reconnects and checks. options.kind wait-for-device waits for the device to be online (options.timeoutSeconds 1-600, options.state device, recovery, or sideload). ESP takes esptool-style commands: chip_id, read_mac, flash_id, get_security_info, efuse_summary, efuse_dump (read-only), and erase_flash / erase_region ADDRESS SIZE (backs the range up first, then needs the user's typed override). Fastboot also takes stage and get_staged, and update / flashall with a package ZIP as the artifact. DFU takes abort, clear_status, reset, and leave ADDRESS (DfuSe).", ["device", "protocol"]),
+  startDefinition("device_exec", "exec", "Run a protocol command with streamed output. ADB arbitrary shell requires the user's connection-scoped shell grant in Devices; without it only id, uname -a, df -h, getprop [ro.*] work. Other state-changing commands require exact browser confirmation. ADB also takes options.kind: reverse-list (adb reverse --list), reverse-remove with target tcp:PORT, or reverse-remove-all; these need no command. ADB options.kind root, unroot, tcpip (with options.port), and usb restart adbd; the device usually leaves the USB bus and the operation keeps running through that one disconnect, takes the SAME device (same USB identity) again, and checks what the device itself reports (tcpip and usb check adbd's effective listeners, which fixed service.adb.listen_addrs can override, and say so when they do); options.timeoutSeconds 1-300 bounds how long it waits for the device to come back. Shell access is revoked by the disconnect, so the user must grant it again afterwards. options.kind wait-for-device waits for the device to be online (options.timeoutSeconds 1-600 covers connecting, approval of the RSA prompt and every reconnect; options.state device, recovery, or sideload); it can be started while the device is absent (rebooting) by the exact id it had before, and it only ever waits for that same device. ESP takes esptool-style commands: chip_id, read_mac, flash_id, get_security_info, efuse_summary, efuse_dump (read-only), and erase_flash / erase_region ADDRESS SIZE (backs the range up first, then needs the user's typed override). Fastboot also takes stage and get_staged, and update / flashall with a package ZIP as the artifact. DFU takes abort, clear_status, reset, and leave ADDRESS (DfuSe).", ["device", "protocol"]),
   startDefinition("device_push", "push", "Start a resumable protocol file push using a session artifact."),
   startDefinition("device_pull", "pull", "Start a protocol file pull; output remains a session-owned browser artifact."),
   startDefinition("device_sideload", "sideload", "Serve a session artifact to ADB recovery sideload. Requires direct approval; transfer completion does not verify installation."),

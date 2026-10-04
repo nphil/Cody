@@ -79,8 +79,23 @@ export interface HardwareContext {
   /** Produces a session-scoped downloadable file and returns its opaque id. */
   save: (name: string, data: Blob) => Promise<string>;
   saveStream?: (name: string, chunks: AsyncIterable<Uint8Array>) => Promise<StreamArtifact>;
-  /** Explicit recovery after the caller verified a safe resume point. It never retries a write. */
-  reacquireTransport?: () => Promise<HardwareTransport>;
+  /**
+   * Explicit recovery after the caller verified a safe resume point. It never
+   * retries a write. `deadline` (an absolute time) bounds how long the same
+   * device is awaited; without one the runner applies its own limit.
+   */
+  reacquireTransport?: (options?: { deadline?: number }) => Promise<HardwareTransport>;
+  /**
+   * For an operation that is about to make the device restart its own daemon: the
+   * device will leave the USB bus on purpose, so the runner must not treat that
+   * one disconnect as a reason to cancel this operation. Returns a function that
+   * ends the exception; it also ends by itself after `windowMs`. Shell access is
+   * revoked by the disconnect all the same, and only the same device identity may
+   * come back.
+   */
+  expectDeviceRestart?: (windowMs: number) => () => void;
+  /** The absolute time at which a bounded wait gives up, counted from when the operation began waiting (so it covers lease acquisition). */
+  deadline?: number;
   /** The durable operation running this protocol: identity for relay rules. */
   operation?: { id: string; deviceId: string };
   /** Browser-to-server relay for port forwarding; absent when no relay is attached. */
