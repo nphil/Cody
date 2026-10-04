@@ -2277,9 +2277,22 @@ as expanded-image hashes.
   not upload downgrades to the UNVERIFIED warning. `exec` also takes `reset`
   (USB reset through `HardwareTransport.reset`; a failed reset is an error
   unless `HardwareTransport.connected()` shows the device left the bus) and, for
-  DfuSe, `leave ADDRESS`. The Devices form offers `allow-unknown` for DFU
-  through `flashOverrideChoices` (ui-model.ts). No caller descriptor option
-  creates a capability.
+  DfuSe, `leave ADDRESS` (`DfuSession.leave` validates the GETSTATUS that follows:
+  an explicit DFU error, a reply that is not a six-byte status, or a failed read
+  while the device is still connected is an error; only a device that left the
+  bus may stay silent). Manifestation, leave and reset make the device leave the
+  bus on purpose, and the browser reports that as a disconnect that would cancel
+  the operation: each opens `context.expectDeviceRestart(DFU_DEPARTURE_WINDOW_MS)`
+  just before the transfer that causes it (the zero-length block, the leaving
+  download, the reset). Only an idle (tolerant) device ends the window; every
+  other path leaves it to expire, because the browser's `disconnect` event can
+  trail the transfer that failed and arrive while the operation is finishing.
+  A disconnect during the download blocks and the user's Disconnect still
+  cancel. Real-route tests: `dfu-browser-lifecycle.test.mjs`
+  (`fakeUsbDfuDevice` in `usb-dfu.test-helper.mjs` over `fakeDfuDevice`, whose
+  `onDeparture` hook tells the fake browser the device left). The Devices form
+  offers `allow-unknown` for DFU through `flashOverrideChoices` (ui-model.ts).
+  No caller descriptor option creates a capability.
 - **ADB:** detection, shell/PTY, push, pull/dump, recovery sideload and raw-image
   readback verification use Cody's persistent browser IndexedDB RSA credential.
   Without a shell grant only literal diagnostics are available; a user-granted

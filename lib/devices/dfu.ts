@@ -6,6 +6,12 @@ const MAX_STATUS_POLLS = 1_024;
 const MAX_ARTIFACT_BYTES = 512 * 1024 * 1024;
 /** A DFU device that never ends an UPLOAD is not given more than this for a backup or readback. */
 const MAX_IMAGE_BACKUP_BYTES = 64 * 1024 * 1024;
+/**
+ * How long a device may take to leave the bus once a manifestation, leave or reset has been
+ * asked of it. The browser reports that departure as a disconnect, which would otherwise
+ * cancel the very operation that caused it; the window is that exception, and it is bounded.
+ */
+const DFU_DEPARTURE_WINDOW_MS = 30_000;
 const DFU_CAN_DOWNLOAD = 0x01;
 const DFU_CAN_UPLOAD = 0x02;
 const DFU_MANIFESTATION_TOLERANT = 0x04;
@@ -377,8 +383,8 @@ class DfuSession {
     throw new DfuProtocolError("The upload exceeded the 16-bit block range.");
   }
 
-  /** DFU_DNLOAD of every block (numbered from 0, each polled to dfuDNLOAD-IDLE), then the zero-length block that starts manifestation. */
-  async downloadImage(image: Blob): Promise<void> {
+  /** DFU_DNLOAD of every block (numbered from 0, each polled to dfuDNLOAD-IDLE). Returns the number of the zero-length block that starts manifestation. */
+  async downloadBlocks(image: Blob): Promise<number> {
     await this.requireIdle();
     const size = this.metadata.descriptor.transferSize;
     let block = 0;
@@ -388,6 +394,11 @@ class DfuSession {
       await this.waitDownloadIdle();
       this.context.progress({ phase: "write", completed: Math.min(offset + size, image.size), total: image.size });
     }
+    return block;
+  }
+
+  /** The zero-length DFU_DNLOAD block: manifestation starts, and the device may leave the bus. */
+  async startManifestation(block: number): Promise<void> {
     await this.transport.controlOut(this.setup(DfuRequest.DNLOAD, block), new Uint8Array(0), this.context.signal);
   }
 
@@ -410,14 +421,30 @@ class DfuSession {
     return "idle";
   }
 
-  /** DfuSe leave: the zero-length download that makes the device exit DFU (dfu-util sends it as block 2). */
-  async leave(): Promise<void> {
+  /**
+   * DfuSe leave: the zero-length download that makes the device exit DFU (dfu-util
+   * sends it as block 2), then one GETSTATUS. A device that has already left cannot
+   * answer it, and that is the only silence accepted: an explicit DFU error, or a
+   * reply that is not a DFU status, means the device did not do what was asked.
+   * Returns what the device answered, or undefined when it had left the bus.
+   */
+  async leave(): Promise<DfuStatus | undefined> {
     await this.transport.controlOut(this.setup(DfuRequest.DNLOAD, 2), new Uint8Array(0), this.context.signal);
+    let status: DfuStatus;
     try {
-      await this.status();
-    } catch {
+      status = await this.status();
+    } catch (error) {
       throwIfAborted(this.context.signal);
+      // A reply that is not a DFU status is the device answering, wrongly.
+      if (error instanceof DfuProtocolError) throw error;
+      // Anything else is the device leaving only if the browser bridge can see that it left.
+      if (this.context.transport.connected?.() !== false) {
+        throw new DfuProtocolError(`The device accepted the leave request but then failed to answer DFU_GETSTATUS while still connected: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      return undefined;
     }
+    if (status.status !== "OK" || status.state === "dfuERROR") statusFailure(status);
+    return status;
   }
 
   /** Returns a device left in dfuERROR or mid-transfer by a refused upload to dfuIDLE. */
@@ -546,7 +573,11 @@ async function flashDfu11(request: HardwareRequest, metadata: DfuMetadata, conte
       "Cody does not reset the device afterwards; use dfu reset when you want it to run the new firmware.",
     ].join(" "),
   });
-  await session.downloadImage(input);
+  const manifestBlock = await session.downloadBlocks(input);
+  // From the next transfer on the device may leave the bus, and the browser reports that as a disconnect: expected, not a cancel. An
+  // operation that ends with the device gone leaves the window to expire (the report can trail it); one that finds the device idle ends it.
+  const departure = context.expectDeviceRestart?.(DFU_DEPARTURE_WINDOW_MS);
+  await session.startManifestation(manifestBlock);
   let manifestation: "idle" | "restarting" | "disconnected";
   try {
     manifestation = await session.manifest(tolerant);
@@ -555,6 +586,7 @@ async function flashDfu11(request: HardwareRequest, metadata: DfuMetadata, conte
     if (error instanceof DfuProtocolError) throw error;
     manifestation = "disconnected";
   }
+  if (manifestation === "idle") departure?.();
   let readback: Uint8Array<ArrayBuffer> | undefined;
   let verification: string;
   if (manifestation !== "idle") {
@@ -644,8 +676,14 @@ async function leaveDfuSe(metadata: DfuMetadata, context: HardwareContext, addre
   await session.requireIdle();
   await session.addressCommand(0x21, address);
   await session.abort();
-  await session.leave();
-  return { summary: `DFU leave requested at 0x${address.toString(16)}; the device should start its application and re-enumerate.`, verified: false, details: { address } };
+  // The leaving download makes the device exit DFU and re-enumerate; the browser reporting that is expected, so the window is left to expire.
+  context.expectDeviceRestart?.(DFU_DEPARTURE_WINDOW_MS);
+  const answered = await session.leave();
+  return {
+    summary: `DFU leave requested at 0x${address.toString(16)}; the device should start its application and re-enumerate.`,
+    verified: false,
+    details: { address, status: answered?.status ?? null, state: answered?.state ?? null, leftTheBusBeforeAnswering: answered === undefined },
+  };
 }
 
 async function resetDevice(metadata: DfuMetadata, context: HardwareContext): Promise<HardwareResult> {
@@ -658,6 +696,8 @@ async function resetDevice(metadata: DfuMetadata, context: HardwareContext): Pro
     details: "Issue a USB reset (dfu-util -R). A DFU bootloader normally restarts and runs the application; the device re-enumerates and Cody's connection to it ends.",
   });
   throwIfAborted(context.signal);
+  // The reset re-enumerates the device; the browser reporting that is expected, so the window is left to expire.
+  context.expectDeviceRestart?.(DFU_DEPARTURE_WINDOW_MS);
   let note = "The USB reset completed.";
   try {
     await reset.call(context.transport, context.signal);

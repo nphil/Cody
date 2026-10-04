@@ -177,8 +177,12 @@ item remains **UNVERIFIED** until its permitted evidence is completed.
   `allow-unknown` override, escrows the current image when the device can upload,
   and is read back only when the device returns to DFU idle after manifesting.
 - [ ] **UNVERIFIED** `dfu reset` and DfuSe `leave ADDRESS` make a real device run
-  its application and re-enumerate; record the new USB identity and whether a
-  fresh grant was needed.
+  its application and re-enumerate, and the operation still ends as completed
+  (UNVERIFIED), not cancelled, although the browser reports the disconnect. A
+  plain DFU image whose device leaves the bus while it manifests is likewise an
+  unverified write, and a `leave` the device answers with a DFU error status
+  fails because the device did not leave. Record the new USB identity and
+  whether a fresh grant was needed.
 - [ ] **UNVERIFIED** Device recovery/re-enumeration is recorded after refusal,
   test flash, and restore.
 
