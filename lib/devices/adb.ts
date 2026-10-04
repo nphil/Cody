@@ -1402,51 +1402,97 @@ function restartWindowMs(request: HardwareRequest): number {
   return seconds * 1000;
 }
 
-const ADBD_LISTENER_PROPERTIES = ["service.adb.listen_addrs", "service.adb.tcp.port", "persist.adb.tcp.port"] as const;
+/** The properties that decide what adbd listens on: the legacy TCP listener (`adb tcpip`) and, independently, Wireless debugging's TLS listener. */
+const ADBD_LISTENER_PROPERTIES = [
+  "service.adb.listen_addrs",
+  "service.adb.tcp.port",
+  "persist.adb.tcp.port",
+  "persist.adb.tls_server.enable",
+  "service.adb.tls.port",
+] as const;
 export type AdbListenerProperties = Readonly<Record<(typeof ADBD_LISTENER_PROPERTIES)[number], string>>;
 
 export interface AdbTcpListeners {
-  /** The three properties adbd reads, as the device reports them ("" when unset). */
+  /** The properties adbd's listeners follow, as the device reports them ("" when unset). */
   readonly properties: AdbListenerProperties;
-  /** What adbd listens on over TCP once it has started, and which property says so; undefined means USB only. */
-  readonly effective?: { readonly source: keyof AdbListenerProperties; readonly addresses: readonly string[] };
+  /** What the legacy listener (`adb tcpip`) will be on once adbd has started, and which property says so; undefined means there is none. */
+  readonly effective?: { readonly source: "service.adb.listen_addrs" | "service.adb.tcp.port" | "persist.adb.tcp.port"; readonly addresses: readonly string[] };
+  /**
+   * Wireless debugging: a SEPARATE TLS listener, controlled from Developer options, that
+   * `adb usb` does not touch and that computers paired with the device can reach over the
+   * network. Present when the switch (`persist.adb.tls_server.enable`) is on or adbd
+   * published the port it listens on (`service.adb.tls.port`); undefined when neither says so.
+   */
+  readonly wireless?: { readonly source: "persist.adb.tls_server.enable" | "service.adb.tls.port"; readonly port?: number };
+}
+
+/** A port counts when it parses (as sscanf %d does) to more than zero. */
+function listenerPort(value: string): number | undefined {
+  const port = Number.parseInt(value.trim(), 10);
+  return Number.isInteger(port) && port > 0 ? port : undefined;
 }
 
 /**
- * What adbd will listen on, in adbd's own order (AOSP adb/daemon/main.cpp):
- * fixed `service.adb.listen_addrs` win outright; otherwise `service.adb.tcp.port`
- * when it is set at all - even to "0", which is how `adb usb` overrides a
- * persisted port - and `persist.adb.tcp.port` only when it is not. A port counts
- * when it parses (as sscanf %d does) to more than zero. The SDK's
- * getListenAddresses() folds "" and "0" together and cannot tell those apart.
+ * What adbd will listen on. The legacy listener follows adbd's own order (AOSP
+ * adb/daemon/main.cpp): fixed `service.adb.listen_addrs` win outright; otherwise
+ * `service.adb.tcp.port` when it is set at all - even to "0", which is how `adb usb`
+ * overrides a persisted port - and `persist.adb.tcp.port` only when it is not. The
+ * SDK's getListenAddresses() folds "" and "0" together and cannot tell those apart.
+ * Wireless debugging is independent of all of that (AOSP docs/dev/adb_wifi.md):
+ * `adb usb` leaves it running, so it is reported on its own.
  */
 export function adbTcpListeners(properties: AdbListenerProperties): AdbTcpListeners {
+  const tlsPort = listenerPort(properties["service.adb.tls.port"]);
+  const wireless: AdbTcpListeners["wireless"] = tlsPort !== undefined
+    ? { source: "service.adb.tls.port", port: tlsPort }
+    : properties["persist.adb.tls_server.enable"].trim() === "1" ? { source: "persist.adb.tls_server.enable" } : undefined;
   const fixed = properties["service.adb.listen_addrs"].trim();
-  if (fixed) return { properties, effective: { source: "service.adb.listen_addrs", addresses: fixed.split(",").map((address) => address.trim()).filter(Boolean) } };
+  if (fixed) return { properties, wireless, effective: { source: "service.adb.listen_addrs", addresses: fixed.split(",").map((address) => address.trim()).filter(Boolean) } };
   const service = properties["service.adb.tcp.port"].trim();
   const source = service ? "service.adb.tcp.port" : "persist.adb.tcp.port";
-  const port = Number.parseInt(service || properties["persist.adb.tcp.port"].trim(), 10);
-  return Number.isInteger(port) && port > 0 ? { properties, effective: { source, addresses: [`tcp:${port}`] } } : { properties };
+  const port = listenerPort(service || properties["persist.adb.tcp.port"]);
+  return port !== undefined ? { properties, wireless, effective: { source, addresses: [`tcp:${port}`] } } : { properties, wireless };
 }
 
 async function readTcpListeners(adb: Adb): Promise<AdbTcpListeners> {
   const values: string[] = [];
   for (const name of ADBD_LISTENER_PROPERTIES) values.push(await adb.getProp(name));
-  return adbTcpListeners({ "service.adb.listen_addrs": values[0]!, "service.adb.tcp.port": values[1]!, "persist.adb.tcp.port": values[2]! });
+  const [fixed, service, persisted, tlsEnabled, tlsPort] = values as [string, string, string, string, string];
+  return adbTcpListeners({ "service.adb.listen_addrs": fixed, "service.adb.tcp.port": service, "persist.adb.tcp.port": persisted, "persist.adb.tls_server.enable": tlsEnabled, "service.adb.tls.port": tlsPort });
 }
 
 function describeListeners({ effective }: AdbTcpListeners): string {
   return effective ? `${effective.addresses.join(", ")} (from ${effective.source})` : "no TCP listener";
 }
 
-/** Why the device is not in the requested TCP/USB mode, from what adbd will really listen on; undefined when it is. */
+function describeWireless(wireless: NonNullable<AdbTcpListeners["wireless"]>): string {
+  return wireless.port !== undefined ? `Wireless debugging is on (TLS port ${wireless.port})` : "Wireless debugging is on (persist.adb.tls_server.enable=1)";
+}
+
+/**
+ * Why the device is not in the requested TCP/USB mode, from what adbd will really listen on;
+ * undefined when it is. USB mode means no way in over the network: the legacy listener is
+ * off AND Wireless debugging, which `adb usb` does not switch off, is not running.
+ */
 function listenerProblem(kind: "tcpip" | "usb", port: number | undefined, listeners: AdbTcpListeners): string | undefined {
-  const { effective } = listeners;
-  if (kind === "usb") return effective ? `the device still listens on TCP: ${describeListeners(listeners)}` : undefined;
+  const { effective, wireless } = listeners;
+  if (kind === "usb") {
+    if (effective) return `the device still listens on TCP: ${describeListeners(listeners)}${wireless ? `, and ${describeWireless(wireless)}` : ""}`;
+    return wireless
+      ? `the legacy TCP/IP listener is off, but ${describeWireless(wireless)}, so computers paired with the device can still connect to it over the network and it is not USB-only. Cody cannot switch Wireless debugging off; it is the toggle in Developer options`
+      : undefined;
+  }
   if (effective?.addresses.includes(`tcp:${port}`)) return undefined;
   return effective?.source === "service.adb.listen_addrs"
     ? `its fixed listener addresses ${describeListeners(listeners)} override the port adb tcpip sets, and tcp:${port} is not among them`
     : `the device reports ${describeListeners(listeners)}, not tcp:${port}`;
+}
+
+/** What the approval for `adb usb` says about Wireless debugging, so nobody approves it believing it makes the device USB-only when it cannot. */
+function usbApprovalNote(before: AdbTcpListeners | undefined): string {
+  if (before?.wireless) return `${describeWireless(before.wireless)} and adb usb does not switch it off, so computers paired with this device can still connect over the network afterwards; turn it off in Developer options for a USB-only device.`;
+  const separate = "Wireless debugging is a separate TLS listener that adb usb does not change";
+  return before ? `${separate}, and it is off now.` : `${separate}, and it could not be read: if it is on, computers paired with this device can still connect over the network afterwards.`;
 }
 
 /** Fixed listener addresses beat every port adbd can be told, so no restart can reach the requested state. */
@@ -1500,16 +1546,17 @@ async function restartAdbd(kind: "root" | "unroot" | "tcpip" | "usb", request: H
     port = raw;
     service = `tcpip:${port}`;
   }
+  let before: AdbTcpListeners | undefined;
   if (kind === "tcpip" || kind === "usb") {
     // Refuse before asking for approval or touching the device when no restart can work.
-    const before = await readTcpListeners(adb).catch(() => { context.signal.throwIfAborted(); return undefined; });
+    before = await readTcpListeners(adb).catch(() => { context.signal.throwIfAborted(); return undefined; });
     const conflict = before && fixedListenerConflict(kind, port, before);
     if (conflict) throw new AdbProtocolError(`adb ${kind === "tcpip" ? `tcpip ${port}` : "usb"} cannot do what it says on this device: ${conflict}. Nothing was changed.`);
   }
   const effects = {
     root: "Restart adbd with root privileges. The ADB connection drops and Cody reconnects. Only debuggable builds allow it.",
     unroot: "Restart adbd without root privileges. The ADB connection drops and Cody reconnects.",
-    usb: "Restart adbd in USB mode, turning TCP/IP listening off. The ADB connection drops and Cody reconnects.",
+    usb: `Restart adbd in USB mode, turning the legacy TCP/IP listener (adb tcpip) off. The ADB connection drops and Cody reconnects. ${usbApprovalNote(before)}`,
     tcpip: `Restart adbd listening for TCP/IP on port ${port}. The ADB connection drops and Cody reconnects. A browser cannot open raw TCP, so Cody keeps using USB: this is for a PC on the network that will run adb connect to the device.`,
   };
   await context.confirm({ action: `adb.${kind}`, target: service, backup: "not applicable: no device storage is written", details: effects[kind] });
@@ -1552,10 +1599,13 @@ async function restartAdbd(kind: "root" | "unroot" | "tcpip" | "usb", request: H
     const outcome = await reconnectAndRead(context, deadline, readTcpListeners);
     if ("failure" in outcome) return unreachable(outcome.failure);
     const problem = listenerProblem(kind, port, outcome.value);
+    const { effective, wireless } = outcome.value;
     return {
-      summary: problem ? `adbd restarted (${kind}) but the reconnected device does not report the requested state: ${problem}.` : `adbd restarted (${kind}) and the reconnected device confirms it: ${describeListeners(outcome.value)}.`,
+      summary: problem
+        ? `adbd restarted (${kind}) but the reconnected device does not report the requested state: ${problem}.`
+        : `adbd restarted (${kind}) and the reconnected device confirms it: ${kind === "usb" ? "no legacy TCP listener, and Wireless debugging is off" : describeListeners(outcome.value)}.`,
       verified: problem === undefined,
-      details: { answer, restarted: true, observed: { ...outcome.value.properties, effective: outcome.value.effective ?? null } },
+      details: { answer, restarted: true, observed: { ...outcome.value.properties, effective: effective ?? null, wireless: wireless ?? null } },
     };
   } finally {
     endExpectation?.();

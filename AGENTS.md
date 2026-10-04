@@ -2309,11 +2309,17 @@ as expanded-image hashes.
   the disconnect before reacquiring, and `reacquireTransport` retries (it needs no
   current lease: `OperationRecord.identity` says which device) until
   `options.timeoutSeconds` (default 45) for the SAME stable USB identity.
-  `tcpip` and `usb` verify adbd's effective listeners with `adbTcpListeners`
+  `tcpip` and `usb` verify adbd's effective legacy listener with `adbTcpListeners`
   (fixed `service.adb.listen_addrs`, then `service.adb.tcp.port` even when `0`,
   then `persist.adb.tcp.port`), refuse before approval when fixed addresses make
   the request impossible, and report `verified: false` when a property overrides
-  the result. `wait-for-device` (`adbWaitOptions`) uses ONE deadline for lease
+  the result. Wireless debugging (`persist.adb.tls_server.enable`,
+  `service.adb.tls.port`) is a SEPARATE TLS listener that `adb usb` leaves
+  running: `adbTcpListeners().wireless` reports it, the `usb` approval says
+  whether it is on, and `usb` is `verified: false` ("not USB-only") while it is on
+  even with the legacy port at `0`. Never write "no TCP listener" from the three
+  legacy properties alone.
+  `wait-for-device` (`adbWaitOptions`) uses ONE deadline for lease
   acquisition (`record.waitDeadline`, handed to the flasher as
   `context.deadline`), authentication (`adbFor(context, { deadline })`), queries
   and every reacquisition; a failed reacquisition leaves no lease and nothing is

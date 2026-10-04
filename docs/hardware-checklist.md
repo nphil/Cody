@@ -244,8 +244,11 @@ item remains **UNVERIFIED** until its permitted evidence is completed.
   operation reconnects and reports `service.adb.root` 1; the same request on a
   production build is refused with adbd's message. `unroot` returns it.
 - [ ] **UNVERIFIED** `tcpip 5555` makes `adb connect <device>:5555` work from a
-  PC on the same network and `usb` turns it off; record whether the USB
-  identity changed and whether a fresh grant was needed.
+  PC on the same network and `usb` turns that legacy listener off (the same
+  `adb connect` is refused); record whether the USB identity changed and whether
+  a fresh grant was needed. With Wireless debugging switched ON in Developer
+  options, `usb` must report `verified: false` ("not USB-only") and a paired PC
+  can still connect over TLS; switched OFF, `usb` verifies.
 - [ ] **UNVERIFIED** `wait-for-device` started while the device reboots (after
   `device_exec` reboot) returns once adbd answers; with the cable pulled it ends
   at its timeout; Cancel ends it at once.
