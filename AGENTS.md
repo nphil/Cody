@@ -2214,17 +2214,37 @@ as expanded-image hashes.
   ESP8266 offset-zero `0..0x10000` range is conservatively spi-boot
   protected; either needs exact `allow-spi-boot` when intersected. The flasher writes
   once, uses esptool device MD5, then reads the full footprint back and
-  SHA-256-verifies it. Erase and eFuse actions are refused; detect does not
-  promise secure-boot or encryption discovery.
+  SHA-256-verifies it. `device_exec` takes esptool-style commands
+  (`parseEspCommand`): read-only `chip_id`, `read_mac`, `flash_id`,
+  `get_security_info`, `efuse_summary` and `efuse_dump`, and the stub-only
+  `erase_flash` / `erase_region ADDRESS SIZE`. An erase refuses a ROM-only
+  connection and any flash whose SPI ID does not map to a size esptool-js
+  recognises, escrows every byte it will remove (checking the stub's read-digest
+  frame), and asks for approval with a typed override the flasher chooses:
+  `allow-spi-boot` when it touches the boot area, `allow-fuses` when secure boot
+  or flash encryption is burned, `allow-unknown` when the chip's eFuse map is not
+  reviewed. It then proves the range blank with the device's own MD5. eFuse reads
+  use the register maps in `lib/devices/esp-efuse.ts` (ESP32, S2, S3, C3, C2, C6,
+  H2); `efuse_dump` asks first and keeps key-block contents out of the operation
+  log. eFuse burns and `espsecure` are not offered (irreversible).
 - **Fastboot:** detection, arbitrary getvar, streamed dump/backup, raw/sparse
   named-partition flash, volatile download/boot, set_active, erase, reboot modes,
   OEM/flashing commands, and arbitrary vendor commands are available. Missing
   fetch permits a confirmed UNVERIFIED flash; available fetch keeps full backup
   and image-defined readback. Preloader/LK/TEE/RPMB/GPT/boot0/boot1/eFuse targets
   require exact typed overrides. Vendor/security commands require typing the
-  entire command. FastbootCommand uses the selected artifact for boot/flash.
-  Host filesystem generation (format) and automatic sparse splitting above
-  the bootloader's download limit are not implemented.
+  entire command. FastbootCommand uses the selected artifact for
+  boot/flash/stage/update. `flash` reads `max-download-size` (decimal, or hex with
+  `0x`) and resparses a larger image into sparse pieces (`sparse-image.ts`, at
+  most 1 GiB each) that are flashed in turn; a failed piece stops with no retry.
+  `stage` / `get_staged` move data to and from the bootloader's staging buffer.
+  `update` / `flashall` flash the images of a package ZIP (`zip-archive.ts`,
+  `android-info.ts`): its `android-info.txt` must be met by the device, every
+  partition is backed up before ONE approval typed as `update:<first 8 hex of the
+  package SHA-256>`, and each partition is written once and read back before the
+  next. Logical partitions need fastbootd; bootloader/radio/super/userdata images,
+  `-w`, and mode switches are not part of it. Host filesystem generation
+  (format) is not implemented.
 - **USB DFU:** `detect`, `dump`, verified `flash`, and confirmed
   `abort`/`clear_status` maintenance are descriptor-bound. Flash is allowed
   only for bcdDFU `0x011a` on the actual selected `@Internal Flash` DfuSe

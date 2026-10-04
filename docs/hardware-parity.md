@@ -87,12 +87,13 @@ Differs, with the reason:
 |------------|------|--------|----------|
 | `fastboot devices`, `getvar <name>`, `getvar all` | `device_list`; `device_detect` (`getvar:version`, `getvar:all`); `device_exec "getvar:NAME"` | Done | `fastboot-dfu.test.mjs` (detect), `fastboot-parity.test.mjs` (arbitrary getvar) |
 | `fastboot flash <part> <img>` (raw and Android sparse) | `device_flash` (backup via `fetch` when offered, confirmation, full readback of raw bytes / sparse RAW and FILL extents; without `fetch` it writes after an UNVERIFIED warning) | Done | `fastboot-dfu.test.mjs`, `fastboot-parity.test.mjs` |
-| image larger than `max-download-size` (auto-split into sparse pieces) | none | Not implemented | `fastboot.ts` rejects a download over 0xffffffff bytes; host-side sparse splitting is not written |
-| `fastboot flashall`, `update <zip>`, `flash --force`, `-w` | flash each image with `device_flash`; `erase userdata` for the wipe half | Composed | none (no zip/`android-info.txt` parser) |
+| image larger than `max-download-size` (auto-split into sparse pieces) | `device_flash` reads `getvar:max-download-size` (decimal, or hex with `0x`) and resparses a raw or sparse image above it into pieces of at most that size (never over 1 GiB), each flashed in turn; the approval shows the piece count | **Done** (implemented, host-tested; hardware evidence pending) | `fastboot-set.test.mjs` (split, limit grammar, piece failure, sparse source), `sparse-split.test.mjs` (every piece fits and rewrites exactly the carried blocks, random layouts) |
+| `fastboot flashall`, `update <zip>` | `device_exec "update"` (or `"flashall"`) with the package ZIP as the artifact: `android-info.txt` requirements checked, A/B current slot resolved, each partition backed up, ONE approval typed as `update:<package hash prefix>`, each partition written once and read back in order | **Done** (implemented, host-tested; hardware evidence pending) for the images `update` flashes. Not offered: `-w`, `--force`, `update-super`, secondary-slot `*_other` images, `bootloader`/`radio`/`super`/`userdata` images, reboots between steps (a mode switch re-enumerates USB and needs a fresh grant), compressed entries over 2 GiB | `fastboot-set.test.mjs`, `zip-archive.test.mjs`, `android-info.test.mjs` |
+| `fastboot flash --force`, `-w` | flash each image with `device_flash`; `erase userdata` for the wipe half | Composed | none |
 | `fastboot erase <part>` | `device_exec "erase:PART"` (backup + typed override for protected partitions) | Done | none (code path only) |
 | `fastboot format[:fs] <part>` | none | Not implemented | Android's `format` builds a filesystem image on the host; Cody refuses the command and says to upload a prebuilt image |
 | `fastboot boot <img>`, `download <img>` | `device_exec "boot"` / `"download"` with the chosen artifact | Done | `fastboot-dfu.test.mjs`, `fastboot-parity.test.mjs` |
-| `fastboot stage` / `get_staged` | none | Not implemented | no code |
+| `fastboot stage` / `get_staged` | `device_exec "stage"` (the chosen artifact to the bootloader's buffer) and `"get_staged"` (the protocol's `upload`, saved as an artifact) | **Done** (implemented, host-tested; hardware evidence pending) | `fastboot-set.test.mjs` (stage, get_staged, large staged upload) |
 | `fastboot fetch <part> <file>` | `device_dump` (when the bootloader reports `fetch-size`) | Done | the same `fetch` read is the flash backup/readback in `fastboot-dfu.test.mjs`; standalone `dump` has no test |
 | `fastboot --set-active=<slot>` | `device_exec "set_active:SLOT"` | Done | none (code path only) |
 | `fastboot reboot`, `reboot-bootloader`, `-recovery`, `-fastboot` | `device_exec "reboot[-mode]"` | Done | none (code path only) |
@@ -103,13 +104,14 @@ Differs, with the reason:
 
 | PC command | Cody | Status | Evidence |
 |------------|------|--------|----------|
-| `chip_id`, `flash_id` (chip name, flash size) | `device_detect` (esptool-js `detectFlashSize`; reports chip, flash size, stub, SPI boot offset) | Done | none for `detect` itself; `esp.test.mjs` stubs the same flash-size call inside `flash` |
-| `read_mac` | not reported by `device_detect` | Not implemented | `esp.ts` detect does not read it |
+| `chip_id`, `flash_id` (chip name, flash size) | `device_detect` (chip, description, revision, features, crystal, MAC, flash size, stub, SPI boot offset, secure boot and flash encryption state) and `device_exec "chip_id"` / `"flash_id"` | Done (implemented, host-tested; hardware evidence pending) | `esp-admin.test.mjs` (chip_id/read_mac/flash_id, detect) |
+| `read_mac` | `device_exec "read_mac"`; also reported by `device_detect` | Done (implemented, host-tested; hardware evidence pending) | `esp-admin.test.mjs` |
 | `read_flash` | `device_dump` | Done | none for standalone `dump`; the same `readFlash` is the backup/readback in `esp.test.mjs` |
 | `write_flash` (compressed, MD5, offsets) | `device_flash` (preserves the whole erase footprint, one compressed write, device MD5, then full readback SHA-256; protected boot ranges need a typed override) | Done | `esp.test.mjs`, `hardware-safety.test.mjs` |
 | `verify_flash` | the post-write readback inside `device_flash`; no standalone compare | Composed | `esp.test.mjs` |
-| `erase_flash`, `erase_region` | none | **Refused today** | `esp.ts`: "eFuse and erase operations are deliberately unavailable". Policy, not a browser limit |
-| `espefuse`, `espsecure`, secure-boot / flash-encryption commands | none | **Refused today** | same policy; `detect` reports `eFuseOperations: "disabled"` |
+| `erase_flash`, `erase_region` | `device_exec "erase_flash"` / `"erase_region ADDRESS SIZE"` (stub only, 4096-byte aligned; the whole range is escrowed first with the stub's read MD5 checked; typed override `allow-spi-boot` for the boot area, `allow-fuses` when secure boot or flash encryption is burned, `allow-unknown` for a chip whose eFuse map is not reviewed; afterwards the device's own MD5 of every erased byte must equal blank flash) | **Done** (implemented, host-tested; hardware evidence pending) | `esp-admin.test.mjs`, run through the real esptool-js loader over an emulated stub: wire payloads, backup before approval, overrides, an erase the chip ignored, a rejected erase, a corrupted backup read |
+| `espefuse summary`, `espefuse dump`, `get_security_info` | `device_exec "efuse_summary"`, `"efuse_dump"` (asks first; key contents saved only in Files & backups and withheld from the log), `"get_security_info"` | **Done** for ESP32, S2, S3, C3, C2, C6, H2 (implemented, host-tested; hardware evidence pending); other chips report "unreviewed" | `esp-admin.test.mjs` (summary, dump, register map, unreviewed chip) |
+| `espefuse burn_*`, `write_protect_*`, `espsecure`, secure-boot / flash-encryption commands | none | **Refused today** | irreversible; Cody reads eFuses and never burns them (`parseEspCommand` rejects the commands with that reason) |
 | `load_ram`, `run`, `dump_mem`, `read_mem`, `write_mem` | none | Not implemented | no code |
 | `image_info`, `elf2image`, `merge_bin`, `make_image` | none | Not implemented | host-side file tools, out of scope for the device bridge |
 | serial monitor (`idf.py monitor`, `miniterm`, `picocom`) | `device_monitor` protocol `serial` or the Devices panel terminal (baud, DTR/RTS/break) | Done | `serial-terminal.test.mjs` |
@@ -148,11 +150,15 @@ exposes once running (ADB, fastboot) from the rows above.
 
 1. **MediaTek** (preloader/BROM, DA, GPT read, partition read/write) behind the
    existing confirmation model, with a recorded licensing/DA-provenance decision.
-2. **esptool `erase_flash` / `erase_region` and eFuse reads** behind confirmation
-   and typed targets (currently refused by policy).
-3. **fastboot**: automatic sparse splitting above `max-download-size`,
-   `flashall`/`update` from a zip, `stage`/`get_staged`.
-4. **dfu-util**: plain DFU 1.1 download, `:leave`/`-R` after a proven read-back.
-5. **adb**: dedicated `install`, `root`, `tcpip`, `wait-for-device` actions (all
-   currently reachable only through the shell grant).
-6. **Hardware evidence** for every "Done" row via `docs/hardware-checklist.md`.
+2. **dfu-util**: plain DFU 1.1 download, `:leave`/`-R` after a proven read-back.
+   Not started.
+3. **adb**: dedicated `install`, `root`, `unroot`, `tcpip`, `usb` and
+   `wait-for-device` actions (all currently reachable only through the shell
+   grant). Not started.
+4. **Hardware evidence** for every "Done" row via `docs/hardware-checklist.md`,
+   including the erase, eFuse, sparse-split, `update` and `stage` items.
+
+Closed since the previous revision (implemented and host-tested; hardware
+evidence pending): esptool `erase_flash` / `erase_region`, `read_mac`, eFuse and
+security-info reads; fastboot automatic sparse splitting, `update` / `flashall`
+from a ZIP, and `stage` / `get_staged`.

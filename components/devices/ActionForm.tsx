@@ -74,7 +74,7 @@ export function ActionForm({ sessionId, manager, device, group, protocols, selec
   const protocolCandidates = useMemo(() => device.protocolCandidates?.filter((candidate) => candidate.protocol === activeProtocol) ?? [], [activeProtocol, device]);
   const selectedCandidate = protocolCandidates.find((candidate) => `${candidate.interfaceNumber}:${candidate.alternateSetting}` === candidateKey);
   const input = selectedInputId ? deviceArtifacts.list(sessionId).find((artifact) => artifact.id === selectedInputId) : undefined;
-  const commandUsesImage = activeProtocol === "fastboot" && activeAction === "exec" && /^(?:boot|download|flash)(?:$|[:\s])/.test(command.trim().replace(/^fastboot\s+/, ""));
+  const commandUsesImage = activeProtocol === "fastboot" && activeAction === "exec" && /^(?:boot|download|stage|flash|update|flashall)(?:$|[:\s])/.test(command.trim().replace(/^fastboot\s+/, ""));
   const keys = targetKeys(activeAction);
 
   useEffect(() => {

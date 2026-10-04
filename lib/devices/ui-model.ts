@@ -43,7 +43,7 @@ export const GROUP_ORDER: readonly ActionGroup[] = ["overview", "terminal", "com
 const GROUP_ACTIONS: Readonly<Record<ActionGroup, Readonly<Partial<Record<HardwareProtocol, readonly HardwareAction[]>>>>> = {
   overview: { esp: ["detect"], adb: ["detect"], fastboot: ["detect"], gecko: ["detect"], stm32: ["detect"], stk500: ["detect"], dfu: ["detect"] },
   terminal: { adb: ["monitor", "exec"] },
-  commands: { fastboot: ["exec"], dfu: ["exec"] },
+  commands: { fastboot: ["exec"], dfu: ["exec"], esp: ["exec"] },
   serial: { serial: ["monitor", "exec"] },
   files: { adb: ["push", "pull", "sideload"] },
   flash: { esp: ["flash"], fastboot: ["flash"], dfu: ["flash"], stm32: ["flash"], stk500: ["flash"] },

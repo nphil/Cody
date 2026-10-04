@@ -1,11 +1,18 @@
 import type { Flasher, HardwareContext, HardwareRequest, HardwareResult, HardwareTransport } from "./flasher";
 import { classifyProtectedRegionName, parseFlashSafety } from "./hardware-safety";
 import { hashBlob } from "./blob-stream";
-import { imageFootprint, type ImageFootprint } from "./sparse-image";
+import { buildSparsePiece, imageFootprint, planImageSplit, type ImageFootprint, type SparseSplit } from "./sparse-image";
+import { openZip, type ZipEntry } from "./zip-archive";
+import { checkRequirements, parseAndroidInfo, SKIPPED_BY_UPDATE, UPDATE_IMAGES } from "./android-info";
 import { sha256 as incrementalSha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { deadline, readExact, throwIfAborted } from "./serial";
 const FETCH_CHUNK_BYTES = 4 * 1024 * 1024;
+/** fastboot never resparses into pieces larger than this, whatever the device would accept (RESPARSE_LIMIT). */
+const MAX_RESPARSE_PIECE_BYTES = 1024 * 1024 * 1024;
+/** The largest staged upload (`get_staged`) Cody accepts from a bootloader, and the size it reads at a time. */
+const MAX_STAGED_UPLOAD_BYTES = 1024 * 1024 * 1024;
+const UPLOAD_CHUNK_BYTES = 1024 * 1024;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -159,8 +166,8 @@ async function* fetchChunks(context: HardwareContext, target: string, offset: nu
   }
 }
 
-async function saveFetch(context: HardwareContext, target:string, offset:number, length:number, capability:FastbootReadback, name:string) {
-  const chunks=fetchChunks(context,target,offset,length,capability);
+/** Escrows a stream of device bytes: streamed when the browser manager offers it, otherwise one small Blob. */
+async function saveChunks(context: HardwareContext, chunks:AsyncIterable<Uint8Array<ArrayBuffer>>, length:number, name:string) {
   if (context.saveStream) return context.saveStream(name,chunks);
   // Small direct Flasher consumers may provide Blob escrow only. The browser manager streams.
   if (length>8*1024*1024) throw new FastbootProtocolError("This client must provide streaming artifact escrow for this backup.");
@@ -168,14 +175,14 @@ async function saveFetch(context: HardwareContext, target:string, offset:number,
   const blob=new Blob(data); return {fileId:await context.save(name,blob),sha256:await hashBlob(blob),length};
 }
 
-async function download(context: HardwareContext, firmware:Blob):Promise<void> {
-  if (!firmware.size || firmware.size>0xffffffff) throw new FastbootProtocolError("One Fastboot download must contain 1 through 0xffffffff bytes; larger images need host-side sparse splitting.");
+async function download(context: HardwareContext, firmware:Blob, label?:string):Promise<void> {
+  if (!firmware.size || firmware.size>0xffffffff) throw new FastbootProtocolError("One Fastboot download must contain 1 through 0xffffffff bytes. A larger image is sent as sparse pieces, which needs the bootloader to report its max-download-size.");
   await context.transport.write(requireCommand("download:"+firmware.size.toString(16).padStart(8,"0")),context.signal);
   const response=await readResponse(context);
   if(response.type==="FAIL") throw new FastbootCommandFailure(response.message);
   if(response.type!=="DATA" || response.size!==firmware.size) throw new FastbootProtocolError("Fastboot did not acknowledge the exact download byte count.");
   const reader=firmware.stream().getReader(); let completed=0;
-  try { for (;;) { context.signal.throwIfAborted(); const next=await reader.read(); if(next.done)break; await context.transport.write(next.value,context.signal); completed+=next.value.length; context.progress({phase:"download",completed,total:firmware.size}); } }
+  try { for (;;) { context.signal.throwIfAborted(); const next=await reader.read(); if(next.done)break; await context.transport.write(next.value,context.signal); completed+=next.value.length; context.progress({phase:"download",completed,total:firmware.size,...(label?{message:`Sending ${label}`}:{})}); } }
   finally { reader.releaseLock(); }
   await readTerminal(context);
 }
@@ -220,7 +227,7 @@ async function dump(request: HardwareRequest, context: HardwareContext): Promise
     length,
     backup: "not applicable: read-only Fastboot fetch",
   });
-  const saved = await saveFetch(context,target,offset,length,capability,`${target}.bin`);
+  const saved = await saveChunks(context,fetchChunks(context,target,offset,length,capability),length,`${target}.bin`);
   return { summary:`Read ${length} bytes from Fastboot ${target}.`,verified:true,sha256:saved.sha256,fileId:saved.fileId,details:{offset,length} };
 }
 
@@ -230,10 +237,20 @@ function protectedOverride(target:string):string|undefined {
   return /^(?:rpmb|gpt|pgpt|sgpt|boot[01]|mmcblk\d+boot[01])(?:[_:-].*)?$/i.test(target) ? "write:"+target : undefined;
 }
 
-async function backupPartition(context:HardwareContext,target:string) {
+/** What was learned and escrowed about a partition before it is overwritten. */
+interface PartitionBackup {
+  readonly partitionSize:number|undefined;
+  /** Present when the bootloader supports exact fetch readback. */
+  readonly capability:FastbootReadback|undefined;
+  readonly backupId:string|undefined;
+  /** The sentence shown in the confirmation: where the backup is, or why there is none. */
+  readonly backup:string;
+}
+
+async function backupPartition(context:HardwareContext,target:string):Promise<PartitionBackup> {
   const info=await inspectPartition(context,target);
   if (!info.capability) return {...info,backupId:undefined,backup:"Backup unavailable: this bootloader does not support exact fetch readback. Back up with TWRP/ADB before continuing."};
-  const saved=await saveFetch(context,target,0,info.capability.partitionSize,info.capability,target+".preflash.bin");
+  const saved=await saveChunks(context,fetchChunks(context,target,0,info.capability.partitionSize,info.capability),info.capability.partitionSize,target+".preflash.bin");
   return {...info,backupId:saved.fileId,backup:"Saved full "+target+" backup as "+saved.fileId+" (sha256 "+saved.sha256+")."};
 }
 
@@ -254,6 +271,58 @@ async function verifyImage(context:HardwareContext,target:string,input:Blob,plan
   }
 }
 
+/** `max-download-size` as fastboot reads it: decimal, or hex with a 0x prefix. Zero means unreported or unreadable. */
+function parseDownloadLimit(value:string|undefined):number {
+  const text=value?.trim();
+  if (!text) return 0;
+  const parsed=/^0x[0-9a-f]+$/i.test(text) ? Number.parseInt(text,16) : /^\d+$/.test(text) ? Number.parseInt(text,10) : 0;
+  return Number.isSafeInteger(parsed) && parsed>0 ? parsed : 0;
+}
+
+/** Everything decided about writing one image to one partition before anything is approved. */
+interface PartitionFlash {
+  readonly target:string;
+  readonly image:Blob;
+  readonly digest:string;
+  readonly footprint:ImageFootprint;
+  readonly backup:PartitionBackup;
+  /** Present when the image is larger than the device's max-download-size. */
+  readonly split?:SparseSplit;
+}
+
+async function prepareFlash(context:HardwareContext,target:string,image:Blob,limit:number):Promise<PartitionFlash> {
+  const footprint=await imageFootprint(image), digest=await hashBlob(image);
+  // Like fastboot's get_sparse_limit: only an image larger than the reported limit is resparsed, into pieces of at most 1 GiB.
+  const split=limit>0 && image.size>limit ? await planImageSplit(image,Math.min(limit,MAX_RESPARSE_PIECE_BYTES)) : undefined;
+  const backup=await backupPartition(context,target);
+  if (backup.partitionSize && footprint.length>backup.partitionSize) throw new FastbootProtocolError("Image expanded size exceeds the reported partition size.");
+  return {target,image,digest,footprint,backup,split};
+}
+
+/** Sends the image (as one download, or as sparse pieces in turn) and flashes it. A failed piece is never retried. */
+async function writeFlash(context:HardwareContext,flash:PartitionFlash):Promise<void> {
+  if (!flash.split) { await download(context,flash.image); await command(context,"flash:"+flash.target); return; }
+  const {layout,pieces}=flash.split;
+  for (let index=0;index<pieces.length;index+=1) {
+    const label=`piece ${index+1} of ${pieces.length}`;
+    try {
+      await download(context,buildSparsePiece(flash.image,layout,pieces[index]!),label);
+      await command(context,"flash:"+flash.target);
+    } catch (error) {
+      throwIfAborted(context.signal);
+      throw new FastbootProtocolError(`Sparse ${label} failed after ${index} piece(s) were written to ${flash.target}: ${error instanceof Error ? error.message : String(error)} The partition is partly written; nothing was retried.`);
+    }
+  }
+}
+
+function flashDetails(chip:string|undefined,flash:PartitionFlash):string {
+  return [
+    "Product: "+(chip||"unreported")+". Partition size: "+(flash.backup.partitionSize??"unreported")+". Expanded image bytes: "+flash.footprint.length+".",
+    ...(flash.split ? [`The image is larger than the device's max-download-size, so it is sent as ${flash.split.pieces.length} sparse pieces that are flashed in turn.`] : []),
+    !flash.backup.capability ? "UNVERIFIED WRITE: this bootloader has no fetch readback. An OKAY response is not verification. Reboot to TWRP and verify the written bytes over ADB afterwards." : "The full partition is backed up. Readback will verify the image-defined bytes; sparse skip regions and bytes beyond the image are not assumed preserved.",
+  ].join(" ");
+}
+
 async function flash(request:HardwareRequest,context:HardwareContext):Promise<HardwareResult> {
   const target=requireTarget(request.target);
   if ((request.offset??0)!==0) throw new FastbootProtocolError("The Fastboot flash protocol addresses named partitions, not a nonzero byte offset.");
@@ -262,17 +331,110 @@ async function flash(request:HardwareRequest,context:HardwareContext):Promise<Ha
   const expected=parseFlashSafety(request.options);
   const chip=await optionalGetvar(context,"product");
   if(expected.expectedChip && expected.expectedChip.toLowerCase()!==chip?.trim().toLowerCase()) throw new FastbootProtocolError("Fastboot product does not match expectedChip.");
-  const plan=await imageFootprint(input), digest=await hashBlob(input);
-  const info=await backupPartition(context,target);
-  if (info.partitionSize && plan.length>info.partitionSize) throw new FastbootProtocolError("Image expanded size exceeds the reported partition size.");
-  const unverified=!info.capability;
-  await context.confirm({action:"fastboot flash",target,offset:0,length:input.size,sha256:digest,backup:info.backup,protectedOverride:protectedOverride(target),details:[
-    "Product: "+(chip||"unreported")+". Partition size: "+(info.partitionSize??"unreported")+". Expanded image bytes: "+plan.length+".",
-    unverified ? "UNVERIFIED WRITE: this bootloader has no fetch readback. An OKAY response is not verification. Reboot to TWRP and verify the written bytes over ADB afterwards." : "The full partition is backed up. Readback will verify the image-defined bytes; sparse skip regions and bytes beyond the image are not assumed preserved.",
-  ].join(" ")});
-  await download(context,input); await command(context,"flash:"+target);
-  if(info.capability) await verifyImage(context,target,input,plan,info.capability);
-  return {summary:unverified ? "Fastboot accepted the write to "+target+". UNVERIFIED: use ADB verify in recovery before booting it." : "Flashed and verified the image-defined bytes in Fastboot "+target+".",verified:!unverified,sha256:digest,details:{chip,backupId:info.backupId,partitionSize:info.partitionSize,length:plan.length,sparse:plan.sparse,skippedBytes:plan.skipped,followup:unverified ? "Boot TWRP, locate "+target+" in /dev/block/by-name, then device_verify the image byte range using this SHA-256. Sparse images require expanded-image verification, not the compressed file hash." : undefined}};
+  const prepared=await prepareFlash(context,target,input,parseDownloadLimit(await optionalGetvar(context,"max-download-size")));
+  const unverified=!prepared.backup.capability;
+  await context.confirm({action:"fastboot flash",target,offset:0,length:input.size,sha256:prepared.digest,backup:prepared.backup.backup,protectedOverride:protectedOverride(target),details:flashDetails(chip,prepared)});
+  await writeFlash(context,prepared);
+  if(prepared.backup.capability) await verifyImage(context,target,input,prepared.footprint,prepared.backup.capability);
+  return {summary:unverified ? "Fastboot accepted the write to "+target+". UNVERIFIED: use ADB verify in recovery before booting it." : "Flashed and verified the image-defined bytes in Fastboot "+target+".",verified:!unverified,sha256:prepared.digest,details:{chip,backupId:prepared.backup.backupId,partitionSize:prepared.backup.partitionSize,length:prepared.footprint.length,sparse:prepared.footprint.sparse,skippedBytes:prepared.footprint.skipped,pieces:prepared.split?.pieces.length??1,followup:unverified ? "Boot TWRP, locate "+target+" in /dev/block/by-name, then device_verify the image byte range using this SHA-256. Sparse images require expanded-image verification, not the compressed file hash." : undefined}};
+}
+
+/** The data the previous command left staged in the bootloader (`fastboot get_staged`; the protocol's `upload`). */
+async function getStaged(context:HardwareContext):Promise<HardwareResult> {
+  await context.confirm({action:"fastboot get_staged",target:"staged data",backup:"Not applicable: read-only; nothing is written to the device.",details:"Reads back the data the previous command left staged in the bootloader, for example the output of an oem command."});
+  throwIfAborted(context.signal);
+  await context.transport.write(requireCommand("upload"),context.signal);
+  let reply=await readResponse(context);
+  while (reply.type==="INFO") { context.output?.(reply.message+"\n"); reply=await readResponse(context); }
+  if (reply.type==="FAIL") throw new FastbootCommandFailure(`Fastboot has no staged data to read: ${reply.message||"unspecified failure"}.`);
+  if (reply.type!=="DATA") throw new FastbootProtocolError("Fastboot did not announce staged data in answer to upload.");
+  const size=reply.size;
+  if (size<=0 || size>MAX_STAGED_UPLOAD_BYTES) throw new FastbootProtocolError(`Fastboot announced ${size} staged bytes; Cody reads from 1 to ${MAX_STAGED_UPLOAD_BYTES}.`);
+  async function* chunks():AsyncGenerator<Uint8Array<ArrayBuffer>> {
+    for (let offset=0;offset<size;) {
+      const wanted=Math.min(UPLOAD_CHUNK_BYTES,size-offset);
+      yield await readExact(context.transport,wanted,deadline("Fastboot staged upload",FASTBOOT_TIMEOUT_MS),context.signal);
+      offset+=wanted; context.progress({phase:"upload",completed:offset,total:size});
+    }
+  }
+  const saved=await saveChunks(context,chunks(),size,"fastboot-staged.bin");
+  await readTerminal(context);
+  return {summary:`Read ${size} staged bytes from Fastboot.`,sha256:saved.sha256,fileId:saved.fileId,details:{length:size}};
+}
+
+/**
+ * `fastboot update` / `flashall`: flashes the images of an update package after
+ * one approval. The package's android-info.txt must be met by this device; every
+ * partition is backed up (when the bootloader can fetch) before the approval, is
+ * written once, and is read back before the next one starts.
+ */
+async function updateFromPackage(context:HardwareContext):Promise<HardwareResult> {
+  const archive=context.input;
+  if (!archive?.size) throw new FastbootProtocolError("Fastboot update needs a package artifact: a ZIP holding android-info.txt and the partition images.");
+  const zip=await openZip(archive).catch((error:unknown)=>{throw new FastbootProtocolError(`The selected file is not an update package: ${error instanceof Error ? error.message : String(error)}`);});
+  const infoEntry=zip.find("android-info.txt");
+  if (!infoEntry) throw new FastbootProtocolError("The package has no android-info.txt, so Cody cannot confirm its images are for this device (fastboot update refuses this too). Flash single images with device_flash instead.");
+  const info=parseAndroidInfo(await zip.text(infoEntry));
+  const product=(await optionalGetvar(context,"product"))?.trim();
+  const unmet=(await checkRequirements(info,product,(name)=>optionalGetvar(context,name))).filter((outcome)=>!outcome.met);
+  if (unmet.length>0) throw new FastbootProtocolError(`This package is not for this device, so nothing was written: ${unmet.map((outcome)=>`${outcome.line} (${outcome.detail})`).join("; ")}.`);
+  const present=UPDATE_IMAGES.flatMap((image)=>{const entry=zip.find(image.file);return entry ? [{partition:image.partition,entry}] : [];});
+  if (present.length===0) {
+    const nested=zip.entries.find((entry)=>/^image-.*\.zip$/.test(entry.name));
+    throw new FastbootProtocolError(nested ? `The package holds no partition images, but it contains ${nested.name}: that inner ZIP is what fastboot update flashes. Extract it and select it instead.` : "The package holds none of the images fastboot update flashes (boot.img, system.img, vendor.img, ...).");
+  }
+  const limit=parseDownloadLimit(await optionalGetvar(context,"max-download-size"));
+  const slot=(await optionalGetvar(context,"current-slot"))?.trim().replace(/^_/,"");
+  const userspace=(await optionalGetvar(context,"is-userspace"))?.trim()==="yes";
+  const targets:{target:string;entry:ZipEntry}[]=[];
+  for (const image of present) {
+    const slotted=(await optionalGetvar(context,"has-slot:"+image.partition))?.trim()==="yes";
+    if (slotted && !slot) throw new FastbootProtocolError(`${image.partition} has A/B slots but the device did not report current-slot, so Cody cannot choose the slot to flash.`);
+    const target=requireTarget(slotted ? `${image.partition}_${slot}` : image.partition);
+    if (!userspace && (await optionalGetvar(context,"is-logical:"+target))?.trim()==="yes") {
+      throw new FastbootProtocolError(`${target} is a logical partition, which only userspace fastboot (fastbootd) can write. Reboot the device to fastbootd (reboot-fastboot), select it again in Devices, and run the update again. Nothing was written.`);
+    }
+    targets.push({target,entry:image.entry});
+  }
+  const prepared:PartitionFlash[]=[];
+  for (const {target,entry} of targets) {
+    context.progress({phase:"prepare",completed:prepared.length,total:targets.length,message:`Reading ${entry.name} and backing up ${target}`});
+    prepared.push(await prepareFlash(context,target,await zip.open(entry),limit));
+  }
+  const digest=await hashBlob(archive);
+  const unbacked=prepared.filter((flash)=>!flash.backup.capability).map((flash)=>flash.target);
+  await context.confirm({
+    action:"fastboot update",
+    target:`update package, ${prepared.length} partition(s): ${prepared.map((flash)=>flash.target).join(", ")}`,
+    sha256:digest,offset:0,length:archive.size,
+    backup:unbacked.length===0 ? `Every partition is backed up in full before it is overwritten: ${prepared.map((flash)=>flash.backup.backupId).join(", ")}.` : `Backup unavailable for ${unbacked.length} of ${prepared.length} partition(s) (${unbacked.join(", ")}): this bootloader has no fetch readback, so they are written UNVERIFIED.`,
+    protectedOverride:`update:${digest.slice(0,8)}`,
+    details:[
+      `Product: ${product||"unreported"}. The package's android-info.txt requirements (${info.requirements.length}) are all met by this device.`,
+      ...prepared.map((flash)=>`${flash.target}: ${flash.footprint.length} bytes${flash.split ? ` in ${flash.split.pieces.length} sparse pieces` : ""}, sha256 ${flash.digest}, ${flash.backup.capability ? `backup ${flash.backup.backupId}, readback verified` : "NO BACKUP, UNVERIFIED"}`),
+      "Partitions are written one after another and each is read back when the bootloader supports it. The first failure stops the update and leaves the later partitions untouched.",
+      `Not flashed by update: ${SKIPPED_BY_UPDATE.filter((name)=>zip.find(name)).join(", ")||"nothing"} (flash those separately if you want them).`,
+    ].join("\n"),
+  });
+  const written:string[]=[];
+  try {
+    for (const flash of prepared) {
+      context.progress({phase:"flash",completed:written.length,total:prepared.length,message:`Flashing ${flash.target}`});
+      await writeFlash(context,flash);
+      if (flash.backup.capability) await verifyImage(context,flash.target,flash.image,flash.footprint,flash.backup.capability);
+      written.push(flash.target);
+    }
+  } catch (error) {
+    throwIfAborted(context.signal);
+    const pending=prepared.map((flash)=>flash.target).filter((target)=>!written.includes(target));
+    throw new FastbootProtocolError(`The update stopped at ${pending[0]}: ${error instanceof Error ? error.message : String(error)} Written: ${written.join(", ")||"none"}. Not written: ${pending.join(", ")}. Nothing was retried.`);
+  }
+  return {
+    summary:unbacked.length===0 ? `Flashed ${prepared.length} partition(s) from the package and verified each by readback.` : `Flashed ${prepared.length} partition(s) from the package; ${unbacked.join(", ")} could not be read back and are UNVERIFIED.`,
+    verified:unbacked.length===0,
+    sha256:digest,
+    details:{product,slot,partitions:prepared.map((flash)=>({partition:flash.target,bytes:flash.footprint.length,sha256:flash.digest,pieces:flash.split?.pieces.length??1,backupId:flash.backup.backupId,verified:Boolean(flash.backup.capability)})),notFlashed:SKIPPED_BY_UPDATE.filter((name)=>zip.find(name))},
+  };
 }
 
 async function execute(request:HardwareRequest,context:HardwareContext):Promise<HardwareResult> {
@@ -282,12 +444,17 @@ async function execute(request:HardwareRequest,context:HardwareContext):Promise<
   if(get) { const reply=await command(context,"getvar:"+get[1]);return {summary:[...reply.infos,reply.okay].join("\n")||"getvar completed.",details:{...reply}}; }
   const flashTarget=/^flash(?::|\s+)(.+)$/.exec(value);
   if(value==="flash"||flashTarget) return flash({...request,action:"flash",target:flashTarget?.[1]??request.target},context);
-  if(value==="download"||value==="boot") {
+  if(value==="download"||value==="stage"||value==="boot") {
     if(!context.input?.size) throw new FastbootProtocolError("Fastboot "+value+" needs an image artifact.");
     const digest=await hashBlob(context.input);
-    await context.confirm({action:"fastboot "+value,target:value==="boot"?"temporary boot image":"fastboot-download-buffer",sha256:digest,offset:0,length:context.input.size,backup:"Not applicable: image is loaded into RAM. A booted image can itself change storage.",details:value==="boot"?"Execute the uploaded boot image without flashing a partition.":"Stage the uploaded image in the volatile download buffer."});
+    await context.confirm({action:"fastboot "+value,target:value==="boot"?"temporary boot image":value==="stage"?"fastboot-staging-buffer":"fastboot-download-buffer",sha256:digest,offset:0,length:context.input.size,backup:"Not applicable: image is loaded into RAM. A booted image can itself change storage.",details:value==="boot"?"Execute the uploaded boot image without flashing a partition.":value==="stage"?"Stage the uploaded file in the bootloader for the next command to consume, for example an oem command.":"Stage the uploaded image in the volatile download buffer."});
     await download(context,context.input);if(value==="boot")await command(context,"boot");
     return {summary:"Fastboot accepted "+value+".",verified:false,sha256:digest,details:{length:context.input.size}};
+  }
+  if(value==="get_staged"||value==="upload") return getStaged(context);
+  if(/^(?:update|flashall)(?:\s|$)/.test(value)) {
+    if(!/^(?:update|flashall)$/.test(value)) throw new FastbootProtocolError("update and flashall take no arguments here: the package is the selected file, and -w, --force and slot options are not offered. Use erase and set_active as separate commands.");
+    return updateFromPackage(context);
   }
   const eraseTarget=/^erase(?::|\s+)(.+)$/.exec(value);
   if(value==="erase"||eraseTarget) {

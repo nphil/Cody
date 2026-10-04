@@ -117,6 +117,35 @@ item remains **UNVERIFIED** until its permitted evidence is completed.
 - [ ] **UNVERIFIED** An ESP32 user selects/uploads a test image through Cody,
   sees the exact confirmation/backup/readback evidence, and the console resumes
   exclusive ownership after flashing to capture the expected boot output.
+- [ ] **UNVERIFIED** `erase_region` on a recoverable board: the confirmation
+  shows the exact range and a backup reference; after approval the range reads
+  back blank (device MD5 and a `read_flash` of it), and restoring the backup
+  with `device_flash` returns the original bytes.
+- [ ] **UNVERIFIED** `erase_flash` is refused on a ROM-only connection, needs
+  `allow-spi-boot` (and `allow-fuses` on a chip with secure boot or flash
+  encryption burned), and never runs when the flash ID does not map to a
+  recognised size.
+- [ ] **UNVERIFIED** `efuse_summary` and `efuse_dump` agree with
+  `espefuse.py summary` / `dump` on the same board for each reviewed chip, and
+  key blocks never appear in the operation log.
+
+### Fastboot: large images, packages and staging
+
+- [ ] **UNVERIFIED** An image larger than the device's real `max-download-size`
+  is flashed as sparse pieces on a recoverable device: every `download:` is
+  within the limit, the bootloader accepts every piece, and the readback matches
+  the whole image. Record the limit the device reported and the piece count.
+- [ ] **UNVERIFIED** A bootloader that reports `max-download-size` in decimal
+  rather than `0x` hex is split the way `fastboot` splits it.
+- [ ] **UNVERIFIED** `update` with a real factory ZIP on a recoverable A/B
+  device: the requirements pass, only the current slot is written, the typed
+  `update:<hash>` approval is required, and each partition's readback matches.
+  A ZIP for another product is refused before any write.
+- [ ] **UNVERIFIED** `update` refuses logical partitions from the bootloader and
+  accepts them from fastbootd.
+- [ ] **UNVERIFIED** `stage` followed by an OEM command that consumes staged
+  data, and `get_staged` after an OEM command that stages output, on a device
+  that supports `upload`.
 
 ### Fastboot
 

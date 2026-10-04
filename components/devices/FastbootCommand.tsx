@@ -26,7 +26,7 @@ export function FastbootCommand({ manager, deviceId, label, interfaceNumber, alt
   const active = operation && !["succeeded", "failed", "cancelled"].includes(operation.state);
   const start = () => {
     try {
-      const usesImage = /^(?:boot|download|flash)(?:$|[:\s])/.test(command.trim().replace(/^fastboot\s+/, ""));
+      const usesImage = /^(?:boot|download|stage|flash|update|flashall)(?:$|[:\s])/.test(command.trim().replace(/^fastboot\s+/, ""));
       const result = manager.startUser({ deviceId, protocol: "fastboot", action: "exec", command, interfaceNumber, alternateSetting,
         ...(input && usesImage ? { fileId: input.id, sha256: input.sha256 } : {}) });
       setOperation(manager.status(result.id));
