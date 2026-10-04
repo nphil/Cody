@@ -2573,8 +2573,10 @@ as expanded-image hashes.
     after `configure` the eMMC serial and product, sector size, capacity and the
     disk GUID of an intact table on the device (primary, else backup; neither
     intact = refused) must match as well. Every region the set covers is then
-    read and saved (a region that already holds the set's bytes is left alone),
-    ONE confirmation carries the merged ranges and the typed override
+    read and hashed; a region that already holds the set's bytes is left alone
+    (the set is its copy), and what each of the others holds is saved (and must
+    hash the same on the second read) before anything is written. ONE
+    confirmation carries the merged ranges and the typed override
     `restore:<first 8 of the manifest SHA-256>`, partitions are written in disk
     order, then the backup table, then the primary table last, and each region is
     read back and compared before the next starts. The first mismatch, or a

@@ -297,11 +297,17 @@ interface RestoreProgress {
   stage: "being written" | "written, being read back" | "written, but read back different";
 }
 
-/** One region of the set, compared with what the device holds now (its saved copy). */
+/** One region of the set and whether the device already holds its bytes. */
 interface Check {
   readonly region: RestoreRegion;
-  readonly escrow: StreamArtifact;
+  /** The SHA-256 of what the device holds there now. */
+  readonly current: string;
   readonly identical: boolean;
+}
+
+/** A region that differs, with the session file that holds what it contains now. */
+interface Saved extends Check {
+  readonly escrow: StreamArtifact;
 }
 
 class RestoreStopped extends EdlError {}
@@ -345,28 +351,39 @@ export async function restoreSet(run: EdlRun): Promise<HardwareResult> {
   for (const note of live.notes) say(`Note: ${note} The other table identifies the disk.`);
   say(`Unit check passed: chip serial 0x${manifest.unit.chipSerial}, public-key hash, eMMC serial ${manifest.unit.emmcSerial}, disk GUID ${manifest.unit.diskGuid} all match the set.`);
 
-  // Everything the restore could overwrite is saved first.
+  // Which regions already hold the set's bytes; of the others, what they hold now is saved before anything is changed.
+  // A region that matches needs no copy: the set is its copy.
   const tag = unitTag(opened);
   const regionBytes = plan.regions.reduce((sum, region) => sum + region.sectors * sectorSize, 0);
-  say(`Saving what the device holds now in the ${plan.regions.length} region(s) the set covers (${formatBytes(regionBytes)}), before anything is changed.`);
+  say(`Reading what the device holds now in the ${plan.regions.length} region(s) the set covers (${formatBytes(regionBytes)}) to see which differ.`);
   const checks: Check[] = [];
   for (const [position, region] of plan.regions.entries()) {
     throwIfAborted(context.signal);
-    const fileName = `edl-${tag}-restore-${short}-${region.slug}.pre.bin`;
-    const { saved } = await escrowRange(run, opened, region.label, region.firstLba, region.sectors, fileName, "written", `Saving ${region.label} (${position + 1} of ${plan.regions.length})`);
-    checks.push({ region, escrow: saved, identical: saved.sha256 === region.sha256 });
+    const now = await summarizeRegion(run, opened, region.firstLba, region.sectors, "check", `Checking ${region.label} (${position + 1} of ${plan.regions.length})`);
+    checks.push({ region, current: now.sha256, identical: now.sha256 === region.sha256 });
   }
   const identical = checks.filter((check) => check.identical);
-  const toWrite = checks.filter((check) => !check.identical);
-  if (toWrite.length === 0) {
+  const differing = checks.filter((check) => !check.identical);
+  if (differing.length === 0) {
     const summary = `Nothing to restore: all ${checks.length} region(s) the set covers already hold exactly the set's bytes, checked by reading them. The device was not changed.`;
     say(summary);
     return { summary, verified: true, details: { set: manifestSha256, diskGuid: manifest.unit.diskGuid, written: [], alreadyIdentical: identical.map((check) => check.region.label) } };
   }
-  for (const check of toWrite) say(`${check.region.label} differs from the set and will be rewritten (saved as ${check.escrow.fileId}).`);
+  say(`${differing.length} region(s) differ from the set: ${listed(differing.map((check) => check.region.label))}. Saving what they hold now, before anything is changed.`);
+  const toWrite: Saved[] = [];
+  for (const [position, check] of differing.entries()) {
+    throwIfAborted(context.signal);
+    const { region } = check;
+    const fileName = `edl-${tag}-restore-${short}-${region.slug}.pre.bin`;
+    const { saved } = await escrowRange(run, opened, region.label, region.firstLba, region.sectors, fileName, "written", `Saving ${region.label} (${position + 1} of ${differing.length})`);
+    if (saved.sha256 !== check.current) {
+      throw new EdlError(`${region.label} read back as different bytes the second time (SHA-256 ${check.current}, then ${saved.sha256}), so the saved copy cannot be trusted. Nothing was written.`);
+    }
+    toWrite.push({ ...check, escrow: saved });
+  }
   if (identical.length > 0) say(`Already identical, left alone: ${listed(identical.map((check) => check.region.label))}.`);
 
-  const escrowList = (list: readonly Check[]): string => listed(list.map((check) => `${check.region.label} → ${check.escrow.fileId}`));
+  const escrowList = (list: readonly Saved[]): string => listed(list.map((check) => `${check.region.label} → ${check.escrow.fileId}`));
   const protectedNames = toWrite.filter((check) => check.region.protectedBecause).map((check) => check.region.label);
   const writeSectors = toWrite.reduce((sum, check) => sum + check.region.sectors, 0);
   const override = restoreOverride(manifestSha256);
