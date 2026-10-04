@@ -225,8 +225,11 @@ export interface SpanReport {
 
 /**
  * Whether the partition table, the capacity the programmer reports and the
- * sectors actually present at the end of the disk tell one story. A whole-disk
- * read is only offered when they do.
+ * sectors actually present at the end of the disk tell one story. Matching
+ * checksums prove a table is intact, not that it fits THIS disk, so the ranges it
+ * declares (usable range, both entry arrays, every partition) are checked against
+ * the measured capacity too. A whole-disk read is only offered when everything
+ * agrees.
  */
 export function evaluateSpan(measuredSectors: number, sectorSize: number, primary: GptTable, tail: TailFacts): SpanReport {
   const header = primary.header;
@@ -242,6 +245,35 @@ export function evaluateSpan(measuredSectors: number, sectorSize: number, primar
   add("span", gptSpanSectors === measuredSectors, gptSpanSectors === measuredSectors
     ? `The partition table spans ${gptSpanSectors} sectors, exactly the ${measuredSectors} the programmer reports.`
     : `The partition table spans ${gptSpanSectors} sectors (its backup header is at sector ${header.alternateLba}) but the programmer reports ${measuredSectors}: they disagree by ${Math.abs(gptSpanSectors - measuredSectors)} sector(s).`);
+
+  const entrySectors = gptEntrySectors(header, sectorSize);
+  const { firstUsableLba, lastUsableLba } = header;
+  const usableFits = firstUsableLba <= lastUsableLba && lastUsableLba < measuredSectors;
+  add("usable range", usableFits, usableFits
+    ? `The usable range (sectors ${firstUsableLba}-${lastUsableLba}) lies inside the ${measuredSectors}-sector disk.`
+    : `The partition table's usable range (sectors ${firstUsableLba}-${lastUsableLba}) does not fit the ${measuredSectors}-sector disk.`);
+
+  const arrayProblems: string[] = [];
+  const primaryArrayLast = header.entriesLba + entrySectors - 1;
+  if (header.entriesLba < 2) arrayProblems.push(`The primary entry array starts at sector ${header.entriesLba}, inside the protective MBR or the header.`);
+  if (primaryArrayLast >= measuredSectors) arrayProblems.push(`The primary entry array (sectors ${header.entriesLba}-${primaryArrayLast}) runs past the end of the ${measuredSectors}-sector disk.`);
+  if (primaryArrayLast >= firstUsableLba) arrayProblems.push(`The primary entry array (sectors ${header.entriesLba}-${primaryArrayLast}) runs into the usable range, which starts at sector ${firstUsableLba}.`);
+  if (backup.header) {
+    const backupFirst = backup.header.entriesLba;
+    const backupLast = backupFirst + entrySectors - 1;
+    if (backupLast >= measuredSectors) arrayProblems.push(`The backup entry array (sectors ${backupFirst}-${backupLast}) runs past the end of the ${measuredSectors}-sector disk.`);
+    if (backupFirst <= lastUsableLba) arrayProblems.push(`The backup entry array (sectors ${backupFirst}-${backupLast}) runs into the usable range, which ends at sector ${lastUsableLba}.`);
+    if (backupLast >= backup.header.myLba) arrayProblems.push(`The backup entry array (sectors ${backupFirst}-${backupLast}) runs into its own header at sector ${backup.header.myLba}.`);
+  }
+  add("entry arrays", arrayProblems.length === 0, arrayProblems.length === 0
+    ? `The entry array${backup.header ? "s" : ""} (primary at sector ${header.entriesLba}${backup.header ? `, backup at sector ${backup.header.entriesLba}` : ""}) lie${backup.header ? "" : "s"} inside the disk and outside the usable range.`
+    : arrayProblems.join(" "));
+
+  const outside = primary.partitions.filter((part) => part.firstLba < firstUsableLba || part.lastLba > lastUsableLba || part.lastLba >= measuredSectors);
+  const nameOf = (part: GptPartition): string => `"${part.name || "unnamed"}" (sectors ${part.firstLba}-${part.lastLba})`;
+  add("partitions", outside.length === 0, outside.length === 0
+    ? `All ${primary.partitions.length} partition(s) lie inside the usable range and the disk.`
+    : `${outside.length === 1 ? "Partition" : "Partitions"} ${outside.slice(0, 3).map(nameOf).join(", ")}${outside.length > 3 ? ` and ${outside.length - 3} more` : ""} ${outside.length === 1 ? "lies" : "lie"} outside the usable range (sectors ${firstUsableLba}-${lastUsableLba}) of the ${measuredSectors}-sector disk.`);
   add("last sector", tail.lastSectorReadable, tail.lastSectorReadable
     ? `Sector ${lastSectorLba}, the last one the programmer reports, can be read.`
     : `Sector ${lastSectorLba}, the last one the programmer reports, could not be read.`);
