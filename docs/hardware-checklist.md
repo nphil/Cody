@@ -227,14 +227,18 @@ PC tool's output is the reference to compare with.
   `r NAME` dump of the same partition. A one-byte offset would surface as
   "misaligned" or a GPT with a shifted signature: record it if it does.
 - [ ] **UNVERIFIED** The programmer ends each raw-data transfer with a short packet or a
-  zero-length packet and sends its log lines and answers as transfers of their own.
-  Cody relies on that to tell a log line taken for sector data (a read that came up
-  short by its length, or that carried a log line among the data, or that carried
-  nothing else) from data that merely contains similar text. A message that shares a
-  USB transfer with real data cannot be told apart, and a transfer that is itself
-  nothing but programmer-style log or answer XML is refused as a message. Record any
-  read that fails with "are a complete message from the programmer" on a unit whose
-  partition really holds such text.
+  zero-length packet, sends its log lines and answers as transfers of their own, and
+  sends raw data in whole sectors. Cody relies on that to tell text of the programmer's
+  own taken for sector data (a read that came up short by its length, or that carried a
+  log line among the data, or that carried nothing else) from data that merely contains
+  similar text. A message that shares a USB transfer with real data cannot be told
+  apart. A transfer that is itself nothing but programmer-style log or answer XML is
+  refused as a message; a transfer shorter than one sector that is nothing but white
+  space, or that begins with an XML declaration or a tag, is refused too (erased flash
+  and a sector or more of blanks are not). Record any read that fails with "are a
+  complete message from the programmer", "are nothing but white space" or "are the
+  start of a message from the programmer" on a unit whose partition really holds such
+  text, and whether the programmer ever sends a transfer shorter than a sector.
 - [ ] **UNVERIFIED** Every raw read ends where the programmer ended a USB transfer: the
   last byte of the data is followed by a short packet or a zero-length packet, and the
   closing answer is a transfer of its own. Cody refuses a read otherwise ("did not end

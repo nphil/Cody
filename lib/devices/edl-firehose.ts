@@ -1,5 +1,5 @@
 import { EdlError, edlTimeouts, type EdlLink } from "./edl-link";
-import { cleanDeviceText, FIREHOSE_XML_LIMITS, isPaddingByte, parseFirehoseDocument, RawMessageWatch, scanFirehoseFrame } from "./edl-xml";
+import { cleanDeviceText, FIREHOSE_XML_LIMITS, isPaddingByte, parseFirehoseDocument, RawMessageWatch, scanFirehoseFrame, type SwallowedKind } from "./edl-xml";
 import type { HardwareContext, HardwareRisk } from "./flasher";
 import { throwIfAborted } from "./serial";
 
@@ -44,6 +44,12 @@ const MAX_KEPT_LOGS = 300;
 const MAX_COMMAND_BYTES = 1024;
 /** Bytes after a document's `</data>`, in the same transfer, that are padding rather than the start of raw data. */
 const MAX_TRAILING_PADDING = 16;
+/** What the raw-data watch can find where the disk's data should be, in the words of the refusal that follows "... are". */
+const SWALLOWED: Readonly<Record<SwallowedKind, string>> = {
+  message: "a complete message from the programmer (a log line or an answer) that arrived as a transfer of its own, so the data is that many bytes short and those bytes are not the disk's",
+  padding: "nothing but white space that arrived as a transfer of its own, shorter than a sector: it is the padding the programmer puts in front of its answers, so the data is that many bytes short and those bytes are not the disk's",
+  opening: "the start of a message from the programmer (an XML declaration or a tag) that arrived as a transfer of its own, shorter than a sector, so the data is that many bytes short and those bytes are not the disk's",
+};
 const MAX_GRANTED_RANGES = 4096;
 const MAX_SECTOR = 2 ** 40;
 
@@ -652,16 +658,16 @@ export class FirehoseSession {
       this.requireAck(announced, label, "true");
       const owed = count * sectorSize;
       let remaining = owed;
-      const watch = new RawMessageWatch();
+      const watch = new RawMessageWatch(sectorSize);
       while (remaining > 0) {
         const ends: number[] = [];
         const chunk = await this.link.readSome(Math.min(remaining, 64 * 1024), edlTimeouts.dataInactivity, `${label} (${remaining} byte(s) still to come)`, ends);
         remaining -= chunk.byteLength;
-        // The programmer sends each message of its own as a transfer of its own: a stretch of the data between two ends of the
-        // device's transfers that is nothing but such messages is not the disk's, and nothing of this read can be trusted.
+        // The programmer sends each piece of its own text as a transfer of its own: a stretch of the data between two ends of the
+        // device's transfers that is nothing but such text is not the disk's, and nothing of this read can be trusted.
         const message = watch.feed(chunk, ends, remaining === 0);
         if (message) {
-          throw new EdlError(`${label}: ${message.length} byte(s) of the sector data, starting at byte ${message.at} of ${owed}, are a complete message from the programmer (a log line or an answer) that arrived as a transfer of its own, so the data is that many bytes short and those bytes are not the disk's. Nothing from this read can be trusted.`);
+          throw new EdlError(`${label}: ${message.length} byte(s) of the sector data, starting at byte ${message.at} of ${owed}, are ${SWALLOWED[message.kind]}. Nothing from this read can be trusted.`);
         }
         yield chunk;
       }

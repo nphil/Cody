@@ -2614,15 +2614,20 @@ as expanded-image hashes.
     declaration, a log line), is refused without looking at what the bytes say. A
     programmer that ends its data transfers with neither a short nor a
     zero-length packet cannot be read from (Cody asks for them with
-    `ZLPAwareHost`), and the refusal says so. (2) *Messages taken for data*
-    (`RawMessageWatch`): alignment cannot see a log line or answer that arrives
-    as a transfer of its own and completes the byte count, because it ends on a
-    transfer end (and it can repeat on every read), so any stretch between two
-    ends of the device's transfers - the start and the end of the data count -
-    that is nothing but such documents (read with the reader's own rule for what
-    may precede one, `leadBeforeDocument`) refuses the read, wherever it sits and
-    even when no disk byte arrived, while the same text inside a transfer of data
-    is still data. (3) *Two reads*: a copy that later justifies a write - the
+    `ZLPAwareHost`), and the refusal says so. (2) *Programmer text taken for
+    data* (`RawMessageWatch`): alignment cannot see text of the programmer's own
+    that arrives as a transfer of its own and completes the byte count, because
+    it ends on a transfer end (and it can repeat on every read). So a stretch
+    between two ends of the device's transfers - the start and the end of the
+    data count - refuses the read, wherever it sits and even when no disk byte
+    arrived, when it is (a) nothing but complete documents (read with the
+    reader's own rule for what may precede one, `leadBeforeDocument`), or, when
+    it is shorter than one sector and its end was marked, (b) nothing but white
+    space (the padding in front of an answer) or (c) the start of a document (an
+    XML declaration, a tag). (b) and (c) rest on disk data arriving in whole
+    sectors; NUL and 0xFF stretches (erased flash) and a sector or more of
+    blanks stay data, and so does the same text inside a transfer of data.
+    (3) *Two reads*: a copy that later justifies a write - the
     preflash and pre-erase copies, each region a restore overwrites, every region
     of a backup set - is read a second time and the two SHA-256s must agree
     before the user is asked anything (for a set: before the manifest is

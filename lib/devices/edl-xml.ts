@@ -292,19 +292,22 @@ const HEAD_BYTES = FIREHOSE_XML_LIMITS.leadingJunkBytes + Math.max(...ANSWER_STA
 const latin1 = new TextDecoder("latin1");
 
 /**
- * Whether a stretch that begins with `head` can still be a message: what comes before its first `<` is what the reader
- * tolerates before a document (`leadBeforeDocument`, the reader's own rule), and what follows could be the start of one of the
- * programmer's documents. Undecided - only tolerated bytes so far, or a start cut short - counts as yes.
+ * Whether a stretch that begins with `head` has a `<` within what the reader tolerates in front of a document
+ * (`leadBeforeDocument`, the reader's own rule), followed by the start of one of the programmer's documents.
  */
-function canOpenAMessage(head: Uint8Array): boolean {
+function opensAMessage(head: Uint8Array): boolean {
   const lead = leadBeforeDocument(head, false);
-  if (lead.kind === "waiting") return true;
   if (lead.kind !== "found") return false;
   const text = latin1.decode(head.subarray(lead.length, lead.length + HEAD_BYTES));
   return ANSWER_STARTS.some((start) => {
     const shared = Math.min(start.length, text.length);
     return text.slice(0, shared) === start.slice(0, shared);
   });
+}
+
+/** Whether a stretch that begins with `head` can still be a message: it opens one, or has so far only what the reader tolerates in front of one. Undecided counts as yes. */
+function canOpenAMessage(head: Uint8Array): boolean {
+  return leadBeforeDocument(head, false).kind === "waiting" || opensAMessage(head);
 }
 
 /** Whether `bytes` is nothing but complete programmer documents - log lines and answers - each read as the reader reads it, with only padding after the last. */
@@ -327,30 +330,45 @@ function onlyProgrammerMessages(bytes: Uint8Array): boolean {
   }
 }
 
-/** A stretch of raw data that is nothing but the programmer's own messages. */
+/** What a stretch of the data turned out to be: a whole message, only white space, or the beginning of a message. */
+export type SwallowedKind = "message" | "padding" | "opening";
+
+/** A stretch of raw data that is the programmer's own text and not the disk's. */
 export interface SwallowedMessage {
-  /** Bytes from the start of the data to where the message begins. */
+  /** Bytes from the start of the data to where it begins. */
   readonly at: number;
   /** Bytes of text it is. */
   readonly length: number;
+  readonly kind: SwallowedKind;
 }
 
 /**
- * Raw sector data and the programmer's own messages (log lines, answers) are separate USB transfers, but the host counts
- * bytes, so a message that arrives while data is still owed is taken for sector bytes - and a programmer that is short
- * of data by exactly that much looks complete. What the bytes say cannot tell the two apart (a disk may hold any text,
- * even a whole answer); how they arrived can: the programmer sends each message as a transfer of its own, so a message
- * that was delivered as data fills exactly one stretch between two ends of the device's transfers.
+ * Raw sector data and the programmer's own text (log lines, answers, the white space it puts in front of them) are separate
+ * USB transfers, but the host counts bytes, so text that arrives while data is still owed is taken for sector bytes - and a
+ * programmer that is short of data by exactly that much looks complete. What the bytes say cannot tell the two apart (a disk
+ * may hold any text, even a whole answer); how they arrived can: the programmer sends each piece of its own text as a transfer
+ * of its own, so text that was delivered as data fills exactly one stretch between two ends of the device's transfers.
  *
  * The raw data of one read is fed in order, with the offsets (within each chunk) at which the device ended a transfer. The
  * start of the data counts as the start of a stretch - the announcing answer was a transfer of its own - and the end of the
- * data as the end of one, so a message that is ALL the data (not one disk byte arrived) is found too. A stretch that is
- * nothing but complete `data`, `log` and `response` documents, read the way the reader reads them (including what it
- * tolerates in front of a document and the padding after one), is reported, however long it is and wherever it sits. Text
- * that is only part of a transfer of data is data, and so is a stretch longer than 2 MiB. What cannot be seen is a message
- * that shares a USB transfer with real data.
+ * data as the end of one, so a message that is ALL the data (not one disk byte arrived) is found too. Three things are
+ * refused, wherever they sit:
  *
- * This is not the alignment rule's job and cannot be: a message that is a transfer of its own and completes the byte count ends
+ *  - `message`: a stretch of any size that is nothing but complete `data`, `log` and `response` documents, read the way the
+ *    reader reads them (including what it tolerates in front of a document and the padding after one);
+ *  - `padding`: a stretch shorter than one sector that is nothing but white space - what the reader skips in front of an
+ *    answer, so a programmer that is short by that lead and sends it as a transfer of its own would otherwise pass;
+ *  - `opening`: a stretch shorter than one sector that begins like one of the programmer's documents (an XML declaration,
+ *    a tag) - the first part of an answer sent as a transfer of its own.
+ *
+ * The last two rest on one fact: disk data arrives in whole sectors, so a transfer of the device's own that is shorter than a
+ * sector is not disk data when it is text the reader would skip or open. They apply only to a stretch whose END the device
+ * marked (a short packet or a zero-length packet): a sub-sector piece of a longer transfer is the alignment rule's to judge.
+ * NUL and 0xFF stretches are never refused, so erased flash is data whatever size the programmer's transfers are; a sector of
+ * white space is a sector of blanks, and so is any stretch longer than that. Text that is only part of a transfer of data is
+ * data, and so is a stretch longer than 2 MiB. What cannot be seen is text that shares a USB transfer with real data.
+ *
+ * This is not the alignment rule's job and cannot be: text that is a transfer of its own and completes the byte count ends
  * exactly where a transfer ends, so the data looks aligned (and it can repeat on every read, so a second read agrees).
  */
 export class RawMessageWatch {
@@ -360,6 +378,11 @@ export class RawMessageWatch {
   private held = 0;
   private alive = true;
   private judged = false;
+  /** Every byte of the stretch so far is white space. */
+  private white = true;
+
+  /** `sectorSize` is the unit the disk's data comes in: a transfer shorter than that is not disk data when it is the programmer's padding or the start of its text. */
+  constructor(private readonly sectorSize: number) {}
 
   /** `ends` are offsets within `chunk` (0 to its length) at which the device ended a transfer; `last` marks the end of the data. */
   feed(chunk: Uint8Array, ends: readonly number[], last: boolean): SwallowedMessage | null {
@@ -368,14 +391,15 @@ export class RawMessageWatch {
       if (end < cursor || end > chunk.length) continue;
       this.extend(chunk.subarray(cursor, end));
       cursor = end;
-      const found = this.close();
+      const found = this.close(true);
       if (found) return found;
     }
     this.extend(chunk.subarray(cursor));
-    return last ? this.close() : null;
+    return last ? this.close(false) : null;
   }
 
   private extend(bytes: Uint8Array): void {
+    if (bytes.length > 0 && this.white && !bytes.every(isWhiteSpaceByte)) this.white = false;
     if (this.alive && bytes.length > 0) {
       if (this.held + bytes.length > MAX_STRETCH_BYTES) this.alive = false;
       else {
@@ -420,14 +444,23 @@ export class RawMessageWatch {
     return out;
   }
 
-  private close(): SwallowedMessage | null {
+  /** Ends the stretch. `endSeen`: the device marked its end there (a short packet or a zero-length packet). */
+  private close(endSeen: boolean): SwallowedMessage | null {
+    const size = this.offset - this.begun;
     let found: SwallowedMessage | null = null;
-    if (this.alive && this.held > 0 && onlyProgrammerMessages(this.text())) found = { at: this.begun, length: this.held };
+    if (size > 0) {
+      if (this.alive && onlyProgrammerMessages(this.text())) found = { at: this.begun, length: size, kind: "message" };
+      else if (endSeen && size < this.sectorSize) {
+        if (this.white) found = { at: this.begun, length: size, kind: "padding" };
+        else if (this.alive && opensAMessage(this.text())) found = { at: this.begun, length: size, kind: "opening" };
+      }
+    }
     this.begun = this.offset;
     this.parts = [];
     this.held = 0;
     this.alive = true;
     this.judged = false;
+    this.white = true;
     return found;
   }
 }
