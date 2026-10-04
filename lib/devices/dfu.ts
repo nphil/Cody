@@ -663,6 +663,9 @@ async function resetDevice(metadata: DfuMetadata, context: HardwareContext): Pro
     await reset.call(context.transport, context.signal);
   } catch (error) {
     throwIfAborted(context.signal);
+    if (context.transport.connected?.() !== false) {
+      throw new DfuProtocolError(`USB reset failed while the device remained connected: ${error instanceof Error ? error.message : String(error)}`);
+    }
     note = `The device left the bus during the reset (${error instanceof Error ? error.message : String(error)}), which is the usual result.`;
   }
   return { summary: "USB reset requested; the device re-enumerates and may need a fresh grant.", verified: false, details: { note } };

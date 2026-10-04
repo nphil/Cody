@@ -1819,6 +1819,7 @@ export class DeviceBridgeConnection implements PageOperationBridge {
         await ensureReady();
         await runUsbAbortable(ready, signal, () => ready.device.reset());
       },
+      connected: () => ready.device.opened,
     };
     let protocolTransport = transport;
     if (selectedAlternate?.interfaceClass === 0x0a && interfaceNumber !== undefined) {

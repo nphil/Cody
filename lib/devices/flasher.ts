@@ -40,6 +40,8 @@ export interface HardwareTransport {
   controlOut?(setup: USBControlTransferParameters, bytes: Uint8Array, signal: AbortSignal): Promise<void>;
   /** USB port reset (`dfu-util -R`); the device may re-enumerate. */
   reset?(signal: AbortSignal): Promise<void>;
+  /** Browser bridge observation after a reset failure. False proves a disconnect. */
+  connected?(): boolean;
   /** esptool-js owns the reader while borrowed; the console pump is suspended. */
   serialPort?: SerialPort;
   interfaceNumber?: number;
