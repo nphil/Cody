@@ -14,7 +14,7 @@ import type { GptPartition, GptTable } from "./edl-gpt";
 import { EdlError } from "./edl-link";
 import { saharaLeave } from "./edl-sahara";
 import { describeIdentity, discoverDevice, inspectDevice, openFirehose, type EdlRun } from "./edl-session";
-import { flashPartition } from "./edl-write";
+import { erasePartition, flashPartition } from "./edl-write";
 import type { Flasher, HardwareContext, HardwareRequest, HardwareResult, HardwareTransport } from "./flasher";
 import { throwIfAborted } from "./serial";
 
@@ -81,7 +81,7 @@ async function detect(run: EdlRun): Promise<HardwareResult> {
 
 // ---- exec ------------------------------------------------------------------
 
-type EdlCommand = "connect" | "printgpt" | "check" | "reset";
+type EdlCommand = "connect" | "printgpt" | "check" | "reset" | "erase";
 
 const COMMAND_NAMES: Readonly<Record<string, EdlCommand>> = {
   connect: "connect",
@@ -93,12 +93,13 @@ const COMMAND_NAMES: Readonly<Record<string, EdlCommand>> = {
   span: "check",
   reset: "reset",
   reboot: "reset",
+  erase: "erase",
 };
 
 export function parseEdlCommand(command: string | undefined): EdlCommand {
   const word = (command ?? "").trim().replace(/^edl\s+/i, "").toLowerCase();
   const found = Object.hasOwn(COMMAND_NAMES, word) ? COMMAND_NAMES[word] : undefined;
-  if (!found) throw new EdlError(`"${(command ?? "").trim().slice(0, 40)}" is not an EDL command Cody offers. Use connect, printgpt, check or reset.`, "refused");
+  if (!found) throw new EdlError(`"${(command ?? "").trim().slice(0, 40)}" is not an EDL command Cody offers. Use connect, printgpt, check, erase (the partition name goes in target) or reset.`, "refused");
   return found;
 }
 
@@ -210,6 +211,7 @@ async function exec(run: EdlRun): Promise<HardwareResult> {
     case "printgpt": return printGpt(run);
     case "check": return checkDisk(run);
     case "reset": return reset(run);
+    case "erase": return erasePartition(run);
   }
 }
 

@@ -255,9 +255,9 @@ async function main() {
   };
   const startOperationTools = [
     ["device_detect", "Start protocol detection in the browser. Protocol edl reads a Qualcomm 9008 device's boot-ROM identity (chip serial, hardware id, public-key hash) and needs no loader."],
-    ["device_flash", "Start a verified flash. Any destructive write pauses for direct browser UI confirmation bound to the exact target, hash, and offset."],
+    ["device_flash", "Start a verified flash. Any destructive write pauses for direct browser UI confirmation bound to the exact target, hash, and offset. Protocol edl: target is the exact GPT partition name, fileId + sha256 the image (the partition's exact size, or smaller with options.pad zero or ff); the partition is saved first, protected names need the typed override write:NAME, boot0/boot1/rpmb are refused, and the read-back SHA-256 decides verified. Run device_exec connect first; flash never sends a loader."],
     ["device_dump", "Start a dump or backup; resulting bytes remain a session-owned browser artifact. Protocol edl: target is the exact GPT partition name, or user-area with options.sectors set to the count device_exec check verified; fileId + sha256 name the loader while the device is still in the boot ROM."],
-    ["device_exec", "Start a protocol command. State-changing commands pause for direct browser UI confirmation. Protocol edl (Qualcomm 9008) takes connect, printgpt, check and reset."],
+    ["device_exec", "Start a protocol command. State-changing commands pause for direct browser UI confirmation. Protocol edl (Qualcomm 9008) takes connect, printgpt, check, reset, and erase (target = the exact GPT partition name; saved first, typed override write:NAME for protected names, reports what the partition reads as afterwards)."],
     ["device_push", "Start a resumable file push from a session artifact."],
     ["device_pull", "Start a file pull into a session-owned browser artifact."],
     ["device_sideload", "Serve a session artifact to ADB recovery sideload. Requires direct approval; transfer completion does not verify installation."],

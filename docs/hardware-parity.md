@@ -140,7 +140,9 @@ code or tables are used (Cody is MIT). Cody ships **no loader**: the programmer
 (a signed `.mbn`/`.elf`) is a session artifact the user chooses. A loader runs
 arbitrary code on the device, so loading one is the one thing here that asks for
 a confirmation bound to the file's SHA-256; the boot ROM itself refuses a loader
-that was not signed for the device. **This stage reads and never writes.**
+that was not signed for the device. **This stage reads, and can flash or erase one
+named partition under the write gate described below; a full backup set with a
+manifest, restore of such a set, and the boot-drive change are not built yet.**
 
 | PC command | Cody | Status | Evidence |
 |------------|------|--------|----------|
@@ -156,7 +158,12 @@ that was not signed for the device. **This stage reads and never writes.**
 | (new) span check: table span vs. measured capacity, backup header in the last sector, last sector readable | `device_exec "check"` | Done (emulator-tested; hardware evidence pending) | `edl-protocol.test.mjs`, `edl.test.mjs` |
 | `rs START SECTORS FILE` (any range) | none | Not implemented | only named partitions and the verified whole area are offered |
 | `reset` | `device_exec "reset"` (asks first; Sahara RESET from the boot ROM, `power reset` from a programmer; the departure is announced so the disconnect is not a cancel) | Done (emulator-tested; hardware evidence pending) | `edl.test.mjs`, `edl-browser.test.mjs` |
-| `w`, `wl`, `wf`, `ws`, `e`, `ef`, `es`, `peek`, `poke`, `memorydump`, `secureboot`, `provision`, `setbootablestoragedrive`, `reset --resetmode=edl`, raw `xml` | none | **Refused today** | read-only stage: the Firehose layer builds only five read commands and refuses anything else before it reaches the wire (`edl-protocol.test.mjs`, `edl.test.mjs`) |
+| `w NAME FILE`, `wf` (write one partition from a file) | `device_flash` protocol `edl`, `target` = exact GPT partition name, `fileId` = the image, optional `options.pad` `zero`\|`ff`. The image must be the partition's exact size (or smaller with an explicit pad: the partition is always written whole). The whole partition is saved first and the saved file is checked; ONE confirmation with the exact sectors and the backup; the typed override `write:<name>` for the protected boot-chain / radio / identity / partition-table names; writes in blocks and a cancel lands between blocks; read-back by SHA-256 (mismatch = POSSIBLY MODIFIED + the id of the saved copy; no read-back = UNVERIFIED). Needs a running programmer (Connect first) | Done (emulator-tested; hardware evidence pending) | `edl.test.mjs` (flash suite), `edl-protocol.test.mjs` (write gate) |
+| `e NAME`, `ef` (erase one partition) | `device_exec "erase"` with `target` = the partition name: the same save-first / one confirmation / typed override / cancel-between-segments flow, using the programmer's own `erase`; afterwards the partition is read back and reported as all zero, all 0xFF, unchanged or mixed - no value is assumed | Done (emulator-tested; hardware evidence pending) | `edl.test.mjs` (erase suite) |
+| `wl`, `ws`, `es` (raw sector ranges), `peek`, `poke`, `memorydump`, `secureboot`, `provision`, `reset --resetmode=edl`, raw `xml` | none | **Refused** | the Firehose guard knows only the closed command set; every other tag, `power` value, attribute and physical partition other than 0 is refused before it reaches the wire, under any write grant (`edl-protocol.test.mjs`) |
+| `patch` | none | **Deliberately not shipped** | nothing in Cody needs an in-place patch: a same-unit GPT restore writes the saved sectors byte for byte. Factory `rawprogram`/`patch` XML flows are out of scope |
+| `setbootablestoragedrive` | the guarded builder and write gate exist (`setBootableDrive`, needs a typed override and cannot be read back, so it would be UNVERIFIED); **no flasher command calls it yet** | Not implemented | `edl-protocol.test.mjs` (gate only) |
+| whole-disk backup set with a manifest, and restore of it (partitions first, GPT last, unit-identity match: chip serial, public-key hash, eMMC serial, disk GUID) | none | **Not implemented yet** | planned; the pieces it will use (write gate, saved copy before approval, read-back) are the ones above |
 | UFS, NAND, SPI-NOR, other LUNs, the eMMC boot partitions, RPMB | none | Not implemented | refused with a plain message; a partition dump never touches them |
 | Sahara 3 / multi-file image configs, streaming (`nprg`) loaders, memory-debug (`900E`) | none | Not implemented | the ROM's version is checked first and a newer one is refused |
 | driver install (Zadig / libusb / udev) | none | **Browser limit** | WebUSB can only use an interface no OS driver owns. On Windows the Qualcomm QDLoader driver owns it; replace it with WinUSB first. On Linux and Android no driver action is needed |

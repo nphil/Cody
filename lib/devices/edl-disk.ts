@@ -308,9 +308,9 @@ export interface LocatedPartition {
 /**
  * Reads the primary table and finds the ONE partition called `name` in it, or says why
  * it cannot be used. `outcome` is what the refusal says was left undone ("read",
- * "written"). Nothing is read from or written to the partition itself.
+ * "written", "erased"). Nothing is read from or written to the partition itself.
  */
-export async function locatePartition(opened: OpenedEdl, name: string, outcome: "read" | "written"): Promise<LocatedPartition> {
+export async function locatePartition(opened: OpenedEdl, name: string, outcome: "read" | "written" | "erased"): Promise<LocatedPartition> {
   const primary = await readPrimaryGpt(opened);
   const { header } = primary.table;
   if (!header.headerCrcValid || !primary.table.entriesCrcValid) {

@@ -192,13 +192,14 @@ item remains **UNVERIFIED** until its permitted evidence is completed.
 - [ ] **UNVERIFIED** Device recovery/re-enumeration is recorded after refusal,
   test flash, and restore.
 
-### Qualcomm EDL (read-only stage)
+### Qualcomm EDL (reads, plus flash and erase of one named partition)
 
 Device in mind: Lenovo Smart Display 10" SD-X701B (APQ8053) with the loader
 `amber_bluebbery_prog_emmc_firehose_8953_ddr.mbn` (374,900 bytes; record its
 SHA-256). Per `notes/hw/lenovo-sd-x701b.md` no contact with a unit is authorised
-by these notes: each session needs a coordinated go-ahead. Nothing in this stage
-writes storage, and the PC tool's output is the reference to compare with.
+by these notes: each session needs a coordinated go-ahead. The read items come
+first and write nothing; the flash and erase items at the end write storage. The
+PC tool's output is the reference to compare with.
 
 - [ ] **UNVERIFIED** The browser (Android Chrome, over USB-C OTG) offers the
   `05c6:9008` device in the picker, claims its interface, and `device_list`
@@ -242,6 +243,31 @@ writes storage, and the PC tool's output is the reference to compare with.
   space before and after. It does not include the eMMC boot areas or RPMB.
 - [ ] **UNVERIFIED** `reset` makes the unit leave EDL and boot normally, and the
   operation ends as completed, not cancelled.
+
+Flash and erase (emulator-tested only; each item below needs a coordinated
+go-ahead on a real unit and a saved copy of every partition touched):
+
+- [ ] **UNVERIFIED** `program` is accepted by the programmer WITHOUT a
+  `filename` attribute and with the raw data followed by a zero-length packet
+  after each payload-sized piece; record any NAK text and whether the programmer
+  needs `ZLPAwareHost` to be 1.
+- [ ] **UNVERIFIED** A flash of a small ordinary partition (for example `cache`
+  or a scratch partition) reads back with the SHA-256 of the image; the saved
+  copy taken first equals what the PC tool reads for the same partition.
+- [ ] **UNVERIFIED** The read-back goes through the same programmer path as the
+  write: record whether a programmer with a write cache could return cached data
+  (the read-back would then not prove the flash holds the bytes). Power-cycle and
+  read again if in doubt.
+- [ ] **UNVERIFIED** Cancelling a flash between blocks leaves the programmer
+  answering the next command; cancelling while a block is in flight (the grace
+  period `edlTimeouts.cancelGrace`) leaves it waiting for data and needs the
+  device put into EDL again. Record which one happened.
+- [ ] **UNVERIFIED** `erase` is in the programmer's function list; record what a
+  freshly erased partition reads as (all zero, all 0xFF, unchanged) - Cody reports
+  it and assumes nothing.
+- [ ] **UNVERIFIED** The typed override `write:<name>` is demanded in the panel's
+  confirmation for a protected partition (for example `persist`) and the write is
+  refused without it; `boot0`, `boot1` and `rpmb` are refused outright.
 
 ### CMSIS-DAP / DAPLink (not shipped)
 

@@ -2479,7 +2479,7 @@ as expanded-image hashes.
   the `state::props` text). MTK
   preloader/BROM/download-agent support is **not implemented** (parked); see
   `docs/hardware-parity.md` for every tool's command-by-command status.
-- **Qualcomm EDL (USB `05c6:9008`, `edl*.ts`) — read-only so far.** Implemented
+- **Qualcomm EDL (USB `05c6:9008`, `edl*.ts`) — read-only commands plus a guarded `flash` and `erase` of one named partition; backup-set/restore and the boot-drive change are NOT built yet.** Implemented
   from the Sahara/Firehose wire format; the GPLv3 `edl` tool was read as a
   behavioural reference only and none of its code or tables are used (Cody is
   MIT). Cody ships no loader: the user chooses one as a session artifact.
@@ -2497,18 +2497,45 @@ as expanded-image hashes.
   no DOCTYPE/entities/CDATA, every dimension capped, control characters made
   harmless), `edl-firehose.ts`, `edl-gpt.ts` (CRC32, header and entry checks,
   `evaluateSpan`), `edl-session.ts` (what state is the device in: boot ROM or
-  programmer, the recovery ladder, the confirmed loader upload) and `edl.ts`
-  (the flasher). Components: `components/devices/EdlWorkflow.tsx`.
-  - **Read-only by construction.** Firehose commands exist only as the closed
-    union `FirehoseCommand` (`nop`, `configure` for eMMC, `getstorageinfo`,
-    `read` of physical partition 0, `power reset`), built from validated integers
-    and fixed words, and `assertReadOnlyFirehoseXml` parses every document about
-    to be sent and refuses anything that is not exactly one of those with exactly
-    their attributes (program, erase, patch, setbootablestoragedrive, poke, peek,
-    digests, `power off|edl`, two commands in one document, comments...).
-    `parseEdlCommand` accepts only connect, printgpt, check and reset. The tests
-    prove it against the emulator, which records and carries out any write it is
-    sent.
+  programmer, the recovery ladder, the confirmed loader upload), `edl-disk.ts`
+  (shared reads/saves/hashes and partition lookup), `edl-protect.ts` (which names
+  are refused, protected or ordinary), `edl-write.ts` (flash and erase) and
+  `edl.ts` (the flasher). Components: `components/devices/EdlWorkflow.tsx` (no
+  flash/erase card in the panel yet: the Flash tab exists, the agent tools
+  `device_flash` / `device_exec erase` work, and the confirmation card is the
+  generic one).
+  - **Writes only inside a grant.** Firehose commands exist only as the closed
+    union `FirehoseCommand`, built from validated integers and fixed words, and
+    `assertFirehoseXml` parses every document about to be sent. Reading
+    (`nop`, `configure` for eMMC, `getstorageinfo`, `read`, `power reset`) needs
+    nothing. `program`, `erase` and `setbootablestoragedrive` go out only under a
+    `WriteGrant`, and a grant exists only after `grantWrites` awaited the user's
+    confirmation (which lists the exact sector ranges). The guard then refuses any
+    write outside the approved merged ranges, of a kind not approved, in another
+    sector size, or in a physical partition other than 0 (so the eMMC boot areas
+    and RPMB cannot be addressed at all). patch, peek, poke, digests, `power`
+    other than reset and unknown tags are refused under any grant; `patch` is
+    deliberately not shipped (a same-unit GPT restore writes the saved sectors
+    byte for byte, so nothing needs it). `parseEdlCommand` accepts connect,
+    printgpt, check, erase and reset.
+  - **Flash and erase** (`edl-write.ts`). Target = exact GPT partition name. A
+    flash needs an image of exactly the partition's size, or `options.pad`
+    `zero`|`ff` to fill the rest (the partition is always written whole). Before
+    anything is written the partition is saved and the saved file is checked to
+    hold exactly those bytes (no saved copy = no write); one confirmation carries
+    the exact sectors and the backup, plus the typed override `write:<name>` for
+    the protected boot-chain / radio / identity / partition-table names
+    (`edl-protect.ts`). Names like boot0/boot1/rpmb/mmcblk*boot* and partitions
+    that overlap a partition table or another partition are refused with no
+    override. Writes run in blocks; a cancel lands BETWEEN blocks (the link rides
+    a signal that follows the operation's only after `edlTimeouts.cancelGrace`),
+    because a programmer left waiting for the rest of a block takes the next
+    command for sector data. The partition is read back and compared by SHA-256:
+    a mismatch is reported as POSSIBLY MODIFIED with the id of the saved copy; a
+    programmer that will not read back leaves the write UNVERIFIED. An erase
+    reports what the partition reads as afterwards (all zero, all 0xFF,
+    unchanged, mixed) and never claims a value. Neither sends a loader: run
+    Connect first. Flash/erase are emulator-tested only.
   - **Actions.** `detect` (Sahara identity; leaves the ROM's re-offered HELLO
     unread so the next operation finds an ordinary device), `exec connect`
     (loader only if the device is still in the boot ROM, after a confirmation

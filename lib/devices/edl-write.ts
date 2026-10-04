@@ -110,22 +110,39 @@ export function tallyHooks(opened: OpenedEdl, tally: WriteTally, stop: () => voi
   };
 }
 
+/** What an interruption needs to say, besides the error itself. */
+export interface InterruptionFacts {
+  readonly verb: "write" | "erase";
+  /** What was being changed: a partition name, or "the restore of ..." for a whole set. */
+  readonly subject: string;
+  readonly totalSectors: number;
+  readonly tally: WriteTally;
+  /** Where the previous contents are and how to put them back. */
+  readonly where: string;
+}
+
 /**
- * What an interrupted write tells the user, and the error that ends the operation.
- * A cancel stays a cancel (the operation is "cancelled", with this in its output);
- * anything else becomes an error whose message is the same text.
+ * What an interrupted write or erase tells the user, and the error that ends the
+ * operation. A cancel stays a cancel (the operation is "cancelled", with this in its
+ * output); anything else becomes an error whose message is the same text.
  */
-export function interruption(run: EdlRun, opened: OpenedEdl, error: unknown, subject: string, totalSectors: number, tally: WriteTally, where: string): unknown {
+export function interruption(run: EdlRun, opened: OpenedEdl, error: unknown, facts: InterruptionFacts): unknown {
+  const { verb, subject, totalSectors, tally, where } = facts;
   const cancelled = isCancel(error, run);
   const left = run.context.transport.connected?.() === false;
   const cause = (left ? "the device left the USB bus" : cancelled ? "the operation was cancelled" : messageOf(error)).replace(/[.\s]+$/, "");
-  const dataSent = tally.acknowledged > 0 || (tally.inFlight > 0 && opened.link.bytesSent - tally.sentAtBlockStart > COMMAND_BYTES_CEILING);
-  const note = dataSent
-    ? `POSSIBLY MODIFIED: the write to ${subject} stopped (${cause}) after ${tally.acknowledged} of ${totalSectors} sectors were acknowledged${tally.inFlight > 0 ? `; a block of ${tally.inFlight} sector(s) was in flight, so it may be partly written` : ""}. ${subject} now holds a mix of the new data and its previous contents. ${where}`
-    : `Nothing was written to ${subject}: ${cause}. Its contents are as they were.`;
+  // A write has changed something once data went out; an erase once its command went out without the programmer refusing it.
+  const touched = tally.acknowledged > 0 || (tally.inFlight > 0 && (verb === "write" ? opened.link.bytesSent - tally.sentAtBlockStart > COMMAND_BYTES_CEILING : !(error instanceof FirehoseRejection)));
+  const inFlight = tally.inFlight > 0 ? (verb === "write" ? `; a block of ${tally.inFlight} sector(s) was in flight, so it may be partly written` : `; the erase of the next ${tally.inFlight} sector(s) was in flight, so its outcome is unknown`) : "";
+  const note = touched
+    ? `POSSIBLY MODIFIED: the ${verb === "write" ? "write to" : "erase of"} ${subject} stopped (${cause}) after ${tally.acknowledged} of ${totalSectors} sectors were ${verb === "write" ? "acknowledged" : "erased"}${inFlight}. ${subject} now holds a mix of ${verb === "write" ? "the new data and its previous contents" : "erased and original contents"}. ${where}`
+    : `Nothing was ${verb === "write" ? "written to" : "erased in"} ${subject}: ${cause}. Its contents are as they were.`;
   run.say(note);
-  if (dataSent && tally.inFlight > 0 && cancelled && !left) {
-    run.say(`The cancel arrived while a block was in flight and the block did not finish within ${edlTimeouts.cancelGrace / 1000} s, so it was cut off. The programmer may still be waiting for the rest of that block and would take the next command for data: unplug the device and put it into EDL mode again before doing anything else.`);
+  if (touched && tally.inFlight > 0 && cancelled && !left) {
+    const waited = `The cancel arrived while ${verb === "write" ? "a block" : "an erase"} was in flight and it did not finish within ${edlTimeouts.cancelGrace / 1000} s, so it was cut off.`;
+    run.say(verb === "write"
+      ? `${waited} The programmer may still be waiting for the rest of that block and would take the next command for data: unplug the device and put it into EDL mode again before doing anything else.`
+      : `${waited} Whether that erase completed is unknown: read the partition back before relying on it, and put the device into EDL mode again if the programmer stops answering.`);
   }
   return cancelled ? error : new EdlError(note, error instanceof EdlError ? error.kind : "protocol");
 }
@@ -146,8 +163,8 @@ function parseFlashOptions(options: Record<string, unknown> | undefined): FlashO
   throw new EdlError('options.pad must be "zero" or "ff".', "refused");
 }
 
-/** Saves what is in `part` now. A copy that cannot be saved or does not match what was read refuses the write. */
-export async function escrowPartition(run: EdlRun, opened: OpenedEdl, part: GptPartition, suffix: string): Promise<StreamedRead> {
+/** Saves what is in `part` now. A copy that cannot be saved or does not match what was read refuses the change. */
+export async function escrowPartition(run: EdlRun, opened: OpenedEdl, part: GptPartition, suffix: string, outcome: "written" | "erased" = "written"): Promise<StreamedRead> {
   const fileName = `edl-${unitTag(opened)}-${fileNamePart(part.name)}.${suffix}.bin`;
   try {
     return await streamToArtifact(run, opened, part.firstLba, part.sectors, fileName, "escrow");
@@ -155,7 +172,7 @@ export async function escrowPartition(run: EdlRun, opened: OpenedEdl, part: GptP
     // A cancel, or the device going away, is the caller's to report; anything else means there is no saved copy.
     const deviceOrCancel = error instanceof DOMException && /^(AbortError|NotFoundError|NetworkError)$/.test(error.name);
     if (deviceOrCancel || isCancel(error, run)) throw error;
-    throw new EdlError(`The current contents of ${part.name} could not be saved (${messageOf(error)}). Nothing was written: Cody never writes without a saved copy of what it overwrites.`, error instanceof EdlError ? error.kind : "refused");
+    throw new EdlError(`The current contents of ${part.name} could not be saved (${messageOf(error)}). Nothing was ${outcome}: Cody never ${outcome === "written" ? "writes" : "erases"} without a saved copy of what it ${outcome === "written" ? "overwrites" : "erases"}.`, error instanceof EdlError ? error.kind : "refused");
   }
 }
 
@@ -229,7 +246,7 @@ export async function flashPartition(run: EdlRun): Promise<HardwareResult> {
       tallyHooks(opened, tally, stop, report, sectorSize),
     ));
   } catch (error) {
-    throw interruption(run, opened, error, name, part.sectors, tally, `Its previous contents are saved as ${escrow.saved.fileId} (SHA-256 ${escrow.saved.sha256}). ${undo}`);
+    throw interruption(run, opened, error, { verb: "write", subject: name, totalSectors: part.sectors, tally, where: `Its previous contents are saved as ${escrow.saved.fileId} (SHA-256 ${escrow.saved.sha256}). ${undo}` });
   } finally {
     grant.revoke();
   }
@@ -274,5 +291,94 @@ export async function flashPartition(run: EdlRun): Promise<HardwareResult> {
       backup: escrow.saved,
       unit: tag,
     },
+  };
+}
+
+/**
+ * Erases one named partition with the programmer's own `erase`. Like a flash it saves the
+ * partition first, asks once (typed `write:<name>` for the protected list), erases in
+ * segments that a cancel can stop between, and reads the partition back. What the
+ * region holds afterwards is REPORTED (all zero, all 0xFF, unchanged, mixed), never
+ * assumed: an eMMC erase may leave either value, or only mark the blocks unused.
+ */
+export async function erasePartition(run: EdlRun): Promise<HardwareResult> {
+  const { context, request, say } = run;
+  const name = requirePartitionName(request.target, "Erasing");
+  if (request.offset !== undefined || request.length !== undefined) {
+    throw new EdlError("EDL erase erases a whole named partition; offset and length are not accepted. Nothing was erased.", "refused");
+  }
+  if (context.input || request.fileId || request.sha256) throw new EdlError("An erase takes no file. Nothing was erased.", "refused");
+  if (request.options && Object.keys(request.options).length > 0) {
+    throw new EdlError("An erase takes no options. Approvals are given in the panel, never in options. Nothing was erased.", "refused");
+  }
+  const kind = classifyEdlPartition(name);
+  if (kind.level === "refused") throw new EdlError(`${kind.reason} Nothing was erased.`, "refused");
+
+  const opened = await openFirehose(run, { identity: "try", loader: "never" }, undefined);
+  const { sectorSize } = opened.storage;
+  const { primary, part } = await locatePartition(opened, name, "erased");
+  const unsafe = partitionWriteProblem(primary, part, opened.storage.totalSectors, sectorSize);
+  if (unsafe) throw new EdlError(`${unsafe} Cody never erases across a partition table or another partition. Nothing was erased.`, "refused");
+
+  say(`Saving the current contents of ${name} before anything is changed.`);
+  const escrow = await escrowPartition(run, opened, part, "preerase", "erased");
+  const undo = `To undo this, flash that file back to ${name}.`;
+  const backup = `Saved the whole ${name} partition (${describeRange(part.firstLba, part.sectors, sectorSize)}) as ${escrow.saved.fileId}, SHA-256 ${escrow.saved.sha256}, before any change, and checked that the file holds exactly those bytes. ${undo}`;
+  say(backup);
+
+  const grant = await grantWrites(context, {
+    action: "edl erase",
+    target: name,
+    offset: 0,
+    length: part.bytes,
+    ...(kind.level === "protected" ? { protectedOverride: `write:${name}` } : {}),
+    backup,
+    details: [
+      `Erase the partition ${name} with the programmer's erase command: ${describeRange(part.firstLba, part.sectors, sectorSize)} of the eMMC user area (physical partition 0).`,
+      `${describeStorage(opened)}. Disk GUID ${primary.table.header.diskGuid}.`,
+      kind.level === "protected" ? `PROTECTED: ${kind.reason} Type write:${name} to approve.` : "",
+      "What the partition holds afterwards depends on the chip: an eMMC erase may leave zeros, 0xFF, or only mark the blocks unused. After the erase Cody reads the partition back and reports what it actually reads as; it claims no particular value.",
+    ].filter(Boolean).join("\n"),
+  }, { label: `erase ${name}`, sectorSize, kinds: ["erase"], ranges: [{ startSector: part.firstLba, sectors: part.sectors }] });
+
+  const tally = newTally();
+  const report = progressReporter(context, "erase", part.bytes, `Erasing ${name}`);
+  say(`Erasing ${name}: ${describeRange(part.firstLba, part.sectors, sectorSize)}.`);
+  try {
+    await duringWrites(run, opened, (stop) => opened.firehose.eraseSectors(grant, part.firstLba, part.sectors, sectorSize, tallyHooks(opened, tally, stop, report, sectorSize)));
+  } catch (error) {
+    throw interruption(run, opened, error, { verb: "erase", subject: name, totalSectors: part.sectors, tally, where: `Its previous contents are saved as ${escrow.saved.fileId} (SHA-256 ${escrow.saved.sha256}). ${undo}` });
+  } finally {
+    grant.revoke();
+  }
+
+  say(`The programmer acknowledged the erase. Reading ${name} back to see what it holds now.`);
+  let back: RegionSummary;
+  try {
+    back = await summarizeRegion(run, opened, part.firstLba, part.sectors, "verify", `Reading ${name} back`);
+  } catch (error) {
+    if (isCancel(error, run)) {
+      say(`Cancelled before the read-back finished: the erase of ${name} was acknowledged but its result is UNVERIFIED. Its previous contents are saved as ${escrow.saved.fileId}.`);
+      throw error;
+    }
+    if (!(error instanceof FirehoseRejection)) {
+      throw new EdlError(`The erase of ${name} was acknowledged, but reading it back failed (${messageOf(error)}). UNVERIFIED, and ${name} is POSSIBLY MODIFIED. Its previous contents are saved as ${escrow.saved.fileId} (SHA-256 ${escrow.saved.sha256}). ${undo}`, error instanceof EdlError ? error.kind : "protocol");
+    }
+    const unverified = `UNVERIFIED: the programmer acknowledged the erase of ${name} but would not read it back (${error.message}), so its result was not checked. Its previous contents are saved as ${escrow.saved.fileId} (SHA-256 ${escrow.saved.sha256}).`;
+    say(unverified);
+    return { summary: unverified, verified: false, details: { partition: name, firstSector: part.firstLba, sectors: part.sectors, backup: escrow.saved, readback: "refused" } };
+  }
+  const state = back.allZero ? "zero" : back.allOnes ? "ff" : back.sha256 === escrow.saved.sha256 ? "unchanged" : "mixed";
+  const saved = `The previous contents are saved as ${escrow.saved.fileId}.`;
+  const summary = state === "zero" ? `Erased ${name}: it now reads as all zero bytes (0x00) (SHA-256 ${back.sha256}). ${saved}`
+    : state === "ff" ? `Erased ${name}: it now reads as all 0xFF bytes (SHA-256 ${back.sha256}). ${saved}`
+      : state === "unchanged" ? `UNCHANGED: the programmer acknowledged the erase of ${name}, but the partition still reads exactly as before. Some eMMC erase commands only mark blocks unused. ${saved}`
+        : `${name} was changed but not left uniform: it now reads as mixed contents, neither all zero nor all 0xFF (SHA-256 ${back.sha256}). Cody claims no particular erased value. ${saved}`;
+  say(summary);
+  return {
+    summary,
+    verified: state === "zero" || state === "ff",
+    sha256: back.sha256,
+    details: { partition: name, firstSector: part.firstLba, sectors: part.sectors, sectorSize, state, readbackSha256: back.sha256, protectedPartition: kind.level === "protected", backup: escrow.saved },
   };
 }
