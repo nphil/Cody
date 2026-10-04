@@ -1815,6 +1815,10 @@ export class DeviceBridgeConnection implements PageOperationBridge {
           if (result.bytesWritten !== bytes.byteLength) throw new Error(`USB control write was incomplete (${result.bytesWritten}/${bytes.byteLength} bytes).`);
         });
       },
+      reset: async (signal) => {
+        await ensureReady();
+        await runUsbAbortable(ready, signal, () => ready.device.reset());
+      },
     };
     let protocolTransport = transport;
     if (selectedAlternate?.interfaceClass === 0x0a && interfaceNumber !== undefined) {

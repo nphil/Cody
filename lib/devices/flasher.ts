@@ -38,6 +38,8 @@ export interface HardwareTransport {
   setSignals?(signals: { dtr?: boolean; rts?: boolean; brk?: boolean }, signal?: AbortSignal): Promise<void>;
   controlIn?(setup: USBControlTransferParameters, length: number, signal: AbortSignal): Promise<Uint8Array>;
   controlOut?(setup: USBControlTransferParameters, bytes: Uint8Array, signal: AbortSignal): Promise<void>;
+  /** USB port reset (`dfu-util -R`); the device may re-enumerate. */
+  reset?(signal: AbortSignal): Promise<void>;
   /** esptool-js owns the reader while borrowed; the console pump is suspended. */
   serialPort?: SerialPort;
   interfaceNumber?: number;

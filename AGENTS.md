@@ -2253,8 +2253,15 @@ as expanded-image hashes.
   offset, and raw binary (not a `.dfu` container). All internal flash is
   conservatively protected and needs exact `allow-bootloader`. Cody escrows,
   merges, writes, and exact-reads every touched sector without manifestation or
-  reset before proof. Generic bcdDFU `0x0110` remains detect/dump/exec only;
-  flash rejects. No caller descriptor option creates a capability.
+  reset before proof. Generic bcdDFU `0x0110` flash (`flashDfu11` in dfu.ts) is
+  also supported: target is the exact selected alternate, offset 0, raw binary
+  (a `.dfu` suffix is refused); the typed override is `allow-unknown` (or the
+  role the alternate's name implies); the current image is escrowed when the
+  device can upload; the image is sent as numbered blocks plus the zero-length
+  block; a manifestation-tolerant device is read back and SHA-256-compared, an
+  intolerant one restarts itself and is reported UNVERIFIED. `exec` also takes
+  `reset` (USB reset through `HardwareTransport.reset`) and, for DfuSe,
+  `leave ADDRESS`. No caller descriptor option creates a capability.
 - **ADB:** detection, shell/PTY, push, pull/dump, recovery sideload and raw-image
   readback verification use Cody's persistent browser IndexedDB RSA credential.
   Without a shell grant only literal diagnostics are available; a user-granted

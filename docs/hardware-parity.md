@@ -123,8 +123,10 @@ Differs, with the reason:
 | `dfu-util -l` | `device_list` + `device_detect` (DFU interface/alternate, state, DfuSe memory map) | Done | `fastboot-dfu.test.mjs` (descriptor parsing and `detect` validation) |
 | `-U file` (upload) | `device_dump` (descriptor-selected alternate) | Done | `fastboot-dfu.test.mjs` |
 | `-D file` (download), `-a`, `-s ADDR` | `device_flash` only for DfuSe (`bcdDFU 0x011a`) `@Internal Flash`, raw `.bin`, explicit offset, exact `allow-bootloader`; escrows, merges, writes, reads back every sector | Done (DfuSe only) | `fastboot-dfu.test.mjs` |
-| `-D` on plain DFU 1.1 (`bcdDFU 0x0110`) | none | Not implemented | detect/dump/exec only; flash is rejected |
-| `-s ADDR:leave`, `-R` (reset/manifest), `-e` detach, `-E` | none | Not implemented | Cody deliberately does not manifest or reset before the read-back proof; `exec` allows only `abort` and `clear_status` |
+| `-D` on plain DFU 1.1 (`bcdDFU 0x0110`) | `device_flash` with target = the exact selected alternate name, offset 0, raw binary (a `.dfu` suffix is refused). The device's current image is escrowed when it can upload; the typed override `allow-unknown` (or the role named by the alternate) is required; numbered DNLOAD blocks, zero-length block, status polling; a manifestation-tolerant device is read back and SHA-256-compared, an intolerant one restarts itself and is reported UNVERIFIED | **Done** (implemented, host-tested; hardware evidence pending) | `dfu-11.test.mjs` (state-machine emulator: block numbering, backup before approval, tolerant/intolerant/vanishing devices, rejected image, readback mismatch, stalled block never retried, refusals) |
+| `-s ADDR:leave` | `device_exec "leave ADDRESS"` (DfuSe only): set address pointer, abort to idle, zero-length download as block 2 (as dfu-util does); asks first; result is UNVERIFIED because the device leaves the bus | **Done** (implemented, host-tested; hardware evidence pending) | `dfu-11.test.mjs` (wire order, address bounds, plain DFU refused, decline sends nothing) |
+| `-R` (USB reset) | `device_exec "reset"` (WebUSB `device.reset()`); asks first; the device vanishing is the normal result | **Done** (implemented, host-tested; hardware evidence pending) | `dfu-11.test.mjs` |
+| `-e` detach, `-E`, `:unprotect`, `:force` | none | Not implemented | `exec` allows only `abort`, `clear_status`, `reset`, `leave ADDRESS` |
 | `-s ADDR:mass-erase` | none | Refused today | not offered; sector-wise erase only |
 | `.dfu` container files | none | Not implemented | raw binary only |
 
@@ -150,8 +152,8 @@ exposes once running (ADB, fastboot) from the rows above.
 
 1. **MediaTek** (preloader/BROM, DA, GPT read, partition read/write) behind the
    existing confirmation model, with a recorded licensing/DA-provenance decision.
-2. **dfu-util**: plain DFU 1.1 download, `:leave`/`-R` after a proven read-back.
-   Not started.
+2. ~~dfu-util plain DFU 1.1 download, `:leave`/`-R`~~ closed below (implemented,
+   host-tested; hardware evidence pending).
 3. **adb**: dedicated `install`, `root`, `unroot`, `tcpip`, `usb` and
    `wait-for-device` actions (all currently reachable only through the shell
    grant). Not started.

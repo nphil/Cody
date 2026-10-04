@@ -173,8 +173,12 @@ item remains **UNVERIFIED** until its permitted evidence is completed.
   reads every touched sector; it remains in DFU with no manifestation/reset
   before the readback hash matches.
 - [ ] **UNVERIFIED** The conservative whole-internal-flash `allow-bootloader`
-  confirmation is recorded. A generic bcdDFU `0x0110` device remains
-  detect/dump/exec only and refuses flash.
+  confirmation is recorded. A generic bcdDFU `0x0110` flash needs the typed
+  `allow-unknown` override, escrows the current image when the device can upload,
+  and is read back only when the device returns to DFU idle after manifesting.
+- [ ] **UNVERIFIED** `dfu reset` and DfuSe `leave ADDRESS` make a real device run
+  its application and re-enumerate; record the new USB identity and whether a
+  fresh grant was needed.
 - [ ] **UNVERIFIED** Device recovery/re-enumeration is recorded after refusal,
   test flash, and restore.
 

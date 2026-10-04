@@ -1,9 +1,14 @@
 import type { Flasher, HardwareContext, HardwareRequest, HardwareResult, HardwareTransport } from "./flasher";
-import { bindIntrinsicFlashSafety, runVerifiedFlash, sha256Blob } from "./hardware-safety";
+import { assessFlashWritePolicy, bindIntrinsicFlashSafety, classifyProtectedRegionName, PROTECTED_REGION_OVERRIDES, runVerifiedFlash, sha256Blob, type ProtectedRegionKind } from "./hardware-safety";
 import { throwIfAborted } from "./serial";
 
 const MAX_STATUS_POLLS = 1_024;
 const MAX_ARTIFACT_BYTES = 512 * 1024 * 1024;
+/** A DFU device that never ends an UPLOAD is not given more than this for a backup or readback. */
+const MAX_IMAGE_BACKUP_BYTES = 64 * 1024 * 1024;
+const DFU_CAN_DOWNLOAD = 0x01;
+const DFU_CAN_UPLOAD = 0x02;
+const DFU_MANIFESTATION_TOLERANT = 0x04;
 
 const DfuRequest = {
   DNLOAD: 1,
@@ -341,6 +346,87 @@ class DfuSession {
     await this.abort();
     return data;
   }
+
+  /**
+   * DFU_UPLOAD from block 0 until the device ends the transfer with a short
+   * packet, or until `enough` bytes are read (then the upload is aborted).
+   */
+  async uploadImage(options: { limit: number; enough?: number }): Promise<Uint8Array<ArrayBuffer>> {
+    await this.requireIdle();
+    const size = this.metadata.descriptor.transferSize;
+    const parts: Uint8Array[] = [];
+    let total = 0;
+    for (let block = 0; block <= 0xffff; block += 1) {
+      const received = await this.transport.controlIn(this.setup(DfuRequest.UPLOAD, block), size, this.context.signal);
+      if (received.length > size) throw new DfuProtocolError("DFU_UPLOAD returned more than the transfer size.");
+      total += received.length;
+      parts.push(Uint8Array.from(received));
+      this.context.progress({ phase: "readback", completed: total, message: `Read ${total} bytes from the device.` });
+      if (received.length < size || (options.enough !== undefined && total >= options.enough)) {
+        await this.abort();
+        const image = new Uint8Array(total);
+        let at = 0;
+        for (const part of parts) {
+          image.set(part, at);
+          at += part.length;
+        }
+        return image;
+      }
+      if (total > options.limit) throw new DfuProtocolError(`The device kept uploading past ${options.limit} bytes without ending the transfer.`);
+    }
+    throw new DfuProtocolError("The upload exceeded the 16-bit block range.");
+  }
+
+  /** DFU_DNLOAD of every block (numbered from 0, each polled to dfuDNLOAD-IDLE), then the zero-length block that starts manifestation. */
+  async downloadImage(image: Blob): Promise<void> {
+    await this.requireIdle();
+    const size = this.metadata.descriptor.transferSize;
+    let block = 0;
+    for (let offset = 0; offset < image.size; offset += size, block += 1) {
+      const chunk = new Uint8Array(await image.slice(offset, offset + size).arrayBuffer());
+      await this.transport.controlOut(this.setup(DfuRequest.DNLOAD, block), chunk, this.context.signal);
+      await this.waitDownloadIdle();
+      this.context.progress({ phase: "write", completed: Math.min(offset + size, image.size), total: image.size });
+    }
+    await this.transport.controlOut(this.setup(DfuRequest.DNLOAD, block), new Uint8Array(0), this.context.signal);
+  }
+
+  /**
+   * After the zero-length block: read the status once (a device that rejects
+   * the image says so here). A manifestation-tolerant device then returns to
+   * dfuIDLE; an intolerant one restarts itself, so nothing more is read.
+   */
+  async manifest(tolerant: boolean): Promise<"idle" | "restarting"> {
+    let status = await this.status();
+    if (status.status !== "OK") statusFailure(status);
+    if (!tolerant) return "restarting";
+    for (let polls = 0; status.state !== "dfuIDLE" && polls < MAX_STATUS_POLLS; polls += 1) {
+      if (status.state !== "dfuMANIFEST_SYNC" && status.state !== "dfuMANIFEST") throw new DfuProtocolError(`DFU manifestation entered unexpected state ${status.state}.`);
+      await delay(Math.max(status.pollTimeoutMs, 10), this.context.signal);
+      status = await this.status();
+      if (status.status !== "OK") statusFailure(status);
+    }
+    if (status.state !== "dfuIDLE") throw new DfuProtocolError("DFU manifestation did not finish within the status-poll limit.");
+    return "idle";
+  }
+
+  /** DfuSe leave: the zero-length download that makes the device exit DFU (dfu-util sends it as block 2). */
+  async leave(): Promise<void> {
+    await this.transport.controlOut(this.setup(DfuRequest.DNLOAD, 2), new Uint8Array(0), this.context.signal);
+    try {
+      await this.status();
+    } catch {
+      throwIfAborted(this.context.signal);
+    }
+  }
+
+  /** Returns a device left in dfuERROR or mid-transfer by a refused upload to dfuIDLE. */
+  async recover(): Promise<void> {
+    const status = await this.status();
+    if (status.state === "dfuERROR") await this.clearStatus();
+    else if (status.state !== "dfuIDLE") await this.abort();
+    await this.requireIdle();
+  }
 }
 
 function requireCapability(metadata: DfuMetadata, capability: number, name: string): void {
@@ -375,7 +461,130 @@ async function dump(request: HardwareRequest, metadata: DfuMetadata, context: Ha
   return { summary: "Read " + data.length + " bytes from " + namedTarget + ".", verified: true, sha256: await sha256Blob(file), fileId, details: { alternateSetting: metadata.alternateSetting } };
 }
 
+/** Whether a file ends with the 16-byte suffix of a .dfu container (signature "UFD", length 16). */
+async function hasDfuSuffix(image: Blob): Promise<boolean> {
+  if (image.size < 16) return false;
+  const suffix = new Uint8Array(await image.slice(image.size - 16).arrayBuffer());
+  return suffix[8] === 0x55 && suffix[9] === 0x46 && suffix[10] === 0x44 && suffix[11] === 16;
+}
+
+interface ImageBackup {
+  readonly id?: string;
+  readonly note: string;
+}
+
+/** Escrows the device's current image when it can upload one; a device that will not is not a reason to refuse the write. */
+async function backupCurrentImage(metadata: DfuMetadata, context: HardwareContext, session: DfuSession): Promise<ImageBackup> {
+  if ((metadata.descriptor.attributes & DFU_CAN_UPLOAD) === 0) return { note: "Backup unavailable: this DFU interface cannot upload (bitCanUpload is 0), so the write is UNVERIFIED." };
+  try {
+    const image = await session.uploadImage({ limit: MAX_IMAGE_BACKUP_BYTES });
+    if (image.length > 0) {
+      const file = binaryBlob(image);
+      const id = await context.save(`${target(metadata)}.preflash.bin`, file);
+      return { id, note: `Saved the device's current image (${image.length} bytes) as ${id} (sha256 ${await sha256Blob(file)}).` };
+    }
+    await session.recover();
+    return { note: "Backup unavailable: the device answered an upload with no data, so the write is UNVERIFIED." };
+  } catch (error) {
+    throwIfAborted(context.signal);
+    await session.recover();
+    return { note: `Backup unavailable: the device would not upload its image (${error instanceof Error ? error.message : String(error)}), so the write is UNVERIFIED.` };
+  }
+}
+
+/**
+ * Plain DFU 1.1 download (`dfu-util -D`). There are no addresses: the device
+ * replaces the selected alternate's whole image when manifestation finishes, so
+ * the role of that image is unknown and the write needs the typed `allow-unknown`
+ * override (or the name-derived one). The current image is escrowed when the
+ * device can upload it, and the new one is read back only when the device
+ * returns to DFU idle after manifesting; otherwise the write is reported
+ * UNVERIFIED, never as proven.
+ */
+async function flashDfu11(request: HardwareRequest, metadata: DfuMetadata, context: HardwareContext): Promise<HardwareResult> {
+  requireCapability(metadata, DFU_CAN_DOWNLOAD, "DFU_DNLOAD");
+  const input = context.input;
+  if (!input || !input.size) throw new DfuProtocolError("DFU flash requires a non-empty raw binary artifact.");
+  const alternate = target(metadata);
+  if ((request.offset ?? 0) !== 0) throw new DfuProtocolError("Generic DFU has no addresses: a download replaces the selected alternate's whole image, so the offset must be 0.");
+  if (request.target !== alternate) throw new DfuProtocolError(`Generic DFU flash needs the exact selected alternate as its target: ${alternate}.`);
+  if (request.length !== undefined && request.length !== input.size) throw new DfuProtocolError("DFU length must match the raw binary artifact.");
+  if (input.size > MAX_ARTIFACT_BYTES) throw new DfuProtocolError(`DFU images over ${MAX_ARTIFACT_BYTES} bytes are not supported.`);
+  const transferSize = metadata.descriptor.transferSize;
+  if (Math.ceil(input.size / transferSize) > 0xffff) throw new DfuProtocolError(`A ${input.size}-byte image needs more blocks than a DFU download can number (65535) at this device's ${transferSize}-byte transfer size.`);
+  if (await hasDfuSuffix(input)) throw new DfuProtocolError("This file ends with a DFU suffix (a .dfu container). Cody downloads raw binaries: remove the final 16 bytes and select the raw image.");
+  const digest = await sha256Blob(input);
+  const kind: ProtectedRegionKind = classifyProtectedRegionName(alternate) ?? "unknown";
+  const safety = bindIntrinsicFlashSafety({ ...request, offset: 0 }, request.options, {
+    protocol: "dfu", chip: "USB DFU 1.1", region: alternate, offset: 0, eraseOffset: 0, eraseLength: input.size,
+    layout: {
+      protocol: "dfu", chip: "USB DFU 1.1", storage: "logical",
+      regions: [{ name: alternate, offset: 0, length: input.size, protection: kind }],
+      protections: Object.fromEntries(Object.keys(PROTECTED_REGION_OVERRIDES).map((name) => [name, name === kind ? "present" : "absent"])) as Record<ProtectedRegionKind, "present" | "absent">,
+    },
+  });
+  assessFlashWritePolicy(safety, input.size);
+  const tolerant = (metadata.descriptor.attributes & DFU_MANIFESTATION_TOLERANT) !== 0;
+  const canUpload = (metadata.descriptor.attributes & DFU_CAN_UPLOAD) !== 0;
+  const session = new DfuSession(context, metadata);
+  await session.requireIdle();
+  const backup = await backupCurrentImage(metadata, context, session);
+  await context.confirm({
+    action: "dfu download",
+    target: alternate,
+    offset: 0,
+    length: input.size,
+    sha256: digest,
+    protectedOverride: safety.protectedOverride,
+    backup: backup.note,
+    details: [
+      `Generic DFU 1.1 replaces the whole firmware image of ${alternate}; there are no addresses. What that image is on this device is unknown.`,
+      tolerant ? "The device finishes manifestation and returns to DFU idle, so Cody reads the image back when the device can upload it." : "The device restarts itself to finish the download, so Cody cannot read it back and the write stays UNVERIFIED.",
+      "Cody does not reset the device afterwards; use dfu reset when you want it to run the new firmware.",
+    ].join(" "),
+  });
+  await session.downloadImage(input);
+  let manifestation: "idle" | "restarting" | "disconnected";
+  try {
+    manifestation = await session.manifest(tolerant);
+  } catch (error) {
+    throwIfAborted(context.signal);
+    if (error instanceof DfuProtocolError) throw error;
+    manifestation = "disconnected";
+  }
+  let readback: Uint8Array<ArrayBuffer> | undefined;
+  let verification: string;
+  if (manifestation !== "idle") {
+    verification = manifestation === "restarting" ? "Not verified: this device restarts itself to finish the download, so it cannot be read back." : "Not verified: the device left the bus as it began manifesting.";
+  } else if (!canUpload) {
+    verification = "Not verified: this DFU interface cannot upload.";
+  } else {
+    try {
+      readback = await session.uploadImage({ limit: MAX_IMAGE_BACKUP_BYTES, enough: input.size });
+      verification = readback.length < input.size ? `Not verified: the device returned only ${readback.length} of the ${input.size} bytes written.` : "Readback matched the written image.";
+    } catch (error) {
+      throwIfAborted(context.signal);
+      readback = undefined;
+      verification = `Not verified: the device would not upload after manifesting (${error instanceof Error ? error.message : String(error)}).`;
+    }
+  }
+  const verified = readback !== undefined && readback.length >= input.size;
+  if (verified && (await sha256Blob(binaryBlob(readback!.slice(0, input.size)))) !== digest) {
+    throw new DfuProtocolError(`DFU readback SHA-256 does not match the written image. ${backup.id ? `The previous image is saved as ${backup.id}.` : "No backup was possible."} Nothing was retried.`);
+  }
+  return {
+    summary: verified ? "DFU image written and read back; the device stays in DFU mode." : `DFU image sent. UNVERIFIED: ${verification}`,
+    verified,
+    sha256: digest,
+    details: { alternate, bytes: input.size, backupId: backup.id, manifestation, verification, manifestationTolerant: tolerant },
+  };
+}
+
 async function flash(request: HardwareRequest, metadata: DfuMetadata, context: HardwareContext): Promise<HardwareResult> {
+  return metadata.descriptor.version === 0x011a ? flashDfuSe(request, metadata, context) : flashDfu11(request, metadata, context);
+}
+
+async function flashDfuSe(request: HardwareRequest, metadata: DfuMetadata, context: HardwareContext): Promise<HardwareResult> {
   const map = dfuseMap(metadata);
   requireCapability(metadata, 0x01, "DFU_DNLOAD");
   requireCapability(metadata, 0x02, "DFU_UPLOAD");
@@ -417,10 +626,52 @@ async function flash(request: HardwareRequest, metadata: DfuMetadata, context: H
   });
   return { ...result, summary: "DfuSe internal flash written and readback verified; device remains in DFU mode.", details: { backupId, interfaceNumber: metadata.interfaceNumber, alternateSetting: metadata.alternateSetting, eraseOffset: first.offset, eraseLength } };
 }
+async function leaveDfuSe(metadata: DfuMetadata, context: HardwareContext, address: number): Promise<HardwareResult> {
+  if (metadata.descriptor.version !== 0x011a) throw new DfuProtocolError("leave ADDRESS is a DfuSe command. Plain DFU 1.1 has no address to jump to; use reset.");
+  const map = dfuseMap(metadata);
+  if (!Number.isSafeInteger(address) || address < map.start || address >= map.end) throw new DfuProtocolError(`The leave address must lie inside the selected flash map 0x${map.start.toString(16)}..0x${map.end.toString(16)}.`);
+  await context.confirm({
+    action: "dfu leave",
+    target: target(metadata),
+    offset: address,
+    backup: "not applicable: nothing is written, but the device leaves DFU mode and starts the application at this address",
+    details: `Set the address pointer to 0x${address.toString(16)} and send the zero-length download that makes the device leave DFU. It re-enumerates; Cody's connection to it ends and the result cannot be checked from here.`,
+  });
+  const session = new DfuSession(context, metadata);
+  await session.requireIdle();
+  await session.addressCommand(0x21, address);
+  await session.abort();
+  await session.leave();
+  return { summary: `DFU leave requested at 0x${address.toString(16)}; the device should start its application and re-enumerate.`, verified: false, details: { address } };
+}
+
+async function resetDevice(metadata: DfuMetadata, context: HardwareContext): Promise<HardwareResult> {
+  const reset = context.transport.reset;
+  if (!reset) throw new DfuProtocolError("This browser transport cannot issue a USB reset.");
+  await context.confirm({
+    action: "dfu reset",
+    target: target(metadata),
+    backup: "not applicable: nothing is written",
+    details: "Issue a USB reset (dfu-util -R). A DFU bootloader normally restarts and runs the application; the device re-enumerates and Cody's connection to it ends.",
+  });
+  throwIfAborted(context.signal);
+  let note = "The USB reset completed.";
+  try {
+    await reset.call(context.transport, context.signal);
+  } catch (error) {
+    throwIfAborted(context.signal);
+    note = `The device left the bus during the reset (${error instanceof Error ? error.message : String(error)}), which is the usual result.`;
+  }
+  return { summary: "USB reset requested; the device re-enumerates and may need a fresh grant.", verified: false, details: { note } };
+}
+
 async function execute(request: HardwareRequest, metadata: DfuMetadata, context: HardwareContext): Promise<HardwareResult> {
-  const command = request.command;
+  const command = request.command?.trim() ?? "";
+  const leave = /^leave\s+(0x[0-9a-f]+|\d+)$/i.exec(command);
+  if (command === "reset") return resetDevice(metadata, context);
+  if (leave) return leaveDfuSe(metadata, context, Number(leave[1]));
   if (command !== "abort" && command !== "clear_status") {
-    throw new DfuProtocolError("DFU exec only permits abort and clear_status; it does not expose DfuSe address commands.");
+    throw new DfuProtocolError("DFU exec permits abort, clear_status, reset, and (DfuSe) leave ADDRESS; it does not expose DfuSe address commands.");
   }
   const namedTarget = target(metadata);
   await context.confirm({ action: `dfu ${command}`, target: namedTarget, backup: "not applicable: DFU state transition only" });
