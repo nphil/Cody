@@ -167,6 +167,8 @@ interface CollectOptions {
   readonly quietMs?: number;
   /** The answer must follow raw sector data directly. */
   readonly strict?: boolean;
+  /** `quiet` only: wait the whole timeout for the FIRST document instead of one quiet window. */
+  readonly patient?: boolean;
 }
 
 function numberAttribute(attributes: FirehoseAttributes, name: string): number | null {
@@ -304,8 +306,11 @@ export class FirehoseSession {
       }
       const remaining = until - Date.now();
       if (options.until === "quiet") {
-        const added = await this.link.pull(Math.min(options.quietMs ?? 400, Math.max(1, remaining)));
-        if (added === null || remaining <= 0) return { logs, omittedLogs, responses, documents };
+        if (remaining <= 0) return { logs, omittedLogs, responses, documents };
+        // Before anything has arrived a patient wait gives the whole timeout; afterwards (or when not patient) one quiet window ends it.
+        const window = documents === 0 && options.patient ? remaining : Math.min(options.quietMs ?? 400, remaining);
+        const added = await this.link.pull(window);
+        if (added === null) return { logs, omittedLogs, responses, documents };
         continue;
       }
       if (remaining <= 0) throw new EdlError(`${options.label} timed out waiting for the programmer's answer.`, "timeout");
@@ -348,10 +353,27 @@ export class FirehoseSession {
     }
     await this.settle();
     await this.transmit({ kind: "nop" });
-    const answer = await this.collect({ label: "Firehose nop", timeoutMs: edlTimeouts.nop, until: "quiet", quietMs: edlTimeouts.nopQuiet });
+    const answer = await this.collect({ label: "Firehose nop", timeoutMs: edlTimeouts.nop, until: "quiet", quietMs: edlTimeouts.nopQuiet, patient: true });
     this.noteLogs(answer.logs);
     this.greeting.push(...answer.logs);
     if (answer.documents === 0) throw new EdlError("No Firehose programmer answered. The device may still be in the boot ROM, or the loader did not start.", "timeout");
+  }
+
+  /**
+   * Asks whether a programmer is listening: a `nop`, and whether anything XML came
+   * back. A boot ROM answers a command it does not know with binary data, which
+   * counts as "no programmer".
+   */
+  async probe(timeoutMs: number): Promise<boolean> {
+    try {
+      await this.transmit({ kind: "nop" });
+      const answer = await this.collect({ label: "Firehose probe", timeoutMs, until: "quiet", quietMs: edlTimeouts.nopQuiet, patient: true });
+      this.noteLogs(answer.logs);
+      return answer.documents > 0;
+    } catch (error) {
+      if (error instanceof EdlError && error.kind !== "refused") return false;
+      throw error;
+    }
   }
 
   /** Negotiates eMMC and transfer sizes. A programmer that says it supports less is asked once more with its own figure. */

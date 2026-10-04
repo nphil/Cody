@@ -2109,7 +2109,7 @@ re-use a grant across sessions.
   unclaimable interface fails rather than becoming a partial success. On
   Windows an interface held by another driver cannot be claimed; this is a host
   driver issue, not a retryable device error. Do not hand-roll packet loops in
-  `eval` for an implemented protocol (ESP, ADB, fastboot, DFU, Gecko, STM32,
+  `eval` for an implemented protocol (ESP, ADB, fastboot, DFU, EDL, Gecko, STM32,
   or STK500).
 
 #### Operations, artifacts, and progress
@@ -2186,8 +2186,10 @@ groups for those protocols (`availableGroups`) and which `(protocol, action)`
 pairs each group exposes. A new flasher action MUST be added to a group there;
 `ui-model.test.mjs` fails when any action a shipped flasher declares is
 unreachable. Terminal-shaped actions (`adb` monitor, `serial` monitor,
-`fastboot` exec) are covered by `DeviceTerminal` / `FastbootCommand`, not by
-the generic `ActionForm`. A device in a mode Cody cannot read (`unknown-usb`),
+`fastboot` exec) are covered by `DeviceTerminal` / `FastbootCommand`, and EDL's
+exec and dump by `EdlWorkflow` (connect, partition tables, check, a partition
+picked from the last table read, the whole-area backup offered only after a
+passing check), not by the generic `ActionForm`. A device in a mode Cody cannot read (`unknown-usb`),
 or a card with "Show every protocol" on, offers every protocol. The
 confirmation card (`OperationList`) keeps the exact-binding rows and the typed
 protected-override gate unchanged; only its presentation is the panel's.
@@ -2477,6 +2479,60 @@ as expanded-image hashes.
   the `state::props` text). MTK
   preloader/BROM/download-agent support is **not implemented** (parked); see
   `docs/hardware-parity.md` for every tool's command-by-command status.
+- **Qualcomm EDL (USB `05c6:9008`, `edl*.ts`) — read-only so far.** Implemented
+  from the Sahara/Firehose wire format; the GPLv3 `edl` tool was read as a
+  behavioural reference only and none of its code or tables are used (Cody is
+  MIT). Cody ships no loader: the user chooses one as a session artifact.
+  `usbProtocolCandidates` (client.ts) offers `edl` only for that vendor/product
+  pair with a vendor-class interface that has one bulk IN and one bulk OUT
+  endpoint (the 0xff/0xff/0xff triplet alone names far too many devices; the
+  Sahara HELLO still decides). Layers: `edl-link.ts` (a buffered pipe over the
+  lease: ONE constant 64 KiB bulk-IN request size, because the browser transport
+  remembers the largest length ever asked and a smaller request can come back
+  with MORE bytes; it also remembers where each USB transfer ended), `edl-sahara.ts`
+  (the boot ROM: HELLO, command mode for chip serial / hardware id / public-key
+  hash, image transfer of the loader, reset; a ROM needing Sahara above 2 is
+  refused; rejections quote the status code), `edl-xml.ts` (Firehose answers come
+  from a device nobody vouches for, so this is a bounded scanner, not a parser:
+  no DOCTYPE/entities/CDATA, every dimension capped, control characters made
+  harmless), `edl-firehose.ts`, `edl-gpt.ts` (CRC32, header and entry checks,
+  `evaluateSpan`), `edl-session.ts` (what state is the device in: boot ROM or
+  programmer, the recovery ladder, the confirmed loader upload) and `edl.ts`
+  (the flasher). Components: `components/devices/EdlWorkflow.tsx`.
+  - **Read-only by construction.** Firehose commands exist only as the closed
+    union `FirehoseCommand` (`nop`, `configure` for eMMC, `getstorageinfo`,
+    `read` of physical partition 0, `power reset`), built from validated integers
+    and fixed words, and `assertReadOnlyFirehoseXml` parses every document about
+    to be sent and refuses anything that is not exactly one of those with exactly
+    their attributes (program, erase, patch, setbootablestoragedrive, poke, peek,
+    digests, `power off|edl`, two commands in one document, comments...).
+    `parseEdlCommand` accepts only connect, printgpt, check and reset. The tests
+    prove it against the emulator, which records and carries out any write it is
+    sent.
+  - **Actions.** `detect` (Sahara identity; leaves the ROM's re-offered HELLO
+    unread so the next operation finds an ordinary device), `exec connect`
+    (loader only if the device is still in the boot ROM, after a confirmation
+    bound to the file's SHA-256; `configure`; storage), `exec printgpt` (primary
+    AND the real backup table at the end of the disk, both saved byte for byte),
+    `exec check` (table span vs. the capacity the programmer reports, the backup
+    header in the last sector, the last sector readable), `exec reset`
+    (confirmed; announces the departure), `dump NAME` (one GPT partition) and
+    `dump user-area` (only with `options.sectors` equal to the verified count and
+    only when the check passes IN THE SAME OPERATION).
+  - **Data integrity.** Reads are segmented (16 MiB per `read`), the raw bytes
+    are counted exactly, the answer after them must follow directly (a data
+    stream that is off by one byte is reported as misaligned, never saved), the
+    SHA-256 is computed on the wire and compared with the artifact store's, and a
+    failed or cancelled read saves nothing. A cancelled read leaves data in
+    flight: the next operation's `discover` discards it.
+  - **What only hardware can prove.** Everything is emulator evidence. Open
+    questions are listed in `docs/hardware-checklist.md` ("Qualcomm EDL"): whether
+    the ROM's HELLO survives Cody closing and re-opening the USB device, whether
+    the programmer re-enumerates after it starts, the exact framing of XML versus
+    raw data on the wire, whether the ROM accepts a reset from command mode,
+    whether Android Chrome claims the 9008 interface, and whether browser storage
+    can hold a 3.5 GB artifact. Not covered: UFS, NAND/SPI-NOR, other LUNs, the
+    eMMC boot areas and RPMB, Sahara 3, memory-debug (900E).
 - **Serial bootloaders:** Gecko provides detection/XMODEM framing only until a
   verified readback-capable flash profile exists. STM32 flash is limited to ROM
   PID `0x0410` (STM32F103 medium-density), factory-size discovery, and 1 KiB

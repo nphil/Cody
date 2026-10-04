@@ -3,7 +3,7 @@ import type { TunnelChannel } from "./tunnel";
 /** Page-side protocol boundary. A transport is an exclusive session/device lease,
  * not a fresh connection per packet. Implementations must never retry writes
  * implicitly: a lost acknowledgement makes completion unknown. */
-export type HardwareProtocol = "esp" | "adb" | "fastboot" | "gecko" | "stm32" | "stk500" | "dfu" | "serial";
+export type HardwareProtocol = "esp" | "adb" | "fastboot" | "gecko" | "stm32" | "stk500" | "dfu" | "edl" | "serial";
 export type HardwareAction = "detect" | "flash" | "dump" | "exec" | "push" | "pull" | "monitor" | "sideload" | "verify" | "forward" | "reverse" | "install";
 
 export interface HardwareRequest {

@@ -254,8 +254,13 @@ export interface SaharaIdentity {
   readonly pkHashBytes: number | null;
   /** What could not be read, and anything odd about it. */
   readonly warnings: readonly string[];
-  /** True when the device sent a fresh HELLO after the switch back, i.e. it is waiting for a loader again. */
-  readonly backInLoaderState: boolean;
+  /**
+   * True when the device said HELLO again after the switch back (it is waiting for a loader), false when it did not,
+   * null when the HELLO was left unread for the next operation to find.
+   */
+  readonly backInLoaderState: boolean | null;
+  /** That fresh HELLO, ready to be answered (a loader upload goes on from it). */
+  readonly nextHello: SaharaHello | null;
 }
 
 async function executeCommand(link: EdlLink, command: number, label: string): Promise<Uint8Array | { rejected: number }> {
@@ -273,7 +278,7 @@ async function executeCommand(link: EdlLink, command: number, label: string): Pr
  * then ask the device to go back to waiting for a loader. Nothing here changes
  * the device.
  */
-export async function saharaIdentify(link: EdlLink, hello: SaharaHello): Promise<SaharaIdentity> {
+export async function saharaIdentify(link: EdlLink, hello: SaharaHello, options: { readonly consumeNextHello: boolean }): Promise<SaharaIdentity> {
   await sendHelloResponse(link, hello, SAHARA_MODE.COMMAND);
   const ready = await readSaharaPacket(link, edlTimeouts.packet, "Sahara command mode");
   if (ready.kind === "end-transfer" && ready.status !== 0) throw new SaharaRejection(ready.status, "command mode");
@@ -320,21 +325,26 @@ export async function saharaIdentify(link: EdlLink, hello: SaharaHello): Promise
     }
   }
 
-  let backInLoaderState = false;
+  let backInLoaderState: boolean | null = null;
+  let nextHello: SaharaHello | null = null;
   if (!stopped) {
     await switchToImageTransfer(link);
-    try {
-      const again = await awaitHello(link, edlTimeouts.packet, "Sahara return to loader mode");
-      backInLoaderState = again.mode === SAHARA_MODE.IMAGE_TX_PENDING || again.mode === SAHARA_MODE.COMMAND;
-    } catch (error) {
-      // A silent or confused device is a finding to report; a failed USB transfer or a cancel is not ours to swallow.
-      if (!(error instanceof EdlError)) throw error;
-      warnings.push(`The device did not say HELLO again after the switch back (${error.message}). It may need to be put into EDL again before a loader is sent.`);
+    if (options.consumeNextHello) {
+      backInLoaderState = false;
+      try {
+        const again = await awaitHello(link, edlTimeouts.packet, "Sahara return to loader mode");
+        backInLoaderState = again.mode === SAHARA_MODE.IMAGE_TX_PENDING || again.mode === SAHARA_MODE.COMMAND;
+        nextHello = again;
+      } catch (error) {
+        // A silent or confused device is a finding to report; a failed USB transfer or a cancel is not ours to swallow.
+        if (!(error instanceof EdlError)) throw error;
+        warnings.push(`The device did not say HELLO again after the switch back (${error.message}). It may need to be put into EDL again before a loader is sent.`);
+      }
     }
   } else {
     warnings.push("The device was left in command mode; put it into EDL again before sending a loader.");
   }
-  return { saharaVersion: hello.version, minHostVersion: hello.minVersion, serial, hardwareId, msmId, oemId, modelId, pkHash, pkHashBytes, warnings, backInLoaderState };
+  return { saharaVersion: hello.version, minHostVersion: hello.minVersion, serial, hardwareId, msmId, oemId, modelId, pkHash, pkHashBytes, warnings, backInLoaderState, nextHello };
 }
 
 export interface SaharaUploadResult {
@@ -407,11 +417,22 @@ export async function saharaUpload(link: EdlLink, hello: SaharaHello, loader: Bl
   }
 }
 
-/** Sahara RESET: the device restarts, leaving EDL. It may be gone before it answers. */
-export async function saharaReset(link: EdlLink): Promise<boolean> {
+/**
+ * Leaves EDL from the boot ROM: answers the HELLO in command mode (the state the
+ * ROM accepts a reset in), then sends RESET. The device restarts, so it may be
+ * gone before it answers; `true` means it said so.
+ */
+export async function saharaLeave(link: EdlLink, hello: SaharaHello): Promise<boolean> {
+  await sendHelloResponse(link, hello, SAHARA_MODE.COMMAND);
+  try {
+    await readSaharaPacket(link, edlTimeouts.packet, "Sahara command mode");
+  } catch (error) {
+    // A ROM without command mode still takes a reset.
+    if (!(error instanceof EdlError)) throw error;
+  }
   await link.write(packet(SAHARA.RESET_REQ));
   try {
-    const answer = await readSaharaPacket(link, 3_000, "Sahara reset");
+    const answer = await readSaharaPacket(link, edlTimeouts.packet, "Sahara reset");
     return answer.kind === "reset-response";
   } catch (error) {
     if (error instanceof EdlError && error.kind === "timeout") return false;

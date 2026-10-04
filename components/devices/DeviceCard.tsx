@@ -11,6 +11,7 @@ import { ActionForm } from "./ActionForm";
 import { ActivityLine } from "./ActivityLine";
 import { DeviceTerminal } from "./DeviceTerminal";
 import { FastbootCommand } from "./FastbootCommand";
+import { EdlBackup, EdlCommands } from "./EdlWorkflow";
 import { isTerminalState, OperationList } from "./OperationList";
 import { ShellAccessControl } from "./ShellAccessControl";
 import { Button, cardStyle, Chip, Disclosure, Notice, sectionHeadingStyle, TOUCH } from "./ui";
@@ -61,6 +62,7 @@ function modeLabel(mode: DeviceMode, operations: readonly DeviceOperationSnapsho
     }
     case "fastboot": return t("devices.modeFastboot");
     case "dfu": return t("devices.modeDfu");
+    case "edl": return t("devices.modeEdl");
     case "serial": {
       const chip = lastDetect(operations, "esp")?.chip;
       return typeof chip === "string" && chip ? t("devices.modeSerialChip", { chip }) : t("devices.modeSerial");
@@ -128,6 +130,7 @@ export function DeviceCard({ sessionId, manager, device, activity, operations, s
   const adbCandidates = device.protocolCandidates?.filter((candidate) => candidate.protocol === "adb") ?? [];
   const fastbootCandidates = device.protocolCandidates?.filter((candidate) => candidate.protocol === "fastboot") ?? [];
   const serialCandidates = device.protocolCandidates?.filter((candidate) => candidate.protocol === "serial") ?? [];
+  const edlCandidate = device.protocolCandidates?.find((candidate) => candidate.protocol === "edl");
 
   const form = (group: ActionGroup) => manager && (
     <ActionForm key={group} sessionId={sessionId} manager={manager} device={device} group={group} protocols={protocols} selectedInputId={selectedInputId} onChooseFile={onChooseFile} />
@@ -175,6 +178,7 @@ export function DeviceCard({ sessionId, manager, device, activity, operations, s
             {protocols.includes("fastboot") && (fastbootCandidates.length > 0 ? fastbootCandidates : [undefined]).map((candidate) => (
               <FastbootCommand key={candidate ? `${candidate.interfaceNumber}:${candidate.alternateSetting}` : "fastboot"} manager={manager} deviceId={device.id} label={device.label} interfaceNumber={candidate?.interfaceNumber} alternateSetting={candidate?.alternateSetting} input={input} showTitle={fastbootCandidates.length > 1} />
             ))}
+            {protocols.includes("edl") && <EdlCommands manager={manager} deviceId={device.id} operations={operations} interfaceNumber={edlCandidate?.interfaceNumber} alternateSetting={edlCandidate?.alternateSetting} input={input} onChooseFile={onChooseFile} />}
             {protocols.some((protocol) => formActions("commands", protocol).length > 0) && form("commands")}
           </>
         );
@@ -203,6 +207,7 @@ export function DeviceCard({ sessionId, manager, device, activity, operations, s
           <>
             <Notice>{t("devices.backupRestoreNote")}</Notice>
             {form("backup")}
+            {protocols.includes("edl") && <EdlBackup manager={manager} deviceId={device.id} operations={operations} interfaceNumber={edlCandidate?.interfaceNumber} alternateSetting={edlCandidate?.alternateSetting} input={input} onChooseFile={onChooseFile} />}
           </>
         );
       case "ports":

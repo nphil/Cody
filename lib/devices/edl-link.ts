@@ -43,7 +43,7 @@ export const edlTimeouts = {
   /** How long a `nop` is given to produce any answer at all. */
   nop: 5_000,
   /** The first look at a device that may already have something to say. */
-  firstContact: 2_500,
+  firstContact: 1_000,
   /** How long a device probed with a Firehose `nop` or a Sahara reset gets to react. */
   probe: 2_500,
   /** Silence that ends a programmer's startup text. */

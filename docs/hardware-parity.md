@@ -132,6 +132,38 @@ Differs, with the reason:
 | `-s ADDR:mass-erase` | none | Refused today | not offered; sector-wise erase only |
 | `.dfu` container files | none | Not implemented | raw binary only |
 
+## Qualcomm EDL (the `edl` tool: Sahara + Firehose)
+
+Protocol `edl`, USB `05c6:9008` ("QDLoader 9008"). Implemented from the wire
+format; the GPLv3 `edl` tool was read as a behavioural reference and none of its
+code or tables are used (Cody is MIT). Cody ships **no loader**: the programmer
+(a signed `.mbn`/`.elf`) is a session artifact the user chooses. A loader runs
+arbitrary code on the device, so loading one is the one thing here that asks for
+a confirmation bound to the file's SHA-256; the boot ROM itself refuses a loader
+that was not signed for the device. **This stage reads and never writes.**
+
+| PC command | Cody | Status | Evidence |
+|------------|------|--------|----------|
+| waiting for the device (`05c6:9008`) | `device_list` shows a candidate only for that vendor/product pair with a vendor-class interface holding one bulk IN and one bulk OUT endpoint; the Sahara HELLO still decides | Done (emulator-tested; hardware evidence pending) | `client.test.mjs` (candidate rules), `edl-browser.test.mjs` |
+| Sahara handshake, serial number / hardware id / public-key hash | `device_detect` protocol `edl`; leaves the ROM waiting for a loader | Done (emulator-tested; hardware evidence pending) | `edl-protocol.test.mjs`, `edl.test.mjs` |
+| `--loader=FILE` upload | `device_exec "connect"` with the loader as the artifact: one confirmation bound to its SHA-256; a loader the ROM rejects is reported with the ROM's own Sahara status; a programmer that is already running is used as it is | Done (emulator-tested; hardware evidence pending) | `edl.test.mjs` |
+| Firehose `configure`, `getstorageinfo` | part of `connect` (eMMC; payload size negotiation; a UFS device is refused plainly) | Done (emulator-tested; hardware evidence pending) | `edl-protocol.test.mjs` |
+| `printgpt` | `device_exec "printgpt"`: the primary table AND the real backup table at the end of the disk, both saved byte for byte as files | Done (emulator-tested; hardware evidence pending) | `edl.test.mjs` |
+| `gpt DIR`, `--genxml` | the two table files are saved; no rawprogram XML is generated | Not implemented | none |
+| `r PARTITION FILE` | `device_dump` with `target` = the exact GPT partition name (optional sector-aligned `offset`/`length`); SHA-256 computed on the wire and compared with the stored file's | Done (emulator-tested; hardware evidence pending) | `edl.test.mjs`, `edl-browser.test.mjs` |
+| `rl DIR` (every partition) | dump each partition (and `printgpt` for the tables) | Composed | none dedicated |
+| `rf FILE`, `rs 0 N FILE` (whole disk) | `device_dump` with `target` `user-area` and `options.sectors`, **only** when the span check passes in the same operation and the count equals the verified user area. `rf` sizes the disk from the partition table and `rs 0 N` takes any N; neither compares them with the chip | Done, narrowed on purpose (emulator-tested; hardware evidence pending) | `edl.test.mjs` |
+| (new) span check: table span vs. measured capacity, backup header in the last sector, last sector readable | `device_exec "check"` | Done (emulator-tested; hardware evidence pending) | `edl-protocol.test.mjs`, `edl.test.mjs` |
+| `rs START SECTORS FILE` (any range) | none | Not implemented | only named partitions and the verified whole area are offered |
+| `reset` | `device_exec "reset"` (asks first; Sahara RESET from the boot ROM, `power reset` from a programmer; the departure is announced so the disconnect is not a cancel) | Done (emulator-tested; hardware evidence pending) | `edl.test.mjs`, `edl-browser.test.mjs` |
+| `w`, `wl`, `wf`, `ws`, `e`, `ef`, `es`, `peek`, `poke`, `memorydump`, `secureboot`, `provision`, `setbootablestoragedrive`, `reset --resetmode=edl`, raw `xml` | none | **Refused today** | read-only stage: the Firehose layer builds only five read commands and refuses anything else before it reaches the wire (`edl-protocol.test.mjs`, `edl.test.mjs`) |
+| UFS, NAND, SPI-NOR, other LUNs, the eMMC boot partitions, RPMB | none | Not implemented | refused with a plain message; a partition dump never touches them |
+| Sahara 3 / multi-file image configs, streaming (`nprg`) loaders, memory-debug (`900E`) | none | Not implemented | the ROM's version is checked first and a newer one is refused |
+| driver install (Zadig / libusb / udev) | none | **Browser limit** | WebUSB can only use an interface no OS driver owns. On Windows the Qualcomm QDLoader driver owns it; replace it with WinUSB first. On Linux and Android no driver action is needed |
+
+Everything above is **UNVERIFIED on hardware**: the checks in
+`docs/hardware-checklist.md` ("Qualcomm EDL") are what would settle it.
+
 ## mtkclient (MediaTek)
 
 | PC command | Cody | Status | Evidence |
@@ -158,7 +190,8 @@ exposes once running (ADB, fastboot) from the rows above.
 2. **Hardware evidence** for every row marked "implemented, host-tested" via
    `docs/hardware-checklist.md`, including the erase, eFuse, sparse-split,
    `update`, `stage`, DFU download/`leave`/`reset`, and adb
-   `install`/`root`/`tcpip`/`wait-for-device` items.
+   `install`/`root`/`tcpip`/`wait-for-device` items, and the whole Qualcomm EDL
+   section.
 3. Smaller non-MediaTek gaps that remain: `adb uninstall`, `install-multiple`
    and split APKs, `remount` / `disable-verity`, DFU `-e` detach / `-E` /
    `:unprotect` / `:mass-erase`, `.dfu` container files, fastboot `format`,
@@ -170,4 +203,6 @@ evidence pending): esptool `erase_flash` / `erase_region`, `read_mac`, eFuse and
 security-info reads; fastboot automatic sparse splitting, `update` / `flashall`
 from a ZIP, and `stage` / `get_staged`; dfu-util plain DFU 1.1 download,
 DfuSe `:leave`, and `-R` reset; adb `install`, `root` / `unroot`, `tcpip` /
-`usb`, and `wait-for-device`.
+`usb`, and `wait-for-device`; Qualcomm EDL identity, loader upload, partition
+tables, the span check, partition and guarded whole-area reads, and reset (read
+only).

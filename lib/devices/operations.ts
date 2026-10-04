@@ -14,6 +14,7 @@ import { pause } from "./pause";
 import type { TunnelChannel } from "./tunnel";
 import { deviceArtifacts } from "./artifacts";
 import { dfuFlasher } from "./dfu";
+import { edlFlasher } from "./edl";
 import { espFlasher } from "./esp";
 import { fastbootFlasher } from "./fastboot";
 import { geckoFlasher } from "./gecko";
@@ -1140,5 +1141,6 @@ export function createDefaultPageOperationDelegate(
     stm32Flasher,
     stk500Flasher,
     dfuFlasher,
+    edlFlasher,
   ]);
 }

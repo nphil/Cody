@@ -47,7 +47,7 @@ export type DeviceKind = "serial" | "usb" | "ble";
  * of it (the polyfill has no signal control on some adapters). */
 export type SerialTransport = "web-serial" | "webusb-polyfill";
 export interface DeviceProtocolCandidate {
-  protocol: "adb" | "fastboot" | "dfu" | "serial";
+  protocol: "adb" | "fastboot" | "dfu" | "edl" | "serial";
   interfaceNumber: number;
   alternateSetting: number;
 }

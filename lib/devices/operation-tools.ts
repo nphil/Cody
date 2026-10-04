@@ -26,6 +26,7 @@ const PROTOCOLS: Record<HardwareProtocol, true> = {
   stm32: true,
   stk500: true,
   dfu: true,
+  edl: true,
 };
 
 const MAX_OPERATION_TEXT = 16 * 1024;
@@ -70,7 +71,7 @@ function requestFor(
   const device = resolveDeviceId(args, bridge, { allowDeparted: waitsForDevice });
   if ("error" in device) return device.error;
   const protocol = stringArg(args, "protocol") ?? (action === "forward" || action === "reverse" ? "adb" : undefined);
-  if (!protocol || !PROTOCOLS[protocol as HardwareProtocol]) return "protocol must be one of esp, adb, fastboot, gecko, stm32, stk500, dfu, or serial.";
+  if (!protocol || !PROTOCOLS[protocol as HardwareProtocol]) return "protocol must be one of esp, adb, fastboot, gecko, stm32, stk500, dfu, edl, or serial.";
   const offset = optionalInteger(args, "offset");
   if (typeof offset === "string") return offset;
   const length = optionalInteger(args, "length");
@@ -176,7 +177,7 @@ function startingHandler(action: HardwareAction): DeviceOperationToolHandler {
 
 const OPERATION_PROPERTIES = {
   device: { type: "string", description: "Exact browser device id from device_list." },
-  protocol: { type: "string", enum: ["esp", "adb", "fastboot", "gecko", "stm32", "stk500", "dfu", "serial"], description: "Protocol implementation to run. Use serial for an interactive CDC/UART console." },
+  protocol: { type: "string", enum: ["esp", "adb", "fastboot", "gecko", "stm32", "stk500", "dfu", "edl", "serial"], description: "Protocol implementation to run. Use serial for an interactive CDC/UART console." },
   target: { type: "string", description: "Exact destination, partition, path, or address used by the protocol." },
   offset: { type: "number", description: "Exact byte offset, when supported." },
   length: { type: "number", description: "Exact byte length, when supported." },
@@ -316,10 +317,10 @@ const tunnelsHandler: DeviceOperationToolHandler = async (args, context) => {
 };
 
 export const DEVICE_OPERATION_TOOLS: DeviceOperationToolDefinition[] = [
-  startDefinition("device_detect", "detect", "Start a browser-hosted protocol detection operation."),
+  startDefinition("device_detect", "detect", "Start a browser-hosted protocol detection operation. Protocol edl reads a Qualcomm 9008 device's boot-ROM identity (chip serial number, hardware id, public-key hash) and needs no loader."),
   startDefinition("device_flash", "flash", "Start browser-hosted flashing. Writes pause for direct confirmation with exact target, hash and backup status. Fastboot without fetch can write after an UNVERIFIED warning; verify in ADB recovery afterwards. Protected destinations require an exact typed override."),
-  startDefinition("device_dump", "dump", "Start a device dump or backup operation; resulting bytes remain a session-owned browser artifact."),
-  startDefinition("device_exec", "exec", "Run a protocol command with streamed output. ADB arbitrary shell requires the user's connection-scoped shell grant in Devices; without it only id, uname -a, df -h, getprop [ro.*] work. Other state-changing commands require exact browser confirmation. ADB also takes options.kind: reverse-list (adb reverse --list), reverse-remove with target tcp:PORT, or reverse-remove-all; these need no command. ADB options.kind root, unroot, tcpip (with options.port), and usb restart adbd; the device usually leaves the USB bus and the operation keeps running through that one disconnect, takes the SAME device (same USB identity) again, and checks what the device itself reports (tcpip and usb check adbd's effective listeners, which fixed service.adb.listen_addrs can override, and say so when they do; usb also reads Wireless debugging, a separate TLS listener it cannot switch off, and reports the device as not USB-only, with verified false, while that is on); options.timeoutSeconds 1-300 bounds how long it waits for the device to come back. Shell access is revoked by the disconnect, so the user must grant it again afterwards. options.kind wait-for-device waits for the device to be online (options.timeoutSeconds 1-600 covers connecting, approval of the RSA prompt and every reconnect; options.state device, recovery, or sideload); it can be started while the device is absent (rebooting) by the exact id it had before, and it only ever waits for that same device. ESP takes esptool-style commands: chip_id, read_mac, flash_id, get_security_info, efuse_summary, efuse_dump (read-only), and erase_flash / erase_region ADDRESS SIZE (backs the range up first, then needs the user's typed override). Fastboot also takes stage and get_staged, and update / flashall with a package ZIP as the artifact. DFU takes abort, clear_status, reset, and leave ADDRESS (DfuSe).", ["device", "protocol"]),
+  startDefinition("device_dump", "dump", "Start a device dump or backup operation; resulting bytes remain a session-owned browser artifact. Protocol edl: target is the exact GPT partition name (optional offset/length in bytes, sector-aligned), or user-area with options.sectors set to the sector count that device_exec check verified; while the device is still in the boot ROM, fileId + sha256 name the loader file to send."),
+  startDefinition("device_exec", "exec", "Run a protocol command with streamed output. ADB arbitrary shell requires the user's connection-scoped shell grant in Devices; without it only id, uname -a, df -h, getprop [ro.*] work. Other state-changing commands require exact browser confirmation. ADB also takes options.kind: reverse-list (adb reverse --list), reverse-remove with target tcp:PORT, or reverse-remove-all; these need no command. ADB options.kind root, unroot, tcpip (with options.port), and usb restart adbd; the device usually leaves the USB bus and the operation keeps running through that one disconnect, takes the SAME device (same USB identity) again, and checks what the device itself reports (tcpip and usb check adbd's effective listeners, which fixed service.adb.listen_addrs can override, and say so when they do; usb also reads Wireless debugging, a separate TLS listener it cannot switch off, and reports the device as not USB-only, with verified false, while that is on); options.timeoutSeconds 1-300 bounds how long it waits for the device to come back. Shell access is revoked by the disconnect, so the user must grant it again afterwards. options.kind wait-for-device waits for the device to be online (options.timeoutSeconds 1-600 covers connecting, approval of the RSA prompt and every reconnect; options.state device, recovery, or sideload); it can be started while the device is absent (rebooting) by the exact id it had before, and it only ever waits for that same device. ESP takes esptool-style commands: chip_id, read_mac, flash_id, get_security_info, efuse_summary, efuse_dump (read-only), and erase_flash / erase_region ADDRESS SIZE (backs the range up first, then needs the user's typed override). Fastboot also takes stage and get_staged, and update / flashall with a package ZIP as the artifact. DFU takes abort, clear_status, reset, and leave ADDRESS (DfuSe). EDL (Qualcomm 9008) takes connect (sends the loader given as fileId + sha256 after the user's confirmation when the device is still in the boot ROM, then configures the programmer and reports its eMMC storage), printgpt (the primary and the real backup partition table, saved as artifacts), check (whether the partition table, the measured capacity and the last sector agree) and reset (leaves EDL, asks first).", ["device", "protocol"]),
   startDefinition("device_push", "push", "Start a resumable protocol file push using a session artifact."),
   startDefinition("device_pull", "pull", "Start a protocol file pull; output remains a session-owned browser artifact."),
   startDefinition("device_sideload", "sideload", "Serve a session artifact to ADB recovery sideload. Requires direct approval; transfer completion does not verify installation."),

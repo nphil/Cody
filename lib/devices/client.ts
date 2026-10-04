@@ -196,9 +196,20 @@ function usbLikeLabel(kind: "Serial" | "USB", vendorId?: number, productId?: num
   return `${kind} device`;
 }
 
+/** Qualcomm's emergency download mode ("QDLoader 9008"). Its interface is the generic vendor class 0xff/0xff/0xff that a great many
+ * unrelated devices also use, so for this one protocol the vendor/product pair is what names it. */
+const QUALCOMM_VENDOR_ID = 0x05c6;
+const QUALCOMM_EDL_PRODUCT_ID = 0x9008;
+
+function hasBulkPair(alternate: USBAlternateInterface): boolean {
+  return alternate.endpoints.some((endpoint) => endpoint.type === "bulk" && endpoint.direction === "in")
+    && alternate.endpoints.some((endpoint) => endpoint.type === "bulk" && endpoint.direction === "out");
+}
+
 /** Descriptor hints only: a protocol still validates its own handshake before
- * any operation. Only USB class/subclass/protocol triplets are considered;
- * product IDs, labels, and serial numbers are deliberately never guessed. */
+ * any operation. USB class/subclass/protocol triplets are considered, plus the
+ * Qualcomm EDL vendor/product pair above; labels and serial numbers are
+ * deliberately never guessed. */
 function usbProtocolCandidates(device: USBDevice): readonly DeviceProtocolCandidate[] | undefined {
   const candidates: DeviceProtocolCandidate[] = [];
   for (const configuration of device.configurations) {
@@ -211,6 +222,7 @@ function usbProtocolCandidates(device: USBDevice): readonly DeviceProtocolCandid
         }
         if (alternate.interfaceClass === 0xfe && alternate.interfaceSubclass === 0x01 && alternate.interfaceProtocol === 0x02) protocol = "dfu";
         if (alternate.interfaceClass === 0x0a && alternate.endpoints.some(endpoint => endpoint.type === "bulk" && endpoint.direction === "in") && alternate.endpoints.some(endpoint => endpoint.type === "bulk" && endpoint.direction === "out")) protocol = "serial";
+        if (!protocol && device.vendorId === QUALCOMM_VENDOR_ID && device.productId === QUALCOMM_EDL_PRODUCT_ID && alternate.interfaceClass === 0xff && hasBulkPair(alternate)) protocol = "edl";
         if (protocol) candidates.push({ protocol, interfaceNumber: iface.interfaceNumber, alternateSetting: alternate.alternateSetting });
       }
     }

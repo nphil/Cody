@@ -192,6 +192,57 @@ item remains **UNVERIFIED** until its permitted evidence is completed.
 - [ ] **UNVERIFIED** Device recovery/re-enumeration is recorded after refusal,
   test flash, and restore.
 
+### Qualcomm EDL (read-only stage)
+
+Device in mind: Lenovo Smart Display 10" SD-X701B (APQ8053) with the loader
+`amber_bluebbery_prog_emmc_firehose_8953_ddr.mbn` (374,900 bytes; record its
+SHA-256). Per `notes/hw/lenovo-sd-x701b.md` no contact with a unit is authorised
+by these notes: each session needs a coordinated go-ahead. Nothing in this stage
+writes storage, and the PC tool's output is the reference to compare with.
+
+- [ ] **UNVERIFIED** The browser (Android Chrome, over USB-C OTG) offers the
+  `05c6:9008` device in the picker, claims its interface, and `device_list`
+  shows it as an EDL candidate. On Windows the QDLoader driver must first be
+  replaced with WinUSB.
+- [ ] **UNVERIFIED** `device_detect` returns the chip serial number, hardware id
+  (MSM / OEM / model) and public-key hash; they match what the PC tool prints
+  for the same unit. Record all three.
+- [ ] **UNVERIFIED** Right after a `detect`, a `connect` finds the boot ROM's
+  re-offered HELLO. If it instead needs the recovery ladder ("asking it to start
+  over"), record that and whether the ROM accepted the restart packet. Record
+  whether a HELLO survives Cody closing and re-opening the USB device.
+- [ ] **UNVERIFIED** The loader confirmation shows a SHA-256 equal to
+  `sha256sum` of the file. Declining sends nothing. A loader for another device
+  is rejected with a Sahara status and nothing runs.
+- [ ] **UNVERIFIED** After the loader starts, the programmer keeps the same USB
+  device. If it re-enumerates, record how the operation reported it (it is
+  reported as the device leaving the bus).
+- [ ] **UNVERIFIED** `configure` is accepted with `MemoryName="eMMC"`,
+  `ZLPAwareHost="1"` and the payload size the programmer reports; `getstorageinfo`
+  `total_blocks` and `block_size` equal the PC tool's. Record the product name.
+- [ ] **UNVERIFIED** The XML answer and the raw sector data are framed as
+  assumed: the first sector read for the partition table shows `EFI PART` at
+  offset 0 of sector 1, and a whole partition's SHA-256 equals the PC tool's
+  `r NAME` dump of the same partition. A one-byte offset would surface as
+  "misaligned" or a GPT with a shifted signature: record it if it does.
+- [ ] **UNVERIFIED** `printgpt` lists the same partitions as the PC tool; the
+  saved primary region equals sectors 0-33 read by the PC tool and the saved
+  backup region equals the last 33 sectors. Record the disk GUID, the span the
+  table describes and the capacity the programmer measures.
+- [ ] **UNVERIFIED** `check` says whether the table's span equals the measured
+  capacity on this unit (the research notes list this as unknown). A mismatch
+  must stop the whole-area read; confirm that on the real unit.
+- [ ] **UNVERIFIED** A large partition (for example `system_a`, 512 MiB) reads
+  completely; record the speed. Cancelling mid-read leaves no file and the next
+  operation recovers; unplugging mid-read ends with the "left the USB bus"
+  message and no file.
+- [ ] **UNVERIFIED** The whole-area read of about 3.5 GB completes in the
+  tablet's browser storage (it needs about twice the size while it is saved) and
+  its SHA-256 equals the PC tool's `rs 0 COUNT` for the same count. Record free
+  space before and after. It does not include the eMMC boot areas or RPMB.
+- [ ] **UNVERIFIED** `reset` makes the unit leave EDL and boot normally, and the
+  operation ends as completed, not cancelled.
+
 ### CMSIS-DAP / DAPLink (not shipped)
 
 - [ ] **UNVERIFIED** WebUSB transport feasibility through DAP.js/DAPLink is

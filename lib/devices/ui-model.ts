@@ -11,6 +11,7 @@
 
 import { adbFlasher } from "./adb";
 import { dfuFlasher } from "./dfu";
+import { edlFlasher } from "./edl";
 import { espFlasher } from "./esp";
 import { fastbootFlasher } from "./fastboot";
 import type { HardwareAction, HardwareProtocol } from "./flasher";
@@ -21,7 +22,7 @@ import { serialFlasher } from "./serial-monitor";
 import { stk500Flasher } from "./stk500";
 import { stm32Flasher } from "./stm32";
 
-export const SHIPPED_FLASHERS = [serialFlasher, espFlasher, adbFlasher, fastbootFlasher, geckoFlasher, stm32Flasher, stk500Flasher, dfuFlasher] as const;
+export const SHIPPED_FLASHERS = [serialFlasher, espFlasher, adbFlasher, fastbootFlasher, geckoFlasher, stm32Flasher, stk500Flasher, dfuFlasher, edlFlasher] as const;
 
 /** The same protocol declarations used by the page operation delegate. */
 export const ACTIONS_BY_PROTOCOL = Object.fromEntries(SHIPPED_FLASHERS.map((flasher) => [
@@ -42,13 +43,13 @@ export const GROUP_ORDER: readonly ActionGroup[] = ["overview", "terminal", "com
  * monitor, which the card renders as a real terminal rather than a form.
  */
 const GROUP_ACTIONS: Readonly<Record<ActionGroup, Readonly<Partial<Record<HardwareProtocol, readonly HardwareAction[]>>>>> = {
-  overview: { esp: ["detect"], adb: ["detect"], fastboot: ["detect"], gecko: ["detect"], stm32: ["detect"], stk500: ["detect"], dfu: ["detect"] },
+  overview: { esp: ["detect"], adb: ["detect"], fastboot: ["detect"], gecko: ["detect"], stm32: ["detect"], stk500: ["detect"], dfu: ["detect"], edl: ["detect"] },
   terminal: { adb: ["monitor", "exec"] },
-  commands: { fastboot: ["exec"], dfu: ["exec"], esp: ["exec"] },
+  commands: { fastboot: ["exec"], dfu: ["exec"], esp: ["exec"], edl: ["exec"] },
   serial: { serial: ["monitor", "exec"] },
   files: { adb: ["push", "pull", "sideload", "install"] },
   flash: { esp: ["flash"], fastboot: ["flash"], dfu: ["flash"], stm32: ["flash"], stk500: ["flash"] },
-  backup: { esp: ["dump"], adb: ["dump", "verify"], fastboot: ["dump"], dfu: ["dump"], stm32: ["dump"], stk500: ["dump"] },
+  backup: { esp: ["dump"], adb: ["dump", "verify"], fastboot: ["dump"], dfu: ["dump"], stm32: ["dump"], stk500: ["dump"], edl: ["dump"] },
   ports: { adb: ["forward", "reverse"] },
 };
 
@@ -63,12 +64,14 @@ export const TERMINAL_COVERED: Readonly<Partial<Record<HardwareProtocol, readonl
   adb: ["monitor"],
   serial: ["monitor"],
   fastboot: ["exec"],
+  // The EDL workflow card (connect, partition table, check, one-partition backup) stands in for generic forms.
+  edl: ["exec", "dump"],
 };
 
 /** Protocols a UART-attached chip can speak: a plain monitor plus the ROM/bootloader flashers. */
 const SERIAL_PROTOCOLS: readonly HardwareProtocol[] = ["serial", "esp", "stm32", "stk500", "gecko"];
 
-export type DeviceModeId = "adb" | "fastboot" | "dfu" | "serial" | "unknown-usb" | "ble";
+export type DeviceModeId = "adb" | "fastboot" | "dfu" | "edl" | "serial" | "unknown-usb" | "ble";
 
 export interface DeviceMode {
   id: DeviceModeId;

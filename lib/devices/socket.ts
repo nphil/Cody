@@ -70,7 +70,7 @@ function asDevices(value: unknown): DeviceInfo[] {
         protocolCandidates: record.protocolCandidates.flatMap((candidate) => {
           if (!candidate || typeof candidate !== "object") return [];
           const item = candidate as Record<string, unknown>;
-          if ((item.protocol !== "adb" && item.protocol !== "fastboot" && item.protocol !== "dfu")
+          if ((item.protocol !== "adb" && item.protocol !== "fastboot" && item.protocol !== "dfu" && item.protocol !== "edl")
             || typeof item.interfaceNumber !== "number" || !Number.isInteger(item.interfaceNumber)
             || typeof item.alternateSetting !== "number" || !Number.isInteger(item.alternateSetting)) return [];
           return [{ protocol: item.protocol, interfaceNumber: item.interfaceNumber, alternateSetting: item.alternateSetting }];
