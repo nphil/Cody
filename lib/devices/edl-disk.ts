@@ -388,12 +388,50 @@ export async function locatePartition(opened: OpenedEdl, name: string, outcome: 
 }
 
 /**
+ * The first sector a partition write must stay below because the backup partition table lives from there on. The primary
+ * header only says where it EXPECTS its backup, so the last sector is read: a header there names the entry array it really
+ * protects, and a partition that touches that array would destroy the recovery copy. A header whose entry array sits
+ * somewhere that makes no sense is refused rather than guessed at; with no header in the last sector, the place the
+ * primary header implies stays protected.
+ */
+export async function backupTableFloor(opened: OpenedEdl, primary: PrimaryGpt): Promise<{ readonly floor: number } | { readonly problem: string }> {
+  const { sectorSize, totalSectors } = opened.storage;
+  const last = totalSectors - 1;
+  const expected = Math.min(primary.table.header.alternateLba, last) - gptEntrySectors(primary.table.header, sectorSize);
+  let sector: Uint8Array;
+  try {
+    sector = await readRegion(opened, last, 1);
+  } catch (error) {
+    if (error instanceof FirehoseRejection) return { problem: `The programmer would not read the last sector (${error.message}), where the backup partition table should be, so Cody cannot tell which sectors it protects.` };
+    throw error;
+  }
+  let header: GptHeader;
+  try {
+    header = parseGptHeader(sector, sectorSize);
+  } catch (error) {
+    if (error instanceof EdlError) return { floor: expected };
+    throw error;
+  }
+  let entrySectors: number;
+  try {
+    entrySectors = gptEntrySectors(header, sectorSize);
+  } catch (error) {
+    if (error instanceof EdlError) return { problem: `The backup partition table header in the last sector declares an entry array Cody cannot size (${error.message}), so it cannot tell which sectors it protects.` };
+    throw error;
+  }
+  if (header.entriesLba >= last || last - header.entriesLba > entrySectors + 64) {
+    return { problem: `The backup partition table header in the last sector puts its entry array at sector ${header.entriesLba}, which is not just before it, so Cody cannot tell which sectors it protects.` };
+  }
+  return { floor: Math.min(expected, header.entriesLba) };
+}
+
+/**
  * Why the sectors of `part` must not be written as "the partition called X", or
  * undefined when they may. A table that is intact can still describe sectors that are
  * not safe to hand to a partition write: outside the usable range, across either
  * partition table, or across another partition. There is no override for these.
  */
-export function partitionWriteProblem(primary: PrimaryGpt, part: GptPartition, totalSectors: number, sectorSize: number): string | undefined {
+export function partitionWriteProblem(primary: PrimaryGpt, part: GptPartition, totalSectors: number, sectorSize: number, backupFloor?: number): string | undefined {
   const { header } = primary.table;
   const where = `${part.name} (sectors ${part.firstLba}-${part.lastLba})`;
   if (part.firstLba < header.firstUsableLba || part.lastLba > header.lastUsableLba) {
@@ -401,7 +439,8 @@ export function partitionWriteProblem(primary: PrimaryGpt, part: GptPartition, t
   }
   const entrySectors = gptEntrySectors(header, sectorSize);
   if (part.firstLba < primary.regionSectors) return `${where} overlaps the primary partition table (sectors 0-${primary.regionSectors - 1}).`;
-  const backupFirst = Math.min(header.alternateLba, totalSectors - 1) - entrySectors;
+  const implied = Math.min(header.alternateLba, totalSectors - 1) - entrySectors;
+  const backupFirst = backupFloor === undefined ? implied : Math.min(implied, backupFloor);
   if (part.lastLba >= backupFirst) return `${where} overlaps the backup partition table (from sector ${backupFirst}).`;
   const other = primary.table.partitions.find((candidate) => candidate.index !== part.index && candidate.firstLba <= part.lastLba && part.firstLba <= candidate.lastLba);
   if (other) return `${where} overlaps the partition ${other.name} (sectors ${other.firstLba}-${other.lastLba}), so writing it would change that one too.`;

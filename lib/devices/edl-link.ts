@@ -91,6 +91,8 @@ export class EdlLink {
   private position = 0;
   /** Absolute stream offsets at which a read completed, ascending. */
   private transferEnds: number[] = [];
+  /** Absolute stream offsets at which the DEVICE ended a transfer (a short read, or a zero-length packet), ascending. A read that merely filled the request is not one. */
+  private deviceEnds: number[] = [];
   private received = 0;
   private sent = 0;
 
@@ -138,6 +140,9 @@ export class EdlLink {
     let dropped = 0;
     while (dropped < this.transferEnds.length && this.transferEnds[dropped]! <= this.position) dropped += 1;
     if (dropped > 0) this.transferEnds.splice(0, dropped);
+    let gone = 0;
+    while (gone < this.deviceEnds.length && this.deviceEnds[gone]! <= this.position) gone += 1;
+    if (gone > 0) this.deviceEnds.splice(0, gone);
   }
 
   /**
@@ -150,6 +155,23 @@ export class EdlLink {
     return ends === undefined ? 0 : ends - at;
   }
 
+  private noteDeviceEnd(): void {
+    const at = this.position + this.buffered;
+    if (this.deviceEnds[this.deviceEnds.length - 1] === at) return;
+    this.deviceEnds.push(at);
+    // Only recent boundaries are ever asked about; a device that sends nothing but tiny transfers must not grow this without end.
+    if (this.deviceEnds.length > 4096) this.deviceEnds.splice(0, this.deviceEnds.length - 4096);
+  }
+
+  /**
+   * Where the device ended a transfer within the next `count` bytes, as offsets from the next unconsumed byte. An end right
+   * at the next byte (the previous transfer ended there, seen as a zero-length packet only now) and one exactly at `count`
+   * are both included.
+   */
+  deviceEndsWithin(count: number): number[] {
+    return this.deviceEnds.filter((at) => at >= this.position && at <= this.position + count).map((at) => at - this.position);
+  }
+
   /**
    * One read from the device. Returns how many bytes it added (0 for a
    * zero-length packet) or `null` when nothing arrived in `timeoutMs`.
@@ -160,11 +182,15 @@ export class EdlLink {
     const chunk = await this.transport.read(EDL_READ_REQUEST_BYTES, wait, this.activeSignal);
     throwIfAborted(this.activeSignal);
     if (!chunk) return null;
-    if (chunk.byteLength === 0) return 0;
+    if (chunk.byteLength === 0) {
+      this.noteDeviceEnd();
+      return 0;
+    }
     if (this.buffered + chunk.byteLength > MAX_BUFFERED_BYTES) throw new EdlError("The device sent far more data than the protocol allows at this point.");
     this.append(chunk);
     this.received += chunk.byteLength;
     this.transferEnds.push(this.position + this.buffered);
+    if (chunk.byteLength < EDL_READ_REQUEST_BYTES) this.noteDeviceEnd();
     return chunk.byteLength;
   }
 
@@ -192,11 +218,12 @@ export class EdlLink {
     return out;
   }
 
-  /** Up to `max` bytes, as soon as any are available (raw sector data). */
-  async readSome(max: number, timeoutMs: number, label: string): Promise<Uint8Array> {
+  /** Up to `max` bytes, as soon as any are available (raw sector data). `ends` receives `deviceEndsWithin` for the bytes returned. */
+  async readSome(max: number, timeoutMs: number, label: string, ends?: number[]): Promise<Uint8Array> {
     if (!Number.isSafeInteger(max) || max <= 0) throw new EdlError(`${label}: a read of ${max} byte(s) is not possible.`);
     await this.fill(1, timeoutMs, label);
     const count = Math.min(max, this.buffered);
+    if (ends) ends.push(...this.deviceEndsWithin(count));
     const out = this.buffer.slice(this.start, this.start + count);
     this.consume(count);
     return out;

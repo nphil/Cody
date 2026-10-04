@@ -434,7 +434,7 @@ export async function restoreSet(run: EdlRun): Promise<HardwareResult> {
         region.sectors,
         sectorSize,
         paddedSource(blobs.get(region)!, 0),
-        tallyHooks(opened, tally, stop, report, sectorSize, base),
+        tallyHooks(tally, stop, report, sectorSize, base),
       ));
       base += region.sectors;
       progress.stage = "written, being read back";
@@ -457,7 +457,7 @@ export async function restoreSet(run: EdlRun): Promise<HardwareResult> {
       say(error.message);
       throw error;
     }
-    throw interruption(run, opened, error, { verb: "write", subject: `disk ${manifest.unit.diskGuid}`, totalSectors: writeSectors, tally, where: where() });
+    throw interruption(run, error, { verb: "write", subject: `disk ${manifest.unit.diskGuid}`, totalSectors: writeSectors, tally, where: where() });
   } finally {
     grant.revoke();
   }

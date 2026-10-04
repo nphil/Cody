@@ -1,5 +1,6 @@
 import { hashBlob } from "./blob-stream";
 import {
+  backupTableFloor,
   describeRange,
   describeStorage,
   fileNamePart,
@@ -36,9 +37,6 @@ import { throwIfAborted } from "./serial";
  *   - reads the partition back and compares SHA-256, and says plainly when it
  *     cannot, or when the bytes differ, always with where the old contents are.
  */
-
-/** A block that was cut in two leaves the programmer waiting for data; this is how large a command can be, to tell whether data went out. */
-const COMMAND_BYTES_CEILING = 1024;
 
 export function requirePartitionName(target: string | undefined, what: string): string {
   if (!target || target !== target.trim() || target.length > 64 || /[\u0000-\u001f]/.test(target)) {
@@ -85,26 +83,32 @@ export interface WriteTally {
   acknowledged: number;
   /** Sectors of the block now in flight; zero between blocks. */
   inFlight: number;
-  /** Bytes the link had sent when the current block began. */
-  sentAtBlockStart: number;
+  /** The block in flight got as far as its data (or an erase command) being sent, even if only part of it was. */
+  attempted: boolean;
 }
 
 export function newTally(): WriteTally {
-  return { acknowledged: 0, inFlight: 0, sentAtBlockStart: 0 };
+  return { acknowledged: 0, inFlight: 0, attempted: false };
 }
 
 /** Block hooks that keep `tally`, stop between blocks on a cancel, and report progress in bytes. */
-export function tallyHooks(opened: OpenedEdl, tally: WriteTally, stop: () => void, report: (bytes: number) => void, sectorSize: number, base = 0): BlockHooks {
+export function tallyHooks(tally: WriteTally, stop: () => void, report: (bytes: number) => void, sectorSize: number, base = 0): BlockHooks {
+  const attempt = (): void => {
+    tally.attempted = true;
+  };
   return {
     beforeBlock(done, sectors) {
       stop();
       tally.inFlight = sectors;
-      tally.sentAtBlockStart = opened.link.bytesSent;
+      tally.attempted = false;
       report((base + done) * sectorSize);
     },
+    payloadAttempted: attempt,
+    commandAttempted: attempt,
     afterBlock(done, sectors) {
       tally.acknowledged = base + done + sectors;
       tally.inFlight = 0;
+      tally.attempted = false;
       report(tally.acknowledged * sectorSize);
     },
   };
@@ -126,13 +130,14 @@ export interface InterruptionFacts {
  * operation. A cancel stays a cancel (the operation is "cancelled", with this in its
  * output); anything else becomes an error whose message is the same text.
  */
-export function interruption(run: EdlRun, opened: OpenedEdl, error: unknown, facts: InterruptionFacts): unknown {
+export function interruption(run: EdlRun, error: unknown, facts: InterruptionFacts): unknown {
   const { verb, subject, totalSectors, tally, where } = facts;
   const cancelled = isCancel(error, run);
   const left = run.context.transport.connected?.() === false;
   const cause = (left ? "the device left the USB bus" : cancelled ? "the operation was cancelled" : messageOf(error)).replace(/[.\s]+$/, "");
-  // A write has changed something once data went out; an erase once its command went out without the programmer refusing it.
-  const touched = tally.acknowledged > 0 || (tally.inFlight > 0 && (verb === "write" ? opened.link.bytesSent - tally.sentAtBlockStart > COMMAND_BYTES_CEILING : !(error instanceof FirehoseRejection)));
+  // A write may have changed something once a block's data was sent, even part of it, whatever the programmer then said; an
+  // erase once its command went out and the programmer did not refuse it. Only a refusal before any data went out is "nothing".
+  const touched = tally.acknowledged > 0 || (tally.attempted && (verb === "write" || !(error instanceof FirehoseRejection)));
   const inFlight = tally.inFlight > 0 ? (verb === "write" ? `; a block of ${tally.inFlight} sector(s) was in flight, so it may be partly written` : `; the erase of the next ${tally.inFlight} sector(s) was in flight, so its outcome is unknown`) : "";
   const note = touched
     ? `POSSIBLY MODIFIED: the ${verb === "write" ? "write to" : "erase of"} ${subject} stopped (${cause}) after ${tally.acknowledged} of ${totalSectors} sectors were ${verb === "write" ? "acknowledged" : "erased"}${inFlight}. ${subject} now holds a mix of ${verb === "write" ? "the new data and its previous contents" : "erased and original contents"}. ${where}`
@@ -202,7 +207,9 @@ export async function flashPartition(run: EdlRun): Promise<HardwareResult> {
   const opened = await openFirehose(run, { identity: "try", loader: "never" }, undefined);
   const { sectorSize } = opened.storage;
   const { primary, part } = await locatePartition(opened, name, "written");
-  const unsafe = partitionWriteProblem(primary, part, opened.storage.totalSectors, sectorSize);
+  const floor = await backupTableFloor(opened, primary);
+  if ("problem" in floor) throw new EdlError(`${floor.problem} Nothing was written.`, "refused");
+  const unsafe = partitionWriteProblem(primary, part, opened.storage.totalSectors, sectorSize, floor.floor);
   if (unsafe) throw new EdlError(`${unsafe} Cody never writes across a partition table or another partition. Nothing was written.`, "refused");
   if (image.size > part.bytes) {
     throw new EdlError(`The image is ${image.size} bytes but ${name} is only ${part.bytes} bytes (${part.sectors} sectors). Cody never writes past the end of a partition. Nothing was written.`, "refused");
@@ -250,10 +257,10 @@ export async function flashPartition(run: EdlRun): Promise<HardwareResult> {
       part.sectors,
       sectorSize,
       padBytes > 0 ? paddedSource(image, pad!) : paddedSource(image, 0),
-      tallyHooks(opened, tally, stop, report, sectorSize),
+      tallyHooks(tally, stop, report, sectorSize),
     ));
   } catch (error) {
-    throw interruption(run, opened, error, { verb: "write", subject: name, totalSectors: part.sectors, tally, where: `Its previous contents are saved as ${escrow.saved.fileId} (SHA-256 ${escrow.saved.sha256}). ${undo}` });
+    throw interruption(run, error, { verb: "write", subject: name, totalSectors: part.sectors, tally, where: `Its previous contents are saved as ${escrow.saved.fileId} (SHA-256 ${escrow.saved.sha256}). ${undo}` });
   } finally {
     grant.revoke();
   }
@@ -324,7 +331,9 @@ export async function erasePartition(run: EdlRun): Promise<HardwareResult> {
   const opened = await openFirehose(run, { identity: "try", loader: "never" }, undefined);
   const { sectorSize } = opened.storage;
   const { primary, part } = await locatePartition(opened, name, "erased");
-  const unsafe = partitionWriteProblem(primary, part, opened.storage.totalSectors, sectorSize);
+  const floor = await backupTableFloor(opened, primary);
+  if ("problem" in floor) throw new EdlError(`${floor.problem} Nothing was erased.`, "refused");
+  const unsafe = partitionWriteProblem(primary, part, opened.storage.totalSectors, sectorSize, floor.floor);
   if (unsafe) throw new EdlError(`${unsafe} Cody never erases across a partition table or another partition. Nothing was erased.`, "refused");
 
   say(`Saving the current contents of ${name} before anything is changed.`);
@@ -352,9 +361,9 @@ export async function erasePartition(run: EdlRun): Promise<HardwareResult> {
   const report = progressReporter(context, "erase", part.bytes, `Erasing ${name}`);
   say(`Erasing ${name}: ${describeRange(part.firstLba, part.sectors, sectorSize)}.`);
   try {
-    await duringWrites(run, opened, (stop) => opened.firehose.eraseSectors(grant, part.firstLba, part.sectors, sectorSize, tallyHooks(opened, tally, stop, report, sectorSize)));
+    await duringWrites(run, opened, (stop) => opened.firehose.eraseSectors(grant, part.firstLba, part.sectors, sectorSize, tallyHooks(tally, stop, report, sectorSize)));
   } catch (error) {
-    throw interruption(run, opened, error, { verb: "erase", subject: name, totalSectors: part.sectors, tally, where: `Its previous contents are saved as ${escrow.saved.fileId} (SHA-256 ${escrow.saved.sha256}). ${undo}` });
+    throw interruption(run, error, { verb: "erase", subject: name, totalSectors: part.sectors, tally, where: `Its previous contents are saved as ${escrow.saved.fileId} (SHA-256 ${escrow.saved.sha256}). ${undo}` });
   } finally {
     grant.revoke();
   }

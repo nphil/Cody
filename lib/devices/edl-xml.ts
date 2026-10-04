@@ -289,3 +289,32 @@ export function answerBeganInsideData(tail: Uint8Array, answer: Uint8Array): num
   }
   return null;
 }
+
+const ANSWER_ELEMENTS: readonly string[] = ["data", "log", "response"];
+
+/**
+ * Raw sector data that ENDS with a complete message of the programmer's own - a log line or a response, followed by at
+ * most white space - came up short by that message: the programmer sent it where the last bytes of data belong, and the
+ * host took it for sector bytes. Returns the length of that text in bytes (the data is at least that short), or `null`.
+ * The message must have arrived as a transfer of its own: `boundaries` are the distances from the end of the data at which the
+ * device ended a USB transfer, and the message has to begin at one of them. Sector data that merely contains such text,
+ * even a whole answer, sits inside a data transfer and is still data. Only documents made of `data`, `log` and `response`
+ * elements count.
+ */
+export function dataEndsWithAnswer(tail: Uint8Array, boundaries: readonly number[]): number | null {
+  const longest = Math.min(tail.length, MAX_ANSWER_OVERLAP_BYTES);
+  for (let length = 1; length <= longest; length += 1) {
+    if (!boundaries.includes(length)) continue;
+    const candidate = tail.subarray(tail.length - length);
+    if (candidate[0] !== 0x3c || !startsLikeAnswer(candidate)) continue;
+    try {
+      const frame = scanFirehoseFrame(candidate, true);
+      if (frame.kind !== "document" || frame.document.extras !== 0 || frame.document.strayText) continue;
+      if (!frame.document.elements.every((element) => ANSWER_ELEMENTS.includes(element.name))) continue;
+      if (candidate.subarray(frame.end).every((byte) => byte === 0x20 || byte === 0x0a || byte === 0x0d || byte === 0x09)) return length;
+    } catch {
+      // Not a document that ends the data; keep looking.
+    }
+  }
+  return null;
+}

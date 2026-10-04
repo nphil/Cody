@@ -226,6 +226,12 @@ PC tool's output is the reference to compare with.
   offset 0 of sector 1, and a whole partition's SHA-256 equals the PC tool's
   `r NAME` dump of the same partition. A one-byte offset would surface as
   "misaligned" or a GPT with a shifted signature: record it if it does.
+- [ ] **UNVERIFIED** The programmer ends each raw-data transfer with a short packet or a
+  zero-length packet and sends its log lines and answers as transfers of their own.
+  Cody relies on that to tell a log line swallowed as sector data (a read that came
+  up short by exactly its length) from data that merely contains similar text. Record
+  any read that fails with "the sector data ends with a complete message" on a unit
+  whose partition really ends that way.
 - [ ] **UNVERIFIED** `printgpt` lists the same partitions as the PC tool; the
   saved primary region equals sectors 0-33 read by the PC tool and the saved
   backup region equals the last 33 sectors. Record the disk GUID, the span the

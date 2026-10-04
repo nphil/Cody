@@ -2536,10 +2536,16 @@ as expanded-image hashes.
     the protected boot-chain / radio / identity / partition-table names
     (`edl-protect.ts`). Names like boot0/boot1/rpmb/mmcblk*boot* and partitions
     that overlap a partition table or another partition are refused with no
-    override. Writes run in blocks; a cancel lands BETWEEN blocks (the link rides
+    override; where the backup table lives is read from the header in the last
+    sector (`backupTableFloor`), not assumed from the primary header, and a header
+    whose entry array sits somewhere implausible refuses the write. Writes run in blocks; a cancel lands BETWEEN blocks (the link rides
     a signal that follows the operation's only after `edlTimeouts.cancelGrace`),
     because a programmer left waiting for the rest of a block takes the next
-    command for sector data. The partition is read back and compared by SHA-256:
+    command for sector data. A failure once a block's data was attempted, even
+    part of it, is reported as POSSIBLY MODIFIED with the saved copy's id
+    (explicit stage tracking in the block hooks, not a byte count); "nothing was
+    written" is said only when no data had gone out. The partition is read back
+    and compared by SHA-256:
     a mismatch is reported as POSSIBLY MODIFIED with the id of the saved copy; a
     programmer that will not read back leaves the write UNVERIFIED. An erase
     reports what the partition reads as afterwards (all zero, all 0xFF,
@@ -2597,8 +2603,10 @@ as expanded-image hashes.
     only when the check passes IN THE SAME OPERATION).
   - **Data integrity.** Reads are segmented (16 MiB per `read`), the raw bytes
     are counted exactly, the answer after them must follow directly (a data
-    stream that is off by one byte is reported as misaligned, never saved), the
-    SHA-256 is computed on the wire and compared with the artifact store's, and a
+    stream that is off by one byte is reported as misaligned, never saved; data
+    that ends with a complete message the programmer sent as a USB transfer of its
+    own is refused as short, while data that merely contains such text is still
+    data), the SHA-256 is computed on the wire and compared with the artifact store's, and a
     failed or cancelled read saves nothing. A cancelled read leaves data in
     flight: the next operation's `discover` discards it.
   - **What only hardware can prove.** Everything is emulator evidence. Open

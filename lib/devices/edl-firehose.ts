@@ -1,5 +1,5 @@
 import { EdlError, edlTimeouts, type EdlLink } from "./edl-link";
-import { answerBeganInsideData, cleanDeviceText, FIREHOSE_XML_LIMITS, parseFirehoseDocument, scanFirehoseFrame } from "./edl-xml";
+import { answerBeganInsideData, cleanDeviceText, dataEndsWithAnswer, FIREHOSE_XML_LIMITS, parseFirehoseDocument, scanFirehoseFrame } from "./edl-xml";
 import type { HardwareContext, HardwareRisk } from "./flasher";
 import { throwIfAborted } from "./serial";
 
@@ -360,6 +360,10 @@ export interface BlockHooks {
   beforeBlock(sectorsDone: number, sectors: number): void;
   /** After the programmer acknowledged the block. */
   afterBlock(sectorsDone: number, sectors: number): void;
+  /** The block's data is about to be sent (a transfer that fails part-way counts): from here on its sectors may have been written. */
+  payloadAttempted?(sectorsDone: number, sectors: number): void;
+  /** The command that changes the device (an erase) is about to go out: from here on it may have been carried out. */
+  commandAttempted?(sectorsDone: number, sectors: number): void;
 }
 
 const NO_HOOKS: BlockHooks = { beforeBlock() {}, afterBlock() {} };
@@ -383,7 +387,12 @@ interface CollectOptions {
    * With `strict`: the last bytes of the sector data this answer closes. A first document that is really the continuation of
    * data that came up short (its start was taken for sector bytes) is refused. `what` names the read in the message.
    */
-  readonly dataTail?: { readonly bytes: Uint8Array; readonly what: string };
+  readonly dataTail?: {
+    readonly bytes: Uint8Array;
+    readonly what: string;
+    /** How many bytes before the end of the data the device ended a USB transfer (only those within `bytes`): where a message of its own could have begun. */
+    readonly boundaries: readonly number[];
+  };
   /** `quiet` only: wait the whole timeout for the FIRST document instead of one quiet window. */
   readonly patient?: boolean;
 }
@@ -467,11 +476,12 @@ export class FirehoseSession {
    * writes Firehose XML. A command that changes the device goes out only under `grant`,
    * and the guard checks the very bytes about to be sent against it.
    */
-  private async transmit(command: FirehoseCommand, grant?: WriteGrant): Promise<void> {
+  private async transmit(command: FirehoseCommand, grant?: WriteGrant, beforeSend?: () => void): Promise<void> {
     let xml = serializeFirehoseCommand(command);
     // A command whose length is a multiple of the packet size would need a zero-length packet to end it; whitespace avoids that.
     if (new TextEncoder().encode(xml).length % 512 === 0) xml += "\n";
     assertFirehoseXml(xml, grant);
+    beforeSend?.();
     await this.link.write(new TextEncoder().encode(xml));
   }
 
@@ -518,6 +528,10 @@ export class FirehoseSession {
             const short = answerBeganInsideData(options.dataTail.bytes, this.link.view().subarray(0, frame.end));
             if (short !== null) {
               throw new EdlError(`${options.dataTail.what}: the programmer's closing answer began inside the sector data (the data is ${short} byte(s) short), so the last ${short} byte(s) delivered are the programmer's own text, not the disk's. Nothing from this read can be trusted.`);
+            }
+            const swallowed = dataEndsWithAnswer(options.dataTail.bytes, options.dataTail.boundaries);
+            if (swallowed !== null) {
+              throw new EdlError(`${options.dataTail.what}: the sector data ends with a complete message from the programmer (${swallowed} byte(s) of text), so the data came up at least that many bytes short and its last bytes are not the disk's. Nothing from this read can be trusted.`);
             }
           }
           documents += 1;
@@ -666,15 +680,23 @@ export class FirehoseSession {
       const label = `Firehose read of sectors ${first}-${first + count - 1}`;
       const announced = await this.exchange({ kind: "read", sectorSize, startSector: first, sectors: count }, { label, timeoutMs: edlTimeouts.firstAnswer });
       this.requireAck(announced, label, "true");
-      let remaining = count * sectorSize;
+      const owed = count * sectorSize;
+      let remaining = owed;
       let tail: Uint8Array = new Uint8Array(0);
+      const boundaries: number[] = [];
       while (remaining > 0) {
-        const chunk = await this.link.readSome(Math.min(remaining, 64 * 1024), edlTimeouts.dataInactivity, `${label} (${remaining} byte(s) still to come)`);
+        const ends: number[] = [];
+        const chunk = await this.link.readSome(Math.min(remaining, 64 * 1024), edlTimeouts.dataInactivity, `${label} (${remaining} byte(s) still to come)`, ends);
+        // A transfer the device ended inside the last stretch of the data is where a message of its own may have begun.
+        for (const end of ends) {
+          const before = remaining - end;
+          if (before > 0 && before <= DATA_TAIL_BYTES) boundaries.push(before);
+        }
         remaining -= chunk.byteLength;
         tail = lastBytes(tail, chunk, DATA_TAIL_BYTES);
         yield chunk;
       }
-      const closing = await this.collect({ label: `${label}, closing answer`, timeoutMs: edlTimeouts.command, until: "response", strict: true, dataTail: { bytes: tail, what: label } });
+      const closing = await this.collect({ label: `${label}, closing answer`, timeoutMs: edlTimeouts.command, until: "response", strict: true, dataTail: { bytes: tail, what: label, boundaries } });
       this.requireAck(closing, label, "false");
     }
   }
@@ -688,7 +710,7 @@ export class FirehoseSession {
    * whatever comes next for sector data, so a block is never cut in two on purpose:
    * callers stop BETWEEN blocks.
    */
-  async programBlock(grant: WriteGrant, startSector: number, data: Uint8Array, sectorSize: number): Promise<void> {
+  async programBlock(grant: WriteGrant, startSector: number, data: Uint8Array, sectorSize: number, beforePayload?: () => void): Promise<void> {
     if (data.byteLength === 0 || data.byteLength % sectorSize !== 0) throw new EdlError(`A block of ${data.byteLength} bytes is not a whole number of ${sectorSize}-byte sectors.`, "refused");
     const sectors = data.byteLength / sectorSize;
     const label = `Firehose write of sectors ${startSector}-${startSector + sectors - 1}`;
@@ -697,6 +719,7 @@ export class FirehoseSession {
     const announced = await this.collect({ label, timeoutMs: edlTimeouts.firstAnswer, until: "response" });
     this.requireAck(announced, label, "true");
     const payload = Math.max(sectorSize, Math.floor((this.configuration?.negotiatedPayloadToTarget ?? 64 * 1024) / sectorSize) * sectorSize);
+    beforePayload?.();
     for (let offset = 0; offset < data.byteLength; offset += payload) {
       await this.link.write(data.subarray(offset, Math.min(data.byteLength, offset + payload)));
       await this.link.writeZlp();
@@ -721,7 +744,7 @@ export class FirehoseSession {
       hooks.beforeBlock(done, count);
       const data = await source.read(done * sectorSize, count * sectorSize);
       if (data.byteLength !== count * sectorSize) throw new EdlError(`The data source gave ${data.byteLength} bytes for a block of ${count * sectorSize}. Nothing more was sent.`);
-      await this.programBlock(grant, startSector + done, data, sectorSize);
+      await this.programBlock(grant, startSector + done, data, sectorSize, () => hooks.payloadAttempted?.(done, count));
       hooks.afterBlock(done, count);
     }
   }
@@ -737,7 +760,7 @@ export class FirehoseSession {
       const label = `Firehose erase of sectors ${first}-${first + count - 1}`;
       hooks.beforeBlock(done, count);
       await this.settle(true);
-      await this.transmit({ kind: "erase", sectorSize, startSector: first, sectors: count }, grant);
+      await this.transmit({ kind: "erase", sectorSize, startSector: first, sectors: count }, grant, () => hooks.commandAttempted?.(done, count));
       const answer = await this.collect({ label, timeoutMs: edlTimeouts.erase, until: "response" });
       this.requireAck(answer, label, "false");
       hooks.afterBlock(done, count);
