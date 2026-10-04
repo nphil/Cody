@@ -476,20 +476,23 @@ interface ImageBackup {
 /** Escrows the device's current image when it can upload one; a device that will not is not a reason to refuse the write. */
 async function backupCurrentImage(metadata: DfuMetadata, context: HardwareContext, session: DfuSession): Promise<ImageBackup> {
   if ((metadata.descriptor.attributes & DFU_CAN_UPLOAD) === 0) return { note: "Backup unavailable: this DFU interface cannot upload (bitCanUpload is 0), so the write is UNVERIFIED." };
+  let image: Uint8Array<ArrayBuffer>;
   try {
-    const image = await session.uploadImage({ limit: MAX_IMAGE_BACKUP_BYTES });
-    if (image.length > 0) {
-      const file = binaryBlob(image);
-      const id = await context.save(`${target(metadata)}.preflash.bin`, file);
-      return { id, note: `Saved the device's current image (${image.length} bytes) as ${id} (sha256 ${await sha256Blob(file)}).` };
-    }
-    await session.recover();
-    return { note: "Backup unavailable: the device answered an upload with no data, so the write is UNVERIFIED." };
+    image = await session.uploadImage({ limit: MAX_IMAGE_BACKUP_BYTES });
   } catch (error) {
     throwIfAborted(context.signal);
     await session.recover();
     return { note: `Backup unavailable: the device would not upload its image (${error instanceof Error ? error.message : String(error)}), so the write is UNVERIFIED.` };
   }
+  if (image.length === 0) {
+    await session.recover();
+    return { note: "Backup unavailable: the device answered an upload with no data, so the write is UNVERIFIED." };
+  }
+  const file = binaryBlob(image);
+  // Storage failure is not an upload failure: do not let a write continue when
+  // Cody has already read a backup but could not preserve it.
+  const id = await context.save(`${target(metadata)}.preflash.bin`, file);
+  return { id, note: `Saved the device's current image (${image.length} bytes) as ${id} (sha256 ${await sha256Blob(file)}).` };
 }
 
 /**
