@@ -48,7 +48,7 @@ const GROUP_ACTIONS: Readonly<Record<ActionGroup, Readonly<Partial<Record<Hardwa
   commands: { fastboot: ["exec"], dfu: ["exec"], esp: ["exec"], edl: ["exec"] },
   serial: { serial: ["monitor", "exec"] },
   files: { adb: ["push", "pull", "sideload", "install"] },
-  flash: { esp: ["flash"], fastboot: ["flash"], dfu: ["flash"], stm32: ["flash"], stk500: ["flash"] },
+  flash: { esp: ["flash"], fastboot: ["flash"], dfu: ["flash"], stm32: ["flash"], stk500: ["flash"], edl: ["flash"] },
   backup: { esp: ["dump"], adb: ["dump", "verify"], fastboot: ["dump"], dfu: ["dump"], stm32: ["dump"], stk500: ["dump"], edl: ["dump"] },
   ports: { adb: ["forward", "reverse"] },
 };
@@ -64,8 +64,8 @@ export const TERMINAL_COVERED: Readonly<Partial<Record<HardwareProtocol, readonl
   adb: ["monitor"],
   serial: ["monitor"],
   fastboot: ["exec"],
-  // The EDL workflow card (connect, partition table, check, one-partition backup) stands in for generic forms.
-  edl: ["exec", "dump"],
+  // The EDL workflow cards (connect, partition table, check, flash, backup) stand in for generic forms.
+  edl: ["exec", "dump", "flash"],
 };
 
 /** Protocols a UART-attached chip can speak: a plain monitor plus the ROM/bootloader flashers. */

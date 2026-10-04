@@ -3,7 +3,8 @@
 import { useMemo, useState } from "react";
 import { Select } from "@/components/ui/Select";
 import type { DeviceArtifact } from "@/lib/devices/artifacts";
-import { formatBytes, parseEdlCommand } from "@/lib/devices/edl";
+import { formatBytes } from "@/lib/devices/edl-disk";
+import { parseEdlCommand } from "@/lib/devices/edl";
 import type { DeviceOperationManager, DeviceOperationSnapshot } from "@/lib/devices/operations";
 import { useI18n } from "@/lib/i18n";
 import { isTerminalState } from "./OperationList";

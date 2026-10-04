@@ -145,6 +145,17 @@ export interface OpenedEdl {
 export interface OpenSpec {
   /** `require`: the boot ROM's identity is part of what the operation needs, so a programmer that is already running is refused. */
   readonly identity: "skip" | "try" | "require";
+  /**
+   * `never`: this operation does not send a loader. A device still waiting in the boot ROM is refused, before the
+   * boot ROM is spoken to, with the way to get a programmer running first (Connect). The file such an operation
+   * carries is its own (an image), never a loader.
+   */
+  readonly loader?: "never";
+  /**
+   * Called with the boot ROM's identity as soon as it has been read, BEFORE any loader is confirmed or sent;
+   * throw to stop there. Not called when the identity could not be read.
+   */
+  readonly checkIdentity?: (identity: SaharaIdentity) => void;
 }
 
 export function describeIdentity(identity: SaharaIdentity): string[] {
@@ -175,6 +186,9 @@ export async function openFirehose(run: EdlRun, spec: OpenSpec, loaderBlob: Blob
   if (state.kind === "firehose" && spec.identity === "require") {
     throw new EdlError("A programmer is already running, so the boot ROM's identity (chip serial, hardware id, public-key hash) can no longer be read. Put the device into EDL mode again and repeat this.", "refused");
   }
+  if (state.kind === "sahara" && spec.loader === "never") {
+    throw new EdlError("The device is still waiting in the boot ROM. This operation never sends a loader itself: run Connect with the loader file first so a programmer is running, then repeat this. Nothing was changed.", "refused");
+  }
 
   if (state.kind === "sahara") {
     if (spec.identity !== "skip") {
@@ -191,6 +205,7 @@ export async function openFirehose(run: EdlRun, spec: OpenSpec, loaderBlob: Blob
         state = await discover(link, run);
       }
     }
+    if (identity) spec.checkIdentity?.(identity);
     if (state.kind === "sahara") {
       if (!loaderBlob || !loader) {
         throw new EdlError("The device is waiting in the boot ROM and needs a programmer (loader) file. Choose the loader for this device in Files & backups, then run this again.", "refused");

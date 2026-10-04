@@ -1,22 +1,21 @@
-import { sha256 as incrementalSha256 } from "@noble/hashes/sha2.js";
-import { bytesToHex } from "@noble/hashes/utils.js";
-import { hashBlob } from "./blob-stream";
-import { FirehoseRejection } from "./edl-firehose";
 import {
-  evaluateSpan,
-  findPartitions,
-  gptEntrySectors,
-  parseGptEntries,
-  parseGptHeader,
-  type BackupGpt,
-  type GptPartition,
-  type GptTable,
-  type SpanReport,
-} from "./edl-gpt";
+  describeRange,
+  describeStorage,
+  examineDisk,
+  fileNamePart,
+  formatBytes,
+  locatePartition,
+  saveSmall,
+  storageNote,
+  streamToArtifact,
+  unitTag,
+} from "./edl-disk";
+import type { GptPartition, GptTable } from "./edl-gpt";
 import { EdlError } from "./edl-link";
 import { saharaLeave } from "./edl-sahara";
-import { describeIdentity, discoverDevice, inspectDevice, openFirehose, type EdlRun, type OpenedEdl } from "./edl-session";
-import type { Flasher, HardwareContext, HardwareRequest, HardwareResult, HardwareTransport, StreamArtifact } from "./flasher";
+import { describeIdentity, discoverDevice, inspectDevice, openFirehose, type EdlRun } from "./edl-session";
+import { flashPartition } from "./edl-write";
+import type { Flasher, HardwareContext, HardwareRequest, HardwareResult, HardwareTransport } from "./flasher";
 import { throwIfAborted } from "./serial";
 
 /**
@@ -32,198 +31,19 @@ import { throwIfAborted } from "./serial";
  *   dump NAME     one GPT partition into a session file with its SHA-256
  *   dump user-area  the whole user area, only with an explicit sector count and
  *                 only when `check` passes in the same operation
+ *   flash NAME    write an image into one GPT partition (edl-write.ts): saved
+ *                 copy first, one confirmation, typed override for the protected
+ *                 boot chain and identity partitions, read-back afterwards
  *
- * Nothing here changes storage.
+ * Everything that changes storage lives in edl-write.ts and goes through a
+ * `WriteGrant` (edl-firehose.ts); the read-only commands here never write.
  */
 
 const USER_AREA = "user-area";
 const MAX_LISTED_PARTITIONS = 256;
-/** The primary entry array is expected directly after the header; a table that starts it elsewhere is not read. */
-const MAX_PRIMARY_ENTRIES_LBA = 64;
-const PROGRESS_EVERY_MS = 400;
-/** Browsers cap what a Blob fallback may hold; real devices stream. */
-const MAX_BUFFERED_ARTIFACT_BYTES = 8 * 1024 * 1024;
 
 function requireUsb(transport: HardwareTransport): void {
   if (transport.kind !== "usb") throw new EdlError("Qualcomm EDL needs a USB bulk transport.", "refused");
-}
-
-export function formatBytes(bytes: number): string {
-  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GiB`;
-  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MiB`;
-  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
-  return `${bytes} B`;
-}
-
-function fileNamePart(text: string): string {
-  return text.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 48) || "unnamed";
-}
-
-function progressReporter(context: HardwareContext, phase: string, total: number, message: string): (completed: number) => void {
-  let last = 0;
-  return (completed) => {
-    const now = Date.now();
-    if (completed >= total || now - last >= PROGRESS_EVERY_MS) {
-      last = now;
-      context.progress({ phase, completed: Math.min(completed, total), total, message });
-    }
-  };
-}
-
-/** Escrows a stream of device bytes: streamed when the browser offers it, otherwise a small Blob. */
-async function saveChunks(context: HardwareContext, chunks: AsyncIterable<Uint8Array>, length: number, name: string): Promise<StreamArtifact> {
-  if (context.saveStream) return context.saveStream(name, chunks);
-  if (length > MAX_BUFFERED_ARTIFACT_BYTES) throw new EdlError("This client must provide streaming artifact storage for a file this large.", "refused");
-  const parts: Uint8Array<ArrayBuffer>[] = [];
-  for await (const chunk of chunks) parts.push(Uint8Array.from(chunk));
-  const blob = new Blob(parts);
-  return { fileId: await context.save(name, blob), sha256: await hashBlob(blob), length };
-}
-
-async function saveSmall(context: HardwareContext, name: string, bytes: Uint8Array): Promise<{ fileId: string; sha256: string }> {
-  const blob = new Blob([Uint8Array.from(bytes)]);
-  return { fileId: await context.save(name, blob), sha256: await hashBlob(blob) };
-}
-
-async function readRegion(opened: OpenedEdl, start: number, sectors: number): Promise<Uint8Array> {
-  const out = new Uint8Array(sectors * opened.storage.sectorSize);
-  let filled = 0;
-  for await (const chunk of opened.firehose.readSectors(start, sectors, opened.storage.sectorSize)) {
-    out.set(chunk, filled);
-    filled += chunk.byteLength;
-  }
-  if (filled !== out.byteLength) throw new EdlError(`Read ${filled} of ${out.byteLength} bytes at sector ${start}.`);
-  return out;
-}
-
-interface PrimaryGpt {
-  readonly table: GptTable;
-  /** Sectors 0 .. end of the entry array, byte for byte. */
-  readonly region: Uint8Array;
-  readonly regionSectors: number;
-}
-
-/** What the primary header says about where the backup table is, against where the measured disk ends. */
-interface BackupPointer {
-  /** The sector the primary header's AlternateLBA names. */
-  readonly lba: number;
-  /** It is the last sector the programmer reports. */
-  readonly agrees: boolean;
-  /** When it does not agree: what is at that sector, in a sentence. Empty when it agrees. */
-  readonly there: string;
-}
-
-interface BackupRead extends BackupGpt {
-  readonly region: Uint8Array | null;
-  readonly firstLba: number | null;
-  readonly sectors: number | null;
-  /** The sector the backup table was looked for in: the last one the programmer reports. */
-  readonly atLba: number;
-  /** The programmer would not read that sector at all. */
-  readonly lastSectorUnreadable: boolean;
-  readonly pointer: BackupPointer;
-}
-
-type TailCopy = Omit<BackupRead, "pointer">;
-
-export async function readPrimaryGpt(opened: OpenedEdl): Promise<PrimaryGpt> {
-  const sectorSize = opened.storage.sectorSize;
-  const head = await readRegion(opened, 0, 2);
-  const header = parseGptHeader(head.subarray(sectorSize, 2 * sectorSize), sectorSize);
-  if (header.myLba !== 1) throw new EdlError(`The primary partition table header says it is at sector ${header.myLba}, not sector 1.`);
-  if (header.entriesLba < 2 || header.entriesLba > MAX_PRIMARY_ENTRIES_LBA) throw new EdlError(`The primary partition entry array starts at sector ${header.entriesLba}; Cody expects it right after the header.`);
-  const end = header.entriesLba + gptEntrySectors(header, sectorSize);
-  const region = await readRegion(opened, 0, end);
-  const table = parseGptEntries(header, region.subarray(header.entriesLba * sectorSize, end * sectorSize), sectorSize);
-  return { table, region, regionSectors: end };
-}
-
-function problem(message: string, atLba: number, lastSectorUnreadable = false): TailCopy {
-  return { header: null, table: null, problem: message, region: null, firstLba: null, sectors: null, atLba, lastSectorUnreadable };
-}
-
-/** The partition table header in sector `at` and the entry array just before it: where a backup table has to sit. */
-async function readTailCopy(opened: OpenedEdl, at: number): Promise<TailCopy> {
-  const sectorSize = opened.storage.sectorSize;
-  let headerSector: Uint8Array;
-  try {
-    headerSector = await readRegion(opened, at, 1);
-  } catch (error) {
-    if (error instanceof FirehoseRejection) return problem(`The programmer would not read sector ${at}, the last one it reports, where the backup partition table should be: ${error.message}`, at, true);
-    throw error;
-  }
-  let header;
-  let count;
-  try {
-    header = parseGptHeader(headerSector, sectorSize);
-    count = gptEntrySectors(header, sectorSize);
-  } catch (error) {
-    if (error instanceof EdlError) return problem(`Sector ${at} does not hold a usable backup partition table header: ${error.message}`, at);
-    throw error;
-  }
-  if (header.entriesLba >= at || at - header.entriesLba > count + 64) return problem(`The backup header at sector ${at} puts its entry array at sector ${header.entriesLba}, which is not just before it.`, at);
-  const first = header.entriesLba;
-  const sectors = at - first + 1;
-  let region: Uint8Array;
-  try {
-    region = await readRegion(opened, first, sectors);
-  } catch (error) {
-    if (error instanceof FirehoseRejection) return problem(`The programmer would not read the backup entry array at sector ${first}: ${error.message}`, at);
-    throw error;
-  }
-  const table = parseGptEntries(header, region.subarray(0, count * sectorSize), sectorSize);
-  return { header, table, problem: null, region, firstLba: first, sectors, atLba: at, lastSectorUnreadable: false };
-}
-
-/** What a sector the primary header names as the backup's home holds, when that is not the end of the disk. */
-async function describeStrayPointer(opened: OpenedEdl, lba: number): Promise<string> {
-  if (lba >= opened.storage.totalSectors) return "That sector does not exist on this disk.";
-  let sector: Uint8Array;
-  try {
-    sector = await readRegion(opened, lba, 1);
-  } catch (error) {
-    if (error instanceof FirehoseRejection) return `The programmer would not read that sector (${error.message}).`;
-    throw error;
-  }
-  try {
-    const found = parseGptHeader(sector, opened.storage.sectorSize);
-    return `That sector holds a GPT header too (its own address is ${found.myLba}, checksum ${found.headerCrcValid ? "valid" : "bad"}): probably an older copy. It is not the one saved.`;
-  } catch (error) {
-    if (error instanceof EdlError) return "That sector holds no GPT header.";
-    throw error;
-  }
-}
-
-/**
- * The partition table at the END of the disk. It is looked for in the last sector the
- * programmer reports, independently of what the primary header says: a pointer that was
- * left stale by a resize, or damaged, must neither hide the real recovery copy nor stand
- * in for it with an interior one. A pointer that disagrees is reported, not followed.
- */
-export async function readBackupGpt(opened: OpenedEdl, primary: PrimaryGpt): Promise<BackupRead> {
-  const last = opened.storage.totalSectors - 1;
-  const copy = await readTailCopy(opened, last);
-  const lba = primary.table.header.alternateLba;
-  const agrees = lba === last;
-  return { ...copy, pointer: { lba, agrees, there: agrees ? "" : await describeStrayPointer(opened, lba) } };
-}
-
-interface DiskReport {
-  readonly primary: PrimaryGpt;
-  readonly backup: BackupRead;
-  readonly lastSectorReadable: boolean;
-  readonly span: SpanReport;
-}
-
-/** Everything the span check needs, read in this operation. */
-async function examineDisk(opened: OpenedEdl, run: EdlRun): Promise<DiskReport> {
-  run.context.progress({ phase: "gpt", message: "Reading the partition tables" });
-  const primary = await readPrimaryGpt(opened);
-  const backup = await readBackupGpt(opened, primary);
-  const lastSectorReadable = !backup.lastSectorUnreadable;
-  if (!lastSectorReadable && backup.problem) run.say(backup.problem);
-  const span = evaluateSpan(opened.storage.totalSectors, opened.storage.sectorSize, primary.table, { lastSectorReadable, backup });
-  return { primary, backup, lastSectorReadable, span };
 }
 
 function partitionLines(table: GptTable): string[] {
@@ -232,16 +52,6 @@ function partitionLines(table: GptTable): string[] {
 
 function describePartitions(parts: readonly GptPartition[]): Record<string, unknown>[] {
   return parts.slice(0, MAX_LISTED_PARTITIONS).map((part) => ({ index: part.index, name: part.name, firstLba: part.firstLba, lastLba: part.lastLba, sectors: part.sectors, bytes: part.bytes, typeGuid: part.typeGuid, uniqueGuid: part.uniqueGuid }));
-}
-
-function unitTag(opened: OpenedEdl): string {
-  const serial = opened.identity?.serial ?? opened.firehose.chipSerial?.replace(/^0x/, "");
-  return fileNamePart(serial ?? opened.storage.serialNumber ?? "unit");
-}
-
-function describeStorage(opened: OpenedEdl): string {
-  const { storage } = opened;
-  return `${storage.productName ?? "eMMC"}: ${storage.totalSectors} sectors of ${storage.sectorSize} bytes (${formatBytes(storage.totalSectors * storage.sectorSize)})`;
 }
 
 // ---- detect ----------------------------------------------------------------
@@ -405,60 +215,12 @@ async function exec(run: EdlRun): Promise<HardwareResult> {
 
 // ---- dump ------------------------------------------------------------------
 
-interface StreamedRead {
-  readonly saved: StreamArtifact;
-  readonly wireSha256: string;
-}
-
-async function streamToArtifact(run: EdlRun, opened: OpenedEdl, startSector: number, sectors: number, name: string): Promise<StreamedRead> {
-  const { context } = run;
-  const total = sectors * opened.storage.sectorSize;
-  const hash = incrementalSha256.create();
-  let received = 0;
-  const report = progressReporter(context, "read", total, `Reading ${name}`);
-  context.progress({ phase: "read", completed: 0, total, message: `Reading ${name}` });
-  async function* chunks(): AsyncGenerator<Uint8Array> {
-    for await (const chunk of opened.firehose.readSectors(startSector, sectors, opened.storage.sectorSize)) {
-      hash.update(chunk);
-      received += chunk.byteLength;
-      report(received);
-      yield chunk;
-    }
-  }
-  try {
-    const saved = await saveChunks(context, chunks(), total, name);
-    const wireSha256 = bytesToHex(hash.digest());
-    if (received !== total || saved.length !== total) throw new EdlError(`Received ${received} bytes and saved ${saved.length}, expected ${total}. The file is not usable.`);
-    if (saved.sha256 !== wireSha256) throw new EdlError(`The saved file's SHA-256 (${saved.sha256}) differs from that of the bytes received (${wireSha256}). Browser storage altered the data; do not trust the file.`);
-    return { saved, wireSha256 };
-  } finally {
-    hash.destroy();
-  }
-}
-
-function describeRange(first: number, sectors: number, sectorSize: number): string {
-  return `sectors ${first}-${first + sectors - 1} (${sectors} sectors, ${sectors * sectorSize} bytes)`;
-}
-
 async function dumpPartition(run: EdlRun, name: string): Promise<HardwareResult> {
   const { context, request } = run;
   const opened = await openFirehose(run, { identity: "try" }, context.input);
   const { storage } = opened;
   const sectorSize = storage.sectorSize;
-  const primary = await readPrimaryGpt(opened);
-  const { header } = primary.table;
-  if (!header.headerCrcValid || !primary.table.entriesCrcValid) {
-    throw new EdlError("The primary partition table is damaged (its checksums do not match), so a partition cannot be found by name. Nothing was read. Use printgpt to see the damage.", "refused");
-  }
-  const matches = findPartitions(primary.table, name);
-  if (matches.length === 0) {
-    throw new EdlError(`The device has no partition named "${name.slice(0, 48)}". Partitions: ${primary.table.partitions.slice(0, 64).map((part) => part.name).join(", ")}.`, "refused");
-  }
-  if (matches.length > 1) throw new EdlError(`Two partitions are named "${name.slice(0, 48)}", so the name does not pick one. Nothing was read.`, "refused");
-  const part = matches[0]!;
-  if (part.lastLba >= storage.totalSectors) {
-    throw new EdlError(`Partition ${part.name} ends at sector ${part.lastLba}, beyond the ${storage.totalSectors} sectors the programmer reports. Nothing was read.`, "refused");
-  }
+  const { part } = await locatePartition(opened, name, "read");
   const byteOffset = request.offset ?? 0;
   const byteLength = request.length ?? part.bytes - byteOffset;
   if (byteOffset % sectorSize !== 0 || byteLength % sectorSize !== 0) throw new EdlError(`offset and length must be multiples of the ${sectorSize}-byte sector.`, "refused");
@@ -483,21 +245,6 @@ async function dumpPartition(run: EdlRun, name: string): Promise<HardwareResult>
     fileId: saved.fileId,
     details: { partition: part.name, firstSector: first, sectors, sectorSize, offset: byteOffset, length: byteLength, deviceHash: "not available: Cody does not ask the programmer for a digest", wireSha256: saved.sha256 },
   };
-}
-
-async function storageNote(bytes: number): Promise<string> {
-  try {
-    const estimate = await globalThis.navigator?.storage?.estimate?.();
-    if (estimate?.quota !== undefined && estimate.usage !== undefined) {
-      const free = estimate.quota - estimate.usage;
-      return free < bytes * 2
-        ? `WARNING: this browser reports about ${formatBytes(free)} of storage left; a read this size needs about twice its size (${formatBytes(bytes * 2)}) while it is saved.`
-        : `This browser reports about ${formatBytes(free)} of storage left.`;
-    }
-  } catch {
-    // An estimate is a courtesy.
-  }
-  return "";
 }
 
 async function dumpUserArea(run: EdlRun): Promise<HardwareResult> {
@@ -580,6 +327,7 @@ async function runEdl(request: HardwareRequest, context: HardwareContext): Promi
       case "detect": return await detect(run);
       case "dump": return await dump(run);
       case "exec": return await exec(run);
+      case "flash": return await flashPartition(run);
       default: throw new EdlError(`EDL does not support ${request.action}.`, "refused");
     }
   } catch (error) {
@@ -589,6 +337,6 @@ async function runEdl(request: HardwareRequest, context: HardwareContext): Promi
 
 export const edlFlasher: Flasher = {
   protocol: "edl",
-  actions: ["detect", "dump", "exec"],
+  actions: ["detect", "dump", "exec", "flash"],
   run: runEdl,
 };
