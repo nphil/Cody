@@ -2309,6 +2309,11 @@ as expanded-image hashes.
   removes the copy and its staging files on every exit (copy failure, `pm`
   failure, and cancel: it keeps the connection for that cleanup, and
   `stagingIo(adb, capabilities, signal)` stops at the next step when cancelled).
+  The retained lifetime belongs to the OPERATION, not the transport: the hold an
+  operation entered is found through `contextHolds` (keyed by context), so the
+  connection made on a replacement transport after a resumed copy (or a restart,
+  or a wait reacquisition) lives and dies with the same hold, and a cancel after
+  the resume still removes the files over it.
   Replacement is off unless `options.replace`: `-R` on Android 9+ (API read from
   `ro.build.version.sdk`; unreadable counts as modern), nothing on older Android,
   where `-R` is an unknown option and refusing is already the default. The

@@ -137,7 +137,7 @@ async function adbFor(context: HardwareContext, options?: { deadline?: number })
   if (existing) return existing;
   // The connection outlives any single operation when several share it, so it
   // is bound to the hold's own signal, never to one operation's.
-  const holdSignal = adbHolds.get(context.transport)?.controller.signal ?? context.signal;
+  const holdSignal = contextHolds.get(context)?.controller.signal ?? context.signal;
   const sessionSignal = options?.deadline === undefined ? holdSignal : AbortSignal.any([holdSignal, AbortSignal.timeout(Math.max(1, options.deadline - Date.now()))]);
 
   let initialProbeFailed = false;
@@ -206,6 +206,14 @@ interface AdbHold {
 
 const adbHolds = new WeakMap<HardwareTransport, AdbHold>();
 
+/**
+ * The hold an operation entered, by operation. A resumed push, install or wait swaps
+ * `context.transport` for a reacquired one; the connection made on the new transport
+ * belongs to the same hold and must live exactly as long as the first would have,
+ * including the stretch an operation keeps it to clean up after its own cancel.
+ */
+const contextHolds = new WeakMap<HardwareContext, AdbHold>();
+
 function abortIfAbandoned(hold: AdbHold): void {
   if (hold.users > 0 && hold.active === 0 && hold.retained === 0) hold.controller.abort();
 }
@@ -236,6 +244,7 @@ async function enterAdbHold(context: HardwareContext): Promise<() => Promise<voi
     adbHolds.set(transport, hold);
   }
   const entered = hold;
+  contextHolds.set(context, entered);
   entered.users += 1;
   let counted = !signal.aborted;
   const onAbort = (): void => {
@@ -278,7 +287,7 @@ async function enterAdbHold(context: HardwareContext): Promise<() => Promise<voi
 /** Keep the connection alive past this operation's own cancellation, so it can
  * undo what it set up on the device (a reverse rule). Returns the release. */
 function retainAdbSession(context: HardwareContext): () => void {
-  const hold = adbHolds.get(context.transport);
+  const hold = contextHolds.get(context);
   if (!hold) return () => undefined;
   hold.retained += 1;
   let released = false;
