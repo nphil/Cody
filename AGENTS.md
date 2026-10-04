@@ -2313,7 +2313,18 @@ as expanded-image hashes.
   operation entered is found through `contextHolds` (keyed by context), so the
   connection made on a replacement transport after a resumed copy (or a restart,
   or a wait reacquisition) lives and dies with the same hold, and a cancel after
-  the resume still removes the files over it.
+  the resume still removes the files over it. Cancel also ends the subprocess in
+  flight without touching that connection: `shellStatus(adb, command, signal)`
+  spawns with a dependent signal (ya-webadb closes only that stream and rejects
+  `exited`; its own `spawnWaitText` takes no signal, so it is not used), `pm
+  install` and every staging step receive the operation's signal, and a cancelled
+  operation is never classified as a connection failure (it would reconnect and
+  close the connection the cleanup needs). `removeRemote` runs the cleanup within
+  `ADB_CLEANUP_MS` so a silent device cannot keep the exclusive lease, and the
+  operation tells the operator `pm` may still finish installing. The sandbox
+  device (`adb-device.test-helper.mjs`) can hold `pm` silent (`pm: () => undefined`),
+  speak the shell v2 protocol (`features: "shell_v2"`), share storage between two
+  connections (`root`) and report a lost connection (`syncFault: "disconnect"`).
   Replacement is off unless `options.replace`: `-R` on Android 9+ (API read from
   `ro.build.version.sdk`; unreadable counts as modern), nothing on older Android,
   where `-R` is an unknown option and refusing is already the default. The

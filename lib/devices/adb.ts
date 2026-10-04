@@ -2,9 +2,11 @@ import { Adb, AdbCommand, AdbDaemonTransport, AdbPacket, AdbPacketSerializeStrea
 import type { StructDeserializer } from "@yume-chan/struct";
 import AdbWebCredentialStore from "@yume-chan/adb-credential-web";
 import {
+  ConcatStringStream,
   Consumable,
   ReadableStream as AdbReadableStream,
   StructDeserializeStream,
+  TextDecoderStream,
   TransformStream as AdbTransformStream,
   WritableStream as AdbWritableStream,
 } from "@yume-chan/stream-extra";
@@ -391,18 +393,33 @@ interface ShellResult {
   status: number;
 }
 
-async function shellStatus(adb: Adb, command: string): Promise<ShellResult> {
+function streamText(stream: AdbReadableStream<Uint8Array>): Promise<string> {
+  return stream.pipeThrough(new TextDecoderStream()).pipeThrough(new ConcatStringStream());
+}
+
+/**
+ * Runs `command` through the device shell and returns what it printed and the exit
+ * status it ended with (a marker line carries it, so it survives every protocol).
+ * `signal` cancels THIS subprocess only: its stream is closed and the call fails with
+ * the signal's reason while the connection stays up, which matters to an operation
+ * that keeps the connection past its own cancel to clean up. ya-webadb's
+ * spawnWaitText takes no signal, and the abort listener it adds to one is never
+ * removed, so the signal is passed on as a dependent one that goes away with the call.
+ */
+async function shellStatus(adb: Adb, command: string, signal?: AbortSignal): Promise<ShellResult> {
   const wrapped = `(${command}); c=$?; printf '\\n${SHELL_STATUS_PREFIX}%s\\n' "$c"; exit "$c"`;
+  signal?.throwIfAborted();
+  const call = signal && AbortSignal.any([signal]);
   const shell = adb.subprocess.shellProtocol;
   let stdout: string;
   let stderr = "";
   if (shell) {
     // ya-webadb joins argv literally; adbd already invokes the device shell.
-    const result = await shell.spawnWaitText([wrapped]);
-    stdout = result.stdout;
-    stderr = result.stderr;
+    const process = await shell.spawn([wrapped], call);
+    [stdout, stderr] = await Promise.all([streamText(process.stdout), streamText(process.stderr), process.exited]);
   } else {
-    stdout = await adb.subprocess.noneProtocol.spawnWaitText([wrapped]);
+    const process = await adb.subprocess.noneProtocol.spawn([wrapped], call);
+    [stdout] = await Promise.all([streamText(process.output), process.exited]);
   }
   const marker = new RegExp(`\\n${SHELL_STATUS_PREFIX}(\\d+)\\n`, "g");
   let match: RegExpExecArray | null = null;
@@ -413,8 +430,8 @@ async function shellStatus(adb: Adb, command: string): Promise<ShellResult> {
   return { output: `${stdout.slice(0, match.index)}${stderr}`, status: Number(match[1]) };
 }
 
-async function shell(adb: Adb, command: string, description: string): Promise<string> {
-  const result = await shellStatus(adb, command);
+async function shell(adb: Adb, command: string, description: string, signal?: AbortSignal): Promise<string> {
+  const result = await shellStatus(adb, command, signal);
   if (result.status !== 0) {
     const detail = abbreviatedOutput(result.output);
     throw new AdbProtocolError(`${description} failed with status ${result.status}${detail ? `: ${detail}` : "."}`);
@@ -428,7 +445,7 @@ interface ShellCapabilities {
   hashTool: HashTool;
 }
 
-async function shellCapabilities(adb: Adb): Promise<ShellCapabilities> {
+async function shellCapabilities(adb: Adb, signal?: AbortSignal): Promise<ShellCapabilities> {
   const result = await shellStatus(
     adb,
     "missing=''; for c in sh cat mv mkdir wc test; do command -v \"$c\" >/dev/null 2>&1 || missing=\"$missing $c\"; done; " +
@@ -437,6 +454,7 @@ async function shellCapabilities(adb: Adb): Promise<ShellCapabilities> {
       "elif command -v busybox >/dev/null 2>&1 && busybox sha256sum /dev/null >/dev/null 2>&1; then hash=busybox; " +
       "else missing=\"$missing sha256sum\"; fi; " +
       "if [ -n \"$missing\" ]; then printf 'MISSING:%s' \"$missing\"; exit 127; fi; printf 'HASH:%s' \"$hash\";",
+    signal,
   );
   const hash = /^HASH:(sha256sum|toybox|busybox)\s*$/.exec(result.output);
   if (result.status !== 0 || !hash) {
@@ -462,15 +480,15 @@ function hashCommand(tool: HashTool, path: string): string {
   }
 }
 
-async function remoteSha256(adb: Adb, capabilities: ShellCapabilities, path: string): Promise<string> {
-  const output = await shell(adb, hashCommand(capabilities.hashTool, path), `Hashing '${path}'`);
+async function remoteSha256(adb: Adb, capabilities: ShellCapabilities, path: string, signal?: AbortSignal): Promise<string> {
+  const output = await shell(adb, hashCommand(capabilities.hashTool, path), `Hashing '${path}'`, signal);
   const hash = output.match(/\b[0-9a-f]{64}\b/i)?.[0];
   if (!hash) throw new AdbProtocolError(`ADB target did not return a SHA-256 for '${path}'.`);
   return normalizeSha256(hash, `SHA-256 for '${path}'`);
 }
 
-async function remoteLength(adb: Adb, path: string): Promise<number> {
-  const output = await shell(adb, `wc -c < ${shQuote(path)}`, `Measuring '${path}'`);
+async function remoteLength(adb: Adb, path: string, signal?: AbortSignal): Promise<number> {
+  const output = await shell(adb, `wc -c < ${shQuote(path)}`, `Measuring '${path}'`, signal);
   const text = output.trim();
   if (!/^\d+$/.test(text)) throw new AdbProtocolError(`ADB target returned an invalid byte length for '${path}'.`);
   const length = Number(text);
@@ -478,8 +496,8 @@ async function remoteLength(adb: Adb, path: string): Promise<number> {
   return length;
 }
 
-async function remoteExists(adb: Adb, path: string): Promise<boolean> {
-  const result = await shellStatus(adb, `test -e ${shQuote(path)}`);
+async function remoteExists(adb: Adb, path: string, signal?: AbortSignal): Promise<boolean> {
+  const result = await shellStatus(adb, `test -e ${shQuote(path)}`, signal);
   if (result.status === 0) return true;
   if (result.status === 1) return false;
   throw new AdbProtocolError(`Could not determine whether '${path}' exists on the ADB target.`);
@@ -725,10 +743,12 @@ async function stateFor(context: HardwareContext, input: Blob, target: string, s
 }
 
 /**
- * The shell and sync steps staging is made of. A caller that must stop at the
- * very next step when its operation is cancelled passes that signal: the
- * connection may be kept alive past the cancel (for the caller's own cleanup),
- * so it will not fail the step for it.
+ * The shell and sync steps staging is made of. A caller that must stop when its
+ * operation is cancelled passes that signal: it ends the step in flight (the
+ * subprocess alone, never the connection) and fails the next one. The connection
+ * may be kept alive past the cancel for the caller's own cleanup, so it will
+ * not fail either of them for it. A sync write in flight is the one step that
+ * cannot be interrupted; it is bounded by the size of one chunk.
  */
 function stagingIo(adb: Adb, capabilities: ShellCapabilities, signal?: AbortSignal): AdbStagingIo {
   const step = <Args extends unknown[], Result>(call: (...args: Args) => Promise<Result>) => (...args: Args): Promise<Result> => {
@@ -737,18 +757,18 @@ function stagingIo(adb: Adb, capabilities: ShellCapabilities, signal?: AbortSign
   };
   return {
     writeFile: step((path: string, data: Uint8Array) => pushRemote(adb, path, data)),
-    exists: step((path: string) => remoteExists(adb, path)),
-    length: step((path: string) => remoteLength(adb, path)),
-    sha256: step((path: string) => remoteSha256(adb, capabilities, path)),
-    makeDirectory: step((path: string) => shell(adb, `mkdir -p ${shQuote(path)}`, `Creating staging directory '${path}'`).then(() => undefined)),
+    exists: step((path: string) => remoteExists(adb, path, signal)),
+    length: step((path: string) => remoteLength(adb, path, signal)),
+    sha256: step((path: string) => remoteSha256(adb, capabilities, path, signal)),
+    makeDirectory: step((path: string) => shell(adb, `mkdir -p ${shQuote(path)}`, `Creating staging directory '${path}'`, signal).then(() => undefined)),
     concatenate: step(async (parts: readonly string[], destination: string) => {
-      await shell(adb, `: > ${shQuote(destination)}`, `Creating staged aggregate '${destination}'`);
+      await shell(adb, `: > ${shQuote(destination)}`, `Creating staged aggregate '${destination}'`, signal);
       for (const part of parts) {
         signal?.throwIfAborted();
-        await shell(adb, `cat ${shQuote(part)} >> ${shQuote(destination)}`, `Appending staged chunk '${part}'`);
+        await shell(adb, `cat ${shQuote(part)} >> ${shQuote(destination)}`, `Appending staged chunk '${part}'`, signal);
       }
     }),
-    moveReplace: step((source: string, destination: string) => shell(adb, `mv -f ${shQuote(source)} ${shQuote(destination)}`, `Atomically replacing '${destination}'`).then(() => undefined)),
+    moveReplace: step((source: string, destination: string) => shell(adb, `mv -f ${shQuote(source)} ${shQuote(destination)}`, `Atomically replacing '${destination}'`, signal).then(() => undefined)),
   };
 }
 
@@ -762,7 +782,7 @@ async function reconnectStaging(context: HardwareContext, signal?: AbortSignal):
   await reacquire.call(context);
 
   const adb = await adbFor(context);
-  return stagingIo(adb, await shellCapabilities(adb), signal);
+  return stagingIo(adb, await shellCapabilities(adb, signal), signal);
 }
 
 
@@ -1366,22 +1386,43 @@ async function install(request: HardwareRequest, context: HardwareContext, adb: 
   // The staging files must be removable after a cancel too, which needs the live connection.
   const finishCleanup = retainAdbSession(context);
   try {
-    await resumeVerifiedStagedPush({ input, state, io: stagingIo(adb, capabilities, context.signal), progress: context.progress, reconnect: () => reconnectStaging(context, context.signal), isConnectionFailure });
+    // A cancelled operation never reconnects: that would close the connection the cleanup below needs.
+    await resumeVerifiedStagedPush({ input, state, io: stagingIo(adb, capabilities, context.signal), progress: context.progress, reconnect: () => reconnectStaging(context, context.signal), isConnectionFailure: (error) => !context.signal.aborted && isConnectionFailure(error) });
     const live = await adbFor(context);
     context.signal.throwIfAborted();
     context.progress({ phase: "adb.install", message: "Running pm install" });
-    const installed = await shellStatus(live, command);
+    // Cancel ends the wait for the package manager, not the connection: the staged copy still has to be removed over it.
+    const installed = await shellStatus(live, command, context.signal).catch((error: unknown) => {
+      if (context.signal.aborted) context.output?.("Cancelled while pm install was running. Cody stopped waiting for it and is removing the staged copy, but the package manager may still finish installing the app on the device.");
+      throw error;
+    });
     const output = abbreviatedOutput(installed.output);
     if (installed.status !== 0 || !/^Success\b/m.test(installed.output)) throw new AdbProtocolError(`pm install failed: ${output || `status ${installed.status}`}. The staged copy was removed.`);
     context.output?.(output);
     return { summary: `Installed the APK (${input.size} bytes): the file matched its SHA-256 on the device and the package manager reported Success.`, verified: true, sha256, details: { command, flags, apiLevel, packageManager: output } };
   } finally {
     try {
-      const live = await adbFor(context).catch(() => undefined);
-      if (live) await live.rm([staged, state.stagingDirectory], { recursive: true, force: true }).catch(() => undefined);
+      await removeRemote(context, [staged, state.stagingDirectory]);
     } finally {
       finishCleanup();
     }
+  }
+}
+
+/** How long removing what an operation staged may take: after a cancel the device may be silent, and the exclusive lease has to come back regardless. */
+const ADB_CLEANUP_MS = 10_000;
+
+/**
+ * Removes files over the connection the operation kept for that, within `ADB_CLEANUP_MS`. A
+ * connection that is already gone cannot be cleaned over; what was staged has content-addressed
+ * names, so a later run of the same install reuses or replaces it.
+ */
+async function removeRemote(context: HardwareContext, paths: readonly string[]): Promise<void> {
+  try {
+    const live = await adbFor(context, { deadline: Date.now() + ADB_CLEANUP_MS });
+    await shellStatus(live, `rm -r -f ${paths.map(shQuote).join(" ")} </dev/null`, AbortSignal.timeout(ADB_CLEANUP_MS));
+  } catch {
+    // Nothing more can be done over a connection that is gone or silent.
   }
 }
 

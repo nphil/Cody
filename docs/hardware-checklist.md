@@ -244,6 +244,11 @@ item remains **UNVERIFIED** until its permitted evidence is completed.
   the app appears; `/data/local/tmp` holds no `cody-install-*` file or
   `.cody-adb-stage-*` directory afterwards. A downgrade without `-d` and a
   reinstall without `-r` fail with the package manager's own message.
+- [ ] **UNVERIFIED** Cancel while `pm install` of a large debug APK is running
+  ends the wait at once; `/data/local/tmp` holds no `cody-install-*` file or
+  `.cody-adb-stage-*` directory afterwards, the operation says the package
+  manager may still finish installing, and the device can be used again
+  immediately. Record whether the app was installed anyway.
 - [ ] **UNVERIFIED** `adb root` on a userdebug build restarts adbd and the
   operation reconnects and reports `service.adb.root` 1; the same request on a
   production build is refused with adbd's message. `unroot` returns it.
