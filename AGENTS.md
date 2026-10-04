@@ -2128,6 +2128,27 @@ progress and output are coalesced at 200 ms. Status deliberately retains only
 128 terminal records, each bounded to 256 events, 512 output lines, and 64 KiB
 of output.
 
+Pop-ups are for decisions, not progress. Every hardware `notice` frame comes from
+`lib/devices/operation-notices.ts` (`noticeForOperation`, pure and tested alone):
+an approval waiting for the person, a long (15 s) or bulk (flash, dump, pull,
+push, sideload, install) operation finishing, a failure, and a cancel the system
+made. Started/progress/output/state events and a routine read that succeeded
+raise nothing, and a finish is news only as the step from running to finished
+(`onOperation` hands the listener the snapshot it replaced): a page that re-sends
+the finished operations it remembers to a restarted server announces none of them.
+A run of failures is one pop-up plus one "N more" summary (`DeviceNoticeBatcher`,
+5 s window). The frame carries `source: "device"` and a `dedupeKey`, and the
+browser shows it as written (`shelfItemFor`), never through the engine-error
+describer, so a repeat folds into one notice with a count. The Devices panel
+does the same for its list (`lib/devices/activity-groups.ts`, `ActivityFeed`): a
+finished agent command that never asked for approval (`approvalAsked`), is not a
+flash/dump/transfer and saved no file is routine, and a burst of routine commands
+on one device is one compact entry whose rows open to each command's full card.
+Whatever is running, significant, or waiting for the person keeps its own card,
+and what waits for the person is listed first. `operation-notice-wiring.test.mjs`
+drives the whole chain (operation manager, frame validator, device bridge,
+session wrapper); keep it passing when touching any link.
+
 Engines launched through the MCP bridge (`displayMcpAcpServer()`,
 `claudeDisplayMcpConfig()`) get their device tools from the hard-coded copy in
 `bin/cody-display-mcp.js`, not from `DEVICE_OPERATION_TOOLS`. Adding or
@@ -2193,7 +2214,9 @@ offered only after a passing check, a backup set and its restore), not by the
 generic `ActionForm`. A device in a mode Cody cannot read (`unknown-usb`),
 or a card with "Show every protocol" on, offers every protocol. The
 confirmation card (`OperationList`) keeps the exact-binding rows and the typed
-protected-override gate unchanged; only its presentation is the panel's.
+protected-override gate unchanged, and adds the device it is for and the choice of
+when to send; once approved it becomes a countdown card with its own Cancel
+(`ArmedCard`). The activity under each device is `ActivityFeed`, not a flat list.
 Every control is at least 44 px (`components/devices/ui.tsx`); the panel is
 used with a finger, and the right panel can be as narrow as 300 px, so layouts
 wrap rather than scroll sideways.
@@ -2283,6 +2306,33 @@ exact override displayed by the panel. Unknown readback is not a write veto:
 Fastboot explicitly warns, writes once if approved, and reports UNVERIFIED.
 An ACK, progress counter, CRC or successful command is never readback proof.
 A transport timeout is unknown completion, never permission to replay a write.
+
+**Approving before the moment of sending.** The approval is of the real,
+flasher-computed binding, shown in full with the device it is for; what the person
+can choose is *when it goes out*. `options.sendDelaySeconds` (1-300, accepted by
+every start tool and checked in `requestFor` and `validateRequest`) is the agent's
+request for a wait after approval, and the approval card offers Right away / 10 /
+30 / 60 s plus the requested value; the person's choice wins
+(`confirm(..., { sendDelaySeconds })`). The manager strips the key before a
+flasher sees the request - several flashers refuse option keys they do not know -
+so a protocol can neither read nor move the clock. After approval the operation
+is `armed` (`snapshot.armed`: approvedAt, releaseAt, expiresAt, the binding and
+device): nothing is sent, Cancel works at any moment, and the approval is spent -
+a second confirm for the card throws, and it cannot be re-armed or extended. At
+the due time `refuseRelease` checks once more that the approval has not expired
+(`APPROVAL_SLACK_MS` after the wait, so a page that slept through its countdown
+sends nothing), that the connection is the one approved (`currentIdentity` on the
+provider against the identity captured with the lease, and `transport.connected()`),
+and fails the operation with "Not sent: ..." otherwise. An approval still waiting
+for an answer has NO timeout: it ends when answered, cancelled, or when the device
+leaves the USB bus. That departure used to be silent - a tablet whose volume keys
+were held dropped off the bus, `deviceDisconnected` cancelled the pending
+approval, and the card simply vanished - so every system cancel now records a
+reason (`cancel(id, reason)` -> `snapshot.error`) that the card and
+`device_operation_status` show. Approval "before the operation exists" (run when
+the device appears) is deliberately not offered: it could only approve a
+prediction of a binding that flashers compute from the device (backup status,
+typed override, program footprint).
 
 Protocols with intrinsic erase geometry preserve and verify their whole erase
 footprint. Fastboot addresses named partitions: when fetch is available it

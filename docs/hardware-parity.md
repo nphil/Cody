@@ -28,6 +28,40 @@ Tool names: all hardware tools take the browser `device` id from `device_list`
 and a `protocol`. Writes pause for a direct confirmation in the Devices panel;
 no tool argument can approve one.
 
+### Approving before the command goes out, and what makes noise
+
+Some commands are only useful with the person's hands on the device (`fastboot
+reboot-bootloader` while holding the volume keys to reach a download mode). The
+confirmation used to land at the moment of sending, which is the wrong moment
+for that. The approval is unchanged - the complete binding, the device it is
+for, the typed override where one applies - but **when the command goes out
+after it is now a choice**:
+
+| | |
+|---|---|
+| Ask for a wait | any start tool takes `options.sendDelaySeconds` (whole seconds, 1-300). Cody shows the approval at once and sends the command that many seconds **after** the person approves. The agent should tell the person to approve first and then get ready. It is only a default: the approval card offers *Right away / 10 s / 30 s / 60 s* (plus the requested value), and the person's choice wins. |
+| While it waits | the operation is `armed`: nothing has been sent, the card counts down, and **Cancel** stops it at any moment. A device that leaves the USB bus cancels it, with the reason on the card. |
+| What an approval covers | exactly the action, target and device on the card. It is spent when given (a second confirm for the same card is refused) and cannot be extended or re-armed. |
+| When it expires | at the end of its wait plus 10 s of slack (`APPROVAL_SLACK_MS`); five minutes is the longest wait. A page that slept through the countdown sends nothing: *"Not sent: the approval ran out"*. |
+| The moment of sending | re-checked once more: still the same USB identity (`vendor:product:serial`) as when approved, still connected. If not, nothing is sent and the operation fails with *"Not sent: ..."*. |
+| An unanswered approval | **does not time out.** It waits until the person answers, the agent cancels, or the device leaves the USB bus. (The "it disappeared after a second" seen with a tablet whose keys were held was the device leaving the bus, not a timer; the card now says so.) |
+
+Deliberately **not** built: approving *before the operation exists* ("run it
+when the device appears"). Such an approval could only be of a prediction of
+the binding, and flashers work out the binding from the device (backup status,
+typed override, program footprint), so approving early would approve less than
+the card shows today. Approving the real binding and deferring only the
+sending keeps the safety model whole.
+
+Pop-ups are for decisions, not progress. Hardware `notice` frames exist only
+for an approval waiting for the person, a long (15 s) or bulk
+(flash / dump / pull / push / sideload / install) operation finishing, a
+failure, and a cancel the system made. Started / progress / output events and a
+routine read that succeeded raise nothing; a burst of failures is one pop-up
+plus one summary. In the Devices panel the routine commands an agent ran (no
+approval asked, no file saved) fold into one entry per burst - *"Agent ran 7
+fastboot commands"* - whose rows open to the full card of each command.
+
 ## adb
 
 Cody speaks ADB to `adbd` directly over WebUSB (`@yume-chan/adb`); there is no
