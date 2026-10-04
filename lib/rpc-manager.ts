@@ -38,6 +38,7 @@ import { SIDEBAR_CONTEXT_TOOLS } from "./sidebar-context-tools";
 import { SESSION_AWARENESS_TOOLS, type SessionLivePhase, type SessionToolContext } from "./session-tools";
 import { findUserById, hasAnyUser, type UserRecord } from "./auth/users";
 import { DEVICE_OPERATION_TOOLS } from "./devices/operation-tools";
+import { DeviceNoticeBatcher, deviceNoticeFrame, noticeForOperation, type DeviceNotice } from "./devices/operation-notices";
 import { DEVICE_TOOLS } from "./devices/tools";
 import { aliasDeviceBridge, getDeviceBridge } from "./devices/bus";
 import type {
@@ -1034,6 +1035,8 @@ export class AgentSessionWrapper {
   private mcpListWaiter: { resolve: (text: string) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
   /** Unsubscribe for durable browser operation transcript updates. */
   private operationWatch: (() => void) | null = null;
+  /** Decides which device operations deserve a pop-up and folds bursts of failures into one (see lib/devices/operation-notices.ts). */
+  private readonly deviceNotices = new DeviceNoticeBatcher((notice) => this.emitDeviceNotice(notice));
   /** Unsubscribe for the device-bridge watch, set once the session id is known. */
   private deviceWatch: (() => void) | null = null;
   /** Whether the hardware tools beyond `device_list` are published. Follows
@@ -1179,6 +1182,12 @@ export class AgentSessionWrapper {
     return published.map(({ handler: _handler, ...tool }) => tool);
   }
 
+  /** A device pop-up for the page: `source: "device"` tells the browser to show it as it is, not as an engine error. */
+  private emitDeviceNotice(notice: DeviceNotice): void {
+    if (!this.isAlive()) return;
+    this.emit(deviceNoticeFrame(notice));
+  }
+
   /** Re-publish the tool list when this session gains or loses hardware, and
    * say so once in the transcript: a tool that silently materializes
    * mid-conversation is a capability the model has no reason to go looking
@@ -1192,27 +1201,11 @@ export class AgentSessionWrapper {
     // and a watch that was never installed would miss its hardware entirely.
     const bridge = getDeviceBridge(this._sessionId);
     if (!this.operationWatch) {
-      this.operationWatch = bridge.onOperation((snapshot, event) => {
+      this.operationWatch = bridge.onOperation((snapshot, event, previous) => {
         if (!this.isAlive()) return;
-        let message = `Hardware operation ${snapshot.id} is ${snapshot.state}.`;
-        let level: "info" | "warning" = "info";
-        if (event?.type === "progress" && event.progress) {
-          message = `Hardware operation ${snapshot.id}: ${event.progress.phase}${event.progress.message ? ` — ${event.progress.message}` : ""}.`;
-        } else if (event?.type === "output" && event.output) {
-          const output = event.output.line.length > 1024
-            ? event.output.line.slice(0, 1024) + " …[line truncated]"
-            : event.output.line;
-          message = `Hardware operation ${snapshot.id} device output (untrusted): ${output}`;
-        } else if (event?.type === "confirmation" && event.confirmation) {
-          level = "warning";
-          message = `Hardware operation ${snapshot.id} is awaiting direct UI confirmation for ${event.confirmation.binding.action} on ${event.confirmation.binding.target}.`;
-        } else if (snapshot.error) {
-          level = "warning";
-          message = `Hardware operation ${snapshot.id} failed: ${snapshot.error}`;
-        } else if (snapshot.result) {
-          message = `Hardware operation ${snapshot.id} completed: ${snapshot.result.summary}`;
-        }
-        this.emit({ type: "notice", level, message });
+        const deviceLabel = bridge.list().find((device) => device.id === snapshot.request.deviceId)?.label;
+        const notice = noticeForOperation(snapshot, event, previous, deviceLabel);
+        if (notice) this.deviceNotices.push(notice);
       });
     }
     const republish = () => {
@@ -1250,9 +1243,9 @@ export class AgentSessionWrapper {
       }
       if (count > 0 && previous === 0) {
         const labels = bridge.list().map((device) => device.label).join(", ");
-        this.emit({
-          type: "notice",
+        this.emitDeviceNotice({
           level: "info",
+          dedupeKey: "device:attached",
           message: `Hardware attached in the browser: ${labels}. device_open now claims it and reports its endpoints; device_read, device_write, device_close, usb_transfer and ble_gatt work against it.`,
         });
       }
@@ -1261,9 +1254,9 @@ export class AgentSessionWrapper {
       // nothing to connect it to. Measured on a long ADB push where the
       // socket dropped — the agent kept retrying a device that was gone.
       if (count === 0 && previous > 0) {
-        this.emit({
-          type: "notice",
+        this.emitDeviceNotice({
           level: "warning",
+          dedupeKey: "device:released",
           message: attached
             ? "The browser released its hardware (unplugged, or the grant was revoked). Any transfer in progress did not finish; reconnect it in Cody's Devices panel."
             : "The browser holding this session's hardware disconnected (tab closed, reloaded, or offline). Any transfer in progress did not finish; reopen Cody's Devices panel to reconnect.",
@@ -3915,6 +3908,7 @@ export class AgentSessionWrapper {
     this.deviceWatch = null;
     this.operationWatch?.();
     this.operationWatch = null;
+    this.deviceNotices.dispose();
     this.unsubscribeFrames?.();
     this.clearPendingUiRequests();
     if (this.mcpListWaiter) {

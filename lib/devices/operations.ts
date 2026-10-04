@@ -11,6 +11,7 @@ import { hashBlob } from "./blob-stream";
 import type { StreamArtifact } from "./flasher";
 import { adbFlasher, adbWaitOptions } from "./adb";
 import { pause } from "./pause";
+import { MAX_SEND_DELAY_SECONDS } from "./protocol";
 import type { TunnelChannel } from "./tunnel";
 import { deviceArtifacts } from "./artifacts";
 import { dfuFlasher } from "./dfu";
@@ -58,6 +59,12 @@ export interface OperationArtifacts {
     identity: string,
     options: { interfaceNumber?: number; alternateSetting?: number; signal: AbortSignal; timeoutMs?: number },
   ): Promise<HardwareTransportLease>;
+  /**
+   * The stable identity the granted device `deviceId` is attached under right now, or undefined when it is not
+   * attached or has none. An approval that waits before it is sent asks this at the moment of sending: a device
+   * that is not the one the person approved receives nothing.
+   */
+  currentIdentity?(deviceId: string): string | undefined;
   /** Browser-to-server relay for ADB port forwarding, when this page has one. */
   readonly tunnels?: TunnelChannel;
  }
@@ -73,6 +80,7 @@ export type OperationState =
   | "starting"
   | "running"
   | "awaiting-confirmation"
+  | "armed"
   | "cancelling"
   | "succeeded"
   | "failed"
@@ -96,10 +104,40 @@ export interface OperationRiskBinding {
   backup: string;
 }
 
+/** The device an approval is for, shown beside the action so approving it is approving THIS device. */
+export interface OperationDevice {
+  id: string;
+  /** The stable USB identity (vendor:product:serial) the operation holds, when the device has one. */
+  identity?: string;
+}
+
 export interface OperationConfirmation {
   id: string;
   binding: OperationRiskBinding;
   requestedAt: number;
+  device: OperationDevice;
+  /** The wait before sending the request asked for, in seconds; the person may change it when approving. */
+  sendDelaySeconds?: number;
+}
+
+/**
+ * An approval that has been given and whose command has not been sent yet. It covers exactly the binding the
+ * person saw, on exactly this device, until `expiresAt`; it is spent when the command goes out and void if the
+ * operation is cancelled, the device changes or leaves, or the time runs out.
+ */
+export interface OperationApproval {
+  approvedAt: number;
+  /** When the approved command is sent. */
+  releaseAt: number;
+  /** Past this nothing is sent; the person must approve again. */
+  expiresAt: number;
+  binding: OperationRiskBinding;
+  device: OperationDevice;
+}
+
+/** What the person chose while approving. The wait is theirs to change; what is approved is not. */
+export interface ApprovalChoice {
+  sendDelaySeconds?: number;
 }
 
 export interface OperationOutput {
@@ -129,6 +167,10 @@ export interface DeviceOperationSnapshot {
   updatedAt: number;
   progress?: OperationProgress;
   confirmation?: OperationConfirmation;
+  /** Set from the moment the person approves until the command is sent, when the approval waits first. */
+  armed?: OperationApproval;
+  /** True once this operation asked for an approval: it is not a routine, read-only operation. */
+  approvalAsked?: boolean;
   result?: HardwareResult;
   error?: string;
   output: readonly OperationOutput[];
@@ -154,10 +196,16 @@ const RESTART_DISCONNECT_GRACE_MS = 4_000;
  * pre-empts the provider's message in a photo finish.
  */
 const PROVIDER_TIMEOUT_GRACE_MS = 250;
+/**
+ * How late the countdown of an approval may fire (a throttled background tab, a page that was busy) before the
+ * approval is considered stale and nothing is sent. A page that slept through its countdown must not send a
+ * command the person approved minutes ago.
+ */
+export const APPROVAL_SLACK_MS = 10_000;
 const textEncoder = new TextEncoder();
 interface PendingConfirmation {
   confirmation: OperationConfirmation;
-  resolve(): void;
+  resolve(approval?: OperationApproval): void;
   reject(reason: Error): void;
 }
 
@@ -181,6 +229,13 @@ interface OperationRecord {
   progress?: OperationProgress;
   confirmation?: OperationConfirmation;
   pendingConfirmation?: PendingConfirmation;
+  /** The wait before sending the request asked for; the approval may change it. */
+  sendDelaySeconds?: number;
+  /** The approval given, from the moment it is given until the command is sent. */
+  approval?: OperationApproval;
+  approvalAsked: boolean;
+  /** Why the system (not the person or the agent) cancelled this: shown instead of a bare "cancelled". */
+  cancelReason?: string;
   result?: HardwareResult;
   error?: string;
   output: OperationOutput[];
@@ -222,7 +277,13 @@ function cloneConfirmation(confirmation: OperationConfirmation): OperationConfir
     id: confirmation.id,
     binding: cloneRiskBinding(confirmation.binding),
     requestedAt: confirmation.requestedAt,
+    device: { ...confirmation.device },
+    ...(confirmation.sendDelaySeconds === undefined ? {} : { sendDelaySeconds: confirmation.sendDelaySeconds }),
   };
+}
+
+function cloneApproval(approval: OperationApproval): OperationApproval {
+  return { ...approval, binding: cloneRiskBinding(approval.binding), device: { ...approval.device } };
 }
 
 function cloneProgress(progress: OperationProgress): OperationProgress {
@@ -254,6 +315,8 @@ function frozenSnapshot(record: OperationRecord): DeviceOperationSnapshot {
     updatedAt: record.updatedAt,
     progress: record.progress ? cloneProgress(record.progress) : undefined,
     confirmation: record.confirmation ? cloneConfirmation(record.confirmation) : undefined,
+    armed: record.approval ? cloneApproval(record.approval) : undefined,
+    approvalAsked: record.approvalAsked ? true : undefined,
     result: record.result ? cloneResult(record.result) : undefined,
     error: record.error,
     output: Object.freeze(record.output.map(cloneOutput)),
@@ -269,6 +332,24 @@ function isTerminal(state: OperationState): boolean {
 function validFiniteInteger(value: number | undefined, name: string, minimum = 0): void {
   if (value === undefined) return;
   if (!Number.isSafeInteger(value) || value < minimum) throw new Error(`${name} must be a safe integer at least ${minimum}.`);
+}
+
+/** A whole number of seconds a command may wait after its approval: `minimum` up to the shared maximum. */
+function validSendDelay(value: unknown, minimum: number): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= minimum && value <= MAX_SEND_DELAY_SECONDS;
+}
+
+/**
+ * The wait before sending belongs to the manager, never to a flasher: several flashers refuse option keys they do
+ * not know, and a protocol must not be able to read or move the clock an approval runs on.
+ */
+function splitScheduling(request: DeviceOperationRequest): { request: DeviceOperationRequest; sendDelaySeconds?: number } {
+  const clone = cloneRequest(request);
+  const options = clone.options;
+  if (!options || !("sendDelaySeconds" in options)) return { request: clone };
+  const { sendDelaySeconds, ...rest } = options;
+  clone.options = Object.keys(rest).length > 0 ? rest : undefined;
+  return { request: clone, sendDelaySeconds: sendDelaySeconds as number };
 }
 
 interface SharedAdbLease {
@@ -320,6 +401,10 @@ function validateRequest(request: DeviceOperationRequest): void {
   validFiniteInteger(request.offset, "offset");
   validFiniteInteger(request.length, "length", 1);
   if (request.baudRate !== undefined) validFiniteInteger(request.baudRate, "baudRate", 1);
+  const sendDelay = request.options?.sendDelaySeconds;
+  if (sendDelay !== undefined && !validSendDelay(sendDelay, 1)) {
+    throw new Error(`options.sendDelaySeconds must be a whole number of seconds from 1 to ${MAX_SEND_DELAY_SECONDS}.`);
+  }
 }
 
 function randomId(prefix: string): string {
@@ -406,7 +491,7 @@ export class DeviceOperationManager {
     for (const record of this.records.values()) {
       if (record.request.deviceId === deviceId && record.request.protocol === "adb" && record.origin === "agent" && !isTerminal(record.state) && !spare(record)) {
         this.addOutput(record, "Agent shell access revoked. Cancelling this operation; already executed commands cannot be undone.");
-        this.cancel(record.id);
+        this.cancel(record.id, "Agent shell access was revoked, so this operation was cancelled.");
       }
     }
   }
@@ -436,7 +521,7 @@ export class DeviceOperationManager {
         }
         continue;
       }
-      if (!isTerminal(record.state)) this.cancel(record.id);
+      if (!isTerminal(record.state)) this.cancel(record.id, this.departureReason(record, cause));
       if (record.settled) settling.push(record.settled);
     }
     await Promise.all(settling);
@@ -454,6 +539,21 @@ export class DeviceOperationManager {
     const now = Date.now();
     if (record.restart !== undefined && now < record.restart.expiresAt) return true;
     return record.waitDeadline !== undefined && now < record.waitDeadline;
+  }
+
+  /** Why a device leaving cancelled this operation, in the words the person reads where the card used to just vanish. */
+  private departureReason(record: OperationRecord, cause: "left-bus" | "forgotten"): string {
+    const left = cause === "forgotten" ? "The device was disconnected" : "The device left the USB bus";
+    switch (record.state) {
+      case "awaiting-confirmation":
+        return `${left} before this was approved, so it was cancelled. Nothing was changed on the device.`;
+      case "armed":
+        return `${left} during the countdown, so the approval was dropped and the command was not sent. Nothing was changed on the device.`;
+      case "starting":
+        return `${left} before this started, so it was cancelled.`;
+      default:
+        return `${left}, so this operation was cancelled. Anything already sent to the device cannot be undone.`;
+    }
   }
 
   constructor(
@@ -552,12 +652,13 @@ export class DeviceOperationManager {
     validateRequest(request);
     if (!operationId.trim()) throw new Error("An operation id is required.");
     if (this.records.has(operationId)) throw new Error("That operation id already exists.");
+    const scheduled = splitScheduling(request);
     const now = Date.now();
     const record: OperationRecord = {
       origin,
       id: operationId,
       sessionId: this.sessionId,
-      request: cloneRequest(request),
+      request: scheduled.request,
       state: "starting",
       createdAt: now,
       updatedAt: now,
@@ -568,6 +669,8 @@ export class DeviceOperationManager {
       sequence: 0,
       writeChain: Promise.resolve(),
       writeGeneration: 0,
+      approvalAsked: false,
+      ...(scheduled.sendDelaySeconds === undefined ? {} : { sendDelaySeconds: scheduled.sendDelaySeconds }),
     };
     this.records.set(record.id, record);
     this.emit(record, { type: "started", state: record.state });
@@ -591,15 +694,19 @@ export class DeviceOperationManager {
     for (const listener of this.shellListeners) listener();
     this.authorityRevokedReason = reason;
     for (const record of this.records.values()) {
-      if (!isTerminal(record.state)) this.cancel(record.id);
+      if (!isTerminal(record.state)) this.cancel(record.id, reason);
     }
   }
 
-  /** Cancellation never queues an additional device write. */
-  cancel(id: string): DeviceOperationSnapshot {
+  /**
+   * Cancellation never queues an additional device write. `reason` is for a cancellation the system makes (a
+   * device left, authority moved): it is kept on the operation so the card says why instead of just "cancelled".
+   */
+  cancel(id: string, reason?: string): DeviceOperationSnapshot {
     const record = this.requireRecord(id);
     if (isTerminal(record.state)) return frozenSnapshot(record);
     if (record.state !== "cancelling") {
+      if (reason) record.cancelReason ??= reason;
       record.state = "cancelling";
       record.updatedAt = Date.now();
       record.writeGeneration += 1;
@@ -607,6 +714,7 @@ export class DeviceOperationManager {
       record.pendingConfirmation?.reject(new DOMException("Operation cancelled.", "AbortError"));
       record.pendingConfirmation = undefined;
       record.confirmation = undefined;
+      record.approval = undefined;
       this.emit(record, { type: "state", state: record.state });
     }
     return frozenSnapshot(record);
@@ -667,8 +775,13 @@ export class DeviceOperationManager {
    * approval command. Neither `start` nor any high-level agent tool accepts an
    * approval bit. Matching the one-use id and complete binding rejects stale
    * cards after a changed target, offset, or artifact digest.
+   *
+   * `choice.sendDelaySeconds` (else the wait the request asked for, else none)
+   * is the wait between this approval and the command going out. The approval
+   * is spent here either way: a second confirm for the same card throws, and a
+   * waiting approval cannot be re-armed or extended, only cancelled.
    */
-  confirm(id: string, confirmationId: string, binding: OperationRiskBinding, typedOverride?: string): DeviceOperationSnapshot {
+  confirm(id: string, confirmationId: string, binding: OperationRiskBinding, typedOverride?: string, choice: ApprovalChoice = {}): DeviceOperationSnapshot {
     if (this.authorityRevokedReason) throw new Error(this.authorityRevokedReason);
     const record = this.requireRecord(id);
     const pending = record.pendingConfirmation;
@@ -679,12 +792,26 @@ export class DeviceOperationManager {
     if (pending.confirmation.binding.protectedOverride && typedOverride !== pending.confirmation.binding.protectedOverride) {
       throw new Error("Type the exact protected-target override shown in the panel.");
     }
+    const sendDelaySeconds = choice.sendDelaySeconds ?? record.sendDelaySeconds ?? 0;
+    if (sendDelaySeconds !== 0 && !validSendDelay(sendDelaySeconds, 1)) {
+      throw new Error(`The wait before sending must be a whole number of seconds from 1 to ${MAX_SEND_DELAY_SECONDS}, or none.`);
+    }
+    const now = Date.now();
     record.pendingConfirmation = undefined;
     record.confirmation = undefined;
-    record.state = "running";
-    record.updatedAt = Date.now();
+    if (sendDelaySeconds > 0) {
+      record.approval = {
+        approvedAt: now,
+        releaseAt: now + sendDelaySeconds * 1000,
+        expiresAt: now + sendDelaySeconds * 1000 + APPROVAL_SLACK_MS,
+        binding: cloneRiskBinding(pending.confirmation.binding),
+        device: { ...pending.confirmation.device },
+      };
+    }
+    record.state = record.approval ? "armed" : "running";
+    record.updatedAt = now;
     this.emit(record, { type: "state", state: record.state });
-    pending.resolve();
+    pending.resolve(record.approval);
     return frozenSnapshot(record);
   }
 
@@ -803,7 +930,7 @@ export class DeviceOperationManager {
       completed = true;
     } catch (error) {
       if (record.controller.signal.aborted || isAbort(error)) {
-        this.setState(record, "cancelled");
+        this.setState(record, "cancelled", record.cancelReason);
       } else {
         this.setState(record, "failed", errorMessage(error));
       }
@@ -822,7 +949,7 @@ export class DeviceOperationManager {
         }
       }
     }
-    if (completed && record.controller.signal.aborted) this.setState(record, "cancelled");
+    if (completed && record.controller.signal.aborted) this.setState(record, "cancelled", record.cancelReason);
     else if (completed && record.state === "running") this.setState(record, "succeeded");
   }
 
@@ -937,15 +1064,54 @@ export class DeviceOperationManager {
       id: randomId("device-confirmation"),
       binding,
       requestedAt: Date.now(),
+      device: { id: record.request.deviceId, ...(record.identity === undefined ? {} : { identity: record.identity }) },
+      ...(record.sendDelaySeconds === undefined ? {} : { sendDelaySeconds: record.sendDelaySeconds }),
     };
+    record.approvalAsked = true;
     record.confirmation = confirmation;
     record.state = "awaiting-confirmation";
     record.updatedAt = confirmation.requestedAt;
-    const approved = new Promise<void>((resolve, reject) => {
+    const approved = new Promise<OperationApproval | undefined>((resolve, reject) => {
       record.pendingConfirmation = { confirmation, resolve, reject };
     });
     this.emit(record, { type: "confirmation", confirmation });
-    await approved;
+    const approval = await approved;
+    if (approval) await this.holdUntilDue(record, approval);
+  }
+
+  /**
+   * The person approved and chose to wait before the command goes out (their hands are on the device's buttons,
+   * say). Nothing is sent while this waits, and it can be cancelled at any moment. At the moment of sending the
+   * approval is checked once more - not expired, still the same device, still connected - and a failed check
+   * ends the operation with the reason instead of sending.
+   */
+  private async holdUntilDue(record: OperationRecord, approval: OperationApproval): Promise<void> {
+    await pause(Math.max(0, approval.releaseAt - Date.now()), record.controller.signal);
+    if (record.controller.signal.aborted) throw new DOMException("Operation cancelled.", "AbortError");
+    const refusal = this.refuseRelease(record, approval);
+    record.approval = undefined;
+    if (refusal) throw new Error(refusal);
+    record.state = "running";
+    record.updatedAt = Date.now();
+    this.emit(record, { type: "state", state: record.state });
+  }
+
+  private refuseRelease(record: OperationRecord, approval: OperationApproval): string | undefined {
+    if (Date.now() > approval.expiresAt) {
+      return "Not sent: the approval ran out before the command could go out (the page was probably asleep). Nothing was changed on the device; approve it again to send it.";
+    }
+    const lease = record.lease;
+    if (!lease) return "Not sent: Cody no longer holds the device connection that the approval was given for. Nothing was changed on the device.";
+    if (record.identity !== undefined && this.transportProvider.currentIdentity) {
+      const current = this.transportProvider.currentIdentity(record.request.deviceId);
+      if (current !== record.identity) {
+        return `Not sent: this is no longer the device you approved (approved ${record.identity}, now ${current ?? "not attached"}). Nothing was changed on the device.`;
+      }
+    }
+    if (lease.transport.connected && !lease.transport.connected()) {
+      return "Not sent: the device left the USB bus during the countdown. Nothing was changed on the device.";
+    }
+    return undefined;
   }
 
   private bindRisk(record: OperationRecord, risk: HardwareRisk): OperationRiskBinding {

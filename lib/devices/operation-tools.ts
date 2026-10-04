@@ -3,6 +3,7 @@ import { numberArg, stringArg } from "../session-tools";
 import { isRecord } from "../type-guards";
 import { matchDevice, type DeviceBridge } from "./bus";
 import type { HardwareAction, HardwareProtocol } from "./flasher";
+import { MAX_SEND_DELAY_SECONDS } from "./protocol";
 import { parseDeviceSpec, parseHostSpec } from "./tunnel";
 import type { DeviceOperationRequest, DeviceOperationSnapshot } from "./operations";
 
@@ -115,6 +116,12 @@ function requestFor(
   if (suppliedOptions && ("approval" in suppliedOptions || "approved" in suppliedOptions || "confirm" in suppliedOptions)) {
     return "Operation options cannot carry an approval; destructive actions require direct browser UI confirmation.";
   }
+  if (suppliedOptions && "sendDelaySeconds" in suppliedOptions) {
+    const delay = suppliedOptions.sendDelaySeconds;
+    if (typeof delay !== "number" || !Number.isInteger(delay) || delay < 1 || delay > MAX_SEND_DELAY_SECONDS) {
+      return `options.sendDelaySeconds must be a whole number of seconds from 1 to ${MAX_SEND_DELAY_SECONDS}.`;
+    }
+  }
   const deviceSideKind = DEVICE_SIDE_EXEC_KINDS.includes(String(suppliedOptions?.kind));
   if (action === "exec" && !command?.trim() && !deviceSideKind) return "device_exec requires command.";
   const local = stringArg(args, "local");
@@ -155,7 +162,14 @@ function describeSnapshot(snapshot: DeviceOperationSnapshot): string {
     `Protocol/action: ${snapshot.request.protocol}/${snapshot.request.action}; device: ${snapshot.request.deviceId}.`,
     `Progress: ${progress}.`,
   ];
-  if (snapshot.confirmation) lines.push(`Awaiting direct UI confirmation for ${snapshot.confirmation.binding.action} on ${snapshot.confirmation.binding.target}.`);
+  if (snapshot.confirmation) {
+    const { binding, sendDelaySeconds } = snapshot.confirmation;
+    lines.push(`Awaiting direct UI confirmation for ${binding.action} on ${binding.target}. It has no time limit: it stays pending until the user answers, the operation is cancelled, or the device leaves the USB bus.${sendDelaySeconds ? ` Once the user approves, it is sent ${sendDelaySeconds} s later.` : ""}`);
+  }
+  if (snapshot.armed) {
+    const { binding, approvedAt, releaseAt } = snapshot.armed;
+    lines.push(`The user approved ${binding.action} on ${binding.target}; it is sent ${Math.round((releaseAt - approvedAt) / 1000)} s after the approval unless it is cancelled or the device changes, and the approval expires if it cannot be sent in time. Nothing has been sent yet.`);
+  }
   if (snapshot.error) lines.push(`Error: ${snapshot.error}`);
   if (snapshot.result) lines.push(`Result: ${snapshot.result.summary}`);
   for (const output of snapshot.output.slice(-20)) lines.push(output.line);
@@ -168,7 +182,11 @@ function startingHandler(action: HardwareAction): DeviceOperationToolHandler {
     if (typeof request === "string") return request;
     try {
       const id = await context.bridge.startOperation(request);
-      return `Operation ${id} was accepted by the browser and is running independently. Progress will arrive in the live transcript; use device_operation_status with operationId ${id} to retrieve its current snapshot.`;
+      const delay = request.options?.sendDelaySeconds;
+      const timing = typeof delay === "number"
+        ? ` If it needs the user's approval, Cody asks in the Devices panel at once and sends it ${delay} s after the user approves: tell the user to approve first and then get ready.`
+        : "";
+      return `Operation ${id} was accepted by the browser and is running independently. Progress and output appear in the Devices panel; use device_operation_status with operationId ${id} to retrieve its current snapshot.${timing}`;
     } catch (error) {
       return `Could not start device operation: ${operationError(error)}`;
     }
@@ -187,8 +205,15 @@ const OPERATION_PROPERTIES = {
    interfaceNumber: { type: "number", description: "USB interface number for an exclusive operation lease." },
   alternateSetting: { type: "number", description: "USB alternate setting paired with interfaceNumber from device_detect." },
   command: { type: "string", description: "Exact command for device_exec." },
-  options: { type: "object", description: "Protocol-specific validated configuration (for example safety or DFU descriptor data). It cannot approve a risk." },
+  options: { type: "object", description: "Protocol-specific validated configuration (for example safety or DFU descriptor data). It cannot approve a risk. The one key every protocol shares is sendDelaySeconds (1-300): the wait between the user's approval and the command being sent, so they can approve before putting their hands on the device." },
 } as const;
+
+/**
+ * Appended to every start tool that can ask for an approval, so it is written once. The bridge for engines launched
+ * over MCP (bin/cody-display-mcp.js) carries a copy; its test fails when the two differ.
+ */
+export const APPROVAL_TIMING_NOTE = "Approval timing: options.sendDelaySeconds (a whole number of seconds from 1 to 300) makes Cody show the user's approval at once but send the approved command that many seconds AFTER the user approves, so they can approve first and then put their hands on the device's buttons; tell them to do it in that order. The approval covers only the exact action, target and device shown, is spent when the command goes out, can be cancelled, expires if it cannot be sent in time, and is refused if the device is no longer the one approved. An approval nobody has answered does not time out: it ends when the user answers, when you cancel it, or when the device leaves the USB bus.";
+const APPROVAL_TIMING_TOOLS: Record<string, true> = { device_flash: true, device_dump: true, device_exec: true, device_push: true, device_sideload: true, device_install: true };
 
 function startDefinition(name: string, action: HardwareAction, description: string, required: readonly string[] = ["device", "protocol"]): DeviceOperationToolDefinition {
   return {
@@ -361,5 +386,9 @@ export const DEVICE_OPERATION_TOOLS: DeviceOperationToolDefinition[] = [
     handler: monitorSend,
   },
 ];
+
+for (const tool of DEVICE_OPERATION_TOOLS) {
+  if (APPROVAL_TIMING_TOOLS[tool.name]) tool.description = `${tool.description} ${APPROVAL_TIMING_NOTE}`;
+}
 
 export const DEVICE_OPERATION_TOOL_NAMES: readonly string[] = DEVICE_OPERATION_TOOLS.map((tool) => tool.name);

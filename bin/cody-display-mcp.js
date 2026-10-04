@@ -251,7 +251,7 @@ async function main() {
     interfaceNumber: z.number().int().nonnegative().optional().describe("USB interface number for an exclusive operation lease."),
     alternateSetting: z.number().int().nonnegative().optional().describe("USB alternate setting paired with interfaceNumber from device_detect."),
     command: z.string().max(16 * 1024).optional(),
-    options: z.object({}).passthrough().optional().describe("Protocol-specific validated configuration, such as safety or DFU descriptor data. It cannot approve a risk."),
+    options: z.object({}).passthrough().optional().describe("Protocol-specific validated configuration, such as safety or DFU descriptor data. It cannot approve a risk. The one key every protocol shares is sendDelaySeconds (1-300): the wait between the user's approval and the command being sent, so they can approve before putting their hands on the device."),
   };
   const startOperationTools = [
     ["device_detect", "Start protocol detection in the browser. Protocol edl reads a Qualcomm 9008 device's boot-ROM identity (chip serial, hardware id, public-key hash) and needs no loader."],
@@ -265,8 +265,11 @@ async function main() {
     ["device_verify", "After a Fastboot write without fetch support, compare an exact raw-image byte range in ADB recovery with the expected SHA-256. Needs target, length, sha256 and the shell grant."],
     ["device_monitor", "Start an exclusive serial monitor. Use device_monitor_send with its operation id for input."],
   ];
+  // Written once in lib/devices/operation-tools.ts (APPROVAL_TIMING_NOTE); bin/cody-display-mcp.test.mjs fails when this copy drifts.
+  const APPROVAL_TIMING_NOTE = "Approval timing: options.sendDelaySeconds (a whole number of seconds from 1 to 300) makes Cody show the user's approval at once but send the approved command that many seconds AFTER the user approves, so they can approve first and then put their hands on the device's buttons; tell them to do it in that order. The approval covers only the exact action, target and device shown, is spent when the command goes out, can be cancelled, expires if it cannot be sent in time, and is refused if the device is no longer the one approved. An approval nobody has answered does not time out: it ends when the user answers, when you cancel it, or when the device leaves the USB bus.";
+  const APPROVAL_TIMING_TOOLS = { device_flash: true, device_dump: true, device_exec: true, device_push: true, device_sideload: true, device_install: true };
   for (const [name, description] of startOperationTools) {
-    server.registerTool(name, { description, inputSchema: operationInput }, async (input) => {
+    server.registerTool(name, { description: APPROVAL_TIMING_TOOLS[name] ? `${description} ${APPROVAL_TIMING_NOTE}` : description, inputSchema: operationInput }, async (input) => {
       try {
         const text = await callDeviceTool(name, input);
         return { content: [{ type: "text", text }] };

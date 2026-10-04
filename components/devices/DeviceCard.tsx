@@ -6,13 +6,15 @@ import type { DeviceOperationManager, DeviceOperationSnapshot } from "@/lib/devi
 import type { DeviceActivity, DeviceInfo } from "@/lib/devices/protocol";
 import type { DeviceArtifact } from "@/lib/devices/artifacts";
 import { adbBannerState, availableGroups, deviceMode, formActions, offeredProtocols, type ActionGroup, type DeviceMode } from "@/lib/devices/ui-model";
+import { entrySize, groupActivity } from "@/lib/devices/activity-groups";
 import { useI18n } from "@/lib/i18n";
 import { ActionForm } from "./ActionForm";
+import { ActivityFeed } from "./ActivityFeed";
 import { ActivityLine } from "./ActivityLine";
 import { DeviceTerminal } from "./DeviceTerminal";
 import { FastbootCommand } from "./FastbootCommand";
 import { EdlBackup, EdlBackupSets, EdlCommands, EdlFlash } from "./EdlWorkflow";
-import { isTerminalState, OperationList } from "./OperationList";
+import { isTerminalState } from "./OperationList";
 import { ShellAccessControl } from "./ShellAccessControl";
 import { Button, cardStyle, Chip, Disclosure, Notice, sectionHeadingStyle, TOUCH } from "./ui";
 
@@ -29,7 +31,8 @@ const GROUP_ICON: Record<ActionGroup, React.ReactNode> = {
   ports: <Network size={16} />,
 };
 
-const VISIBLE_OPERATIONS = 3;
+/** How many entries of a device's activity are open to view before the rest fold into "Earlier activity". */
+const VISIBLE_ENTRIES = 3;
 
 function hex4(value: number | undefined): string {
   return (value ?? 0).toString(16).padStart(4, "0");
@@ -120,11 +123,12 @@ export function DeviceCard({ sessionId, manager, device, activity, operations, s
   const groups = useMemo(() => availableGroups(protocols), [protocols]);
   const tab = groups.includes(selected) ? selected : "overview";
   const awaiting = operations.some((operation) => operation.state === "awaiting-confirmation");
+  const armed = operations.some((operation) => operation.state === "armed");
   const running = operations.some((operation) => !isTerminalState(operation.state));
   // A user terminal shows its own output on the Terminal tab; listing it again here would repeat every line.
-  const listed = useMemo(() => operations.filter((operation) => !(operation.origin === "user" && operation.request.action === "monitor")).slice().reverse(), [operations]);
-  const recent = listed.slice(0, VISIBLE_OPERATIONS);
-  const earlier = listed.slice(VISIBLE_OPERATIONS);
+  const entries = useMemo(() => groupActivity(operations.filter((operation) => !(operation.origin === "user" && operation.request.action === "monitor"))), [operations]);
+  const recent = entries.slice(0, VISIBLE_ENTRIES);
+  const earlier = entries.slice(VISIBLE_ENTRIES);
   const label = modeLabel(mode, operations, t);
 
   const adbCandidates = device.protocolCandidates?.filter((candidate) => candidate.protocol === "adb") ?? [];
@@ -233,7 +237,7 @@ export function DeviceCard({ sessionId, manager, device, activity, operations, s
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
             <Chip tone="accent">{label}</Chip>
             <Chip tone={device.open ? "good" : "neutral"}>{device.open ? t("devices.stateInUse") : t("devices.stateReady")}</Chip>
-            {awaiting ? <Chip tone="warn">{t("devices.operationStateAwaitingConfirmation")}</Chip> : running ? <Chip tone="neutral">{t("devices.operationStateRunning")}</Chip> : null}
+            {awaiting ? <Chip tone="warn">{t("devices.operationStateAwaitingConfirmation")}</Chip> : armed ? <Chip tone="accent">{t("devices.operationStateArmed")}</Chip> : running ? <Chip tone="neutral">{t("devices.operationStateRunning")}</Chip> : null}
           </div>
           {activity && <ActivityLine activity={activity} />}
         </div>
@@ -303,13 +307,13 @@ export function DeviceCard({ sessionId, manager, device, activity, operations, s
         </div>
       ))}
 
-      {manager && listed.length > 0 && (
+      {manager && entries.length > 0 && (
         <section aria-label={t("devices.activityTitle")} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <h4 style={sectionHeadingStyle}>{t("devices.activityTitle")}</h4>
-          <OperationList manager={manager} operations={recent} />
+          <ActivityFeed manager={manager} entries={recent} deviceLabel={device.label} />
           {earlier.length > 0 && (
-            <Disclosure summary={t("devices.earlierActivity", { count: earlier.length })}>
-              <OperationList manager={manager} operations={earlier} />
+            <Disclosure summary={t("devices.earlierActivity", { count: earlier.reduce((total, entry) => total + entrySize(entry), 0) })}>
+              <ActivityFeed manager={manager} entries={earlier} deviceLabel={device.label} />
             </Disclosure>
           )}
         </section>

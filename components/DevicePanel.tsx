@@ -4,12 +4,14 @@ import { Cable } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useI18n } from "@/lib/i18n";
 import { useDeviceBridge } from "@/hooks/useDeviceBridge";
+import { ActivityFeed } from "@/components/devices/ActivityFeed";
 import { ArtifactPanel } from "@/components/devices/ArtifactPanel";
 import { ConnectCard } from "@/components/devices/ConnectCard";
 import { DeviceCard } from "@/components/devices/DeviceCard";
-import { OperationList, useOperations } from "@/components/devices/OperationList";
+import { useOperations } from "@/components/devices/OperationList";
 import { Disclosure, Notice, sectionHeadingStyle } from "@/components/devices/ui";
 import { deviceArtifacts } from "@/lib/devices/artifacts";
+import { groupActivity } from "@/lib/devices/activity-groups";
 
 export interface DevicePanelProps {
   sessionId: string | null;
@@ -41,7 +43,8 @@ export function DevicePanel({ sessionId }: DevicePanelProps): React.ReactElement
     return grouped;
   }, [operations]);
   const connectedIds = useMemo(() => new Set(devices.map((device) => device.id)), [devices]);
-  const orphaned = useMemo(() => operations.filter((operation) => !connectedIds.has(operation.request.deviceId)).slice().reverse(), [operations, connectedIds]);
+  const orphanedDevices = useMemo(() => [...byDevice].filter(([deviceId]) => !connectedIds.has(deviceId)), [byDevice, connectedIds]);
+  const orphanedCount = useMemo(() => orphanedDevices.reduce((total, [, deviceOperations]) => total + deviceOperations.length, 0), [orphanedDevices]);
 
   const chooseFile = () => {
     const target = document.getElementById("device-files-choose");
@@ -114,9 +117,11 @@ export function DevicePanel({ sessionId }: DevicePanelProps): React.ReactElement
 
             <ArtifactPanel sessionId={sessionId} selectedInputId={selectedInputId} onSelectInput={setSelectedInputId} />
 
-            {operationManager && orphaned.length > 0 && (
-              <Disclosure summary={t("devices.orphanedActivity", { count: orphaned.length })}>
-                <OperationList manager={operationManager} operations={orphaned} />
+            {operationManager && orphanedCount > 0 && (
+              <Disclosure summary={t("devices.orphanedActivity", { count: orphanedCount })}>
+                {orphanedDevices.map(([deviceId, deviceOperations]) => (
+                  <ActivityFeed key={deviceId} manager={operationManager} entries={groupActivity(deviceOperations)} deviceLabel={deviceId} />
+                ))}
               </Disclosure>
             )}
           </>

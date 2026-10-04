@@ -49,6 +49,7 @@ import { clearDraft, getDraft, setDraft } from "@/lib/draft-store";
 import { engineSupports } from "@/lib/engine-capabilities";
 import { translate } from "@/lib/i18n";
 import { describeEngineError, errorDedupeKey, type ErrorKind } from "@/lib/error-text";
+import { shelfItemFor } from "@/lib/devices/operation-notices";
 import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { createMessageUpdateCoalescer, type MessageUpdateCoalescer } from "@/lib/message-update-coalescer";
@@ -3511,6 +3512,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const message = (event.message as string | undefined)?.trim() ?? "";
         if (/^xd:\/\/:\s*mounted\s+mcp__/i.test(message)) {
           toast.info("MCP tools updated", message, { clamp: true });
+        } else if (event.source === "device") {
+          // Hardware pop-ups are decided on the server (lib/devices/operation-notices.ts), so the few that arrive are
+          // worth showing, in plain words. Run through the engine-error describer they would read as provider faults.
+          const item = shelfItemFor(event);
+          if (item) addNotice(item);
         } else if (event.source === "session-persistence" && level === "warning") {
           // omp moved this live session to a new file (cody_session_moved
           // adopts the new id): worth saying, but not an engine failure.

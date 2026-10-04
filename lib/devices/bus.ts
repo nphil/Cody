@@ -43,6 +43,13 @@ import { TunnelHost } from "./tunnel-host";
 const DEPARTED_RETENTION_MS = 15 * 60_000;
 const DEPARTED_MAX = 16;
 
+/**
+ * Told about every stored operation update. `previous` is what the bridge held for that operation before this
+ * update (undefined the first time it hears of it): a finished snapshot is news only when `previous` was still
+ * running, because a page that reconnects replays every finished operation it remembers.
+ */
+export type OperationListener = (snapshot: DeviceOperationSnapshot, event?: OperationEvent, previous?: DeviceOperationSnapshot) => void;
+
 type Sender = (frame: DeviceServerFrame) => void;
 
 /** Cody's own listener: a reverse rule must never let a device reach it. */
@@ -215,7 +222,7 @@ export class DeviceBridge {
 
   /** Bounded replayable summaries from the page operation manager. */
   private operations = new Map<string, DeviceOperationSnapshot>();
-  private operationListeners = new Set<(snapshot: DeviceOperationSnapshot, event?: OperationEvent) => void>();
+  private operationListeners = new Set<OperationListener>();
 
   /** adb forward/reverse rules served by this session's relay. */
   readonly tunnels = new TunnelHost({
@@ -610,7 +617,7 @@ export class DeviceBridge {
     return [...this.operations.values()];
   }
 
-  onOperation(listener: (snapshot: DeviceOperationSnapshot, event?: OperationEvent) => void): () => void {
+  onOperation(listener: OperationListener): () => void {
     this.operationListeners.add(listener);
     return () => this.operationListeners.delete(listener);
   }
@@ -661,7 +668,7 @@ export class DeviceBridge {
     if (event || terminal) {
       for (const listener of this.operationListeners) {
         try {
-          listener(snapshot, event);
+          listener(snapshot, event, previous);
         } catch {
           // Transcript observers cannot break an active hardware operation.
         }

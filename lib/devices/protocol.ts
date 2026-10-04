@@ -308,6 +308,7 @@ const OPERATION_STATES: Record<string, true> = {
   starting: true,
   running: true,
   "awaiting-confirmation": true,
+  armed: true,
   cancelling: true,
   succeeded: true,
   failed: true,
@@ -403,3 +404,13 @@ export class DeviceOperationCancelledError extends Error {
     this.name = "DeviceOperationCancelledError";
   }
 }
+
+/**
+ * The longest a person's approval may wait before the approved command is sent
+ * (`options.sendDelaySeconds` on a request, or the wait chosen on the approval
+ * card). It is also the longest an approval can live: approval expires at the
+ * end of its wait plus a few seconds of slack, so five minutes bounds how long
+ * a "yes" can sit unused. Shared by the tool layer (which refuses a bad value
+ * early) and the page's operation manager (which trusts nothing the server says).
+ */
+export const MAX_SEND_DELAY_SECONDS = 300;

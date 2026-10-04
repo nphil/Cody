@@ -7,7 +7,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { createJiti } from "jiti";
 
 const jiti = createJiti(import.meta.url, { tsconfigPaths: true });
-const { DEVICE_OPERATION_TOOLS } = await jiti.import("../lib/devices/operation-tools.ts");
+const { APPROVAL_TIMING_NOTE, DEVICE_OPERATION_TOOLS } = await jiti.import("../lib/devices/operation-tools.ts");
 
 /**
  * Engines launched through displayMcpAcpServer() / claudeDisplayMcpConfig() do
@@ -69,6 +69,23 @@ test("every device operation tool the host defines can be discovered through the
       }
     }
     assert.match(bridge.get("device_install").description, /typed browser confirmation/);
+  });
+});
+
+test("the approval-timing note is the same words through the bridge as for the host, on the same tools", async () => {
+  await withBridge(async ({ client }) => {
+    const { tools } = await client.listTools();
+    const bridge = new Map(tools.map((tool) => [tool.name, tool]));
+    for (const hosted of DEVICE_OPERATION_TOOLS) {
+      const exposed = bridge.get(hosted.name);
+      assert.equal(
+        exposed.description.includes(APPROVAL_TIMING_NOTE),
+        hosted.description.includes(APPROVAL_TIMING_NOTE),
+        `${hosted.name}: the bridge and the host disagree about whether the tool documents the wait`,
+      );
+    }
+    assert.ok(bridge.get("device_exec").description.includes(APPROVAL_TIMING_NOTE), "an engine reached over MCP is told about sendDelaySeconds");
+    assert.match(bridge.get("device_exec").inputSchema.properties.options.description, /sendDelaySeconds/);
   });
 });
 

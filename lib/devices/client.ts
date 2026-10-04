@@ -1698,6 +1698,18 @@ export class DeviceBridgeConnection implements PageOperationBridge {
     }
     throw new Error(`The same USB device did not reappear within ${Math.max(1, Math.round(windowMs / 1000))} seconds. Reconnect it and grant it again if its USB identity changed.`);
   }
+
+  /**
+   * The stable identity this granted USB device is attached under right now. Undefined when it is gone, was
+   * invalidated, waits for a new grant, or never had one (no serial number): in each case an approval that is
+   * about to be sent must not assume it is still talking to the device the person approved.
+   */
+  currentIdentity(deviceId: string): string | undefined {
+    const entry = registry.get(deviceId);
+    if (entry?.kind !== "usb" || entry.invalidatedReason || entry.needsNewGrant) return undefined;
+    return entry.stableIdentity ?? undefined;
+  }
+
   private async borrowSerialTransport(entry: SerialEntry, ownership: DeviceBorrowLease): Promise<HardwareTransportLease> {
     await stopSerialPump(entry);
     if (!entry.port.readable) {
