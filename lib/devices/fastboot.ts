@@ -448,20 +448,30 @@ async function updateFromPackage(context:HardwareContext):Promise<HardwareResult
       inFlight=undefined;
     }
   } catch (error) {
-    throwIfAborted(context.signal);
     const names=(flashes:readonly PartitionFlash[])=>flashes.map((flash)=>flash.target).join(", ")||"none";
     // Assigned inside writeFlash's callback, which control-flow analysis cannot see.
     const suspect=inFlight as PartitionFlash|undefined;
     const untouched=prepared.filter((flash)=>flash!==suspect && !written.includes(flash));
     const unverifiable=written.filter((flash)=>!flash.backup.capability);
-    throw new FastbootProtocolError([
-      `The update stopped at ${suspect?.target??untouched[0]?.target}: ${error instanceof Error ? error.message : String(error)}`,
+    const stoppedAt=suspect?.target??untouched[0]?.target;
+    const cancelled=context.signal.aborted;
+    const account=[
+      cancelled
+        ? `The update was cancelled ${suspect ? `while ${suspect.target} was being flashed or verified` : stoppedAt ? `before ${stoppedAt} was flashed` : "after every partition was handled"}.`
+        : `The update stopped at ${stoppedAt}: ${error instanceof Error ? error.message : String(error)}`,
       `Written and verified: ${names(written.filter((flash)=>flash.backup.capability))}.`,
       ...(unverifiable.length>0 ? [`Written but not verifiable (no fetch readback): ${names(unverifiable)}.`] : []),
       ...(suspect ? [`POSSIBLY MODIFIED (a flash command was sent and the result is not verified): ${suspect.target}; ${suspect.backup.backupId ? `its previous contents are saved as ${suspect.backup.backupId}` : "no backup of it exists, because this bootloader cannot read partitions"}.`] : []),
       `Untouched: ${names(untouched)}.`,
       "Nothing was retried.",
-    ].join(" "));
+    ];
+    // A cancel (the user's, or a USB disconnect, which cancels) leaves no error in the operation's record, and it is exactly
+    // when the operator may need to recover a partition: the accounting goes to the retained output before the cancel goes on.
+    if (cancelled) {
+      for (const line of account) context.output?.(line);
+      throwIfAborted(context.signal);
+    }
+    throw new FastbootProtocolError(account.join(" "));
   }
   return {
     summary:unbacked.length===0 ? `Flashed ${prepared.length} partition(s) from the package and verified each by readback.` : `Flashed ${prepared.length} partition(s) from the package; ${unbacked.join(", ")} could not be read back and are UNVERIFIED.`,

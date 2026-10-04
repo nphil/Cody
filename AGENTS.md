@@ -2255,7 +2255,12 @@ as expanded-image hashes.
   and each partition is written once and read back before the next. A failed
   update names four states: written and verified, written but not verifiable,
   POSSIBLY MODIFIED (a `flash:` command was sent; with its backup id), and
-  untouched. Logical partitions need fastbootd; bootloader/radio/super/userdata
+  untouched. A cancel (Cancel, or the browser reporting the USB device gone,
+  which cancels) leaves no error in the operation record, so the same accounting
+  is published line by line to the operation's retained output BEFORE the
+  cancellation is rethrown (`updateFromPackage`'s catch; the tests drive it
+  through `DeviceOperationManager` and read `snapshot.output`). Logical
+  partitions need fastbootd; bootloader/radio/super/userdata
   images, `-w`, and mode switches are not part of it. Host filesystem
   generation (format) is not implemented.
 - **USB DFU:** `detect`, `dump`, verified `flash`, and confirmed

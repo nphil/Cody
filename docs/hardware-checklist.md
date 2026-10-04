@@ -143,6 +143,11 @@ item remains **UNVERIFIED** until its permitted evidence is completed.
   A ZIP for another product is refused before any write.
 - [ ] **UNVERIFIED** `update` refuses logical partitions from the bootloader and
   accepts them from fastbootd.
+- [ ] **UNVERIFIED** Cancelling an `update` (or pulling the cable) between and
+  during partitions leaves the operation's output naming which partitions were
+  written and verified, the one possibly modified (with its backup id) and the
+  untouched ones, and nothing is written again; the named backup restores the
+  possibly modified partition.
 - [ ] **UNVERIFIED** `stage` followed by an OEM command that consumes staged
   data, and `get_staged` after an OEM command that stages output, on a device
   that supports `upload`.
