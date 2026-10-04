@@ -1,5 +1,5 @@
 import { EdlError, edlTimeouts, type EdlLink } from "./edl-link";
-import { cleanDeviceText, FIREHOSE_XML_LIMITS, parseFirehoseDocument, scanFirehoseFrame } from "./edl-xml";
+import { answerBeganInsideData, cleanDeviceText, FIREHOSE_XML_LIMITS, parseFirehoseDocument, scanFirehoseFrame } from "./edl-xml";
 
 /**
  * Firehose: the programmer's XML command protocol, READ-ONLY by construction.
@@ -27,6 +27,8 @@ const MAX_KEPT_LOGS = 300;
 const MAX_COMMAND_BYTES = 1024;
 /** Bytes after a document's `</data>`, in the same transfer, that are padding rather than the start of raw data. */
 const MAX_TRAILING_PADDING = 16;
+/** How much of the end of a read's data is kept to check it against the answer that closes it. */
+const DATA_TAIL_BYTES = 1024;
 
 export type FirehoseCommand =
   | { readonly kind: "nop" }
@@ -38,6 +40,16 @@ export type FirehoseCommand =
 function integer(value: number, name: string, minimum: number, maximum: number): number {
   if (!Number.isSafeInteger(value) || value < minimum || value > maximum) throw new EdlError(`${name} must be a whole number from ${minimum} to ${maximum}.`, "refused");
   return value;
+}
+
+/** The last `limit` bytes of `previous` followed by `next`, as a copy that stays valid when the caller reuses `next`. */
+function lastBytes(previous: Uint8Array, next: Uint8Array, limit: number): Uint8Array {
+  if (next.byteLength >= limit) return Uint8Array.from(next.subarray(next.byteLength - limit));
+  const keep = Math.min(previous.byteLength, limit - next.byteLength);
+  const out = new Uint8Array(keep + next.byteLength);
+  out.set(previous.subarray(previous.byteLength - keep), 0);
+  out.set(next, keep);
+  return out;
 }
 
 /** The XML for one command. Only numbers and fixed words go in; there is no free text. */
@@ -167,6 +179,11 @@ interface CollectOptions {
   readonly quietMs?: number;
   /** The answer must follow raw sector data directly. */
   readonly strict?: boolean;
+  /**
+   * With `strict`: the last bytes of the sector data this answer closes. A first document that is really the continuation of
+   * data that came up short (its start was taken for sector bytes) is refused. `what` names the read in the message.
+   */
+  readonly dataTail?: { readonly bytes: Uint8Array; readonly what: string };
   /** `quiet` only: wait the whole timeout for the FIRST document instead of one quiet window. */
   readonly patient?: boolean;
 }
@@ -290,6 +307,12 @@ export class FirehoseSession {
       if (this.link.buffered > 0) {
         const frame = scanFirehoseFrame(this.link.view(), options.strict === true && documents === 0);
         if (frame.kind === "document") {
+          if (options.dataTail && documents === 0) {
+            const short = answerBeganInsideData(options.dataTail.bytes, this.link.view().subarray(0, frame.end));
+            if (short !== null) {
+              throw new EdlError(`${options.dataTail.what}: the programmer's closing answer began inside the sector data (the data is ${short} byte(s) short), so the last ${short} byte(s) delivered are the programmer's own text, not the disk's. Nothing from this read can be trusted.`);
+            }
+          }
           documents += 1;
           for (const line of frame.document.logs) {
             if (logs.length < MAX_KEPT_LOGS) logs.push(cleanDeviceText(line, 1024));
@@ -437,12 +460,14 @@ export class FirehoseSession {
       const announced = await this.exchange({ kind: "read", sectorSize, startSector: first, sectors: count }, { label, timeoutMs: edlTimeouts.firstAnswer });
       this.requireAck(announced, label, "true");
       let remaining = count * sectorSize;
+      let tail: Uint8Array = new Uint8Array(0);
       while (remaining > 0) {
         const chunk = await this.link.readSome(Math.min(remaining, 64 * 1024), edlTimeouts.dataInactivity, `${label} (${remaining} byte(s) still to come)`);
         remaining -= chunk.byteLength;
+        tail = lastBytes(tail, chunk, DATA_TAIL_BYTES);
         yield chunk;
       }
-      const closing = await this.collect({ label: `${label}, closing answer`, timeoutMs: edlTimeouts.command, until: "response", strict: true });
+      const closing = await this.collect({ label: `${label}, closing answer`, timeoutMs: edlTimeouts.command, until: "response", strict: true, dataTail: { bytes: tail, what: label } });
       this.requireAck(closing, label, "false");
     }
   }

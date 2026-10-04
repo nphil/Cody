@@ -247,3 +247,45 @@ export function scanFirehoseFrame(bytes: Uint8Array, strict = false): FirehoseFr
   if (end - first > limits.documentBytes) throw malformed(`a document is longer than ${limits.documentBytes} bytes`);
   return { kind: "document", end, document: parseFirehoseDocument(decoder.decode(bytes.subarray(first, end))) };
 }
+
+/** How far back into the sector data an answer that began early can have started. A closing answer is about a hundred bytes. */
+const MAX_ANSWER_OVERLAP_BYTES = 1024;
+const ANSWER_STARTS = ["<?xml", "<data", "<response", "<log"];
+
+function startsLikeAnswer(bytes: Uint8Array): boolean {
+  const head = new TextDecoder("latin1").decode(bytes.subarray(0, 16));
+  return ANSWER_STARTS.some((start) => head.startsWith(start));
+}
+
+/**
+ * Raw sector data and the programmer's closing answer are separate messages, but
+ * a byte stream does not show where one ends. A programmer that delivers FEWER
+ * bytes than it promised makes the host take the first bytes of its closing
+ * answer for the missing data, and when what is swallowed is exactly the XML
+ * declaration, what is left still reads as a complete answer.
+ *
+ * `tail` is the end of the data as received, `answer` the complete document that
+ * followed it. Returns the number of bytes at the end of `tail` that are really
+ * the start of that document (how short the data came up), or `null` when the
+ * answer begins where the data ended. Data that merely looks like the start of an
+ * answer does not count: the document has to run on INTO the answer, as a single
+ * well-formed document with no second declaration, for the check to fire.
+ */
+export function answerBeganInsideData(tail: Uint8Array, answer: Uint8Array): number | null {
+  const longest = Math.min(tail.length, MAX_ANSWER_OVERLAP_BYTES);
+  for (let overlap = 1; overlap <= longest; overlap += 1) {
+    const start = tail.length - overlap;
+    if (tail[start] !== 0x3c) continue;
+    const joined = new Uint8Array(overlap + answer.length);
+    joined.set(tail.subarray(start), 0);
+    joined.set(answer, overlap);
+    if (!startsLikeAnswer(joined)) continue;
+    try {
+      const frame = scanFirehoseFrame(joined, true);
+      if (frame.kind === "document" && frame.end > overlap && frame.document.extras === 0 && !frame.document.strayText) return overlap;
+    } catch {
+      // Not a document that begins in the data; keep looking.
+    }
+  }
+  return null;
+}
