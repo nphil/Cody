@@ -196,7 +196,7 @@ export function findPartitions(table: GptTable, name: string): readonly GptParti
 }
 
 export interface BackupGpt {
-  /** The backup header, when the sector at the alternate address held one. */
+  /** The backup header found in the LAST sector of the measured disk, when that sector held one. */
   readonly header: GptHeader | null;
   readonly table: GptTable | null;
   /** Why the backup could not be read as a GPT, when it could not. */
@@ -278,13 +278,14 @@ export function evaluateSpan(measuredSectors: number, sectorSize: number, primar
     ? `Sector ${lastSectorLba}, the last one the programmer reports, can be read.`
     : `Sector ${lastSectorLba}, the last one the programmer reports, could not be read.`);
 
+  // The backup table is judged where the disk ends, whatever the primary header says about where it is.
   const backupHeader = backup.header;
-  const backupOk = backupHeader !== null && backup.table !== null && backupHeader.headerCrcValid && backup.table.entriesCrcValid && backupHeader.myLba === header.alternateLba && backupHeader.alternateLba === header.myLba;
+  const backupOk = backupHeader !== null && backup.table !== null && backupHeader.headerCrcValid && backup.table.entriesCrcValid && backupHeader.myLba === lastSectorLba && backupHeader.alternateLba === header.myLba;
   add("backup header", backupOk, backupOk
-    ? `A valid backup partition table header sits at sector ${header.alternateLba}.`
+    ? `A valid backup partition table header sits in the last sector (${lastSectorLba}).`
     : backup.problem ?? (backupHeader === null || backup.table === null
-      ? `No usable backup partition table header was found at sector ${header.alternateLba}.`
-      : `The backup partition table at sector ${header.alternateLba} is not intact or does not point back at the primary (CRC ${backupHeader.headerCrcValid && backup.table.entriesCrcValid ? "ok" : "bad"}, own address ${backupHeader.myLba}, alternate ${backupHeader.alternateLba}).`));
+      ? `No usable backup partition table header was found in the last sector (${lastSectorLba}).`
+      : `The backup partition table in the last sector (${lastSectorLba}) is not intact or does not point back at the primary (CRC ${backupHeader.headerCrcValid && backup.table.entriesCrcValid ? "ok" : "bad"}, own address ${backupHeader.myLba}, alternate ${backupHeader.alternateLba}).`));
   const consistent = backupHeader !== null && backup.table !== null
     && backupHeader.diskGuid === header.diskGuid
     && backupHeader.entryCount === header.entryCount
@@ -296,8 +297,8 @@ export function evaluateSpan(measuredSectors: number, sectorSize: number, primar
     ? "The backup partition table is identical to the primary one."
     : "The backup partition table differs from the primary one (disk id, entry layout, usable range or entry checksum).");
   add("backup at the end", header.alternateLba === lastSectorLba, header.alternateLba === lastSectorLba
-    ? `The backup header is in the last sector (${lastSectorLba}).`
-    : `The backup header is at sector ${header.alternateLba}, not in the last sector (${lastSectorLba}).`);
+    ? `The primary header puts the backup in the last sector (${lastSectorLba}).`
+    : `The primary header puts the backup at sector ${header.alternateLba}, not in the last sector (${lastSectorLba}).`);
 
   return {
     ok: checks.every((check) => check.passed),

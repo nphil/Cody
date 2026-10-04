@@ -103,11 +103,28 @@ interface PrimaryGpt {
   readonly regionSectors: number;
 }
 
+/** What the primary header says about where the backup table is, against where the measured disk ends. */
+interface BackupPointer {
+  /** The sector the primary header's AlternateLBA names. */
+  readonly lba: number;
+  /** It is the last sector the programmer reports. */
+  readonly agrees: boolean;
+  /** When it does not agree: what is at that sector, in a sentence. Empty when it agrees. */
+  readonly there: string;
+}
+
 interface BackupRead extends BackupGpt {
   readonly region: Uint8Array | null;
   readonly firstLba: number | null;
   readonly sectors: number | null;
+  /** The sector the backup table was looked for in: the last one the programmer reports. */
+  readonly atLba: number;
+  /** The programmer would not read that sector at all. */
+  readonly lastSectorUnreadable: boolean;
+  readonly pointer: BackupPointer;
 }
+
+type TailCopy = Omit<BackupRead, "pointer">;
 
 export async function readPrimaryGpt(opened: OpenedEdl): Promise<PrimaryGpt> {
   const sectorSize = opened.storage.sectorSize;
@@ -121,20 +138,18 @@ export async function readPrimaryGpt(opened: OpenedEdl): Promise<PrimaryGpt> {
   return { table, region, regionSectors: end };
 }
 
-function problem(message: string): BackupRead {
-  return { header: null, table: null, problem: message, region: null, firstLba: null, sectors: null };
+function problem(message: string, atLba: number, lastSectorUnreadable = false): TailCopy {
+  return { header: null, table: null, problem: message, region: null, firstLba: null, sectors: null, atLba, lastSectorUnreadable };
 }
 
-/** The partition table at the END of the disk, found where the primary header says it is. */
-export async function readBackupGpt(opened: OpenedEdl, primary: PrimaryGpt): Promise<BackupRead> {
+/** The partition table header in sector `at` and the entry array just before it: where a backup table has to sit. */
+async function readTailCopy(opened: OpenedEdl, at: number): Promise<TailCopy> {
   const sectorSize = opened.storage.sectorSize;
-  const at = primary.table.header.alternateLba;
-  if (at >= opened.storage.totalSectors) return problem(`The primary header puts the backup partition table at sector ${at}, beyond the ${opened.storage.totalSectors} sectors the programmer reports.`);
   let headerSector: Uint8Array;
   try {
     headerSector = await readRegion(opened, at, 1);
   } catch (error) {
-    if (error instanceof FirehoseRejection) return problem(`The programmer would not read sector ${at}, where the backup partition table should be: ${error.message}`);
+    if (error instanceof FirehoseRejection) return problem(`The programmer would not read sector ${at}, the last one it reports, where the backup partition table should be: ${error.message}`, at, true);
     throw error;
   }
   let header;
@@ -143,21 +158,54 @@ export async function readBackupGpt(opened: OpenedEdl, primary: PrimaryGpt): Pro
     header = parseGptHeader(headerSector, sectorSize);
     count = gptEntrySectors(header, sectorSize);
   } catch (error) {
-    if (error instanceof EdlError) return problem(`Sector ${at} does not hold a usable backup partition table header: ${error.message}`);
+    if (error instanceof EdlError) return problem(`Sector ${at} does not hold a usable backup partition table header: ${error.message}`, at);
     throw error;
   }
-  if (header.entriesLba >= at || at - header.entriesLba > count + 64) return problem(`The backup header at sector ${at} puts its entry array at sector ${header.entriesLba}, which is not just before it.`);
+  if (header.entriesLba >= at || at - header.entriesLba > count + 64) return problem(`The backup header at sector ${at} puts its entry array at sector ${header.entriesLba}, which is not just before it.`, at);
   const first = header.entriesLba;
   const sectors = at - first + 1;
   let region: Uint8Array;
   try {
     region = await readRegion(opened, first, sectors);
   } catch (error) {
-    if (error instanceof FirehoseRejection) return problem(`The programmer would not read the backup entry array at sector ${first}: ${error.message}`);
+    if (error instanceof FirehoseRejection) return problem(`The programmer would not read the backup entry array at sector ${first}: ${error.message}`, at);
     throw error;
   }
   const table = parseGptEntries(header, region.subarray(0, count * sectorSize), sectorSize);
-  return { header, table, problem: null, region, firstLba: first, sectors };
+  return { header, table, problem: null, region, firstLba: first, sectors, atLba: at, lastSectorUnreadable: false };
+}
+
+/** What a sector the primary header names as the backup's home holds, when that is not the end of the disk. */
+async function describeStrayPointer(opened: OpenedEdl, lba: number): Promise<string> {
+  if (lba >= opened.storage.totalSectors) return "That sector does not exist on this disk.";
+  let sector: Uint8Array;
+  try {
+    sector = await readRegion(opened, lba, 1);
+  } catch (error) {
+    if (error instanceof FirehoseRejection) return `The programmer would not read that sector (${error.message}).`;
+    throw error;
+  }
+  try {
+    const found = parseGptHeader(sector, opened.storage.sectorSize);
+    return `That sector holds a GPT header too (its own address is ${found.myLba}, checksum ${found.headerCrcValid ? "valid" : "bad"}): probably an older copy. It is not the one saved.`;
+  } catch (error) {
+    if (error instanceof EdlError) return "That sector holds no GPT header.";
+    throw error;
+  }
+}
+
+/**
+ * The partition table at the END of the disk. It is looked for in the last sector the
+ * programmer reports, independently of what the primary header says: a pointer that was
+ * left stale by a resize, or damaged, must neither hide the real recovery copy nor stand
+ * in for it with an interior one. A pointer that disagrees is reported, not followed.
+ */
+export async function readBackupGpt(opened: OpenedEdl, primary: PrimaryGpt): Promise<BackupRead> {
+  const last = opened.storage.totalSectors - 1;
+  const copy = await readTailCopy(opened, last);
+  const lba = primary.table.header.alternateLba;
+  const agrees = lba === last;
+  return { ...copy, pointer: { lba, agrees, there: agrees ? "" : await describeStrayPointer(opened, lba) } };
 }
 
 interface DiskReport {
@@ -172,15 +220,8 @@ async function examineDisk(opened: OpenedEdl, run: EdlRun): Promise<DiskReport> 
   run.context.progress({ phase: "gpt", message: "Reading the partition tables" });
   const primary = await readPrimaryGpt(opened);
   const backup = await readBackupGpt(opened, primary);
-  const last = opened.storage.totalSectors - 1;
-  let lastSectorReadable = true;
-  try {
-    await readRegion(opened, last, 1);
-  } catch (error) {
-    if (!(error instanceof FirehoseRejection)) throw error;
-    lastSectorReadable = false;
-    run.say(`The programmer would not read sector ${last}: ${error.message}`);
-  }
+  const lastSectorReadable = !backup.lastSectorUnreadable;
+  if (!lastSectorReadable && backup.problem) run.say(backup.problem);
   const span = evaluateSpan(opened.storage.totalSectors, opened.storage.sectorSize, primary.table, { lastSectorReadable, backup });
   return { primary, backup, lastSectorReadable, span };
 }
@@ -282,15 +323,18 @@ async function printGpt(run: EdlRun): Promise<HardwareResult> {
   const saved: Record<string, { fileId: string; sha256: string }> = {};
   saved.primary = await saveSmall(run.context, `edl-${tag}-gpt-primary.bin`, primary.region);
   run.say(`Saved the primary table (sectors 0-${primary.regionSectors - 1}) as ${saved.primary.fileId}, SHA-256 ${saved.primary.sha256}.`);
+  const backupIntact = Boolean(backup.header?.headerCrcValid && backup.table?.entriesCrcValid);
   if (backup.region && backup.firstLba !== null) {
     saved.backup = await saveSmall(run.context, `edl-${tag}-gpt-backup.bin`, backup.region);
-    run.say(`Saved the backup table at the end of the disk (sectors ${backup.firstLba}-${header.alternateLba}) as ${saved.backup.fileId}, SHA-256 ${saved.backup.sha256}.`);
+    run.say(`Saved the backup table at the end of the disk (sectors ${backup.firstLba}-${backup.atLba}) as ${saved.backup.fileId}, SHA-256 ${saved.backup.sha256}.`);
+    if (!backupIntact) run.say("Warning: the backup table at the end of the disk is damaged (its checksums do not match); it is saved as it was read.");
   } else {
     run.say(`The backup table at the end of the disk could not be read: ${backup.problem}`);
   }
+  if (!backup.pointer.agrees) run.say(`Note: the primary header puts its backup table at sector ${backup.pointer.lba}, not at the last sector (${backup.atLba}). ${backup.pointer.there}`);
   const intact = header.headerCrcValid && primary.table.entriesCrcValid;
   return {
-    summary: `${primary.table.partitions.length} partition(s); primary table ${intact ? "intact" : "DAMAGED"}; backup table ${backup.region ? "read" : "not readable"}.`,
+    summary: `${primary.table.partitions.length} partition(s); primary table ${intact ? "intact" : "DAMAGED"}; backup table ${backup.region ? (backupIntact ? "read" : "DAMAGED") : "not readable"}${backup.pointer.agrees ? "" : `; the primary header points its backup at sector ${backup.pointer.lba}, not at the last sector`}.`,
     verified: intact,
     details: {
       diskGuid: header.diskGuid,
@@ -300,7 +344,7 @@ async function printGpt(run: EdlRun): Promise<HardwareResult> {
       primaryIntact: intact,
       warnings: primary.table.warnings,
       partitions: describePartitions(primary.table.partitions),
-      backup: { read: Boolean(backup.region), problem: backup.problem, firstLba: backup.firstLba, sectors: backup.sectors },
+      backup: { read: Boolean(backup.region), intact: backupIntact, problem: backup.problem, firstLba: backup.firstLba, sectors: backup.sectors, atLba: backup.atLba, pointer: backup.pointer },
       files: saved,
     },
   };
