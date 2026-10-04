@@ -291,30 +291,125 @@ export function answerBeganInsideData(tail: Uint8Array, answer: Uint8Array): num
 }
 
 const ANSWER_ELEMENTS: readonly string[] = ["data", "log", "response"];
+/** The most data one stretch may hold to be examined: a few exchanges' worth of the programmer's own text. A longer stretch is not a message. */
+const MAX_STRETCH_BYTES = 2 * 1024 * 1024;
+/** How much of the start of a stretch says whether it can be a message. */
+const HEAD_BYTES = 16;
 
-/**
- * Raw sector data that ENDS with a complete message of the programmer's own - a log line or a response, followed by at
- * most white space - came up short by that message: the programmer sent it where the last bytes of data belong, and the
- * host took it for sector bytes. Returns the length of that text in bytes (the data is at least that short), or `null`.
- * The message must have arrived as a transfer of its own: `boundaries` are the distances from the end of the data at which the
- * device ended a USB transfer, and the message has to begin at one of them. Sector data that merely contains such text,
- * even a whole answer, sits inside a data transfer and is still data. Only documents made of `data`, `log` and `response`
- * elements count.
- */
-export function dataEndsWithAnswer(tail: Uint8Array, boundaries: readonly number[]): number | null {
-  const longest = Math.min(tail.length, MAX_ANSWER_OVERLAP_BYTES);
-  for (let length = 1; length <= longest; length += 1) {
-    if (!boundaries.includes(length)) continue;
-    const candidate = tail.subarray(tail.length - length);
-    if (candidate[0] !== 0x3c || !startsLikeAnswer(candidate)) continue;
+/** Whether what is known of a stretch's first bytes could still be the start of a programmer document. */
+function couldBeginAnAnswer(head: Uint8Array): boolean {
+  const text = new TextDecoder("latin1").decode(head.subarray(0, HEAD_BYTES));
+  return ANSWER_STARTS.some((start) => {
+    const shared = Math.min(start.length, text.length);
+    return text.slice(0, shared) === start.slice(0, shared);
+  });
+}
+
+/** Whether `bytes` is nothing but complete programmer documents - log lines and answers - with only padding between and after them. */
+function onlyProgrammerMessages(bytes: Uint8Array): boolean {
+  let at = 0;
+  let documents = 0;
+  for (;;) {
+    while (at < bytes.length && (bytes[at] === 0x20 || bytes[at] === 0x0a || bytes[at] === 0x0d || bytes[at] === 0x09 || bytes[at] === 0x00)) at += 1;
+    if (at >= bytes.length) return documents > 0;
+    if (bytes[at] !== 0x3c) return false;
     try {
-      const frame = scanFirehoseFrame(candidate, true);
-      if (frame.kind !== "document" || frame.document.extras !== 0 || frame.document.strayText) continue;
-      if (!frame.document.elements.every((element) => ANSWER_ELEMENTS.includes(element.name))) continue;
-      if (candidate.subarray(frame.end).every((byte) => byte === 0x20 || byte === 0x0a || byte === 0x0d || byte === 0x09)) return length;
+      const frame = scanFirehoseFrame(bytes.subarray(at), true);
+      if (frame.kind !== "document" || frame.document.extras !== 0 || frame.document.strayText) return false;
+      if (!frame.document.elements.every((element) => ANSWER_ELEMENTS.includes(element.name))) return false;
+      documents += 1;
+      at += frame.end;
     } catch {
-      // Not a document that ends the data; keep looking.
+      return false;
     }
   }
-  return null;
+}
+
+/** A stretch of raw data that is nothing but the programmer's own messages. */
+export interface SwallowedMessage {
+  /** Bytes from the start of the data to where the message begins. */
+  readonly at: number;
+  /** Bytes of text it is. */
+  readonly length: number;
+}
+
+/**
+ * Raw sector data and the programmer's own messages (log lines, answers) are separate USB transfers, but the host counts
+ * bytes, so a message that arrives while data is still owed is taken for sector bytes - and a programmer that is short
+ * of data by exactly that much looks complete. What the bytes say cannot tell the two apart (a disk may hold any text,
+ * even a whole answer); how they arrived can: the programmer sends each message as a transfer of its own, so a message
+ * that was delivered as data fills exactly one stretch between two ends of the device's transfers.
+ *
+ * The raw data of one read is fed in order, with the offsets (within each chunk) at which the device ended a transfer. The
+ * start of the data counts as the start of a stretch - the announcing answer was a transfer of its own - and the end of the
+ * data as the end of one, so a message that is ALL the data (not one disk byte arrived) is found too. A stretch that is
+ * nothing but complete `data`, `log` and `response` documents, with padding, is reported, however long it is and
+ * wherever it sits. Text that is only part of a transfer of data is data, and so is a stretch longer than 2 MiB.
+ * What cannot be seen is a message that shares a USB transfer with real data.
+ */
+export class RawMessageWatch {
+  private offset = 0;
+  private begun = 0;
+  private parts: Uint8Array[] = [];
+  private held = 0;
+  private alive = true;
+  private judged = false;
+
+  /** `ends` are offsets within `chunk` (0 to its length) at which the device ended a transfer; `last` marks the end of the data. */
+  feed(chunk: Uint8Array, ends: readonly number[], last: boolean): SwallowedMessage | null {
+    let cursor = 0;
+    for (const end of ends) {
+      if (end < cursor || end > chunk.length) continue;
+      this.extend(chunk.subarray(cursor, end));
+      cursor = end;
+      const found = this.close();
+      if (found) return found;
+    }
+    this.extend(chunk.subarray(cursor));
+    return last ? this.close() : null;
+  }
+
+  private extend(bytes: Uint8Array): void {
+    if (this.alive && bytes.length > 0) {
+      if (this.held + bytes.length > MAX_STRETCH_BYTES) this.alive = false;
+      else if (this.held === 0 && bytes.length >= HEAD_BYTES && !couldBeginAnAnswer(bytes)) this.alive = false;
+      else {
+        this.parts.push(Uint8Array.from(bytes));
+        this.held += bytes.length;
+        if (!this.judged && this.held >= HEAD_BYTES) {
+          this.judged = true;
+          if (!couldBeginAnAnswer(this.text())) this.alive = false;
+        }
+      }
+      if (!this.alive) {
+        this.parts = [];
+        this.held = 0;
+      }
+    }
+    this.offset += bytes.length;
+  }
+
+  private text(): Uint8Array {
+    const out = new Uint8Array(this.held);
+    let at = 0;
+    for (const part of this.parts) {
+      out.set(part, at);
+      at += part.length;
+    }
+    return out;
+  }
+
+  private close(): SwallowedMessage | null {
+    let found: SwallowedMessage | null = null;
+    if (this.alive && this.held > 0) {
+      const text = this.text();
+      if (couldBeginAnAnswer(text) && onlyProgrammerMessages(text)) found = { at: this.begun, length: this.held };
+    }
+    this.begun = this.offset;
+    this.parts = [];
+    this.held = 0;
+    this.alive = true;
+    this.judged = false;
+    return found;
+  }
 }

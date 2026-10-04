@@ -228,10 +228,13 @@ PC tool's output is the reference to compare with.
   "misaligned" or a GPT with a shifted signature: record it if it does.
 - [ ] **UNVERIFIED** The programmer ends each raw-data transfer with a short packet or a
   zero-length packet and sends its log lines and answers as transfers of their own.
-  Cody relies on that to tell a log line swallowed as sector data (a read that came
-  up short by exactly its length) from data that merely contains similar text. Record
-  any read that fails with "the sector data ends with a complete message" on a unit
-  whose partition really ends that way.
+  Cody relies on that to tell a log line taken for sector data (a read that came up
+  short by its length, or that carried a log line among the data, or that carried
+  nothing else) from data that merely contains similar text. A message that shares a
+  USB transfer with real data cannot be told apart, and a transfer that is itself
+  nothing but programmer-style log or answer XML is refused as a message. Record any
+  read that fails with "are a complete message from the programmer" on a unit whose
+  partition really holds such text.
 - [ ] **UNVERIFIED** `printgpt` lists the same partitions as the PC tool; the
   saved primary region equals sectors 0-33 read by the PC tool and the saved
   backup region equals the last 33 sectors. Record the disk GUID, the span the

@@ -2603,9 +2603,13 @@ as expanded-image hashes.
     only when the check passes IN THE SAME OPERATION).
   - **Data integrity.** Reads are segmented (16 MiB per `read`), the raw bytes
     are counted exactly, the answer after them must follow directly (a data
-    stream that is off by one byte is reported as misaligned, never saved; data
-    that ends with a complete message the programmer sent as a USB transfer of its
-    own is refused as short, while data that merely contains such text is still
+    stream that is off by one byte is reported as misaligned, never saved; the
+    data is also watched by its USB framing (`RawMessageWatch`): any stretch
+    between two ends of the device's transfers - the start and the end of the
+    data count - that is nothing but the programmer's own log lines and answers
+    is a message taken for sector bytes and refuses the read, wherever it sits,
+    however long (up to the 256 KiB a document may be) and even when no disk byte
+    arrived at all, while the same text inside a transfer of data is still
     data), the SHA-256 is computed on the wire and compared with the artifact store's, and a
     failed or cancelled read saves nothing. A cancelled read leaves data in
     flight: the next operation's `discover` discards it.

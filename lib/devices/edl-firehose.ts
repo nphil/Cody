@@ -1,5 +1,5 @@
 import { EdlError, edlTimeouts, type EdlLink } from "./edl-link";
-import { answerBeganInsideData, cleanDeviceText, dataEndsWithAnswer, FIREHOSE_XML_LIMITS, parseFirehoseDocument, scanFirehoseFrame } from "./edl-xml";
+import { answerBeganInsideData, cleanDeviceText, FIREHOSE_XML_LIMITS, parseFirehoseDocument, RawMessageWatch, scanFirehoseFrame } from "./edl-xml";
 import type { HardwareContext, HardwareRisk } from "./flasher";
 import { throwIfAborted } from "./serial";
 
@@ -387,12 +387,7 @@ interface CollectOptions {
    * With `strict`: the last bytes of the sector data this answer closes. A first document that is really the continuation of
    * data that came up short (its start was taken for sector bytes) is refused. `what` names the read in the message.
    */
-  readonly dataTail?: {
-    readonly bytes: Uint8Array;
-    readonly what: string;
-    /** How many bytes before the end of the data the device ended a USB transfer (only those within `bytes`): where a message of its own could have begun. */
-    readonly boundaries: readonly number[];
-  };
+  readonly dataTail?: { readonly bytes: Uint8Array; readonly what: string };
   /** `quiet` only: wait the whole timeout for the FIRST document instead of one quiet window. */
   readonly patient?: boolean;
 }
@@ -528,10 +523,6 @@ export class FirehoseSession {
             const short = answerBeganInsideData(options.dataTail.bytes, this.link.view().subarray(0, frame.end));
             if (short !== null) {
               throw new EdlError(`${options.dataTail.what}: the programmer's closing answer began inside the sector data (the data is ${short} byte(s) short), so the last ${short} byte(s) delivered are the programmer's own text, not the disk's. Nothing from this read can be trusted.`);
-            }
-            const swallowed = dataEndsWithAnswer(options.dataTail.bytes, options.dataTail.boundaries);
-            if (swallowed !== null) {
-              throw new EdlError(`${options.dataTail.what}: the sector data ends with a complete message from the programmer (${swallowed} byte(s) of text), so the data came up at least that many bytes short and its last bytes are not the disk's. Nothing from this read can be trusted.`);
             }
           }
           documents += 1;
@@ -683,20 +674,21 @@ export class FirehoseSession {
       const owed = count * sectorSize;
       let remaining = owed;
       let tail: Uint8Array = new Uint8Array(0);
-      const boundaries: number[] = [];
+      const watch = new RawMessageWatch();
       while (remaining > 0) {
         const ends: number[] = [];
         const chunk = await this.link.readSome(Math.min(remaining, 64 * 1024), edlTimeouts.dataInactivity, `${label} (${remaining} byte(s) still to come)`, ends);
-        // A transfer the device ended inside the last stretch of the data is where a message of its own may have begun.
-        for (const end of ends) {
-          const before = remaining - end;
-          if (before > 0 && before <= DATA_TAIL_BYTES) boundaries.push(before);
-        }
         remaining -= chunk.byteLength;
+        // The programmer sends each message of its own as a transfer of its own: a stretch of the data between two ends of the
+        // device's transfers that is nothing but such messages is not the disk's, and nothing of this read can be trusted.
+        const message = watch.feed(chunk, ends, remaining === 0);
+        if (message) {
+          throw new EdlError(`${label}: ${message.length} byte(s) of the sector data, starting at byte ${message.at} of ${owed}, are a complete message from the programmer (a log line or an answer) that arrived as a transfer of its own, so the data is that many bytes short and those bytes are not the disk's. Nothing from this read can be trusted.`);
+        }
         tail = lastBytes(tail, chunk, DATA_TAIL_BYTES);
         yield chunk;
       }
-      const closing = await this.collect({ label: `${label}, closing answer`, timeoutMs: edlTimeouts.command, until: "response", strict: true, dataTail: { bytes: tail, what: label, boundaries } });
+      const closing = await this.collect({ label: `${label}, closing answer`, timeoutMs: edlTimeouts.command, until: "response", strict: true, dataTail: { bytes: tail, what: label } });
       this.requireAck(closing, label, "false");
     }
   }
