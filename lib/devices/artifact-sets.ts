@@ -198,3 +198,8 @@ export function shortArtifactName(name: string): string {
   const dump = /^(.+?)\.bin$/.exec(rest);
   return dump ? dump[1]! : rest;
 }
+
+/** What a set is called in a file or folder name: its device, protocol and command, such as "Lenovo QUSB__BULK EDL backup". */
+export function setFileLabel(set: ArtifactSet): string {
+  return [set.label, set.protocol?.toUpperCase(), set.command ?? set.action].filter((part): part is string => Boolean(part)).join(" ") || "Device files";
+}

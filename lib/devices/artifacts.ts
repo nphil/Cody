@@ -2,7 +2,9 @@ import type { OperationArtifacts } from "./operations";
 import { encodeFilePathForApi } from "@/lib/file-paths";
 import { hashBlobWithCrc } from "./blob-stream";
 import type { StreamArtifact } from "./flasher";
-import { groupArtifactSets, setSaveState } from "./artifact-sets";
+import { groupArtifactSets, setFileLabel, setSaveState } from "./artifact-sets";
+import { archiveFileName, browserDownloadSink, exportArchive, type ArchiveInput, type DownloadSink } from "./artifact-download";
+import { listServerSaves, uploadToServer, type SaveBegun, type ServerSave, type UploadFile } from "./artifact-upload";
 import {
   DeviceArtifactError,
   type ArtifactProvenance,
@@ -12,6 +14,11 @@ import {
   type DeviceArtifactKind,
   type DeviceArtifactSource,
   type SetSaveState,
+  type DownloadResult,
+  type ServerSaveResult,
+  type TransferJob,
+  type TransferOptions,
+  type TransferProgress,
 } from "./artifact-model";
 
 export { DeviceArtifactError } from "./artifact-model";
@@ -181,15 +188,66 @@ class IndexedDbArtifactPersistence {
   }
 }
 
+export interface DeviceArtifactStoreOptions {
+  /** The network, for tests; a page uses its own `fetch`. */
+  readonly fetch?: FetchLike;
+  /** Where a downloaded archive goes, for tests; a page uses the browser's picker or download. */
+  readonly sink?: DownloadSink;
+  /** How long an upload waits before trying a failed request again, for tests; the uploader's own schedule otherwise. */
+  readonly retryDelaysMs?: readonly number[];
+}
+
+export type TransferJobListener = (jobs: readonly TransferJob[]) => void;
+
+/** How many finished transfers a session keeps listed. */
+const MAX_FINISHED_JOBS = 20;
+/** Progress reaches listeners at most this often, like an operation's does. */
+const JOB_NOTIFY_MS = 200;
+
+function copyKey(artifact: { readonly sha256: string; readonly size: number }): string {
+  return `${artifact.sha256}:${artifact.size}`;
+}
+
+function serverFilePath(folder: string, file: string): string {
+  return `${folder}${folder.includes("\\") && !folder.includes("/") ? "\\" : "/"}${file}`;
+}
+
+function asArtifactError(error: unknown): DeviceArtifactError {
+  if (error instanceof DeviceArtifactError) return error;
+  return new DeviceArtifactError(error instanceof Error ? error.message : String(error));
+}
+
 /**
  * A page-session artifact store. Browser Blobs remain out of operation frames;
  * only opaque ids and hashes cross the operation boundary. Each add/save waits
  * for IndexedDB commit, allowing escrow to survive a reload before a flash.
+ *
+ * It also turns a session's files into the two things a person wants of a backup: ONE zip to keep
+ * (`downloadArtifacts`, `downloadSet`) and a verified copy on the server (`saveArtifactsToServer`,
+ * `saveSetToServer`). Both stream, and both are listed as transfers (`jobs`, `subscribeJobs`, `cancelJob`) whether
+ * the person or an agent started them.
  */
 export class DeviceArtifactStore implements OperationArtifacts {
   private readonly sessions = new Map<string, Map<string, StoredDeviceArtifact>>();
   private readonly listeners = new Map<string, Set<DeviceArtifactListener>>();
   private readonly persistence = new IndexedDbArtifactPersistence();
+  private readonly fetchImpl: FetchLike;
+  private readonly sink: DownloadSink;
+  private readonly retryDelaysMs: readonly number[] | undefined;
+  /** What the server holds of each session's files, by SHA-256 and size (see ArtifactServerCopy). */
+  private readonly serverCopies = new Map<string, Map<string, ArtifactServerCopy>>();
+  /** CRC-32 of files saved before it was recorded, worked out once per page session. */
+  private readonly checksums = new Map<string, number>();
+  private readonly transfers = new Map<string, TransferJob[]>();
+  private readonly transferControllers = new Map<string, AbortController>();
+  private readonly transferListeners = new Map<string, Set<TransferJobListener>>();
+  private readonly transferTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  constructor(options: DeviceArtifactStoreOptions = {}) {
+    this.fetchImpl = options.fetch ?? ((input, init) => fetch(input, init));
+    this.sink = options.sink ?? browserDownloadSink;
+    this.retryDelaysMs = options.retryDelaysMs;
+  }
 
   private entries(sessionId: string): Map<string, StoredDeviceArtifact> {
     let entries = this.sessions.get(sessionId);
@@ -210,6 +268,7 @@ export class DeviceArtifactStore implements OperationArtifacts {
     const persisted = await this.persistence.list(sessionId);
     for (const artifact of persisted) entries.set(artifact.id, artifact);
     this.publish(sessionId);
+    void this.refreshServerCopies(sessionId);
     return this.list(sessionId);
   }
 
@@ -277,9 +336,10 @@ export class DeviceArtifactStore implements OperationArtifacts {
   }
 
   list(sessionId: string): readonly DeviceArtifact[] {
+    const copies = this.serverCopies.get(sessionId);
     return [...this.entries(sessionId).values()]
       .sort((left, right) => right.createdAt - left.createdAt)
-      .map((artifact) => artifactMetadata(artifact));
+      .map((artifact) => artifactMetadata(artifact, copies?.get(copyKey(artifact))));
   }
 
   async getInput(sessionId: string, fileId: string): Promise<Blob | undefined> {
@@ -336,9 +396,14 @@ export class DeviceArtifactStore implements OperationArtifacts {
   /** Every listed file of this session that exists, gone from memory and from the escrow; how many that was. */
   async removeMany(sessionId: string, artifactIds: readonly string[]): Promise<number> {
     const entries = this.entries(sessionId);
+    const doomed = new Set(artifactIds);
+    // A transfer of a file the person just removed is stopped, not left to finish with bytes they asked to drop.
+    for (const job of this.jobs(sessionId)) {
+      if (job.state === "running" && job.artifactIds.some((id) => doomed.has(id))) this.transferControllers.get(job.id)?.abort();
+    }
     let removed = 0;
     try {
-      for (const id of new Set(artifactIds)) {
+      for (const id of doomed) {
         if (!entries.has(id)) continue;
         await this.persistence.delete(sessionId, id);
         entries.delete(id);
@@ -355,16 +420,293 @@ export class DeviceArtifactStore implements OperationArtifacts {
     return groupArtifactSets(this.list(sessionId));
   }
 
-  async removeSet(sessionId: string, setId: string): Promise<number> {
+  private requireSet(sessionId: string, setId: string): ArtifactSet {
     const set = this.sets(sessionId).find((candidate) => candidate.id === setId);
     if (!set) throw new DeviceArtifactError("This set is no longer in the current session.", "not-found");
-    return this.removeMany(sessionId, set.artifactIds);
+    return set;
+  }
+
+  async removeSet(sessionId: string, setId: string): Promise<number> {
+    return this.removeMany(sessionId, this.requireSet(sessionId, setId).artifactIds);
   }
 
   getSetSaveState(sessionId: string, setId: string): SetSaveState {
     const artifacts = this.list(sessionId);
     const set = groupArtifactSets(artifacts).find((candidate) => candidate.id === setId);
     return set ? setSaveState(set, artifacts) : { state: "none" };
+  }
+
+  /**
+   * Asks the server which of this session's files it holds a verified copy of, and marks them (`artifact.server`).
+   * Never throws: a server that cannot be asked just means nothing new is shown as saved.
+   */
+  async refreshServerCopies(sessionId: string): Promise<void> {
+    let saves: readonly ServerSave[];
+    try {
+      saves = await listServerSaves(sessionId, this.fetchImpl);
+    } catch {
+      return;
+    }
+    const next = new Map<string, ArtifactServerCopy>();
+    for (const save of saves) {
+      for (const file of save.files) {
+        next.set(copyKey(file), { saveId: save.saveId, path: serverFilePath(save.folder, file.path), folder: save.folder, savedAt: save.completedAt ?? save.createdAt, verified: save.verified });
+      }
+    }
+    const previous = this.serverCopies.get(sessionId);
+    const unchanged = previous && previous.size === next.size && [...next].every(([key, copy]) => previous.get(key)?.saveId === copy.saveId && previous.get(key)?.savedAt === copy.savedAt);
+    if (unchanged) return;
+    this.serverCopies.set(sessionId, next);
+    this.publish(sessionId);
+  }
+
+  // -------------------------------------------------------------------------------------------------------------------
+  // Transfers: one zip to keep, a verified copy on the server
+  // -------------------------------------------------------------------------------------------------------------------
+
+  /** Every transfer of this session in the order they started, the person's and an agent's alike; the latest 20 finished ones stay listed. */
+  jobs(sessionId: string): readonly TransferJob[] {
+    return this.transfers.get(sessionId) ?? [];
+  }
+
+  subscribeJobs(sessionId: string, listener: TransferJobListener): () => void {
+    let listeners = this.transferListeners.get(sessionId);
+    if (!listeners) {
+      listeners = new Set();
+      this.transferListeners.set(sessionId, listeners);
+    }
+    listeners.add(listener);
+    listener(this.jobs(sessionId));
+    return () => {
+      const current = this.transferListeners.get(sessionId);
+      current?.delete(listener);
+      if (current?.size === 0) this.transferListeners.delete(sessionId);
+    };
+  }
+
+  /** Stops a running transfer; false when there is none by that id. A cancelled save keeps what already reached the server. */
+  cancelJob(sessionId: string, jobId: string): boolean {
+    const job = this.jobs(sessionId).find((candidate) => candidate.id === jobId);
+    if (job?.state !== "running") return false;
+    this.transferControllers.get(jobId)?.abort();
+    return true;
+  }
+
+  private notifyJobs(sessionId: string, immediately: boolean): void {
+    const flush = (): void => {
+      clearTimeout(this.transferTimers.get(sessionId));
+      this.transferTimers.delete(sessionId);
+      const snapshot = [...this.jobs(sessionId)];
+      for (const listener of this.transferListeners.get(sessionId) ?? []) listener(snapshot);
+    };
+    if (immediately) flush();
+    else if (!this.transferTimers.has(sessionId)) this.transferTimers.set(sessionId, setTimeout(flush, JOB_NOTIFY_MS));
+  }
+
+  private putJob(sessionId: string, job: TransferJob, immediately: boolean): void {
+    const jobs = [...this.jobs(sessionId)];
+    const index = jobs.findIndex((candidate) => candidate.id === job.id);
+    if (index >= 0) jobs[index] = job;
+    else jobs.push(job);
+    // Finished transfers beyond the latest MAX_FINISHED_JOBS are forgotten, oldest first; a running one never is.
+    let finished = jobs.filter((candidate) => candidate.state !== "running").length;
+    for (let at = 0; at < jobs.length && finished > MAX_FINISHED_JOBS;) {
+      if (jobs[at]!.state === "running") at += 1;
+      else {
+        jobs.splice(at, 1);
+        finished -= 1;
+      }
+    }
+    this.transfers.set(sessionId, jobs);
+    this.notifyJobs(sessionId, immediately);
+  }
+
+  private runTransfer<Result extends DownloadResult | ServerSaveResult>(
+    sessionId: string,
+    spec: { kind: TransferJob["kind"]; setId?: string; artifactIds: readonly string[]; label: string; origin: TransferJob["origin"]; total: number; totalBytes: number; phase: TransferProgress["phase"] },
+    outer: AbortSignal | undefined,
+    work: (control: { signal: AbortSignal; progress: (progress: TransferProgress) => void }) => Promise<Result>,
+  ): { id: string; finished: Promise<Result> } {
+    const id = cryptoApi().randomUUID();
+    const controller = new AbortController();
+    if (outer?.aborted) controller.abort();
+    else outer?.addEventListener("abort", () => controller.abort(), { once: true });
+    this.transferControllers.set(id, controller);
+    let job: TransferJob = {
+      id,
+      kind: spec.kind,
+      ...(spec.setId ? { setId: spec.setId } : {}),
+      artifactIds: spec.artifactIds,
+      label: spec.label,
+      state: "running",
+      progress: { phase: spec.phase, done: 0, total: spec.total, bytes: 0, totalBytes: spec.totalBytes },
+      startedAt: Date.now(),
+      origin: spec.origin,
+    };
+    this.putJob(sessionId, job, true);
+    const settle = (patch: Partial<TransferJob>): void => {
+      job = { ...job, ...patch, endedAt: Date.now() };
+      this.transferControllers.delete(id);
+      this.putJob(sessionId, job, true);
+    };
+    const finished = work({
+      signal: controller.signal,
+      progress: (progress) => {
+        job = { ...job, progress };
+        this.putJob(sessionId, job, false);
+      },
+    }).then(
+      (result) => {
+        settle({ state: "succeeded", result });
+        return result;
+      },
+      (error: unknown) => {
+        const failure = asArtifactError(error);
+        settle(failure.code === "aborted" ? { state: "cancelled" } : { state: "failed", error: { code: failure.code, message: failure.message } });
+        throw failure;
+      },
+    );
+    return { id, finished };
+  }
+
+  /** The stored files for these ids, oldest first, loaded from the escrow when they are not in memory. */
+  private async loadStored(sessionId: string, artifactIds: readonly string[]): Promise<StoredDeviceArtifact[]> {
+    const found: StoredDeviceArtifact[] = [];
+    for (const id of new Set(artifactIds)) {
+      await this.getInput(sessionId, id);
+      const stored = this.entries(sessionId).get(id);
+      if (!stored) throw new DeviceArtifactError("One of the selected files is no longer in this session. Refresh the list and try again.", "not-found");
+      found.push(stored);
+    }
+    return found.sort((left, right) => left.createdAt - right.createdAt || (left.name < right.name ? -1 : 1));
+  }
+
+  private selectedBytes(sessionId: string, artifactIds: readonly string[]): number {
+    const entries = this.entries(sessionId);
+    return artifactIds.reduce((total, id) => total + (entries.get(id)?.size ?? 0), 0);
+  }
+
+  /**
+   * One .zip of these files (ZIP64 where a size needs it, every entry stored, with `SHA256SUMS` and `manifest.json`
+   * inside). Call it straight from the click: where the browser has a Save-as picker it opens first, which needs that
+   * click's user activation. Resolves when the archive is fully written (picker) or handed to the browser's download.
+   */
+  async downloadArtifacts(sessionId: string, artifactIds: readonly string[], options: TransferOptions & { archiveName?: string; label?: string; setId?: string; origin?: TransferJob["origin"] } = {}): Promise<DownloadResult> {
+    const ids = [...new Set(artifactIds)];
+    if (ids.length === 0) throw new DeviceArtifactError("There is nothing to download.", "not-found");
+    const label = options.label ?? "Device files";
+    const fileName = options.archiveName ?? archiveFileName(label, Date.now());
+    const chosen = this.sink.choose(fileName);
+    chosen.catch(() => undefined);
+    const { finished } = this.runTransfer(
+      sessionId,
+      { kind: "download", ...(options.setId ? { setId: options.setId } : {}), artifactIds: ids, label, origin: options.origin ?? "user", total: ids.length, totalBytes: this.selectedBytes(sessionId, ids), phase: "checking" },
+      options.signal,
+      async ({ signal, progress }) => {
+        const stored = await this.loadStored(sessionId, ids);
+        const entries: ArchiveInput[] = stored.map((artifact) => ({
+          id: artifact.id,
+          name: artifact.name,
+          size: artifact.size,
+          sha256: artifact.sha256,
+          kind: artifact.kind,
+          source: artifact.source,
+          createdAt: artifact.createdAt,
+          ...(artifact.provenance ? { provenance: artifact.provenance } : {}),
+          ...(artifact.crc32 === undefined ? {} : { crc32: artifact.crc32 }),
+          blob: artifact.blob,
+        }));
+        return exportArchive(entries, {
+          sessionId,
+          label,
+          fileName,
+          sink: this.sink,
+          chosen,
+          signal,
+          onProgress: (value) => {
+            progress(value);
+            options.onProgress?.(value);
+          },
+          knownCrc: (entry) => this.checksums.get(copyKey(entry)),
+          rememberCrc: (entry, crc) => this.checksums.set(copyKey(entry), crc),
+        });
+      },
+    );
+    // A file the person picked but that was never written to (the transfer failed first) is not left half-open.
+    finished.catch(async () => {
+      const target = await chosen.catch(() => undefined);
+      if (target && !target.locked) await target.abort().catch(() => undefined);
+    });
+    return finished;
+  }
+
+  async downloadSet(sessionId: string, setId: string, options: TransferOptions & { label?: string } = {}): Promise<DownloadResult> {
+    const set = this.requireSet(sessionId, setId);
+    return this.downloadArtifacts(sessionId, set.artifactIds, { ...options, label: options.label ?? setFileLabel(set), setId });
+  }
+
+  /**
+   * Begins saving these files to the server and returns at once: `begun` settles when the server has accepted the
+   * announcement (so the folder is known), `finished` when every file is stored, re-read from the server's disk and
+   * matched. An agent's save uses this so it can answer the agent before the bytes have moved.
+   */
+  startServerSave(sessionId: string, artifactIds: readonly string[], options: TransferOptions & { label?: string; setId?: string; origin?: TransferJob["origin"] } = {}): { jobId: string; begun: Promise<SaveBegun>; finished: Promise<ServerSaveResult> } {
+    const ids = [...new Set(artifactIds)];
+    if (ids.length === 0) throw new DeviceArtifactError("There are no files to save.", "not-found");
+    const label = options.label ?? "Device files";
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const begun = Promise.withResolvers<SaveBegun>();
+    begun.promise.catch(() => undefined);
+    const { id, finished } = this.runTransfer(
+      sessionId,
+      { kind: "save", ...(options.setId ? { setId: options.setId } : {}), artifactIds: ids, label, origin: options.origin ?? "user", total: ids.length, totalBytes: this.selectedBytes(sessionId, ids), phase: "uploading" },
+      options.signal,
+      async ({ signal, progress }) => {
+        try {
+          const stored = await this.loadStored(sessionId, ids);
+          const files: UploadFile[] = stored.map((artifact) => ({
+            artifactId: artifact.id,
+            name: artifact.name,
+            size: artifact.size,
+            sha256: artifact.sha256,
+            kind: artifact.kind,
+            source: artifact.source,
+            createdAt: artifact.createdAt,
+            ...(artifact.provenance ? { provenance: artifact.provenance } : {}),
+            blob: artifact.blob,
+          }));
+          const result = await uploadToServer(files, {
+            sessionId,
+            label,
+            signal,
+            fetch: this.fetchImpl,
+            ...(this.retryDelaysMs ? { retryDelaysMs: this.retryDelaysMs } : {}),
+            ...(timeZone ? { timeZone } : {}),
+            onBegun: (info) => begun.resolve(info),
+            onProgress: (value) => {
+              progress(value);
+              options.onProgress?.(value);
+            },
+          });
+          await this.refreshServerCopies(sessionId);
+          return result;
+        } catch (error) {
+          begun.reject(asArtifactError(error));
+          throw error;
+        }
+      },
+    );
+    return { jobId: id, begun: begun.promise, finished };
+  }
+
+  /** Saves these files to the server and resolves when every one is stored there and verified (see startServerSave). */
+  saveArtifactsToServer(sessionId: string, artifactIds: readonly string[], options: TransferOptions & { label?: string } = {}): Promise<ServerSaveResult> {
+    return this.startServerSave(sessionId, artifactIds, options).finished;
+  }
+
+  saveSetToServer(sessionId: string, setId: string, options: TransferOptions & { label?: string } = {}): Promise<ServerSaveResult> {
+    const set = this.requireSet(sessionId, setId);
+    return this.startServerSave(sessionId, set.artifactIds, { ...options, label: options.label ?? setFileLabel(set), setId }).finished;
   }
 
   /** Deliberate user export: no automatic downloads are created for device output. */

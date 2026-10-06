@@ -139,6 +139,8 @@ export interface ServerSaveResult {
   readonly verified: boolean;
   /** The save carried on from bytes an earlier attempt had already stored. */
   readonly resumed: boolean;
+  /** The same files were already saved here, so nothing was sent. */
+  readonly alreadySaved?: boolean;
 }
 
 export interface TransferJob {

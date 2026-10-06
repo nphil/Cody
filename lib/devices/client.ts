@@ -39,6 +39,9 @@ import { TunnelClient } from "./tunnel-client";
 import { parseTunnelMessage } from "./tunnel";
 import { deviceTrustKey, type DeviceTrustSubject } from "./trust";
 import { deviceTrustHub } from "./trust-hub";
+import { parseArtifactSaveFrame, runArtifactSave } from "./artifact-agent";
+import { deviceArtifacts } from "./artifacts";
+import type { DeviceArtifactSaveFrame } from "./protocol";
 
 /**
  * TypeScript's bundled DOM lib does not yet ship the User-Agent Client Hints
@@ -748,7 +751,7 @@ function isDeviceActivity(value: unknown): value is DeviceActivity {
     && isNonNegativeFiniteNumber(candidate.inFlight.startedAt);
 }
 
-function parseServerFrame(raw: unknown): DeviceServerFrame | null {
+function parseServerFrame(raw: unknown): Exclude<DeviceServerFrame, DeviceArtifactSaveFrame> | null {
   let payload: unknown = raw;
   if (typeof raw === "string") {
     try {
@@ -1586,6 +1589,19 @@ export class DeviceBridgeConnection implements PageOperationBridge {
     this.send(frame);
   }
 
+  /** An agent asked for files to be saved to the server: start the same save the button starts, and answer once the server accepted it. */
+  private async handleArtifactSave(frame: DeviceArtifactSaveFrame): Promise<void> {
+    if (this.authorityRevoked) {
+      this.send({ type: "result", id: frame.id, status: "error", error: "Device host authority was replaced." });
+      return;
+    }
+    try {
+      this.send({ type: "result", id: frame.id, status: "ok", value: await runArtifactSave(deviceArtifacts, this.sessionId, frame) });
+    } catch (error) {
+      this.send({ type: "result", id: frame.id, status: "error", error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
   private async handleOperationCommand(command: PageOperationCommand): Promise<void> {
     if (this.authorityRevoked) {
       this.send({ type: "result", id: command.id, status: "error", error: "Device host authority was replaced." });
@@ -1612,6 +1628,11 @@ export class DeviceBridgeConnection implements PageOperationBridge {
   }
 
   private async handleMessage(event: MessageEvent): Promise<void> {
+    const artifactSave = parseArtifactSaveFrame(event.data);
+    if (artifactSave) {
+      await this.handleArtifactSave(artifactSave);
+      return;
+    }
     const operation = operationCommandFrom(event.data);
     if (operation) {
       await this.handleOperationCommand(operation);

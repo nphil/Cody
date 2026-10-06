@@ -403,6 +403,35 @@ async function main() {
       return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to send monitor input" }] };
     }
   });
+  server.registerTool("device_artifacts_save", {
+    description: "Save files this chat's browser holds (a backup's partitions, dumps, pulls) to the Cody server, where you and the NAS can read them: uploaded in slices, every file re-read from the server's disk and checked against its SHA-256, then a manifest.json and SHA256SUMS are written and the finished folder appears in one step. Name operationId/operationIds, fileIds or all: true. Returns the folder path, or follow it with device_artifacts_status. The upload runs in the user's browser and continues only while the tab stays open.",
+    inputSchema: {
+      operationId: z.string().optional().describe("Save every file this operation made."),
+      operationIds: z.array(z.string()).optional().describe("Save every file these operations made."),
+      fileIds: z.array(z.string()).optional().describe("Save these session artifacts by id."),
+      all: z.boolean().optional().describe("Save every device output of this chat."),
+      label: z.string().optional().describe("Names the folder: <date>-<label>."),
+      waitSeconds: z.number().min(0).max(110).optional().describe("How long to wait for the save to finish before answering, 0 to 110 (default 60)."),
+    },
+  }, async (input) => {
+    try {
+      const text = await callDeviceTool("device_artifacts_save", input);
+      return { content: [{ type: "text", text }] };
+    } catch (error) {
+      return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to save the files" }] };
+    }
+  });
+  server.registerTool("device_artifacts_status", {
+    description: "Follow a save started with device_artifacts_save: files verified, bytes stored, and when done the folder, manifest and checksum file. Defaults to the latest save of this chat.",
+    inputSchema: { saveId: z.string().optional().describe("The save id device_artifacts_save returned.") },
+  }, async (input) => {
+    try {
+      const text = await callDeviceTool("device_artifacts_status", input);
+      return { content: [{ type: "text", text }] };
+    } catch (error) {
+      return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to read the save" }] };
+    }
+  });
   await server.connect(new StdioServerTransport());
 }
 

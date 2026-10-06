@@ -273,7 +273,38 @@ export interface DeviceOperationRequestFrame {
   command: PageOperationCommand;
 }
 
-export type DeviceServerFrame = DeviceRequestFrame | DeviceActivityFrame | DeviceOperationRequestFrame | TunnelFrame;
+/**
+ * Which of a chat's files an agent wants saved to the server: every file an operation made, explicit files, or every
+ * output. The page resolves it against its own files; the server never names a file the page does not hold.
+ */
+export interface ArtifactSaveSelection {
+  operationIds?: readonly string[];
+  fileIds?: readonly string[];
+  all?: boolean;
+}
+
+/** Server -> page: an agent asked for files to be saved to the server. The page answers with a `result` frame carrying an `ArtifactSaveAck`. */
+export interface DeviceArtifactSaveFrame {
+  type: "artifacts.save";
+  /** Correlates the result; unique per bridge. */
+  id: string;
+  selection: ArtifactSaveSelection;
+  label?: string;
+}
+
+/** What the page tells the agent once the server has accepted the save, before the bytes have moved. */
+export interface ArtifactSaveAck {
+  saveId: string;
+  /** Where the save is, or will be once it completes. */
+  folder: string;
+  files: number;
+  bytes: number;
+  resumed: boolean;
+  /** The same files were already there: nothing is uploaded. */
+  alreadySaved: boolean;
+}
+
+export type DeviceServerFrame = DeviceRequestFrame | DeviceActivityFrame | DeviceOperationRequestFrame | DeviceArtifactSaveFrame | TunnelFrame;
 
 /** How often the activity feed is pushed while a link is busy. Faster than a
  * person reads a changing number, slow enough to cost nothing next to the

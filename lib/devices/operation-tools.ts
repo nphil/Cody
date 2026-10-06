@@ -6,6 +6,7 @@ import type { HardwareAction, HardwareProtocol } from "./flasher";
 import { MAX_SEND_DELAY_SECONDS } from "./protocol";
 import { parseDeviceSpec, parseHostSpec } from "./tunnel";
 import type { DeviceOperationRequest, DeviceOperationSnapshot } from "./operations";
+import { DEVICE_ARTIFACT_TOOLS } from "./artifact-tools";
 
 export interface DeviceOperationToolContext {
   bridge: DeviceBridge;
@@ -381,6 +382,7 @@ export const DEVICE_OPERATION_TOOLS: DeviceOperationToolDefinition[] = [
     parameters: { type: "object", properties: { operationId: { type: "string" }, text: { type: "string" } }, required: ["operationId", "text"] },
     handler: monitorSend,
   },
+  ...DEVICE_ARTIFACT_TOOLS,
 ];
 
 for (const tool of DEVICE_OPERATION_TOOLS) {

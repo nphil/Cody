@@ -29,6 +29,8 @@ import {
   type DeviceInfo,
   type DeviceOpName,
   type DeviceServerFrame,
+  type ArtifactSaveAck,
+  type ArtifactSaveSelection,
 } from "./protocol";
 import type {
   DeviceOperationRequest,
@@ -36,6 +38,7 @@ import type {
   OperationEvent,
   PageOperationCommand,
 } from "./operations";
+import { isRecord } from "../type-guards";
 
 import { TunnelHost } from "./tunnel-host";
 
@@ -202,6 +205,8 @@ export class DeviceBridge {
   private waiters = new Map<string, Set<() => void>>();
   private pending = new Map<string, Pending>();
   private send: Sender | null = null;
+  /** The saves this session's agent started through `requestArtifactSave`, newest last: the status tool answers for these and no others. */
+  private readonly artifactSaveIds: string[] = [];
   private hostGeneration = 0;
   private revokeHost: (() => void) | null = null;
   private nextOpId = 1;
@@ -560,6 +565,50 @@ export class DeviceBridge {
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
+  }
+
+  /**
+   * Asks the page to save files to the server (the files are in its browser, so only it can). Resolves when the page has
+   * started the save and the server accepted it, not when the bytes have moved; the save is then followed on the server
+   * by its id. Rejects with the page's own plain-English reason when it cannot (nothing matches, the server refused).
+   */
+  async requestArtifactSave(selection: ArtifactSaveSelection, label?: string): Promise<ArtifactSaveAck> {
+    const send = this.send;
+    if (!send) {
+      throw new Error("No browser is attached to this session, so its saved files are unreachable. Open this chat in Cody in a browser tab and keep it open.");
+    }
+    const id = String(this.nextOpId++);
+    const answer = await new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error("The browser did not acknowledge the save within " + Math.round(DEVICE_LIVENESS_TIMEOUT_MS / 1000) + "s; it may be asleep or closed."));
+      }, DEVICE_LIVENESS_TIMEOUT_MS);
+      this.pending.set(id, { resolve, reject, timer, deviceId: "artifacts" });
+      try {
+        send({ type: "artifacts.save", id, selection, ...(label ? { label } : {}) });
+      } catch (error) {
+        this.pending.delete(id);
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+    if (!isRecord(answer) || typeof answer.saveId !== "string" || typeof answer.folder !== "string") {
+      throw new Error("The browser answered the save request with something this server does not understand.");
+    }
+    const ack = answer as unknown as ArtifactSaveAck;
+    this.artifactSaveIds.push(ack.saveId);
+    while (this.artifactSaveIds.length > 20) this.artifactSaveIds.shift();
+    return ack;
+  }
+
+  /** Whether this session's agent started the save, and so may ask about it. */
+  startedArtifactSave(saveId: string): boolean {
+    return this.artifactSaveIds.includes(saveId);
+  }
+
+  /** The save this session's agent started most recently, if any. */
+  latestArtifactSave(): string | undefined {
+    return this.artifactSaveIds.at(-1);
   }
 
   /** Starts a durable page-side run and waits only for page acceptance, not completion. */
