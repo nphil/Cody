@@ -1,26 +1,40 @@
 import type { OperationArtifacts } from "./operations";
 import { encodeFilePathForApi } from "@/lib/file-paths";
-import { hashBlob } from "./blob-stream";
+import { hashBlobWithCrc } from "./blob-stream";
 import type { StreamArtifact } from "./flasher";
+import { groupArtifactSets, setSaveState } from "./artifact-sets";
+import {
+  DeviceArtifactError,
+  type ArtifactProvenance,
+  type ArtifactServerCopy,
+  type ArtifactSet,
+  type DeviceArtifact,
+  type DeviceArtifactKind,
+  type DeviceArtifactSource,
+  type SetSaveState,
+} from "./artifact-model";
 
-export type DeviceArtifactKind = "input" | "output";
-export type DeviceArtifactSource = "picker" | "drop" | "server-file" | "device";
-
-/** Metadata is intentionally separate from the Blob so consumers can render a
- * session's artifact list without taking ownership of the bytes. */
-export interface DeviceArtifact {
-  readonly id: string;
-  readonly name: string;
-  readonly size: number;
-  readonly mime: string;
-  readonly sha256: string;
-  readonly kind: DeviceArtifactKind;
-  readonly source: DeviceArtifactSource;
-  readonly createdAt: number;
-}
+export { DeviceArtifactError } from "./artifact-model";
+export type {
+  ArtifactProvenance,
+  ArtifactServerCopy,
+  ArtifactSet,
+  DeviceArtifact,
+  DeviceArtifactErrorCode,
+  DeviceArtifactKind,
+  DeviceArtifactSource,
+  DownloadResult,
+  ServerSaveResult,
+  SetSaveState,
+  TransferJob,
+  TransferOptions,
+  TransferProgress,
+} from "./artifact-model";
 
 interface StoredDeviceArtifact extends DeviceArtifact {
   readonly blob: Blob;
+  /** CRC-32 of the bytes, taken with the SHA-256 when the file was saved; a ZIP entry needs it. Files saved earlier have none. */
+  readonly crc32?: number;
 }
 
 interface PersistedDeviceArtifact {
@@ -29,16 +43,10 @@ interface PersistedDeviceArtifact {
   readonly artifact: StoredDeviceArtifact;
 }
 
-export class DeviceArtifactError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "DeviceArtifactError";
-  }
-}
-
 export interface AddDeviceArtifactOptions {
   readonly kind?: DeviceArtifactKind;
   readonly source?: DeviceArtifactSource;
+  readonly provenance?: ArtifactProvenance;
 }
 
 export type DeviceArtifactListener = (artifacts: readonly DeviceArtifact[]) => void;
@@ -65,17 +73,34 @@ function filenameFromPath(filePath: string): string {
   return normalizeName(segment ?? "server-file");
 }
 
-function artifactMetadata(artifact: StoredDeviceArtifact): DeviceArtifact {
+function artifactMetadata(artifact: StoredDeviceArtifact, server?: ArtifactServerCopy): DeviceArtifact {
   return {
     id: artifact.id, name: artifact.name, size: artifact.size, mime: artifact.mime, sha256: artifact.sha256,
     kind: artifact.kind, source: artifact.source, createdAt: artifact.createdAt,
+    ...(artifact.provenance ? { provenance: artifact.provenance } : {}),
+    ...(server ? { server } : {}),
   };
 }
 function artifactKey(sessionId: string, artifactId: string): string {
   return `${sessionId}:${artifactId}`;
 }
 
-async function sha256(blob: Blob): Promise<string> { return hashBlob(blob); }
+const MAX_PROVENANCE_TEXT = 200;
+
+/** The provenance an operation hands over, bounded and stripped to its known fields before it is stored. */
+function cleanProvenance(provenance: ArtifactProvenance | undefined): ArtifactProvenance | undefined {
+  if (!provenance) return undefined;
+  const text = (value: string | undefined): string | undefined => (typeof value === "string" && value.trim() ? value.slice(0, MAX_PROVENANCE_TEXT) : undefined);
+  const operationId = text(provenance.operationId);
+  const deviceId = text(provenance.deviceId);
+  const protocol = text(provenance.protocol);
+  const action = text(provenance.action);
+  if (!operationId || !deviceId || !protocol || !action) return undefined;
+  const target = text(provenance.target);
+  const command = text(provenance.command);
+  const label = text(provenance.label);
+  return { operationId, deviceId, protocol, action, ...(target ? { target } : {}), ...(command ? { command } : {}), ...(label ? { label } : {}) };
+}
 
 function waitForTransaction<T>(transaction: IDBTransaction, request: IDBRequest<T>): Promise<T> {
   const { promise, resolve, reject } = Promise.withResolvers<T>();
@@ -190,15 +215,20 @@ export class DeviceArtifactStore implements OperationArtifacts {
 
   async add(sessionId: string, file: Blob, name: string, options: AddDeviceArtifactOptions = {}): Promise<DeviceArtifact> {
     if (!(file instanceof Blob)) throw new DeviceArtifactError("A browser Blob is required for a device artifact.");
+    cryptoApi();
+    const { sha256, crc32 } = await hashBlobWithCrc(file);
+    const provenance = cleanProvenance(options.provenance);
     const artifact: StoredDeviceArtifact = {
       id: cryptoApi().randomUUID(),
       name: normalizeName(name),
       size: file.size,
       mime: file.type || "application/octet-stream",
-      sha256: await sha256(file),
+      sha256,
+      crc32,
       kind: options.kind ?? "input",
       source: options.source ?? "picker",
       createdAt: Date.now(),
+      ...(provenance ? { provenance } : {}),
       blob: file,
     };
     await this.persistence.put(sessionId, artifact);
@@ -209,7 +239,7 @@ export class DeviceArtifactStore implements OperationArtifacts {
 
   /** Spool to browser-private disk; commit the Blob to escrow before deleting
    * the spool. No full-file JS array is ever constructed. */
-  async saveStream(sessionId: string, name: string, chunks: AsyncIterable<Uint8Array>, signal: AbortSignal): Promise<StreamArtifact> {
+  async saveStream(sessionId: string, name: string, chunks: AsyncIterable<Uint8Array>, signal: AbortSignal, provenance?: ArtifactProvenance): Promise<StreamArtifact> {
     if (!navigator.storage?.getDirectory) throw new DeviceArtifactError("This browser has no streaming file storage (OPFS).");
     const directory = await navigator.storage.getDirectory();
     const temporary = "cody-transfer-" + cryptoApi().randomUUID();
@@ -224,7 +254,7 @@ export class DeviceArtifactStore implements OperationArtifacts {
       signal.throwIfAborted();
       await writer.close();
       closed = true;
-      const artifact = await this.add(sessionId, await handle.getFile(), name, { kind: "output", source: "device" });
+      const artifact = await this.add(sessionId, await handle.getFile(), name, { kind: "output", source: "device", ...(provenance ? { provenance } : {}) });
       // Keep the independently escrowed Blob, not a File backed by the spool.
       const persisted = await this.persistence.get(sessionId, artifact.id);
       if (!persisted) throw new DeviceArtifactError("Streamed artifact escrow could not be read back.");
@@ -249,7 +279,7 @@ export class DeviceArtifactStore implements OperationArtifacts {
   list(sessionId: string): readonly DeviceArtifact[] {
     return [...this.entries(sessionId).values()]
       .sort((left, right) => right.createdAt - left.createdAt)
-      .map(artifactMetadata);
+      .map((artifact) => artifactMetadata(artifact));
   }
 
   async getInput(sessionId: string, fileId: string): Promise<Blob | undefined> {
@@ -279,8 +309,8 @@ export class DeviceArtifactStore implements OperationArtifacts {
     return persisted.blob;
   }
 
-  async save(sessionId: string, name: string, blob: Blob): Promise<string> {
-    const artifact = await this.add(sessionId, blob, name, { kind: "output", source: "device" });
+  async save(sessionId: string, name: string, blob: Blob, provenance?: ArtifactProvenance): Promise<string> {
+    const artifact = await this.add(sessionId, blob, name, { kind: "output", source: "device", ...(provenance ? { provenance } : {}) });
     return artifact.id;
   }
 
@@ -300,12 +330,41 @@ export class DeviceArtifactStore implements OperationArtifacts {
   }
 
   async remove(sessionId: string, artifactId: string): Promise<boolean> {
+    return (await this.removeMany(sessionId, [artifactId])) === 1;
+  }
+
+  /** Every listed file of this session that exists, gone from memory and from the escrow; how many that was. */
+  async removeMany(sessionId: string, artifactIds: readonly string[]): Promise<number> {
     const entries = this.entries(sessionId);
-    if (!entries.has(artifactId)) return false;
-    await this.persistence.delete(sessionId, artifactId);
-    entries.delete(artifactId);
-    this.publish(sessionId);
-    return true;
+    let removed = 0;
+    try {
+      for (const id of new Set(artifactIds)) {
+        if (!entries.has(id)) continue;
+        await this.persistence.delete(sessionId, id);
+        entries.delete(id);
+        removed += 1;
+      }
+    } finally {
+      if (removed > 0) this.publish(sessionId);
+    }
+    return removed;
+  }
+
+  /** The sets of this session's outputs, newest first (see ./artifact-sets.ts). */
+  sets(sessionId: string): readonly ArtifactSet[] {
+    return groupArtifactSets(this.list(sessionId));
+  }
+
+  async removeSet(sessionId: string, setId: string): Promise<number> {
+    const set = this.sets(sessionId).find((candidate) => candidate.id === setId);
+    if (!set) throw new DeviceArtifactError("This set is no longer in the current session.", "not-found");
+    return this.removeMany(sessionId, set.artifactIds);
+  }
+
+  getSetSaveState(sessionId: string, setId: string): SetSaveState {
+    const artifacts = this.list(sessionId);
+    const set = groupArtifactSets(artifacts).find((candidate) => candidate.id === setId);
+    return set ? setSaveState(set, artifacts) : { state: "none" };
   }
 
   /** Deliberate user export: no automatic downloads are created for device output. */

@@ -9,6 +9,7 @@ import type {
 } from "./flasher";
 import { hashBlob } from "./blob-stream";
 import type { StreamArtifact } from "./flasher";
+import type { ArtifactProvenance } from "./artifact-model";
 import { adbFlasher, adbWaitOptions } from "./adb";
 import { pause } from "./pause";
 import { MAX_SEND_DELAY_SECONDS } from "./protocol";
@@ -43,8 +44,9 @@ import { pageTrustBook } from "./trust-client";
  */
 export interface OperationArtifacts {
   getInput(sessionId: string, fileId: string): Promise<Blob | undefined>;
-  save(sessionId: string, name: string, data: Blob): Promise<string>;
-  saveStream?(sessionId: string, name: string, chunks: AsyncIterable<Uint8Array>, signal: AbortSignal): Promise<StreamArtifact>;
+  /** `provenance` says which operation made the file, so the panel can group a backup's files into one set. */
+  save(sessionId: string, name: string, data: Blob, provenance?: ArtifactProvenance): Promise<string>;
+  saveStream?(sessionId: string, name: string, chunks: AsyncIterable<Uint8Array>, signal: AbortSignal, provenance?: ArtifactProvenance): Promise<StreamArtifact>;
   /** A file of this session by its SHA-256, for a job (a backup-set restore) that names its parts by digest. */
   findBySha256?(sessionId: string, sha256: string): Promise<Blob | undefined>;
 }
@@ -999,6 +1001,7 @@ export class DeviceOperationManager {
     if (!flasher.actions.includes(record.request.action)) {
       throw new Error(`${record.request.protocol} does not support ${record.request.action}.`);
     }
+    const provenance = this.provenanceFor(record);
     const context: HardwareContext = {
       transport,
       signal: record.controller.signal,
@@ -1006,10 +1009,10 @@ export class DeviceOperationManager {
       output: (text) => this.addOutput(record, text, record.request.action === "monitor" ? "terminal" : "log"),
       setTerminalInput: (send) => { record.terminalInput = send; },
       input,
-      save: (name, data) => this.artifacts.save(this.sessionId, name, data),
+      save: (name, data) => this.artifacts.save(this.sessionId, name, data, provenance),
       saveStream: (name, chunks) => {
         if (!this.artifacts.saveStream) throw new Error("Streaming artifact storage is unavailable.");
-        return this.artifacts.saveStream(this.sessionId, name, chunks, record.controller.signal);
+        return this.artifacts.saveStream(this.sessionId, name, chunks, record.controller.signal, provenance);
       },
       ...(this.artifacts.findBySha256 ? { findArtifact: (digest: string) => this.artifacts.findBySha256!(this.sessionId, digest) } : {}),
       confirm: (risk) => this.declareRisk(record, risk),
@@ -1020,6 +1023,21 @@ export class DeviceOperationManager {
     };
     context.reacquireTransport = async (options): Promise<HardwareTransport> => this.reacquireTransport(record, context, options);
     return flasher.run(record.request, context);
+  }
+
+  /** What every file this operation saves records about where it came from. */
+  private provenanceFor(record: OperationRecord): ArtifactProvenance {
+    const { request } = record;
+    const command = request.command?.trim().split(/\s+/)[0];
+    return {
+      operationId: record.id,
+      deviceId: request.deviceId,
+      protocol: request.protocol,
+      action: request.action,
+      ...(request.target ? { target: request.target } : {}),
+      ...(command ? { command } : {}),
+      label: this.subjectOf(request.deviceId).label,
+    };
   }
 
   /** Opens, and returns the closer of, the window in which this operation's device leaving the bus is expected. */
