@@ -66,6 +66,67 @@ the Devices panel the routine commands an agent ran (no risk declared, no file
 saved) fold into one entry per burst - *"Agent ran 7 fastboot commands"* - whose
 rows open to the full card of each command.
 
+### The Devices panel: jobs, what needs you, history and the detail sheet
+
+The panel tells what happened in the words a person would use, not one card per command. Pure model in
+`lib/devices/jobs.ts` and `lib/devices/activity-groups.ts`; components in `components/devices/`.
+
+- **A job is one task.** A flash or dump, or a run of the same bulk operation on one device (fifty-eight `dump`s,
+  gap under two minutes, nothing different in between; routine reads do not break it) is ONE job that owns its
+  operations. It has one state (waiting, starting soon, running, done, failed, stopped, cancelled, declined) and says
+  how far it has got only as far as it can know: *n of N* needs the partition table the device reported (a backup only),
+  an estimate needs a measured rate (the newest ten seconds of progress), and a total it cannot know is not shown.
+  While a run is going its title carries no count (`Back up partitions`), because the count would disagree with
+  *47 of 58*; once it ends the title says `Back up 58 partitions`.
+- **Top to bottom by how much it needs the person:** *Needs you* (pinned; a countdown that can still be cancelled,
+  the one question waiting in the chat with how many commands queue behind it, a failed or system-stopped job, a failed
+  zip or save) - at most two rows show, the rest fold; *Running now*; connect; the devices and their actions; *History*
+  by device (only when several have any) and by day (today open, older days closed and counted); *Files & backups*.
+  A failure stays pinned until the person presses *Got it* (`useAcknowledged`, kept per session in the page); a new
+  failure in an acknowledged job raises it again. A stop the person made, and a refusal, are history, not alarms.
+- **A command that merely looks routine** (an agent read with no risk declared) is not drawn while it runs unless it
+  runs longer than two seconds (`ROUTINE_QUIET_MS`), so a dozen `getvar`s do not flash cards in and out of the top.
+- **Nothing technical is written out in the feed.** Hashes, ids, logs and JSON live in ONE place, the detail sheet
+  (`DetailSheet`): it covers the Devices panel only (the chat stays usable), the panel behind it is `inert`, Escape or
+  the close button ends it and focus returns to what opened it. It is reached from a job, a command in a burst, or a
+  file's menu. The panel's own scroll and the sheet's body are the only scrollers; no card contains one.
+- **Files** follow the jobs: one card per set (`groupArtifactSets`), partition names as labels, a menu per file
+  (Download, Copy SHA-256, Copy id, Use as input, Details, Remove; Remove asks first), a filter and sort past ten
+  files and a first page of twelve with *Show all*. What the person added is its own short group.
+- **Tests:** `lib/devices/jobs.test.mjs` and `activity-groups.test.mjs` (grouping, phases, progress and estimates,
+  attention order, acknowledgement, day grouping), `components/DeviceActivity.test.mjs` and `DeviceFiles.test.mjs`
+  (what each card says, the detail sheet, the menu keys, the three languages), `components/DevicePanelLayout.test.mjs`
+  (a real browser at 320, 360 and 480 px: no sideways scroll, every control at least 44 px).
+
+## Files & backups: sets, "Download all", "Save to server"
+
+Everything a device operation saves lives in the browser (IndexedDB, the "Files & backups" list), so keeping it
+means moving it out. A backup of 58 partitions is 58 files; both ways out take them as a group.
+
+| | |
+|---|---|
+| Sets | Every output records its provenance when it is saved (operation, device, protocol, action, target, command, the device's name), and `groupArtifactSets` (`lib/devices/artifact-sets.ts`, pure) turns the files into sets: one operation is one run, and consecutive runs of one kind on one device within two minutes are one set (an agent dumping partition after partition is one backup). Files saved before provenance existed are grouped by name and time and marked `legacy`. |
+| Download all | `deviceArtifacts.downloadSet` / `downloadArtifacts`: ONE `.zip`. Every entry is stored (never deflated), ZIP64 records are written where a size, an offset or the entry count outgrows the classic fields (a 5 GiB set is ZIP64; a normal backup stays a classic archive every unzip tool opens), and `SHA256SUMS` + `manifest.json` are inside. Each file's CRC-32 is taken with its SHA-256 when it is saved, so the download starts at once (older files are read once for it). Nothing is held in memory beyond one 4 MiB slice. Desktop Chrome/Edge: the Save-as picker opens first and the archive streams into the chosen file, every entry's CRC re-proved on the way (a stored copy that went bad stops the write); Android Chrome has no picker, so the archive is one lazy Blob of the stored files handed to the browser's own download. |
+| Save to server | `deviceArtifacts.saveSetToServer` / `saveArtifactsToServer`: the page uploads to the artifact vault (`lib/devices/artifact-vault.ts`). The save is announced with every file's size and SHA-256 (and a key made of them, so asking again finds the same save), written under `<root>/.incoming/<id>/`, appended in 4 MiB slices at exactly the offset the server holds (a retry cannot duplicate or skip a byte; a dropped connection or a reload carries on), and each finished file is **read back from the server's disk and hashed** before it counts. Only then are `manifest.json` (name, size, SHA-256, source operation, device, created time, owner, chat) and `SHA256SUMS` written and the folder moved to `<root>/<date>-<label>/` in one rename, so a folder that is visible is a finished one. The date is the day in the person's own time zone. The same files saved again answer `alreadySaved` and send nothing. |
+| Where | `<Cody data dir>/cody-device-artifacts` by default; `CODY_DEVICE_ARTIFACTS_DIR` moves it. Directories are 0700 and files 0600 (a root the owner prepared keeps the permissions they gave it). `CODY_DEVICE_ARTIFACTS_MAX_GB` caps the whole folder (default 256, `0` for no cap). |
+| Bounds | 8 MiB per slice (the framework buffers only the first 10 MB of a request body once a proxy sits in front of a route and silently truncates the rest, so the server checks every slice arrived whole), 32 GiB per file, 64 GiB and 4,096 files per save, free space for the save plus 1 GiB, and an unfinished upload nobody touched for 7 days is deleted by the next save. A finished save is never deleted for the person (`DELETE /api/devices/artifacts/saves/<id>` removes one). |
+| Names | A name the browser chose is data, never a path: separators, drive letters, control characters, Windows-reserved names and leading/trailing dots are reduced to one safe segment (`lib/devices/artifact-names.ts`, shared by the zip and the server), unique ignoring case, and `manifest.json` / `SHA256SUMS` are moved aside. The folder is built by the server from the date and a slug of the label; ids are generated by the server and checked against a pattern before they touch a path. |
+| Who | The routes need the same credential every route does (session cookie, personal access token or Basic), and a save belongs to the account that made it and to a chat that account can open (`canAccessSession`): another account's save is reported as missing, not forbidden. An open instance (no accounts) sees everything. |
+| Agents | `device_artifacts_save` (`operationId` / `operationIds` / `fileIds` / `all`, `label`, `waitSeconds`) and `device_artifacts_status`. The tool asks the page, the page runs the same save the button runs (listed in the Devices panel as the agent's), and the answer is the folder, the manifest and the exact `cd '<folder>' && sha256sum -c SHA256SUMS` to verify with. The upload runs in the browser, so it continues only while the Cody tab is open; the status tool reads the server's own record, and only saves this chat's agent started. Like every working device tool they are offered while a device is granted. |
+
+Routes (`app/api/devices/artifacts/saves`): `GET ?sessionId=` lists finished saves (name, size, SHA-256 of every file);
+`POST` announces a save; `GET|PUT|POST|DELETE /<id>` read its status, append a slice (`?file=&offset=`), verify a
+file or complete the save, and abandon or delete it. Errors are `{error, code}` with plain-English messages
+(`disk_full`, `quota_exceeded`, `too_large`, `hash_mismatch`, `offset_mismatch`, `truncated`, ...).
+
+Evidence: `artifact-zip.test.mjs` (the classic and forced-ZIP64 archives are opened by `unzip -t`, Python's `zipfile`
+and Cody's own reader; ZIP64 headers for 4 GiB+ entries, offsets and directories are checked on virtual sizes),
+`artifact-vault*.test.mjs` (slices, resume, damage, limits, names, permissions, accounts),
+`artifact-transfer.test.mjs` (the real uploader against the real handlers with dropped connections, lost answers and
+damaged bodies; the real zip into a picker stand-in), `artifact-tools.test.mjs` (an agent's save end to end). **Not run
+on hardware or in a real browser's picker: the anchor download of a multi-gigabyte Blob on Android Chrome is the one
+path only a tablet can prove.**
+
 ## adb
 
 Cody speaks ADB to `adbd` directly over WebUSB (`@yume-chan/adb`); there is no
