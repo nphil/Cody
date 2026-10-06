@@ -50,6 +50,7 @@ import { engineSupports } from "@/lib/engine-capabilities";
 import { translate } from "@/lib/i18n";
 import { describeEngineError, errorDedupeKey, type ErrorKind } from "@/lib/error-text";
 import { shelfItemFor } from "@/lib/devices/operation-notices";
+import { useDeviceTrustRequests } from "@/hooks/useDeviceTrustRequests";
 import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { createMessageUpdateCoalescer, type MessageUpdateCoalescer } from "@/lib/message-update-coalescer";
@@ -2437,14 +2438,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setPermissionRequests((prev) => (prev.length === 0 ? prev : []));
   }, [session?.id]);
 
+  // The "Let the agent control <device>?" question of this chat's device bridge. It lives in the page-global trust
+  // hub, keyed by the same session id the Devices panel opens its bridge with (AppShell's selectedSession).
+  const { requests: deviceTrustRequests, respond: respondToDeviceTrust } = useDeviceTrustRequests(session?.id ?? null);
+
   // Collect user-response prompts for the shared, non-modal composer panel.
   const pendingInputs = useMemo<PendingInput[]>(() => {
     const inputs: PendingInput[] = [];
     if (extensionDialog) inputs.push({ kind: "extension", request: extensionDialog });
     for (const request of permissionRequests) inputs.push({ kind: "permission", request });
     if (pendingRefusalDecision) inputs.push({ kind: "refusal", decision: pendingRefusalDecision });
+    for (const request of deviceTrustRequests) inputs.push({ kind: "device-trust", request });
     return inputs;
-  }, [extensionDialog, permissionRequests, pendingRefusalDecision]);
+  }, [extensionDialog, permissionRequests, pendingRefusalDecision, deviceTrustRequests]);
 
   const respondToInput = useCallback(async (item: PendingInput, response: PendingInputResponse) => {
     switch (item.kind) {
@@ -2459,8 +2465,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           await respondToRefusalDecision(item.decision.id, response.choice, response.remember ?? false);
         }
         return;
+      case "device-trust":
+        if (response.kind === "device-trust") {
+          try {
+            const result = await respondToDeviceTrust(item.request.id, { allow: response.allow, remember: response.remember });
+            if (result.error) addNoticeRef.current({ type: "warning", message: translate("deviceTrust.rememberFailed", { message: result.error }) });
+          } catch (error) {
+            addNoticeRef.current({ type: "error", message: translate("deviceTrust.answerFailed", { message: error instanceof Error ? error.message : String(error) }) });
+          }
+        }
+        return;
     }
-  }, [respondToExtensionUi, respondToPermission, respondToRefusalDecision]);
+  }, [respondToExtensionUi, respondToPermission, respondToRefusalDecision, respondToDeviceTrust]);
 
   // ---------------------------------------------------------------------
   // Host-tool bridge: Cody registers tools the AGENT can call. The server

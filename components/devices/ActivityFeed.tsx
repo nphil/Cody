@@ -26,7 +26,7 @@ function RowIcon({ state }: { state: DeviceOperationSnapshot["state"] }): React.
 }
 
 /** One routine command inside a burst: what it was and what came of it; opening it shows its full card. */
-function BurstRow({ manager, operation, deviceLabel }: { manager: DeviceOperationManager; operation: DeviceOperationSnapshot; deviceLabel: string }): React.ReactElement {
+function BurstRow({ manager, operation }: { manager: DeviceOperationManager; operation: DeviceOperationSnapshot }): React.ReactElement {
   const { title, outcome } = describeRoutine(operation);
   return (
     <details className="dv-disclosure" style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg)" }}>
@@ -38,7 +38,7 @@ function BurstRow({ manager, operation, deviceLabel }: { manager: DeviceOperatio
         </span>
       </summary>
       <div style={{ padding: "4px 8px 8px" }}>
-        <OperationCard manager={manager} operation={operation} deviceLabel={deviceLabel} />
+        <OperationCard manager={manager} operation={operation} />
       </div>
     </details>
   );
@@ -55,7 +55,7 @@ function burstMeta(burst: ActivityBurst, t: Translate): string {
 }
 
 /** A run of routine agent commands as one compact entry; every command stays one tap away. */
-function BurstEntry({ manager, burst, deviceLabel }: { manager: DeviceOperationManager; burst: ActivityBurst; deviceLabel: string }): React.ReactElement {
+function BurstEntry({ manager, burst }: { manager: DeviceOperationManager; burst: ActivityBurst }): React.ReactElement {
   const { t, tn } = useI18n();
   const protocol = burst.protocols.join(" + ");
   const count = burst.operations.length;
@@ -73,7 +73,7 @@ function BurstEntry({ manager, burst, deviceLabel }: { manager: DeviceOperationM
         </span>
       </summary>
       <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: "4px 8px 8px" }}>
-        {burst.operations.map((operation) => <BurstRow key={operation.id} manager={manager} operation={operation} deviceLabel={deviceLabel} />)}
+        {burst.operations.map((operation) => <BurstRow key={operation.id} manager={manager} operation={operation} />)}
       </div>
     </details>
   );
@@ -84,13 +84,13 @@ function BurstEntry({ manager, burst, deviceLabel }: { manager: DeviceOperationM
  * An operation that is waiting, running or significant keeps its full card; routine agent commands are folded into
  * bursts.
  */
-export function ActivityFeed({ manager, entries, deviceLabel }: { manager: DeviceOperationManager; entries: readonly ActivityEntry[]; deviceLabel: string }): React.ReactElement | null {
+export function ActivityFeed({ manager, entries }: { manager: DeviceOperationManager; entries: readonly ActivityEntry[] }): React.ReactElement | null {
   if (entries.length === 0) return null;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       {entries.map((entry) => entry.kind === "burst"
-        ? <BurstEntry key={`burst-${entry.id}`} manager={manager} burst={entry} deviceLabel={deviceLabel} />
-        : <OperationCard key={entry.operation.id} manager={manager} operation={entry.operation} deviceLabel={deviceLabel} />)}
+        ? <BurstEntry key={`burst-${entry.id}`} manager={manager} burst={entry} />
+        : <OperationCard key={entry.operation.id} manager={manager} operation={entry.operation} />)}
     </div>
   );
 }

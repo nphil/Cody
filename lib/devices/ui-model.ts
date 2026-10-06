@@ -126,12 +126,12 @@ export function formActions(group: ActionGroup, protocol: HardwareProtocol): rea
 /**
  * Protocols whose flash is addressed by a name Cody cannot always tie to a
  * role: a Fastboot partition, or a plain DFU 1.1 alternate. Both are refused
- * unless the user types `allow-unknown`, so the form must offer it for exactly
+ * unless the request names `allow-unknown`, so the form must offer it for exactly
  * these protocols - a choice the user needs but is not shown is a dead end.
  */
 const UNNAMED_ROLE_FLASH_PROTOCOLS: readonly HardwareProtocol[] = ["fastboot", "dfu"];
 
-/** The typed overrides the flash form lets the user pick for a protocol, in the order they are listed. */
+/** The protected-region overrides the flash form lets the user name in a request for a protocol, in the order they are listed. */
 export function flashOverrideChoices(protocol: HardwareProtocol): readonly ProtectedRegionOverride[] {
   const named = (Object.keys(PROTECTED_REGION_OVERRIDES) as Array<keyof typeof PROTECTED_REGION_OVERRIDES>)
     .filter((kind) => kind !== "unknown")

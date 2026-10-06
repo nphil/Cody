@@ -1,5 +1,5 @@
 import type { Flasher, HardwareContext, HardwareRequest, HardwareResult, HardwareTransport } from "./flasher";
-import { bindIntrinsicFlashSafety, parseFlashSafety, runVerifiedFlash, sha256Blob, type FlashLayout, type FlashSafetyContext, type ProtectedRegionOverride } from "./hardware-safety";
+import { bindIntrinsicFlashSafety, parseFlashSafety, runVerifiedFlash, sha256Blob, type FlashLayout, type FlashSafetyContext } from "./hardware-safety";
 import { describeEfuseBlock, formatEfuseBlock, readEfuseBlocks, readEfuseKeyPurposes, readEspSecurity, type EspSecurityState } from "./esp-efuse";
 import { requireLength, requireOffset, requireSerial, stringOption, throwIfAborted } from "./serial";
 
@@ -767,7 +767,7 @@ function parseEspNumber(token: string | undefined, label: string, sizeSuffix: bo
 /**
  * Parses the esptool/espefuse command line a person already knows. Options
  * (`--chip`, `--port`, `--force`) are refused: the connected device comes from
- * the Devices panel and the safety override is typed in the confirmation.
+ * the Devices panel and nothing here can force a protected erase.
  */
 export function parseEspCommand(text: string | undefined): EspCommand {
   const words = (text ?? "").trim().split(/\s+/).filter(Boolean);
@@ -778,7 +778,7 @@ export function parseEspCommand(text: string | undefined): EspCommand {
     words.shift();
   }
   if (words.some((word) => word.startsWith("-"))) {
-    throw new EspProtocolError("ESP command options are not accepted: the device comes from the Devices panel and a protected erase is approved by typing its override in the confirmation.");
+    throw new EspProtocolError("ESP command options are not accepted: the device comes from the Devices panel and nothing here can force an erase.");
   }
   const verb = words.shift()?.toLowerCase().replaceAll("-", "_");
   if (!verb) throw new EspProtocolError(`An ESP command is required: ${ESP_COMMANDS_HELP}.`);
@@ -1090,11 +1090,6 @@ async function eraseCommand(command: Extract<EspCommand, { kind: "erase_flash" |
   const touchesBoot = offset < ESP_APPLICATION_OFFSET && offset + length > bootStart;
   const securityActive = security.secureBoot === true || security.flashEncryption === true;
   const securityUnknown = security.secureBoot === undefined || security.flashEncryption === undefined;
-  // Each named override is typed in the confirmation; the flasher decides which apply, as it does for a Fastboot erase.
-  const overrides: ProtectedRegionOverride[] = [
-    ...(touchesBoot ? (["allow-spi-boot"] as const) : []),
-    ...(securityActive ? (["allow-fuses"] as const) : securityUnknown ? (["allow-unknown"] as const) : []),
-  ];
 
   context.progress({ phase: "backup", completed: 0, total: length, message: "Escrowing every byte this erase removes." });
   const saved = await escrowFlash(loader, context, chip, offset, length);
@@ -1106,14 +1101,13 @@ async function eraseCommand(command: Extract<EspCommand, { kind: "erase_flash" |
     offset,
     length,
     backup: `Saved ${length} bytes of ${range} as ${saved.fileId} (sha256 ${saved.sha256}).`,
-    ...(overrides.length > 0 ? { protectedOverride: overrides.join(" ") } : {}),
     details: [
       `${command.kind === "erase_flash" ? "Erase the whole" : "Erase flash range"} ${command.kind === "erase_flash" ? `${flashLabel} flash` : range} of ${chip}. Every erased byte reads 0xFF afterwards; the backup above is the only copy, and restoring it is a device_flash.`,
       "After the erase the device's own MD5 of every erased byte must equal that of blank flash.",
       describeSecurity(security),
       ...(touchesBoot ? [`This range includes the SPI boot area 0x${bootStart.toString(16)}..0x${ESP_APPLICATION_OFFSET.toString(16)}: the chip cannot boot until a bootloader is flashed again. ROM download mode stays available.`] : []),
-      ...(securityActive ? ["Erasing a chip with secure boot or flash encryption burned can leave it unable to boot, and recovery needs the original keys. esptool refuses this unless forced."] : []),
-      ...(!securityActive && securityUnknown ? ["Cody could not establish this chip's security state, so it is treated as possibly secured."] : []),
+      ...(securityActive ? ["Erasing a chip with secure boot or flash encryption burned can leave it unable to boot, and recovery needs the original keys."] : []),
+      ...(!securityActive && securityUnknown ? ["Cody could not establish this chip's security state."] : []),
     ].join(" "),
   });
 

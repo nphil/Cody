@@ -37,6 +37,8 @@ import { NO_CAPABILITIES, type BleServiceInfo, type BleTraceEvent, type DeviceAc
 import { cdcControlInterface, cdcSerialTransport } from "./cdc";
 import { TunnelClient } from "./tunnel-client";
 import { parseTunnelMessage } from "./tunnel";
+import { deviceTrustKey, type DeviceTrustSubject } from "./trust";
+import { deviceTrustHub } from "./trust-hub";
 
 /**
  * TypeScript's bundled DOM lib does not yet ship the User-Agent Client Hints
@@ -1403,6 +1405,7 @@ export class DeviceBridgeConnection implements PageOperationBridge {
   private readonly coalescer: DataCoalescer;
   private operationDelegate: PageOperationDelegate | null = null;
   private operationUnsubscribe: (() => void) | null = null;
+  private trustRegistration: (() => void) | null = null;
   private usbConnectListener: ((event: USBConnectionEvent) => void) | null = null;
   /** adb forward/reverse relay to the Cody server for this session. */
   readonly tunnels = new TunnelClient((message) => this.send({ type: "tunnel", message }));
@@ -1420,8 +1423,11 @@ export class DeviceBridgeConnection implements PageOperationBridge {
 
   setOperationDelegate(delegate: PageOperationDelegate): void {
     this.operationUnsubscribe?.();
+    this.trustRegistration?.();
     this.operationDelegate = delegate;
     this.operationUnsubscribe = delegate.manager.subscribe(() => evictIdleDeviceConnection(this.sessionId));
+    // The chat that owns this session finds the device's trust questions through the hub, never through this connection.
+    this.trustRegistration = deviceTrustHub.register(this.sessionId, delegate.manager);
     if (this.snapshot.attached) delegate.snapshot(this);
   }
 
@@ -1496,6 +1502,8 @@ export class DeviceBridgeConnection implements PageOperationBridge {
     this.coalescer.destroy();
     this.operationUnsubscribe?.();
     this.operationUnsubscribe = null;
+    this.trustRegistration?.();
+    this.trustRegistration = null;
     if (this.usbConnectListener) {
       navigator.usb.removeEventListener("connect", this.usbConnectListener);
       this.usbConnectListener = null;
@@ -1701,13 +1709,32 @@ export class DeviceBridgeConnection implements PageOperationBridge {
 
   /**
    * The stable identity this granted USB device is attached under right now. Undefined when it is gone, was
-   * invalidated, waits for a new grant, or never had one (no serial number): in each case an approval that is
-   * about to be sent must not assume it is still talking to the device the person approved.
+   * invalidated, waits for a new grant, or never had one (no serial number): in each case a countdown that is
+   * about to send must not assume it is still talking to the device it started on.
    */
   currentIdentity(deviceId: string): string | undefined {
     const entry = registry.get(deviceId);
     if (entry?.kind !== "usb" || entry.invalidatedReason || entry.needsNewGrant) return undefined;
     return entry.stableIdentity ?? undefined;
+  }
+
+  /**
+   * What the person calls this granted device, and the key its trust can be remembered under: USB vendor id and
+   * serial number, which stay the same as the unit changes mode. A device with no serial number has no key.
+   */
+  describeDevice(deviceId: string): DeviceTrustSubject | undefined {
+    const entry = registry.get(deviceId);
+    if (!entry) return undefined;
+    const { label, vendorId, productId, serialNumber } = entry;
+    const hasUsbIdentity = entry.kind === "usb" || (entry.kind === "serial" && entry.transport === "webusb-polyfill");
+    const key = hasUsbIdentity ? deviceTrustKey({ vendorId, serialNumber }) : null;
+    return {
+      label,
+      ...(key === null ? {} : { key }),
+      ...(vendorId === undefined ? {} : { vendorId }),
+      ...(productId === undefined ? {} : { productId }),
+      ...(serialNumber === undefined ? {} : { serialNumber }),
+    };
   }
 
   private async borrowSerialTransport(entry: SerialEntry, ownership: DeviceBorrowLease): Promise<HardwareTransportLease> {
@@ -1879,7 +1906,6 @@ export class DeviceBridgeConnection implements PageOperationBridge {
     deviceLeases.claim(this.sessionId, info.id);
     const entry = registry.get(info.id);
     if (entry?.kind === "usb" && entry.stableIdentity) rememberUsbOwner(entry.stableIdentity, this.sessionId);
-    this.operationManager?.setShellAccess(info.id, false);
     this.watchLifecycle(info.id);
     this.refresh();
     return info;

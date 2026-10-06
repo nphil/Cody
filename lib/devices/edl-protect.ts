@@ -8,7 +8,8 @@ import { classifyProtectedRegionName } from "./hardware-safety";
  *               override exists; a name that looks like one is refused too, wherever
  *               it sits in the partition table.
  *   protected   the boot chain and the radio / identity data a unit cannot be rebuilt
- *               from: writing one takes the typed override `write:<name>`.
+ *               from: writing one is allowed and noted as PROTECTED in the log,
+ *               with no extra prompt.
  *   ordinary    everything else (boot, recovery, system, vendor, userdata, ...).
  *
  * Names are compared lower-case with an A/B slot suffix (`_a`, `_b`) removed.

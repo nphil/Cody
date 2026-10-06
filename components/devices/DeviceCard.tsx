@@ -1,6 +1,6 @@
 "use client";
 
-import { Activity, ArchiveRestore, Bluetooth, Cable, FolderOpen, Info, Network, Smartphone, Terminal, Unplug, Usb, Zap } from "lucide-react";
+import { Activity, ArchiveRestore, Bluetooth, Cable, Clock, FolderOpen, Info, Network, ShieldAlert, ShieldCheck, ShieldOff, Smartphone, Terminal, Unplug, Usb, Zap } from "lucide-react";
 import { useId, useMemo, useState } from "react";
 import type { DeviceOperationManager, DeviceOperationSnapshot } from "@/lib/devices/operations";
 import type { DeviceActivity, DeviceInfo } from "@/lib/devices/protocol";
@@ -15,8 +15,8 @@ import { DeviceTerminal } from "./DeviceTerminal";
 import { FastbootCommand } from "./FastbootCommand";
 import { EdlBackup, EdlBackupSets, EdlCommands, EdlFlash } from "./EdlWorkflow";
 import { isTerminalState } from "./OperationList";
-import { ShellAccessControl } from "./ShellAccessControl";
 import { Button, cardStyle, Chip, Disclosure, Notice, sectionHeadingStyle, TOUCH } from "./ui";
+import { useTrustLevel } from "./useTrustLevel";
 
 type Translate = (key: string, vars?: Record<string, string | number>) => string;
 
@@ -100,6 +100,42 @@ function Facts({ device, mode, t }: { device: DeviceInfo; mode: DeviceMode; t: T
   );
 }
 
+/**
+ * What the person has told the agent about this device: trusted (with a way to take it back), trusted until it is
+ * unplugged, or refused. Nothing shows until the agent has asked. The question itself is asked in the chat.
+ */
+function TrustStatus({ manager, device, t }: { manager: DeviceOperationManager | null; device: DeviceInfo; t: Translate }): React.ReactElement | null {
+  const level = useTrustLevel(manager, device.id);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (!manager || level === "none") return null;
+  const forget = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await manager.withdrawTrust(device.id);
+    } catch (caught) {
+      setError(t("deviceTrust.forgetFailed", { message: caught instanceof Error ? caught.message : String(caught) }));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}>
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, minWidth: 0 }}>
+        {level === "remembered" && <span title={t("deviceTrust.chipRememberedHint")} style={{ display: "inline-flex", maxWidth: "100%" }}><Chip tone="good" icon={<ShieldCheck size={13} />}>{t("deviceTrust.chipRemembered")}</Chip></span>}
+        {level === "session" && <span title={t("deviceTrust.chipSessionHint")} style={{ display: "inline-flex", maxWidth: "100%" }}><Chip tone="accent" icon={<Clock size={13} />}>{t("deviceTrust.chipSession")}</Chip></span>}
+        {level === "declined" && <Chip tone="warn" icon={<ShieldAlert size={13} />}>{t("deviceTrust.chipDeclined")}</Chip>}
+        {(level === "remembered" || level === "session") && (
+          <Button icon={<ShieldOff size={16} />} ariaLabel={t("deviceTrust.forgetLabel", { device: device.label })} disabled={busy} style={{ maxWidth: "100%" }} onClick={() => void forget()}>{t("deviceTrust.forget")}</Button>
+        )}
+      </div>
+      {level === "declined" && <div style={{ fontSize: 12, lineHeight: 1.45, color: "var(--text-muted)" }}>{t("deviceTrust.chipDeclinedHint")}</div>}
+      {error && <Notice tone="error" role="alert">{error}</Notice>}
+    </div>
+  );
+}
+
 interface DeviceCardProps {
   sessionId: string;
   manager: DeviceOperationManager | null;
@@ -122,8 +158,8 @@ export function DeviceCard({ sessionId, manager, device, activity, operations, s
   const protocols = offeredProtocols(mode, showAll);
   const groups = useMemo(() => availableGroups(protocols), [protocols]);
   const tab = groups.includes(selected) ? selected : "overview";
-  const awaiting = operations.some((operation) => operation.state === "awaiting-confirmation");
-  const armed = operations.some((operation) => operation.state === "armed");
+  const awaitingTrust = operations.some((operation) => operation.state === "awaiting-trust");
+  const counting = operations.some((operation) => operation.state === "countdown");
   const running = operations.some((operation) => !isTerminalState(operation.state));
   // A user terminal shows its own output on the Terminal tab; listing it again here would repeat every line.
   const entries = useMemo(() => groupActivity(operations.filter((operation) => !(operation.origin === "user" && operation.request.action === "monitor"))), [operations]);
@@ -169,7 +205,6 @@ export function DeviceCard({ sessionId, manager, device, activity, operations, s
       case "terminal":
         return (
           <>
-            <ShellAccessControl manager={manager} deviceId={device.id} label={device.label} />
             {(adbCandidates.length > 0 ? adbCandidates : [undefined]).map((candidate) => (
               <DeviceTerminal key={candidate ? `${candidate.interfaceNumber}:${candidate.alternateSetting}` : "adb"} manager={manager} deviceId={device.id} label={device.label} interfaceNumber={candidate?.interfaceNumber} alternateSetting={candidate?.alternateSetting} showTitle={adbCandidates.length > 1} />
             ))}
@@ -237,8 +272,9 @@ export function DeviceCard({ sessionId, manager, device, activity, operations, s
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
             <Chip tone="accent">{label}</Chip>
             <Chip tone={device.open ? "good" : "neutral"}>{device.open ? t("devices.stateInUse") : t("devices.stateReady")}</Chip>
-            {awaiting ? <Chip tone="warn">{t("devices.operationStateAwaitingConfirmation")}</Chip> : armed ? <Chip tone="accent">{t("devices.operationStateArmed")}</Chip> : running ? <Chip tone="neutral">{t("devices.operationStateRunning")}</Chip> : null}
+            {awaitingTrust ? <Chip tone="warn">{t("deviceTrust.stateAwaiting")}</Chip> : counting ? <Chip tone="accent">{t("deviceTrust.stateCountdown")}</Chip> : running ? <Chip tone="neutral">{t("devices.operationStateRunning")}</Chip> : null}
           </div>
+          {device.kind !== "ble" && <TrustStatus manager={manager} device={device} t={t} />}
           {activity && <ActivityLine activity={activity} />}
         </div>
         <Button icon={<Unplug size={18} />} ariaLabel={t("devices.disconnectLabel", { label: device.label })} title={t("devices.disconnectLabel", { label: device.label })} onClick={onDisconnect} />
@@ -310,10 +346,10 @@ export function DeviceCard({ sessionId, manager, device, activity, operations, s
       {manager && entries.length > 0 && (
         <section aria-label={t("devices.activityTitle")} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <h4 style={sectionHeadingStyle}>{t("devices.activityTitle")}</h4>
-          <ActivityFeed manager={manager} entries={recent} deviceLabel={device.label} />
+          <ActivityFeed manager={manager} entries={recent} />
           {earlier.length > 0 && (
             <Disclosure summary={t("devices.earlierActivity", { count: earlier.reduce((total, entry) => total + entrySize(entry), 0) })}>
-              <ActivityFeed manager={manager} entries={earlier} deviceLabel={device.label} />
+              <ActivityFeed manager={manager} entries={earlier} />
             </Disclosure>
           )}
         </section>

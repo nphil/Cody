@@ -6,15 +6,16 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { createJiti } from "jiti";
 
 /**
- * The Devices panel's activity list and approval cards, rendered for real: a burst of routine agent commands is one
- * compact entry with every command still inside it; what waits for the person comes first and shows the exact device,
- * action and a choice of when to send; an approved command shows its countdown and a Cancel; a cancel the system made
- * says why. Every string exists in all three languages.
+ * The Devices panel's activity list and trust UI, rendered for real: a burst of routine agent commands is one compact
+ * entry with every command still inside it; what waits for the person comes first; a command that waits for the
+ * chat's trust question says so, one that is counting down shows its exact action and a Cancel; a device card shows how
+ * far the person has trusted the device and offers Forget. Every string exists in all three languages.
  */
 
 const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
 const { ActivityFeed } = await jiti.import("./devices/ActivityFeed.tsx");
 const { OperationCard } = await jiti.import("./devices/OperationList.tsx");
+const { DeviceCard } = await jiti.import("./devices/DeviceCard.tsx");
 const { groupActivity } = await jiti.import("../lib/devices/activity-groups.ts");
 const { setLocale } = await jiti.import("../lib/i18n/index.tsx");
 
@@ -23,7 +24,7 @@ const locales = Object.fromEntries(
 );
 
 const escape = (text) => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#x27;");
-const manager = { cancel() { throw new Error("rendering never cancels"); }, confirm() { throw new Error("rendering never confirms"); }, sendUser() {} };
+const manager = { cancel() { throw new Error("rendering never cancels"); }, sendUser() {} };
 
 let counter = 0;
 let clock = 10_000_000;
@@ -47,17 +48,19 @@ function operation(over = {}) {
 }
 
 const binding = { action: "fastboot command", target: "reboot-bootloader", backup: "Not applicable: reboot changes mode.", details: "Switch device mode; reconnect after USB re-enumerates." };
-const waiting = (over = {}) => operation({
-  state: "awaiting-confirmation",
+const awaitingTrust = (over = {}) => operation({ state: "awaiting-trust", result: undefined, request: { command: "reboot-bootloader" }, ...over });
+const counting = (releaseAt, over = {}) => operation({
+  state: "countdown",
   result: undefined,
-  approvalAsked: true,
+  riskDeclared: true,
   request: { command: "reboot-bootloader" },
-  confirmation: { id: "device-confirmation-1", requestedAt: clock, binding, device: { id: "usb-1", identity: "usb:18d1:4ee0:UNIT1" }, ...over },
+  countdown: { startedAt: releaseAt - 30_000, releaseAt, binding },
+  ...over,
 });
 
 const html = (element) => renderToStaticMarkup(element);
-const feed = (operations, deviceLabel = "Lenovo Smart Display") => html(React.createElement(ActivityFeed, { manager, entries: groupActivity(operations), deviceLabel }));
-const card = (snapshot, deviceLabel = "Lenovo Smart Display") => html(React.createElement(OperationCard, { manager, operation: snapshot, deviceLabel }));
+const feed = (operations) => html(React.createElement(ActivityFeed, { manager, entries: groupActivity(operations) }));
+const card = (snapshot) => html(React.createElement(OperationCard, { manager, operation: snapshot }));
 
 test("seven routine agent commands are one compact entry that is closed by default, with every command one tap inside it", () => {
   const reads = ["product", "serialno", "secure", "unlocked", "version-bootloader", "current-slot", "slot-count"].map((name) => operation({ request: { command: `getvar ${name}` }, result: { summary: `${name} value` } }));
@@ -91,70 +94,147 @@ test("one routine command reads as that command, not as 'a burst of 1'", () => {
 test("what waits for the person is listed before the history, and a command the person ran keeps its own card", () => {
   const history = [operation(), operation(), operation()];
   const mine = operation({ origin: "user", request: { command: "getvar all" } });
-  const markup = feed([...history, mine, waiting()]);
-  assert.ok(markup.indexOf("Hardware action needs your confirmation") < markup.indexOf("Agent ran 3"), "the approval comes first");
-  assert.ok(markup.indexOf("Hardware action needs your confirmation") < markup.indexOf("getvar all"));
+  const markup = feed([...history, mine, awaitingTrust()]);
+  assert.ok(markup.indexOf("Waiting for your answer") < markup.indexOf("Agent ran 3"), "the waiting command comes first");
+  assert.ok(markup.indexOf("Waiting for your answer") < markup.indexOf("getvar all"));
   assert.match(markup, /fastboot · exec/, "the person's own command is a normal card");
 });
 
-test("the approval card names the device, the exact action, and lets the person pick when to send", () => {
-  const markup = card(waiting(), "Lenovo Smart Display");
-  assert.match(markup, /Hardware action needs your confirmation/);
-  assert.match(markup, /Device<\/dt>.*Lenovo Smart Display \(usb:18d1:4ee0:UNIT1\)/s, "the device it is for, with its USB identity");
-  assert.match(markup, /reboot-bootloader/);
-  assert.match(markup, /Switch device mode; reconnect after USB re-enumerates\./, "the details are shown in full");
-  assert.match(markup, /role="radiogroup"[^>]*aria-label="When to send"/);
-  for (const label of ["Right away", "In 10 s", "In 30 s", "In 60 s"]) assert.ok(markup.includes(label), label);
-  assert.match(markup, /aria-checked="true"[^>]*>Right away/, "with no request, sending right away is what is selected");
-  assert.match(markup, /Confirm exact action/);
-  assert.doesNotMatch(markup, /The agent asked for/);
+test("a command held for the trust question says the answer is in the chat and can still be cancelled", () => {
+  const markup = card(awaitingTrust());
+  assert.match(markup, /Waiting for your answer<\/span>/, "the state label");
+  assert.match(markup, /The agent wants to control this device\. Answer the question in the chat to let it start\./);
+  assert.match(markup, /Cancel operation/, "the generic cancel stays: it is not a countdown");
+  assert.doesNotMatch(markup, /Starting in/, "no countdown card before the person answered");
+  assert.doesNotMatch(markup, /Confirm exact action|asked to type/, "nothing here asks for a per-command confirmation or typed text");
 });
 
-test("a wait the agent asked for is pre-selected and said, and added to the choices when it is not one of them", () => {
-  const asked = card(waiting({ sendDelaySeconds: 20 }));
-  assert.match(asked, /aria-checked="true"[^>]*>In 20 s/);
-  assert.match(asked, /Confirm, send in 20 s/);
-  assert.match(asked, /The agent asked for 20 s\./);
-  const standard = card(waiting({ sendDelaySeconds: 30 }));
-  assert.equal((standard.match(/In 30 s/g) ?? []).length, 1, "30 s is not offered twice");
-  assert.match(standard, /aria-checked="true"[^>]*>In 30 s/);
-});
-
-test("an approved command shows its exact action, a live countdown and a Cancel that stops it; its other buttons are gone", (t) => {
+test("a command counting down shows its exact action, a live countdown and one Cancel that stops it", (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: 1_700_000_000_000 }); // the countdown is read off the clock: a frozen one cannot tick past a boundary mid-render
-  const releaseAt = Date.now() + 30_000;
-  const armed = operation({
-    state: "armed",
-    result: undefined,
-    approvalAsked: true,
-    request: { command: "reboot-bootloader" },
-    armed: { approvedAt: releaseAt - 30_000, releaseAt, expiresAt: releaseAt + 10_000, binding, device: { id: "usb-1", identity: "usb:18d1:4ee0:UNIT1" } },
-  });
-  const markup = card(armed);
-  assert.match(markup, /Approved\. Sending in 30 s/);
-  assert.match(markup, /fastboot command · reboot-bootloader/);
-  assert.match(markup, /Nothing has been sent yet/);
-  assert.match(markup, /void if the command cannot be sent by/);
+  const markup = card(counting(Date.now() + 30_000));
+  assert.match(markup, /Starting in 30 s/);
+  assert.match(markup, /<code>fastboot command - reboot-bootloader<\/code>/);
+  assert.match(markup, /Nothing has been sent yet\./);
   assert.equal((markup.match(/Cancel, don&#x27;t send/g) ?? []).length, 1, "one Cancel, on the countdown card");
   assert.doesNotMatch(markup, /Cancel operation/, "no second cancel beneath it");
-  assert.doesNotMatch(markup, /Confirm exact action/, "an approval already given cannot be given again");
-  assert.match(markup, /Approved, waiting to send/);
+  assert.match(markup, /Starting soon<\/span>/, "the state label");
+  assert.match(markup, /min-height:44px/, "the Cancel is a full-size touch target");
+});
+
+test("a command that finished no longer shows the waiting notice or the countdown, only its result", () => {
+  const markup = card(operation({ request: { command: "reboot-bootloader" }, result: { summary: "device is rebooting" } }));
+  assert.match(markup, /device is rebooting/);
+  assert.match(markup, /Succeeded/);
+  assert.doesNotMatch(markup, /Answer the question in the chat|Nothing has been sent yet|Cancel operation/);
 });
 
 test("a cancel the system made shows its reason as a warning, not as a failure", () => {
-  const reason = "The device left the USB bus before this was approved, so it was cancelled. Nothing was changed on the device.";
-  const markup = card(operation({ state: "cancelled", result: undefined, error: reason, approvalAsked: true, request: { command: "reboot-bootloader" } }));
+  const reason = "The device left the USB bus before this started, so it was cancelled. Nothing was changed on the device.";
+  const markup = card(operation({ state: "cancelled", result: undefined, error: reason, request: { command: "reboot-bootloader" } }));
   assert.ok(markup.includes(escape(reason)));
   assert.match(markup, /Cancelled/);
   assert.match(markup, /var\(--status-warning\)/);
   assert.doesNotMatch(markup, /color:var\(--status-error\)[^>]*>[^<]*left the USB bus/);
 });
 
+// A device card needs a manager that can say how far the device is trusted; nothing else of it runs while rendering.
+function trustManager(levels, operations = []) {
+  return {
+    trustLevel: (deviceId) => levels[deviceId] ?? "none",
+    subscribeTrust: () => () => {},
+    withdrawTrust: async () => { throw new Error("rendering never forgets"); },
+    snapshots: () => operations,
+    subscribe: () => () => {},
+    cancel() { throw new Error("rendering never cancels"); },
+    sendUser() {},
+    status() { return undefined; },
+  };
+}
+const device = (over = {}) => ({
+  id: "usb-1",
+  kind: "usb",
+  label: "Lenovo Smart Display",
+  vendorId: 0x17ef,
+  productId: 0x7435,
+  serialNumber: "UNIT1",
+  open: false,
+  protocolCandidates: [{ protocol: "adb", interfaceNumber: 0, alternateSetting: 0 }],
+  ...over,
+});
+const deviceCard = (level, over = {}, operations = []) => html(React.createElement(DeviceCard, {
+  sessionId: "panel-session",
+  manager: trustManager({ "usb-1": level, ...over.levels }, operations),
+  device: device(over.device),
+  activity: undefined,
+  operations,
+  selectedInputId: null,
+  input: undefined,
+  onChooseFile() {},
+  onDisconnect() {},
+}));
+
+test("a remembered device shows the Trusted chip and a Forget button that names the device", () => {
+  const markup = deviceCard("remembered");
+  assert.match(markup, />Trusted<\/span>/);
+  assert.ok(markup.includes(`title="${escape(locales.en["deviceTrust.chipRememberedHint"])}"`), "the hint explains what it means");
+  assert.ok(markup.includes(`aria-label="${escape(locales.en["deviceTrust.forgetLabel"].replace("{device}", "Lenovo Smart Display"))}"`));
+  assert.match(markup, /<button[^>]*aria-label="Forget Lenovo Smart Display[^"]*"[^>]*>(?:(?!<\/button>).)*>Forget<\/span>/s);
+  assert.doesNotMatch(markup, /Agent blocked/);
+});
+
+test("a device trusted only until it is unplugged says so and can still be forgotten", () => {
+  const markup = deviceCard("session");
+  assert.match(markup, />Trusted for now<\/span>/);
+  assert.ok(markup.includes(`title="${escape(locales.en["deviceTrust.chipSessionHint"])}"`));
+  assert.match(markup, />Forget<\/span>/);
+  assert.doesNotMatch(markup, />Trusted<\/span>/);
+});
+
+test("a device the person said no to shows the blocked chip and why, with nothing to forget", () => {
+  const markup = deviceCard("declined");
+  assert.match(markup, />Agent blocked<\/span>/);
+  assert.ok(markup.includes(escape(locales.en["deviceTrust.chipDeclinedHint"])));
+  assert.doesNotMatch(markup, />Forget<\/span>/);
+});
+
+test("a device the agent has not asked about shows no trust UI at all", () => {
+  const markup = deviceCard("none");
+  assert.doesNotMatch(markup, /Trusted|Agent blocked|Forget|deviceTrust\./);
+});
+
+test("a Bluetooth device is never an operation target, so it shows no trust UI even if a stale level is reported", () => {
+  const markup = deviceCard("remembered", { device: { kind: "ble", protocolCandidates: undefined, services: [] } });
+  assert.doesNotMatch(markup, />Trusted<\/span>|Forget/);
+});
+
+test("without a manager the card shows no trust UI", () => {
+  const markup = html(React.createElement(DeviceCard, { sessionId: "panel-session", manager: null, device: device(), activity: undefined, operations: [], selectedInputId: null, input: undefined, onChooseFile() {}, onDisconnect() {} }));
+  assert.doesNotMatch(markup, />Trusted<\/span>|Forget/);
+});
+
+test("the title chips follow the operations: waiting for the answer, then starting soon, then running", (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: 1_700_000_000_000 });
+  const chipRow = (operations) => deviceCard("none", {}, operations);
+  assert.match(chipRow([awaitingTrust()]), />Waiting for your answer<\/span><\/span>/);
+  assert.match(chipRow([counting(Date.now() + 10_000)]), />Starting soon<\/span><\/span>/);
+  assert.match(chipRow([operation({ state: "running", result: undefined })]), />Running<\/span><\/span>/);
+});
+
+test("the Terminal tab holds the terminal only: no shell grant button stands above it", () => {
+  const markup = deviceCard("session");
+  const start = markup.search(/id="[^"]*-panel-terminal"/);
+  assert.ok(start >= 0, "the device offers a Terminal tab");
+  const rest = markup.slice(start + 4);
+  const next = rest.search(/id="[^"]*-panel-/);
+  const panel = next < 0 ? rest : rest.slice(0, next);
+  assert.match(panel, /Start terminal|Start/i, "the terminal itself is there");
+  assert.doesNotMatch(panel, /aria-pressed|shell access|Allow shell|Revoke/i);
+});
+
 test("every new card and entry reads in English, Japanese and Chinese with real words: no key left bare, no placeholder unfilled", (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: 1_700_000_000_000 });
   const reads = [operation(), operation(), operation({ state: "failed", error: "No such variable", result: undefined })];
   const releaseAt = Date.now() + 45_000;
-  const armed = operation({ state: "armed", result: undefined, approvalAsked: true, request: { command: "reboot-bootloader" }, armed: { approvedAt: releaseAt - 45_000, releaseAt, expiresAt: releaseAt + 10_000, binding, device: { id: "usb-1" } } });
   // The language only follows a switch where there is a document; on the server it is always English.
   globalThis.document = { documentElement: {} };
   try {
@@ -164,24 +244,28 @@ test("every new card and entry reads in English, Japanese and Chinese with real 
       const rendered = {
         burst: feed(reads),
         single: feed([operation({ request: { command: "getvar product" } })]),
-        approval: card(waiting({ sendDelaySeconds: 20 })),
-        armed: card(armed),
+        awaiting: card(awaitingTrust()),
+        countdown: card(counting(releaseAt)),
+        remembered: deviceCard("remembered", {}, [awaitingTrust()]),
+        session: deviceCard("session", {}, [counting(releaseAt)]),
+        declined: deviceCard("declined"),
       };
       for (const [name, markup] of Object.entries(rendered)) {
-        assert.doesNotMatch(markup, /devices\.[a-zA-Z]+/, `${locale}/${name}: a translation key shows`);
+        assert.doesNotMatch(markup, /devices\.[a-zA-Z]+|deviceTrust\.[a-zA-Z]+/, `${locale}/${name}: a translation key shows`);
         assert.doesNotMatch(markup, /\{[a-zA-Z]+\}/, `${locale}/${name}: a placeholder was not filled`);
       }
       assert.ok(rendered.burst.includes(say("devices.burstTitle.other", { count: 3, protocol: "fastboot" })), `${locale}: burst title`);
       assert.ok(rendered.burst.includes(say("devices.burstFailed", { count: 1 })), `${locale}: burst failure count`);
       assert.ok(rendered.single.includes(say("devices.burstOne", { protocol: "fastboot", command: "getvar product" })), `${locale}: single command`);
-      assert.ok(rendered.approval.includes(say("devices.confirmDevice")), `${locale}: device row`);
-      assert.ok(rendered.approval.includes(say("devices.sendTimingLabel")), `${locale}: timing label`);
-      assert.ok(rendered.approval.includes(say("devices.sendNow")) && rendered.approval.includes(say("devices.sendInSeconds", { seconds: 30 })), `${locale}: timing choices`);
-      assert.ok(rendered.approval.includes(say("devices.sendTimingRequested", { seconds: 20 })), `${locale}: the agent's request`);
-      assert.ok(rendered.approval.includes(say("devices.confirmOperationIn", { seconds: 20 })), `${locale}: confirm button`);
-      assert.ok(rendered.armed.includes(say("devices.armedTitle", { seconds: 45 })), `${locale}: countdown title`);
-      assert.ok(rendered.armed.includes(say("devices.armedBody")) && rendered.armed.includes(say("devices.armedCancel")), `${locale}: countdown body and cancel`);
-      assert.ok(rendered.armed.includes(say("devices.operationStateArmed")), `${locale}: state label`);
+      assert.ok(rendered.awaiting.includes(say("deviceTrust.stateAwaiting")) && rendered.awaiting.includes(say("deviceTrust.awaitingBody")), `${locale}: waiting state and notice`);
+      assert.ok(rendered.countdown.includes(say("deviceTrust.countdownTitle", { seconds: 45 })), `${locale}: countdown title`);
+      assert.ok(rendered.countdown.includes(say("deviceTrust.countdownBody")) && rendered.countdown.includes(say("deviceTrust.countdownCancel")), `${locale}: countdown body and cancel`);
+      assert.ok(rendered.countdown.includes(say("deviceTrust.stateCountdown")), `${locale}: countdown state label`);
+      assert.ok(rendered.remembered.includes(say("deviceTrust.chipRemembered")) && rendered.remembered.includes(say("deviceTrust.forget")), `${locale}: remembered chip and Forget`);
+      assert.ok(rendered.remembered.includes(say("deviceTrust.forgetLabel", { device: "Lenovo Smart Display" })), `${locale}: Forget's accessible name`);
+      assert.ok(rendered.remembered.includes(say("deviceTrust.stateAwaiting")), `${locale}: the device's waiting chip`);
+      assert.ok(rendered.session.includes(say("deviceTrust.chipSession")) && rendered.session.includes(say("deviceTrust.stateCountdown")), `${locale}: session chip and countdown chip`);
+      assert.ok(rendered.declined.includes(say("deviceTrust.chipDeclined")) && rendered.declined.includes(say("deviceTrust.chipDeclinedHint")), `${locale}: declined chip and hint`);
     }
   } finally {
     setLocale("en");

@@ -5,11 +5,14 @@
  * `getvar`s, a few `getprop`s). Each one used to raise a pop-up for every event
  * it produced - started, acquiring, running, each line of output, finished - so
  * ten commands buried the chat in dozens of toasts. A pop-up is for the moments
- * a person must act or would want to know, and nothing else:
+ * a person would want to know, and nothing else:
  *
- *  - an operation is waiting for their approval (they have to act),
  *  - a long or bulk operation finished (a backup, a flash, a dump),
  *  - something failed, or the system cancelled it (a device left the USB bus).
+ *
+ * The question "Let the agent control this device?" is not a pop-up: it sits in
+ * the chat's input dock until answered (components/DeviceTrustCard.tsx), and the
+ * operations a refusal fails are not announced - the person just said no.
  *
  * Everything else - progress, output, the routine read that succeeded - lives
  * in the Devices panel, which groups it. This module is the one place that
@@ -18,6 +21,7 @@
  * protocol implementations into the server bundle.
  */
 
+import { DECLINED_MESSAGE_PREFIX } from "./trust";
 import type { DeviceOperationSnapshot, OperationEvent, OperationState } from "./operations";
 
 export type DeviceNoticeLevel = "info" | "warning" | "success";
@@ -76,7 +80,7 @@ export function describeOperation(snapshot: DeviceOperationSnapshot): string {
   return `${protocol} ${clip(what, MAX_TARGET_CHARS)}`;
 }
 
-/** How long it ran once it was allowed to run: the wait for an approval is the person's time, not the operation's. */
+/** How long it ran once it was allowed to run: the wait for the person's trust is their time, not the operation's. */
 function runMillis(snapshot: DeviceOperationSnapshot): number {
   const running = snapshot.events.findLast((event) => event.type === "state" && event.state === "running");
   return Math.max(0, snapshot.updatedAt - (running?.at ?? snapshot.createdAt));
@@ -97,18 +101,6 @@ export function noticeForOperation(
   previous: DeviceOperationSnapshot | undefined,
   deviceLabel?: string,
 ): DeviceNotice | null {
-  if (event?.type === "confirmation" && event.confirmation) {
-    // A person who clicked the button themselves is looking at the card that asks.
-    if (snapshot.origin === "user") return null;
-    const { binding, sendDelaySeconds } = event.confirmation;
-    const wait = sendDelaySeconds ? ` After you approve it waits ${sendDelaySeconds} s before sending.` : "";
-    return {
-      level: "warning",
-      message: `Approval needed: ${clip(binding.action, MAX_TARGET_CHARS)} - ${clip(binding.target, MAX_TARGET_CHARS)}${onDevice(deviceLabel)}. Open the Devices panel to review and approve.${wait}`,
-      dedupeKey: `device:approval:${event.confirmation.id}`,
-    };
-  }
-
   // A finish arrives as a snapshot with no event. It is news when it is the step from running to finished, and
   // also when it CORRECTS a finish already filed: the bridge records "completion unknown" as a failure when a page
   // goes quiet, and the real outcome (it succeeded, or failed some other way) arrives later. Only a repeat of the
@@ -121,6 +113,8 @@ export function noticeForOperation(
   const fromAgent = snapshot.origin !== "user";
 
   if (snapshot.state === "failed") {
+    // The agent asked for a device the person said no to: they know, and the failures it queued must not shout it again.
+    if (snapshot.error?.startsWith(DECLINED_MESSAGE_PREFIX)) return null;
     // A command the person typed fails in front of them; a long one they walked away from, or any the agent ran, does not.
     if (!fromAgent && !long) return null;
     const why = clip(snapshot.error ?? "no reason was reported", MAX_DETAIL_CHARS);

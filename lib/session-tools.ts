@@ -129,7 +129,8 @@ async function visibleSessions(ctx: SessionToolContext): Promise<SessionInfo[]> 
   return [...allowed].sort((a, b) => Date.parse(b.modified) - Date.parse(a.modified));
 }
 
-function mayRead(sessionId: string, ctx: SessionToolContext): boolean {
+/** May this caller see (and, for the scheduling tools, act on) this session? Ownership is the boundary: another account's chat, or an owned chat asked about by an unowned caller, is refused. */
+export function mayRead(sessionId: string, ctx: SessionToolContext): boolean {
   if (!canAccessSession(sessionId, ctx.user)) return false;
   return !ctx.restrictToUnowned || getSessionOwner(sessionId) === null;
 }
@@ -285,17 +286,28 @@ function extractText(content: string | Array<{ type: string; text?: string }>): 
     .join(" ");
 }
 
-async function readSession(args: SessionToolArgs, ctx: SessionToolContext): Promise<string> {
+/**
+ * A tool's `session` argument as ONE chat this caller may act on, or the text
+ * to answer with instead (not found, or the candidate list when a title matches
+ * several). The default — the caller's own chat — is not in the listing until
+ * its file exists, so membership is required only for a resolved OTHER chat;
+ * the ownership gate applies to every id either way. Shared with the scheduling
+ * tools, which must refuse a chat its owner cannot reach exactly as reading does.
+ */
+export async function resolveSessionArgument(query: string | undefined, ctx: SessionToolContext): Promise<{ id: string } | { text: string }> {
   const sessions = await visibleSessions(ctx);
-  const resolved = resolveTarget(stringArg(args, "session"), sessions, ctx);
-  if (resolved === null) return SESSION_NOT_FOUND;
-  if ("candidates" in resolved) return resolved.candidates;
-  const targetId = resolved.id;
-  // The default (the caller's own session) is not in the listing until its
-  // file exists, so membership is required only for a resolved OTHER session;
-  // the ownership gate below applies to every id either way.
-  const listed = sessions.some((session) => session.id === targetId);
-  if ((!listed && targetId !== ctx.defaultSessionId) || !mayRead(targetId, ctx)) return SESSION_NOT_FOUND;
+  const resolved = resolveTarget(query, sessions, ctx);
+  if (resolved === null) return { text: SESSION_NOT_FOUND };
+  if ("candidates" in resolved) return { text: resolved.candidates };
+  const listed = sessions.some((session) => session.id === resolved.id);
+  if ((!listed && resolved.id !== ctx.defaultSessionId) || !mayRead(resolved.id, ctx)) return { text: SESSION_NOT_FOUND };
+  return { id: resolved.id };
+}
+
+async function readSession(args: SessionToolArgs, ctx: SessionToolContext): Promise<string> {
+  const target = await resolveSessionArgument(stringArg(args, "session"), ctx);
+  if ("text" in target) return target.text;
+  const targetId = target.id;
 
   const filePath = await resolveSessionPath(targetId);
   if (!filePath) return SESSION_NOT_FOUND;

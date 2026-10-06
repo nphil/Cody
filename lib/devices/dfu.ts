@@ -525,7 +525,7 @@ async function backupCurrentImage(metadata: DfuMetadata, context: HardwareContex
 /**
  * Plain DFU 1.1 download (`dfu-util -D`). There are no addresses: the device
  * replaces the selected alternate's whole image when manifestation finishes, so
- * the role of that image is unknown and the write needs the typed `allow-unknown`
+ * the role of that image is unknown and the request must name the `allow-unknown`
  * override (or the name-derived one). The current image is escrowed when the
  * device can upload it, and the new one is read back only when the device
  * returns to DFU idle after manifesting; otherwise the write is reported
@@ -565,7 +565,6 @@ async function flashDfu11(request: HardwareRequest, metadata: DfuMetadata, conte
     offset: 0,
     length: input.size,
     sha256: digest,
-    protectedOverride: safety.protectedOverride,
     backup: backup.note,
     details: [
       `Generic DFU 1.1 replaces the whole firmware image of ${alternate}; there are no addresses. What that image is on this device is unknown.`,

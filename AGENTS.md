@@ -88,6 +88,9 @@ app/api/
   sessions/[id]/context/route.ts  GET ?leafId= — context for a specific leaf
   sessions/[id]/export/route.ts   GET exported HTML for a session
   sessions/[id]/media/route.ts    GET one deferred tool-result image's bytes
+  sessions/[id]/scheduled/route.ts GET list / POST schedule a message for later (owner-checked)
+  sessions/[id]/scheduled/[itemId]/route.ts  PATCH change text/time / DELETE cancel
+  sessions/[id]/scheduled/[itemId]/send-now/route.ts  POST send it now (a failed one's Retry)
   preview/screenshot/route.ts     POST server-side screenshot of a loopback URL
   agent/new/route.ts              POST { cwd, message, toolNames?, provider?, modelId? }
   agent/[id]/route.ts             GET state | POST any RPC command
@@ -98,6 +101,7 @@ app/api/
   sidebar-chats/route.ts          GET list sidebar chats for workspace
   sidebar-chats/[id]/route.ts     DELETE a sidebar chat session by id
   internal/display/route.ts       POST publish from engine MCP servers (capability-token auth)
+  internal/scheduled/route.ts     POST the scheduling tools for ACP engines (capability-token auth)
   auth/**                         omp's provider list + login flow (via RPC); every
                                    route refuses `unsupported` unless omp is active
   cwd/validate/route.ts           POST validate/select a cwd
@@ -390,6 +394,19 @@ lib/
                        the ownership gate, the condensed transcript (messages
                        and tool NAMES only), snapshot-only — nothing here
                        blocks on another session's run
+  scheduled/           scheduled send ("Scheduled messages" below). Browser-safe:
+                       `types.ts` (item views, SCHEDULED_LIMITS, error codes),
+                       `client.ts` (fetch helpers), `ui.ts` (every composer
+                       decision that is not React: quick times, row words, menu
+                       placement, long press, the refresh plan, the phone row's
+                       arithmetic), `sync.ts` (when the list is read again).
+                       Server only: `store.ts` (the schedule file, 0600,
+                       atomic), `service.ts` (create / change / cancel / send
+                       now — the one place routes AND tools go through),
+                       `scheduler.ts` (the timer), `delivery.ts` (into the
+                       chat), `quota.ts` ("when quota resets"), `tools.ts`
+                       (schedule_message / list_scheduled / cancel_scheduled),
+                       `notify.ts`, `access.ts` (the routes' ownership gate)
   sidebar-context-tools.ts  the sidebar's three WORKSPACE tools
                        (list_workspace_files, read_workspace_file,
                        read_project_context) plus the session three above,
@@ -449,6 +466,14 @@ components/
   SessionSidebar.tsx  session tree + FileExplorer
   ChatWindow.tsx      chat composition + completion sound wrapper
   ChatInput.tsx       input bar + model/thinking/tools/compact controls
+  SendPill.tsx        the Send button: one pill whose main part sends and whose
+                      joined ▾ zone (and a right-click, and a long press) opens
+                      ScheduleMenu
+  ScheduleMenu.tsx    that menu: a popover on a mouse, a bottom sheet on touch —
+                      Send now · When quota resets · Send at… (quick times and a
+                      native date-time field)
+  ScheduledRows.tsx   the scheduled messages stacked above the input: when, what,
+                      "by the agent", Edit / Send now / Cancel (Retry when failed)
   SidebarChatPanel.tsx sidebar chat: rpc-managed session, model picker (grouped by
                       provider) + thinking level, message display, composer (no file
                       editing, no tools). Image attachments go through the MAIN
@@ -610,6 +635,10 @@ hooks/
                            visible, every 30 s while visible, null on hide /
                            pagehide via sendBeacon) so push notifications skip
                            the chat you are looking at
+  useScheduledMessages.ts  this chat's scheduled messages for the composer's rows
+                           and the Send menu: read on open, tab focus, network
+                           return, a run ending and at the next due time —
+                           never polled (lib/scheduled/sync.ts holds the rules)
   useDistill.ts            the client store over POST /api/distill: SSE framing,
                            per-key in-memory cache, FIFO queue capped at two
                            concurrent streams (a queued request for a key is
@@ -1601,6 +1630,11 @@ edits them; `app/api/notifications/{route,test,presence,action}`.
   `notifications-state.json` and pruned as they reset. Messages never name an
   account's email (`UsageAccount.label` can contain one) — provider, "account
   n/m", window, reset time in the recipient's zone.
+- **Scheduled messages** (`lib/scheduled/notify.ts`): the `scheduled` kind
+  (progress group, on by default, priority 3) says a scheduled message was sent
+  into its chat, or gave up and why ("Open the chat to retry or cancel it").
+  Never fired for a Send now the person pressed themselves — they are looking.
+  The preview is the person's own words, clipped to a line.
 - **Traps**: nothing here may use `@/` (the custom server loads it through bare
   jiti — `lib/server-import-graph.test.mjs`); shared state (presence, spent
   nonces, log throttle, watcher) is on `globalThis`; every ntfy call is
@@ -2074,6 +2108,96 @@ paged).
   `capability.sid` alone — a body may name any session id, but it must match
   the token, and the caller's identity is derived server-side from it.
 
+### Scheduled messages (`lib/scheduled/`)
+
+The Send button's ▾ menu and the agent's own tools put a message into a chat
+LATER: at a chosen time, or when the chat's own model's quota refills. When it
+is due it is an ordinary user turn — nothing about the chat is special-cased,
+and nothing repeats (one-off, by design).
+
+- **One store, one timer** (`store.ts`, `scheduler.ts`). The store is
+  `cody-scheduled.json` in the instance data dir (0600, atomic; every change is
+  one synchronous read-modify-write, so a cancel and a claim cannot both win).
+  `startScheduledSender()` / `stopScheduledSender()` run from
+  `bin/cody-server.js` beside the quota watch. The timer is armed for the NEXT
+  moment something can happen (an item's time, a retry's back-off, a quota
+  re-check) — never on a fixed cadence — is `unref`'d, and sleeps at most a
+  minute, because Node's timers do not count time a suspended machine spent
+  asleep. A message due while the server was down is sent on boot (3 s after
+  start); one found `sending` at boot was interrupted and goes back to waiting
+  as an attempt. Different chats are served side by side, one chat's messages
+  in the order they were due.
+- **Delivery is the composer's own path** (`delivery.ts`): the chat's child is
+  started if none is alive (`startRpcSession`, in the OWNER's zone), then a
+  `prompt` with `streamingBehavior: "followUp"` (a chat mid-turn holds it until
+  the turn ends) and a `clientMessageId` that is stable for the life of one
+  delivery (`sched-<id>[-<n>]`), so a retry rejoins the wrapper's ledger instead
+  of sending twice; a retry after a crash also looks for its own message in the
+  transcript first. A send that could not be handed over retries on a back-off
+  (15 s, 1, 3, 10, 30 min), then stays `failed` for the person — Retry, Edit or
+  Cancel; an engine's own refusal is final at once. A message is sent exactly
+  once: it is claimed (`pending` → `sending`) before delivery and removed after.
+  Sent and failed both notify the owner (the `scheduled` kind: progress group,
+  on by default, priority 3; `notify.ts`).
+- **"When quota resets"** is about THE CHAT'S OWN model — the composer sends the
+  model it shows, an agent's call asks the chat (`resolveChatModel`) — and the
+  account the chat is on (`planQuotaForChat`: the same ranking the ring uses).
+  Nothing goes before the reset; then a FRESH usage read must say the model is
+  usable (`judgeQuota`: a provider that reports nothing counts as usable, a read
+  that did not happen does not), re-read every 3 minutes; a later reset the
+  provider names is slept until; 24 h after the reset it waited for, it gives up
+  as `failed`. No known reset time, or one over 30 days away, is refused up
+  front.
+- **Limits, in one place** (`types.ts` `SCHEDULED_LIMITS`; the routes, the tools
+  and the composer all read it): 20 waiting per chat, 100 per account (the
+  chat's owner's), a time within 30 days and not in the past, 64 KB a message.
+  A failed message is kept 7 days. Ownership is the boundary: every route goes
+  through `access.ts` (a chat of another account, a sidebar chat and a missing
+  chat all answer the same 404) and a tool through `resolveSessionArgument`.
+- **Agents schedule too** (`tools.ts`): `schedule_message`, `list_scheduled`,
+  `cancel_scheduled`, written once. omp gets them as server host tools
+  (`SCHEDULE_TOOLS`, merged into every MAIN chat's `set_host_tools` beside the
+  session tools; the sidebar chat is not offered them — its schema budget is a
+  small local model's). ACP engines reach them over MCP: three tools in
+  `bin/cody-display-mcp.js` calling `POST /api/internal/scheduled`
+  (capability-token authenticated, on `proxy.ts`'s `PUBLIC_EXACT`, trusting
+  `capability.sid` alone like `/api/internal/sessions`);
+  `bin/cody-display-mcp.test.mjs` fails when the bridge's copy of a name,
+  schema or description drifts from `tools.ts`. The target chat is a name or id
+  resolved with the ownership gate; `at` without an offset is read in the
+  OWNER's zone; results use `formatToolTime`. The descriptions teach what the
+  tools are for (continue after a quota reset, run a job at a set time, check
+  back on CI) and that the message arrives as a normal user turn. A message the
+  agent scheduled is marked "by the agent" in the composer. The operator's
+  user RULES.md carries one line telling every session and subagent the
+  capability exists.
+- **The composer** (`components/SendPill.tsx`, `ScheduleMenu.tsx`,
+  `ScheduledRows.tsx`, `hooks/useScheduledMessages.ts`). The Send pill gains a
+  joined ▾ zone (+22 px on a desktop, +24 px on a phone, where Send stays an
+  icon); the ▾, a right-click and a long press (450 ms, touch/pen) on Send open
+  the menu — a popover on a mouse, a bottom sheet with 48 px rows on a touch
+  screen. Choosing a row schedules at once and clears the box (the same
+  snapshot/restore as a failed send, `restoreComposer`); only "Pick…" asks for a
+  Schedule press. A row that cannot work is OFF with its reason, never hidden:
+  an empty box or attachments still preparing, a chat that does not exist yet,
+  images attached, a `!` shell line (a scheduled message arrives as a plain
+  prompt, so the command would reach the model as text), or no reset time
+  known. "Tonight 11 PM" disappears once it has passed. Rows above the input
+  show the time, the text, "by the agent" and Edit / Send now / Cancel; Edit
+  cancels the item and puts its text back in the box ahead of whatever is typed
+  there. More than four rows fold behind "N more scheduled". The list is never
+  polled: it is read when the chat opens, the tab or the network returns, a run
+  ends (an agent may have scheduled something during it) and at the next due
+  time (`sync.ts`, `planScheduledRefresh`).
+- **Traps.** Nothing under `lib/scheduled/` that `bin/cody-server.js` loads may
+  use `@/` (`lib/server-import-graph.test.mjs`). `scheduler.ts` imports
+  `delivery.ts` lazily: delivery imports the session manager, which imports the
+  tools, which import the store. The Send pill's main button is `aria-disabled`,
+  not `disabled`: a disabled button swallows the pointer events the long press
+  listens to. The ▾ menu's chips compute from the moment it OPENED, but "In 1
+  hour" is resolved when it is CHOSEN. A failed read of the list keeps the rows
+  the page already has rather than blanking them.
+
 ### Browser-hosted hardware (`lib/devices/`)
 
 The hardware is connected to the machine running Cody in the browser, not to the
@@ -2098,8 +2222,10 @@ re-use a grant across sessions.
 - **Grants, identity, and leases are strict.** A device is owned by one session;
   raw requests and a high-level operation hold mutually exclusive leases.
   Re-adoption is limited to the same full USB VID/PID/serial identity. A device
-  which re-enumerates into another identity or mode needs a fresh user grant,
-  then a new operation and confirmation. Do not retry or replay a write across
+  which re-enumerates into another identity or mode needs a fresh user grant in
+  the browser's picker, then a new operation (the agent is asked afresh unless
+  the unit was remembered: same vendor id and serial number, see "Device
+  trust"). Do not retry or replay a write across
   disconnect, cancellation, or mode change. Raw USB IN/control-IN calls are
   bounded (five seconds by default); an expired connection is invalidated.
 - **Use the raw tools only for discovery or a protocol Cody does not implement.**
@@ -2122,17 +2248,19 @@ Use high-level operation tools for supported work:
 `device_operation_cancel`. Start requests name the exact browser `device`,
 `protocol`, and where relevant target, offset, interface, and artifact
 `fileId` with its displayed SHA-256. The operation runs independently in the
-page. Read progress/status or cancel it; never translate approval into a tool
-argument. Phase/state/confirmation/terminal events are immediate; live
+page. Read progress/status or cancel it; no argument can give or move the user's
+trust (see "Device trust"). Phase/state/declared/terminal events are immediate; live
 progress and output are coalesced at 200 ms. Status deliberately retains only
 128 terminal records, each bounded to 256 events, 512 output lines, and 64 KiB
 of output.
 
-Pop-ups are for decisions, not progress. Every hardware `notice` frame comes from
+Pop-ups are for news, not progress. Every hardware `notice` frame comes from
 `lib/devices/operation-notices.ts` (`noticeForOperation`, pure and tested alone):
-an approval waiting for the person, a long (15 s) or bulk (flash, dump, pull,
-push, sideload, install) operation finishing, a failure, and a cancel the system
-made. Started/progress/output/state events and a routine read that succeeded
+a long (15 s) or bulk (flash, dump, pull, push, sideload, install) operation
+finishing, a failure, and a cancel the system made. The trust question is NOT a
+pop-up (it waits in the chat's input dock), nor is a countdown, and the operations
+a Deny failed are not announced (`DECLINED_MESSAGE_PREFIX`): the person just said
+no. Started/progress/output/state events and a routine read that succeeded
 raise nothing, and a finish is news only as the step from running to finished
 (`onOperation` hands the listener the snapshot it replaced): a page that re-sends
 the finished operations it remembers to a restarted server announces none of them.
@@ -2141,11 +2269,12 @@ A run of failures is one pop-up plus one "N more" summary (`DeviceNoticeBatcher`
 browser shows it as written (`shelfItemFor`), never through the engine-error
 describer, so a repeat folds into one notice with a count. The Devices panel
 does the same for its list (`lib/devices/activity-groups.ts`, `ActivityFeed`): a
-finished agent command that never asked for approval (`approvalAsked`), is not a
+finished agent command that declared no risk to the device (`riskDeclared`), is not a
 flash/dump/transfer and saved no file is routine, and a burst of routine commands
 on one device is one compact entry whose rows open to each command's full card.
-Whatever is running, significant, or waiting for the person keeps its own card,
-and what waits for the person is listed first. `operation-notice-wiring.test.mjs`
+Whatever is running, significant, or waiting for the person (a trust question, a
+countdown) keeps its own card, and what waits for the person is listed first.
+`operation-notice-wiring.test.mjs`
 drives the whole chain (operation manager, frame validator, device bridge,
 session wrapper); keep it passing when touching any link.
 
@@ -2156,21 +2285,103 @@ changing an operation tool means changing both; `bin/cody-display-mcp.test.mjs`
 starts the real bridge and fails when a tool is missing or takes different
 arguments.
 
+#### Device trust: one permission per device (`lib/devices/trust*.ts`)
+
+There is exactly ONE permission between an agent and a device, it is given per
+device, and it is asked in the chat, not in the Devices panel. It replaced the
+per-operation approval cards, the typed protected-region overrides, the armed
+approval countdown and the connection-scoped shell grant; none of them exists any more.
+
+- **The gate** (`DeviceOperationManager.requireTrust`, operations.ts). An agent
+  operation (`manager.start`) that is anything but read-only `detect`
+  (`actionNeedsTrust`) waits until the person has trusted its device. The first one
+  raises ONE question for that device (`trustRequests()`: one `DeviceTrustRequest`
+  per device, its operations in state `awaiting-trust`); every later operation on the
+  device queues behind it (`waiting` counts them) and nothing touches the device - no
+  lease, no artifact read - until the answer. `answerTrust(requestId, { allow,
+  remember })`: **Allow** lets every queued operation go on; **Deny** fails them all
+  with `declinedMessage(label)` ("The user declined control of <device>; do not ask
+  again until they reconnect it") and the agent is refused with that same sentence,
+  raising no new question, until the device is disconnected (`deviceDisconnected`
+  ends both a connection's trust and a refusal). The person's own operations
+  (`startUser`: Devices-panel buttons and terminals) are never gated. An agent typing
+  into a terminal (`send`) needs the device trusted at that moment too. An
+  unanswered question has no time limit: it ends when answered, when the operations
+  behind it are cancelled, or when the device leaves the bus (the cancel says why).
+  The gate covers the high-level operation tools; the raw tools (`device_open`,
+  `device_read`, `device_write`, `usb_transfer`, `ble_gatt`) are still governed only
+  by the browser's own device grant, as before.
+- **Who can give it.** Only `answerTrust`, which only the chat card's Allow reaches
+  (`DeviceTrustCard` -> `respondToInput` -> `useDeviceTrustRequests` ->
+  `deviceTrustHub`, lib/devices/trust-hub.ts, the registry each session's manager
+  adds itself to, so a chat with no device never loads the bridge). No tool, request
+  option, server frame or `PageOperationCommand` names it. The card latches with a
+  ref so a double-click sends one answer, and neither button carries
+  `data-input-choice`, so the dock's Enter and digit shortcuts can never consent to
+  hardware control.
+- **Remembering.** "Remember this device" (ticked by default, not rendered for a
+  device without a serial number) makes the Allow last. The key (`deviceTrustKey`) is
+  the USB vendor id plus the serial number and NOT the product id: one unit
+  enumerates as adb, then fastboot, then recovery and stays trusted; a second unit
+  of the same model has its own serial number and is asked about. A device with no
+  serial number has no key and is trusted for the connection only (until unplug or
+  reload). Remembered devices are stored per account on the server:
+  `<accounts dir>/device-trust.json` (`trust-store.ts`, 0600, atomic write, keyed by
+  user id, `__instance` on an open instance), through `GET/PUT/DELETE
+  /api/devices/trust` (owner-scoped, 4 KB bodies, 100 devices per account). PUT
+  refuses any request that carries an `Authorization` header, so an access token, a
+  capability token or an agent's script can never remember a device; the key and the
+  time are set by the server; DELETE only removes. The page's copy is
+  `ServerTrustBook` (`pageTrustBook()`, trust-client.ts): the gate waits for its
+  first read (`ready`, 4 s limit) before deciding about a keyed device, a hidden tab
+  re-reads when it returns, and `remember()` is called from `answerTrust` alone. A
+  save that fails leaves the device trusted for the connection and the chat says why.
+- **Seeing and revoking it.** The device card shows a Trusted (or Trusted for now, or
+  Agent blocked) chip, and **Forget** (device card, or Settings > Preferences >
+  Trusted devices, `TrustedDevicesSetting`): `withdrawTrust` / the store's DELETE end
+  the connection's trust and the remembered entry, cancel what the agent had running
+  on the device (`TRUST_WITHDRAWN_REASON`; a question still waiting stays open) and
+  the next operation asks again. Forget can only remove trust.
+- **What stayed.** Backup before a write, readback verification, UNVERIFIED
+  reporting, the hard refusals (eFuse burns, EDL boot0/boot1/rpmb, partitions that
+  overlap a table) and the browser's own USB picker are unchanged, and the REQUEST
+  still names an exact `options.protectedOverride` for a protected ESP/DFU/STM32/STK500
+  range (named by whoever makes the request: the refusal says which, nothing is
+  typed in a prompt). A flasher still calls `context.confirm(risk)`, but that now
+  only DECLARES the exact action, target, range, digest and backup: the manager
+  checks it against the request (`bindRisk`), writes `Starting <action> on
+  <target>. Backup: ...` to the operation's log, emits a `declared` event, marks the
+  snapshot `riskDeclared` and asks nobody. No extra prompt exists for bootloader or
+  partition-table targets (they get a PROTECTED note in the declared details).
+- **A visible wait before sending.** `options.sendDelaySeconds` (1-300, accepted by
+  every start tool, checked in `requestFor` and `validateRequest`) is a countdown,
+  not an approval. The manager strips the key before a flasher sees the request
+  (several refuse option keys they do not know), so a protocol can neither read nor
+  move the clock. Once the device is trusted and the flasher declares its first risk,
+  the operation is in state `countdown` (`snapshot.countdown`: startedAt, releaseAt,
+  the declared binding): the card reads "Starting in N s" with its own Cancel,
+  nothing is sent, and the wait runs once, before the first command. At the due time
+  `refuseRelease` checks once more that the page did not oversleep
+  (`COUNTDOWN_SLACK_MS`), that the connection is the one it started on
+  (`currentIdentity`, `transport.connected()`), and fails with "Not sent: ..."
+  otherwise. Tests: `operation-trust.test.mjs` (the gate, remembering, Forget),
+  `operation-countdown.test.mjs`, the route and store tests, `DeviceTrustCard.test.mjs`.
+
 Input uploads (picker, drop, or an authorized local-path import) and device
 outputs are browser-owned session artifacts. `DeviceArtifactStore` hashes each
 Blob and waits for its IndexedDB commit in `cody-device-artifacts`; hydrate
 restores that session's escrow after reload. Artifacts never become server files
 or cross another session. Use the Devices panel's explicit download to retain an
 important backup outside browser storage. An output backup is selectable as a new input without download/re-upload; selecting it does not itself restore anything, and there is no generic or automatic restore. The panel displays artifact hashes, output,
-progress, cancellation, and the exact confirmation footprint.
+progress, cancellation, and the exact action each operation declared before it sent anything.
 
-ADB shell authority is separate from the USB grant. `ShellAccessControl` grants
-agent shell access for this device connection only; revoke, disconnect, re-grant,
-or page replacement removes it and cancels active agent ADB work. `DeviceTerminal`
-is user-driven and does not grant agent access. `device_exec` streams arbitrary
-shell commands only with that grant; without it the four read-only diagnostics
-remain available. `device_monitor` / `device_monitor_send` also support an ADB
-PTY. Requests/options cannot supply the grant or impersonate the panel.
+ADB shell access is covered by the device's trust like everything else: once the
+device is trusted an agent `device_exec` streams arbitrary shell commands,
+and `device_monitor` / `device_monitor_send` open and type into an ADB PTY. There
+is no separate shell grant and no literal-diagnostics tier. `DeviceTerminal` is the
+person's own terminal and is never gated; an agent may type into it only while the
+device is trusted, and Forget, a disconnect or page replacement cancels the agent's
+active ADB work and refuses its later input.
 
 Serial consoles use protocol serial and the same user terminal surface as ADB.
 Both use xterm for ANSI/control characters plus mobile input/line-ending controls.
@@ -2180,8 +2391,8 @@ CDC Union descriptors disambiguate composite devices. Stalled/short USB writes
 fail instead of reporting delivery. Prompt chunks appear without waiting for a
 newline. Explicit disconnect waits for the borrowed operation lease to finish.
 
-For an agent-run TWRP command, the user first taps the connection-scoped shell
-grant, then device_exec accepts protocol adb and the exact command without a
+For an agent-run TWRP command the device is trusted first (the one question in
+the chat), then device_exec accepts protocol adb and the exact command without a
 regex filter or per-command prompt. No total shell-command timeout is imposed;
 a missing initial daemon response is bounded, but quiet established connections
 stay alive. Output is streamed into bounded logs and nonzero exit status fails.
@@ -2212,11 +2423,13 @@ exec, dump and flash by `EdlWorkflow` (connect, partition tables, check, flash a
 erase of a partition picked from the last table read, the whole-area backup
 offered only after a passing check, a backup set and its restore), not by the
 generic `ActionForm`. A device in a mode Cody cannot read (`unknown-usb`),
-or a card with "Show every protocol" on, offers every protocol. The
-confirmation card (`OperationList.tsx`) keeps the exact-binding rows and the typed
-protected-override gate unchanged, and adds the device it is for and the choice of
-when to send; once approved it becomes a countdown card with its own Cancel
-(`ArmedCard`). The activity under each device is `ActivityFeed`, not a flat list.
+or a card with "Show every protocol" on, offers every protocol. There is no
+confirmation or armed card in `OperationList.tsx` any more: an operation
+waiting for the trust answer says so on its card (`awaiting-trust`; the question
+itself is in the chat), and one counting down shows `CountdownCard` ("Starting in
+N s", the exact action and target, its own Cancel). `DeviceCard` shows the
+Trusted / Agent blocked chip with Forget under its title (`TrustStatus`,
+`useTrustLevel`). The activity under each device is `ActivityFeed`, not a flat list.
 Every control is at least 44 px (`components/devices/ui.tsx`); the panel is
 used with a finger, and the right panel can be as narrow as 300 px, so layouts
 wrap rather than scroll sideways.
@@ -2243,16 +2456,17 @@ socket (`lib/devices/tunnel.ts` vocabulary, `tunnel-host.ts` server half,
   always `tcp:PORT` (forward: 1024+ or `tcp:0`). `;` and control characters are
   refused (`parseDeviceSpec` / `parseHostSpec`).
 - **One rule = one long-running operation.** It follows the normal operation
-  path: request -> the page's confirmation card (action `adb.forward` /
-  `adb.reverse`, exact target, host port, who can then connect) -> running until
+  path: request -> the device's trust (the one question in the chat, if it has not
+  been answered) -> the rule is declared (action `adb.forward` / `adb.reverse`,
+  exact target, host port, who can then connect) -> running until
   `device_operation_cancel`, `device_tunnels remove`, the card's Cancel, a
   disconnect, or a lost connection. Nothing listens and the device is not
-  touched before the tap. Cancelling removes the listener, closes every
+  touched before the trust answer. Cancelling removes the listener, closes every
   connection, and (reverse) asks the device to `killforward` before the
   connection is closed.
 - **The server verifies; it does not trust the page blindly.** A `listen` or
   `reverse` claim is accepted only for an operation of this session whose
-  snapshot is `running` and records a confirmation event; one rule per
+  snapshot is `running` and has declared its rule (`riskDeclared`); one rule per
   operation, 16 per session (both reserved before the listener binds, so
   concurrent claims cannot overshoot), 64 connections per rule; privileged ports and
   Cody's own port (`PORT`, `CODY_INTERNAL_DISPLAY_ORIGIN`) are refused for both
@@ -2287,52 +2501,33 @@ socket (`lib/devices/tunnel.ts` vocabulary, `tunnel-host.ts` server half,
   staging/reacquire, sideload, reboot, TWRP script) keeps the exclusive lease.
 - `device_exec` with `options.kind` `reverse-list`, `reverse-remove`, or
   `reverse-remove-all` manages rules *on the device* (including ones other
-  programs made); remove and remove-all need a confirmation.
+  programs made); remove and remove-all are declared like any other change.
 
 ADB transfers hash in bounded chunks (`blob-stream.ts`). Pull/backup uses an OPFS
-spool, commits the result to IndexedDB escrow, then removes the spool. Restricted
-paths require the shell grant; raw/symlink push uses direct sync, offers a backup,
-and requires typing `write:<exact path>` in the confirmation card. Regular-file
+spool, commits the result to IndexedDB escrow, then removes the spool. Raw/symlink
+push uses direct sync, offers a backup, and is declared for the exact path (no
+typed `write:<path>`: the device's trust covers it). Regular-file
 push retains verified staging/atomic replacement. `device_sideload` serves AOSP
 `sideload-host` block requests; it reports the input SHA-256, not installation
-verification. All structured protected actions require an exact typed override.
+verification.
 
-#### Human-confirmed flashing and honest verification
+#### Trust-gated flashing and honest verification
 
-Caller options cannot supply authority, device geometry, or approval. Each
-structured mutation binds its real target, input digest, and backup status to
-one direct browser confirmation. Protected destinations require typing the
-exact override displayed by the panel. Unknown readback is not a write veto:
-Fastboot explicitly warns, writes once if approved, and reports UNVERIFIED.
+Caller options cannot supply authority, device geometry, or trust. Each
+structured mutation declares its real target, input digest, and backup status
+before anything is sent (`context.confirm`: a declaration the manager checks and
+logs, never a question); the device's trust, given earlier in the chat, is the only
+permission. Protected destinations (the boot chain, partition tables) are noted
+PROTECTED in the declared details and proceed with no extra prompt. Unknown
+readback is not a write veto:
+Fastboot explicitly warns, writes once, and reports UNVERIFIED.
 An ACK, progress counter, CRC or successful command is never readback proof.
 A transport timeout is unknown completion, never permission to replay a write.
 
-**Approving before the moment of sending.** The approval is of the real,
-flasher-computed binding, shown in full with the device it is for; what the person
-can choose is *when it goes out*. `options.sendDelaySeconds` (1-300, accepted by
-every start tool and checked in `requestFor` and `validateRequest`) is the agent's
-request for a wait after approval, and the approval card offers Right away / 10 /
-30 / 60 s plus the requested value; the person's choice wins
-(`confirm(..., { sendDelaySeconds })`). The manager strips the key before a
-flasher sees the request - several flashers refuse option keys they do not know -
-so a protocol can neither read nor move the clock. After approval the operation
-is `armed` (`snapshot.armed`: approvedAt, releaseAt, expiresAt, the binding and
-device): nothing is sent, Cancel works at any moment, and the approval is spent -
-a second confirm for the card throws, and it cannot be re-armed or extended. At
-the due time `refuseRelease` checks once more that the approval has not expired
-(`APPROVAL_SLACK_MS` after the wait, so a page that slept through its countdown
-sends nothing), that the connection is the one approved (`currentIdentity` on the
-provider against the identity captured with the lease, and `transport.connected()`),
-and fails the operation with "Not sent: ..." otherwise. An approval still waiting
-for an answer has NO timeout: it ends when answered, cancelled, or when the device
-leaves the USB bus. That departure used to be silent - a tablet whose volume keys
-were held dropped off the bus, `deviceDisconnected` cancelled the pending
-approval, and the card simply vanished - so every system cancel now records a
-reason (`cancel(id, reason)` -> `snapshot.error`) that the card and
-`device_operation_status` show. Approval "before the operation exists" (run when
-the device appears) is deliberately not offered: it could only approve a
-prediction of a binding that flashers compute from the device (backup status,
-typed override, program footprint).
+Every system cancel records its reason (`cancel(id, reason)` -> `snapshot.error`),
+so the card and `device_operation_status` say why an operation ended: a tablet whose
+volume keys are held drops off the bus, `deviceDisconnected` cancels what waits
+on it, and the card would otherwise simply vanish.
 
 Protocols with intrinsic erase geometry preserve and verify their whole erase
 footprint. Fastboot addresses named partitions: when fetch is available it
@@ -2358,20 +2553,21 @@ as expanded-image hashes.
   `erase_flash` / `erase_region ADDRESS SIZE`. An erase refuses a ROM-only
   connection and any flash whose SPI ID does not map to a size esptool-js
   recognises, escrows every byte it will remove (checking the stub's read-digest
-  frame), and asks for approval with a typed override the flasher chooses:
-  `allow-spi-boot` when it touches the boot area, `allow-fuses` when secure boot
-  or flash encryption is burned, `allow-unknown` when the chip's eFuse map is not
-  reviewed. It then proves the range blank with the device's own MD5. eFuse reads
+  frame), and declares itself in the log with no override asked: the SPI boot area
+  it touches, a chip with secure boot or flash encryption burned, and an eFuse map
+  that is not reviewed are all named in the declared details. It then proves the
+  range blank with the device's own MD5. eFuse reads
   use the register maps in `lib/devices/esp-efuse.ts` (ESP32, S2, S3, C3, C2, C6,
-  H2); `efuse_dump` asks first and keeps key-block contents out of the operation
+  H2); `efuse_dump` declares itself first and keeps key-block contents out of the operation
   log. eFuse burns and `espsecure` are not offered (irreversible).
 - **Fastboot:** detection, arbitrary getvar, streamed dump/backup, raw/sparse
   named-partition flash, volatile download/boot, set_active, erase, reboot modes,
   OEM/flashing commands, and arbitrary vendor commands are available. Missing
-  fetch permits a confirmed UNVERIFIED flash; available fetch keeps full backup
-  and image-defined readback. Preloader/LK/TEE/RPMB/GPT/boot0/boot1/eFuse targets
-  require exact typed overrides. Vendor/security commands require typing the
-  entire command. FastbootCommand uses the selected artifact for
+  fetch permits an UNVERIFIED flash after the warning; available fetch keeps full backup
+  and image-defined readback. Boot-critical and partition-table targets
+  (preloader/LK/TEE/RPMB/GPT/boot0/boot1/eFuse) and vendor/security commands are
+  declared in the log with a PROTECTED note or the exact command; nothing is typed
+  or asked. FastbootCommand uses the selected artifact for
   boot/flash/stage/update. `flash` reads `max-download-size` (decimal, or hex with
   `0x`) and resparses a larger image into sparse pieces (`sparse-image.ts`, at
   most 1 GiB each) that are flashed in turn; a failed piece stops with no retry.
@@ -2382,7 +2578,7 @@ as expanded-image hashes.
   size before it is opened; `partition-exists` also needs that image in the
   package, and like AOSP only its first value names the partition), stored and
   deflated members are CRC-checked when opened, every partition is backed up
-  before ONE approval typed as `update:<first 8 hex of the package SHA-256>`,
+  before ONE declared risk (the package digest and every partition's backup),
   and each partition is written once and read back before the next. A failed
   update names four states: written and verified, written but not verifiable,
   POSSIBLY MODIFIED (a `flash:` command was sent; with its backup id), and
@@ -2400,8 +2596,8 @@ as expanded-image hashes.
   partitions need fastbootd; bootloader/radio/super/userdata
   images, `-w`, and mode switches are not part of it. Host filesystem
   generation (format) is not implemented.
-- **USB DFU:** `detect`, `dump`, verified `flash`, and confirmed
-  `abort`/`clear_status` maintenance are descriptor-bound. Flash is allowed
+- **USB DFU:** `detect`, `dump`, verified `flash`, and `abort`/`clear_status`
+  maintenance are descriptor-bound. Flash is allowed
   only for bcdDFU `0x011a` on the actual selected `@Internal Flash` DfuSe
   map, with contiguous readable/erasable/writable g-sectors inside the STM32
   program range; it requires target `internal-flash`, an explicit absolute
@@ -2410,7 +2606,7 @@ as expanded-image hashes.
   merges, writes, and exact-reads every touched sector without manifestation or
   reset before proof. Generic bcdDFU `0x0110` flash (`flashDfu11` in dfu.ts) is
   also supported: target is the exact selected alternate, offset 0, raw binary
-  (a `.dfu` suffix is refused); the typed override is `allow-unknown` (or the
+  (a `.dfu` suffix is refused); the request must name `allow-unknown` (or the
   role the alternate's name implies); the current image is escrowed when the
   device can upload; the image is sent as numbered blocks plus the zero-length
   block; a manifestation-tolerant device is read back and SHA-256-compared, an
@@ -2437,13 +2633,13 @@ as expanded-image hashes.
   No caller descriptor option creates a capability.
 - **ADB:** detection, shell/PTY, push, pull/dump, recovery sideload and raw-image
   readback verification use Cody's persistent browser IndexedDB RSA credential.
-  Without a shell grant only literal diagnostics are available; a user-granted
-  connection permits arbitrary shell, including mount/dd and recovery scripts.
-  User terminals do not grant the agent access. Normal file push retains verified
+  A trusted device permits arbitrary shell, including mount/dd and recovery
+  scripts; there is no shell grant and no separate literal-diagnostics tier.
+  A user's terminal never grants the agent access by itself. Normal file push retains verified
   staged chunks and atomic replacement; direct block/symlink push instead offers
-  a backup and requires an exact typed write override. Pull streams into escrow.
+  a backup and is declared for the exact path. Pull streams into escrow.
   Reboot mode and queued TWRP OpenRecoveryScript remain the original bounded
-  helpers in this checkpoint; arbitrary commands use the granted shell path.
+  helpers in this checkpoint; arbitrary commands use the shell path.
   A new USB mode needs the user's new grant. `adb forward` / `adb reverse` are
   supported through the server relay (see "ADB port forward and reverse").
   `device_install` (`install` in adb.ts) stages an APK with the push path's
@@ -2482,23 +2678,23 @@ as expanded-image hashes.
   Replacement is off unless `options.replace`: `-R` on Android 9+ (API read from
   `ro.build.version.sdk`; unreadable counts as modern), nothing on older Android,
   where `-R` is an unknown option and refusing is already the default. The
-  approval is typed (`install:<first 8 hex of the APK SHA-256>`).
+  declared risk names the exact `pm install` command and the APK's SHA-256.
   `device_exec` `options.kind` `root`, `unroot`, `tcpip` (with `options.port`)
   and `usb` restart adbd, and the device usually leaves the USB bus. The flasher
-  calls `context.expectDeviceRestart(windowMs)` after the approval; while that
+  calls `context.expectDeviceRestart(windowMs)` after it declares the restart; while that
   window is open `DeviceOperationManager.deviceDisconnected` does not cancel THAT
-  operation (shell access is still revoked; `disconnectDevice` passes
+  operation (the connection's trust still ends with the disconnect; `disconnectDevice` passes
   `"forgotten"` and still cancels everything), the manager waits up to 4 s to see
   the disconnect before reacquiring, and `reacquireTransport` retries (it needs no
   current lease: `OperationRecord.identity` says which device) until
   `options.timeoutSeconds` (default 45) for the SAME stable USB identity.
   `tcpip` and `usb` verify adbd's effective legacy listener with `adbTcpListeners`
   (fixed `service.adb.listen_addrs`, then `service.adb.tcp.port` even when `0`,
-  then `persist.adb.tcp.port`), refuse before approval when fixed addresses make
+  then `persist.adb.tcp.port`), refuse before anything is declared or sent when fixed addresses make
   the request impossible, and report `verified: false` when a property overrides
   the result. Wireless debugging (`persist.adb.tls_server.enable`,
   `service.adb.tls.port`) is a SEPARATE TLS listener that `adb usb` leaves
-  running: `adbTcpListeners().wireless` reports it, the `usb` approval says
+  running: `adbTcpListeners().wireless` reports it, the `usb` declaration says
   whether it is on, and `usb` is `verified: false` ("not USB-only") while it is on
   even with the legacy port at `0`. Never write "no TCP listener" from the three
   legacy properties alone.
@@ -2509,7 +2705,7 @@ as expanded-image hashes.
   authenticated until one succeeds; `pause()` (pause.ts) makes every poll
   cancellable. A wait is never cancelled by its device leaving the bus
   (`DeviceOperationManager.departureExpected`: an announced restart window OR a
-  `record.waitDeadline` still ahead; shell access is still revoked, only the
+  `record.waitDeadline` still ahead; the connection's trust still ends with the departure, only the
   same granted identity is ever taken again, and `disconnectDevice`'s
   `"forgotten"` still cancels). `awaitLease` (operations.ts) races every wait
   acquisition and every reacquisition against the deadline and Cancel (a
@@ -2548,7 +2744,7 @@ as expanded-image hashes.
   no DOCTYPE/entities/CDATA, every dimension capped, control characters made
   harmless), `edl-firehose.ts`, `edl-gpt.ts` (CRC32, header and entry checks,
   `evaluateSpan`), `edl-session.ts` (what state is the device in: boot ROM or
-  programmer, the recovery ladder, the confirmed loader upload), `edl-disk.ts`
+  programmer, the recovery ladder, the declared loader upload), `edl-disk.ts`
   (shared reads/saves/hashes and partition lookup), `edl-protect.ts` (which names
   are refused, protected or ordinary), `edl-write.ts` (flash and erase),
   `edl-manifest.ts` (the backup-set manifest: format, strict parser, and every
@@ -2558,8 +2754,9 @@ as expanded-image hashes.
   a partition from the last table read or typed, the chosen file as the image
   with a pad choice, flash and erase; Backup tab: one partition, the whole area
   after a passing check, `EdlBackupSets` for a backup set and a restore from the
-  manifests in the session). Every confirmation, including the typed override,
-  is the generic confirmation card; `setbootablestoragedrive` has no card and is
+  manifests in the session). Nothing in these forms asks for a confirmation or an
+  override: the person's own click, or the agent's trust, is the permission, and
+  what each operation declares is in its log; `setbootablestoragedrive` has no form and is
   reached through the agent tools. `adviseFlash` is the one decision the Flash
   card makes (protected/refused name, size against the partition, pad); the
   flasher checks it all again.
@@ -2568,9 +2765,10 @@ as expanded-image hashes.
     `assertFirehoseXml` parses every document about to be sent. Reading
     (`nop`, `configure` for eMMC, `getstorageinfo`, `read`, `power reset`) needs
     nothing. `program`, `erase` and `setbootablestoragedrive` go out only under a
-    `WriteGrant`, and a grant exists only after `grantWrites` awaited the user's
-    confirmation (which lists the exact sector ranges). The guard then refuses any
-    write outside the approved merged ranges, of a kind not approved, in another
+    `WriteGrant`, and a grant exists only after `grantWrites` declared the exact
+    sector ranges (`context.confirm`: logged, and held for the visible countdown if one was asked
+    for). The guard then refuses any
+    write outside the declared merged ranges, of a kind not declared, in another
     sector size, or in a physical partition other than 0 (so the eMMC boot areas
     and RPMB cannot be addressed at all). patch, peek, poke, digests, `power`
     other than reset and unknown tags are refused under any grant; `patch` is
@@ -2582,10 +2780,10 @@ as expanded-image hashes.
     `zero`|`ff` to fill the rest (the partition is always written whole). Before
     anything is written the partition is saved, the saved file is checked to
     hold exactly those bytes and the partition is read a second time to agree
-    with it (no saved copy = no write); one confirmation carries
-    the exact sectors and the backup, plus the typed override `write:<name>` for
-    the protected boot-chain / radio / identity / partition-table names
-    (`edl-protect.ts`). Names like boot0/boot1/rpmb/mmcblk*boot* and partitions
+    with it (no saved copy = no write); one declaration carries
+    the exact sectors and the backup, and the protected boot-chain / radio / identity /
+    partition-table names (`edl-protect.ts`) add a PROTECTED note to it (no override, no prompt).
+    Names like boot0/boot1/rpmb/mmcblk*boot* and partitions
     that overlap a partition table or another partition are refused with no
     override; where the backup table lives is read from the header in the last
     sector (`backupTableFloor`), not assumed from the primary header, and a header
@@ -2604,8 +2802,8 @@ as expanded-image hashes.
     Connect first. Flash/erase are emulator-tested only.
   - **Boot drive** (`setBootableDrive` in `edl-write.ts`). `exec setbootablestoragedrive`
     takes the drive number 0-7 as its target (nothing else is accepted), needs a
-    running programmer, and asks once with the typed override `set-bootable:<N>`.
-    The confirmation says plainly that there is no saved copy (the protocol cannot
+    running programmer, and declares itself once. The declaration says plainly
+    that there is no saved copy (the protocol cannot
     report the setting) and the result is always `verified: false` / UNVERIFIED: a
     NAK is quoted and means it was not applied, a verdict that never arrives after
     the command went out is POSSIBLY CHANGED. Emulator-tested only.
@@ -2621,21 +2819,21 @@ as expanded-image hashes.
     hash and says NOT RESTORABLE, as does one holding a partition Cody would
     never write. Bytes outside the tables and partitions, the eMMC boot areas
     and RPMB are not in a set. `exec restore` takes the LOADER as the request's
-    file and the manifest as `options.manifestSha256` (a confirmation's digest
+    file and the manifest as `options.manifestSha256` (a declared risk's digest
     must be the request's own, so the loader owns that slot). It finds every
     saved file with `context.findArtifact(sha256)` (`DeviceArtifactStore.findBySha256`),
     hashes each again, parses the saved tables and requires the manifest to agree
     with them, all before the device is touched. It needs a boot ROM it can
     identify in this very operation (a running programmer is refused): chip
-    serial and public-key hash are compared before the loader is confirmed;
+    serial and public-key hash are compared before the loader is declared;
     after `configure` the eMMC serial and product, sector size, capacity and the
     disk GUID of an intact table on the device (primary, else backup; neither
     intact = refused) must match as well. Every region the set covers is then
     read and hashed; a region that already holds the set's bytes is left alone
     (the set is its copy), and what each of the others holds is saved (and must
     hash the same on the second read) before anything is written. ONE
-    confirmation carries the merged ranges and the typed override
-    `restore:<first 8 of the manifest SHA-256>`, partitions are written in disk
+    declaration carries the merged ranges,
+    partitions are written in disk
     order, then the backup table, then the primary table last, and each region is
     read back and compared before the next starts. The first mismatch, or a
     programmer that will not read back, stops the restore and the tables are
@@ -2645,12 +2843,12 @@ as expanded-image hashes.
     partition tables back. Emulator-tested only.
   - **Actions.** `detect` (Sahara identity; leaves the ROM's re-offered HELLO
     unread so the next operation finds an ordinary device), `exec connect`
-    (loader only if the device is still in the boot ROM, after a confirmation
-    bound to the file's SHA-256; `configure`; storage), `exec printgpt` (primary
+    (loader only if the device is still in the boot ROM, after declaring
+    the file's SHA-256; `configure`; storage), `exec printgpt` (primary
     AND the real backup table at the end of the disk, both saved byte for byte),
     `exec check` (table span vs. the capacity the programmer reports, the backup
     header in the last sector, the last sector readable), `exec reset`
-    (confirmed; announces the departure), `dump NAME` (one GPT partition) and
+    (declared; announces the departure), `dump NAME` (one GPT partition) and
     `dump user-area` (only with `options.sectors` equal to the verified count and
     only when the check passes IN THE SAME OPERATION).
   - **Data integrity.** Reads are segmented (16 MiB per `read`) and the raw bytes
@@ -2680,7 +2878,7 @@ as expanded-image hashes.
     (3) *Two reads*: a copy that later justifies a write - the
     preflash and pre-erase copies, each region a restore overwrites, every region
     of a backup set - is read a second time and the two SHA-256s must agree
-    before the user is asked anything (for a set: before the manifest is
+    before anything is declared (for a set: before the manifest is
     written); `readsDisagree` is the one refusal. A plain `dump` is read once.
     On top of that the SHA-256 is computed on the wire and compared with the
     artifact store's, and a failed or cancelled read saves nothing. A cancelled
@@ -2697,7 +2895,7 @@ as expanded-image hashes.
   verified readback-capable flash profile exists. STM32 flash is limited to ROM
   PID `0x0410` (STM32F103 medium-density), factory-size discovery, and 1 KiB
   page-aligned backup/program/readback; unknown geometry refuses and every
-  program-flash write needs exact `allow-bootloader`. STK500 is limited to
+  program-flash write needs the request to name `allow-bootloader`. STK500 is limited to
   ATmega328P signature `1e950f`, 32 KiB flash, 128-byte pages, application
   `[0,0x7000)`, and its protected top 4 KiB bootloader; bootloader writes need
   `allow-bootloader`. Both retain full physical-footprint escrow/readback.
@@ -2713,7 +2911,8 @@ Browser and fake-transport tests exercise the software guards only. No real brow
 grants or physical hardware operations were performed; hardware behavior is **unverified on real hardware**. Follow
 `docs/hardware-checklist.md` for the manual, recoverable-device evidence
 before treating any protocol as field-verified; it authorizes no destructive
-operation and each real action still needs an exact point-of-risk approval.
+operation, and each real attempt is still the operator's own decision (Cody's
+device trust is permission to drive a device, not a go-ahead for a test).
 
 `docs/hardware-host-helper.md` is a design, not a shipped component. A future
 optional local helper would be per-user and local-only, signed and bound to one
@@ -4264,9 +4463,21 @@ palette (`components/CommandPalette.tsx`, ⌘K/Ctrl+K) is built on `cmdk`.
 
 ### Phone composer: one row, nothing wraps
 - Below 640px the controls row is `flex-wrap: nowrap`. Every fixed control is
-  38px and `flex-shrink: 0` (attach, reasoning, Fast, agent mode, the quota
-  ring's box, Send/Stop); the model selector is the ONLY item that shrinks and
-  it ellipsises. At 390px that leaves ~114px for the model name.
+  38px and `flex-shrink: 0` (attach, reasoning, agent mode, the quota
+  ring's box, Stop); Send is the one wider piece — a 38px arrow plus its 24px ▾
+  zone (scheduled send), 62px in a single pill, also `flex-shrink: 0`; the model
+  selector is the ONLY item that shrinks and it ellipsises.
+- The arithmetic lives in `phoneBudget()` (`lib/scheduled/ui.ts`, tested) and
+  was checked against a real Chromium at each width: the row is the viewport
+  minus 60px (the 16px gutters, the shell's border and its 14/12px padding),
+  every box costs 38px plus a 4px gap, the row's zero-width spacer costs one
+  more gap, the ring's box keeps 4px to its right, and the model button spends
+  51px of its own on chrome before a letter of the name fits. With reasoning and
+  the ring beside attach and Send, the name gets 49px at 360px, 79px at 390px
+  and 101px at 412px — 24px less than before the ▾ zone, which is its whole
+  cost: nothing else gave up space for it. Add the agent-mode button and a
+  360px phone is down to 7px (the row still fits; it does not wrap), so a new
+  control on this row needs the budget redone first.
 - Controls an icon can speak for drop their labels there — Fast included: its
   glyph carries the state the words did (accent + filled bg = requested,
   `TriangleAlert` = inactive/unavailable, `ZapOff` = off, `Zap` = unverified,

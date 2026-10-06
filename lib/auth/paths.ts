@@ -58,6 +58,14 @@ export function getNotificationsPath(): string {
   return path.join(getAccountsDir(), "notifications.json");
 }
 
+/** The devices each account lets the agent control without asking again, plus
+ * one record for an OPEN instance (lib/devices/trust-store.ts). Written 0600.
+ * It sits in the accounts directory so a deployment that persists accounts
+ * persists it too, and a test that redirects CODY_ACCOUNTS_DIR redirects it. */
+export function getDeviceTrustPath(): string {
+  return path.join(getAccountsDir(), "device-trust.json");
+}
+
 /** HMAC key signing the answer buttons on a notification (lib/notifications/
  * tokens.ts). Written 0600; losing it only makes outstanding buttons stop
  * working. */

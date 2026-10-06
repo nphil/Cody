@@ -298,11 +298,11 @@ export function EdlBackupSets(props: EdlProps): React.ReactElement {
 }
 
 export interface FlashAdvice {
-  /** How the flasher will treat the name: not chosen yet, an ordinary partition, one that needs a typed override, or one it never writes. */
+  /** How the flasher will treat the name: not chosen yet, an ordinary partition, a protected one (boot chain, radio, identity; it writes it and logs a note), or one it never writes. */
   level: "none" | "ordinary" | "protected" | "refused";
   /** How the image compares with the partition, when both are known. */
   fit: "unknown" | "exact" | "tooBig" | "needsPad";
-  /** Whether the Flash button may be pressed. The flasher checks all of this again; the button only avoids asking for what it will refuse. */
+  /** Whether the Flash button may be pressed. The flasher checks all of this again; the button only avoids starting what it will refuse. */
   canFlash: boolean;
 }
 
@@ -314,7 +314,7 @@ export function adviseFlash(name: string, partitions: readonly { name: string; b
   return { level, fit, canFlash };
 }
 
-/** Write the chosen image into one named partition, or erase one. The confirmation card asks for the typed override where one is needed. */
+/** Write the chosen image into one named partition, or erase one. A protected name only shows a warning here; the flasher still refuses the ones it never writes. */
 export function EdlFlash(props: EdlProps): React.ReactElement {
   const { t } = useI18n();
   const { start, error } = useEdlStarter(props);

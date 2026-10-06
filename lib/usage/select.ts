@@ -1,4 +1,4 @@
-import type { UsageAccount, UsageAccountService, UsageInUseBasis, UsageWindow } from "./types";
+import type { UsageAccount, UsageAccountService, UsageInUseBasis, UsageSessionAccount, UsageWindow } from "./types";
 
 /**
  * Picking the binding constraint.
@@ -54,6 +54,20 @@ export interface AccountEvidence {
    *  that has not used the provider must NOT use this: omp routes a fresh
    *  session by quota headroom, not by what another session last used. */
   recent?: boolean;
+}
+
+/**
+ * What one conversation's recorded account says about a provider: the account
+ * that served its latest reply, or — when omp recorded a pin Cody cannot match
+ * — only that the provider WAS used, so the account that most recently served
+ * a request stands in. A provider the conversation never used is no evidence
+ * at all: omp routes a fresh conversation by quota headroom, so another
+ * conversation's account says nothing here. Shared by the composer ring and
+ * by scheduled messages, which must name the same account the ring does.
+ */
+export function evidenceFromSessionAccount(entry: UsageSessionAccount | null | undefined): AccountEvidence {
+  if (!entry) return {};
+  return entry.accountId ? { inUseAccountId: entry.accountId } : { recent: true };
 }
 
 /**

@@ -69,8 +69,6 @@ export interface HardwareContext {
   transport: HardwareTransport;
   signal: AbortSignal;
   progress: (event: HardwareProgress) => void;
-  /** Browser-owned permission; never read from agent-supplied options. */
-  shellAccess?: () => boolean;
   output?: (text: string) => void;
   /** Installs protocol-framed input for a live terminal. */
   setTerminalInput?: (send: ((bytes: Uint8Array) => Promise<void>) | undefined) => void;
@@ -100,8 +98,8 @@ export interface HardwareContext {
    * Returns a function that ends the exception; it also ends by itself after
    * `windowMs`. An operation whose device may be reported gone only after the
    * operation has returned (the browser's disconnect event can trail the transfer
-   * that failed) leaves the window to expire instead of closing it. Shell access
-   * is revoked by the disconnect all the same, only the same device identity may
+   * that failed) leaves the window to expire instead of closing it. The connection's
+   * trust ends with the disconnect all the same, only the same device identity may
    * come back, and a disconnect the user makes on purpose still cancels.
    */
   expectDeviceRestart?: (windowMs: number) => () => void;
@@ -111,8 +109,13 @@ export interface HardwareContext {
   operation?: { id: string; deviceId: string };
   /** Browser-to-server relay for port forwarding; absent when no relay is attached. */
   tunnels?: TunnelChannel;
-  /** Request point-of-risk approval. Bound to the exact destination and digest;
-   * protocols call this before every destructive action, including shell exec. */
+  /**
+   * Declare, immediately before sending it, what is about to change on the device: the exact destination and
+   * digest. Protocols call this before every destructive action, including shell exec. Nothing is asked of the
+   * person here - their trust covered the operation before it began - but the runner checks the declaration
+   * against the request, writes it to the operation's log, and holds for the countdown the request asked for
+   * (cancellable) before this returns. A cancelled operation rejects.
+   */
   confirm: (risk: HardwareRisk) => Promise<void>;
 }
 
@@ -127,9 +130,8 @@ export interface HardwareRisk {
   programSha256?: string;
   programOffset?: number;
   programLength?: number;
-  /** Exact command, script, or protocol action presented at confirmation. */
+  /** Exact command, script, or protocol action about to be sent. */
   details?: string;
-  protectedOverride?: string;
   /** Escrow location, or why this device cannot supply a readable backup. */
   backup: string;
 }

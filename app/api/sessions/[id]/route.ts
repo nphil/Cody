@@ -29,6 +29,7 @@ import { getHarness } from "@/lib/harness";
 import { removeEngineSession, upsertEngineSession, type EngineSessionRow } from "@/lib/harness/engine-sessions";
 import { forgetSessionLocalRouting } from "@/lib/local-model-routing";
 import { forgetSessionPreset } from "@/lib/model-presets/overlay";
+import { removeSessionItems } from "@/lib/scheduled/store";
 import type { AgentMessage } from "@/lib/types";
 
 // BranchNavigator still traverses recursively, so keep the response tree shallow.
@@ -364,6 +365,7 @@ export async function DELETE(
       forgetSession(id);
       forgetSessionLocalRouting(id);
       forgetSessionPreset(id);
+      removeSessionItems(id);
       return NextResponse.json({ ok: true });
     }
 
@@ -489,6 +491,7 @@ export async function DELETE(
     forgetSession(deletedSessionId);
     forgetSessionLocalRouting(deletedSessionId);
     forgetSessionPreset(deletedSessionId);
+    removeSessionItems(deletedSessionId);
     return NextResponse.json({
       ok: true,
       ...(skippedChildren.length > 0 ? { skippedChildren } : {}),

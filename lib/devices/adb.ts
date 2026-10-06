@@ -401,13 +401,6 @@ function requireTarget(request: HardwareRequest): string {
   return target;
 }
 
-function rejectRawStorageTarget(target: string): void {
-  const forbidden = ["/dev/", "/proc/", "/sys/", "/system/", "/vendor/", "/boot/", "/recovery/", "/firmware/", "/persist/"];
-  if (forbidden.some((prefix) => target === prefix.slice(0, -1) || target.startsWith(prefix))) {
-    throw new AdbProtocolError(`ADB refuses writes or dumps to protected raw storage target '${target}'.`);
-  }
-}
-
 function shQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
@@ -845,12 +838,9 @@ async function reconnectStaging(context: HardwareContext, signal?: AbortSignal):
 
 
 
-function shellCommand(request: HardwareRequest, context: HardwareContext): string {
+function shellCommand(request: HardwareRequest): string {
   const command = request.command;
   if (!command?.trim() || command.includes("\0")) throw new AdbProtocolError("ADB shell requires a non-empty command without NUL bytes.");
-  if (!context.shellAccess?.() && !/^(?:id|uname -a|df -h|getprop(?: ro\.[A-Za-z0-9_.-]+)?)$/.test(command)) {
-    throw new AdbProtocolError("Allow agent shell access in the Devices panel first. Without it, only literal read-only diagnostics are available: id, uname -a, df -h, or getprop [ro.*].");
-  }
   return command;
 }
 
@@ -890,7 +880,6 @@ async function runShellCommand(command: string, context: HardwareContext, adb: A
 }
 
 async function terminal(context: HardwareContext): Promise<HardwareResult> {
-  if (!context.shellAccess?.()) throw new AdbProtocolError("Allow agent shell access in the Devices panel before opening an ADB terminal.");
   const adb = await adbFor(context);
   context.signal.throwIfAborted();
   const process = adb.subprocess.shellProtocol
@@ -947,7 +936,6 @@ async function queueTwrpOpenRecoveryScript(request: HardwareRequest, context: Ha
 }
 
 async function pushDirect(request: HardwareRequest, context: HardwareContext, adb: Adb, target: string): Promise<HardwareResult> {
-  if (!context.shellAccess?.()) throw new AdbProtocolError("Allow agent shell access before pushing to a device node or symlink.");
   const input = context.input!;
   const sha256 = await hashFirmware(input, request.sha256);
   let backup: string;
@@ -960,7 +948,7 @@ async function pushDirect(request: HardwareRequest, context: HardwareContext, ad
     context.signal.throwIfAborted();
     backup = "backup unavailable: " + (error instanceof Error ? error.message : String(error));
   }
-  await context.confirm({ action: "adb.push.raw", target, sha256, length: input.size, backup, protectedOverride: "write:" + target, details: "Direct write to the exact device node or symlink. No atomic replacement and no automatic retry. This can overwrite boot/storage metadata." });
+  await context.confirm({ action: "adb.push.raw", target, sha256, length: input.size, backup, details: "Direct write to the exact device node or symlink. No atomic replacement and no automatic retry. This can overwrite boot/storage metadata." });
   const reader = input.stream().getReader();
   let completed = 0;
   const file = new AdbReadableStream<Uint8Array>({
@@ -989,7 +977,6 @@ async function pushDirect(request: HardwareRequest, context: HardwareContext, ad
 
 async function push(request: HardwareRequest, context: HardwareContext, adb: Adb): Promise<HardwareResult> {
   const target = requireTarget(request);
-  if (!context.shellAccess?.()) rejectRawStorageTarget(target);
   if (!context.input?.size) throw new AdbProtocolError("ADB push requires a non-empty operation input file.");
   const direct = await shellStatus(adb, "test -L " + shQuote(target) + " || { test -e " + shQuote(target) + " && test ! -f " + shQuote(target) + "; }");
   if (direct.status === 0) return pushDirect(request, context, adb, target);
@@ -1019,7 +1006,6 @@ async function push(request: HardwareRequest, context: HardwareContext, adb: Adb
 
 async function pull(request: HardwareRequest, context: HardwareContext, action: "pull" | "dump"): Promise<HardwareResult> {
   const target = requireTarget(request);
-  if (!context.shellAccess?.()) rejectRawStorageTarget(target);
   const adb = await adbFor(context);
   const name = typeof request.options?.name === "string" ? request.options.name : safeDownloadName(target, action === "dump" ? "dump.bin" : "pull.bin");
   const result = await saveRemote(adb, target, name, context);
@@ -1028,7 +1014,6 @@ async function pull(request: HardwareRequest, context: HardwareContext, action: 
 }
 
 async function verifyWrittenRange(request:HardwareRequest,context:HardwareContext):Promise<HardwareResult> {
-  if(!context.shellAccess?.()) throw new AdbProtocolError("Allow agent shell access before verifying device storage.");
   const target=requireTarget(request), length=request.length??context.input?.size;
   const expected=request.sha256?.toLowerCase();
   if(!expected || !/^[a-f0-9]{64}$/.test(expected) || !Number.isSafeInteger(length) || !length || length<1) throw new AdbProtocolError("ADB verify needs an expected SHA-256 and the exact byte length of the raw image.");
@@ -1391,7 +1376,7 @@ function installChoices(options: Record<string, unknown> | undefined): Record<st
 }
 
 /**
- * Replacement happens only when the user approved it. An API level that cannot
+ * Replacement happens only when the request asks for it. An API level that cannot
  * be read is treated as modern: `-R` is then an error on an old device (nothing
  * is installed) instead of a silent replacement on a new one.
  */
@@ -1416,8 +1401,7 @@ async function androidApiLevel(adb: Adb, context: HardwareContext): Promise<numb
  * resumable staging a push uses, `pm install` runs on exactly that file, and the
  * copy and its staging files are removed whether or not the copy or the install
  * succeeded, and even when the user cancels. The command line is built only from
- * the validated flags and a path derived from the file's SHA-256, so no shell
- * grant is needed; the typed confirmation is the gate.
+ * the validated flags and a path derived from the file's SHA-256.
  */
 async function install(request: HardwareRequest, context: HardwareContext, adb: Adb): Promise<HardwareResult> {
   const input = context.input;
@@ -1436,7 +1420,6 @@ async function install(request: HardwareRequest, context: HardwareContext, adb: 
     target: command,
     sha256,
     length: input.size,
-    protectedOverride: `install:${sha256.slice(0, 8)}`,
     backup: choices.replace ? "not applicable: -r replaces the installed app's code (its data is kept); Cody does not back up the old APK" : "not applicable: this install will not replace an app that is already installed",
     details: `Copy the APK to ${staged} (hash-checked on the device), run \`${command}\`, then delete the copy and its staging files. ${choices.replace ? "An installed copy of the app is replaced." : "An installed copy of the app is left alone and the install fails instead."} An installed app can request permissions and run code on the device.`,
   });
@@ -1600,8 +1583,8 @@ function listenerProblem(kind: "tcpip" | "usb", port: number | undefined, listen
     : `the device reports ${describeListeners(listeners)}, not tcp:${port}`;
 }
 
-/** What the approval for `adb usb` says about Wireless debugging, so nobody approves it believing it makes the device USB-only when it cannot. */
-function usbApprovalNote(before: AdbTcpListeners | undefined): string {
+/** What the effects text for `adb usb` says about Wireless debugging, so nobody reads it believing it makes the device USB-only when it cannot. */
+function usbEffectNote(before: AdbTcpListeners | undefined): string {
   if (before?.wireless) return `${describeWireless(before.wireless)} and adb usb does not switch it off, so computers paired with this device can still connect over the network afterwards; turn it off in Developer options for a USB-only device.`;
   const separate = "Wireless debugging is a separate TLS listener that adb usb does not change";
   return before ? `${separate}, and it is off now.` : `${separate}, and it could not be read: if it is on, computers paired with this device can still connect over the network afterwards.`;
@@ -1660,7 +1643,7 @@ async function restartAdbd(kind: "root" | "unroot" | "tcpip" | "usb", request: H
   }
   let before: AdbTcpListeners | undefined;
   if (kind === "tcpip" || kind === "usb") {
-    // Refuse before asking for approval or touching the device when no restart can work.
+    // Refuse before touching the device when no restart can work.
     before = await readTcpListeners(adb).catch(() => { context.signal.throwIfAborted(); return undefined; });
     const conflict = before && fixedListenerConflict(kind, port, before);
     if (conflict) throw new AdbProtocolError(`adb ${kind === "tcpip" ? `tcpip ${port}` : "usb"} cannot do what it says on this device: ${conflict}. Nothing was changed.`);
@@ -1668,7 +1651,7 @@ async function restartAdbd(kind: "root" | "unroot" | "tcpip" | "usb", request: H
   const effects = {
     root: "Restart adbd with root privileges. The ADB connection drops and Cody reconnects. Only debuggable builds allow it.",
     unroot: "Restart adbd without root privileges. The ADB connection drops and Cody reconnects.",
-    usb: `Restart adbd in USB mode, turning the legacy TCP/IP listener (adb tcpip) off. The ADB connection drops and Cody reconnects. ${usbApprovalNote(before)}`,
+    usb: `Restart adbd in USB mode, turning the legacy TCP/IP listener (adb tcpip) off. The ADB connection drops and Cody reconnects. ${usbEffectNote(before)}`,
     tcpip: `Restart adbd listening for TCP/IP on port ${port}. The ADB connection drops and Cody reconnects. A browser cannot open raw TCP, so Cody keeps using USB: this is for a PC on the network that will run adb connect to the device.`,
   };
   await context.confirm({ action: `adb.${kind}`, target: service, backup: "not applicable: no device storage is written", details: effects[kind] });
@@ -1857,7 +1840,7 @@ export const adbFlasher: Flasher = {
               return await waitForDevice(request, context);
             case undefined:
             case "shell": {
-              const command = shellCommand(request, context);
+              const command = shellCommand(request);
               return await runShellCommand(command, context, await adbFor(context));
             }
             default:

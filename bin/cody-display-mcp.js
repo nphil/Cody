@@ -10,6 +10,7 @@ async function main() {
   const endpoint = process.env.CODY_DISPLAY_ENDPOINT;
   const sessionsEndpoint = process.env.CODY_SESSIONS_ENDPOINT;
   const devicesEndpoint = process.env.CODY_DEVICES_ENDPOINT;
+  const scheduledEndpoint = process.env.CODY_SCHEDULED_ENDPOINT;
   const capability = process.env.CODY_DISPLAY_CAPABILITY;
   const sessionId = process.env.CODY_DISPLAY_SESSION_ID;
   if (!endpoint || !capability) throw new Error("Cody display capability is unavailable");
@@ -28,6 +29,20 @@ async function main() {
       // sweep over every running session), and a timeout here costs the model
       // a whole tool call.
       signal: AbortSignal.timeout(15_000),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : "HTTP " + response.status);
+    return typeof body.text === "string" ? body.text : "";
+  }
+
+  /** Same envelope as callSessionTool, for scheduling. The wait is longer: a quota-mode message reads the account's usage first. */
+  async function callScheduledTool(tool, toolArgs) {
+    if (!scheduledEndpoint || !sessionId) throw new Error("Cody scheduling capability is unavailable");
+    const response = await fetch(scheduledEndpoint, {
+      method: "POST",
+      headers: { Authorization: "Bearer " + capability, "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId, tool, arguments: toolArgs }),
+      signal: AbortSignal.timeout(30_000),
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : "HTTP " + response.status);
@@ -145,6 +160,49 @@ async function main() {
       return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to read the session transcript" }] };
     }
   });
+  // Scheduling. Written once in lib/scheduled/tools.ts; bin/cody-display-mcp.test.mjs fails when these copies drift.
+  server.registerTool("schedule_message", {
+    description: "Send a message into a chat LATER — at a time you choose, or when this chat's model quota refills. Use it to carry on unfinished work after a usage limit resets, to run something at a set time (\"at 9 AM run the full suite and report\"), or to check back on CI or a long job instead of waiting or asking the user to return. The message arrives as an ordinary user message in that chat (this one unless `session` names another; if that chat is mid-turn it waits as a follow-up behind the turn), so write it as a complete instruction: whoever reads it — possibly you — may remember nothing but the transcript. It is sent once and never repeats. A chat holds at most 20 pending messages and a time must be within 30 days. Give `at` or `whenQuotaResets`, not both. Returns an id; cancel_scheduled withdraws it.",
+    inputSchema: {
+      message: z.string().describe("What the chat will receive, written as the user would."),
+      at: z.string().optional().describe("When to send: an ISO 8601 date and time such as 2026-10-06T09:00, read in the user's time zone unless it carries an offset (Z, +02:00)."),
+      whenQuotaResets: z.boolean().optional().describe("true: send once this chat's model quota refills. Cody waits for the reset, confirms the model is usable again, and gives up 24 hours after the reset."),
+      session: z.string().optional().describe("Another chat's id or title; omit for this chat."),
+    },
+  }, async (input) => {
+    try {
+      const text = await callScheduledTool("schedule_message", input);
+      return { content: [{ type: "text", text }] };
+    } catch (error) {
+      return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to schedule the message" }] };
+    }
+  });
+  server.registerTool("list_scheduled", {
+    description: "List the messages scheduled for this chat (or `session`): id, when, who scheduled it (the user or an agent), status and a preview.",
+    inputSchema: {
+      session: z.string().optional().describe("Another chat's id or title; omit for this chat."),
+    },
+  }, async (input) => {
+    try {
+      const text = await callScheduledTool("list_scheduled", input);
+      return { content: [{ type: "text", text }] };
+    } catch (error) {
+      return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to list scheduled messages" }] };
+    }
+  });
+  server.registerTool("cancel_scheduled", {
+    description: "Withdraw a scheduled message by id (from schedule_message or list_scheduled). A message that was already sent cannot be taken back.",
+    inputSchema: {
+      id: z.string().describe("The scheduled message's id, e.g. sch_k3J9x2Qa."),
+    },
+  }, async (input) => {
+    try {
+      const text = await callScheduledTool("cancel_scheduled", input);
+      return { content: [{ type: "text", text }] };
+    } catch (error) {
+      return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to cancel the scheduled message" }] };
+    }
+  });
   server.registerTool("device_list", {
     description: "List what this session's browser can reach: its Web Serial/WebUSB/Web Bluetooth capabilities, whether a browser is attached, and one line per device (id, label, kind, open/closed, buffered bytes).",
     inputSchema: {},
@@ -251,25 +309,26 @@ async function main() {
     interfaceNumber: z.number().int().nonnegative().optional().describe("USB interface number for an exclusive operation lease."),
     alternateSetting: z.number().int().nonnegative().optional().describe("USB alternate setting paired with interfaceNumber from device_detect."),
     command: z.string().max(16 * 1024).optional(),
-    options: z.object({}).passthrough().optional().describe("Protocol-specific validated configuration, such as safety or DFU descriptor data. It cannot approve a risk. The one key every protocol shares is sendDelaySeconds (1-300): the wait between the user's approval and the command being sent, so they can approve before putting their hands on the device."),
+    options: z.object({}).passthrough().optional().describe("Protocol-specific validated configuration, such as safety or DFU descriptor data. The one key every protocol shares is sendDelaySeconds (1-300): a visible countdown, with a Cancel button, before the first command is sent, so the user can get their hands on the device's buttons first. It is not an approval."),
   };
   const startOperationTools = [
-    ["device_detect", "Start protocol detection in the browser. Protocol edl reads a Qualcomm 9008 device's boot-ROM identity (chip serial, hardware id, public-key hash) and needs no loader."],
-    ["device_flash", "Start a verified flash. Any destructive write pauses for direct browser UI confirmation bound to the exact target, hash, and offset. Protocol edl: target is the exact GPT partition name, fileId + sha256 the image (the partition's exact size, or smaller with options.pad zero or ff); the partition is saved first, protected names need the typed override write:NAME, boot0/boot1/rpmb are refused, and the read-back SHA-256 decides verified. Run device_exec connect first; flash never sends a loader."],
+    ["device_detect", "Start protocol detection in the browser (read-only: it needs no trust). Protocol edl reads a Qualcomm 9008 device's boot-ROM identity (chip serial, hardware id, public-key hash) and needs no loader."],
+    ["device_flash", "Start a verified flash. Fastboot without fetch can write after an UNVERIFIED warning; verify in ADB recovery afterwards. ESP, DFU, STM32 and STK500 refuse a protected destination unless options.protectedOverride names the exact override (the refusal says which); nothing else is asked. Protocol edl: target is the exact GPT partition name, fileId + sha256 the image (the partition's exact size, or smaller with options.pad zero or ff); the partition is saved first, boot0/boot1/rpmb are refused, and the read-back SHA-256 decides verified. Run device_exec connect first; flash never sends a loader."],
     ["device_dump", "Start a dump or backup; resulting bytes remain a session-owned browser artifact. Protocol edl: target is the exact GPT partition name, or user-area with options.sectors set to the count device_exec check verified; fileId + sha256 name the loader while the device is still in the boot ROM."],
-    ["device_exec", "Start a protocol command. State-changing commands pause for direct browser UI confirmation. Protocol edl (Qualcomm 9008) takes connect, printgpt, check, reset, erase (target = the exact GPT partition name; saved first, typed override write:NAME for protected names, reports what the partition reads as afterwards), backup (every partition and both partition tables saved with a manifest; a set restorable only when taken from a device freshly put into EDL mode with the loader as fileId + sha256), restore (fileId + sha256 = the loader, options.manifestSha256 = the manifest's SHA-256; same unit only, typed override restore:<first 8 characters of that SHA-256>, partition tables written last, every region read back) and setbootablestoragedrive (target = the drive number 0-7, typed override set-bootable:N, always UNVERIFIED)."],
+    ["device_exec", "Start a protocol command. ADB runs arbitrary shell commands. Protocol edl (Qualcomm 9008) takes connect, printgpt, check, reset, erase (target = the exact GPT partition name; saved first, reports what the partition reads as afterwards; boot0/boot1/rpmb are refused), backup (every partition and both partition tables saved with a manifest; a set restorable only when taken from a device freshly put into EDL mode with the loader as fileId + sha256), restore (fileId + sha256 = the loader, options.manifestSha256 = the manifest's SHA-256; same unit only, partition tables written last, every region read back) and setbootablestoragedrive (target = the drive number 0-7, always UNVERIFIED)."],
     ["device_push", "Start a resumable file push from a session artifact."],
     ["device_pull", "Start a file pull into a session-owned browser artifact."],
-    ["device_sideload", "Serve a session artifact to ADB recovery sideload. Requires direct approval; transfer completion does not verify installation."],
-    ["device_install", "Install an APK from a session artifact after direct typed browser confirmation."],
-    ["device_verify", "After a Fastboot write without fetch support, compare an exact raw-image byte range in ADB recovery with the expected SHA-256. Needs target, length, sha256 and the shell grant."],
+    ["device_sideload", "Serve a session artifact to ADB recovery sideload; transfer completion does not verify installation."],
+    ["device_install", "Install an APK from a session artifact: copy it to the device, hash-check it there, and run pm install on it."],
+    ["device_verify", "After a Fastboot write without fetch support, compare an exact raw-image byte range in ADB recovery with the expected SHA-256. Needs target, length and sha256."],
     ["device_monitor", "Start an exclusive serial monitor. Use device_monitor_send with its operation id for input."],
   ];
-  // Written once in lib/devices/operation-tools.ts (APPROVAL_TIMING_NOTE); bin/cody-display-mcp.test.mjs fails when this copy drifts.
-  const APPROVAL_TIMING_NOTE = "Approval timing: options.sendDelaySeconds (a whole number of seconds from 1 to 300) makes Cody show the user's approval at once but send the approved command that many seconds AFTER the user approves, so they can approve first and then put their hands on the device's buttons; tell them to do it in that order. The approval covers only the exact action, target and device shown, is spent when the command goes out, can be cancelled, expires if it cannot be sent in time, and is refused if the device is no longer the one approved. An approval nobody has answered does not time out: it ends when the user answers, when you cancel it, or when the device leaves the USB bus.";
-  const APPROVAL_TIMING_TOOLS = { device_flash: true, device_dump: true, device_exec: true, device_push: true, device_sideload: true, device_install: true };
+  // Written once in lib/devices/operation-tools.ts (DEVICE_TRUST_NOTE); bin/cody-display-mcp.test.mjs fails when this copy drifts.
+  const DEVICE_TRUST_NOTE = "Needs the user's one-time trust of the device: the first control operation (anything but device_detect) asks them once in the chat and the others queue behind that one question; nothing else asks for approval afterwards. If they decline, every queued operation fails with \"The user declined control of <device>; do not ask again until they reconnect it\" - stop using that device until they do. An unanswered question has no time limit.";
+  const DEVICE_TRUST_TOOLS = { device_flash: true, device_dump: true, device_exec: true, device_push: true, device_pull: true, device_sideload: true, device_install: true, device_verify: true, device_monitor: true, device_forward: true, device_reverse: true };
+  const withTrustNote = (name, description) => (DEVICE_TRUST_TOOLS[name] ? `${description} ${DEVICE_TRUST_NOTE}` : description);
   for (const [name, description] of startOperationTools) {
-    server.registerTool(name, { description: APPROVAL_TIMING_TOOLS[name] ? `${description} ${APPROVAL_TIMING_NOTE}` : description, inputSchema: operationInput }, async (input) => {
+    server.registerTool(name, { description: withTrustNote(name, description), inputSchema: operationInput }, async (input) => {
       try {
         const text = await callDeviceTool(name, input);
         return { content: [{ type: "text", text }] };
@@ -284,11 +343,11 @@ async function main() {
     local: z.string().describe("Host address on the machine running Cody: tcp:PORT (forward may use tcp:0 for any free port, 1024 or above)."),
   };
   const tunnelTools = [
-    ["device_forward", "adb forward: listen on 127.0.0.1 of the machine running Cody and relay each connection to the device service through the browser's ADB connection. Long-running; pauses for the user's direct confirmation; ends with device_operation_cancel or device_tunnels remove."],
-    ["device_reverse", "adb reverse: the device listens on target and each connection is relayed through the browser to 127.0.0.1:PORT of the machine running Cody. Long-running; pauses for the user's direct confirmation; ends with device_operation_cancel or device_tunnels remove."],
+    ["device_forward", "adb forward: listen on 127.0.0.1 of the machine running Cody and relay each connection to the device service through the browser's ADB connection. Long-running; ends with device_operation_cancel or device_tunnels remove."],
+    ["device_reverse", "adb reverse: the device listens on target and each connection is relayed through the browser to 127.0.0.1:PORT of the machine running Cody. Long-running; ends with device_operation_cancel or device_tunnels remove."],
   ];
   for (const [name, description] of tunnelTools) {
-    server.registerTool(name, { description, inputSchema: tunnelInput }, async (input) => {
+    server.registerTool(name, { description: withTrustNote(name, description), inputSchema: tunnelInput }, async (input) => {
       try {
         const text = await callDeviceTool(name, input);
         return { content: [{ type: "text", text }] };

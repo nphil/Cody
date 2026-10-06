@@ -22,6 +22,20 @@ import { geckoFlasher } from "./gecko";
 import { stm32Flasher } from "./stm32";
 import { stk500Flasher } from "./stk500";
 import { serialFlasher, serialSignals, type SerialSignals } from "./serial-monitor";
+import {
+  MemoryTrustBook,
+  TRUST_WITHDRAWN_REASON,
+  actionNeedsTrust,
+  declinedMessage,
+  type DeviceTrustAnswer,
+  type DeviceTrustAnswerResult,
+  type DeviceTrustBook,
+  type DeviceTrustLevel,
+  type DeviceTrustRequest,
+  type DeviceTrustSubject,
+  type TrustedDevice,
+} from "./trust";
+import { pageTrustBook } from "./trust-client";
 
 /**
  * Browser-owned artifacts. A runner receives bytes only through this session
@@ -61,15 +75,21 @@ export interface OperationArtifacts {
   ): Promise<HardwareTransportLease>;
   /**
    * The stable identity the granted device `deviceId` is attached under right now, or undefined when it is not
-   * attached or has none. An approval that waits before it is sent asks this at the moment of sending: a device
-   * that is not the one the person approved receives nothing.
+   * attached or has none. A countdown asks this at the moment of sending: a device that is not the one the person
+   * was looking at receives nothing.
    */
   currentIdentity?(deviceId: string): string | undefined;
+  /**
+   * What the person calls the granted device `deviceId`, and the key its trust can be remembered under when it has
+   * a stable USB identity (see ./trust.ts). Without it a device is called by its id and is trusted only until it
+   * disconnects.
+   */
+  describeDevice?(deviceId: string): DeviceTrustSubject | undefined;
   /** Browser-to-server relay for ADB port forwarding, when this page has one. */
   readonly tunnels?: TunnelChannel;
  }
 
-/** The request is intentionally unable to carry an approval. Approval is a separate UI-only action. */
+/** The request carries no authority: the agent's control of a device is the person's trust (./trust.ts), given in the chat. */
 export interface DeviceOperationRequest extends HardwareRequest {
   deviceId: string;
   interfaceNumber?: number;
@@ -79,8 +99,8 @@ export interface DeviceOperationRequest extends HardwareRequest {
 export type OperationState =
   | "starting"
   | "running"
-  | "awaiting-confirmation"
-  | "armed"
+  | "awaiting-trust"
+  | "countdown"
   | "cancelling"
   | "succeeded"
   | "failed"
@@ -90,6 +110,7 @@ export interface OperationProgress extends HardwareProgress {
   at: number;
 }
 
+/** What an operation declares it is about to send: the exact target, range and digest. Shown while it counts down and kept in its log. */
 export interface OperationRiskBinding {
   action: string;
   target: string;
@@ -100,44 +121,20 @@ export interface OperationRiskBinding {
   programOffset?: number;
   programLength?: number;
   details?: string;
-  protectedOverride?: string;
   backup: string;
 }
 
-/** The device an approval is for, shown beside the action so approving it is approving THIS device. */
-export interface OperationDevice {
-  id: string;
-  /** The stable USB identity (vendor:product:serial) the operation holds, when the device has one. */
-  identity?: string;
-}
-
-export interface OperationConfirmation {
-  id: string;
-  binding: OperationRiskBinding;
-  requestedAt: number;
-  device: OperationDevice;
-  /** The wait before sending the request asked for, in seconds; the person may change it when approving. */
-  sendDelaySeconds?: number;
-}
-
 /**
- * An approval that has been given and whose command has not been sent yet. It covers exactly the binding the
- * person saw, on exactly this device, until `expiresAt`; it is spent when the command goes out and void if the
- * operation is cancelled, the device changes or leaves, or the time runs out.
+ * The wait the request asked for (`options.sendDelaySeconds`) between the operation being ready to send and sending,
+ * counted down where the person can see it and cancel it. It is not an approval: the person's trust was given before
+ * the operation began.
  */
-export interface OperationApproval {
-  approvedAt: number;
-  /** When the approved command is sent. */
+export interface OperationCountdown {
+  startedAt: number;
+  /** When the command is sent. */
   releaseAt: number;
-  /** Past this nothing is sent; the person must approve again. */
-  expiresAt: number;
+  /** What is about to be sent. */
   binding: OperationRiskBinding;
-  device: OperationDevice;
-}
-
-/** What the person chose while approving. The wait is theirs to change; what is approved is not. */
-export interface ApprovalChoice {
-  sendDelaySeconds?: number;
 }
 
 export interface OperationOutput {
@@ -149,10 +146,11 @@ export interface OperationOutput {
 export interface OperationEvent {
   sequence: number;
   at: number;
-  type: "started" | "progress" | "output" | "confirmation" | "state" | "completed";
+  type: "started" | "progress" | "output" | "declared" | "state" | "completed";
   progress?: OperationProgress;
   output?: OperationOutput;
-  confirmation?: OperationConfirmation;
+  /** The risk an operation declared (type `declared`). */
+  declared?: OperationRiskBinding;
   state?: OperationState;
   error?: string;
 }
@@ -166,11 +164,10 @@ export interface DeviceOperationSnapshot {
   createdAt: number;
   updatedAt: number;
   progress?: OperationProgress;
-  confirmation?: OperationConfirmation;
-  /** Set from the moment the person approves until the command is sent, when the approval waits first. */
-  armed?: OperationApproval;
-  /** True once this operation asked for an approval: it is not a routine, read-only operation. */
-  approvalAsked?: boolean;
+  /** Set from the moment the operation starts counting down until the command is sent. */
+  countdown?: OperationCountdown;
+  /** True once this operation declared a risk to the device: it is not a routine, read-only operation. */
+  riskDeclared?: boolean;
   result?: HardwareResult;
   error?: string;
   output: readonly OperationOutput[];
@@ -197,16 +194,25 @@ const RESTART_DISCONNECT_GRACE_MS = 4_000;
  */
 const PROVIDER_TIMEOUT_GRACE_MS = 250;
 /**
- * How late the countdown of an approval may fire (a throttled background tab, a page that was busy) before the
- * approval is considered stale and nothing is sent. A page that slept through its countdown must not send a
- * command the person approved minutes ago.
+ * How late a countdown may fire (a throttled background tab, a page that was busy) before it is considered stale and
+ * nothing is sent. A page that slept through its countdown must not send a command the person was waiting to time.
  */
-export const APPROVAL_SLACK_MS = 10_000;
+export const COUNTDOWN_SLACK_MS = 10_000;
 const textEncoder = new TextEncoder();
-interface PendingConfirmation {
-  confirmation: OperationConfirmation;
-  resolve(approval?: OperationApproval): void;
+/** What an agent hears when it types into a terminal whose device it is no longer trusted with. */
+const AGENT_INPUT_REFUSED = "The agent's control of this device is no longer allowed, so it cannot type into this terminal.";
+
+/** One operation waiting behind a trust question. */
+interface TrustWaiter {
+  resolve(): void;
   reject(reason: Error): void;
+}
+
+/** The one open trust question for a device, and the operations queued behind it. */
+interface PendingTrust {
+  request: DeviceTrustRequest;
+  subject: DeviceTrustSubject;
+  waiters: Set<TrustWaiter>;
 }
 
 /** An adbd restart the operation itself asked for: its device is expected to leave the bus and come back. */
@@ -227,13 +233,14 @@ interface OperationRecord {
   updatedAt: number;
   controller: AbortController;
   progress?: OperationProgress;
-  confirmation?: OperationConfirmation;
-  pendingConfirmation?: PendingConfirmation;
-  /** The wait before sending the request asked for; the approval may change it. */
+  /** The wait the request asked for. It runs once, before the first command goes out. */
   sendDelaySeconds?: number;
-  /** The approval given, from the moment it is given until the command is sent. */
-  approval?: OperationApproval;
-  approvalAsked: boolean;
+  /** Set from the moment the operation starts counting down until the command is sent. */
+  countdown?: OperationCountdown;
+  /** True once this operation declared a risk to the device. */
+  riskDeclared: boolean;
+  /** True once the operation may touch the device: the person's trust covers it, or it needs none. */
+  cleared: boolean;
   /** Why the system (not the person or the agent) cancelled this: shown instead of a bare "cancelled". */
   cancelReason?: string;
   result?: HardwareResult;
@@ -272,18 +279,8 @@ function cloneRiskBinding(binding: OperationRiskBinding): OperationRiskBinding {
   return { ...binding };
 }
 
-function cloneConfirmation(confirmation: OperationConfirmation): OperationConfirmation {
-  return {
-    id: confirmation.id,
-    binding: cloneRiskBinding(confirmation.binding),
-    requestedAt: confirmation.requestedAt,
-    device: { ...confirmation.device },
-    ...(confirmation.sendDelaySeconds === undefined ? {} : { sendDelaySeconds: confirmation.sendDelaySeconds }),
-  };
-}
-
-function cloneApproval(approval: OperationApproval): OperationApproval {
-  return { ...approval, binding: cloneRiskBinding(approval.binding), device: { ...approval.device } };
+function cloneCountdown(countdown: OperationCountdown): OperationCountdown {
+  return { ...countdown, binding: cloneRiskBinding(countdown.binding) };
 }
 
 function cloneProgress(progress: OperationProgress): OperationProgress {
@@ -299,7 +296,7 @@ function cloneEvent(event: OperationEvent): OperationEvent {
     ...event,
     progress: event.progress ? cloneProgress(event.progress) : undefined,
     output: event.output ? cloneOutput(event.output) : undefined,
-    confirmation: event.confirmation ? cloneConfirmation(event.confirmation) : undefined,
+    declared: event.declared ? cloneRiskBinding(event.declared) : undefined,
   };
 }
 
@@ -314,9 +311,8 @@ function frozenSnapshot(record: OperationRecord): DeviceOperationSnapshot {
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
     progress: record.progress ? cloneProgress(record.progress) : undefined,
-    confirmation: record.confirmation ? cloneConfirmation(record.confirmation) : undefined,
-    armed: record.approval ? cloneApproval(record.approval) : undefined,
-    approvalAsked: record.approvalAsked ? true : undefined,
+    countdown: record.countdown ? cloneCountdown(record.countdown) : undefined,
+    riskDeclared: record.riskDeclared ? true : undefined,
     result: record.result ? cloneResult(record.result) : undefined,
     error: record.error,
     output: Object.freeze(record.output.map(cloneOutput)),
@@ -334,14 +330,14 @@ function validFiniteInteger(value: number | undefined, name: string, minimum = 0
   if (!Number.isSafeInteger(value) || value < minimum) throw new Error(`${name} must be a safe integer at least ${minimum}.`);
 }
 
-/** A whole number of seconds a command may wait after its approval: `minimum` up to the shared maximum. */
+/** A whole number of seconds a command may be held before it is sent: `minimum` up to the shared maximum. */
 function validSendDelay(value: unknown, minimum: number): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= minimum && value <= MAX_SEND_DELAY_SECONDS;
 }
 
 /**
  * The wait before sending belongs to the manager, never to a flasher: several flashers refuse option keys they do
- * not know, and a protocol must not be able to read or move the clock an approval runs on.
+ * not know, and a protocol must not be able to read or move the clock a countdown runs on.
  */
 function splitScheduling(request: DeviceOperationRequest): { request: DeviceOperationRequest; sendDelaySeconds?: number } {
   const clone = cloneRequest(request);
@@ -467,48 +463,32 @@ export class DeviceOperationManager {
   private readonly transportProvider: HardwareTransportProvider;
   private readonly artifacts: OperationArtifacts;
   private authorityRevokedReason: string | undefined;
-  private readonly shellGrants = new Set<string>();
-  private readonly shellListeners = new Set<() => void>();
-
-  hasShellAccess(deviceId: string): boolean { return this.shellGrants.has(deviceId); }
-
-  subscribeShellAccess(listener: () => void): () => void {
-    this.shellListeners.add(listener);
-    return () => this.shellListeners.delete(listener);
-  }
-
-  /** Panel-only action. No server command can grant shell authority. */
-  setShellAccess(deviceId: string, allowed: boolean): void {
-    if (this.authorityRevokedReason) throw new Error(this.authorityRevokedReason);
-    if (allowed) this.shellGrants.add(deviceId);
-    else this.revokeShellAccess(deviceId);
-    for (const listener of this.shellListeners) listener();
-  }
-
-  /** Withdraws the grant and cancels the agent's ADB operations on the device, except those `spare` names. */
-  private revokeShellAccess(deviceId: string, spare: (record: OperationRecord) => boolean = () => false): void {
-    this.shellGrants.delete(deviceId);
-    for (const record of this.records.values()) {
-      if (record.request.deviceId === deviceId && record.request.protocol === "adb" && record.origin === "agent" && !isTerminal(record.state) && !spare(record)) {
-        this.addOutput(record, "Agent shell access revoked. Cancelling this operation; already executed commands cannot be undone.");
-        this.cancel(record.id, "Agent shell access was revoked, so this operation was cancelled.");
-      }
-    }
-  }
+  /** Devices the person allowed for this connection only. The trust ends when the device disconnects. */
+  private readonly sessionTrusted = new Set<string>();
+  /** Devices the person said no to: the agent is refused, with no new question, until the device disconnects. */
+  private readonly declined = new Set<string>();
+  /** The one open question per device, and the operations queued behind it. */
+  private readonly pendingTrust = new Map<string, PendingTrust>();
+  private readonly trustListeners = new Set<() => void>();
+  private readonly trustBook: DeviceTrustBook;
+  private readonly unsubscribeTrustBook: () => void;
+  /** The remembered keys as of the last change, to tell which one was just forgotten. */
+  private knownTrustedKeys: Set<string>;
 
   /**
    * The browser reports that the device left the USB bus, or the user
-   * disconnected it (`forgotten`). Shell access is always revoked and every
-   * operation on the device is cancelled - except one for which the departure is
-   * part of what it is doing (see `departureExpected`): an operation that
-   * announced it was restarting the device (expectDeviceRestart), and a
-   * wait-for-device, which exists to ride out a device that leaves and returns.
+   * disconnected it (`forgotten`). The connection's trust and a refusal both end
+   * here (the person is asked afresh after a reconnect, unless they remembered
+   * the device), and every operation on the device is cancelled - except one
+   * for which the departure is part of what it is doing (see `departureExpected`):
+   * an operation that announced it was restarting the device (expectDeviceRestart),
+   * and a wait-for-device, which exists to ride out a device that leaves and returns.
    * A device the user disconnected on purpose is never expected back.
    */
   async deviceDisconnected(deviceId: string, cause: "left-bus" | "forgotten" = "left-bus"): Promise<void> {
     const expected = (record: OperationRecord): boolean => cause === "left-bus" && this.departureExpected(record);
-    this.revokeShellAccess(deviceId, expected);
-    for (const listener of this.shellListeners) listener();
+    this.sessionTrusted.delete(deviceId);
+    this.declined.delete(deviceId);
     const settling: Promise<void>[] = [];
     for (const record of this.records.values()) {
       if (record.request.deviceId !== deviceId) continue;
@@ -524,6 +504,7 @@ export class DeviceOperationManager {
       if (!isTerminal(record.state)) this.cancel(record.id, this.departureReason(record, cause));
       if (record.settled) settling.push(record.settled);
     }
+    this.notifyTrust();
     await Promise.all(settling);
   }
 
@@ -545,10 +526,10 @@ export class DeviceOperationManager {
   private departureReason(record: OperationRecord, cause: "left-bus" | "forgotten"): string {
     const left = cause === "forgotten" ? "The device was disconnected" : "The device left the USB bus";
     switch (record.state) {
-      case "awaiting-confirmation":
-        return `${left} before this was approved, so it was cancelled. Nothing was changed on the device.`;
-      case "armed":
-        return `${left} during the countdown, so the approval was dropped and the command was not sent. Nothing was changed on the device.`;
+      case "awaiting-trust":
+        return `${left} before the question about it was answered, so this was cancelled. Nothing was changed on the device.`;
+      case "countdown":
+        return `${left} during the countdown, so the command was not sent. Nothing was changed on the device.`;
       case "starting":
         return `${left} before this started, so it was cancelled.`;
       default:
@@ -561,10 +542,14 @@ export class DeviceOperationManager {
     transportProvider: HardwareTransportProvider,
     artifacts: OperationArtifacts,
     flashers: readonly Flasher[] = [serialFlasher],
+    trust: DeviceTrustBook = new MemoryTrustBook(),
   ) {
     this.sessionId = sessionId;
     this.transportProvider = transportProvider;
     this.artifacts = artifacts;
+    this.trustBook = trust;
+    this.knownTrustedKeys = new Set(trust.list().map((device) => device.key));
+    this.unsubscribeTrustBook = trust.subscribe(() => this.trustBookChanged());
     for (const flasher of flashers) this.registerFlasher(flasher);
   }
 
@@ -669,7 +654,8 @@ export class DeviceOperationManager {
       sequence: 0,
       writeChain: Promise.resolve(),
       writeGeneration: 0,
-      approvalAsked: false,
+      riskDeclared: false,
+      cleared: false,
       ...(scheduled.sendDelaySeconds === undefined ? {} : { sendDelaySeconds: scheduled.sendDelaySeconds }),
     };
     this.records.set(record.id, record);
@@ -690,12 +676,14 @@ export class DeviceOperationManager {
   /** A replacement browser page took this session's hardware authority. */
   revokeAuthority(reason = "This browser page no longer owns the session hardware authority."): void {
     if (this.authorityRevokedReason) return;
-    this.shellGrants.clear();
-    for (const listener of this.shellListeners) listener();
     this.authorityRevokedReason = reason;
+    this.sessionTrusted.clear();
+    this.declined.clear();
+    this.unsubscribeTrustBook();
     for (const record of this.records.values()) {
       if (!isTerminal(record.state)) this.cancel(record.id, reason);
     }
+    this.notifyTrust();
   }
 
   /**
@@ -711,10 +699,7 @@ export class DeviceOperationManager {
       record.updatedAt = Date.now();
       record.writeGeneration += 1;
       record.controller.abort();
-      record.pendingConfirmation?.reject(new DOMException("Operation cancelled.", "AbortError"));
-      record.pendingConfirmation = undefined;
-      record.confirmation = undefined;
-      record.approval = undefined;
+      record.countdown = undefined;
       this.emit(record, { type: "state", state: record.state });
     }
     return frozenSnapshot(record);
@@ -752,7 +737,7 @@ export class DeviceOperationManager {
     if (record.state !== "running" || record.controller.signal.aborted || !record.lease) {
       throw new Error("The monitor is not accepting input.");
     }
-    if (origin === "agent" && record.request.protocol === "adb" && !this.hasShellAccess(record.request.deviceId)) throw new Error("Allow agent shell access in the Devices panel first.");
+    if (origin === "agent" && !this.isTrusted(record.request.deviceId)) throw new Error(AGENT_INPUT_REFUSED);
     if (!text.length) throw new Error("Monitor input must not be empty.");
     const generation = record.writeGeneration;
     const bytes = textEncoder.encode(text);
@@ -760,7 +745,7 @@ export class DeviceOperationManager {
       if (record.writeGeneration !== generation || record.state !== "running" || record.controller.signal.aborted || !record.lease) {
         throw new DOMException("Monitor input was cancelled before it was sent.", "AbortError");
       }
-      if (origin === "agent" && record.request.protocol === "adb" && !this.hasShellAccess(record.request.deviceId)) throw new Error("Agent shell access was revoked.");
+      if (origin === "agent" && !this.isTrusted(record.request.deviceId)) throw new Error(AGENT_INPUT_REFUSED);
       if (record.terminalInput) await record.terminalInput(bytes);
       else if (record.lease.transport.kind === "serial") await record.lease.transport.write(bytes, record.controller.signal);
       else throw new Error("The terminal is not ready for input.");
@@ -770,49 +755,90 @@ export class DeviceOperationManager {
     return frozenSnapshot(record);
   }
 
+  // ---------------------------------------------------------------------------------------------------------
+  // Trust: the one permission per device. The model is described in ./trust.ts.
+  // ---------------------------------------------------------------------------------------------------------
+
+  /** The open questions, oldest first: at most one per device, however many operations wait behind it. */
+  trustRequests(): readonly DeviceTrustRequest[] {
+    return [...this.pendingTrust.values()]
+      .map((pending) => ({ ...pending.request }))
+      .sort((left, right) => left.requestedAt - right.requestedAt);
+  }
+
+  /** How far the person has trusted `deviceId` right now. */
+  trustLevel(deviceId: string): DeviceTrustLevel {
+    if (this.declined.has(deviceId)) return "declined";
+    const key = this.subjectOf(deviceId).key;
+    if (key !== undefined && this.trustBook.has(key)) return "remembered";
+    return this.sessionTrusted.has(deviceId) ? "session" : "none";
+  }
+
+  /** Called when a question opens or closes or a device's trust changes; read `trustRequests()` and `trustLevel()` again. */
+  subscribeTrust(listener: () => void): () => void {
+    this.trustListeners.add(listener);
+    return () => { this.trustListeners.delete(listener); };
+  }
+
   /**
-   * Called only by the page's direct risk UI after the server has delivered an
-   * approval command. Neither `start` nor any high-level agent tool accepts an
-   * approval bit. Matching the one-use id and complete binding rejects stale
-   * cards after a changed target, offset, or artifact digest.
+   * The person's answer to one open question. Called only by the chat card's Allow and Deny buttons: neither
+   * `start` nor any tool or frame the agent can reach names this method, and `PageOperationCommand` has no
+   * variant that could.
    *
-   * `choice.sendDelaySeconds` (else the wait the request asked for, else none)
-   * is the wait between this approval and the command going out. The approval
-   * is spent here either way: a second confirm for the same card throws, and a
-   * waiting approval cannot be re-armed or extended, only cancelled.
+   * Allow runs every operation that queued behind the question, in the order they asked. Deny fails them all with
+   * `declinedMessage` and refuses the agent, with no new question, until the device disconnects. `remember` is
+   * honoured only for a device with a stable USB identity; if it cannot be saved the device stays trusted for this
+   * connection and the result says why.
    */
-  confirm(id: string, confirmationId: string, binding: OperationRiskBinding, typedOverride?: string, choice: ApprovalChoice = {}): DeviceOperationSnapshot {
+  async answerTrust(requestId: string, answer: DeviceTrustAnswer): Promise<DeviceTrustAnswerResult> {
     if (this.authorityRevokedReason) throw new Error(this.authorityRevokedReason);
-    const record = this.requireRecord(id);
-    const pending = record.pendingConfirmation;
-    if (!pending || record.state !== "awaiting-confirmation") throw new Error("This operation is not awaiting confirmation.");
-    if (pending.confirmation.id !== confirmationId || !sameBinding(pending.confirmation.binding, binding)) {
-      throw new Error("This confirmation no longer matches the operation risk.");
+    const pending = [...this.pendingTrust.values()].find((candidate) => candidate.request.id === requestId);
+    if (!pending) throw new Error("That question was already answered or is no longer waiting.");
+    const { deviceId, label } = pending.request;
+    const waiters = [...pending.waiters];
+    pending.waiters.clear();
+    this.pendingTrust.delete(deviceId);
+    if (!answer.allow) {
+      this.declined.add(deviceId);
+      this.notifyTrust();
+      const refusal = new Error(declinedMessage(label));
+      for (const waiter of waiters) waiter.reject(refusal);
+      return { remembered: false };
     }
-    if (pending.confirmation.binding.protectedOverride && typedOverride !== pending.confirmation.binding.protectedOverride) {
-      throw new Error("Type the exact protected-target override shown in the panel.");
+    this.sessionTrusted.add(deviceId);
+    this.notifyTrust();
+    for (const waiter of waiters) waiter.resolve();
+    const { subject } = pending;
+    if (!answer.remember || subject.key === undefined || subject.vendorId === undefined || subject.serialNumber === undefined) return { remembered: false };
+    const device: TrustedDevice = {
+      key: subject.key,
+      label: subject.label,
+      vendorId: subject.vendorId,
+      ...(subject.productId === undefined ? {} : { productId: subject.productId }),
+      serialNumber: subject.serialNumber,
+      grantedAt: Date.now(),
+    };
+    try {
+      await this.trustBook.remember(device);
+    } catch (error) {
+      return { remembered: false, error: errorMessage(error) };
     }
-    const sendDelaySeconds = choice.sendDelaySeconds ?? record.sendDelaySeconds ?? 0;
-    if (sendDelaySeconds !== 0 && !validSendDelay(sendDelaySeconds, 1)) {
-      throw new Error(`The wait before sending must be a whole number of seconds from 1 to ${MAX_SEND_DELAY_SECONDS}, or none.`);
-    }
-    const now = Date.now();
-    record.pendingConfirmation = undefined;
-    record.confirmation = undefined;
-    if (sendDelaySeconds > 0) {
-      record.approval = {
-        approvedAt: now,
-        releaseAt: now + sendDelaySeconds * 1000,
-        expiresAt: now + sendDelaySeconds * 1000 + APPROVAL_SLACK_MS,
-        binding: cloneRiskBinding(pending.confirmation.binding),
-        device: { ...pending.confirmation.device },
-      };
-    }
-    record.state = record.approval ? "armed" : "running";
-    record.updatedAt = now;
-    this.emit(record, { type: "state", state: record.state });
-    pending.resolve(record.approval);
-    return frozenSnapshot(record);
+    // The remembered list covers this device from now on; the connection's own grant would outlive a Forget.
+    this.sessionTrusted.delete(deviceId);
+    this.notifyTrust();
+    return { remembered: true };
+  }
+
+  /**
+   * Withdraws the agent's control of a device: the connection's trust ends, what was remembered for it is
+   * forgotten, and what the agent has running on it is cancelled. The next operation asks again.
+   */
+  async withdrawTrust(deviceId: string): Promise<void> {
+    const { key } = this.subjectOf(deviceId);
+    this.sessionTrusted.delete(deviceId);
+    this.cancelClearedAgentOperations(deviceId);
+    this.notifyTrust();
+    if (key !== undefined && this.trustBook.has(key)) await this.trustBook.forget(key);
   }
 
   private requireRecord(id: string): OperationRecord {
@@ -916,6 +942,7 @@ export class DeviceOperationManager {
   private async run(record: OperationRecord): Promise<void> {
     let completed = false;
     try {
+      await this.requireTrust(record);
       const input = await this.resolveInput(record);
       if (record.controller.signal.aborted) throw new DOMException("Operation cancelled.", "AbortError");
       this.reportProgress(record, { phase: "acquiring", message: "Acquiring exclusive hardware lease" });
@@ -976,7 +1003,6 @@ export class DeviceOperationManager {
       transport,
       signal: record.controller.signal,
       progress: (progress) => this.reportProgress(record, progress),
-      shellAccess: () => !record.controller.signal.aborted && (record.origin === "user" || this.hasShellAccess(record.request.deviceId)),
       output: (text) => this.addOutput(record, text, record.request.action === "monitor" ? "terminal" : "log"),
       setTerminalInput: (send) => { record.terminalInput = send; },
       input,
@@ -986,7 +1012,7 @@ export class DeviceOperationManager {
         return this.artifacts.saveStream(this.sessionId, name, chunks, record.controller.signal);
       },
       ...(this.artifacts.findBySha256 ? { findArtifact: (digest: string) => this.artifacts.findBySha256!(this.sessionId, digest) } : {}),
-      confirm: (risk) => this.awaitHumanConfirmation(record, risk),
+      confirm: (risk) => this.declareRisk(record, risk),
       operation: { id: record.id, deviceId: record.request.deviceId },
       tunnels: this.transportProvider.tunnels,
       ...(record.waitDeadline === undefined ? {} : { deadline: record.waitDeadline }),
@@ -1056,56 +1082,190 @@ export class DeviceOperationManager {
     return replacement.transport;
   }
 
-  private async awaitHumanConfirmation(record: OperationRecord, risk: HardwareRisk): Promise<void> {
-    if (record.controller.signal.aborted) throw new DOMException("Operation cancelled.", "AbortError");
-    const binding = this.bindRisk(record, risk);
-    if (record.pendingConfirmation) throw new Error("A confirmation is already pending for this operation.");
-    const confirmation: OperationConfirmation = {
-      id: randomId("device-confirmation"),
-      binding,
-      requestedAt: Date.now(),
-      device: { id: record.request.deviceId, ...(record.identity === undefined ? {} : { identity: record.identity }) },
-      ...(record.sendDelaySeconds === undefined ? {} : { sendDelaySeconds: record.sendDelaySeconds }),
-    };
-    record.approvalAsked = true;
-    record.confirmation = confirmation;
-    record.state = "awaiting-confirmation";
-    record.updatedAt = confirmation.requestedAt;
-    const approved = new Promise<OperationApproval | undefined>((resolve, reject) => {
-      record.pendingConfirmation = { confirmation, resolve, reject };
-    });
-    this.emit(record, { type: "confirmation", confirmation });
-    const approval = await approved;
-    if (approval) await this.holdUntilDue(record, approval);
+  // ---------------------------------------------------------------------------------------------------------
+  // The trust gate, and what the manager does when a protocol declares a risk.
+  // ---------------------------------------------------------------------------------------------------------
+
+  private subjectOf(deviceId: string): DeviceTrustSubject {
+    return this.transportProvider.describeDevice?.(deviceId) ?? { label: deviceId };
+  }
+
+  private isTrusted(deviceId: string): boolean {
+    const level = this.trustLevel(deviceId);
+    return level === "remembered" || level === "session";
+  }
+
+  private notifyTrust(): void {
+    for (const listener of [...this.trustListeners]) {
+      try {
+        listener();
+      } catch {
+        // A page subscriber must never break trust bookkeeping.
+      }
+    }
+  }
+
+  /** Cancels one agent operation because the person withdrew its device's trust. Once is enough: it may already be cancelling. */
+  private withdrawFrom(record: OperationRecord): void {
+    if (record.state === "cancelling") return;
+    this.addOutput(record, `${TRUST_WITHDRAWN_REASON} Anything already sent to the device cannot be undone.`);
+    this.cancel(record.id, TRUST_WITHDRAWN_REASON);
+  }
+
+  /** Cancels the agent's operations that were already allowed to touch `deviceId`; those still waiting for an answer keep waiting. */
+  private cancelClearedAgentOperations(deviceId: string): void {
+    for (const record of this.records.values()) {
+      if (record.request.deviceId === deviceId && record.origin === "agent" && record.cleared && !isTerminal(record.state)) this.withdrawFrom(record);
+    }
   }
 
   /**
-   * The person approved and chose to wait before the command goes out (their hands are on the device's buttons,
-   * say). Nothing is sent while this waits, and it can be cancelled at any moment. At the moment of sending the
-   * approval is checked once more - not expired, still the same device, still connected - and a failed check
-   * ends the operation with the reason instead of sending.
+   * The remembered list changed - this page forgot a device, or Settings did. What the agent has running on a
+   * device the list no longer covers is cancelled; a device the person allowed for this connection keeps its grant.
    */
-  private async holdUntilDue(record: OperationRecord, approval: OperationApproval): Promise<void> {
-    await pause(Math.max(0, approval.releaseAt - Date.now()), record.controller.signal);
+  private trustBookChanged(): void {
+    const current = new Set(this.trustBook.list().map((device) => device.key));
+    const forgotten = [...this.knownTrustedKeys].filter((key) => !current.has(key));
+    this.knownTrustedKeys = current;
+    if (forgotten.length > 0) {
+      for (const record of this.records.values()) {
+        if (record.origin !== "agent" || !record.cleared || isTerminal(record.state)) continue;
+        const { key } = this.subjectOf(record.request.deviceId);
+        if (key !== undefined && forgotten.includes(key) && !this.isTrusted(record.request.deviceId)) this.withdrawFrom(record);
+      }
+    }
+    this.notifyTrust();
+  }
+
+  /**
+   * The trust gate. An agent operation other than read-only detection waits here until the person has trusted the
+   * device: no wait when they already have, a refusal when they declined, otherwise one question for the device
+   * with this operation queued behind it. The person's own operations are not gated: they are the person.
+   */
+  private async requireTrust(record: OperationRecord): Promise<void> {
+    const { deviceId, action } = record.request;
+    if (record.origin === "agent" && actionNeedsTrust(action)) {
+      // A device the page does not know has nothing to control: the operation fails on its own at the lease, and the
+      // person is not asked about a device that is not there.
+      const subject = this.transportProvider.describeDevice ? this.transportProvider.describeDevice(deviceId) : { label: deviceId };
+      if (subject) {
+        // The remembered list is read from the server when the page starts: never decide on half of it.
+        if (subject.key !== undefined) await this.trustBook.ready;
+        if (record.controller.signal.aborted) throw new DOMException("Operation cancelled.", "AbortError");
+        if (this.declined.has(deviceId)) throw new Error(declinedMessage(subject.label));
+        if (!this.isTrusted(deviceId)) await this.askForTrust(record, subject);
+      }
+    }
+    record.cleared = true;
+  }
+
+  private async askForTrust(record: OperationRecord, subject: DeviceTrustSubject): Promise<void> {
+    const { deviceId } = record.request;
+    let queue = this.pendingTrust.get(deviceId);
+    if (!queue) {
+      queue = {
+        request: {
+          id: randomId("device-trust"),
+          deviceId,
+          label: subject.label,
+          ...(subject.key === undefined ? {} : { key: subject.key }),
+          requestedAt: Date.now(),
+          waiting: 0,
+        },
+        subject,
+        waiters: new Set(),
+      };
+      this.pendingTrust.set(deviceId, queue);
+    }
+    const open = queue;
+    const { promise, resolve, reject } = Promise.withResolvers<void>();
+    const waiter: TrustWaiter = { resolve, reject };
+    const cancelled = (): void => {
+      this.leaveTrustQueue(open, waiter);
+      reject(new DOMException("Operation cancelled.", "AbortError"));
+    };
+    // Listening comes first: a subscriber that cancels this operation while the state change is announced must be heard.
+    record.controller.signal.addEventListener("abort", cancelled, { once: true });
+    open.waiters.add(waiter);
+    open.request = { ...open.request, waiting: open.waiters.size };
+    record.state = "awaiting-trust";
+    record.updatedAt = Date.now();
+    this.emit(record, { type: "state", state: record.state });
+    this.notifyTrust();
+    try {
+      await promise;
+    } finally {
+      record.controller.signal.removeEventListener("abort", cancelled);
+    }
+    if (record.state === "awaiting-trust") {
+      record.state = "starting";
+      record.updatedAt = Date.now();
+      this.emit(record, { type: "state", state: record.state });
+    }
+  }
+
+  /** An operation stops waiting for the answer (it was cancelled); the question goes with the last one that was waiting. */
+  private leaveTrustQueue(queue: PendingTrust, waiter: TrustWaiter): void {
+    queue.waiters.delete(waiter);
+    const { deviceId } = queue.request;
+    if (this.pendingTrust.get(deviceId) === queue) {
+      if (queue.waiters.size === 0) this.pendingTrust.delete(deviceId);
+      else queue.request = { ...queue.request, waiting: queue.waiters.size };
+    }
+    this.notifyTrust();
+  }
+
+  /**
+   * A protocol is about to send something to the device and says exactly what. The manager checks that it is what
+   * was requested, writes it to the operation's log, and - once, before the first thing is sent - holds for the
+   * countdown the request asked for. Nobody is asked anything here: the person's trust covered the operation before
+   * it began.
+   */
+  private async declareRisk(record: OperationRecord, risk: HardwareRisk): Promise<void> {
     if (record.controller.signal.aborted) throw new DOMException("Operation cancelled.", "AbortError");
-    const refusal = this.refuseRelease(record, approval);
-    record.approval = undefined;
+    const binding = this.bindRisk(record, risk);
+    record.riskDeclared = true;
+    this.addOutput(record, `Starting ${binding.action} on ${binding.target}. Backup: ${binding.backup}`);
+    this.emit(record, { type: "declared", declared: binding });
+    const seconds = record.sendDelaySeconds;
+    if (seconds === undefined) return;
+    record.sendDelaySeconds = undefined;
+    await this.countDown(record, binding, seconds);
+  }
+
+  /**
+   * The person (or the agent, for the person's benefit) asked for a wait before the command goes out - their hands
+   * are on the device's buttons, say. Nothing is sent while this waits, and it can be cancelled at any moment. At
+   * the moment of sending it is checked once more - not stale, still the same device, still connected - and a failed
+   * check ends the operation with the reason instead of sending.
+   */
+  private async countDown(record: OperationRecord, binding: OperationRiskBinding, seconds: number): Promise<void> {
+    const startedAt = Date.now();
+    const countdown: OperationCountdown = { startedAt, releaseAt: startedAt + seconds * 1000, binding: cloneRiskBinding(binding) };
+    record.countdown = countdown;
+    record.state = "countdown";
+    record.updatedAt = startedAt;
+    this.emit(record, { type: "state", state: record.state });
+    await pause(Math.max(0, countdown.releaseAt - Date.now()), record.controller.signal);
+    if (record.controller.signal.aborted) throw new DOMException("Operation cancelled.", "AbortError");
+    const refusal = this.refuseRelease(record, countdown);
+    record.countdown = undefined;
     if (refusal) throw new Error(refusal);
     record.state = "running";
     record.updatedAt = Date.now();
     this.emit(record, { type: "state", state: record.state });
   }
 
-  private refuseRelease(record: OperationRecord, approval: OperationApproval): string | undefined {
-    if (Date.now() > approval.expiresAt) {
-      return "Not sent: the approval ran out before the command could go out (the page was probably asleep). Nothing was changed on the device; approve it again to send it.";
+  private refuseRelease(record: OperationRecord, countdown: OperationCountdown): string | undefined {
+    if (Date.now() > countdown.releaseAt + COUNTDOWN_SLACK_MS) {
+      return "Not sent: the countdown ran past its end before the command could go out (the page was probably asleep). Nothing was changed on the device; run it again to send it.";
     }
     const lease = record.lease;
-    if (!lease) return "Not sent: Cody no longer holds the device connection that the approval was given for. Nothing was changed on the device.";
+    if (!lease) return "Not sent: Cody no longer holds the device connection this was counting down on. Nothing was changed on the device.";
     if (record.identity !== undefined && this.transportProvider.currentIdentity) {
       const current = this.transportProvider.currentIdentity(record.request.deviceId);
       if (current !== record.identity) {
-        return `Not sent: this is no longer the device you approved (approved ${record.identity}, now ${current ?? "not attached"}). Nothing was changed on the device.`;
+        return `Not sent: this is no longer the device the countdown started on (it was ${record.identity}, now ${current ?? "not attached"}). Nothing was changed on the device.`;
       }
     }
     if (lease.transport.connected && !lease.transport.connected()) {
@@ -1119,13 +1279,13 @@ export class DeviceOperationManager {
     if (!risk.action.trim() || !risk.target.trim() || !risk.backup.trim()) {
       throw new Error("A hardware risk needs an action, target, and backup status.");
     }
-    if (risk.details !== undefined && risk.details.length > 8 * 1024) throw new Error("Confirmation details are too large.");
-    if (request.target !== undefined && risk.target !== request.target) throw new Error("The confirmation target differs from the requested target.");
-    if (request.offset !== undefined && risk.offset !== request.offset) throw new Error("The confirmation payload offset differs from the requested offset.");
-    if (request.length !== undefined && risk.length !== request.length) throw new Error("The confirmation payload length differs from the requested length.");
+    if (risk.details !== undefined && risk.details.length > 8 * 1024) throw new Error("The declared risk's details are too large.");
+    if (request.target !== undefined && risk.target !== request.target) throw new Error("The declared target differs from the requested target.");
+    if (request.offset !== undefined && risk.offset !== request.offset) throw new Error("The declared payload offset differs from the requested offset.");
+    if (request.length !== undefined && risk.length !== request.length) throw new Error("The declared payload length differs from the requested length.");
     const requestedSha256 = request.sha256?.toLowerCase();
     const payloadSha256 = risk.sha256?.toLowerCase() ?? requestedSha256;
-    if (requestedSha256 && payloadSha256 !== requestedSha256) throw new Error("The confirmation payload digest differs from the verified artifact.");
+    if (requestedSha256 && payloadSha256 !== requestedSha256) throw new Error("The declared payload digest differs from the verified artifact.");
     const footprint = [risk.programSha256, risk.programOffset, risk.programLength];
     if (footprint.some((value) => value !== undefined) && footprint.some((value) => value === undefined)) {
       throw new Error("A widened program footprint requires its image digest, offset, and length.");
@@ -1148,26 +1308,9 @@ export class DeviceOperationManager {
       programOffset: risk.programOffset,
       programLength: risk.programLength,
       details: risk.details,
-      protectedOverride: risk.protectedOverride,
       backup: risk.backup,
     };
   }
-
-
-}
-
-function sameBinding(left: OperationRiskBinding, right: OperationRiskBinding): boolean {
-  return left.action === right.action
-    && left.target === right.target
-    && left.sha256 === right.sha256
-    && left.offset === right.offset
-    && left.length === right.length
-    && left.programSha256 === right.programSha256
-    && left.programOffset === right.programOffset
-    && left.programLength === right.programLength
-    && left.details === right.details
-    && left.protectedOverride === right.protectedOverride
-    && left.backup === right.backup;
 }
 
 /** Server-to-page commands. id settles the command; operationId owns the durable run. */
@@ -1222,8 +1365,9 @@ export function createPageOperationDelegate(
   transportProvider: HardwareTransportProvider,
   artifacts: OperationArtifacts,
   flashers: readonly Flasher[] = [],
+  trust?: DeviceTrustBook,
 ): PageOperationDelegate {
-  const manager = new DeviceOperationManager(sessionId, transportProvider, artifacts, flashers);
+  const manager = new DeviceOperationManager(sessionId, transportProvider, artifacts, flashers, trust);
   let activeBridge: PageOperationBridge | undefined;
   const pending = new Map<string, { snapshot: DeviceOperationSnapshot; event: OperationEvent }>();
   const phases = new Map<string, string>();
@@ -1249,7 +1393,7 @@ export function createPageOperationDelegate(
     }
     const phaseChanged = event.type === "progress" && event.progress && phases.get(snapshot.id) !== event.progress.phase;
     if (event.progress) phases.set(snapshot.id, event.progress.phase);
-    if (event.type === "confirmation" || event.type === "state" || phaseChanged) {
+    if (event.type === "declared" || event.type === "state" || phaseChanged) {
       pending.delete(snapshot.id);
       publish(snapshot, event);
       return;
@@ -1311,5 +1455,5 @@ export function createDefaultPageOperationDelegate(
     stk500Flasher,
     dfuFlasher,
     edlFlasher,
-  ]);
+  ], pageTrustBook());
 }

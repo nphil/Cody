@@ -3458,3 +3458,37 @@ span.linenumber {
 @media (prefers-reduced-motion: reduce) {
   .dv-btn, .dv-disclosure > summary::after { transition: none; }
 }
+
+/* Scheduled send (components/SendPill.tsx, ScheduleMenu.tsx, ScheduledRows.tsx).
+   The Send pill is one rounded shape with two buttons in it; its hover and
+   focus are drawn from the text colour (`currentColor`), because the pill is
+   accent-filled when there is something to send and plain when there is not,
+   and a fixed ring colour would vanish on one of the two. It must not be
+   selectable or call out on a long press: the long press is the menu. */
+.send-pill {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: manipulation;
+}
+.send-pill__main:hover:not([aria-disabled="true"]),
+.send-pill__zone:hover {
+  background: color-mix(in srgb, currentColor 14%, transparent) !important;
+}
+.send-pill__main:focus-visible,
+.send-pill__zone:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: -3px;
+}
+.scheduled-row__action:hover:not(:disabled) {
+  background: var(--bg-hover) !important;
+}
+/* The menu slides up from the bottom edge on a touch screen. */
+@keyframes schedule-sheet-in {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+.schedule-sheet { animation: schedule-sheet-in var(--dur-med) var(--ease-out-warm) both; }
+@media (prefers-reduced-motion: reduce) {
+  .schedule-sheet { animation: none; }
+}

@@ -1,11 +1,12 @@
 import * as path from "node:path";
-import { devicesInternalEndpoint, displayInternalEndpoint, issueDisplayCapability, sessionsInternalEndpoint } from "./capability";
+import { devicesInternalEndpoint, displayInternalEndpoint, issueDisplayCapability, scheduledInternalEndpoint, sessionsInternalEndpoint } from "./capability";
 
 export interface DisplayMcpLaunch {
   serverPath: string;
   endpoint: string;
   sessionsEndpoint: string;
   devicesEndpoint: string;
+  scheduledEndpoint: string;
   capability: string;
   engineLabel: string;
 }
@@ -17,6 +18,7 @@ export function createDisplayMcpLaunch(sessionId: string, engineLabel = "Cody"):
     endpoint: displayInternalEndpoint(),
     sessionsEndpoint: sessionsInternalEndpoint(),
     devicesEndpoint: devicesInternalEndpoint(),
+    scheduledEndpoint: scheduledInternalEndpoint(),
     capability: issueDisplayCapability(sessionId),
     engineLabel,
   };
@@ -36,6 +38,7 @@ export function claudeDisplayMcpConfig(sessionId: string): string {
           CODY_DISPLAY_ENDPOINT: launch.endpoint,
           CODY_SESSIONS_ENDPOINT: launch.sessionsEndpoint,
           CODY_DEVICES_ENDPOINT: launch.devicesEndpoint,
+          CODY_SCHEDULED_ENDPOINT: launch.scheduledEndpoint,
           CODY_ENGINE_LABEL: launch.engineLabel,
         },
       },
@@ -70,6 +73,7 @@ export function displayMcpAcpServer(sessionId: string, engineLabel = "Cody"): {
       { name: "CODY_DISPLAY_ENDPOINT", value: launch.endpoint },
       { name: "CODY_SESSIONS_ENDPOINT", value: launch.sessionsEndpoint },
       { name: "CODY_DEVICES_ENDPOINT", value: launch.devicesEndpoint },
+      { name: "CODY_SCHEDULED_ENDPOINT", value: launch.scheduledEndpoint },
       { name: "CODY_ENGINE_LABEL", value: launch.engineLabel },
     ],
   };

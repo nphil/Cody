@@ -57,8 +57,8 @@ export function parseAndroidInfo(text: string): AndroidInfo {
 /**
  * A real android-info.txt is a few hundred bytes of `require` lines. These
  * bounds are for package METADATA, deliberately far below the limits for
- * firmware images: the file is read into a string before the user approves
- * anything, and each requirement costs a round trip to the bootloader.
+ * firmware images: the file is read into a string before anything is sent
+ * to the device, and each requirement costs a round trip to the bootloader.
  */
 export const MAX_ANDROID_INFO_BYTES = 64 * 1024;
 export const MAX_ANDROID_INFO_REQUIREMENTS = 256;

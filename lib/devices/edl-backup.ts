@@ -27,7 +27,6 @@ import {
   normalizeChipSerial,
   parseManifest,
   planRestore,
-  restoreOverride,
   sha256Hex,
   storageMismatches,
   type RestorePlan,
@@ -48,8 +47,8 @@ import { throwIfAborted } from "./serial";
  *                  them by SHA-256 and says which unit they came from. Read-only.
  *   exec restore   puts a set back on the SAME unit: it is matched to the unit by chip serial, public-key hash (both from a
  *                  boot ROM that is read in this very operation), eMMC serial and disk GUID before the loader is even
- *                  confirmed; what it will overwrite is saved first; ONE typed approval (`restore:<manifest sha8>`)
- *                  covers the exact ranges; partitions are written first, then the backup table, then the primary table
+ *                  declared; what it will overwrite is saved first; the exact ranges are declared once
+ *                  (`grantWrites`) and the guard refuses anything outside them; partitions are written first, then the backup table, then the primary table
  *                  last, and every region written is read back and compared before the next is started.
  */
 
@@ -67,7 +66,7 @@ function listed(labels: readonly string[]): string {
   return `${labels.slice(0, LISTED_NAMES).join(", ")}${labels.length > LISTED_NAMES ? ` and ${labels.length - LISTED_NAMES} more` : ""}`;
 }
 
-/** Joins lines but stops adding when the text would no longer fit a confirmation. */
+/** Joins lines but stops adding when the text would no longer fit the declared risk's details (the manager refuses more than 8 KiB). */
 function fitted(lines: readonly string[]): string {
   let text = "";
   for (const line of lines) {
@@ -225,7 +224,7 @@ function parseRestoreRequest(run: EdlRun): string {
   const options = request.options ?? {};
   const extra = Object.keys(options).filter((key) => key !== "manifestSha256");
   if (extra.length > 0) {
-    throw refused(`A restore takes only options.manifestSha256; ${extra.slice(0, 3).join(", ")} ${extra.length === 1 ? "is" : "are"} not accepted. Approvals are given in the panel, never in options. Nothing was written.`);
+    throw refused(`A restore takes only options.manifestSha256; ${extra.slice(0, 3).join(", ")} ${extra.length === 1 ? "is" : "are"} not accepted. Nothing was written.`);
   }
   const digest = options.manifestSha256;
   if (typeof digest !== "string" || !/^[0-9a-f]{64}$/i.test(digest)) {
@@ -393,12 +392,10 @@ export async function restoreSet(run: EdlRun): Promise<HardwareResult> {
   const escrowList = (list: readonly Saved[]): string => listed(list.map((check) => `${check.region.label} → ${check.escrow.fileId}`));
   const protectedNames = toWrite.filter((check) => check.region.protectedBecause).map((check) => check.region.label);
   const writeSectors = toWrite.reduce((sum, check) => sum + check.region.sectors, 0);
-  const override = restoreOverride(manifestSha256);
   const undo = "To undo a partition, flash its saved copy back to it; the saved partition tables have no command that writes them back.";
   const grant = await grantWrites(context, {
     action: "edl restore",
     target: `disk ${manifest.unit.diskGuid}`,
-    protectedOverride: override,
     backup: `Saved the current contents of the ${toWrite.length} region(s) it will overwrite (${formatBytes(writeSectors * sectorSize)}), each checked to hold exactly the bytes read, before any change: ${escrowList(toWrite)}. Files are named edl-${tag}-restore-${short}-*.pre.bin. ${undo}`,
     details: fitted([
       `Restore backup set ${short} (manifest SHA-256 ${manifestSha256}, taken ${manifest.createdAt}) onto disk ${manifest.unit.diskGuid}.`,
@@ -407,7 +404,6 @@ export async function restoreSet(run: EdlRun): Promise<HardwareResult> {
       identical.length > 0 ? `Already identical and left alone: ${listed(identical.map((check) => check.region.label))}.` : "",
       protectedNames.length > 0 ? `PROTECTED partitions among them (boot chain, radio or identity data): ${listed(protectedNames)}.` : "No protected partition is among them.",
       `Order: partitions first, then the backup partition table, then the primary partition table last. Each region is read back and compared by SHA-256 before the next is started; the first mismatch stops the restore and the tables are written only if every partition read back identical.`,
-      `Type ${override} to approve.`,
     ]),
   }, { label: `restore set ${short}`, sectorSize, kinds: ["program"], ranges: toWrite.map((check) => ({ startSector: check.region.firstLba, sectors: check.region.sectors })) });
 

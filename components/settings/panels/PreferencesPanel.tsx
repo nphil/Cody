@@ -30,6 +30,7 @@ import { SaveStatusCorner, useSaveStatus } from "../SaveStatus";
 import type { SearchEntry } from "../search-index";
 import { useSettingsShell } from "../shell-context";
 import { TimeZoneSetting } from "../TimeZoneSetting";
+import { TrustedDevicesSetting } from "../TrustedDevicesSetting";
 
 export const PREFERENCES_PANEL_ID = "general";
 
@@ -56,6 +57,7 @@ export const PREFERENCE_CARDS: readonly PreferenceCard[] = [
   { id: "soft-keys", label: "Terminal soft keys", description: "Choose the buttons shown below the terminal on touch devices. Shift Tab moves backward through terminal UI modes.", scope: "Cody only", keywords: ["touch", "keyboard"] },
   { id: "distill", label: "Distill", description: "Shorten finished assistant replies, and summarize the model's thinking while its box is collapsed. The full text is always one click away.", scope: "Cody only", keywords: ["summary", "summarize", "shorten", "condense", "verbosity", "thinking", "reply", "plain language", "jargon", "non-technical"] },
   { id: "plan-keeper", label: "Live plan keeper", description: "A small background model watches this session and checks off finished tasks and subtasks automatically, so the plan stays current without the agent pausing to update it.", scope: "Cody only", keywords: ["auto", "automatic", "subtasks", "todo", "keeper"] },
+  { id: "trusted-devices", label: "Trusted devices", description: "Devices you let the agent control without asking again. Forget one and the agent has to ask next time. This list can only remove trust; trust is only ever given from the prompt in the chat.", scope: "Cody only", keywords: ["usb", "adb", "fastboot", "flash", "hardware", "permission", "remember", "forget", "revoke", "trust"] },
 ];
 
 export const SEARCH_ENTRIES: readonly SearchEntry[] = PREFERENCE_CARDS.map((card) => ({
@@ -380,6 +382,11 @@ export function PreferencesPanel() {
             })}
           </div>
         )}
+      />
+      <TrustedDevicesSetting
+        label={card("trusted-devices").label}
+        description={card("trusted-devices").description}
+        searchId={slugify(card("trusted-devices").label)}
       />
     </div>
   );

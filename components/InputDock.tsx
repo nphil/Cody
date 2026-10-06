@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, ty
 import { ChevronDown, ChevronLeft, ChevronRight, CircleHelp } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
 import { PermissionRequestCard } from "./PermissionRequestCard";
+import { DeviceTrustCard } from "./DeviceTrustCard";
 import { ExtensionInputCard } from "./ExtensionDialog";
 import { AskDialogForm } from "./AskDialogForm";
 import type { PendingInput, PendingInputResponse, RefusalDecision } from "@/lib/pending-input";
@@ -19,6 +20,7 @@ function inputKey(item: PendingInput): string {
     case "extension": return "extension:" + item.request.id;
     case "permission": return "permission:" + item.request.requestId;
     case "refusal": return "refusal:" + item.decision.id;
+    case "device-trust": return "device-trust:" + item.request.id;
   }
 }
 
@@ -32,6 +34,7 @@ function requestTitle(item: PendingInput, t: ReturnType<typeof useI18n>["t"]): s
     }
     case "permission": return t("permissionRequest.heading");
     case "refusal": return t("refusal.title");
+    case "device-trust": return t("deviceTrust.dockTitle", { device: item.request.label });
   }
 }
 
@@ -289,6 +292,13 @@ export function InputDock({ pendingInputs, onRespond, composerRef }: InputDockPr
                 key={item.decision.id}
                 decision={item.decision}
                 onChoose={(choice, remember) => respond({ kind: "refusal", choice, remember })}
+              />
+            )}
+            {item.kind === "device-trust" && (
+              <DeviceTrustCard
+                key={item.request.id}
+                request={item.request}
+                onRespond={(allow, remember) => respond({ kind: "device-trust", allow, remember })}
               />
             )}
           </div>

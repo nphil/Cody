@@ -7,8 +7,10 @@ listed real hardware and the evidence fields are completed.** Unit tests with
 fake transports prove guard behavior only; they do not establish electrical,
 boot-ROM, cable, vendor-tool, recovery, or retention behavior.
 **This checklist authorizes no destructive write.** It records future acceptance
-criteria only; a separate, exact point-of-risk approval is required for every
-real operation. Protected fuse/eFuse programming is never a casual test.
+criteria only; the operator decides separately, for every real attempt, that it
+may happen (Cody's device trust, below, is the agent's permission to drive a
+device, not a go-ahead for a test). Protected fuse/eFuse programming is never a
+casual test.
 
 Use a disposable or recoverable test device first. Do not repurpose a production
 device as the initial test target.
@@ -47,16 +49,20 @@ Complete one record per attempt before checking any acceptance item:
   the displayed SHA-256 matches the recorded value.
 - [ ] **UNVERIFIED** A readable pre-write backup of the exact destination range
   is saved to persistent escrow. Its path/ID, length, and SHA-256 are recorded.
-- [ ] **UNVERIFIED** The interface presents point-of-risk confirmation with the
-  exact action, device/target, SHA-256, absolute offset, length, backup
-  reference, and any single named protected-region override.
-- [ ] **UNVERIFIED** Cancelling that confirmation sends no write bytes and does
-  not silently retry or retain an approval for a later operation.
+- [ ] **UNVERIFIED** Before the first write byte the operation log states the
+  exact action, device/target, SHA-256, absolute offset, length and backup
+  reference (`Starting <action> on <target>. Backup: ...`); a request that
+  needs a protected-region override names it itself, or is refused.
+- [ ] **UNVERIFIED** Cancelling before the first write byte (including during an
+  `options.sendDelaySeconds` countdown, which shows "Starting in N s" with a
+  Cancel button) sends no write bytes and does not silently retry; nothing
+  from a cancelled operation is retained for a later one.
 - [ ] **UNVERIFIED** The protocol can read back the exact written byte range
   after flashing. A delivery ACK, device “OK”, progress bar, or transfer CRC is
   not accepted as verification.
-- [ ] **UNVERIFIED** Fastboot without fetch presents an UNVERIFIED-write warning,
-  backup-unavailable reason, and recovery verification instructions before approval.
+- [ ] **UNVERIFIED** Fastboot without fetch states an UNVERIFIED-write warning,
+  the backup-unavailable reason, and recovery verification instructions in the
+  declared risk before the write, and again in the result.
   Other protocols retain their documented readback requirements.
 - [ ] **UNVERIFIED** Disconnect, timeout, and cancelled-transfer behavior is
   recorded as unknown completion; no automatic write retry occurs.
@@ -64,21 +70,54 @@ Complete one record per attempt before checking any acceptance item:
 
 - [ ] **UNVERIFIED** Starting an operation in one Cody session, then switching
   to another Cody session mid-transfer, cancels or quarantines the first
-  operation; no approval, write, or result crosses the session boundary.
+  operation; no connection trust, write, or result crosses the session boundary.
 - [ ] **UNVERIFIED** Reconnecting the identical device identity reacquires only
   the authorized session; a different VID/PID, serial/path, or USB identity
-  requires a new device grant and fresh point-of-risk confirmation.
+  requires a new device grant in the browser's USB picker, and the agent is
+  asked afresh unless the device was remembered (same vendor id and serial number).
 - [ ] **UNVERIFIED** A second claimant for the same serial or USB interface is
   rejected without consuming bytes or stealing the active exclusive lease.
 - [ ] **UNVERIFIED** Disconnect/reconnect leaves completion unknown until a new
   identity-bound operation explicitly verifies the device state.
 
+## Device trust: one permission per device
+
+The agent never controls a device by default. Its first control operation on a
+device (anything but read-only detection) asks once, in the chat; nothing else
+asks afterwards. The user's own terminal and Devices-panel buttons are never gated.
+
+- [ ] **UNVERIFIED** With an untrusted device, an agent `device_exec` raises ONE
+  card in the chat ("Let the agent control <device>?" with Allow, Deny and
+  "Remember this device"); two more agent operations started meanwhile wait
+  behind it (state "Waiting for your answer") and raise no second card. Allow
+  runs all three, in the order asked.
+- [ ] **UNVERIFIED** Deny fails every waiting operation with "The user declined
+  control of <device>; do not ask again until they reconnect it"; a new agent
+  operation on that device is refused at once with the same text and raises no
+  card; after the device is unplugged and plugged in again the agent is asked again.
+- [ ] **UNVERIFIED** "Remember this device" is ticked by default for a device that
+  reports a USB serial number and is not shown for one that does not. Allowed
+  and remembered: unplug and replug it, then reboot it into another mode (adb,
+  fastboot, recovery: the vendor id and serial number stay, the product id may
+  change) and grant it again in the browser picker: no new question, and the
+  device card shows "Trusted" with Forget. A device with no serial number: no
+  checkbox, and the trust ends at unplug or page reload.
+- [ ] **UNVERIFIED** Forget (device card, or Settings, Trusted devices) cancels
+  what the agent has running on the device, and its next operation asks again.
+  No tool, option or server frame can add trust; the only place that grants it
+  is Allow on the chat card.
+- [ ] **UNVERIFIED** `device_detect` and the user's own Devices-panel actions
+  never ask. A second browser tab or account never sees the first's questions;
+  remembered devices follow the account, connection-only trust follows the page.
+
 ## Protected-region refusal and override
 
 Protected checks are rejection-only until there is a separately approved
-recoverable-device procedure. Unit/fake transports exercise named-override
-confirmation; this checklist never calls for an actual fuse/eFuse burn. Each
-item remains **UNVERIFIED** until its permitted evidence is completed.
+recoverable-device procedure. Unit/fake transports exercise the request-level
+named override (`options.protectedOverride`, named by whoever makes the request;
+nothing is typed in a prompt); this checklist never calls for an actual
+fuse/eFuse burn. Each item remains **UNVERIFIED** until its permitted evidence
+is completed.
 
 - [ ] **UNVERIFIED** A request targeting `preloader` or `preloader_*` is refused
   without `allow-preloader`; an unrelated override is refused too.
@@ -93,10 +132,11 @@ item remains **UNVERIFIED** until its permitted evidence is completed.
 - [ ] **UNVERIFIED** A defined SPI boot range is refused without
   `allow-spi-boot`.
 - [ ] **UNVERIFIED** A protocol-owned range explicitly classified `unknown` is
-  refused without `allow-unknown`; its confirmation identifies the exact target
+  refused without `allow-unknown`; its declared risk identifies the exact target
   and records that its role/topology is unknown.
-- [ ] **UNVERIFIED** A valid named override still triggers a new point-of-risk
-  confirmation that includes the exact override, backup, digest, and offset.
+- [ ] **UNVERIFIED** A request with a valid named override is still declared
+  before the write: the log names the exact target, backup, digest, and offset,
+  and nothing else is asked.
 - [ ] **UNVERIFIED** An override for an unprotected range is refused rather
   than silently accepted.
 
@@ -108,23 +148,23 @@ item remains **UNVERIFIED** until its permitted evidence is completed.
   and relevant security/encryption state before a layout is selected.
 - [ ] **UNVERIFIED** The real chip’s boot offsets are represented in the
   reviewed layout and protected from generic writes.
-- [ ] **UNVERIFIED** A non-protected test range is backed up, flashed after
-  exact confirmation, read back by the device, and SHA-256-compared to input.
+- [ ] **UNVERIFIED** A non-protected test range is backed up, flashed,
+  read back by the device, and SHA-256-compared to input.
 - [ ] **UNVERIFIED** Restore from the saved backup is read back and
   SHA-256-compared to the backup before the device is returned to service.
 - [ ] **UNVERIFIED** Reset/reconnect confirms expected boot behavior after both
   test flash and restore.
 - [ ] **UNVERIFIED** An ESP32 user selects/uploads a test image through Cody,
-  sees the exact confirmation/backup/readback evidence, and the console resumes
+  sees the declared target/backup/readback evidence in the log, and the console resumes
   exclusive ownership after flashing to capture the expected boot output.
-- [ ] **UNVERIFIED** `erase_region` on a recoverable board: the confirmation
-  shows the exact range and a backup reference; after approval the range reads
+- [ ] **UNVERIFIED** `erase_region` on a recoverable board: the declared risk
+  names the exact range and a backup reference; afterwards the range reads
   back blank (device MD5 and a `read_flash` of it), and restoring the backup
   with `device_flash` returns the original bytes.
-- [ ] **UNVERIFIED** `erase_flash` is refused on a ROM-only connection, needs
-  `allow-spi-boot` (and `allow-fuses` on a chip with secure boot or flash
-  encryption burned), and never runs when the flash ID does not map to a
-  recognised size.
+- [ ] **UNVERIFIED** `erase_flash` is refused on a ROM-only connection and never
+  runs when the flash ID does not map to a recognised size. On a chip with
+  secure boot or flash encryption burned, or whose security state cannot be
+  read, the log says so before the erase; no override is asked.
 - [ ] **UNVERIFIED** `efuse_summary` and `efuse_dump` agree with
   `espefuse.py summary` / `dump` on the same board for each reviewed chip, and
   key blocks never appear in the operation log.
@@ -138,9 +178,10 @@ item remains **UNVERIFIED** until its permitted evidence is completed.
 - [ ] **UNVERIFIED** A bootloader that reports `max-download-size` in decimal
   rather than `0x` hex is split the way `fastboot` splits it.
 - [ ] **UNVERIFIED** `update` with a real factory ZIP on a recoverable A/B
-  device: the requirements pass, only the current slot is written, the typed
-  `update:<hash>` approval is required, and each partition's readback matches.
-  A ZIP for another product is refused before any write.
+  device: the requirements pass, only the current slot is written, the
+  declared risk lists every partition with its digest and backup, and each
+  partition's readback matches. A ZIP for another product is refused before
+  any write.
 - [ ] **UNVERIFIED** `update` refuses logical partitions from the bootloader and
   accepts them from fastbootd.
 - [ ] **UNVERIFIED** Cancelling an `update` (or pulling the cable) between and
@@ -159,13 +200,15 @@ item remains **UNVERIFIED** until its permitted evidence is completed.
   and partition information are captured before any write.
 - [ ] **UNVERIFIED** Fetch support and partition size are probed. With fetch, the
   full partition is backed up and raw/sparse image-defined bytes are verified.
-- [ ] **UNVERIFIED** Without fetch, no download/write occurs until the explicit
-  UNVERIFIED warning is approved. An OKAY response never becomes verified=true.
+- [ ] **UNVERIFIED** Without fetch, the explicit UNVERIFIED warning is in the
+  declared risk before the download/write and in the result. An OKAY response
+  never becomes verified=true.
 - [ ] **UNVERIFIED** After booting TWRP, device_verify compares the written raw
   image range against its expected SHA-256. Sparse files require expanded-image
   verification; their file digest is not a raw-partition digest.
-- [ ] **UNVERIFIED** Preloader/LK/TEE/RPMB/GPT/boot0/boot1/eFuse targets require
-  typing write:<exact target>. OEM/security commands require the exact command.
+- [ ] **UNVERIFIED** Preloader/LK/TEE/RPMB/GPT/boot0/boot1/eFuse targets carry a
+  PROTECTED note in the declared risk (the user's trust of the device covers
+  them; nothing more is asked). OEM/security commands run exactly as named.
 - [ ] **UNVERIFIED** The device boots or returns to fastboot as expected after
   test flash and after verified restore.
 
@@ -179,9 +222,10 @@ item remains **UNVERIFIED** until its permitted evidence is completed.
   reads every touched sector; it remains in DFU with no manifestation/reset
   before the readback hash matches.
 - [ ] **UNVERIFIED** The conservative whole-internal-flash `allow-bootloader`
-  confirmation is recorded. A generic bcdDFU `0x0110` flash needs the typed
-  `allow-unknown` override, escrows the current image when the device can upload,
-  and is read back only when the device returns to DFU idle after manifesting.
+  declaration is recorded. A generic bcdDFU `0x0110` flash needs the request to
+  name the `allow-unknown` override, escrows the current image when the device
+  can upload, and is read back only when the device returns to DFU idle after
+  manifesting.
 - [ ] **UNVERIFIED** `dfu reset` and DfuSe `leave ADDRESS` make a real device run
   its application and re-enumerate, and the operation still ends as completed
   (UNVERIFIED), not cancelled, although the browser reports the disconnect. A
@@ -212,9 +256,9 @@ PC tool's output is the reference to compare with.
   re-offered HELLO. If it instead needs the recovery ladder ("asking it to start
   over"), record that and whether the ROM accepted the restart packet. Record
   whether a HELLO survives Cody closing and re-opening the USB device.
-- [ ] **UNVERIFIED** The loader confirmation shows a SHA-256 equal to
-  `sha256sum` of the file. Declining sends nothing. A loader for another device
-  is rejected with a Sahara status and nothing runs.
+- [ ] **UNVERIFIED** The loader's declared risk shows a SHA-256 equal to
+  `sha256sum` of the file. Cancelling during a send countdown sends nothing. A
+  loader for another device is rejected with a Sahara status and nothing runs.
 - [ ] **UNVERIFIED** After the loader starts, the programmer keeps the same USB
   device. If it re-enumerates, record how the operation reported it (it is
   reported as the device leaving the bus).
@@ -285,9 +329,9 @@ go-ahead on a real unit and a saved copy of every partition touched):
 - [ ] **UNVERIFIED** `erase` is in the programmer's function list; record what a
   freshly erased partition reads as (all zero, all 0xFF, unchanged) - Cody reports
   it and assumes nothing.
-- [ ] **UNVERIFIED** The typed override `write:<name>` is demanded in the panel's
-  confirmation for a protected partition (for example `persist`) and the write is
-  refused without it; `boot0`, `boot1` and `rpmb` are refused outright.
+- [ ] **UNVERIFIED** A protected partition (for example `persist`) is written
+  with only a PROTECTED note in the log - no extra prompt, the owner accepted
+  that risk; `boot0`, `boot1` and `rpmb` are refused outright.
 
 Backup sets and restore (emulator-tested only; the backup items only read, the restore items write and need a coordinated go-ahead and a set taken from the same unit beforehand):
 
@@ -295,14 +339,14 @@ Backup sets and restore (emulator-tested only; the backup items only read, the r
 - [ ] **UNVERIFIED** The programmer reports an eMMC `serial_num` in `getstorageinfo`. If it does not, the set records none and says NOT RESTORABLE; record that.
 - [ ] **UNVERIFIED** A set taken after `Connect` (programmer already running) says NOT RESTORABLE and `restore` refuses it, because the boot ROM's public-key hash cannot be read any more.
 - [ ] **UNVERIFIED** `restore` is refused for a manifest edited to carry another chip serial or public-key hash BEFORE any loader is sent, and for another eMMC serial or disk GUID after `configure` with nothing written. The manifest's SHA-256 changes with every edit, so the edited copy is a new file.
-- [ ] **UNVERIFIED** After one ordinary partition (for example `cache`) was changed, `restore` rewrites only that partition, asks for the typed override `restore:<first 8 characters of the manifest SHA-256>` (and refuses without it), reads it back identical, and leaves every other region alone. Compare the result with the PC tool's reads.
+- [ ] **UNVERIFIED** After one ordinary partition (for example `cache`) was changed, `restore` rewrites only that partition (the declared risk names every region, the manifest's SHA-256 and the backup; nothing is typed), reads it back identical, and leaves every other region alone. Compare the result with the PC tool's reads.
 - [ ] **UNVERIFIED** The programmer accepts `program` for the sectors that hold the partition tables at BOTH ends of the disk (sectors 0-33 and the last 33). Factory flash scripts write them with `program` and then fix them with `patch`; Cody writes the saved tables byte for byte and ships no `patch`. Record any NAK text and whether the unit still boots and lists the same partitions afterwards.
 - [ ] **UNVERIFIED** A restore interrupted by Cancel or an unplug between regions leaves the unit able to re-enter EDL, and the output names the regions done, the one in doubt and those never started. The saved copies of overwritten partitions can be flashed back with `device_flash`; no command writes saved partition tables back.
 
 Boot drive (emulator-tested only; changes what the unit may start from, so it needs a coordinated go-ahead and the PC tool at hand to put it back):
 
 - [ ] **UNVERIFIED** The programmer lists `setbootablestoragedrive` among its functions and accepts `setbootablestoragedrive` with a single `value` attribute. Record what the number means on this unit (UFS logical unit or eMMC boot partition) and the programmer's answer.
-- [ ] **UNVERIFIED** The panel's confirmation demands the typed override `set-bootable:<N>`, shows that there is no saved copy, and the result reads UNVERIFIED whatever the programmer answers. Record what the unit does after `Reset`, and the PC tool's reading of the setting, if it has one.
+- [ ] **UNVERIFIED** The declared risk says that there is no saved copy (nothing is typed), and the result reads UNVERIFIED whatever the programmer answers. Record what the unit does after `Reset`, and the PC tool's reading of the setting, if it has one.
 
 ### CMSIS-DAP / DAPLink (not shipped)
 
@@ -336,17 +380,19 @@ Boot drive (emulator-tested only; changes what the unit may start from, so it ne
   non-destructive location, pulled back, and SHA-256-compared before/after its
   atomic replacement path.
 - [ ] **UNVERIFIED** The exact destination, digest, offset where applicable,
-  and backup/rollback path appear in point-of-risk confirmation.
-- [ ] **UNVERIFIED** Arbitrary shell and raw paths are blocked until the user
-  grants this connection shell access; revoke/disconnect removes that authority.
-- [ ] **UNVERIFIED** A granted recovery script streams output and reports its
+  and backup/rollback path appear in the operation's declared risk (log).
+- [ ] **UNVERIFIED** Arbitrary shell and raw paths run only for a device the user
+  trusted (one question in the chat); Forget, or disconnecting a device that was
+  not remembered, ends that trust and cancels the agent's running operations.
+- [ ] **UNVERIFIED** A recovery script streams output and reports its
   actual exit status. Keep the tablet awake; a disconnect before status means
   unknown completion and never triggers automatic command replay.
-- [ ] **UNVERIFIED** The user can open an ADB terminal without granting the agent
-  shell access. The terminal shares the device's ADB connection with shells and
-  port rules; push staging, sideload, and reboot still need it closed first.
-- [ ] **UNVERIFIED** Raw block/symlink push offers a backup and requires the
-  exact typed target override rather than pretending to be an atomic file push.
+- [ ] **UNVERIFIED** The user can open an ADB terminal whether or not the agent
+  is trusted (the user's own terminal is never gated). The terminal shares the
+  device's ADB connection with shells and port rules; push staging, sideload,
+  and reboot still need it closed first.
+- [ ] **UNVERIFIED** Raw block/symlink push takes a backup first and is declared
+  as a direct write (`adb.push.raw`) rather than pretending to be an atomic file push.
 - [ ] **UNVERIFIED** Interrupted push/pull recovery preserves the original
   destination or restores it from escrow.
 - [ ] **UNVERIFIED** A file of at least 100 MB is interrupted after a recorded
@@ -358,7 +404,7 @@ Boot drive (emulator-tested only; changes what the unit may start from, so it ne
 ### ADB install, adbd restarts and wait-for-device
 
 - [ ] **UNVERIFIED** `device_install` of a real debug APK on a recoverable
-  device: the confirmation shows the digest and the `pm install` command line;
+  device: the declared risk shows the digest and the `pm install` command line;
   the app appears; `/data/local/tmp` holds no `cody-install-*` file or
   `.cody-adb-stage-*` directory afterwards. A downgrade without `-d` and a
   reinstall without `-r` fail with the package manager's own message.
@@ -392,17 +438,18 @@ Use a recoverable, non-critical device and a throwaway service on each side
 (for example `python3 -m http.server` on the Cody server, and a listener on
 the device). None of this writes device storage; it opens network paths.
 
-- [ ] **UNVERIFIED** `device_forward` shows a confirmation card naming the
-  device service, the Cody-server loopback port, and that every process on the
-  Cody server can then connect. Nothing listens before the tap (check with
-  `ss -ltn` on the server); declining leaves nothing behind.
-- [ ] **UNVERIFIED** After the tap, a client on the **Cody server** reaches the
+- [ ] **UNVERIFIED** `device_forward` on a device the user has not trusted waits
+  for the one trust question in the chat; nothing listens before Allow (check
+  with `ss -ltn` on the server) and Deny leaves nothing behind. After Allow the
+  operation log names the device service and the Cody-server loopback port, and
+  every process on the Cody server can then connect.
+- [ ] **UNVERIFIED** After Allow, a client on the **Cody server** reaches the
   device service (HTTP request returns the device's real response). Record the
   port, device model, and Android release.
 - [ ] **UNVERIFIED** A multi-megabyte download through the forward matches its
   source SHA-256 while a second client connects at the same time.
-- [ ] **UNVERIFIED** `device_reverse` card names the device address and Cody
-  server port; an app or `nc` on the device reaches the Cody-server service.
+- [ ] **UNVERIFIED** `device_reverse` names the device address and Cody
+  server port in its log; an app or `nc` on the device reaches the Cody-server service.
   `device_exec` `reverse-list` shows the rule; after removal it is gone.
 - [ ] **UNVERIFIED** While both are live, a diagnostic `device_exec "id"` and a
   Devices-panel terminal still work on the same connection, and cancelling the
@@ -437,5 +484,5 @@ are **UNVERIFIED** and do not authorize deployment:
 
 Do not mark a protocol hardware-verified until every applicable item has dated
 evidence, including the pre-write backup and exact post-write readback hash.
-An approved no-fetch Fastboot write remains explicitly UNVERIFIED until a
+An unverified no-fetch Fastboot write remains explicitly UNVERIFIED until a
 separate recovery readback succeeds. This checklist does not certify hardware.

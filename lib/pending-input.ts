@@ -1,4 +1,5 @@
 import type { AskAnswer } from "@/lib/ask-dialog";
+import type { DeviceTrustRequest } from "@/lib/devices/trust";
 import type { AgentPermissionRequest } from "@/lib/permission-request";
 import type { OutboxImage } from "@/lib/outbox";
 import type { ExtensionUiRequest } from "@/lib/types";
@@ -23,12 +24,14 @@ export type ExtensionDialogResponse =
 export type PendingInput =
   | { kind: "extension"; request: ExtensionDialogRequest }
   | { kind: "permission"; request: AgentPermissionRequest }
-  | { kind: "refusal"; decision: RefusalDecision };
+  | { kind: "refusal"; decision: RefusalDecision }
+  | { kind: "device-trust"; request: DeviceTrustRequest };
 
 export type PendingInputResponse =
   | { kind: "extension"; response: ExtensionDialogResponse }
   | { kind: "permission"; optionId: string }
-  | { kind: "refusal"; choice: "rewind" | "continue" | "keep"; remember?: boolean };
+  | { kind: "refusal"; choice: "rewind" | "continue" | "keep"; remember?: boolean }
+  | { kind: "device-trust"; allow: boolean; remember?: boolean };
 
 /** A message handed back to the composer: a rewound (declined) message, or
  *  queued messages taken back for editing or returned by Stop. */

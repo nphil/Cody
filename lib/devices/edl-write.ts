@@ -32,8 +32,8 @@ import { throwIfAborted } from "./serial";
  *     (an image the same size, or an explicit options.pad to fill the rest);
  *   - saves the partition's current contents first, checks that the saved file
  *     holds exactly those bytes, and refuses to write if it cannot;
- *   - asks once, with the exact sectors, the backup and (for the protected list)
- *     a typed override, and only then gets a `WriteGrant`;
+ *   - declares the exact sectors and the backup (a protected name adds a PROTECTED
+ *     note to the log), and only then gets a `WriteGrant`;
  *   - writes in blocks and stops BETWEEN blocks when cancelled;
  *   - reads the partition back and compares SHA-256, and says plainly when it
  *     cannot, or when the bytes differ, always with where the old contents are.
@@ -161,7 +161,7 @@ function parseFlashOptions(options: Record<string, unknown> | undefined): FlashO
   if (!options) return { pad: undefined };
   const unknown = Object.keys(options).filter((key) => key !== "pad");
   if (unknown.length > 0) {
-    throw new EdlError(`EDL flash takes only options.pad ("zero" or "ff"); ${unknown.slice(0, 3).join(", ")} ${unknown.length === 1 ? "is" : "are"} not accepted. Approvals are given in the panel, never in options.`, "refused");
+    throw new EdlError(`EDL flash takes only options.pad ("zero" or "ff"); ${unknown.slice(0, 3).join(", ")} ${unknown.length === 1 ? "is" : "are"} not accepted.`, "refused");
   }
   if (options.pad === undefined) return { pad: undefined };
   if (options.pad === "zero") return { pad: 0x00 };
@@ -258,13 +258,12 @@ export async function flashPartition(run: EdlRun): Promise<HardwareResult> {
     programSha256,
     programOffset: 0,
     programLength: part.bytes,
-    ...(kind.level === "protected" ? { protectedOverride: `write:${name}` } : {}),
     backup,
     details: [
       `Write ${image.size} bytes (SHA-256 ${imageSha256}) to the partition ${name}: ${describeRange(part.firstLba, part.sectors, sectorSize)} of the eMMC user area (physical partition 0).`,
       padBytes > 0 ? `The image is ${padBytes} bytes shorter than the partition; the rest is filled with ${pad === 0 ? "0x00" : "0xFF"}, so the partition is rewritten whole (final SHA-256 ${programSha256}).` : "The image is exactly the size of the partition, so the partition is rewritten whole.",
       `${describeStorage(opened)}. Disk GUID ${primary.table.header.diskGuid}.`,
-      kind.level === "protected" ? `PROTECTED: ${kind.reason} Type write:${name} to approve.` : "",
+      kind.level === "protected" ? `PROTECTED: ${kind.reason}` : "",
       "After the write Cody reads the partition back and compares its SHA-256. A mismatch, or a read-back that cannot run, is reported together with where the previous contents are saved.",
     ].filter(Boolean).join("\n"),
   }, { label: `flash ${name}`, sectorSize, kinds: ["program"], ranges: [{ startSector: part.firstLba, sectors: part.sectors }] });
@@ -332,7 +331,7 @@ export async function flashPartition(run: EdlRun): Promise<HardwareResult> {
 
 /**
  * Erases one named partition with the programmer's own `erase`. Like a flash it saves the
- * partition first, asks once (typed `write:<name>` for the protected list), erases in
+ * partition first, declares the range, erases in
  * segments that a cancel can stop between, and reads the partition back. What the
  * region holds afterwards is REPORTED (all zero, all 0xFF, unchanged, mixed), never
  * assumed: an eMMC erase may leave either value, or only mark the blocks unused.
@@ -345,7 +344,7 @@ export async function erasePartition(run: EdlRun): Promise<HardwareResult> {
   }
   if (context.input || request.fileId || request.sha256) throw new EdlError("An erase takes no file. Nothing was erased.", "refused");
   if (request.options && Object.keys(request.options).length > 0) {
-    throw new EdlError("An erase takes no options. Approvals are given in the panel, never in options. Nothing was erased.", "refused");
+    throw new EdlError("An erase takes no options. Nothing was erased.", "refused");
   }
   const kind = classifyEdlPartition(name);
   if (kind.level === "refused") throw new EdlError(`${kind.reason} Nothing was erased.`, "refused");
@@ -369,12 +368,11 @@ export async function erasePartition(run: EdlRun): Promise<HardwareResult> {
     target: name,
     offset: 0,
     length: part.bytes,
-    ...(kind.level === "protected" ? { protectedOverride: `write:${name}` } : {}),
     backup,
     details: [
       `Erase the partition ${name} with the programmer's erase command: ${describeRange(part.firstLba, part.sectors, sectorSize)} of the eMMC user area (physical partition 0).`,
       `${describeStorage(opened)}. Disk GUID ${primary.table.header.diskGuid}.`,
-      kind.level === "protected" ? `PROTECTED: ${kind.reason} Type write:${name} to approve.` : "",
+      kind.level === "protected" ? `PROTECTED: ${kind.reason}` : "",
       "What the partition holds afterwards depends on the chip: an eMMC erase may leave zeros, 0xFF, or only mark the blocks unused. After the erase Cody reads the partition back and reports what it actually reads as; it claims no particular value.",
     ].filter(Boolean).join("\n"),
   }, { label: `erase ${name}`, sectorSize, kinds: ["erase"], ranges: [{ startSector: part.firstLba, sectors: part.sectors }] });
@@ -424,8 +422,7 @@ export async function erasePartition(run: EdlRun): Promise<HardwareResult> {
 /**
  * `setbootablestoragedrive N`: asks the programmer to make drive N the one the boot ROM starts from. It changes no
  * partition, but it can change what the unit boots, and nothing in the protocol lets Cody read the setting before or
- * after: there is no saved copy to offer and the result is UNVERIFIED however the programmer answers. The typed override
- * `set-bootable:<N>` is the user's explicit acceptance of that.
+ * after: there is no saved copy to offer and the result is UNVERIFIED however the programmer answers. The log says so.
  */
 export async function setBootableDrive(run: EdlRun): Promise<HardwareResult> {
   const { context, request, say } = run;
@@ -437,23 +434,20 @@ export async function setBootableDrive(run: EdlRun): Promise<HardwareResult> {
     throw new EdlError("setbootablestoragedrive takes a drive number only: no file, offset or length. Nothing was sent.", "refused");
   }
   if (request.options && Object.keys(request.options).length > 0) {
-    throw new EdlError("setbootablestoragedrive takes no options. Approvals are given in the panel, never in options. Nothing was sent.", "refused");
+    throw new EdlError("setbootablestoragedrive takes no options. Nothing was sent.", "refused");
   }
   const drive = Number(target);
 
   const opened = await openFirehose(run, { identity: "try", loader: "never" }, undefined);
-  const override = `set-bootable:${drive}`;
   const grant = await grantWrites(context, {
     action: "edl setbootablestoragedrive",
     target,
-    protectedOverride: override,
     backup: "Backup unavailable: the programmer cannot report which drive the boot ROM starts from, so there is no saved copy of the current setting and no automatic way to put it back.",
     details: [
       `Tell the programmer to set the bootable storage drive to ${drive} (Firehose setbootablestoragedrive).`,
       "It is the programmer's way of choosing the storage drive the boot ROM starts from; what a given number means is up to the programmer, and Cody does not know what it means on this unit. No partition is read or changed.",
       "Cody cannot read the setting before or after, so the change is UNVERIFIED and the previous value is unknown. A wrong value can leave the unit unable to start; putting it into EDL mode again is the way back.",
       `${describeStorage(opened)}.`,
-      `Type ${override} to approve.`,
     ].join("\n"),
   }, { label: `set the bootable storage drive to ${drive}`, sectorSize: opened.storage.sectorSize, kinds: ["set-bootable"], drive });
 

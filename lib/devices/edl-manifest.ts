@@ -74,11 +74,6 @@ export function manifestShort(sha256: string): string {
   return sha256.slice(0, 8);
 }
 
-/** The typed approval a restore of the set with this manifest asks for. */
-export function restoreOverride(manifestSha256: string): string {
-  return `restore:${manifestShort(manifestSha256)}`;
-}
-
 export function sha256Hex(bytes: Uint8Array): string {
   return bytesToHex(noblesha256(bytes));
 }

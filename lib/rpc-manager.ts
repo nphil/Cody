@@ -36,6 +36,8 @@ import { LOCAL_TIME_CUSTOM_TYPE, normalizeTimeZone, serverTimeZone } from "./tim
 import { ownerTimeZone } from "./time-zone-prefs";
 import { SIDEBAR_CONTEXT_TOOLS } from "./sidebar-context-tools";
 import { SESSION_AWARENESS_TOOLS, type SessionLivePhase, type SessionToolContext } from "./session-tools";
+import { SCHEDULE_TOOLS } from "./scheduled/tools";
+import { moveSessionItems } from "./scheduled/store";
 import { findUserById, hasAnyUser, type UserRecord } from "./auth/users";
 import { DEVICE_OPERATION_TOOLS } from "./devices/operation-tools";
 import { DeviceNoticeBatcher, deviceNoticeFrame, noticeForOperation, type DeviceNotice } from "./devices/operation-notices";
@@ -398,6 +400,10 @@ const SERVER_HOST_TOOLS: HostToolDefinition[] = [{
 // own agent hub sees nothing but its own subagents. Shared verbatim with the
 // sidebar (lib/session-tools.ts) so both describe them identically.
 ...SESSION_AWARENESS_TOOLS.map(({ handler: _handler, ...tool }) => tool),
+// Scheduled messages (lib/scheduled/tools.ts): the agent can send a message
+// into a chat later, or when quota resets. Offered to main chats only — the
+// sidebar's schema budget assumes the smallest local model.
+...SCHEDULE_TOOLS.map(({ handler: _handler, ...tool }) => tool),
 FORGE_HOST_TOOL];
 /** Every tool the SERVER settles itself, so `handleFrame` routes its calls
  * here instead of to a browser. The sidebar's context tools are server-side
@@ -409,6 +415,8 @@ const SERVER_HOST_TOOL_NAMES = new Set([
   ...DEVICE_TOOLS.map((tool) => tool.name),
   ...DEVICE_OPERATION_TOOLS.map((tool) => tool.name),
 ]);
+/** The tools a MAIN chat's host-tool calls are settled with: the session three and the scheduling three share one handler contract. */
+const MAIN_SESSION_TOOLS = [...SESSION_AWARENESS_TOOLS, ...SCHEDULE_TOOLS];
 /** One session-tool result's char budget for a MAIN chat. The sidebar's own
  * budget assumes the smallest supported window (6 KB); a main session runs on
  * whatever model the user picked, where paging a transcript four times to
@@ -1638,6 +1646,8 @@ export class AgentSessionWrapper {
     invalidateSessionListCache();
     if (this.requestedIdentityChanges === 0) {
       this.carrySessionState(previousId, sessionId);
+      // What is scheduled for the conversation goes with it, never copied: both ids would send it.
+      moveSessionItems(previousId, sessionId);
       // The checklist belongs to the conversation, which carries on in the new
       // file with its todo list intact (a fork is a different conversation).
       const planOverlay = readPlanOverlay(previousId);
@@ -2435,9 +2445,10 @@ export class AgentSessionWrapper {
    */
   private async handleServerHostTool(id: string, toolName: string, event: AgentEvent): Promise<void> {
     // A sidebar session may call its workspace tools too; a main chat is only
-    // ever offered the session three, and serving it a tool its engine was
-    // never told about would be answering a call nothing can have made.
-    const available = this.engine.kind === "sidebar" ? SIDEBAR_CONTEXT_TOOLS : SESSION_AWARENESS_TOOLS;
+    // ever offered the session and scheduling tools, and serving it a tool its
+    // engine was never told about would be answering a call nothing can have
+    // made.
+    const available = this.engine.kind === "sidebar" ? SIDEBAR_CONTEXT_TOOLS : MAIN_SESSION_TOOLS;
     const sidebarTool = available.find((tool) => tool.name === toolName);
     if (sidebarTool) {
       // Handlers always resolve to plain text, success or failure, so there is
@@ -4200,6 +4211,7 @@ async function startEngineSession(
     // the session becomes "unowned" — visible to every account — as soon as
     // the engine announces its real id (Codex thread ids arrive mid-turn).
     renameSessionOwner(oldId, newId);
+    moveSessionItems(oldId, newId);
     aliasDisplaySession(oldId, newId);
   });
   // A turn-based engine has no frame pipeline calling notifyRunningChange the

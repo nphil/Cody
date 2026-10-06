@@ -59,3 +59,7 @@ export function sessionsInternalEndpoint(): string {
 export function devicesInternalEndpoint(): string {
   return internalEndpoint("/api/internal/devices");
 }
+
+export function scheduledInternalEndpoint(): string {
+  return internalEndpoint("/api/internal/scheduled");
+}

@@ -120,7 +120,7 @@ export function DevicePanel({ sessionId }: DevicePanelProps): React.ReactElement
             {operationManager && orphanedCount > 0 && (
               <Disclosure summary={t("devices.orphanedActivity", { count: orphanedCount })}>
                 {orphanedDevices.map(([deviceId, deviceOperations]) => (
-                  <ActivityFeed key={deviceId} manager={operationManager} entries={groupActivity(deviceOperations)} deviceLabel={deviceId} />
+                  <ActivityFeed key={deviceId} manager={operationManager} entries={groupActivity(deviceOperations)} />
                 ))}
               </Disclosure>
             )}

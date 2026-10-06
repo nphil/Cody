@@ -24,9 +24,10 @@ import { throwIfAborted } from "./serial";
  *   program, erase  sectors of physical partition 0, and only inside the ranges
  *                   the grant names
  *   setbootablestoragedrive  only the one drive number the grant names
- * A grant comes only from `grantWrites`, which asks the user (`context.confirm`)
- * first and puts the exact ranges into what the user is asked to approve. The guard
- * then refuses any write outside them, so nothing the user was not shown can be sent.
+ * A grant comes only from `grantWrites`, which declares the exact ranges
+ * through `context.confirm` first (the manager logs them and may hold for a visible countdown;
+ * the person's trust in the device, given earlier, is the consent). The guard
+ * then refuses any write outside them, so nothing that was not declared can be sent.
  * The guard accepts physical partition 0 only, so the eMMC boot areas and RPMB
  * cannot be addressed at all, and it knows no patch, peek, poke, digest, `firmwarewrite`
  * or `power` other than reset.
@@ -161,7 +162,7 @@ export function assertFirehoseXml(xml: string, grant?: WriteGrant): void {
   const writing = Object.hasOwn(WRITE_COMMANDS, command.name);
   const shape = writing ? WRITE_COMMANDS[command.name]! : Object.hasOwn(READ_COMMANDS, command.name) ? READ_COMMANDS[command.name]! : undefined;
   if (!shape) {
-    refuse(`<${cleanDeviceText(command.name, 32)}> is not a Firehose command Cody sends. Cody reads storage and, inside ranges the user approved, programs and erases it; it never patches, peeks, pokes, asks for digests or powers the device off.`);
+    refuse(`<${cleanDeviceText(command.name, 32)}> is not a Firehose command Cody sends. Cody reads storage and, inside ranges it declared, programs and erases it; it never patches, peeks, pokes, asks for digests or powers the device off.`);
   }
   const given = Object.keys(command.attributes);
   const wanted = Object.keys(shape);
@@ -193,7 +194,7 @@ export interface WriteGrantSpec {
 }
 
 /**
- * What a flasher holds after the user approved a write. It can end the grant; what
+ * What a flasher holds after it declared a write. It can end the grant; what
  * the guard consults is kept out of reach in this module, so changing these
  * fields changes nothing the guard allows.
  */
@@ -230,19 +231,19 @@ function describeRanges(ranges: readonly GrantedRange[]): string {
 
 function authorise(name: string, attributes: Readonly<Record<string, string>>, grant: WriteGrant | undefined): void {
   const state = grant ? GRANTS.get(grant) : undefined;
-  if (!state) refuse(`<${name}> would change the device and no write grant covers it. Cody writes only after the user has approved the exact sectors.`);
+  if (!state) refuse(`<${name}> would change the device and no write grant covers it. Cody writes only after it declared the exact sectors.`);
   if (!state.active) refuse(`<${name}> would change the device, but the write grant it needs has ended.`);
   if (name === "setbootablestoragedrive") {
-    if (!state.kinds.has("set-bootable") || Number(attributes.value) !== state.drive) refuse(`<setbootablestoragedrive value="${attributes.value}"> is not what the user approved.`);
+    if (!state.kinds.has("set-bootable") || Number(attributes.value) !== state.drive) refuse(`<setbootablestoragedrive value="${attributes.value}"> is not what was declared.`);
     return;
   }
   const kind: WriteKind = name === "program" ? "program" : "erase";
-  if (!state.kinds.has(kind)) refuse(`<${name}> is not among what the user approved (${[...state.kinds].join(", ")}).`);
-  if (Number(attributes.SECTOR_SIZE_IN_BYTES) !== state.sectorSize) refuse(`<${name}> uses ${attributes.SECTOR_SIZE_IN_BYTES}-byte sectors, but the approved write is in ${state.sectorSize}-byte sectors.`);
+  if (!state.kinds.has(kind)) refuse(`<${name}> is not among what was declared (${[...state.kinds].join(", ")}).`);
+  if (Number(attributes.SECTOR_SIZE_IN_BYTES) !== state.sectorSize) refuse(`<${name}> uses ${attributes.SECTOR_SIZE_IN_BYTES}-byte sectors, but the declared write is in ${state.sectorSize}-byte sectors.`);
   const start = Number(attributes.start_sector);
   const count = Number(attributes.num_partition_sectors);
   if (!covered(state.ranges, start, count)) {
-    refuse(`<${name}> of sectors ${start}-${start + count - 1} lies outside the sectors the user approved (${describeRanges(state.ranges)}).`);
+    refuse(`<${name}> of sectors ${start}-${start + count - 1} lies outside the sectors declared (${describeRanges(state.ranges)}).`);
   }
 }
 
@@ -297,9 +298,10 @@ function issueGrant(label: string, state: GrantState): WriteGrant {
 }
 
 /**
- * The only way to a `WriteGrant`: asks the user (`context.confirm`) to approve `risk`,
- * with the exact ranges of the grant added to what they are shown, and returns the grant
- * once they have. A declined or cancelled confirmation throws, and no grant exists.
+ * The only way to a `WriteGrant`: declares `risk` through `context.confirm`,
+ * with the exact ranges of the grant added to its details (the manager logs them and may hold for a
+ * visible, cancellable countdown), and returns the grant once that has passed. A cancelled or
+ * failed declaration throws, and no grant exists.
  * The caller ends the grant (`revoke`) when its writes are done or have failed.
  */
 export async function grantWrites(context: HardwareContext, risk: HardwareRisk, spec: WriteGrantSpec): Promise<WriteGrant> {

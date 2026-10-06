@@ -15,6 +15,7 @@ export const NOTIFICATION_EVENT_IDS = [
   "waiting",
   "finished",
   "subagent",
+  "scheduled",
   "error",
   "fallback",
   "quotaLow",
@@ -85,6 +86,15 @@ export const NOTIFICATION_EVENTS: readonly NotificationEventSpec[] = [
     scope: "session",
     defaultEnabled: false,
     defaultPriority: 2,
+  },
+  {
+    id: "scheduled",
+    group: "progress",
+    label: "Scheduled messages",
+    description: "A message you or the agent scheduled was sent to its chat, or could not be.",
+    scope: "session",
+    defaultEnabled: true,
+    defaultPriority: 3,
   },
   {
     id: "error",

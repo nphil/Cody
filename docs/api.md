@@ -454,6 +454,75 @@ Top-level keys: `sessionId`, `filePath`, `info`, `leafId`, `tree`, `context`.
 
 `404` when the session does not exist *or* is owned by another account.
 
+## Scheduled messages — Stable envelope
+
+A message the server holds and sends into one chat later: the composer's Send ▾
+menu makes them, and so does the agent's own `schedule_message` tool (both land in
+the same list). When one is due it is delivered exactly like a message typed in
+the box — a user turn, queued behind the current one if the chat is mid-turn, in
+the chat owner's time zone, with a start of the chat's process if none is alive.
+Nothing repeats. A message that came due while the server was down is sent on
+the next boot. Sent ones disappear from the list; a failed one stays for seven
+days for Retry, Edit (PATCH) or Cancel. The owner gets a `scheduled` push when
+one is sent or gives up (`/api/notifications`).
+
+Every route needs the usual credential and acts for the chat's owner: a chat of
+another account, a sidebar chat and a chat that does not exist all answer `404
+{error, code: "session_not_found"}`. Responses are `Cache-Control: no-store`; a
+refusal is `{error, code}` with one of the codes below.
+
+| Route | Method | Notes |
+| --- | --- | --- |
+| `/api/sessions/<id>/scheduled` | GET | `{items, limits}`, soonest first |
+| `/api/sessions/<id>/scheduled` | POST | schedule one → `201 {item}` |
+| `/api/sessions/<id>/scheduled/<itemId>` | PATCH | change `message` and/or the time → `{item}`; a failed one becomes pending again |
+| `/api/sessions/<id>/scheduled/<itemId>` | DELETE | cancel → `{ok:true}` |
+| `/api/sessions/<id>/scheduled/<itemId>/send-now` | POST | send it now (Retry, for a failed one) → `{ok:true, delivered, item?}`; `202` when it is still going after 20 s |
+
+```json
+{"items":[{"id":"sch_k3J9x2Qa","sessionId":"01a00e5c-…","message":"Continue the refactor",
+           "mode":"quota","at":"2026-10-06T03:40:00.000Z","source":"agent","status":"pending",
+           "createdAt":"2026-10-05T21:12:04.221Z",
+           "quota":{"label":"Claude · Secondary","giveUpAt":"2026-10-07T03:40:00.000Z"}}],
+ "limits":{"perChat":20,"perAccount":100,"maxDays":30,"maxMessageBytes":65536}}
+```
+
+- **When it goes.** POST and PATCH take exactly one of `at` — an ISO 8601
+  instant WITH an offset or `Z` (`2026-10-05T23:40:00-04:00`; a time with no
+  offset is refused, never guessed at) — or `whenQuotaResets: true`, with an
+  optional `model: {provider, modelId}` (the chat's model as the composer shows
+  it; absent, the server asks the chat). `at` is the item's due time: the one
+  chosen, or for a quota message the reset it is waiting for.
+- **"When quota resets"** waits for that model's binding window to reset, then
+  for a fresh usage read that says the model is usable (re-checked every few
+  minutes; a later reset the provider reports is waited for), and gives up as
+  `failed` 24 hours after the reset. `quota.label` is the provider and the
+  account's position ("Claude · Secondary"), never an email.
+- **`status`**: `pending` (a quota message past its reset is still pending while
+  it re-checks), `sending` (being handed over right now; it cannot be edited or
+  cancelled), `failed` (with `error`: why, in a sentence). A pending item that
+  already failed an attempt carries the reason in `error` too.
+- **`source`**: `user` (the composer, or this API) or `agent` (the chat's own
+  `schedule_message` tool; the composer marks the row "by the agent").
+- **Limits**: 20 waiting per chat, 100 per account (the chat owner's), a time
+  within 30 days and not in the past, a message ≤ 64 KB, and a quota reset no
+  more than 30 days away.
+- **Codes**: `400` `invalid_json`, `invalid_body`, `message_required`,
+  `message_too_long` (also `413`), `invalid_time`, `time_in_past`,
+  `time_too_far`, `choose_one_time`, `no_model`, `no_quota_reset` (the provider
+  reports no reset time for that model); `404` `session_not_found`,
+  `item_not_found` (another chat's item answers the same); `409`
+  `too_many_for_chat`, `too_many_for_account`, `already_sending`.
+- **Send now** makes one attempt and no background retries (whoever pressed it
+  is looking): `delivered:true` means the message is already in the chat and the
+  item is gone; otherwise `item` is the row as it now stands (`sending`, or
+  `failed` with `error`).
+
+Agent engines that reach Cody over MCP (Claude, Codex) get the same three tools
+through `POST /api/internal/scheduled`, which is not part of this contract: it is
+authenticated by a per-session capability token and exists only for the bundled
+MCP server.
+
 ## Agent and the event stream
 
 | Route | Method | Notes |

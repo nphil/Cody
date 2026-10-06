@@ -353,4 +353,22 @@ test("keeps rpc model switches available at a turn boundary and marks session-sc
   assert.match(sessionScopedPicker, /\sdisabled(?:=|\s|>)/);
 });
 
+test("an idle composer sends through the Send pill with its menu zone; a running one shows Stop alone", () => {
+  const render = (isStreaming) => renderToStaticMarkup(
+    React.createElement(ChatInput, {
+      onSend() {},
+      onAbort() {},
+      isStreaming,
+      model: { provider: "test", modelId: "test-model" },
+      modelList: [{ provider: "test", id: "test-model", modelId: "test-model", name: "Test model" }],
+    }),
+  );
+  const idle = render(false);
+  assert.match(idle, /data-testid="send-pill"/);
+  assert.match(idle, /data-testid="send-menu-button"[^>]*aria-haspopup="menu"|aria-haspopup="menu"[^>]*data-testid="send-menu-button"/);
+  const running = render(true);
+  assert.doesNotMatch(running, /data-testid="send-pill"/);
+  assert.match(running, />Stop</);
+});
+
 ;

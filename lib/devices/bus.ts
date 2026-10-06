@@ -234,8 +234,8 @@ export class DeviceBridge {
       const snapshot = this.operations.get(operationId);
       if (!snapshot || snapshot.request.deviceId !== deviceId || snapshot.request.protocol !== "adb") return false;
       if (snapshot.request.action !== "forward" && snapshot.request.action !== "reverse") return false;
-      // Only after the page recorded the user's confirmation, and only while the run is live.
-      return snapshot.state === "running" && snapshot.events.some((entry) => entry.type === "confirmation");
+      // Only once the operation declared the rule it is about to open (it has passed the person's trust), and only while the run is live.
+      return snapshot.state === "running" && snapshot.riskDeclared === true;
     },
     traffic: (deviceId, direction, bytes) => {
       const record = this.activityFor(deviceId);

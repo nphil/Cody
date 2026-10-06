@@ -3,12 +3,12 @@
  *
  * An agent that looks over a device sends a burst of small commands, and one
  * card per command buried everything the person had to act on. A command the
- * agent ran that never needed an approval, changed nothing it reports, and
- * saved no file is routine: those are folded, per device, into one compact
+ * agent ran that never declared a risk to the device, changed nothing it reports,
+ * and saved no file is routine: those are folded, per device, into one compact
  * entry per burst ("Agent ran 7 fastboot commands") whose rows expand to the
- * full card of each command. Anything else - an approval waiting, a command
- * still running, a flash or backup, a command the person ran themselves - keeps
- * its own full card, and whatever needs the person is listed first.
+ * full card of each command. Anything else - a question waiting, a countdown, a
+ * command still running, a flash or backup, a command the person ran themselves -
+ * keeps its own full card, and whatever needs the person is listed first.
  *
  * Pure and browser-safe: the panel renders it, the tests pin it.
  */
@@ -49,14 +49,14 @@ export function isFinishedState(state: OperationState): boolean {
 
 /** Waiting on the person: it must never be folded away or scrolled out of sight. */
 export function needsPerson(operation: DeviceOperationSnapshot): boolean {
-  return operation.state === "awaiting-confirmation" || operation.state === "armed";
+  return operation.state === "awaiting-trust" || operation.state === "countdown";
 }
 
-/** A finished command the agent ran that asked for no approval and saved no file. */
+/** A finished command the agent ran that declared no risk to the device and saved no file. */
 export function isRoutine(operation: DeviceOperationSnapshot): boolean {
   return operation.origin === "agent"
     && isFinishedState(operation.state)
-    && !operation.approvalAsked
+    && !operation.riskDeclared
     && ROUTINE_ACTIONS[operation.request.action] === true
     && !operation.result?.fileId;
 }

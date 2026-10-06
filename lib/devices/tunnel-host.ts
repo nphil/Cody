@@ -5,9 +5,9 @@
  * outlive or cross its session: the bridge tears every rule down when the page
  * that owns the device detaches or is replaced, and when the operation that
  * requested the rule finishes. The page may only claim an endpoint for an
- * operation the bridge has already seen running in this same session (which is
- * past the user's confirmation), only on loopback, never a privileged port and
- * never Cody's own port.
+ * operation the bridge has already seen running in this same session and
+ * declaring that rule (so it has passed the person's trust for the device),
+ * only on loopback, never a privileged port and never Cody's own port.
  *
  * Byte flow is credit based. A sender stops reading its source once
  * TUNNEL_WINDOW_BYTES are unacknowledged, and the receiver acknowledges a chunk
@@ -30,7 +30,7 @@ import {
 export interface TunnelHostDeps {
   /** Deliver a message to the attached page. May throw when the socket is gone. */
   send(message: TunnelMessage): void;
-  /** True only for an operation in this session that is past confirmation and not finished. */
+  /** True only for an operation in this session that is running, has declared its rule and is not finished. */
   operationActive(operationId: string, deviceId: string): boolean;
   /** Activity accounting for the device the rule belongs to. */
   traffic(deviceId: string, direction: "toDevice" | "fromDevice", bytes: number): void;
@@ -180,7 +180,7 @@ export class TunnelHost {
   private async claim(message: Extract<TunnelMessage, { kind: "listen" | "reverse" }>, kind: "forward" | "reverse"): Promise<void> {
     const fail = (error: string): void => this.post({ kind: "failed", requestId: message.requestId, error });
     if (!this.deps.operationActive(message.operationId, message.deviceId)) {
-      fail("No running confirmed operation in this session owns that rule.");
+      fail("No running port-rule operation in this session owns that rule.");
       return;
     }
     if (this.claiming.has(message.operationId) || [...this.rules.values()].some((rule) => rule.operationId === message.operationId)) {

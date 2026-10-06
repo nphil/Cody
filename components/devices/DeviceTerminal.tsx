@@ -20,7 +20,7 @@ export interface DeviceTerminalProps {
 const endings = { LF: "\n", CR: "\r", CRLF: "\r\n", None: "" };
 const SPECIAL_KEYS: readonly (readonly [string, string])[] = [["Ctrl+C", "\x03"], ["Esc", "\x1b"], ["Tab", "\t"], ["↑", "\x1b[A"], ["↓", "\x1b[B"]];
 
-/** User terminal ownership never implicitly grants the agent ADB shell authority. */
+/** A terminal the person opens is their own operation: it is never held for the agent's trust question, and it gives the agent no trust. */
 export function DeviceTerminal({ manager, deviceId, label, protocol = "adb", interfaceNumber, alternateSetting, showTitle = false }: DeviceTerminalProps) {
   const { t } = useI18n();
   const inputId = useId();

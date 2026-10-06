@@ -25,13 +25,13 @@ import { QuotaBar, clampQuotaPercent } from "@/components/QuotaBar";
 import { OpenRouterCredits } from "./OpenRouterCredits";
 import type { UseResetCreditsResult, ResetCreditAccount } from "@/hooks/useUsage";
 import type { UseOpenRouterAccountResult } from "@/hooks/useOpenRouterAccount";
-import { rankProviderAccounts, selectBindingWindow, selectWindowsForModel, type AccountEvidence, type ModelRef } from "@/lib/usage/select";
+import { evidenceFromSessionAccount, rankProviderAccounts, selectBindingWindow, selectWindowsForModel, type AccountEvidence, type ModelRef } from "@/lib/usage/select";
 import { resolveModelAvailability } from "@/lib/usage/availability";
+import { usageProviderFor } from "@/lib/usage/provider-map";
 import type { UsageAccount, UsageAccountService, UsageInUseBasis, UsageSnapshot, UsageWindow, UsageWindowState } from "@/lib/usage/types";
 import { brandAccountLabel } from "@/lib/provider-brand";
 import { ProviderIcon } from "./ProviderIcon";
 import { translate, useI18n } from "@/lib/i18n";
-import { OMP_ENGINE_ID } from "./SettingsTabs";
 import type { SessionActiveModel } from "@/lib/session-active-models";
 import { Tooltip, Collapsible, CollapsibleTrigger, CollapsiblePanel } from "./ui/primitives";
 import { ConfirmDialog } from "./ui/field";
@@ -196,34 +196,6 @@ export function isPrepaidProvider(provider: string | null | undefined): boolean 
   return typeof provider === "string" && provider.trim().toLowerCase() === "openrouter";
 }
 
-/** omp's own models already carry the provider id `/api/usage` reports
- *  accounts under ("anthropic", "openai-codex", ...). An ACP engine (Claude
- *  Code, Codex) instead reports every one of ITS models under its own
- *  engine id as `provider` (`lib/harness/acp-session.ts`'s `resolvedModel()`
- *  sets `provider: this.spec.id`), so a bare "claude-opus-4-5" or "gpt-5.1"
- *  needs translating before it means anything to the usage snapshot. */
-const ACP_ENGINE_USAGE_PROVIDER: Record<string, string> = {
-  claude: "anthropic",
-  codex: "openai-codex",
-};
-
-/**
- * The omp usage-provider id that actually meters a model, or null when Cody
- * cannot say so with confidence.
- *
- * Deliberately conservative: only omp itself (whose models already carry the
- * right id) and the two ACP engines above translate, and only when the
- * option's own provider IS that engine's id — never a guess for Pi, Hermes,
- * or any other engine. A wrong guess would mark a healthy model exhausted,
- * or hide a real exhaustion; showing nothing is the safe wrong answer,
- * mismarking is not.
- */
-export function usageProviderFor(engineId: string | null | undefined, modelProvider: string): string | null {
-  if (engineId === OMP_ENGINE_ID) return modelProvider;
-  if (!engineId || modelProvider !== engineId) return null;
-  return ACP_ENGINE_USAGE_PROVIDER[engineId] ?? null;
-}
-
 /**
  * Whether the model picker should mark one option as spent, for ANY engine.
  *
@@ -349,19 +321,6 @@ const ACCOUNT_BASIS_NOTE_KEYS: Record<UsageInUseBasis, string> = {
   recent: "usage.accountsBasisRecent",
   expected: "usage.accountsBasisExpected",
 };
-
-/** What this conversation says about which account serves `provider`: the
- *  account omp recorded for its latest reply, if it has used the provider.
- *  A recorded pin Cody could not match still proves the provider was used,
- *  so the account that most recently served a request stands in — labelled
- *  as that, never as this conversation's. With no pin at all, nothing: omp
- *  routes a conversation's first request by quota headroom, so another
- *  conversation's account is no evidence here. */
-function sessionEvidence(snapshot: UsageSnapshot, provider: string): AccountEvidence {
-  const entry = snapshot.sessionAccounts?.[provider];
-  if (!entry) return {};
-  return entry.accountId ? { inUseAccountId: entry.accountId } : { recent: true };
-}
 
 function isSelectedModel(active: SessionActiveModel, selected: ModelRef): boolean {
   return active.provider.trim().toLocaleLowerCase() === selected.provider.trim().toLocaleLowerCase()
@@ -540,7 +499,7 @@ export function buildQuotaView(
   };
 
   if (model) {
-    const evidenceFor = (provider: string) => sessionEvidence(snapshot, provider);
+    const evidenceFor = (provider: string) => evidenceFromSessionAccount(snapshot.sessionAccounts?.[provider]);
     const ranks = rankProviderAccounts(accounts, model.provider, model.modelId, evidenceFor(model.provider));
     // The ring reads the account in use (ranks[0]); taking it from the same
     // ranking the list below renders guarantees they name the same account.

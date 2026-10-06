@@ -21,6 +21,7 @@ const SUITES = [
   "lib/omp/*.test.mjs",
   "lib/openrouter/*.test.mjs",
   "lib/routing/*.test.mjs",
+  "lib/scheduled/*.test.mjs",
   "lib/usage/*.test.mjs",
   "components/*.test.mjs",
   "components/settings/*.test.mjs",

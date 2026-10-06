@@ -231,10 +231,10 @@ async function dump(request: HardwareRequest, context: HardwareContext): Promise
   return { summary:`Read ${length} bytes from Fastboot ${target}.`,verified:true,sha256:saved.sha256,fileId:saved.fileId,details:{offset,length} };
 }
 
-function protectedOverride(target:string):string|undefined {
-  const protection=classifyProtectedRegionName(target);
-  if (protection) return "write:"+target;
-  return /^(?:rpmb|gpt|pgpt|sgpt|boot[01]|mmcblk\d+boot[01])(?:[_:-].*)?$/i.test(target) ? "write:"+target : undefined;
+/** The log line naming a boot-critical or partition-table target; nothing is asked of anyone. */
+function protectedNote(target:string):string[] {
+  const protectedTarget=Boolean(classifyProtectedRegionName(target)) || /^(?:rpmb|gpt|pgpt|sgpt|boot[01]|mmcblk\d+boot[01])(?:[_:-].*)?$/i.test(target);
+  return protectedTarget ? [`PROTECTED: ${target} holds boot-critical or partition-table data; a bad write here can leave the device unbootable.`] : [];
 }
 
 /** What was learned and escrowed about a partition before it is overwritten. */
@@ -243,7 +243,7 @@ interface PartitionBackup {
   /** Present when the bootloader supports exact fetch readback. */
   readonly capability:FastbootReadback|undefined;
   readonly backupId:string|undefined;
-  /** The sentence shown in the confirmation: where the backup is, or why there is none. */
+  /** The sentence logged with the declared risk: where the backup is, or why there is none. */
   readonly backup:string;
 }
 
@@ -279,7 +279,7 @@ function parseDownloadLimit(value:string|undefined):number {
   return Number.isSafeInteger(parsed) && parsed>0 ? parsed : 0;
 }
 
-/** Everything decided about writing one image to one partition before anything is approved. */
+/** Everything decided about writing one image to one partition before the risk is declared. */
 interface PartitionFlash {
   readonly target:string;
   readonly image:Blob;
@@ -324,6 +324,7 @@ async function writeFlash(context:HardwareContext,flash:PartitionFlash,onFlashSe
 function flashDetails(chip:string|undefined,flash:PartitionFlash):string {
   return [
     "Product: "+(chip||"unreported")+". Partition size: "+(flash.backup.partitionSize??"unreported")+". Expanded image bytes: "+flash.footprint.length+".",
+    ...protectedNote(flash.target),
     ...(flash.split ? [`The image is larger than the device's max-download-size, so it is sent as ${flash.split.pieces.length} sparse pieces that are flashed in turn.`] : []),
     !flash.backup.capability ? "UNVERIFIED WRITE: this bootloader has no fetch readback. An OKAY response is not verification. Reboot to TWRP and verify the written bytes over ADB afterwards." : "The full partition is backed up. Readback will verify the image-defined bytes; sparse skip regions and bytes beyond the image are not assumed preserved.",
   ].join(" ");
@@ -339,7 +340,7 @@ async function flash(request:HardwareRequest,context:HardwareContext):Promise<Ha
   if(expected.expectedChip && expected.expectedChip.toLowerCase()!==chip?.trim().toLowerCase()) throw new FastbootProtocolError("Fastboot product does not match expectedChip.");
   const prepared=await prepareFlash(context,target,input,parseDownloadLimit(await optionalGetvar(context,"max-download-size")));
   const unverified=!prepared.backup.capability;
-  await context.confirm({action:"fastboot flash",target,offset:0,length:input.size,sha256:prepared.digest,backup:prepared.backup.backup,protectedOverride:protectedOverride(target),details:flashDetails(chip,prepared)});
+  await context.confirm({action:"fastboot flash",target,offset:0,length:input.size,sha256:prepared.digest,backup:prepared.backup.backup,details:flashDetails(chip,prepared)});
   await writeFlash(context,prepared);
   if(prepared.backup.capability) await verifyImage(context,target,input,prepared.footprint,prepared.backup.capability);
   return {summary:unverified ? "Fastboot accepted the write to "+target+". UNVERIFIED: use ADB verify in recovery before booting it." : "Flashed and verified the image-defined bytes in Fastboot "+target+".",verified:!unverified,sha256:prepared.digest,details:{chip,backupId:prepared.backup.backupId,partitionSize:prepared.backup.partitionSize,length:prepared.footprint.length,sparse:prepared.footprint.sparse,skippedBytes:prepared.footprint.skipped,pieces:prepared.split?.pieces.length??1,followup:unverified ? "Boot TWRP, locate "+target+" in /dev/block/by-name, then device_verify the image byte range using this SHA-256. Sparse images require expanded-image verification, not the compressed file hash." : undefined}};
@@ -369,9 +370,9 @@ async function getStaged(context:HardwareContext):Promise<HardwareResult> {
 }
 
 /**
- * `fastboot update` / `flashall`: flashes the images of an update package after
- * one approval. The package's android-info.txt must be met by this device; every
- * partition is backed up (when the bootloader can fetch) before the approval, is
+ * `fastboot update` / `flashall`: flashes the images of an update package as one
+ * declared operation. The package's android-info.txt must be met by this device; every
+ * partition is backed up (when the bootloader can fetch) before the risk is declared, is
  * written once, and is read back before the next one starts.
  */
 async function updateFromPackage(context:HardwareContext):Promise<HardwareResult> {
@@ -380,7 +381,7 @@ async function updateFromPackage(context:HardwareContext):Promise<HardwareResult
   const zip=await openZip(archive).catch((error:unknown)=>{throw new FastbootProtocolError(`The selected file is not an update package: ${error instanceof Error ? error.message : String(error)}`);});
   const infoEntry=zip.find("android-info.txt");
   if (!infoEntry) throw new FastbootProtocolError("The package has no android-info.txt, so Cody cannot confirm its images are for this device (fastboot update refuses this too). Flash single images with device_flash instead.");
-  // The package metadata is read into a string before anything is approved, so it
+  // The package metadata is read into a string before anything is sent, so it
   // gets its own small bound (never the firmware-image limits) and a cap on how
   // many requirements the device will be asked about.
   const info=parseAndroidInfo(await zip.text(infoEntry,MAX_ANDROID_INFO_BYTES).catch((error:unknown)=>{throw new FastbootProtocolError(`The package's android-info.txt cannot be read: ${error instanceof Error ? error.message : String(error)} Nothing was written.`);}));
@@ -426,10 +427,10 @@ async function updateFromPackage(context:HardwareContext):Promise<HardwareResult
     target:`update package, ${prepared.length} partition(s): ${prepared.map((flash)=>flash.target).join(", ")}`,
     sha256:digest,offset:0,length:archive.size,
     backup:unbacked.length===0 ? `Every partition is backed up in full before it is overwritten: ${prepared.map((flash)=>flash.backup.backupId).join(", ")}.` : `Backup unavailable for ${unbacked.length} of ${prepared.length} partition(s) (${unbacked.join(", ")}): this bootloader has no fetch readback, so they are written UNVERIFIED.`,
-    protectedOverride:`update:${digest.slice(0,8)}`,
     details:[
       `Product: ${product||"unreported"}. The package's android-info.txt requirements (${info.requirements.length}) are all met by this device.`,
       ...prepared.map((flash)=>`${flash.target}: ${flash.footprint.length} bytes${flash.split ? ` in ${flash.split.pieces.length} sparse pieces` : ""}, sha256 ${flash.digest}, ${flash.backup.capability ? `backup ${flash.backup.backupId}, readback verified` : "NO BACKUP, UNVERIFIED"}`),
+      ...prepared.flatMap((flash)=>protectedNote(flash.target)),
       "Partitions are written one after another and each is read back when the bootloader supports it. The first failure stops the update and leaves the later partitions untouched.",
       `Not flashed by update: ${SKIPPED_BY_UPDATE.filter((name)=>zip.find(name)).join(", ")||"nothing"} (flash those separately if you want them).`,
     ].join("\n"),
@@ -507,7 +508,7 @@ async function execute(request:HardwareRequest,context:HardwareContext):Promise<
   const eraseTarget=/^erase(?::|\s+)(.+)$/.exec(value);
   if(value==="erase"||eraseTarget) {
     const target=requireTarget(eraseTarget?.[1]??request.target), info=await backupPartition(context,target);
-    await context.confirm({action:"fastboot erase",target,length:info.partitionSize,backup:info.backup,protectedOverride:protectedOverride(target),details:"Erase the exact named partition. This is destructive; no erase pattern is assumed and the result is not byte-verified."});
+    await context.confirm({action:"fastboot erase",target,length:info.partitionSize,backup:info.backup,details:[...protectedNote(target),"Erase the exact named partition. This is destructive; no erase pattern is assumed and the result is not byte-verified."].join(" ")});
     await command(context,"erase:"+target); return {summary:"Fastboot accepted erase of "+target+".",verified:false,details:{backupId:info.backupId}};
   }
   const active=/^set_active(?::|\s+)(.+)$/.exec(value);
@@ -521,7 +522,7 @@ async function execute(request:HardwareRequest,context:HardwareContext):Promise<
   if(/^format(?::|\s|$)/.test(value)) throw new FastbootProtocolError("fastboot format is a host filesystem-image generator, not a bootloader command. Upload an ext4/F2FS filesystem image and flash it; Cody does not yet generate filesystem images.");
   const wire=value.replace(/^reboot\s+(\S+)$/,"reboot-$1");
   const reboot=/^reboot(?:-[A-Za-z0-9_-]+)?$/.test(wire);
-  await context.confirm({action:"fastboot command",target:wire,backup:reboot?"Not applicable: reboot changes mode.":"No automatic backup: vendor/unlock commands can wipe data or alter security state. Use partition backup first if the device supports fetch.",protectedOverride:reboot?undefined:"fastboot "+wire,details:reboot?"Switch device mode; reconnect after USB re-enumerates.":"Run this exact bootloader command. OEM and flashing unlock/lock commands may irreversibly alter boot security or erase all user data."});
+  await context.confirm({action:"fastboot command",target:wire,backup:reboot?"Not applicable: reboot changes mode.":"No automatic backup: vendor/unlock commands can wipe data or alter security state. Use partition backup first if the device supports fetch.",details:reboot?"Switch device mode; reconnect after USB re-enumerates.":"Run this exact bootloader command. OEM and flashing unlock/lock commands may irreversibly alter boot security or erase all user data."});
   const result=await command(context,wire);
   return {summary:[...result.infos,result.okay].join("\n")||"Fastboot accepted "+wire+".",verified:false,details:{...result}};
 }

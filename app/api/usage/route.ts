@@ -3,8 +3,8 @@ import { requireUser } from "@/lib/auth/http";
 import { canAccessSession } from "@/lib/auth/session-owners";
 import { resolveSessionPath } from "@/lib/session-reader";
 import { usageReaderInstalled } from "@/lib/usage/omp-usage";
-import { credentialForPin, getUsageSnapshot } from "@/lib/usage/cache";
-import { readSessionCredentialPins } from "@/lib/usage/session-pins";
+import { getUsageSnapshot } from "@/lib/usage/cache";
+import { readSessionAccounts } from "@/lib/usage/session-accounts";
 import { reconcileRoutingForRequest } from "@/lib/routing/request";
 import type { UsageSessionAccount, UsageSnapshot } from "@/lib/usage/types";
 
@@ -25,32 +25,19 @@ function emptySnapshot(reason: string): UsageSnapshot {
 const SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
 /**
- * Per provider, the account this conversation's latest reply was served by:
- * omp's own `credential_pin` entries in the session file, matched against the
- * credential store's digests. A session the caller cannot see, or one with no
- * file yet (first turn still running), answers `{}` — "not used yet" — never
- * an error, and never another account's data.
+ * Per provider, the account this conversation's latest reply was served by
+ * (see lib/usage/session-accounts.ts). A session the caller cannot see, or one
+ * with no file yet (first turn still running), answers `{}` — "not used yet" —
+ * never an error, and never another account's data.
  */
 async function sessionAccounts(
   sessionId: string,
   user: Parameters<typeof canAccessSession>[1],
   snapshot: UsageSnapshot,
 ): Promise<Record<string, UsageSessionAccount>> {
-  const result: Record<string, UsageSessionAccount> = {};
-  if (!SESSION_ID.test(sessionId) || !canAccessSession(sessionId, user)) return result;
+  if (!SESSION_ID.test(sessionId) || !canAccessSession(sessionId, user)) return {};
   const filePath = await resolveSessionPath(sessionId);
-  if (!filePath) return result;
-  for (const [provider, pin] of await readSessionCredentialPins(filePath)) {
-    const credential = credentialForPin(pin.hash);
-    const account = credential && credential.provider === provider
-      ? snapshot.accounts.find((candidate) => candidate.provider === provider && candidate.credentialId === credential.credentialId)
-      : undefined;
-    // An unmatched pin still proves this conversation used the provider:
-    // report it with no account rather than dropping it, which would read as
-    // "never used" and route the gauge onto whichever sibling is idlest.
-    result[provider] = { accountId: account?.id ?? null, since: pin.timestamp };
-  }
-  return result;
+  return filePath ? readSessionAccounts(filePath, snapshot) : {};
 }
 
 export async function GET(request: Request) {

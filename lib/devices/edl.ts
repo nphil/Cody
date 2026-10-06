@@ -28,19 +28,19 @@ import { throwIfAborted } from "./serial";
  *   exec printgpt read the primary AND the real tail (backup) partition table
  *   exec check    does the table's span agree with the capacity the programmer
  *                 reports, and is the backup table where it should be
- *   exec reset    leave EDL (asks first)
+ *   exec reset    leave EDL
  *   exec backup   every partition and both partition tables, saved as session files with a manifest that names them and
  *                 the unit they came from (edl-backup.ts)
  *   exec restore  put such a set back on the same unit: matched by chip serial, public-key hash, eMMC serial and disk GUID,
- *                 what it overwrites saved first, one typed approval, partition tables last, every region read back
- *   exec setbootablestoragedrive  choose the storage drive the boot ROM starts from (target = the drive number), only
- *                 with a typed approval, and always UNVERIFIED: nothing can read the setting back
+ *                 what it overwrites saved first, partition tables last, every region read back
+ *   exec setbootablestoragedrive  choose the storage drive the boot ROM starts from (target = the drive number), always
+ *                 UNVERIFIED: nothing can read the setting back
  *   dump NAME     one GPT partition into a session file with its SHA-256
  *   dump user-area  the whole user area, only with an explicit sector count and
  *                 only when `check` passes in the same operation
  *   flash NAME    write an image into one GPT partition (edl-write.ts): saved
- *                 copy first, one confirmation, typed override for the protected
- *                 boot chain and identity partitions, read-back afterwards
+ *                 copy first, the protected boot chain and identity partitions noted in
+ *                 the log, read-back afterwards
  *
  * Everything that changes storage lives in edl-write.ts and goes through a
  * `WriteGrant` (edl-firehose.ts); the read-only commands here never write.

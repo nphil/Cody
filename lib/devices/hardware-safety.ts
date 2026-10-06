@@ -437,7 +437,7 @@ function requireBackup(backup: string): string {
 
 /**
  * The only generic flash execution path. It establishes layout protection and
- * readback capability before point-of-risk confirmation; calls the write once;
+ * readback capability before the risk is declared; calls the write once;
  * then returns success only after exact-image readback SHA-256 verification.
  */
 export async function runVerifiedFlash(operation: VerifiedFlashOperation): Promise<VerifiedFlashResult> {
@@ -489,7 +489,6 @@ export async function runVerifiedFlash(operation: VerifiedFlashOperation): Promi
     programSha256: approval.programSha256,
     programOffset: approval.offset,
     programLength: approval.length,
-    ...(operation.safety.protectedOverride ? { protectedOverride: operation.safety.protectedOverride } : {}),
     ...(approval.protectedRegion === "unknown"
       ? { details: `Unclassified ${operation.safety.protocol} target ${JSON.stringify(approval.target)}: role and topology are unknown.` }
       : {}),

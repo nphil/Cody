@@ -62,7 +62,14 @@ import { useSettingsOpener } from "./settings/shell-context";
 import { formatModelDisplayName } from "@/lib/model-display";
 import type { SessionActiveModel } from "@/lib/session-active-models";
 import { PromptProfileIndicator, type LocalModelProfileBody } from "./LocalModelProfile";
-import { QuotaPopover, buildQuotaView, isPrepaidProvider, usageProviderFor, modelLimitReached, formatResetTime } from "./QuotaPopover";
+import { QuotaPopover, buildQuotaView, isPrepaidProvider, modelLimitReached, formatResetTime } from "./QuotaPopover";
+import { usageProviderFor } from "@/lib/usage/provider-map";
+import { useScheduledMessages } from "@/hooks/useScheduledMessages";
+import { SendPill } from "./SendPill";
+import { ScheduledRows } from "./ScheduledRows";
+import type { ScheduleChoice } from "./ScheduleMenu";
+import type { ScheduledItemView } from "@/lib/scheduled/types";
+import { scheduleBlock, scheduleErrorMessage, type QuotaResetSource } from "@/lib/scheduled/ui";
 
 export interface AttachedImage {
   data: string;   // base64, no prefix (already compressed if it needed to be)
@@ -658,6 +665,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     failed: usageFailed,
     refresh: refreshUsage,
   } = useUsage(true, sessionId ?? null);
+  // This chat's scheduled messages (lib/scheduled): the rows above the input,
+  // and the create/edit/cancel/send-now the menu and the rows call.
+  const scheduled = useScheduledMessages(sessionId ?? null, { isStreaming });
   // Banked reset credits stay keyed to the active engine: the server route
   // itself still answers `available:false` for anything but omp (they are
   // redeemed through omp's own credential store specifically, not a generic
@@ -1144,6 +1154,29 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       setPreparingImageCount((count) => Math.max(0, count - 1));
     }
   }, [attachedImages, budgetError, preparingImageCount, t]);
+  /**
+   * Put a composer snapshot back after its send (or schedule) did not go
+   * through. When the box has been typed into since, the snapshot becomes a
+   * "failed" row with Edit instead, so nothing typed is ever overwritten.
+   */
+  const restoreComposer = useCallback((textSnapshot: string, imageSnapshot: AttachedImage[], fileSnapshot: AttachedTextFile[], detail: string) => {
+    if (valueRef.current || attachedImagesRef.current.length || attachedTextFilesRef.current.length) {
+      setFailedPreparations((items) => [...items, { id: `preparation-${++failedPreparationIdRef.current}`, text: textSnapshot, images: imageSnapshot, files: fileSnapshot, detail }]);
+      setAttachError(null);
+      return;
+    }
+    const restoredImages = imageSnapshot.map((image) => ({
+      ...image,
+      previewUrl: image.source ? URL.createObjectURL(image.source) : `data:${image.mimeType};base64,${image.data}`,
+    }));
+    valueRef.current = textSnapshot;
+    attachedImagesRef.current = restoredImages;
+    attachedTextFilesRef.current = fileSnapshot;
+    setValue(textSnapshot);
+    setAttachedImages(restoredImages);
+    setAttachedTextFiles(fileSnapshot);
+    setAttachError(null);
+  }, []);
   // Re-entrancy guard: a second Enter while the first send's image prep or
   // builtin command is still awaiting would snapshot the same composer text
   // again and send it twice. The guard covers only that window; once the
@@ -1158,24 +1191,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const textSnapshot = value;
     const imageSnapshot = attachedImages;
     const fileSnapshot = attachedTextFiles;
-    const restoreSnapshot = (detail = t("chatInput.imageReadFailed")) => {
-      if (valueRef.current || attachedImagesRef.current.length || attachedTextFilesRef.current.length) {
-        setFailedPreparations((items) => [...items, { id: `preparation-${++failedPreparationIdRef.current}`, text: textSnapshot, images: imageSnapshot, files: fileSnapshot, detail }]);
-        setAttachError(null);
-        return;
-      }
-      const restoredImages = imageSnapshot.map((image) => ({
-        ...image,
-        previewUrl: image.source ? URL.createObjectURL(image.source) : `data:${image.mimeType};base64,${image.data}`,
-      }));
-      valueRef.current = textSnapshot;
-      attachedImagesRef.current = restoredImages;
-      attachedTextFilesRef.current = fileSnapshot;
-      setValue(textSnapshot);
-      setAttachedImages(restoredImages);
-      setAttachedTextFiles(fileSnapshot);
-      setAttachError(null);
-    };
+    const restoreSnapshot = (detail = t("chatInput.imageReadFailed")) => restoreComposer(textSnapshot, imageSnapshot, fileSnapshot, detail);
     const dispatchSend = async (message: string, images?: AttachedImage[]) => {
       // The message is prepared and the composer already cleared: from here
       // it belongs to the outbox, so the next Enter must not wait on this
@@ -1232,7 +1248,101 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       setSendPreparing(false);
       sendInFlightRef.current = false;
     }
-  }, [value, attachedImages, attachedTextFiles, isStreaming, canSendWhileStreaming, preparingImageCount, prepareOutgoingImages, onBuiltinCommand, onSend, clearInput, onAudioUnlock, t]);
+  }, [value, attachedImages, attachedTextFiles, isStreaming, canSendWhileStreaming, preparingImageCount, prepareOutgoingImages, onBuiltinCommand, onSend, clearInput, restoreComposer, onAudioUnlock, t]);
+
+  // ── Scheduled send ──────────────────────────────────────────────────────
+  // The Send pill's ▾ menu (components/SendPill.tsx). Choosing a row hands
+  // the message to the server's schedule (lib/scheduled) and clears the box at
+  // once, like a send; the message waits as a row above the input until it
+  // goes, and a refusal puts the text back exactly as a failed send does.
+  const hasComposerContent = Boolean(value.trim() || attachedImages.length || attachedTextFiles.length);
+  const scheduleBlockReason = scheduleBlock({
+    hasSession: Boolean(sessionId),
+    hasImages: attachedImages.length > 0,
+    hasContent: hasComposerContent,
+    preparing: sendPreparing || preparingImageCount > 0,
+    shellMode: bashMode,
+  });
+  const scheduleInFlightRef = useRef(false);
+  const scheduleCreate = scheduled.create;
+  const scheduleLimits = scheduled.limits;
+  const handleSchedule = useCallback(async (choice: ScheduleChoice) => {
+    if (scheduleBlockReason !== null || scheduleInFlightRef.current) return;
+    scheduleInFlightRef.current = true;
+    const msg = value.trim();
+    const textSnapshot = value;
+    const imageSnapshot = attachedImages;
+    const fileSnapshot = attachedTextFiles;
+    clearInput();
+    try {
+      let message = composeMessageWithTextAttachments(msg, fileSnapshot);
+      // A web slash command is expanded the way a send made during a run expands it; a builtin is never run from here.
+      if (msg.startsWith("/") && fileSnapshot.length === 0) {
+        const expansion = expandWebSlashCommand(msg);
+        if (expansion.kind === "usage-error") {
+          toast.error(t("chatInput.commandUsageTitle"), t("agentSession.commandRequiresArgs", {
+            command: expansion.command,
+            usage: t(expansion.argumentHintKey),
+          }));
+          restoreComposer(textSnapshot, imageSnapshot, fileSnapshot, t("chatInput.commandUsageTitle"));
+          return;
+        }
+        if (expansion.kind === "expand") message = expansion.prompt;
+      }
+      await scheduleCreate(choice.kind === "quota"
+        ? { message, whenQuotaResets: true, ...(model ? { model: { provider: model.provider, modelId: model.modelId } } : {}) }
+        : { message, at: new Date(choice.at).toISOString() });
+    } catch (error) {
+      const reason = scheduleErrorMessage(error, t, scheduleLimits);
+      restoreComposer(textSnapshot, imageSnapshot, fileSnapshot, reason);
+      toast.error(t("schedule.toastFailed"), reason);
+    } finally {
+      scheduleInFlightRef.current = false;
+    }
+  }, [scheduleBlockReason, value, attachedImages, attachedTextFiles, clearInput, restoreComposer, scheduleCreate, scheduleLimits, model, t]);
+
+  // Edit takes the message back: the server forgets it and its text returns to
+  // the box, ahead of whatever is already typed there.
+  const scheduleCancel = scheduled.cancel;
+  const handleScheduledEdit = useCallback(async (item: ScheduledItemView) => {
+    try {
+      await scheduleCancel(item.id);
+    } catch (error) {
+      toast.error(t("schedule.toastTakeBackFailed"), scheduleErrorMessage(error, t, scheduleLimits));
+      return;
+    }
+    const restoredText = [item.message, valueRef.current].filter(Boolean).join("\n\n");
+    valueRef.current = restoredText;
+    setValue(restoredText);
+    setAtQuery(null);
+    setHistoryMenuOpen(false);
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current;
+      if (!ta) return;
+      ta.focus();
+      ta.setSelectionRange(restoredText.length, restoredText.length);
+      ta.style.height = "auto";
+      ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+    });
+  }, [scheduleCancel, scheduleLimits, t]);
+
+  const scheduleSendNow = scheduled.sendNow;
+  const handleScheduledSendNow = useCallback(async (item: ScheduledItemView) => {
+    try {
+      const answer = await scheduleSendNow(item.id);
+      if (answer.item?.status === "failed") toast.error(t("schedule.toastSendFailed"), answer.item.error);
+    } catch (error) {
+      toast.error(t("schedule.toastSendFailed"), scheduleErrorMessage(error, t, scheduleLimits));
+    }
+  }, [scheduleSendNow, scheduleLimits, t]);
+
+  const handleScheduledCancel = useCallback(async (item: ScheduledItemView) => {
+    try {
+      await scheduleCancel(item.id);
+    } catch (error) {
+      toast.error(t("schedule.toastCancelFailed"), scheduleErrorMessage(error, t, scheduleLimits));
+    }
+  }, [scheduleCancel, scheduleLimits, t]);
 
   const slashQuery = value.startsWith("/") && !/\s/.test(value.slice(1))
     ? value.slice(1).toLowerCase()
@@ -2341,6 +2451,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     setContextPopoverOpen(false);
   }, [draftKey]);
 
+  // The quota ring's knowledge of THIS chat's own model, narrowed to what the
+  // menu's "When quota resets" row reads (lib/scheduled/ui.ts).
+  const scheduleQuotaSource: QuotaResetSource | null = quota.known
+    ? { known: true, provider: quota.provider, resetsAt: quota.resetsAt, accounts: quota.accounts }
+    : null;
+  // The scheduled rows sit under the waiting strip, the outbox rows and the
+  // failed-preparation rows; only the topmost row of the whole stack rounds its
+  // corners, so they do when nothing is above them.
+  const scheduledRoundTop = !(turnWaiting && !outbox.some((entry) => entry.status === "queued"))
+    && !outbox.some((entry) => entry.status !== "delivered")
+    && failedPreparations.length === 0;
+
   return (
     <div
       style={{
@@ -2978,6 +3100,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             </div>
           );
         })}
+        <ScheduledRows
+          items={scheduled.items}
+          busy={scheduled.busy}
+          roundTop={scheduledRoundTop}
+          isMobile={isMobile}
+          onEdit={handleScheduledEdit}
+          onSendNow={handleScheduledSendNow}
+          onCancel={handleScheduledCancel}
+        />
         <div
             className="chat-input-shell"
             style={{
@@ -3789,38 +3920,17 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 {!isMobile && t("chatInput.stop")}
               </button>
             ) : (
-              <button
-                type="button"
-                onClick={handleSend}
+              <SendPill
+                isMobile={isMobile}
+                ready={hasComposerContent}
                 // Sending while an attachment is still being prepared would
                 // send the message without it.
-                disabled={sendPreparing || preparingImageCount > 0 || (!value.trim() && !attachedImages.length && !attachedTextFiles.length)}
-                // Arrow only on a phone; the word survives in the accessible
-                // name, and the arrow grows to stay legible in a 38px target.
-                aria-label={isMobile ? t("chatInput.send") : undefined}
-                style={{
-                  display: "flex", alignItems: "center", justifyContent: isMobile ? "center" : undefined, gap: 6,
-                  height: isMobile ? 38 : 28,
-                  width: isMobile ? 38 : undefined,
-                  flexShrink: isMobile ? 0 : undefined,
-                  padding: isMobile ? 0 : "0 14px",
-                  background: (value.trim() || attachedImages.length || attachedTextFiles.length) ? "var(--accent-strong)" : "var(--bg-panel)",
-                  border: "none",
-                  borderRadius: 8,
-                  color: (value.trim() || attachedImages.length || attachedTextFiles.length) ? "var(--on-accent)" : "var(--text-dim)",
-                  cursor: (value.trim() || attachedImages.length || attachedTextFiles.length) ? "pointer" : "not-allowed",
-                  fontSize: 12,
-                  fontWeight: 600,
-                  boxShadow: (value.trim() || attachedImages.length || attachedTextFiles.length) ? "var(--shadow-card)" : "none",
-                  transition: "background var(--dur-fast) var(--ease-out-warm), box-shadow var(--dur-fast) var(--ease-out-warm)",
-                }}
-              >
-                <svg width={isMobile ? 17 : 12} height={isMobile ? 17 : 12} viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="2" y1="7" x2="11" y2="7" />
-                  <polyline points="7.5 3 12 7 7.5 11" />
-                </svg>
-                {!isMobile && t("chatInput.send")}
-              </button>
+                sendDisabled={sendPreparing || preparingImageCount > 0 || !hasComposerContent}
+                block={scheduleBlockReason}
+                quota={scheduleQuotaSource}
+                onSend={handleSend}
+                onSchedule={handleSchedule}
+              />
             )}
           </div>
           </div>
