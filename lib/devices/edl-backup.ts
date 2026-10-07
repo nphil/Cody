@@ -18,7 +18,7 @@ import {
   unitTag,
 } from "./edl-disk";
 import { FirehoseRejection, grantWrites } from "./edl-firehose";
-import type { GptPartition } from "./edl-gpt";
+import { partitionLabel, type GptPartition } from "./edl-gpt";
 import { EdlError } from "./edl-link";
 import {
   bootRomMismatches,
@@ -90,14 +90,6 @@ const MAX_PARTITION_NAME_CHARS = 80;
 /** How many of the disk's partition names a refusal lists, so the caller can correct its list. */
 const NAMES_SHOWN = 64;
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
-
-/**
- * What a partition is called to the person, to the agent and in a backup's scope: its name, with a control character shown
- * as the replacement mark (a manifest cannot carry one), or "partition N" (N is its place in the table) when it has none.
- */
-function partitionLabel(part: GptPartition): string {
-  return part.name.replace(/[\u0000-\u001f\u007f]/g, "\uFFFD") || `partition ${part.index}`;
-}
 
 /**
  * The partitions the caller chose, by name, or undefined for every partition. Checked before the device is touched: a list

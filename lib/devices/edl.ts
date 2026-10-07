@@ -165,6 +165,8 @@ async function printGpt(run: EdlRun): Promise<HardwareResult> {
       primaryIntact: intact,
       warnings: primary.table.warnings,
       partitions: describePartitions(primary.table.partitions),
+      /** The table's real count: `partitions` lists at most MAX_LISTED_PARTITIONS of them. */
+      partitionCount: primary.table.partitions.length,
       backup: { read: Boolean(backup.region), intact: backupIntact, problem: backup.problem, firstLba: backup.firstLba, sectors: backup.sectors, atLba: backup.atLba, pointer: backup.pointer },
       files: saved,
     },

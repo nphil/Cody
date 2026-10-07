@@ -132,6 +132,8 @@ export interface SetCardProps {
   older?: ArtifactSet;
   /** The job that is still making the older set's files is running: joining it would take half of it. */
   olderBusy?: boolean;
+  /** What the older set's card is called, so the question says which backup this one would join. */
+  olderTitle?: string;
   artifacts: readonly DeviceArtifact[];
   transfers: readonly TransferJob[];
   /** What the device is called now, for a set whose files did not record a name. */
@@ -155,14 +157,14 @@ export interface SetCardProps {
 }
 
 /**
- * Asks before two backups become one: which files join which, and what the person ends up with. Nothing is done until
- * Combine; Keep takes focus because it is the safe answer.
+ * Asks before two backups become one: which files join which backup, and what the person ends up with. Nothing is done
+ * until Combine; Keep takes focus because it is the safe answer.
  */
-export function CombineConfirm({ files, olderFiles, locked, onConfirm, onKeep }: { files: number; olderFiles: number; locked: boolean; onConfirm: () => void; onKeep: () => void }): React.ReactElement {
+export function CombineConfirm({ files, older, olderTitle, locked, locale, onConfirm, onKeep }: { files: number; older: ArtifactSet; olderTitle: string; locked: boolean; locale: string; onConfirm: () => void; onKeep: () => void }): React.ReactElement {
   const { t, tn } = useI18n();
   return (
     <div className="dv-set__confirm dv-set__confirm--plain" role="group" aria-label={t("devices.files.combineWithOlder")}>
-      <p>{t("devices.files.combineConfirm", { these: tn("devices.files.count", files), older: tn("devices.files.count", olderFiles) })}</p>
+      <p>{t("devices.files.combineConfirm", { these: tn("devices.files.count", files), title: olderTitle, when: whenText(older.endedAt, locale), older: tn("devices.files.count", older.count) })}</p>
       <div className="dv-job__actions">
         <Button icon={<Merge size={14} />} disabled={locked} title={locked ? t("devices.files.stillSaving") : undefined} onClick={onConfirm}>{t("devices.files.combine")}</Button>
         <Button autoFocus onClick={onKeep}>{t("devices.files.keep")}</Button>
@@ -176,10 +178,15 @@ export function CombineConfirm({ files, olderFiles, locked, onConfirm, onKeep }:
  * the things to do with all of it (download, save to the server, remove, join the older backup); and, opened, a line per
  * file, which can be turned into a list of checkboxes to download or save only some of them.
  */
-export function SetCard({ sessionId, set, older, olderBusy = false, artifacts, transfers, deviceName, busy, selectedInputId, onSelectInput, onDetails, verifiedBy, acknowledged, acknowledge, defaultOpen = false, defaultSelecting = false, defaultSelected = [], locale }: SetCardProps): React.ReactElement {
+export function SetCard({ sessionId, set, older, olderBusy = false, olderTitle, artifacts, transfers, deviceName, busy, selectedInputId, onSelectInput, onDetails, verifiedBy, acknowledged, acknowledge, defaultOpen = false, defaultSelecting = false, defaultSelected = [], locale }: SetCardProps): React.ReactElement {
   const { t, tn } = useI18n();
   const [open, setOpen] = useState(defaultOpen || defaultSelecting);
-  const [confirming, setConfirming] = useState<"remove" | "combine" | null>(null);
+  // A question is about the files the card showed when it was asked: if the set changes under it (a job adds files, a file
+  // is removed), the question is dropped rather than answered about files the person never saw.
+  const [asked, setAsked] = useState<{ what: "remove" | "combine"; members: string } | null>(null);
+  const members = set.artifactIds.join("\n");
+  const confirming = asked?.members === members ? asked.what : null;
+  const setConfirming = (what: "remove" | "combine" | null): void => setAsked(what === null ? null : { what, members });
   const [confirmFile, setConfirmFile] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<FileSort>("order");
@@ -244,7 +251,8 @@ export function SetCard({ sessionId, set, older, olderBusy = false, artifacts, t
   const combine = (): void => {
     // Asked once: the store publishes the joined set, and whatever this card shows after that is not this question.
     setConfirming(null);
-    deviceArtifacts.combineWithOlder(sessionId, set.id).catch((cause: unknown) => flash(cause instanceof Error ? cause.message : String(cause)));
+    if (!older) return;
+    deviceArtifacts.combineWithOlder(sessionId, set.id, older.id).catch((cause: unknown) => flash(cause instanceof Error ? cause.message : String(cause)));
   };
   const removeFile = (artifactId: string): void => {
     setConfirmFile(null);
@@ -302,12 +310,12 @@ export function SetCard({ sessionId, set, older, olderBusy = false, artifacts, t
         <div className="dv-set__confirm" role="group" aria-label={t("devices.files.removeSet")}>
           <p>{tn("devices.files.removeSetConfirm", files.length)}{saved.state === "saved" ? ` ${t("devices.files.removeKeepsServer")}` : ""}</p>
           <div className="dv-job__actions">
-            <Button tone="danger" icon={<Trash2 size={14} />} onClick={removeSet}>{t("devices.files.removeConfirm")}</Button>
+            <Button tone="danger" icon={<Trash2 size={14} />} disabled={locked} title={locked ? t("devices.files.stillSaving") : undefined} onClick={removeSet}>{t("devices.files.removeConfirm")}</Button>
             <Button autoFocus onClick={() => setConfirming(null)}>{t("devices.files.keep")}</Button>
           </div>
         </div>
       ) : confirming === "combine" && older ? (
-        <CombineConfirm files={files.length} olderFiles={older.count} locked={combineLocked} onConfirm={combine} onKeep={() => setConfirming(null)} />
+        <CombineConfirm files={files.length} older={older} olderTitle={olderTitle ?? ""} locked={combineLocked} locale={locale} onConfirm={combine} onKeep={() => setConfirming(null)} />
       ) : picking ? (
         <div className="dv-set__actions">
           <Button

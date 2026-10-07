@@ -5,6 +5,7 @@ import { Select } from "@/components/ui/Select";
 import { deviceArtifacts, type DeviceArtifact } from "@/lib/devices/artifacts";
 import { parseEdlCommand } from "@/lib/devices/edl";
 import { formatBytes } from "@/lib/devices/edl-disk";
+import { partitionLabel } from "@/lib/devices/edl-gpt";
 import { classifyEdlPartition } from "@/lib/devices/edl-protect";
 import type { DeviceOperationManager, DeviceOperationSnapshot } from "@/lib/devices/operations";
 import { useI18n } from "@/lib/i18n";
@@ -66,6 +67,12 @@ function listedPartitions(details: Record<string, unknown> | undefined): ListedP
   });
 }
 
+/** How many partitions the table really has: a read of a very long table lists only its first entries and says the real count beside them. */
+function partitionCount(details: Record<string, unknown> | undefined, listed: number): number {
+  const count = details?.partitionCount;
+  return typeof count === "number" && count > listed ? count : listed;
+}
+
 interface CheckOutcome {
   ok: boolean;
   sectors: number;
@@ -115,10 +122,8 @@ interface BackupChoice {
 }
 
 function backupChoices(partitions: readonly ListedPartition[]): BackupChoice[] {
-  return partitions.flatMap((part) => {
-    const label = part.name || (part.index === undefined ? "" : `partition ${part.index}`);
-    return label ? [{ label, bytes: part.bytes }] : [];
-  });
+  // Exactly the name the backup accepts for it (control characters replaced, "partition N" for an unnamed one): nothing can be ticked that the backup would then refuse.
+  return partitions.flatMap((part) => (part.name || part.index !== undefined ? [{ label: partitionLabel({ name: part.name, index: part.index ?? 0 }), bytes: part.bytes }] : []));
 }
 
 export interface BackupPlan {
@@ -341,9 +346,14 @@ export function EdlBackupSets(props: EdlProps & { defaultPicked?: readonly strin
   const [chosenId, setChosenId] = useState<string | null>(null);
   const chosen = sets.find((artifact) => artifact.id === chosenId) ?? sets[0];
   const last = useMemo(() => lastBackupSet(operations), [operations]);
-  const choices = useMemo(() => backupChoices(listedPartitions(lastResult(operations, "printgpt"))), [operations]);
+  const table = useMemo(() => lastResult(operations, "printgpt"), [operations]);
+  const listed = useMemo(() => listedPartitions(table), [table]);
+  // A table longer than a read lists cannot be chosen from: an unticked entry would leave the unlisted ones out unseen.
+  const cut = partitionCount(table, listed.length) > listed.length;
+  const choices = useMemo(() => (cut ? [] : backupChoices(listed)), [cut, listed]);
   const [picked, setPicked] = useState<Picked | null>(defaultPicked === undefined ? null : new Set(defaultPicked));
   const plan = planBackup(choices.map((choice) => choice.label), picked);
+  const partialChosen = chosen?.provenance?.scope !== undefined && chosen.provenance.scope.chosen.length < chosen.provenance.scope.all.length;
   return (
     <section aria-label={t("devices.edl.setTitle")} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -359,6 +369,8 @@ export function EdlBackupSets(props: EdlProps & { defaultPicked?: readonly strin
             <PartitionChooser choices={choices} picked={picked} onPick={setPicked} />
             <span style={{ fontSize: 12, lineHeight: 1.4, color: "var(--text-dim)" }}>{t("devices.edl.setPartitionsHint")}</span>
           </>
+        ) : cut ? (
+          <Notice>{t("devices.edl.setPartitionsCut", { count: partitionCount(table, listed.length), listed: listed.length })}</Notice>
         ) : (
           <Notice>{t("devices.edl.setPartitionsNoTable")}</Notice>
         )}
@@ -378,14 +390,19 @@ export function EdlBackupSets(props: EdlProps & { defaultPicked?: readonly strin
             value={chosen?.id ?? null}
             onChange={setChosenId}
             placeholder={t("devices.edl.restorePick")}
-            options={sets.map((artifact) => ({ value: artifact.id, label: t("devices.edl.restoreOption", { name: artifact.name, id: artifact.sha256.slice(0, 8) }) }))}
+            options={sets.map((artifact) => {
+              const scope = artifact.provenance?.scope;
+              const partial = scope !== undefined && scope.chosen.length < scope.all.length;
+              return { value: artifact.id, label: t(partial ? "devices.edl.restoreOptionPartial" : "devices.edl.restoreOption", { name: artifact.name, id: artifact.sha256.slice(0, 8) }) };
+            })}
           />
         ) : (
           <Notice>{t("devices.edl.restoreNone")}</Notice>
         )}
         {chosen && <small style={{ overflowWrap: "anywhere", color: "var(--text-muted)" }}>{t("devices.edl.restoreId", { id: chosen.sha256.slice(0, 8) })} SHA-256 {chosen.sha256}</small>}
+        {partialChosen && <Notice tone="warning">{t("devices.edl.restorePartialRefused")}</Notice>}
         <div>
-          <Button tone="danger" disabled={busy || !input || !chosen} onClick={() => chosen && start({ action: "exec", command: "restore", options: { manifestSha256: chosen.sha256 } }, true)}>{t("devices.edl.restoreStart")}</Button>
+          <Button tone="danger" disabled={busy || !input || !chosen || partialChosen} onClick={() => chosen && start({ action: "exec", command: "restore", options: { manifestSha256: chosen.sha256 } }, true)}>{t("devices.edl.restoreStart")}</Button>
         </div>
       </div>
       {error && <Notice tone="error" role="alert">{error}</Notice>}

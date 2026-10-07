@@ -62,6 +62,15 @@ export interface GptPartition {
   readonly attributes: string;
 }
 
+/**
+ * What a partition is called to the person, to the agent and in a backup's scope: its name, with a control character
+ * shown as the replacement mark (a manifest cannot carry one), or "partition N" (N is its place in the table) when it
+ * has none. The backup accepts exactly these names in `options.partitions`, so the panel offers exactly these.
+ */
+export function partitionLabel(part: Pick<GptPartition, "name" | "index">): string {
+  return part.name.replace(/[\u0000-\u001f\u007f]/g, "\uFFFD") || `partition ${part.index}`;
+}
+
 export interface GptTable {
   readonly header: GptHeader;
   readonly partitions: readonly GptPartition[];

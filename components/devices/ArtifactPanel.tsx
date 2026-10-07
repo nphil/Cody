@@ -6,7 +6,7 @@ import { useI18n } from "@/lib/i18n";
 import { deviceArtifacts } from "@/lib/devices/artifacts";
 import { olderSetOf } from "@/lib/devices/artifact-sets";
 import { FileRow, SetCard } from "./ArtifactSetCard";
-import { setDeviceName } from "./set-text";
+import { setDeviceName, setTitle } from "./set-text";
 import type { ArtifactsState } from "./useArtifacts";
 import { Button, Disclosure, Notice, sectionHeadingStyle, TextField } from "./ui";
 
@@ -45,7 +45,7 @@ interface ArtifactPanelProps {
  * through the existing guarded route.
  */
 export function ArtifactPanel({ sessionId, library, selectedInputId, onSelectInput, deviceLabel, verifiedBy, busySetIds, onDetails, reveal, acknowledged, acknowledge }: ArtifactPanelProps): React.ReactElement {
-  const { t, locale } = useI18n();
+  const { t, tn, locale } = useI18n();
   const picker = useRef<HTMLInputElement>(null);
   const { artifacts, sets, inputs, transfers, error: storageError } = library;
   const [path, setPath] = useState("");
@@ -132,6 +132,7 @@ export function ArtifactPanel({ sessionId, library, selectedInputId, onSelectInp
             set={set}
             older={older}
             olderBusy={older !== undefined && busySetIds.has(older.id)}
+            olderTitle={older === undefined ? undefined : setTitle(older, setDeviceName(older, deviceLabel, t), t, tn)}
             artifacts={artifacts}
             transfers={transfers}
             deviceName={setDeviceName(set, deviceLabel, t)}

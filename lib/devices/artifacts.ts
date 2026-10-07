@@ -54,8 +54,11 @@ interface PersistedDeviceArtifact {
 }
 
 /**
- * The set name a person filed one artifact under (Combine), in a row of its own next to the artifact's. Writing it into the
- * artifact's row would copy that row's Blob, gigabytes for a backup, to change a few characters.
+ * The set name a person filed one artifact under (Combine), kept in a small DATABASE OF ITS OWN (`SET_NAMES_DATABASE`),
+ * never in the artifact's row or beside it: writing it into the artifact's row would copy that row's Blob, gigabytes for a
+ * backup, to change a few characters, and a row of another shape in the artifacts store would crash Cody 0.53.0's list of
+ * files (it reads every row of a session as an artifact), so a rollback to 0.53.0 would lose the whole list. In its own
+ * database, a rollback simply does not open it: the files stay, grouped by time again, and the filings wait for 0.54.
  */
 interface PersistedSetName {
   readonly key: string;
@@ -77,6 +80,9 @@ type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Respo
 const DATABASE_NAME = "cody-device-artifacts";
 const DATABASE_VERSION = 1;
 const STORE_NAME = "artifacts";
+const SET_NAMES_DATABASE = "cody-device-artifact-sets";
+const SET_NAMES_VERSION = 1;
+const SET_NAMES_STORE = "set-names";
 
 function cryptoApi(): Crypto {
   if (!globalThis.crypto?.subtle) throw new DeviceArtifactError("This browser cannot calculate SHA-256 for device artifacts.");
@@ -105,11 +111,6 @@ function artifactMetadata(artifact: StoredDeviceArtifact, server?: ArtifactServe
 }
 function artifactKey(sessionId: string, artifactId: string): string {
   return `${sessionId}:${artifactId}`;
-}
-
-/** The row that holds a person's set name for one artifact (see PersistedSetName). It starts with a NUL, which no session id does, so it never equals an artifact row's key. */
-function setNameKey(sessionId: string, artifactId: string): string {
-  return `\u0000set-name:${artifactKey(sessionId, artifactId)}`;
 }
 
 const MAX_PROVENANCE_TEXT = 200;
@@ -176,32 +177,40 @@ function waitForTransaction<T>(transaction: IDBTransaction, request: IDBRequest<
   return promise;
 }
 
+/** Opens one of the escrow's databases, creating its one store (keyed by `key`, indexed by `sessionId`) the first time. */
+function openDatabase(name: string, version: number, storeName: string): Promise<IDBDatabase> {
+  if (typeof indexedDB === "undefined") {
+    return Promise.reject(new DeviceArtifactError("Persistent browser storage is unavailable; refusing to create device artifact escrow."));
+  }
+  const { promise, resolve, reject } = Promise.withResolvers<IDBDatabase>();
+  const request = indexedDB.open(name, version);
+  request.addEventListener("upgradeneeded", () => {
+    const database = request.result;
+    const store = database.objectStoreNames.contains(storeName)
+      ? request.transaction?.objectStore(storeName)
+      : database.createObjectStore(storeName, { keyPath: "key" });
+    if (store && !store.indexNames.contains("sessionId")) store.createIndex("sessionId", "sessionId", { unique: false });
+  });
+  request.addEventListener("success", () => resolve(request.result), { once: true });
+  request.addEventListener("error", () => reject(request.error ?? new DeviceArtifactError("Could not open persistent artifact storage.")), { once: true });
+  request.addEventListener("blocked", () => reject(new DeviceArtifactError("Persistent artifact storage is blocked by another browser tab.")), { once: true });
+  return promise;
+}
+
 /**
  * Browser-owned escrow. A returned id means its Blob transaction has committed,
  * so a destructive flasher never accepts an in-memory-only backup reference.
  */
 class IndexedDbArtifactPersistence {
   private database: Promise<IDBDatabase> | undefined;
+  private names: Promise<IDBDatabase> | undefined;
 
   private open(): Promise<IDBDatabase> {
-    if (this.database) return this.database;
-    if (typeof indexedDB === "undefined") {
-      return Promise.reject(new DeviceArtifactError("Persistent browser storage is unavailable; refusing to create device artifact escrow."));
-    }
-    const { promise, resolve, reject } = Promise.withResolvers<IDBDatabase>();
-      const request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
-      request.addEventListener("upgradeneeded", () => {
-        const database = request.result;
-        const store = database.objectStoreNames.contains(STORE_NAME)
-          ? request.transaction?.objectStore(STORE_NAME)
-          : database.createObjectStore(STORE_NAME, { keyPath: "key" });
-        if (store && !store.indexNames.contains("sessionId")) store.createIndex("sessionId", "sessionId", { unique: false });
-      });
-      request.addEventListener("success", () => resolve(request.result), { once: true });
-      request.addEventListener("error", () => reject(request.error ?? new DeviceArtifactError("Could not open persistent artifact storage.")), { once: true });
-      request.addEventListener("blocked", () => reject(new DeviceArtifactError("Persistent artifact storage is blocked by another browser tab.")), { once: true });
-    this.database = promise;
-    return this.database;
+    return (this.database ??= openDatabase(DATABASE_NAME, DATABASE_VERSION, STORE_NAME));
+  }
+
+  private openNames(): Promise<IDBDatabase> {
+    return (this.names ??= openDatabase(SET_NAMES_DATABASE, SET_NAMES_VERSION, SET_NAMES_STORE));
   }
 
   async put(sessionId: string, artifact: StoredDeviceArtifact): Promise<void> {
@@ -214,43 +223,47 @@ class IndexedDbArtifactPersistence {
   async get(sessionId: string, artifactId: string): Promise<StoredDeviceArtifact | undefined> {
     const database = await this.open();
     const transaction = database.transaction(STORE_NAME, "readonly");
-    const store = transaction.objectStore(STORE_NAME);
-    const artifactRequest = store.get(artifactKey(sessionId, artifactId)) as IDBRequest<PersistedDeviceArtifact | undefined>;
-    const setName = await waitForTransaction(transaction, store.get(setNameKey(sessionId, artifactId)) as IDBRequest<PersistedSetName | undefined>);
-    const artifact = artifactRequest.result?.artifact;
-    return artifact && setName ? { ...artifact, setName: setName.setName } : artifact;
+    const row = await waitForTransaction(transaction, transaction.objectStore(STORE_NAME).get(artifactKey(sessionId, artifactId)) as IDBRequest<PersistedDeviceArtifact | undefined>);
+    if (!row) return undefined;
+    const names = await this.openNames();
+    const filing = names.transaction(SET_NAMES_STORE, "readonly");
+    const setName = await waitForTransaction(filing, filing.objectStore(SET_NAMES_STORE).get(artifactKey(sessionId, artifactId)) as IDBRequest<PersistedSetName | undefined>);
+    return setName ? { ...row.artifact, setName: setName.setName } : row.artifact;
   }
 
   async list(sessionId: string): Promise<readonly StoredDeviceArtifact[]> {
     const database = await this.open();
     const transaction = database.transaction(STORE_NAME, "readonly");
-    const rows = await waitForTransaction(transaction, transaction.objectStore(STORE_NAME).index("sessionId").getAll(sessionId) as IDBRequest<(PersistedDeviceArtifact | PersistedSetName)[]>);
-    const names = new Map<string, string>();
-    for (const row of rows) if ("setName" in row) names.set(row.artifactId, row.setName);
-    return rows.flatMap((row) => {
-      if (!("artifact" in row)) return [];
-      const setName = names.get(row.artifact.id);
-      return [setName ? { ...row.artifact, setName } : row.artifact];
+    const rows = await waitForTransaction(transaction, transaction.objectStore(STORE_NAME).index("sessionId").getAll(sessionId) as IDBRequest<PersistedDeviceArtifact[]>);
+    const names = await this.openNames();
+    const filing = names.transaction(SET_NAMES_STORE, "readonly");
+    const filed = await waitForTransaction(filing, filing.objectStore(SET_NAMES_STORE).index("sessionId").getAll(sessionId) as IDBRequest<PersistedSetName[]>);
+    const byArtifact = new Map(filed.map((row) => [row.artifactId, row.setName]));
+    // A filing whose file is gone (removed by 0.53.0, which does not know about filings) names nothing and is ignored.
+    return rows.map((row) => {
+      const setName = byArtifact.get(row.artifact.id);
+      return setName ? { ...row.artifact, setName } : row.artifact;
     });
   }
 
   /** Files these artifacts under set names, each in a small row of its own: the Blobs are not touched. */
   async putSetNames(sessionId: string, entries: readonly (readonly [artifactId: string, setName: string])[]): Promise<void> {
     if (entries.length === 0) return;
-    const database = await this.open();
-    const transaction = database.transaction(STORE_NAME, "readwrite");
-    const store = transaction.objectStore(STORE_NAME);
+    const names = await this.openNames();
+    const transaction = names.transaction(SET_NAMES_STORE, "readwrite");
+    const store = transaction.objectStore(SET_NAMES_STORE);
     let last: IDBRequest<IDBValidKey> | undefined;
-    for (const [artifactId, setName] of entries) last = store.put({ key: setNameKey(sessionId, artifactId), sessionId, artifactId, setName } satisfies PersistedSetName);
+    for (const [artifactId, setName] of entries) last = store.put({ key: artifactKey(sessionId, artifactId), sessionId, artifactId, setName } satisfies PersistedSetName);
     await waitForTransaction(transaction, last!);
   }
 
   async delete(sessionId: string, artifactId: string): Promise<void> {
     const database = await this.open();
     const transaction = database.transaction(STORE_NAME, "readwrite");
-    const store = transaction.objectStore(STORE_NAME);
-    store.delete(setNameKey(sessionId, artifactId));
-    await waitForTransaction(transaction, store.delete(artifactKey(sessionId, artifactId)));
+    await waitForTransaction(transaction, transaction.objectStore(STORE_NAME).delete(artifactKey(sessionId, artifactId)));
+    const names = await this.openNames();
+    const filing = names.transaction(SET_NAMES_STORE, "readwrite");
+    await waitForTransaction(filing, filing.objectStore(SET_NAMES_STORE).delete(artifactKey(sessionId, artifactId)));
   }
 }
 
@@ -298,6 +311,8 @@ export class DeviceArtifactStore implements OperationArtifacts {
   private readonly retryDelaysMs: readonly number[] | undefined;
   /** What the server holds of each session's files, by SHA-256 and size (see ArtifactServerCopy). */
   private readonly serverCopies = new Map<string, Map<string, ArtifactServerCopy>>();
+  /** Files removed while a hydrate of their session was reading the escrow: its snapshot may still list them. */
+  private readonly removedWhileHydrating = new Map<string, { readers: number; ids: Set<string> }>();
   private readonly transfers = new Map<string, TransferJob[]>();
   private readonly transferControllers = new Map<string, AbortController>();
   private readonly transferListeners = new Map<string, Set<TransferJobListener>>();
@@ -323,10 +338,23 @@ export class DeviceArtifactStore implements OperationArtifacts {
     for (const listener of this.listeners.get(sessionId) ?? []) listener(artifacts);
   }
 
+  /**
+   * Loads the session's files from the escrow into memory. Memory is never behind the escrow (every change is written
+   * through before it is held), so a file already in memory keeps its newer state, and one removed while the escrow was
+   * being read stays removed: the snapshot cannot undo a Remove or a Combine that finished while it was in flight.
+   */
   async hydrate(sessionId: string): Promise<readonly DeviceArtifact[]> {
     const entries = this.entries(sessionId);
-    const persisted = await this.persistence.list(sessionId);
-    for (const artifact of persisted) entries.set(artifact.id, artifact);
+    const removed = this.removedWhileHydrating.get(sessionId) ?? { readers: 0, ids: new Set<string>() };
+    removed.readers += 1;
+    this.removedWhileHydrating.set(sessionId, removed);
+    try {
+      const persisted = await this.persistence.list(sessionId);
+      for (const artifact of persisted) if (!entries.has(artifact.id) && !removed.ids.has(artifact.id)) entries.set(artifact.id, artifact);
+    } finally {
+      removed.readers -= 1;
+      if (removed.readers === 0) this.removedWhileHydrating.delete(sessionId);
+    }
     this.publish(sessionId);
     void this.refreshServerCopies(sessionId);
     return this.list(sessionId);
@@ -453,7 +481,11 @@ export class DeviceArtifactStore implements OperationArtifacts {
     return (await this.removeMany(sessionId, [artifactId])) === 1;
   }
 
-  /** Every listed file of this session that exists, gone from memory and from the escrow; how many that was. */
+  /**
+   * Every listed file of this session that exists, gone from memory and from the escrow; how many that was. The files
+   * leave the list at once, before the escrow is asked to delete them one by one; a file the escrow would not let go is
+   * put back, and the failure thrown after the others are done.
+   */
   async removeMany(sessionId: string, artifactIds: readonly string[]): Promise<number> {
     const entries = this.entries(sessionId);
     const doomed = new Set(artifactIds);
@@ -461,18 +493,30 @@ export class DeviceArtifactStore implements OperationArtifacts {
     for (const job of this.jobs(sessionId)) {
       if (job.state === "running" && job.artifactIds.some((id) => doomed.has(id))) this.transferControllers.get(job.id)?.abort();
     }
-    let removed = 0;
-    try {
-      for (const id of doomed) {
-        if (!entries.has(id)) continue;
-        await this.persistence.delete(sessionId, id);
-        entries.delete(id);
-        removed += 1;
-      }
-    } finally {
-      if (removed > 0) this.publish(sessionId);
+    const dropped: StoredDeviceArtifact[] = [];
+    for (const id of doomed) {
+      const stored = entries.get(id);
+      if (!stored) continue;
+      entries.delete(id);
+      this.removedWhileHydrating.get(sessionId)?.ids.add(id);
+      dropped.push(stored);
     }
-    return removed;
+    if (dropped.length === 0) return 0;
+    this.publish(sessionId);
+    let failure: unknown;
+    for (const stored of dropped) {
+      try {
+        await this.persistence.delete(sessionId, stored.id);
+      } catch (error) {
+        entries.set(stored.id, stored);
+        failure ??= error;
+      }
+    }
+    if (failure !== undefined) {
+      this.publish(sessionId);
+      throw failure;
+    }
+    return dropped.length;
   }
 
   /** The sets of this session's outputs, newest first (see ./artifact-sets.ts). */
@@ -491,17 +535,19 @@ export class DeviceArtifactStore implements OperationArtifacts {
   }
 
   /**
-   * Joins a set to the next older one of the same device by filing every file of both under one set name. The name is the
-   * older set's (an agent's, or one made up that no card shows). It is kept beside the files in the browser's database, so
-   * the combined set is still one set after a reload. Refused while a transfer is reading either set: those files must not
-   * move under it. Resolves to the combined set.
+   * Joins a set to its next older backup (`olderId`, the one the card offered; refused if the list has changed and it is
+   * not that set's older backup any more) by filing every file of both under one set name. The name is the older set's
+   * (an agent's, or one made up that no card shows). It is kept in the browser's set-names database, so the combined set
+   * is still one set after a reload. Refused while a transfer is reading either set: those files must not move under
+   * it. Resolves to the combined set.
    */
-  async combineWithOlder(sessionId: string, setId: string): Promise<ArtifactSet> {
+  async combineWithOlder(sessionId: string, setId: string, olderId: string): Promise<ArtifactSet> {
     const sets = this.sets(sessionId);
     const newer = sets.find((candidate) => candidate.id === setId);
     if (!newer) throw new DeviceArtifactError("This set is no longer in the current session.", "not-found");
     const older = olderSetOf(sets, newer);
     if (!older) throw new DeviceArtifactError("There is no older backup of this device to combine this one with.", "not-found");
+    if (older.id !== olderId) throw new DeviceArtifactError("The older backup is no longer the one that was offered: the list has changed. Look again, then combine.", "not-found");
     const members = new Set([...newer.artifactIds, ...older.artifactIds]);
     if (this.jobs(sessionId).some((job) => job.state === "running" && job.artifactIds.some((id) => members.has(id)))) {
       throw new DeviceArtifactError("Wait until the transfer of these files has finished, then combine them.", "busy");
@@ -514,7 +560,11 @@ export class DeviceArtifactStore implements OperationArtifacts {
       return stored !== undefined && effectiveSetName(stored) !== name;
     });
     await this.persistence.putSetNames(sessionId, changed.map((id) => [id, name] as const));
-    for (const id of changed) entries.set(id, { ...entries.get(id)!, setName: name });
+    // Only files still here are refiled in memory: one removed while the escrow was written is gone, filing and all.
+    for (const id of changed) {
+      const stored = entries.get(id);
+      if (stored) entries.set(id, { ...stored, setName: name });
+    }
     this.publish(sessionId);
     const combined = this.sets(sessionId).find((candidate) => candidate.artifactIds.includes(older.artifactIds[0]!));
     if (!combined) throw new DeviceArtifactError("The combined set could not be found again. Refresh the list.", "not-found");
@@ -529,12 +579,12 @@ export class DeviceArtifactStore implements OperationArtifacts {
 
   /**
    * Asks the server which of this session's files it holds a verified copy of, and marks them (`artifact.server`).
-   * Never throws: a server that cannot be asked just means nothing new is shown as saved.
+   * Never throws: a server that cannot be asked, or a `signal` that ends the asking, just means nothing new is shown as saved.
    */
-  async refreshServerCopies(sessionId: string): Promise<void> {
+  async refreshServerCopies(sessionId: string, signal?: AbortSignal): Promise<void> {
     let saves: readonly ServerSave[];
     try {
-      saves = await listServerSaves(sessionId, this.fetchImpl);
+      saves = await listServerSaves(sessionId, this.fetchImpl, signal);
     } catch {
       return;
     }
@@ -779,7 +829,8 @@ export class DeviceArtifactStore implements OperationArtifacts {
               options.onProgress?.(value);
             },
           });
-          await this.refreshServerCopies(sessionId);
+          // The save is finished whatever happens now: a Cancel at this point only ends the wait for the list of copies.
+          await this.refreshServerCopies(sessionId, signal);
           return result;
         } catch (error) {
           begun.reject(asArtifactError(error));
