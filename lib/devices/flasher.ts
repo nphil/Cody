@@ -1,3 +1,4 @@
+import type { BackupScope } from "./artifact-model";
 import type { TunnelChannel } from "./tunnel";
 
 /** Page-side protocol boundary. A transport is an exclusive session/device lease,
@@ -109,6 +110,14 @@ export interface HardwareContext {
   operation?: { id: string; deviceId: string };
   /** Browser-to-server relay for port forwarding; absent when no relay is attached. */
   tunnels?: TunnelChannel;
+  /**
+   * A backup says which partitions it takes as soon as it knows (an EDL backup reads the partition table first). The files
+   * the operation saves AFTER this call carry that scope in their provenance, so the panel can say "5 of 56 partitions"
+   * and the archive's manifest can record it; files saved before it do not. Calling it again replaces the scope for the
+   * files that follow. A scope that is not a list of 1 to 1024 names of 1 to 80 characters, with no more chosen than
+   * listed, is a fault of the protocol and fails the operation.
+   */
+  declareScope?: (scope: BackupScope) => void;
   /**
    * Declare, immediately before sending it, what is about to change on the device: the exact destination and
    * digest. Protocols call this before every destructive action, including shell exec. Nothing is asked of the

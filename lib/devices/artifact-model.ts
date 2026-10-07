@@ -1,12 +1,23 @@
 /**
  * What a device artifact, a set of them and a transfer of them ARE, with no
  * IndexedDB, DOM or Node import: the store (./artifacts.ts), the pure set
- * grouping (./artifact-sets.ts), the zip planner, the server vault and the
+ * grouping (./artifact-sets.ts), the archive writer, the server vault and the
  * Devices panel all share these, and a test can import them without a browser.
  */
 
 export type DeviceArtifactKind = "input" | "output";
 export type DeviceArtifactSource = "picker" | "drop" | "server-file" | "device";
+
+/**
+ * Which partitions a backup took, and every partition the device listed when it was taken. A backup of everything has
+ * `chosen` equal to `all`; a backup of chosen partitions has fewer, and says so wherever it is shown or packed.
+ */
+export interface BackupScope {
+  /** Partition names this backup holds, in the order they were read. */
+  readonly chosen: readonly string[];
+  /** Every partition the device listed at the time. */
+  readonly all: readonly string[];
+}
 
 /**
  * Which operation made an output, kept with its bytes. After a reload there are no operation snapshots, so this is
@@ -23,20 +34,38 @@ export interface ArtifactProvenance {
   readonly command?: string;
   /** What the person calls the device (the Devices card title) when the file was saved; it outlives the connection. */
   readonly label?: string;
+  /**
+   * When the operation began working with the device, milliseconds since the epoch. A read that takes ten minutes saves
+   * its file at the END of those minutes, so grouping measures the quiet time between runs from this, not from the
+   * file's creation. Files saved before it was recorded have none (the grouping estimates it).
+   */
+  readonly startedAt?: number;
+  /**
+   * The backup name the agent gave (`set` on the device tools). Every output on one device carrying the same name is one
+   * set, whenever and with whatever command it was made.
+   */
+  readonly set?: string;
+  /** Which partitions a backup operation took, when it said (the EDL `backup` command does). */
+  readonly scope?: BackupScope;
 }
 
 /**
- * The server holds a verified copy of one file. Never stored in the browser: the page asks the server which of a
- * session's files it has (matching SHA-256 and size), so the answer survives a reload and disappears with the copy.
+ * The server holds a verified copy of one file, inside one archive. Never stored in the browser: the page asks the
+ * server which of a session's files it has (matching SHA-256 and size), so the answer survives a reload and disappears
+ * with the copy.
  */
 export interface ArtifactServerCopy {
   readonly saveId: string;
-  /** The file, as the server's own filesystem names it. */
-  readonly path: string;
-  /** The folder of the save it belongs to. */
-  readonly folder: string;
+  /** The archive (one .zip) holding this file, as the server's own filesystem names it. */
+  readonly archive: string;
+  /** This file's path inside that archive. */
+  readonly entry: string;
+  /** What the archive is on the server's disk. */
+  readonly archiveBytes: number;
+  /** What the files in that archive added up to before they were packed. */
+  readonly originalBytes: number;
   readonly savedAt: number;
-  /** The server re-read the file from disk and its SHA-256 matched. */
+  /** The server re-read the archive from disk and every file in it matched its SHA-256 and CRC-32. */
   readonly verified: boolean;
 }
 
@@ -52,6 +81,11 @@ export interface DeviceArtifact {
   readonly source: DeviceArtifactSource;
   readonly createdAt: number;
   readonly provenance?: ArtifactProvenance;
+  /**
+   * The set name a person filed this file under (Combine with the older backup). Kept beside the bytes in the browser's
+   * database, so it survives a reload, and wins over `provenance.set`. Never an agent's: see ./artifact-sets.ts.
+   */
+  readonly setName?: string;
   readonly server?: ArtifactServerCopy;
 }
 
@@ -65,6 +99,7 @@ export type DeviceArtifactErrorCode =
   | "unreachable"
   | "hash-mismatch"
   | "server-refused"
+  | "busy"
   | "unknown";
 
 /** Every message is plain English for the person; the code is for a caller that wants to react. */
@@ -87,7 +122,19 @@ export interface ArtifactSet {
   readonly action?: string;
   readonly command?: string;
   readonly label?: string;
+  /**
+   * The name the set was filed under by an agent (`set`) or kept from one when a person combined sets; shown on the card.
+   * Absent for a set grouped by timing alone and for one a person combined without any name in play.
+   */
+  readonly name?: string;
+  /**
+   * What the backup took, when the set holds exactly one backup operation that said which partitions it took: `chosen`
+   * of `total`. A backup of everything has the two equal.
+   */
+  readonly scope?: { readonly chosen: number; readonly total: number };
+  /** When the first run began (recorded, or estimated for files saved before it was). */
   readonly startedAt: number;
+  /** When the last file was saved. */
   readonly endedAt: number;
   /** Oldest first. */
   readonly artifactIds: readonly string[];
@@ -102,15 +149,32 @@ export interface ArtifactSet {
 export type SetSaveState =
   | { readonly state: "none" }
   | { readonly state: "partial"; readonly saved: number; readonly total: number }
-  | { readonly state: "saved"; readonly path: string; readonly savedAt: number; readonly verified: boolean; readonly files: number; readonly bytes: number };
+  | {
+      readonly state: "saved";
+      /** The newest archive that holds the set. */
+      readonly path: string;
+      readonly savedAt: number;
+      readonly verified: boolean;
+      /** Files in the set. */
+      readonly files: number;
+      /** The files of the archives that hold the set, before packing (normally the set itself). */
+      readonly bytes: number;
+      /** Those archives on the server's disk. */
+      readonly archiveBytes: number;
+      /** How many archives hold the set: one, unless its files were saved in separate groups. */
+      readonly archives: number;
+    };
 
 export interface TransferProgress {
-  readonly phase: "checking" | "writing" | "uploading" | "verifying";
+  /** `writing` is packing the zip: in the browser for a download, on the server after an upload. */
+  readonly phase: "writing" | "uploading" | "verifying";
   /** Files finished. */
   readonly done: number;
   /** Files in all. */
   readonly total: number;
+  /** Bytes of the original files handled so far (read, uploaded or packed). */
   readonly bytes: number;
+  /** Bytes of the original files in all. */
   readonly totalBytes: number;
   readonly currentName?: string;
 }
@@ -121,21 +185,29 @@ export interface TransferOptions {
 }
 
 export interface DownloadResult {
+  /** The one .zip that was written. */
   readonly fileName: string;
+  /** Device files inside it. */
   readonly files: number;
+  /** Those files before packing. */
   readonly bytes: number;
+  /** The archive as written. */
+  readonly archiveBytes: number;
   /** `file-picker`: written straight to the file the person chose. `browser-download`: handed to the browser's own download. */
   readonly method: "file-picker" | "browser-download";
 }
 
 export interface ServerSaveResult {
   readonly saveId: string;
-  /** The save's folder on the server. */
-  readonly path: string;
-  readonly manifestPath: string;
+  /** The one .zip the save became, as the server's own filesystem names it. */
+  readonly archive: string;
+  /** What that archive is on the server's disk. */
+  readonly archiveBytes: number;
+  /** Device files inside it. */
   readonly files: number;
+  /** Those files before packing. */
   readonly bytes: number;
-  /** The server re-read every file from disk and each SHA-256 matched. */
+  /** The server re-read the finished archive from disk and every file in it matched its SHA-256 and CRC-32. */
   readonly verified: boolean;
   /** The save carried on from bytes an earlier attempt had already stored. */
   readonly resumed: boolean;

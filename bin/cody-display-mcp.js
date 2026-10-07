@@ -310,14 +310,15 @@ async function main() {
     alternateSetting: z.number().int().nonnegative().optional().describe("USB alternate setting paired with interfaceNumber from device_detect."),
     command: z.string().max(16 * 1024).optional(),
     options: z.object({}).passthrough().optional().describe("Protocol-specific validated configuration, such as safety or DFU descriptor data. The one key every protocol shares is sendDelaySeconds (1-300): a visible countdown, with a Cancel button, before the first command is sent, so the user can get their hands on the device's buttons first. It is not an approval."),
+    set: z.string().max(80).optional().describe("Name of the backup this operation belongs to. When a backup takes several steps (one device_dump per partition, several device_pull calls, a backup command plus its partition table), give EVERY step the SAME name: the files saved under one name on one device become one set, however long the steps are apart and whatever command made them. A set is one card in Files & backups and one .zip when it is downloaded or saved. Use one name per backup and make it specific, for example with the device and the date. Without a name, runs of the same kind within two minutes of each other are grouped. 1 to 80 characters, no control characters."),
   };
   const startOperationTools = [
     ["device_detect", "Start protocol detection in the browser (read-only: it needs no trust). Protocol edl reads a Qualcomm 9008 device's boot-ROM identity (chip serial, hardware id, public-key hash) and needs no loader."],
     ["device_flash", "Start a verified flash. Fastboot without fetch can write after an UNVERIFIED warning; verify in ADB recovery afterwards. ESP, DFU, STM32 and STK500 refuse a protected destination unless options.protectedOverride names the exact override (the refusal says which); nothing else is asked. Protocol edl: target is the exact GPT partition name, fileId + sha256 the image (the partition's exact size, or smaller with options.pad zero or ff); the partition is saved first, boot0/boot1/rpmb are refused, and the read-back SHA-256 decides verified. Run device_exec connect first; flash never sends a loader."],
-    ["device_dump", "Start a dump or backup; resulting bytes remain a session-owned browser artifact. Protocol edl: target is the exact GPT partition name, or user-area with options.sectors set to the count device_exec check verified; fileId + sha256 name the loader while the device is still in the boot ROM."],
-    ["device_exec", "Start a protocol command. ADB runs arbitrary shell commands. Protocol edl (Qualcomm 9008) takes connect, printgpt, check, reset, erase (target = the exact GPT partition name; saved first, reports what the partition reads as afterwards; boot0/boot1/rpmb are refused), backup (every partition and both partition tables saved with a manifest; a set restorable only when taken from a device freshly put into EDL mode with the loader as fileId + sha256), restore (fileId + sha256 = the loader, options.manifestSha256 = the manifest's SHA-256; same unit only, partition tables written last, every region read back) and setbootablestoragedrive (target = the drive number 0-7, always UNVERIFIED)."],
+    ["device_dump", "Start a dump or backup; resulting bytes remain a session-owned browser artifact. Protocol edl: target is the exact GPT partition name, or user-area with options.sectors set to the count device_exec check verified; fileId + sha256 name the loader while the device is still in the boot ROM. Dumping partition after partition? Give every device_dump the same set name (one name for the whole backup, with the device and the date) so they become one backup - one card in Files & backups, one .zip - instead of many."],
+    ["device_exec", "Start a protocol command. ADB runs arbitrary shell commands. Protocol edl (Qualcomm 9008) takes connect, printgpt, check, reset, erase (target = the exact GPT partition name; saved first, reports what the partition reads as afterwards; boot0/boot1/rpmb are refused), backup (every partition and both partition tables saved with a manifest; options.partitions is an optional list of exact GPT partition names, as printgpt shows them (an unnamed entry is \"partition N\", N being its index), and backs up only those - omit it for every partition; a backup of chosen partitions is still one set and one archive, is labelled partial everywhere, and cannot be restored as a set; a whole set is restorable only when taken from a device freshly put into EDL mode with the loader as fileId + sha256), restore (fileId + sha256 = the loader, options.manifestSha256 = the manifest's SHA-256; same unit only, partition tables written last, every region read back) and setbootablestoragedrive (target = the drive number 0-7, always UNVERIFIED)."],
     ["device_push", "Start a resumable file push from a session artifact."],
-    ["device_pull", "Start a file pull into a session-owned browser artifact."],
+    ["device_pull", "Start a file pull into a session-owned browser artifact. Several pulls that make up one backup should all carry the same set name (one name for the whole backup, with the device and the date) so they become one backup."],
     ["device_sideload", "Serve a session artifact to ADB recovery sideload; transfer completion does not verify installation."],
     ["device_install", "Install an APK from a session artifact: copy it to the device, hash-check it there, and run pm install on it."],
     ["device_verify", "After a Fastboot write without fetch support, compare an exact raw-image byte range in ADB recovery with the expected SHA-256. Needs target, length and sha256."],
@@ -404,13 +405,15 @@ async function main() {
     }
   });
   server.registerTool("device_artifacts_save", {
-    description: "Save files this chat's browser holds (a backup's partitions, dumps, pulls) to the Cody server, where you and the NAS can read them: uploaded in slices, every file re-read from the server's disk and checked against its SHA-256, then a manifest.json and SHA256SUMS are written and the finished folder appears in one step. Name operationId/operationIds, fileIds or all: true. Returns the folder path, or follow it with device_artifacts_status. The upload runs in the user's browser and continues only while the tab stays open.",
+    description: "Save files this chat's browser holds (a backup's partitions, dumps, pulls) to the Cody server as ONE compressed .zip file, where you and the NAS can read it: uploaded in slices, every file re-read from the server's disk and checked against its SHA-256, packed with SHA256SUMS and manifest.json into a single zip, which the server re-reads and checks again before it appears under its final name <label>-<date>.zip. Name operationId/operationIds, set (every file filed under that backup name), fileIds or all: true, and add files to keep only some of them by file name or partition (for example [\"boot_a\"]). Returns the zip's path, its size packed and unpacked and how to check it (unzip -t), or follow it with device_artifacts_status. The upload runs in the user's browser and continues only while the tab stays open. If packing fails the uploaded files stay on the server: call this again with the same selection and nothing is uploaded twice.",
     inputSchema: {
       operationId: z.string().optional().describe("Save every file this operation made."),
       operationIds: z.array(z.string()).optional().describe("Save every file these operations made."),
+      set: z.string().optional().describe("Save every file filed under this backup name: the `set` you gave the operations that made them."),
       fileIds: z.array(z.string()).optional().describe("Save these session artifacts by id."),
       all: z.boolean().optional().describe("Save every device output of this chat."),
-      label: z.string().optional().describe("Names the folder: <date>-<label>."),
+      files: z.array(z.string()).optional().describe("Keep only files whose name, target or partition (for example boot_a) is one of these, on top of the other selectors. A name that matches nothing is an error."),
+      label: z.string().optional().describe("Names the zip: <label>-<date>.zip."),
       waitSeconds: z.number().min(0).max(110).optional().describe("How long to wait for the save to finish before answering, 0 to 110 (default 60)."),
     },
   }, async (input) => {
@@ -422,7 +425,7 @@ async function main() {
     }
   });
   server.registerTool("device_artifacts_status", {
-    description: "Follow a save started with device_artifacts_save: files verified, bytes stored, and when done the folder, manifest and checksum file. Defaults to the latest save of this chat.",
+    description: "Follow a save started with device_artifacts_save: files verified, bytes stored, \"packing the archive: N %\" while the server writes the zip, and when done the zip's path, its size and how to check it (unzip -t). Says why packing stopped when it did. Defaults to the latest save of this chat.",
     inputSchema: { saveId: z.string().optional().describe("The save id device_artifacts_save returned.") },
   }, async (input) => {
     try {

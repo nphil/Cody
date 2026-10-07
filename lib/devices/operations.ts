@@ -9,10 +9,11 @@ import type {
 } from "./flasher";
 import { hashBlob } from "./blob-stream";
 import type { StreamArtifact } from "./flasher";
-import type { ArtifactProvenance } from "./artifact-model";
+import type { ArtifactProvenance, BackupScope } from "./artifact-model";
 import { adbFlasher, adbWaitOptions } from "./adb";
 import { pause } from "./pause";
 import { MAX_SEND_DELAY_SECONDS } from "./protocol";
+import { SET_NAME_RULE, usableSetName } from "./set-name";
 import type { TunnelChannel } from "./tunnel";
 import { deviceArtifacts } from "./artifacts";
 import { dfuFlasher } from "./dfu";
@@ -96,6 +97,12 @@ export interface DeviceOperationRequest extends HardwareRequest {
   deviceId: string;
   interfaceNumber?: number;
   alternateSetting?: number;
+  /**
+   * What the agent calls the backup this operation belongs to (`set` on the device tools). Every file saved on this device
+   * under one name is one set, however far apart the operations were and whatever command made them. It is not an option:
+   * no protocol reads it. Trimmed, 1 to 80 characters, no control characters (see ./set-name.ts).
+   */
+  set?: string;
 }
 
 export type OperationState =
@@ -186,6 +193,9 @@ const MAX_OPERATION_OUTPUT_LINES = 512;
 const MAX_OPERATION_RECORDS = 128;
 const MAX_MONITOR_LINE_CHARS = 8 * 1024;
 const PROGRESS_PUBLISH_MS = 200;
+/** The most partitions, and the longest partition name, a backup may declare as its scope: the bounds a stored scope has too. */
+const MAX_SCOPE_NAMES = 1024;
+const MAX_SCOPE_NAME_CHARS = 80;
 /** How long a reacquisition after an announced adbd restart waits to SEE the device leave the bus before it assumes this device restarts without re-enumerating. */
 const RESTART_DISCONNECT_GRACE_MS = 4_000;
 /**
@@ -261,6 +271,10 @@ interface OperationRecord {
   restart?: RestartWindow;
   /** When a wait-for-device gives up, counted from when it began waiting; the flasher receives it as context.deadline. */
   waitDeadline?: number;
+  /** When the flasher began working with the device, on this page's clock: what every file the operation saves records as its start. */
+  workStartedAt?: number;
+  /** The partitions the operation declared it takes. Files saved after the declaration carry it. */
+  scope?: BackupScope;
 }
 
 function cloneRequest(request: DeviceOperationRequest): DeviceOperationRequest {
@@ -330,6 +344,24 @@ function isTerminal(state: OperationState): boolean {
 function validFiniteInteger(value: number | undefined, name: string, minimum = 0): void {
   if (value === undefined) return;
   if (!Number.isSafeInteger(value) || value < minimum) throw new Error(`${name} must be a safe integer at least ${minimum}.`);
+}
+
+/**
+ * The scope a backup declared, checked like every other report a protocol makes: one that is not what it says is the
+ * protocol's fault and ends the operation, rather than labelling files wrongly. The copy is frozen, so nothing the
+ * protocol does afterwards reaches files that already carry it.
+ */
+function checkedScope(scope: BackupScope | undefined): BackupScope {
+  const names = (list: unknown, which: string): readonly string[] => {
+    const usable = Array.isArray(list) && list.length >= 1 && list.length <= MAX_SCOPE_NAMES
+      && list.every((name) => typeof name === "string" && name.length >= 1 && name.length <= MAX_SCOPE_NAME_CHARS);
+    if (!usable) throw new Error(`A backup's ${which} partitions must be a list of 1 to ${MAX_SCOPE_NAMES} names of 1 to ${MAX_SCOPE_NAME_CHARS} characters.`);
+    return Object.freeze([...(list as readonly string[])]);
+  };
+  const chosen = names(scope?.chosen, "chosen");
+  const all = names(scope?.all, "listed");
+  if (chosen.length > all.length) throw new Error("A backup cannot take more partitions than the device listed.");
+  return Object.freeze({ chosen, all });
 }
 
 /** A whole number of seconds a command may be held before it is sent: `minimum` up to the shared maximum. */
@@ -403,6 +435,7 @@ function validateRequest(request: DeviceOperationRequest): void {
   if (sendDelay !== undefined && !validSendDelay(sendDelay, 1)) {
     throw new Error(`options.sendDelaySeconds must be a whole number of seconds from 1 to ${MAX_SEND_DELAY_SECONDS}.`);
   }
+  if (request.set !== undefined && (typeof request.set !== "string" || usableSetName(request.set) !== request.set)) throw new Error(SET_NAME_RULE);
 }
 
 function randomId(prefix: string): string {
@@ -996,12 +1029,17 @@ export class DeviceOperationManager {
   }
 
   private async runFlasher(record: OperationRecord, transport: HardwareTransport, input: Blob | undefined): Promise<HardwareResult> {
+    // The moment the operation starts working with the device, taken once. A read that takes ten minutes saves its file at
+    // the end of them, so the grouping of backups needs to know when the work began, not only when the file arrived.
+    record.workStartedAt = Date.now();
     const flasher = this.flashers.get(record.request.protocol);
     if (!flasher) throw new Error(`No ${record.request.protocol} flasher is available in this browser.`);
     if (!flasher.actions.includes(record.request.action)) {
       throw new Error(`${record.request.protocol} does not support ${record.request.action}.`);
     }
-    const provenance = this.provenanceFor(record);
+    const fixed = this.provenanceFor(record);
+    // Read at every save, not once: a file saved before the flasher declared its scope does not carry it, one saved after does.
+    const provenance = (): ArtifactProvenance => (record.scope ? { ...fixed, scope: record.scope } : fixed);
     const context: HardwareContext = {
       transport,
       signal: record.controller.signal,
@@ -1009,11 +1047,12 @@ export class DeviceOperationManager {
       output: (text) => this.addOutput(record, text, record.request.action === "monitor" ? "terminal" : "log"),
       setTerminalInput: (send) => { record.terminalInput = send; },
       input,
-      save: (name, data) => this.artifacts.save(this.sessionId, name, data, provenance),
+      save: (name, data) => this.artifacts.save(this.sessionId, name, data, provenance()),
       saveStream: (name, chunks) => {
         if (!this.artifacts.saveStream) throw new Error("Streaming artifact storage is unavailable.");
-        return this.artifacts.saveStream(this.sessionId, name, chunks, record.controller.signal, provenance);
+        return this.artifacts.saveStream(this.sessionId, name, chunks, record.controller.signal, provenance());
       },
+      declareScope: (scope) => { record.scope = checkedScope(scope); },
       ...(this.artifacts.findBySha256 ? { findArtifact: (digest: string) => this.artifacts.findBySha256!(this.sessionId, digest) } : {}),
       confirm: (risk) => this.declareRisk(record, risk),
       operation: { id: record.id, deviceId: record.request.deviceId },
@@ -1025,7 +1064,10 @@ export class DeviceOperationManager {
     return flasher.run(record.request, context);
   }
 
-  /** What every file this operation saves records about where it came from. */
+  /**
+   * What every file this operation saves records about where it came from: fixed for the whole operation, the label and the
+   * start time included, so that the files of one backup agree. The scope joins it save by save, once the flasher declares it.
+   */
   private provenanceFor(record: OperationRecord): ArtifactProvenance {
     const { request } = record;
     const command = request.command?.trim().split(/\s+/)[0];
@@ -1037,6 +1079,8 @@ export class DeviceOperationManager {
       ...(request.target ? { target: request.target } : {}),
       ...(command ? { command } : {}),
       label: this.subjectOf(request.deviceId).label,
+      ...(record.workStartedAt === undefined ? {} : { startedAt: record.workStartedAt }),
+      ...(request.set ? { set: request.set } : {}),
     };
   }
 

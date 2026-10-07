@@ -112,6 +112,38 @@ test("device_install called through the MCP bridge reaches the device endpoint w
   });
 });
 
+test("the backup name an operation can be given is the same words and the same limit through the MCP bridge as for the host, on every tool that starts one", async () => {
+  await withBridge(async ({ client }) => {
+    const { tools } = await client.listTools();
+    const bridge = new Map(tools.map((tool) => [tool.name, tool]));
+    // The tools that start an operation are the ones with a protocol to run; the saving tools have a set of their own.
+    const starting = DEVICE_OPERATION_TOOLS.filter((hosted) => hosted.parameters.properties.protocol && hosted.parameters.properties.set);
+    assert.equal(starting.length, 10, "device_detect, flash, dump, exec, push, pull, sideload, install, verify and monitor");
+    for (const hosted of starting) {
+      const exposed = bridge.get(hosted.name).inputSchema.properties.set;
+      assert.equal(exposed.type, "string", `${hosted.name}: set is text through the bridge`);
+      assert.equal(exposed.maxLength, 80, `${hosted.name}: and no longer than the host allows`);
+      assert.equal(exposed.description, hosted.parameters.properties.set.description, `${hosted.name}: set is described in different words through the bridge`);
+    }
+    // An engine reached over MCP is taught the same two things about backups.
+    assert.match(bridge.get("device_exec").description, /options\.partitions is an optional list of exact GPT partition names, as printgpt shows them.*omit it for every partition.*is labelled partial everywhere, and cannot be restored as a set/s);
+    assert.match(bridge.get("device_dump").description, /same set name/);
+  });
+});
+
+test("a backup name goes through the MCP bridge to the device endpoint with the call, and one that is too long never leaves the bridge", async () => {
+  await withBridge(async ({ client, calls }) => {
+    const args = { device: "usb-1", protocol: "edl", command: "backup", set: "Cronos tablet 2026-10-07", options: { partitions: ["boot_a", "persist"] } };
+    const result = await client.callTool({ name: "device_exec", arguments: args });
+    assert.equal(result.isError, undefined);
+    assert.deepEqual(calls, [{ authorization: "Bearer capability-token", body: { sessionId: "session-1", tool: "device_exec", arguments: args } }]);
+
+    const refused = await client.callTool({ name: "device_exec", arguments: { ...args, set: "x".repeat(81) } }).then((value) => value, (error) => error);
+    assert.ok(refused instanceof Error || refused.isError === true, "the schema refuses a name that is too long");
+    assert.equal(calls.length, 1);
+  });
+});
+
 test("every scheduling tool the host defines is offered through the MCP bridge with the same arguments and the same words", async () => {
   await withBridge(async ({ client }) => {
     const { tools } = await client.listTools();

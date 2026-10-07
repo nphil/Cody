@@ -2,12 +2,14 @@ import type { OperationArtifacts } from "./operations";
 import { encodeFilePathForApi } from "@/lib/file-paths";
 import { hashBlobWithCrc } from "./blob-stream";
 import type { StreamArtifact } from "./flasher";
-import { groupArtifactSets, setFileLabel, setSaveState } from "./artifact-sets";
+import { combinedSetName, effectiveSetName, groupArtifactSets, olderSetOf, setFileLabel, setSaveState } from "./artifact-sets";
+import { usableSetName } from "./set-name";
 import { archiveFileName, browserDownloadSink, exportArchive, type ArchiveInput, type DownloadSink } from "./artifact-download";
 import { listServerSaves, uploadToServer, type SaveBegun, type ServerSave, type UploadFile } from "./artifact-upload";
 import {
   DeviceArtifactError,
   type ArtifactProvenance,
+  type BackupScope,
   type ArtifactServerCopy,
   type ArtifactSet,
   type DeviceArtifact,
@@ -26,6 +28,7 @@ export type {
   ArtifactProvenance,
   ArtifactServerCopy,
   ArtifactSet,
+  BackupScope,
   DeviceArtifact,
   DeviceArtifactErrorCode,
   DeviceArtifactKind,
@@ -40,7 +43,7 @@ export type {
 
 interface StoredDeviceArtifact extends DeviceArtifact {
   readonly blob: Blob;
-  /** CRC-32 of the bytes, taken with the SHA-256 when the file was saved; a ZIP entry needs it. Files saved earlier have none. */
+  /** CRC-32 of the bytes, taken with the SHA-256 when the file was saved, so a download can prove the stored bytes are the ones that were saved. Files saved earlier have none. */
   readonly crc32?: number;
 }
 
@@ -48,6 +51,17 @@ interface PersistedDeviceArtifact {
   readonly key: string;
   readonly sessionId: string;
   readonly artifact: StoredDeviceArtifact;
+}
+
+/**
+ * The set name a person filed one artifact under (Combine), in a row of its own next to the artifact's. Writing it into the
+ * artifact's row would copy that row's Blob, gigabytes for a backup, to change a few characters.
+ */
+interface PersistedSetName {
+  readonly key: string;
+  readonly sessionId: string;
+  readonly artifactId: string;
+  readonly setName: string;
 }
 
 export interface AddDeviceArtifactOptions {
@@ -85,6 +99,7 @@ function artifactMetadata(artifact: StoredDeviceArtifact, server?: ArtifactServe
     id: artifact.id, name: artifact.name, size: artifact.size, mime: artifact.mime, sha256: artifact.sha256,
     kind: artifact.kind, source: artifact.source, createdAt: artifact.createdAt,
     ...(artifact.provenance ? { provenance: artifact.provenance } : {}),
+    ...(artifact.setName ? { setName: artifact.setName } : {}),
     ...(server ? { server } : {}),
   };
 }
@@ -92,7 +107,25 @@ function artifactKey(sessionId: string, artifactId: string): string {
   return `${sessionId}:${artifactId}`;
 }
 
+/** The row that holds a person's set name for one artifact (see PersistedSetName). It starts with a NUL, which no session id does, so it never equals an artifact row's key. */
+function setNameKey(sessionId: string, artifactId: string): string {
+  return `\u0000set-name:${artifactKey(sessionId, artifactId)}`;
+}
+
 const MAX_PROVENANCE_TEXT = 200;
+/** A partition name in a stored scope: as long as a GPT partition name can be. */
+const MAX_SCOPE_NAME_CHARS = 80;
+const MAX_SCOPE_NAMES = 1024;
+
+function cleanNames(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_SCOPE_NAMES) return undefined;
+  const names: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string") return undefined;
+    names.push(entry.slice(0, MAX_SCOPE_NAME_CHARS));
+  }
+  return names;
+}
 
 /** The provenance an operation hands over, bounded and stripped to its known fields before it is stored. */
 function cleanProvenance(provenance: ArtifactProvenance | undefined): ArtifactProvenance | undefined {
@@ -106,7 +139,20 @@ function cleanProvenance(provenance: ArtifactProvenance | undefined): ArtifactPr
   const target = text(provenance.target);
   const command = text(provenance.command);
   const label = text(provenance.label);
-  return { operationId, deviceId, protocol, action, ...(target ? { target } : {}), ...(command ? { command } : {}), ...(label ? { label } : {}) };
+  const startedAt = typeof provenance.startedAt === "number" && Number.isFinite(provenance.startedAt) && provenance.startedAt > 0 ? Math.floor(provenance.startedAt) : undefined;
+  const set = typeof provenance.set === "string" ? usableSetName(provenance.set) : undefined;
+  const chosen = cleanNames(provenance.scope?.chosen);
+  const all = cleanNames(provenance.scope?.all);
+  const scope: BackupScope | undefined = chosen && all && chosen.length <= all.length ? { chosen, all } : undefined;
+  return {
+    operationId, deviceId, protocol, action,
+    ...(target ? { target } : {}),
+    ...(command ? { command } : {}),
+    ...(label ? { label } : {}),
+    ...(startedAt === undefined ? {} : { startedAt }),
+    ...(set ? { set } : {}),
+    ...(scope ? { scope } : {}),
+  };
 }
 
 function waitForTransaction<T>(transaction: IDBTransaction, request: IDBRequest<T>): Promise<T> {
@@ -168,23 +214,43 @@ class IndexedDbArtifactPersistence {
   async get(sessionId: string, artifactId: string): Promise<StoredDeviceArtifact | undefined> {
     const database = await this.open();
     const transaction = database.transaction(STORE_NAME, "readonly");
-    const request = transaction.objectStore(STORE_NAME).get(artifactKey(sessionId, artifactId)) as IDBRequest<PersistedDeviceArtifact | undefined>;
-    const value = await waitForTransaction(transaction, request);
-    return value?.artifact;
+    const store = transaction.objectStore(STORE_NAME);
+    const artifactRequest = store.get(artifactKey(sessionId, artifactId)) as IDBRequest<PersistedDeviceArtifact | undefined>;
+    const setName = await waitForTransaction(transaction, store.get(setNameKey(sessionId, artifactId)) as IDBRequest<PersistedSetName | undefined>);
+    const artifact = artifactRequest.result?.artifact;
+    return artifact && setName ? { ...artifact, setName: setName.setName } : artifact;
   }
 
   async list(sessionId: string): Promise<readonly StoredDeviceArtifact[]> {
     const database = await this.open();
     const transaction = database.transaction(STORE_NAME, "readonly");
-    const request = transaction.objectStore(STORE_NAME).index("sessionId").getAll(sessionId) as IDBRequest<PersistedDeviceArtifact[]>;
-    return (await waitForTransaction(transaction, request)).map(({ artifact }) => artifact);
+    const rows = await waitForTransaction(transaction, transaction.objectStore(STORE_NAME).index("sessionId").getAll(sessionId) as IDBRequest<(PersistedDeviceArtifact | PersistedSetName)[]>);
+    const names = new Map<string, string>();
+    for (const row of rows) if ("setName" in row) names.set(row.artifactId, row.setName);
+    return rows.flatMap((row) => {
+      if (!("artifact" in row)) return [];
+      const setName = names.get(row.artifact.id);
+      return [setName ? { ...row.artifact, setName } : row.artifact];
+    });
+  }
+
+  /** Files these artifacts under set names, each in a small row of its own: the Blobs are not touched. */
+  async putSetNames(sessionId: string, entries: readonly (readonly [artifactId: string, setName: string])[]): Promise<void> {
+    if (entries.length === 0) return;
+    const database = await this.open();
+    const transaction = database.transaction(STORE_NAME, "readwrite");
+    const store = transaction.objectStore(STORE_NAME);
+    let last: IDBRequest<IDBValidKey> | undefined;
+    for (const [artifactId, setName] of entries) last = store.put({ key: setNameKey(sessionId, artifactId), sessionId, artifactId, setName } satisfies PersistedSetName);
+    await waitForTransaction(transaction, last!);
   }
 
   async delete(sessionId: string, artifactId: string): Promise<void> {
     const database = await this.open();
     const transaction = database.transaction(STORE_NAME, "readwrite");
-    const request = transaction.objectStore(STORE_NAME).delete(artifactKey(sessionId, artifactId));
-    await waitForTransaction(transaction, request);
+    const store = transaction.objectStore(STORE_NAME);
+    store.delete(setNameKey(sessionId, artifactId));
+    await waitForTransaction(transaction, store.delete(artifactKey(sessionId, artifactId)));
   }
 }
 
@@ -206,10 +272,6 @@ const JOB_NOTIFY_MS = 200;
 
 function copyKey(artifact: { readonly sha256: string; readonly size: number }): string {
   return `${artifact.sha256}:${artifact.size}`;
-}
-
-function serverFilePath(folder: string, file: string): string {
-  return `${folder}${folder.includes("\\") && !folder.includes("/") ? "\\" : "/"}${file}`;
 }
 
 function asArtifactError(error: unknown): DeviceArtifactError {
@@ -236,8 +298,6 @@ export class DeviceArtifactStore implements OperationArtifacts {
   private readonly retryDelaysMs: readonly number[] | undefined;
   /** What the server holds of each session's files, by SHA-256 and size (see ArtifactServerCopy). */
   private readonly serverCopies = new Map<string, Map<string, ArtifactServerCopy>>();
-  /** CRC-32 of files saved before it was recorded, worked out once per page session. */
-  private readonly checksums = new Map<string, number>();
   private readonly transfers = new Map<string, TransferJob[]>();
   private readonly transferControllers = new Map<string, AbortController>();
   private readonly transferListeners = new Map<string, Set<TransferJobListener>>();
@@ -430,6 +490,37 @@ export class DeviceArtifactStore implements OperationArtifacts {
     return this.removeMany(sessionId, this.requireSet(sessionId, setId).artifactIds);
   }
 
+  /**
+   * Joins a set to the next older one of the same device by filing every file of both under one set name. The name is the
+   * older set's (an agent's, or one made up that no card shows). It is kept beside the files in the browser's database, so
+   * the combined set is still one set after a reload. Refused while a transfer is reading either set: those files must not
+   * move under it. Resolves to the combined set.
+   */
+  async combineWithOlder(sessionId: string, setId: string): Promise<ArtifactSet> {
+    const sets = this.sets(sessionId);
+    const newer = sets.find((candidate) => candidate.id === setId);
+    if (!newer) throw new DeviceArtifactError("This set is no longer in the current session.", "not-found");
+    const older = olderSetOf(sets, newer);
+    if (!older) throw new DeviceArtifactError("There is no older backup of this device to combine this one with.", "not-found");
+    const members = new Set([...newer.artifactIds, ...older.artifactIds]);
+    if (this.jobs(sessionId).some((job) => job.state === "running" && job.artifactIds.some((id) => members.has(id)))) {
+      throw new DeviceArtifactError("Wait until the transfer of these files has finished, then combine them.", "busy");
+    }
+    const entries = this.entries(sessionId);
+    const nameOf = (set: ArtifactSet): string | undefined => set.artifactIds.map((id) => entries.get(id)).flatMap((stored) => (stored ? [effectiveSetName(stored)] : [])).find((name) => name !== undefined);
+    const name = nameOf(older) ?? nameOf(newer) ?? combinedSetName(cryptoApi().randomUUID());
+    const changed = [...members].filter((id) => {
+      const stored = entries.get(id);
+      return stored !== undefined && effectiveSetName(stored) !== name;
+    });
+    await this.persistence.putSetNames(sessionId, changed.map((id) => [id, name] as const));
+    for (const id of changed) entries.set(id, { ...entries.get(id)!, setName: name });
+    this.publish(sessionId);
+    const combined = this.sets(sessionId).find((candidate) => candidate.artifactIds.includes(older.artifactIds[0]!));
+    if (!combined) throw new DeviceArtifactError("The combined set could not be found again. Refresh the list.", "not-found");
+    return combined;
+  }
+
   getSetSaveState(sessionId: string, setId: string): SetSaveState {
     const artifacts = this.list(sessionId);
     const set = groupArtifactSets(artifacts).find((candidate) => candidate.id === setId);
@@ -450,7 +541,7 @@ export class DeviceArtifactStore implements OperationArtifacts {
     const next = new Map<string, ArtifactServerCopy>();
     for (const save of saves) {
       for (const file of save.files) {
-        next.set(copyKey(file), { saveId: save.saveId, path: serverFilePath(save.folder, file.path), folder: save.folder, savedAt: save.completedAt ?? save.createdAt, verified: save.verified });
+        next.set(copyKey(file), { saveId: save.saveId, archive: save.archive, entry: file.entry, archiveBytes: save.archiveBytes ?? 0, originalBytes: save.totalBytes, savedAt: save.completedAt ?? save.createdAt, verified: save.verified });
       }
     }
     const previous = this.serverCopies.get(sessionId);
@@ -587,9 +678,10 @@ export class DeviceArtifactStore implements OperationArtifacts {
   }
 
   /**
-   * One .zip of these files (ZIP64 where a size needs it, every entry stored, with `SHA256SUMS` and `manifest.json`
-   * inside). Call it straight from the click: where the browser has a Save-as picker it opens first, which needs that
-   * click's user activation. Resolves when the archive is fully written (picker) or handed to the browser's download.
+   * One .zip of these files, deflate-compressed (ZIP64 where a size needs it, with `SHA256SUMS` and `manifest.json` inside),
+   * whatever the device and however many files. Call it straight from the click: where the browser has a Save-as picker it
+   * opens first, which needs that click's user activation. Resolves when the archive is fully written (picker) or handed to
+   * the browser's download.
    */
   async downloadArtifacts(sessionId: string, artifactIds: readonly string[], options: TransferOptions & { archiveName?: string; label?: string; setId?: string; origin?: TransferJob["origin"] } = {}): Promise<DownloadResult> {
     const ids = [...new Set(artifactIds)];
@@ -600,7 +692,7 @@ export class DeviceArtifactStore implements OperationArtifacts {
     chosen.catch(() => undefined);
     const { finished } = this.runTransfer(
       sessionId,
-      { kind: "download", ...(options.setId ? { setId: options.setId } : {}), artifactIds: ids, label, origin: options.origin ?? "user", total: ids.length, totalBytes: this.selectedBytes(sessionId, ids), phase: "checking" },
+      { kind: "download", ...(options.setId ? { setId: options.setId } : {}), artifactIds: ids, label, origin: options.origin ?? "user", total: ids.length, totalBytes: this.selectedBytes(sessionId, ids), phase: "writing" },
       options.signal,
       async ({ signal, progress }) => {
         const stored = await this.loadStored(sessionId, ids);
@@ -627,8 +719,6 @@ export class DeviceArtifactStore implements OperationArtifacts {
             progress(value);
             options.onProgress?.(value);
           },
-          knownCrc: (entry) => this.checksums.get(copyKey(entry)),
-          rememberCrc: (entry, crc) => this.checksums.set(copyKey(entry), crc),
         });
       },
     );
@@ -646,9 +736,10 @@ export class DeviceArtifactStore implements OperationArtifacts {
   }
 
   /**
-   * Begins saving these files to the server and returns at once: `begun` settles when the server has accepted the
-   * announcement (so the folder is known), `finished` when every file is stored, re-read from the server's disk and
-   * matched. An agent's save uses this so it can answer the agent before the bytes have moved.
+   * Begins saving these files to the server as ONE archive and returns at once: `begun` settles when the server has accepted
+   * the announcement (so the archive's name is known), `finished` when every file is stored, packed and the finished archive
+   * has been re-read from the server's disk and matched. An agent's save uses this so it can answer the agent before the
+   * bytes have moved.
    */
   startServerSave(sessionId: string, artifactIds: readonly string[], options: TransferOptions & { label?: string; setId?: string; origin?: TransferJob["origin"] } = {}): { jobId: string; begun: Promise<SaveBegun>; finished: Promise<ServerSaveResult> } {
     const ids = [...new Set(artifactIds)];
@@ -699,8 +790,8 @@ export class DeviceArtifactStore implements OperationArtifacts {
     return { jobId: id, begun: begun.promise, finished };
   }
 
-  /** Saves these files to the server and resolves when every one is stored there and verified (see startServerSave). */
-  saveArtifactsToServer(sessionId: string, artifactIds: readonly string[], options: TransferOptions & { label?: string } = {}): Promise<ServerSaveResult> {
+  /** Saves these files to the server as one archive and resolves when it is finished and verified (see startServerSave). */
+  saveArtifactsToServer(sessionId: string, artifactIds: readonly string[], options: TransferOptions & { label?: string; setId?: string } = {}): Promise<ServerSaveResult> {
     return this.startServerSave(sessionId, artifactIds, options).finished;
   }
 
