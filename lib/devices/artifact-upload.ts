@@ -27,7 +27,7 @@
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { isRecord } from "../type-guards";
-import { operationInfo } from "./artifact-archive";
+import { operationInfos } from "./artifact-archive";
 import { DeviceArtifactError, type ArtifactProvenance, type ServerSaveResult, type TransferProgress } from "./artifact-model";
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -40,6 +40,8 @@ const RETRY_DELAYS_MS: readonly number[] = [400, 1500, 4000, 9000];
 const BUILD_POLL_MS = 1000;
 /** A server that has forgotten the build this many times in a row is not going to finish it. */
 const MAX_BUILD_RESTARTS = 3;
+/** A server that loses the save this many times while its files are still arriving is not going to keep it. */
+const MAX_REANNOUNCES = 3;
 /** What the server calls a build that stopped for want of room. */
 const NO_ROOM_CODES: readonly string[] = ["disk_full", "quota_exceeded"];
 /** What the server calls a build that failed: a second `complete` would only fail the same way, so it is not retried blindly. */
@@ -126,6 +128,9 @@ export interface UploadOptions {
 
 /** A failure of the network itself, which is the only kind worth retrying blindly. */
 class NetworkFailure extends Error {}
+
+/** The server says the save is already complete: another tab, or an earlier attempt, finished it while this one was sending. */
+class FinishedElsewhere extends Error {}
 
 interface Failure {
   readonly status: number;
@@ -242,9 +247,9 @@ function toResult(save: ServerSave, resumed: boolean, alreadySaved: boolean): Se
   };
 }
 
-/** The finished saves of a chat that the server holds, oldest first. Throws when the server cannot be asked. */
-export async function listServerSaves(sessionId: string, fetchImpl: FetchLike = fetch): Promise<readonly ServerSave[]> {
-  const response = await fetchImpl(`${SAVES_ROUTE}?sessionId=${encodeURIComponent(sessionId)}`, { credentials: "same-origin" });
+/** The finished saves of a chat that the server holds, oldest first. Throws when the server cannot be asked, or when `signal` ends the asking. */
+export async function listServerSaves(sessionId: string, fetchImpl: FetchLike = fetch, signal?: AbortSignal): Promise<readonly ServerSave[]> {
+  const response = await fetchImpl(`${SAVES_ROUTE}?sessionId=${encodeURIComponent(sessionId)}`, { credentials: "same-origin", ...(signal ? { signal } : {}) });
   if (!response.ok) throw explain(await readFailure(response));
   const body: unknown = await response.json();
   const saves = isRecord(body) && Array.isArray(body.saves) ? body.saves.map(saveFrom) : [];
@@ -289,7 +294,7 @@ export async function uploadToServer(files: readonly UploadFile[], options: Uplo
    * A call that is safe to repeat, retried on a network failure or a 5xx; anything else the server said is final.
    * `describe` gets the first word on a failure the caller knows better than the generic explanation.
    */
-  const repeatable = async (url: string, init: RequestInit, describe?: (failure: Failure) => DeviceArtifactError | undefined): Promise<Response> => {
+  const repeatable = async (url: string, init: RequestInit, describe?: (failure: Failure) => Error | undefined): Promise<Response> => {
     for (let attempt = 0; ; attempt += 1) {
       let failure: Failure | undefined;
       try {
@@ -308,12 +313,13 @@ export async function uploadToServer(files: readonly UploadFile[], options: Uplo
     }
   };
 
+  const operations = operationInfos(files.map((file) => file.provenance));
   const announcement = {
     sessionId: options.sessionId,
     label: options.label,
     key: saveKey(options.sessionId, options.label, files),
     ...(options.timeZone ? { timeZone: options.timeZone } : {}),
-    files: files.map((file) => ({
+    files: files.map((file, index) => ({
       name: file.name,
       size: file.size,
       sha256: file.sha256,
@@ -321,7 +327,7 @@ export async function uploadToServer(files: readonly UploadFile[], options: Uplo
       source: file.source,
       createdAt: file.createdAt,
       artifactId: file.artifactId,
-      ...(file.provenance ? { operation: operationInfo(file.provenance) } : {}),
+      ...(operations[index] ? { operation: operations[index] } : {}),
     })),
   };
   const announce = async (): Promise<ServerSave> =>
@@ -341,13 +347,15 @@ export async function uploadToServer(files: readonly UploadFile[], options: Uplo
   progress.bytes = save.files.reduce((total, file) => total + file.received, 0);
 
   const route = (): string => `${SAVES_ROUTE}/${save.saveId}`;
+  const finishedElsewhere = (failure: Failure): Error | undefined => (failure.status === 409 && failure.code === "already_complete" ? new FinishedElsewhere() : undefined);
   /** What the server holds of a file now, after a failure that left it unclear whether a slice landed. */
   const stored = async (index: number): Promise<number> => {
-    const response = await repeatable(route(), { method: "GET" });
+    const response = await repeatable(route(), { method: "GET" }, finishedElsewhere);
     const current = saveFrom(await response.json());
     return current.files[index]?.received ?? 0;
   };
 
+  let reannounced = 0;
   const sendSlice = async (index: number, offset: number, blob: Blob): Promise<number> => {
     for (let attempt = 0; ; attempt += 1) {
       let failure: Failure | undefined;
@@ -358,9 +366,17 @@ export async function uploadToServer(files: readonly UploadFile[], options: Uplo
         // The server holds a different length than we thought (an earlier try landed, or the save was restarted): take its word.
         if (failure.status === 409 && failure.code === "offset_mismatch" && failure.received !== undefined) return failure.received;
         if (failure.status === 404 && failure.code === "unknown_save") {
+          // The save is gone from under the upload (deleted, or swept): announce it again and carry on from what the server holds, a few times.
+          reannounced += 1;
+          if (reannounced > MAX_REANNOUNCES) {
+            throw new DeviceArtifactError("The server keeps losing this save before its files have all arrived, so the upload was stopped. Check the server's artifact folder and press Save to server again.", "server-refused");
+          }
           save = await announce();
+          if (save.state === "complete") throw new FinishedElsewhere();
           return save.files[index]?.received ?? 0;
         }
+        const elsewhere = finishedElsewhere(failure);
+        if (elsewhere) throw elsewhere;
         if (!worthRetrying(failure)) throw explain(failure);
       } catch (error) {
         if (!(error instanceof NetworkFailure)) throw error;
@@ -374,34 +390,45 @@ export async function uploadToServer(files: readonly UploadFile[], options: Uplo
     }
   };
 
-  for (const [index, file] of files.entries()) {
-    const status = save.files[index];
-    if (status?.verified) continue;
-    let offset = status?.received ?? 0;
-    for (let sends = 0; ; sends += 1) {
-      while (offset < file.size) {
-        report("uploading", file.name);
-        const end = Math.min(offset + sliceBytes, file.size);
-        const received = await sendSlice(index, offset, file.blob.slice(offset, end));
-        progress.bytes += received - offset;
-        offset = received;
-      }
-      report("verifying", file.name);
-      try {
-        await repeatable(route(), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "verify", file: index }) });
-        break;
-      } catch (error) {
-        // The server deleted the damaged copy; one more try from the first byte, then say so.
-        if (error instanceof DeviceArtifactError && error.code === "hash-mismatch" && sends === 0) {
-          progress.bytes -= offset;
-          offset = 0;
-          continue;
+  try {
+    for (const [index, file] of files.entries()) {
+      const status = save.files[index];
+      if (status?.verified) continue;
+      let offset = status?.received ?? 0;
+      for (let sends = 0; ; sends += 1) {
+        while (offset < file.size) {
+          report("uploading", file.name);
+          const end = Math.min(offset + sliceBytes, file.size);
+          const received = await sendSlice(index, offset, file.blob.slice(offset, end));
+          progress.bytes += received - offset;
+          offset = received;
         }
-        throw error;
+        report("verifying", file.name);
+        try {
+          await repeatable(route(), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "verify", file: index }) }, finishedElsewhere);
+          break;
+        } catch (error) {
+          // The server deleted the damaged copy; one more try from the first byte, then say so.
+          if (error instanceof DeviceArtifactError && error.code === "hash-mismatch" && sends === 0) {
+            progress.bytes -= offset;
+            offset = 0;
+            continue;
+          }
+          throw error;
+        }
       }
+      progress.done += 1;
+      report("uploading", file.name);
     }
-    progress.done += 1;
-    report("uploading", file.name);
+  } catch (error) {
+    if (!(error instanceof FinishedElsewhere)) throw error;
+    // Somebody else finished this very save (the same key finds it): its archive is the result, and nothing more is sent.
+    const finished = await announce();
+    if (finished.state !== "complete") throw new DeviceArtifactError("The server said this save was already complete, but does not list it as finished. Press Save to server again.", "server-refused");
+    progress.done = files.length;
+    progress.bytes = totalBytes;
+    report("verifying");
+    return toResult(finished, resumed, true);
   }
 
   // Every file is on the server and verified: it packs them into the archive. A small save is done within one answer;

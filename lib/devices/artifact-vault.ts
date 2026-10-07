@@ -60,9 +60,9 @@ export interface VaultLimits {
   readonly maxFileBytes: number;
   readonly maxSaveBytes: number;
   readonly maxFiles: number;
-  /** What every finished archive, every unfinished save's files and the archive being written may hold together; 0 is no cap. */
+  /** What every finished archive and every unfinished save's archive-to-be (its files plus a packing allowance) may hold together; 0 is no cap. */
   readonly maxVaultBytes: number;
-  /** Free space that must remain after a save. */
+  /** Free space that must remain on the disk at every point of a save: while the files arrive, and while the archive is written beside them. */
   readonly minFreeBytes: number;
   /** An unfinished save nobody touched for this long is deleted. */
   readonly incomingTtlMs: number;
@@ -248,8 +248,8 @@ const FILE_MODE = 0o600;
 const DIRECTORY_MODE = 0o700;
 /** A partial archive nobody has written to for this long belongs to a build that died with its server. */
 const ABANDONED_PARTIAL_MS = 60 * 60 * 1000;
-/** How much archive is written between two looks at what the rest of the vault holds. */
-const CAP_REFRESH_BYTES = 64 * MiB;
+/** How much archive is written between two looks at what the rest of the vault holds and at the disk's free space. */
+const REFRESH_BYTES = 64 * MiB;
 const MANIFEST_CACHE_LIMIT = 512;
 const MAX_PARTITIONS = 1024;
 const MAX_PARTITION_NAME = 80;
@@ -417,13 +417,32 @@ function builds(): Map<string, BuildRecord> {
 // Reading what is stored
 // ---------------------------------------------------------------------------------------------------------------------
 
-function parseStored(raw: unknown): StoredSave | undefined {
-  if (!isRecord(raw) || raw.version !== 2 || typeof raw.saveId !== "string" || !SAVE_ID.test(raw.saveId) || !Array.isArray(raw.files) || typeof raw.archiveName !== "string" || !ARCHIVE_NAME.test(raw.archiveName)) return undefined;
+function parseStoredFile(raw: unknown): StoredFile | undefined {
+  if (!isRecord(raw) || typeof raw.name !== "string" || !raw.name) return undefined;
+  if (typeof raw.size !== "number" || !Number.isSafeInteger(raw.size) || raw.size < 0 || typeof raw.sha256 !== "string" || !SHA256.test(raw.sha256)) return undefined;
+  if (typeof raw.fileName !== "string" || !raw.fileName || raw.fileName.includes("/") || raw.fileName.includes("\\") || raw.fileName === "." || raw.fileName === ".." || isVaultInternalName(raw.fileName)) return undefined;
+  if (typeof raw.kind !== "string" || typeof raw.source !== "string" || validTime(raw.createdAt) === undefined) return undefined;
+  if (raw.verified !== undefined && typeof raw.verified !== "boolean") return undefined;
+  if (raw.artifactId !== undefined && typeof raw.artifactId !== "string") return undefined;
+  if (raw.operation !== undefined && cleanOperation(raw.operation) === undefined) return undefined;
+  return raw as unknown as StoredFile;
+}
+
+/**
+ * A save's record as this vault wrote it, or nothing: a record that is damaged, hand-edited or in another folder than
+ * its own id names is not a save of ours, so no slice, verify or build can act on it and nothing counts it.
+ */
+function parseStored(raw: unknown, saveId: string): StoredSave | undefined {
+  if (!isRecord(raw) || raw.version !== 2 || raw.saveId !== saveId || typeof raw.archiveName !== "string" || !ARCHIVE_NAME.test(raw.archiveName)) return undefined;
+  if (typeof raw.sessionId !== "string" || typeof raw.label !== "string" || (raw.owner !== null && typeof raw.owner !== "string") || validTime(raw.createdAt) === undefined) return undefined;
+  if (raw.key !== undefined && (typeof raw.key !== "string" || !KEY.test(raw.key))) return undefined;
+  if (raw.ownerName !== undefined && typeof raw.ownerName !== "string") return undefined;
+  if (!Array.isArray(raw.files) || !raw.files.every((file) => parseStoredFile(file) !== undefined)) return undefined;
   return raw as unknown as StoredSave;
 }
 
 async function readIncoming(config: VaultConfig, saveId: string): Promise<StoredSave | undefined> {
-  return parseStored(await readJson(path.join(incomingDirectory(config, saveId), STATE_NAME)));
+  return parseStored(await readJson(path.join(incomingDirectory(config, saveId), STATE_NAME)), saveId);
 }
 
 function parseArchiveManifest(raw: unknown): ArchiveManifest | undefined {
@@ -584,17 +603,44 @@ export async function listSaves(config: VaultConfig, filter: SaveListFilter, acc
 }
 
 /**
- * What the vault holds against its cap: every finished archive as it is on the disk, every unfinished save's files (as
- * announced, so room is kept for what has yet to arrive) and every archive being written, as far as it has got.
+ * What the vault will hold for an unfinished save once it is an archive: its files, plus what packing may add. Deflate can
+ * grow data by about 0.04 % at worst, and the archive adds a few hundred bytes of headers per file and the checksums and
+ * the manifest beside them (a few hundred bytes per file, plus a backup's partition lists once).
  */
-async function heldBytes(config: VaultConfig, finished: readonly FinishedSave[], unfinished: readonly StoredSave[], ignorePartialOf?: string): Promise<number> {
+function reservedBytes(save: { readonly files: readonly { readonly size: number }[] }): number {
+  const total = save.files.reduce((sum, file) => sum + file.size, 0);
+  return total + Math.ceil(total / 1000) + (save.files.length + 1) * 4096;
+}
+
+/**
+ * What the vault holds against its cap: every finished archive as it is on the disk and what every unfinished save
+ * reserves (its archive-to-be, whether its files are still arriving or being packed), except `ignore`'s. The raw files
+ * and the partial archive of one save sit beside each other only while it is packed, and that is the disk's business
+ * (`minFreeBytes`), not the cap's: a save the cap admits can always finish.
+ */
+function heldBytes(finished: readonly FinishedSave[], unfinished: readonly StoredSave[], ignore?: string): number {
   let held = 0;
   for (const entry of finished) held += entry.archiveBytes;
-  for (const stored of unfinished) {
-    held += stored.files.reduce((sum, file) => sum + file.size, 0);
-    if (stored.saveId !== ignorePartialOf) held += await sizeOf(path.join(incomingDirectory(config, stored.saveId), ARCHIVE_PART));
-  }
+  for (const stored of unfinished) if (stored.saveId !== ignore) held += reservedBytes(stored);
   return held;
+}
+
+/** The bytes unfinished saves are still owed: every file not yet verified, less what is already stored of it. */
+async function unsentBytes(config: VaultConfig, unfinished: readonly StoredSave[]): Promise<number> {
+  let owed = 0;
+  for (const stored of unfinished) {
+    const directory = incomingDirectory(config, stored.saveId);
+    for (const [index, file] of stored.files.entries()) {
+      if (!file.verified) owed += Math.max(0, file.size - (await sizeOf(path.join(directory, partName(index)))));
+    }
+  }
+  return owed;
+}
+
+/** Refuses with `disk_full` when the disk under the vault has less than the floor to spare; a disk that cannot be asked is never refused. */
+function requireFreeSpace(config: VaultConfig, wanted: number, message: (available: number) => string): void {
+  const space = getDiskSpace(config.root);
+  if (space && space.availableBytes < wanted) throw new VaultError(507, "disk_full", message(space.availableBytes));
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -763,14 +809,19 @@ export async function beginSave(config: VaultConfig, actor: SaveActor, raw: unkn
     }
 
     const total = request.files.reduce((sum, file) => sum + file.size, 0);
-    const held = await heldBytes(config, finished, unfinished);
-    if (config.limits.maxVaultBytes > 0 && held + total > config.limits.maxVaultBytes) {
-      throw new VaultError(507, "quota_exceeded", `The server's artifact folder holds ${describeBytes(held)} and is limited to ${describeBytes(config.limits.maxVaultBytes)}, so ${describeBytes(total)} more does not fit. Delete an older save first.`);
+    const reserve = reservedBytes(request);
+    const held = heldBytes(finished, unfinished);
+    const cap = config.limits.maxVaultBytes;
+    if (cap > 0 && held + reserve > cap) {
+      throw new VaultError(507, "quota_exceeded", reserve > cap
+        ? `This save (${describeBytes(total)}) is larger than the server's artifact folder allows (${describeBytes(cap)}, with room for packing). Save fewer files at a time.`
+        : `The server's artifact folder holds ${describeBytes(held)} and is limited to ${describeBytes(cap)}, so ${describeBytes(total)} more does not fit. Delete an older save first.`);
     }
-    const space = getDiskSpace(config.root);
-    if (space && space.availableBytes < total + config.limits.minFreeBytes) {
-      throw new VaultError(507, "disk_full", `The server has ${describeBytes(space.availableBytes)} free and this save needs ${describeBytes(total)} plus ${describeBytes(config.limits.minFreeBytes)} to spare. Free some space or save fewer files.`);
-    }
+    // The files arrive first and the archive is then written beside them, so for a while the disk holds both: the raw
+    // bytes of every unfinished save that are still to come, this save's files, as much again for its archive, and the floor.
+    const owed = await unsentBytes(config, unfinished);
+    requireFreeSpace(config, owed + total + reserve + config.limits.minFreeBytes, (available) =>
+      `The server has ${describeBytes(available)} free and this save needs ${describeBytes(total)} for its files, as much again while its zip is written beside them, ${owed > 0 ? `${describeBytes(owed)} still to arrive for other saves, ` : ""}and ${describeBytes(config.limits.minFreeBytes)} to spare. Free some space or save fewer files at a time.`);
 
     const saveId = randomUUID().replaceAll("-", "");
     const taken = await takenNames(config, unfinished);
@@ -832,6 +883,8 @@ export async function appendChunk(config: VaultConfig, saveId: string, index: nu
     const received = await sizeOf(part);
     if (offset !== received) throw new VaultError(409, "offset_mismatch", `"${file.name}" has ${received} bytes stored, not ${offset}.`, { received });
     if (received + bytes.byteLength > file.size) throw new VaultError(400, "too_long", `That slice runs past the end of "${file.name}" (${file.size} bytes).`, { received });
+    requireFreeSpace(config, bytes.byteLength + config.limits.minFreeBytes, (available) =>
+      `The server has ${describeBytes(available)} free, and it keeps ${describeBytes(config.limits.minFreeBytes)} to spare. Free some space and press Save to server again: what already arrived is kept.`);
     const handle = await fsp.open(part, "a", FILE_MODE);
     let written = 0;
     try {
@@ -902,23 +955,34 @@ function filesAreSafe(count: number): string {
 
 /**
  * After a failure that could be the stored files' fault: hashes every raw file again, and a file that is not what was
- * verified loses its mark and its copy, so the next try sends just that one. Files that are fine stay verified.
+ * verified loses its mark and its copy, so the next try sends just that one. Files that are fine stay verified, and so
+ * does one that merely could not be read right now (a transient disk error is not damage): the next build looks again.
+ * The record is written before any copy is deleted, so a record that cannot be written leaves every copy in place.
  */
 async function recheckRaw(config: VaultConfig, saveId: string): Promise<void> {
   await withLock(saveId, async () => {
     const stored = await readIncoming(config, saveId);
     if (!stored) return;
     const directory = incomingDirectory(config, saveId);
-    let changed = false;
+    const damaged: string[] = [];
     for (const [index, file] of stored.files.entries()) {
       if (!file.verified || file.size === 0) continue;
       const part = path.join(directory, partName(index));
-      if ((await sizeOf(part)) === file.size && (await hashFile(part).catch(() => undefined)) === file.sha256) continue;
+      if ((await sizeOf(part)) === file.size) {
+        let actual: string;
+        try {
+          actual = await hashFile(part);
+        } catch {
+          continue;
+        }
+        if (actual === file.sha256) continue;
+      }
       file.verified = false;
-      await fsp.rm(part, { force: true });
-      changed = true;
+      damaged.push(part);
     }
-    if (changed) await writeJson(path.join(directory, STATE_NAME), stored);
+    if (damaged.length === 0) return;
+    await writeJson(path.join(directory, STATE_NAME), stored);
+    for (const part of damaged) await fsp.rm(part, { force: true });
   });
 }
 
@@ -943,32 +1007,36 @@ function describeFailure(error: unknown, stored: StoredSave): BuildFailure {
 /**
  * Writes everything the archive is made of into the partial file, stopping the writer the moment anything goes wrong. The
  * writer starts preparing its first chunk, and so opens the first file, as soon as it is made, so the reader is taken before
- * anything else can fail and every way out cancels it.
+ * anything else can fail and every way out cancels it. Every REFRESH_BYTES it looks again at what the rest of the vault
+ * holds (a cap lowered since the save began, or a save begun since) and at the disk, which must keep its floor free while
+ * the raw files and the archive sit side by side.
  */
 async function writeToDisk(config: VaultConfig, record: BuildRecord, stored: StoredSave, partial: string, stream: ReadableStream<Uint8Array>, summary: Promise<unknown>): Promise<void> {
   const { signal } = record.controller;
   const cap = config.limits.maxVaultBytes;
-  const others = async (): Promise<number> => heldBytes(config, await finishedSaves(config), await incomingSaves(config), stored.saveId);
+  const others = async (): Promise<number> => heldBytes(await finishedSaves(config), await incomingSaves(config), stored.saveId);
   const reader = stream.getReader();
   let handle: FileHandle | undefined;
   let closed = false;
   try {
-    let baseline = cap > 0 ? await others() : 0;
+    let baseline = 0;
     let written = 0;
     let refreshedAt = 0;
+    const lookAgain = async (): Promise<void> => {
+      refreshedAt = written;
+      if (cap > 0) baseline = await others();
+      requireFreeSpace(config, config.limits.minFreeBytes, (available) =>
+        `The server's disk is down to ${describeBytes(available)} free, and it keeps ${describeBytes(config.limits.minFreeBytes)} to spare, so the archive (${describeBytes(written)} written so far) was stopped. ${filesAreSafe(stored.files.length)} Free some space, then press Save to server again: nothing is uploaded twice.`);
+    };
+    await lookAgain();
     handle = await fsp.open(partial, "w", FILE_MODE);
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       signal.throwIfAborted();
-      if (cap > 0) {
-        if (written - refreshedAt >= CAP_REFRESH_BYTES) {
-          baseline = await others();
-          refreshedAt = written;
-        }
-        if (baseline + written + value.byteLength > cap) {
-          throw new VaultError(507, "quota_exceeded", `The server's artifact folder is limited to ${describeBytes(cap)} and the rest of it holds ${describeBytes(baseline)}, so the archive (${describeBytes(written)} written so far) does not fit. ${filesAreSafe(stored.files.length)} Delete an older save, then press Save to server again: nothing is uploaded twice.`);
-        }
+      if (written - refreshedAt >= REFRESH_BYTES) await lookAgain();
+      if (cap > 0 && baseline + written + value.byteLength > cap) {
+        throw new VaultError(507, "quota_exceeded", `The server's artifact folder is limited to ${describeBytes(cap)} and the rest of it holds ${describeBytes(baseline)}, so the archive (${describeBytes(written)} written so far) does not fit. ${filesAreSafe(stored.files.length)} Delete an older save, then press Save to server again: nothing is uploaded twice.`);
       }
       // One write may take only part of the chunk (a disk filling up, a network share): go on until it is all down.
       let offset = 0;
@@ -1166,8 +1234,11 @@ export async function completeSave(config: VaultConfig, saveId: string, now = Da
 
   if (record.state === "building") {
     const stored = await readIncoming(config, saveId);
-    if (!stored) throw new VaultError(404, "unknown_save", "That save does not exist, or it was cleaned up after sitting unfinished.");
-    return statusOfIncoming(config, stored, record);
+    // The build may have ended while the record was read: then its outcome is the answer, not a save that is no longer there.
+    if (record.state === "building") {
+      if (!stored) throw new VaultError(404, "unknown_save", "That save does not exist, or it was cleaned up after sitting unfinished.");
+      return statusOfIncoming(config, stored, record);
+    }
   }
   if (record.state === "done") return statusOfFinished(record.result!);
   if (record.state === "aborted") throw new VaultError(409, "aborted", "This save was deleted while its archive was being written.");
@@ -1181,27 +1252,32 @@ export async function completeSave(config: VaultConfig, saveId: string, now = Da
  */
 export async function removeSave(config: VaultConfig, saveId: string): Promise<boolean> {
   if (!SAVE_ID.test(saveId)) return false;
-  // The build is stopped first, without holding the save's lock: the build takes it itself when it has to put the
-  // stored files right after a failure, and a delete that held it while waiting would wait for ever.
-  const running = builds().get(saveId);
-  if (running?.state === "building") {
-    running.controller.abort();
-    await running.done;
+  for (;;) {
+    // The build is stopped first, without holding the save's lock: the build takes it itself when it has to put the
+    // stored files right after a failure, and a delete that held it while waiting would wait for ever.
+    const running = builds().get(saveId);
+    if (running?.state === "building") {
+      running.controller.abort();
+      await running.done;
+    }
+    const removed = await withLock(saveId, async (): Promise<boolean | undefined> => {
+      // A complete that was waiting for the lock may have started a build since: it is stopped the same way, from outside.
+      if (builds().get(saveId)?.state === "building") return undefined;
+      builds().delete(saveId);
+      let removed = false;
+      const directory = incomingDirectory(config, saveId);
+      if (await exists(directory)) {
+        await fsp.rm(directory, { recursive: true, force: true });
+        removed = true;
+      }
+      const done = (await finishedSaves(config)).find((entry) => entry.manifest.saveId === saveId);
+      if (done && path.dirname(done.archive) === config.root) {
+        await fsp.rm(done.archive, { force: true });
+        manifestCache.delete(done.archive);
+        removed = true;
+      }
+      return removed;
+    });
+    if (removed !== undefined) return removed;
   }
-  return withLock(saveId, async () => {
-    builds().delete(saveId);
-    let removed = false;
-    const directory = incomingDirectory(config, saveId);
-    if (await exists(directory)) {
-      await fsp.rm(directory, { recursive: true, force: true });
-      removed = true;
-    }
-    const done = (await finishedSaves(config)).find((entry) => entry.manifest.saveId === saveId);
-    if (done && path.dirname(done.archive) === config.root) {
-      await fsp.rm(done.archive, { force: true });
-      manifestCache.delete(done.archive);
-      removed = true;
-    }
-    return removed;
-  });
 }
