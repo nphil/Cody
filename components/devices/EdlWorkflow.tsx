@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import { Select } from "@/components/ui/Select";
 import { deviceArtifacts, type DeviceArtifact } from "@/lib/devices/artifacts";
 import { parseEdlCommand } from "@/lib/devices/edl";
@@ -9,7 +9,10 @@ import { classifyEdlPartition } from "@/lib/devices/edl-protect";
 import type { DeviceOperationManager, DeviceOperationSnapshot } from "@/lib/devices/operations";
 import { useI18n } from "@/lib/i18n";
 import { isTerminalState } from "./OperationList";
-import { Button, Chip, Notice, Segmented, sectionHeadingStyle, TextField } from "./ui";
+import { FILTER_FROM, narrow } from "./list-view";
+import { chosenIn, selectNone, toggle, type Picked } from "./selection";
+import { selectionText } from "./set-text";
+import { Button, CheckRow, Chip, Notice, Segmented, sectionHeadingStyle, TextField } from "./ui";
 
 interface EdlProps {
   manager: DeviceOperationManager;
@@ -49,6 +52,8 @@ function lastResult(operations: readonly DeviceOperationSnapshot[], command: str
 interface ListedPartition {
   name: string;
   bytes: number;
+  /** Its place in the table: how an unnamed partition is told apart. */
+  index?: number;
 }
 
 function listedPartitions(details: Record<string, unknown> | undefined): ListedPartition[] {
@@ -56,7 +61,8 @@ function listedPartitions(details: Record<string, unknown> | undefined): ListedP
   if (!Array.isArray(raw)) return [];
   return raw.flatMap((entry: unknown) => {
     if (typeof entry !== "object" || entry === null || !("name" in entry) || !("bytes" in entry)) return [];
-    return typeof entry.name === "string" && typeof entry.bytes === "number" ? [{ name: entry.name, bytes: entry.bytes }] : [];
+    if (typeof entry.name !== "string" || typeof entry.bytes !== "number") return [];
+    return [{ name: entry.name, bytes: entry.bytes, ...("index" in entry && typeof entry.index === "number" ? { index: entry.index } : {}) }];
   });
 }
 
@@ -98,9 +104,45 @@ function lastBackupSet(operations: readonly DeviceOperationSnapshot[]): LastSet 
 }
 
 type EdlRequest =
-  | { action: "exec"; command: string; options?: Record<string, string>; target?: string }
+  | { action: "exec"; command: string; options?: Record<string, string | string[]>; target?: string }
   | { action: "dump"; target: string; options?: Record<string, number> }
   | { action: "flash"; target: string; options?: Record<string, string> };
+
+/** One partition the backup can be limited to, by the name the backup knows it by: an unnamed one is "partition N", as in the backup's own record. */
+interface BackupChoice {
+  label: string;
+  bytes: number;
+}
+
+function backupChoices(partitions: readonly ListedPartition[]): BackupChoice[] {
+  return partitions.flatMap((part) => {
+    const label = part.name || (part.index === undefined ? "" : `partition ${part.index}`);
+    return label ? [{ label, bytes: part.bytes }] : [];
+  });
+}
+
+export interface BackupPlan {
+  /** Everything (no partition list is sent), only some of the partitions, or nothing. */
+  readonly kind: "all" | "some" | "none";
+  /** The chosen partitions in the order the table lists them. */
+  readonly chosen: readonly string[];
+  /** Every partition the table lists. */
+  readonly total: number;
+  /** What to start; absent when nothing is chosen. */
+  readonly request?: EdlRequest;
+}
+
+/**
+ * What starting the backup asks for. `picked` is null until the person has touched the list, which means every partition;
+ * with no table read (`table` empty) it is also a full backup. Only a subset sends `options.partitions`, so choosing
+ * everything is exactly the request the card has always made.
+ */
+export function planBackup(table: readonly string[], picked: Picked | null): BackupPlan {
+  const chosen = picked === null ? [...table] : chosenIn(table, picked);
+  if (chosen.length === table.length) return { kind: "all", chosen, total: table.length, request: { action: "exec", command: "backup" } };
+  if (chosen.length === 0) return { kind: "none", chosen, total: table.length };
+  return { kind: "some", chosen, total: table.length, request: { action: "exec", command: "backup", options: { partitions: chosen } } };
+}
 
 /** Starts EDL operations on one device, attaching the chosen file (the loader, or for a flash the image) when asked. */
 function useEdlStarter({ manager, deviceId, interfaceNumber, alternateSetting, input }: EdlProps) {
@@ -250,17 +292,58 @@ export function EdlBackup(props: EdlProps): React.ReactElement {
   );
 }
 
-/** A backup set of the whole disk, and the restore of one onto the same unit. */
-export function EdlBackupSets(props: EdlProps): React.ReactElement {
+/**
+ * The partitions of the last partition-table read, each one a checkbox, with All, None and a count of the whole table. A
+ * long table gets the same filter box and first page as a long list of files; All, None and the count are about every
+ * partition, not the rows on screen.
+ */
+function PartitionChooser({ choices, picked, onPick }: { choices: readonly BackupChoice[]; picked: Picked | null; onPick: Dispatch<SetStateAction<Picked | null>> }) {
+  const { t } = useI18n();
+  const [query, setQuery] = useState("");
+  const [showAll, setShowAll] = useState(false);
+  const names = choices.map((choice) => choice.label);
+  const ticked = new Set(picked === null ? names : chosenIn(names, picked));
+  const tickedBytes = choices.reduce((sum, choice) => (ticked.has(choice.label) ? sum + choice.bytes : sum), 0);
+  const { rows, capped } = narrow(choices, { query, showAll, nameOf: (choice) => choice.label });
+  return (
+    <div role="group" aria-label={t("devices.edl.setPartitionsTitle")} style={{ display: "flex", flexDirection: "column", gap: 8, minWidth: 0 }}>
+      {choices.length > FILTER_FROM && <TextField label={t("devices.edl.setPartitionsFilter")} type="search" value={query} onChange={(event) => setQuery(event.target.value)} />}
+      <div className="dv-pickbar">
+        <Button onClick={() => onPick(null)}>{t("devices.files.selectAll")}</Button>
+        <Button onClick={() => onPick(selectNone())}>{t("devices.files.selectNone")}</Button>
+        <span className="dv-pickbar__count" role="status">{selectionText(ticked.size, names.length, formatBytes(tickedBytes), t)}</span>
+      </div>
+      <ul className="dv-files">
+        {rows.map((choice) => (
+          <li key={choice.label} className="dv-file dv-file--pick" data-picked={ticked.has(choice.label) || undefined}>
+            {/* Against the latest choice, not the one this row was drawn with: two taps before the next draw must both count. */}
+            <CheckRow checked={ticked.has(choice.label)} onToggle={() => onPick((current) => toggle(current ?? new Set(names), choice.label))}>
+              <span className="dv-file__name">{choice.label}</span>
+              <span className="dv-file__size">{formatBytes(choice.bytes)}</span>
+            </CheckRow>
+          </li>
+        ))}
+      </ul>
+      {query && rows.length === 0 && <p className="dv-set__note">{t("devices.edl.setPartitionsNoMatch", { query: query.trim() })}</p>}
+      {capped && <Button tone="quiet" onClick={() => setShowAll(true)}>{t("devices.files.showAll", { count: choices.length })}</Button>}
+    </div>
+  );
+}
+
+/** A backup set of the disk (every partition, or the ones ticked), and the restore of one onto the same unit. */
+export function EdlBackupSets(props: EdlProps & { defaultPicked?: readonly string[] }): React.ReactElement {
   const { t } = useI18n();
   const { start, error } = useEdlStarter(props);
-  const { operations, input, onChooseFile, sessionId } = props;
+  const { operations, input, onChooseFile, sessionId, defaultPicked } = props;
   const busy = operations.some((operation) => !isTerminalState(operation.state));
   const artifacts = useSessionArtifacts(sessionId);
   const sets = useMemo(() => artifacts.filter((artifact) => artifact.name.endsWith(".manifest.json")), [artifacts]);
   const [chosenId, setChosenId] = useState<string | null>(null);
   const chosen = sets.find((artifact) => artifact.id === chosenId) ?? sets[0];
   const last = useMemo(() => lastBackupSet(operations), [operations]);
+  const choices = useMemo(() => backupChoices(listedPartitions(lastResult(operations, "printgpt"))), [operations]);
+  const [picked, setPicked] = useState<Picked | null>(defaultPicked === undefined ? null : new Set(defaultPicked));
+  const plan = planBackup(choices.map((choice) => choice.label), picked);
   return (
     <section aria-label={t("devices.edl.setTitle")} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -270,7 +353,20 @@ export function EdlBackupSets(props: EdlProps): React.ReactElement {
         {last && (last.restorable
           ? <Chip tone="good">{t("devices.edl.setLast", { id: last.id, count: last.partitions })}</Chip>
           : <Notice tone="warning">{t("devices.edl.setNotRestorable", { reason: last.reason })}</Notice>)}
-        <div><Button tone="primary" disabled={busy} onClick={() => start({ action: "exec", command: "backup" }, true)}>{t("devices.edl.setStart")}</Button></div>
+        <h5 style={sectionHeadingStyle}>{t("devices.edl.setPartitionsTitle")}</h5>
+        {choices.length > 0 ? (
+          <>
+            <PartitionChooser choices={choices} picked={picked} onPick={setPicked} />
+            <span style={{ fontSize: 12, lineHeight: 1.4, color: "var(--text-dim)" }}>{t("devices.edl.setPartitionsHint")}</span>
+          </>
+        ) : (
+          <Notice>{t("devices.edl.setPartitionsNoTable")}</Notice>
+        )}
+        <div>
+          <Button tone="primary" disabled={busy || !plan.request} onClick={() => plan.request && start(plan.request, true)}>
+            {plan.kind === "all" ? t("devices.edl.setStart") : t("devices.edl.setStartSome", { selected: plan.chosen.length, total: plan.total })}
+          </Button>
+        </div>
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         <h4 style={sectionHeadingStyle}>{t("devices.edl.restoreTitle")}</h4>

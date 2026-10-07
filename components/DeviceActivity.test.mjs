@@ -275,15 +275,36 @@ test("a run of operations opens as its items, and an item opens with a way back 
   assert.match(item, /Read part7/);
 });
 
-test("a file's detail names where it came from and what the server holds, and a thing that is gone says so", () => {
-  const artifact = { id: "file-1", name: "edl-1-set-p3-boot_a.bin", size: 64 * MB, mime: "application/octet-stream", sha256: "cd".repeat(32), kind: "output", source: "device", createdAt: NOW, provenance: { operationId: "op-9", deviceId: "usb-1", protocol: "edl", action: "exec", command: "backup", target: "boot_a", label: "Lenovo QUSB__BULK" }, server: { saveId: "s1", path: "/srv/backups/boot_a.bin", folder: "/srv/backups", savedAt: NOW, verified: true } };
-  const markup = html(React.createElement(DetailSheet, { subject: { kind: "file", artifactId: "file-1" }, jobs: new Map(), operations: [], artifacts: [artifact], ctx: baseContext(), onSubject() {}, onClose() {} }));
+test("a file's detail names where it came from, which backup it is part of, and the archive and entry the server holds it in; a thing that is gone says so", () => {
+  const all = Array.from({ length: 56 }, (_, index) => `part${index}`);
+  const provenance = { operationId: "op-9", deviceId: "usb-1", protocol: "edl", action: "exec", command: "backup", target: "boot_a", label: "Lenovo QUSB__BULK", scope: { chosen: all.slice(0, 5), all } };
+  const artifact = { id: "file-1", name: "edl-1-set-p3-boot_a.bin", size: 64 * MB, mime: "application/octet-stream", sha256: "cd".repeat(32), kind: "output", source: "device", createdAt: NOW, provenance, server: { saveId: "s1", archive: "/srv/backups/lenovo-2026-10-06.zip", entry: "lenovo-2026-10-06/edl-1-set-p3-boot_a.bin", archiveBytes: 20 * MB, originalBytes: 64 * MB, savedAt: NOW, verified: true } };
+  const sheet = (artifacts, artifactId = "file-1") => html(React.createElement(DetailSheet, { subject: { kind: "file", artifactId }, jobs: new Map(), operations: [], artifacts, ctx: baseContext(), onSubject() {}, onClose() {} }));
+  const markup = sheet([artifact]);
   assert.match(markup, /<h3[^>]*>boot_a<\/h3>/, "the partition, not the file name");
   assert.ok(markup.includes("cd".repeat(32)) && markup.includes("file-1") && markup.includes("edl-1-set-p3-boot_a.bin"));
-  assert.ok(markup.includes("/srv/backups/boot_a.bin"));
-  assert.match(markup, /checked on the server/);
+  assert.match(markup, /Part of<\/dt><dd[^>]*>Lenovo QUSB__BULK · Backup · 5 of 56 partitions<\/dd>/, "the same title the card has");
+  assert.match(markup, /On the server<\/dt><dd[^>]*><code>\/srv\/backups\/lenovo-2026-10-06\.zip<\/code> · checked on the server<\/dd>/, "the archive, not a folder");
+  assert.match(markup, /Inside the archive<\/dt><dd[^>]*><code>lenovo-2026-10-06\/edl-1-set-p3-boot_a\.bin<\/code><\/dd>/);
+  const unsaved = sheet([{ ...artifact, server: undefined }]);
+  assert.doesNotMatch(unsaved, /On the server|Inside the archive/);
+  assert.match(unsaved, /Part of/);
+  assert.doesNotMatch(sheet([{ ...artifact, id: "in-1", kind: "input", source: "picker", provenance: undefined, server: undefined }], "in-1"), /Part of/, "firmware the person added is in no backup");
   const gone = detail({ kind: "job", jobId: "nope" }, []);
   assert.match(gone, /No longer listed/);
+  globalThis.document = { documentElement: {} };
+  try {
+    for (const locale of Object.keys(locales)) {
+      setLocale(locale);
+      const translated = sheet([artifact]);
+      assert.doesNotMatch(translated, /devices\.fact\.|devices\.files\.|\{[a-zA-Z]+\}/, `${locale}: a key shows or a placeholder is unfilled`);
+      for (const key of ["devices.fact.backup", "devices.fact.onServer", "devices.fact.inArchive"]) assert.ok(translated.includes(escape(locales[locale][key])), `${locale}: ${key}`);
+      assert.ok(translated.includes(escape(locales[locale]["devices.files.scopePartial.other"].replace("{chosen}", "5").replace("{count}", "56"))), `${locale}: the backup's title`);
+    }
+  } finally {
+    setLocale("en");
+    delete globalThis.document;
+  }
 });
 
 // ---- the structure of the whole feed ------------------------------------------------------------------------------------

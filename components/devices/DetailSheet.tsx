@@ -6,8 +6,8 @@ import { formatBytes } from "@/lib/format-bytes";
 import { useI18n } from "@/lib/i18n";
 import { jobProgress, memberName, problemMembers, type Job } from "@/lib/devices/jobs";
 import { describeRoutine } from "@/lib/devices/activity-groups";
-import { shortArtifactName } from "@/lib/devices/artifact-sets";
-import type { DeviceArtifact } from "@/lib/devices/artifacts";
+import { groupArtifactSets, shortArtifactName } from "@/lib/devices/artifact-sets";
+import type { ArtifactSet, DeviceArtifact } from "@/lib/devices/artifacts";
 import type { DeviceOperationSnapshot } from "@/lib/devices/operations";
 import type { ActivityContext, DetailSubject } from "./activity-context";
 import { CopyButton } from "./CopyButton";
@@ -15,6 +15,7 @@ import { JobItems } from "./JobItems";
 import { PhaseIcon } from "./job-icons";
 import { bytesText, durationText, etaText, itemsText, phaseText, problemText, titleText, whenText } from "./job-text";
 import { OperationDetail } from "./OperationDetail";
+import { setDeviceName, setTitle } from "./set-text";
 import { Button, Notice, sectionHeadingStyle } from "./ui";
 
 export interface DetailSheetProps {
@@ -36,9 +37,9 @@ function Fact({ label, children }: { label: string; children: React.ReactNode })
   );
 }
 
-/** One file: what it is, where it came from, and the numbers that identify it. */
-function FileDetail({ artifact, ctx, jobOf, onSubject }: { artifact: DeviceArtifact; ctx: ActivityContext; jobOf: (operationId: string) => Job | undefined; onSubject: (subject: DetailSubject) => void }): React.ReactElement {
-  const { t, locale } = useI18n();
+/** One file: what it is, which backup it is part of, where it came from, and the numbers that identify it. */
+function FileDetail({ artifact, set, ctx, jobOf, onSubject }: { artifact: DeviceArtifact; set: ArtifactSet | undefined; ctx: ActivityContext; jobOf: (operationId: string) => Job | undefined; onSubject: (subject: DetailSubject) => void }): React.ReactElement {
+  const { t, tn, locale } = useI18n();
   const origin = artifact.provenance;
   const job = origin ? jobOf(origin.operationId) : undefined;
   return (
@@ -53,9 +54,11 @@ function FileDetail({ artifact, ctx, jobOf, onSubject }: { artifact: DeviceArtif
           <Fact label={t("devices.operationResultHash")}><code>{artifact.sha256}</code><CopyButton text={artifact.sha256} label={t("devices.sheet.copy")} ariaLabel={t("devices.sheet.copyNamed", { what: t("devices.operationResultHash") })} /></Fact>
           <Fact label={t("devices.fact.fileId")}><code>{artifact.id}</code><CopyButton text={artifact.id} label={t("devices.sheet.copy")} ariaLabel={t("devices.sheet.copyNamed", { what: t("devices.fact.fileId") })} /></Fact>
           {origin && <Fact label={t("devices.fact.device")}>{origin.label ?? ctx.deviceLabel(origin.deviceId)}</Fact>}
+          {set && <Fact label={t("devices.fact.backup")}>{setTitle(set, setDeviceName(set, ctx.deviceLabel, t), t, tn)}</Fact>}
           {origin && <Fact label={t("devices.fact.operation")}>{origin.protocol} · {origin.action}{origin.target ? ` · ${origin.target}` : ""}</Fact>}
           {origin && <Fact label={t("devices.fact.operationId")}><code>{origin.operationId}</code></Fact>}
-          {artifact.server && <Fact label={t("devices.fact.onServer")}><code>{artifact.server.path}</code>{artifact.server.verified ? ` · ${t("devices.files.verifiedOnServer")}` : ""}</Fact>}
+          {artifact.server && <Fact label={t("devices.fact.onServer")}><code>{artifact.server.archive}</code>{artifact.server.verified ? ` · ${t("devices.files.verifiedOnServer")}` : ""}</Fact>}
+          {artifact.server && <Fact label={t("devices.fact.inArchive")}><code>{artifact.server.entry}</code></Fact>}
         </dl>
       </section>
       {job && <div><Button onClick={() => onSubject({ kind: "job", jobId: job.id, operationId: origin?.operationId })}>{t("devices.fact.showJob")}</Button></div>}
@@ -143,7 +146,7 @@ export function DetailSheet({ subject, jobs, operations, artifacts, ctx, onSubje
     const artifact = artifacts.find((candidate) => candidate.id === subject.artifactId);
     if (artifact) {
       title = shortArtifactName(artifact.name);
-      body = <FileDetail artifact={artifact} ctx={ctx} jobOf={jobOf} onSubject={onSubject} />;
+      body = <FileDetail artifact={artifact} set={groupArtifactSets(artifacts).find((candidate) => candidate.artifactIds.includes(artifact.id))} ctx={ctx} jobOf={jobOf} onSubject={onSubject} />;
     }
   }
 

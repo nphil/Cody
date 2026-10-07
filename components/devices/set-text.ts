@@ -4,8 +4,8 @@
  */
 
 import { formatBytes } from "@/lib/format-bytes";
-import type { ArtifactSet, DeviceArtifact, TransferJob } from "@/lib/devices/artifacts";
-import { shortArtifactName } from "@/lib/devices/artifact-sets";
+import type { ArtifactSet, DeviceArtifact, SetSaveState, TransferJob } from "@/lib/devices/artifacts";
+import { setFileLabel, shortArtifactName } from "@/lib/devices/artifact-sets";
 import type { Translate, TranslatePlural } from "./job-text";
 
 export type SetKind = "backupSet" | "restoreCopies" | "dumps" | "pulled" | "files";
@@ -19,9 +19,30 @@ export function setKind(set: ArtifactSet): SetKind {
   return "files";
 }
 
-/** "Lenovo QUSB__BULK · Backup set". `deviceName` is what the device was called when the files were saved, else its current name. */
-export function setTitle(set: ArtifactSet, deviceName: string, t: Translate): string {
-  return `${deviceName} · ${t(`devices.files.kind.${setKind(set)}`)}`;
+/** What a backup took, in words that a partial one cannot pass for a whole one: "Full backup · 56 partitions", "Backup · 5 of 56 partitions". */
+export function scopeText(scope: NonNullable<ArtifactSet["scope"]>, tn: TranslatePlural): string {
+  return scope.chosen === scope.total ? tn("devices.files.scopeFull", scope.total) : tn("devices.files.scopePartial", scope.total, { chosen: scope.chosen });
+}
+
+/**
+ * What a set is called, in the card, its menus, the list inside it and a file's details: "Lenovo QUSB__BULK · Full backup · 56
+ * partitions", "Lenovo QUSB__BULK · tablet-2026-10-07" for a set an agent named, or "Lenovo QUSB__BULK · Backups" for one
+ * known only by what made it. The device is whatever the files recorded when they were saved, else `deviceName` (what it is
+ * called now).
+ */
+export function setTitle(set: ArtifactSet, deviceName: string, t: Translate, tn: TranslatePlural): string {
+  const what = set.name ?? (set.scope ? scopeText(set.scope, tn) : t(`devices.files.kind.${setKind(set)}`));
+  return `${set.label ?? deviceName} · ${what}`;
+}
+
+/** The second line of a named set that also says which partitions it took; a set without a name has that in its title. */
+export function setScopeLine(set: ArtifactSet, tn: TranslatePlural): string | undefined {
+  return set.name !== undefined && set.scope ? scopeText(set.scope, tn) : undefined;
+}
+
+/** What the device that made a set is called now, for a set whose files did not record a name. */
+export function setDeviceName(set: ArtifactSet, deviceLabel: (deviceId: string) => string, t: Translate): string {
+  return set.deviceId ? deviceLabel(set.deviceId) : t("devices.files.unknownDevice");
 }
 
 /** The name of a file as a person reads it: the partition, not `edl-3989044886-set-p12-vendor_b.bin`. */
@@ -58,8 +79,29 @@ export function runningTransfer(transfers: readonly TransferJob[], set: Artifact
   return transfers.findLast((job) => job.state === "running" && touches(job, set));
 }
 
-/** The name of the zip a finished download wrote, when the job was a download and said so. */
-export function downloadedName(job: TransferJob): string | undefined {
+/** "Downloaded as lenovo-edl-backup-20261007-1830.zip · 3.8 GB → 610 MB": the zip a finished download wrote and what packing did to it; nothing for a transfer that is not a finished download. */
+export function downloadedText(job: TransferJob, t: Translate): string | undefined {
   const result = job.result;
-  return job.kind === "download" && result && "fileName" in result ? result.fileName : undefined;
+  if (job.kind !== "download" || job.state !== "succeeded" || !result || !("fileName" in result)) return undefined;
+  return t("devices.files.downloaded", { name: result.fileName, original: formatBytes(result.bytes), archive: formatBytes(result.archiveBytes) });
+}
+
+/** "Saved · 1 file · 3.8 GB → 610 MB": the whole save is one archive, so it is one file on the server whatever it holds. */
+export function savedText(saved: Extract<SetSaveState, { state: "saved" }>, t: Translate, tn: TranslatePlural): string {
+  return t("devices.files.savedLine", { files: tn("devices.files.count", saved.archives), original: formatBytes(saved.bytes), archive: formatBytes(saved.archiveBytes) });
+}
+
+/** The longest a selection's label gets: it becomes the name of the zip, and the name of the save on the server. */
+const SELECTION_LABEL_MAX = 60;
+
+/** What a download or save of only some of a set's files is called: "Lenovo QUSB__BULK EDL backup (3 files)". Plain English, because it ends up in a file name. */
+export function selectionLabel(set: ArtifactSet, count: number): string {
+  const suffix = ` (${count} ${count === 1 ? "file" : "files"})`;
+  const base = setFileLabel(set);
+  return base.length + suffix.length <= SELECTION_LABEL_MAX ? `${base}${suffix}` : `${base.slice(0, SELECTION_LABEL_MAX - suffix.length).trimEnd()}${suffix}`;
+}
+
+/** "3 of 58 selected · 6.0 MB": how many of the whole list are ticked (not only the part on screen) and how big that is. `size` is already formatted. */
+export function selectionText(selected: number, total: number, size: string, t: Translate): string {
+  return t("devices.files.selectedCount", { selected, total, size });
 }

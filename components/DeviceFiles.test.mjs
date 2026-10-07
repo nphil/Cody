@@ -7,17 +7,20 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { createJiti } from "jiti";
 
 /**
- * Files & backups, rendered for real. What a device made is listed as SETS: one card per run, with the three things to do
- * with all of it; a backup of 58 partitions is one collapsed card, and opened it is a dense list with a filter, a first page,
- * partition names for labels and a menu per file. What the person added is a short group of its own.
+ * Files & backups, rendered for real. What a device made is listed as SETS: one card per run, with the things to do with
+ * all of it; a backup of 58 partitions is one collapsed card, and opened it is a dense list with a filter, a first page,
+ * partition names for labels and a menu per file. A card says how much of the device a backup took, can be combined with
+ * the older backup, and can turn its list into checkboxes to download or save only some files. What the person added is a
+ * short group of its own.
  */
 
 const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
 const { ArtifactPanel } = await jiti.import("./devices/ArtifactPanel.tsx");
-const { FileRow, orderFiles, fileMenuItems } = await jiti.import("./devices/ArtifactSetCard.tsx");
+const { FileRow, SetCard, CombineConfirm, orderFiles, fileMenuItems } = await jiti.import("./devices/ArtifactSetCard.tsx");
 const { menuStep } = await jiti.import("./devices/RowMenu.tsx");
 const { FILTER_FROM, ROW_CAP, narrow } = await jiti.import("./devices/list-view.ts");
-const { fileLabel, latestTransfer, setKind, transferText, verifiedText } = await jiti.import("./devices/set-text.ts");
+const { chosenIn, selectAll, selectNone, toggle } = await jiti.import("./devices/selection.ts");
+const { downloadedText, fileLabel, latestTransfer, savedText, scopeText, selectionLabel, selectionText, setKind, setTitle, transferText, verifiedText } = await jiti.import("./devices/set-text.ts");
 const { groupArtifactSets } = await jiti.import("../lib/devices/artifact-sets.ts");
 const { setLocale } = await jiti.import("../lib/i18n/index.tsx");
 
@@ -67,6 +70,41 @@ function panel(artifacts, over = {}) {
   }));
 }
 const hex64 = /[0-9a-f]{64}/;
+
+/** What `t` and `tn` say in one language, for the pure text helpers: the same templates the panel fills in. */
+const words = (locale) => ({
+  t: (key, vars = {}) => locales[locale][key].replace(/\{(\w+)\}/g, (_, name) => String(vars[name])),
+  tn: (key, count, vars = {}) => locales[locale][`${key}.${count === 1 ? "one" : "other"}`].replace(/\{(\w+)\}/g, (_, name) => String({ count, ...vars }[name])),
+});
+const partitions = (count) => Array.from({ length: count }, (_, index) => `part${index}`);
+/** The files of ONE EDL backup on one device, as the backup command saves them; `provenance` adds to or overrides what they record. */
+const backupFiles = (count, provenance = {}, over = {}) => Array.from({ length: count }, (_, index) => output(index, {
+  provenance: { operationId: "op-backup", deviceId: "usb-1", protocol: "edl", action: "exec", command: "backup", target: `part${index}`, label: "Lenovo QUSB__BULK", ...provenance },
+  ...over,
+}));
+/** An older backup of 2 files and a newer one of 3 on one device, and one more on another device. */
+function twoBackups() {
+  const made = (prefix, count, operationId, deviceId, at) => Array.from({ length: count }, (_, index) => output(index, {
+    id: `${prefix}-${index}`,
+    createdAt: at + index * 1_000,
+    provenance: { operationId, deviceId, protocol: "edl", action: "exec", command: "backup", target: `${prefix}${index}`, label: deviceId === "usb-1" ? "Lenovo QUSB__BULK" : "Other tablet" },
+  }));
+  const artifacts = [...made("old", 2, "op-old", "usb-1", NOW - 3_600_000), ...made("new", 3, "op-new", "usb-1", NOW), ...made("far", 1, "op-far", "usb-2", NOW - 7_200_000)];
+  const sets = groupArtifactSets(artifacts);
+  const startingWith = (id) => sets.find((set) => set.artifactIds[0] === id);
+  return { artifacts, older: startingWith("old-0"), newer: startingWith("new-0"), stranger: startingWith("far-0") };
+}
+const titleOf = (markup) => /class="dv-set__title">([^<]*)</.exec(markup)?.[1];
+/** One set's card out of a panel's markup. */
+const cardOf = (markup, set) => markup.split("<article ").find((part) => part.includes(`data-set="${set.id}"`)) ?? "";
+const buttonTag = (markup, label) => (new RegExp(`<button[^>]*>(?:(?!</button>).)*${escape(label)}`, "s").exec(markup) ?? [])[0];
+const menuItemTag = (markup, label) => (new RegExp(`<button[^>]*role="menuitem"[^>]*>(?:(?!</button>).)*${escape(label)}`, "s").exec(markup) ?? [])[0];
+const isDisabled = (tag) => /\sdisabled(=|\s|>)/.test(tag.slice(0, tag.indexOf(">") + 1));
+/** One set card on its own, for what the panel does not pass through: opened, choosing files. */
+const cardFor = (files, over = {}) => html(React.createElement(SetCard, {
+  sessionId: "session-files", set: groupArtifactSets(files)[0], artifacts: files, transfers: [], deviceName: "Lenovo QUSB__BULK", busy: false, selectedInputId: null,
+  onSelectInput: noop, onDetails: noop, verifiedBy: () => undefined, acknowledged: new Set(), acknowledge: noop, locale: "en", ...over,
+}));
 
 test("a backup of 58 partitions is ONE collapsed card: its name, when, how many, how big, and the actions for all of it", () => {
   const markup = panel(backup, { verifiedBy: () => true });
@@ -131,14 +169,22 @@ test("what the person added is its own short group, with Use and the same menu m
   assert.equal((markup.match(/<article class="dv-set"/g) ?? []).length, 1, "inputs are not a set");
 });
 
-test("a set the server holds says so and where, with its check; a half-saved one says how many", () => {
-  const saved = backup.map((file) => ({ ...file, server: { saveId: "s1", path: `/srv/b/${file.name}`, folder: "/srv/b", savedAt: NOW + 5_000, verified: true } }));
-  const markup = panel(saved);
-  assert.match(markup, /Saved to the server/);
-  assert.match(markup, /<code title="\/srv\/b">\/srv\/b<\/code>/);
+test("a set the server holds says so in one line, with what packing did to it, and where; a half-saved one says how many", () => {
+  const copy = { saveId: "s1", archive: "/srv/b/lenovo-2026-10-06.zip", entry: "lenovo-2026-10-06/part0.bin", archiveBytes: 41 * MB, originalBytes: 116 * MB, savedAt: NOW + 5_000, verified: true };
+  const markup = panel(backup.map((file) => ({ ...file, server: copy })));
+  assert.match(markup, /Saved · 1 file · 116 MB → 41 MB</);
+  assert.match(markup, /<code title="\/srv\/b\/lenovo-2026-10-06\.zip">\/srv\/b\/lenovo-2026-10-06\.zip<\/code>/);
   assert.match(markup, /checked on the server/);
-  const half = backup.map((file, index) => (index < 20 ? { ...file, server: { saveId: "s1", path: "/srv/b/x", folder: "/srv/b", savedAt: NOW, verified: true } } : file));
-  assert.match(panel(half), /20 of 58 on the server/);
+  const half = panel(backup.map((file, index) => (index < 20 ? { ...file, server: copy } : file)));
+  assert.match(half, /20 of 58 on the server/);
+  assert.doesNotMatch(half, /Saved · /);
+});
+
+test("a finished download says which zip it wrote and what packing did to the size", () => {
+  const set = groupArtifactSets(backup)[0];
+  const done = { id: "d1", kind: "download", setId: set.id, artifactIds: set.artifactIds, label: "x", state: "succeeded", progress: { phase: "writing", done: 58, total: 58, bytes: 100, totalBytes: 100 }, startedAt: NOW, endedAt: NOW + 5, origin: "user", result: { fileName: "lenovo-20261006-1831.zip", files: 58, bytes: 116 * MB, archiveBytes: 41 * MB, method: "file-picker" } };
+  assert.match(panel(backup, { transfers: [done] }), /Downloaded as lenovo-20261006-1831\.zip · 116 MB → 41 MB</);
+  assert.doesNotMatch(panel(backup, { transfers: [{ ...done, state: "failed", result: undefined, error: { code: "unknown", message: "boom" } }] }), /Downloaded as/);
 });
 
 test("while a transfer runs the card shows its line, its bar and a Cancel; the actions wait", () => {
@@ -180,6 +226,8 @@ test("while a transfer of the set runs, taking one file out of it is as locked a
   const actions = { sessionId: "s", selectedInputId: null, onSelectInput: noop, onDetails: noop, onRemove: noop, flash: noop };
   const items = (locked) => fileMenuItems(backup[1], actions, t, { input: false, locked });
   assert.equal(items(true).find((item) => item.id === "remove").disabled, true);
+  assert.equal(items(true).find((item) => item.id === "remove").title, "Wait until it has finished", "and says why, like the other locked controls");
+  assert.equal(items(false).find((item) => item.id === "remove").title, undefined);
   assert.notEqual(items(false).find((item) => item.id === "remove").disabled, true);
   assert.notEqual(items(undefined).find((item) => item.id === "remove").disabled, true);
   assert.ok(items(true).filter((item) => item.id !== "remove").every((item) => item.disabled !== true), "downloading, copying and details stay available");
@@ -210,6 +258,9 @@ test("while the backup is still being made, nothing is offered that would take h
   const markup = panel(backup, { busy: new Set([set.id]) });
   assert.match(markup, /<button[^>]*disabled=""[^>]*title="Wait until it has finished"[^>]*>(?:(?!<\/button>).)*Download all/s);
   assert.match(markup, /<button[^>]*disabled=""[^>]*title="Wait until it has finished"[^>]*>(?:(?!<\/button>).)*Save to server/s);
+  const removal = menuItemTag(markup, "Remove set…");
+  assert.equal(isDisabled(removal), true, "and the set cannot be removed from under the job that is making it");
+  assert.match(removal, /title="Wait until it has finished"/);
 });
 
 test("removing a file asks first, with the file's name and size, and the safe choice is Keep", () => {
@@ -273,15 +324,172 @@ test("what a set is, and how a transfer and a verification read", () => {
   assert.equal(verifiedText(58, 40, en, () => ""), "40 of 58 verified");
 });
 
+test("the sentences for what a backup took, what the server holds and what a download wrote", () => {
+  const en = words("en");
+  assert.equal(scopeText({ chosen: 56, total: 56 }, en.tn), "Full backup · 56 partitions");
+  assert.equal(scopeText({ chosen: 1, total: 1 }, en.tn), "Full backup · 1 partition");
+  assert.equal(scopeText({ chosen: 5, total: 56 }, en.tn), "Backup · 5 of 56 partitions");
+  const saved = { state: "saved", path: "/srv/b/lenovo.zip", savedAt: NOW, verified: true, files: 56, bytes: 3.8 * 1024 ** 3, archiveBytes: 610 * MB, archives: 1 };
+  assert.equal(savedText(saved, en.t, en.tn), "Saved · 1 file · 3.8 GB → 610 MB", "the whole save is one archive: one file");
+  assert.equal(savedText({ ...saved, bytes: 5 * 1024 ** 3, archiveBytes: 700 * MB, archives: 2 }, en.t, en.tn), "Saved · 2 files · 5.0 GB → 700 MB", "saved in two groups: two archives");
+  const job = { id: "d", kind: "download", artifactIds: ["a"], label: "x", state: "succeeded", progress: { phase: "writing", done: 1, total: 1, bytes: 1, totalBytes: 1 }, startedAt: NOW, endedAt: NOW + 1, origin: "user", result: { fileName: "lenovo-20261006-1831.zip", files: 56, bytes: 3.8 * 1024 ** 3, archiveBytes: 610 * MB, method: "file-picker" } };
+  assert.equal(downloadedText(job, en.t), "Downloaded as lenovo-20261006-1831.zip · 3.8 GB → 610 MB");
+  assert.equal(downloadedText({ ...job, state: "running", result: undefined }, en.t), undefined, "nothing was written yet");
+  assert.equal(downloadedText({ ...job, kind: "save", result: { saveId: "s", archive: "/srv/a.zip", archiveBytes: 1, files: 1, bytes: 1, verified: true, resumed: false } }, en.t), undefined, "a save is told on the card by its saved line");
+  assert.equal(selectionText(3, 58, "6.0 MB", en.t), "3 of 58 selected · 6.0 MB");
+});
+
+test("a backup says how much of the device it took: Full backup, or K of N, so a partial one cannot pass for a whole one", () => {
+  const all = partitions(56);
+  const full = panel(backupFiles(3, { scope: { chosen: all, all } }));
+  assert.equal(titleOf(full), "Lenovo QUSB__BULK · Full backup · 56 partitions");
+  const part = panel(backupFiles(3, { scope: { chosen: all.slice(0, 5), all } }));
+  assert.equal(titleOf(part), "Lenovo QUSB__BULK · Backup · 5 of 56 partitions");
+  assert.doesNotMatch(part, /Full backup/);
+  // One sentence names the card for a screen reader, in its menu and over its list.
+  assert.match(part, /<article class="dv-set" aria-label="Lenovo QUSB__BULK · Backup · 5 of 56 partitions"/);
+  assert.match(part, /aria-label="More actions for Lenovo QUSB__BULK · Backup · 5 of 56 partitions"/);
+  assert.match(cardFor(backupFiles(3, { scope: { chosen: all.slice(0, 5), all } }), { defaultOpen: true }), /aria-label="Files in Lenovo QUSB__BULK · Backup · 5 of 56 partitions"/);
+  assert.equal(setTitle(groupArtifactSets(backupFiles(3, { scope: { chosen: all, all } }))[0], "Lenovo now", words("en").t, words("en").tn), "Lenovo QUSB__BULK · Full backup · 56 partitions", "the name the files recorded wins over the device's name now");
+  assert.equal(titleOf(panel(backupFiles(3))), "Lenovo QUSB__BULK · Backup set", "no scope, no name: what made it, as before");
+});
+
+test("a set an agent named leads with that name and keeps the partitions it took on a second line; a name a person made up by combining is never shown", () => {
+  const all = partitions(56);
+  const named = panel(backupFiles(3, { set: "tablet-2026-10-07", scope: { chosen: all.slice(0, 5), all } }));
+  assert.equal(titleOf(named), "Lenovo QUSB__BULK · tablet-2026-10-07");
+  assert.match(named, /class="dv-set__title">[^<]*<\/span><span class="dv-set__scope">Backup · 5 of 56 partitions<\/span><span class="dv-set__meta"/);
+  const plain = panel(backupFiles(3, { set: "tablet-2026-10-07" }));
+  assert.equal(titleOf(plain), "Lenovo QUSB__BULK · tablet-2026-10-07");
+  assert.doesNotMatch(plain, /dv-set__scope/, "nothing to say about partitions");
+  const joined = panel(backupFiles(3, {}, { setName: "\u0001combined-1" }));
+  assert.equal(titleOf(joined), "Lenovo QUSB__BULK · Backup set");
+  assert.doesNotMatch(joined, /combined-1/);
+});
+
+test("Combine with the older backup is offered only where there is an older backup of the same device, before Remove set", () => {
+  const { artifacts, older, newer, stranger } = twoBackups();
+  const markup = panel(artifacts);
+  const labels = (part) => [...part.matchAll(/role="menuitem"[^>]*>(?:<span[^>]*>.*?<\/span>)?<span>([^<]+)<\/span>/g)].map((match) => match[1]);
+  assert.deepEqual(labels(cardOf(markup, newer)), ["Combine with the older backup…", "Remove set…"]);
+  assert.deepEqual(labels(cardOf(markup, older)), ["Remove set…"], "nothing is older on this device");
+  assert.deepEqual(labels(cardOf(markup, stranger)), ["Remove set…"], "another device's backup is not its older backup");
+  assert.equal(isDisabled(menuItemTag(markup, "Combine with the older backup…")), false);
+});
+
+test("Combine waits while either backup is being sent or is still being made, and says why like the other locked controls", () => {
+  const { artifacts, older, newer } = twoBackups();
+  const sending = (set, over = {}) => ({ id: `t-${set.id}`, kind: "download", setId: set.id, artifactIds: set.artifactIds, label: "x", state: "running", progress: { phase: "writing", done: 1, total: 2, bytes: 1, totalBytes: 2 }, startedAt: NOW, origin: "user", ...over });
+  const combine = (over) => menuItemTag(cardOf(panel(artifacts, over), newer), "Combine with the older backup…");
+  for (const [why, over] of [
+    ["this backup is being sent", { transfers: [sending(newer)] }],
+    ["the older backup is being sent", { transfers: [sending(older)] }],
+    ["this backup is still being made", { busy: new Set([newer.id]) }],
+    ["the older backup is still being made", { busy: new Set([older.id]) }],
+  ]) {
+    assert.equal(isDisabled(combine(over)), true, why);
+    assert.match(combine(over), /title="Wait until it has finished"/, why);
+  }
+  assert.equal(isDisabled(combine({ transfers: [sending(older, { state: "succeeded", endedAt: NOW + 1 })] })), false, "a transfer that is over holds nothing");
+  assert.equal(isDisabled(combine({ busy: new Set(["set:somewhere-else"]) })), false);
+});
+
+test("combining asks first: which files join which and what it makes, and the safe choice, Keep, has the focus", () => {
+  const confirm = (props = {}) => html(React.createElement(CombineConfirm, { files: 3, olderFiles: 51, locked: false, onConfirm: noop, onKeep: noop, ...props }));
+  const markup = confirm();
+  assert.match(markup, /<p>3 files will join the older backup of 51 files\. The two become one card and one zip file\.<\/p>/);
+  assert.match(markup, />Combine<\/span>/);
+  assert.match(markup, /autofocus=""[^>]*>(?:(?!<\/button>).)*Keep/s);
+  assert.match(confirm({ files: 1, olderFiles: 1 }), /<p>1 file will join the older backup of 1 file\./);
+  assert.equal(isDisabled(buttonTag(markup, "Combine")), false);
+  const held = confirm({ locked: true });
+  assert.equal(isDisabled(buttonTag(held, "Combine")), true, "a transfer that began after the question was asked holds it");
+  assert.match(buttonTag(held, "Combine"), /title="Wait until it has finished"/);
+  assert.equal(isDisabled(buttonTag(held, "Keep")), false);
+});
+
+test("opened, a set offers Select files; choosing turns every row into a checkbox with All, None and a count of the whole set", () => {
+  const opened = cardFor(backup, { defaultOpen: true });
+  assert.match(opened, />Select files<\/span>/);
+  assert.doesNotMatch(opened, /role="checkbox"/);
+  assert.match(opened, />Download all<\/span>/);
+
+  const choosing = cardFor(backup, { defaultSelecting: true, defaultSelected: ["file-1", "file-2", "file-30", "gone"] });
+  const boxes = [...choosing.matchAll(/<button[^>]*role="checkbox"[^>]*>/g)].map((match) => match[0]);
+  assert.equal(boxes.length, ROW_CAP, "the first page, as before");
+  assert.equal((choosing.match(/<li class="dv-file dv-file--pick"/g) ?? []).length, ROW_CAP);
+  assert.deepEqual(boxes.slice(0, 4).map((tag) => /aria-checked="true"/.test(tag)), [false, true, true, false]);
+  assert.match(choosing, /dv-pickbar__count" role="status">3 of 58 selected · 6\.0 MB</, "file-30 is off the first page and still counts; a file that is not in the set does not");
+  assert.match(choosing, />All<\/span>/);
+  assert.match(choosing, />None<\/span>/);
+  assert.match(choosing, /Show all 58/);
+  assert.match(choosing, /<label[^>]*>Find a file<\/label>/);
+  assert.match(choosing, /role="radiogroup"[^>]*aria-label="Sort files"/);
+  assert.match(choosing, /aria-label="Actions for part0"/, "each row keeps its menu");
+  assert.doesNotMatch(choosing, />Select files<\/span>/, "already choosing");
+  assert.equal((cardFor([output(0)], { defaultOpen: true }).match(/Select files/g) ?? []).length, 0, "one file is not a choice");
+});
+
+test("while choosing, the bulk actions are Download selected and Save selected, waiting for a choice and for the backup to be whole", () => {
+  const none = cardFor(backup, { defaultSelecting: true });
+  assert.match(none, /0 of 58 selected · 0 B/);
+  assert.equal(isDisabled(buttonTag(none, "Download selected")), true);
+  assert.equal(isDisabled(buttonTag(none, "Save selected")), true);
+  assert.equal(isDisabled(buttonTag(none, "Done")), false);
+  assert.doesNotMatch(none, />Download all<\/span>|>Save to server<\/span>/, "the defaults are back only when the choosing is over");
+  const some = cardFor(backup, { defaultSelecting: true, defaultSelected: ["file-3"] });
+  assert.equal(isDisabled(buttonTag(some, "Download selected")), false);
+  assert.equal(isDisabled(buttonTag(some, "Save selected")), false);
+  const making = cardFor(backup, { defaultSelecting: true, defaultSelected: ["file-3"], busy: true });
+  for (const label of ["Download selected", "Save selected"]) {
+    assert.equal(isDisabled(buttonTag(making, label)), true);
+    assert.match(buttonTag(making, label), /title="Wait until it has finished"/);
+  }
+  const set = groupArtifactSets(backup)[0];
+  const sending = { id: "t", kind: "save", setId: set.id, artifactIds: ["file-3"], label: "x", state: "running", progress: { phase: "uploading", done: 0, total: 1, bytes: 1, totalBytes: 2 }, startedAt: NOW, origin: "user" };
+  const running = cardFor(backup, { defaultSelecting: true, defaultSelected: ["file-3"], transfers: [sending] });
+  assert.match(running, />Cancel<\/span>/, "a transfer of some of the files holds the card as one of all of them does");
+  assert.doesNotMatch(running, />Download selected<\/span>/);
+});
+
+test("choosing files: tick, All, None, and what is left once files are gone, as pure functions", () => {
+  const ids = ["a", "b", "c", "d"];
+  const one = toggle(selectNone(), "c");
+  assert.deepEqual([...one], ["c"]);
+  assert.deepEqual([...toggle(one, "c")], [], "ticking again unticks");
+  assert.deepEqual([...one], ["c"], "a choice is never changed in place");
+  assert.deepEqual(chosenIn(ids, toggle(toggle(one, "d"), "a")), ["a", "c", "d"], "in the list's own order, not the order they were ticked");
+  assert.deepEqual(chosenIn(ids, selectAll(ids)), ids, "All is every id of the list it is given, not the rows on screen");
+  assert.deepEqual(chosenIn(ids, selectNone()), []);
+  assert.deepEqual(chosenIn(["b", "c"], new Set(["a", "b", "x"])), ["b"], "a file that was removed or combined away drops out by itself");
+});
+
+test("a selection's label says it is a selection and stays short, because it ends up in a file name", () => {
+  const [set] = groupArtifactSets(backupFiles(3));
+  assert.equal(selectionLabel(set, 3), "Lenovo QUSB__BULK EDL backup (3 files)");
+  assert.equal(selectionLabel(set, 1), "Lenovo QUSB__BULK EDL backup (1 file)");
+  const [partial] = groupArtifactSets(backupFiles(3, { scope: { chosen: partitions(5), all: partitions(56) } }));
+  assert.equal(selectionLabel(partial, 2), "Lenovo QUSB__BULK EDL backup 5 of 56 (2 files)", "a partial backup keeps saying so");
+  const [named] = groupArtifactSets(backupFiles(3, { set: "tablet ".repeat(12).trim() }));
+  const long = selectionLabel(named, 12);
+  assert.ok(long.length <= 60, long);
+  assert.ok(long.endsWith(" (12 files)"), long);
+});
+
 test("every card and line of the files list reads in English, Japanese and Chinese with real words", () => {
   globalThis.document = { documentElement: {} };
   try {
     const set = groupArtifactSets(backup)[0];
-    const saved = backup.map((file) => ({ ...file, server: { saveId: "s1", path: "/srv/b/x", folder: "/srv/b", savedAt: NOW, verified: true } }));
+    const copy = { saveId: "s1", archive: "/srv/b/x.zip", entry: "x/part0.bin", archiveBytes: 41 * MB, originalBytes: 116 * MB, savedAt: NOW, verified: true };
+    const saved = backup.map((file) => ({ ...file, server: copy }));
     const running = { id: "t1", kind: "save", setId: set.id, artifactIds: set.artifactIds, label: "x", state: "running", progress: { phase: "verifying", done: 12, total: 58, bytes: 41, totalBytes: 100 }, startedAt: NOW, origin: "agent" };
     const failed = { ...running, id: "t2", state: "failed", error: { code: "unknown", message: "boom" } };
+    const downloaded = { ...running, id: "t3", kind: "download", state: "succeeded", endedAt: NOW + 1, result: { fileName: "lenovo-20261006-1831.zip", files: 58, bytes: 116 * MB, archiveBytes: 41 * MB, method: "file-picker" } };
+    const all = partitions(56);
+    const twin = twoBackups();
     for (const locale of Object.keys(locales)) {
       setLocale(locale);
+      const { tn } = words(locale);
       const say = (key, vars = {}) => escape(locales[locale][key].replace(/\{(\w+)\}/g, (_, variable) => String(vars[variable])));
       const cards = {
         collapsed: panel([...backup, input("loader.mbn")], { verifiedBy: () => true }),
@@ -289,6 +497,12 @@ test("every card and line of the files list reads in English, Japanese and Chine
         saved: panel(saved),
         running: panel(backup, { transfers: [running] }),
         failed: panel(backup, { transfers: [failed] }),
+        downloaded: panel(backup, { transfers: [downloaded] }),
+        full: panel(backupFiles(3, { scope: { chosen: all, all } })),
+        partial: panel(backupFiles(3, { set: "tablet-2026-10-07", scope: { chosen: all.slice(0, 5), all } })),
+        combine: panel(twin.artifacts),
+        confirm: html(React.createElement(CombineConfirm, { files: 3, olderFiles: 51, locked: false, onConfirm: noop, onKeep: noop })),
+        choosing: cardFor(backup, { defaultSelecting: true, defaultSelected: ["file-1", "file-2"] }),
       };
       for (const [name, markup] of Object.entries(cards)) {
         assert.doesNotMatch(markup, /devices\.files\.[a-zA-Z.]+|devices\.items\.[a-zA-Z.]+|devices\.problem\.[a-zA-Z]+/, `${locale}/${name}: a translation key shows`);
@@ -299,9 +513,17 @@ test("every card and line of the files list reads in English, Japanese and Chine
       assert.ok(cards.collapsed.includes(say("devices.files.kind.dumps")) && cards.collapsed.includes(say("devices.files.inputs")), `${locale}: kind and inputs`);
       assert.ok(cards.open.includes(say("devices.files.filter")) && cards.open.includes(say("devices.files.sortLabel")) && cards.open.includes(say("devices.files.showAll", { count: 58 })), `${locale}: list tools`);
       assert.ok(cards.open.includes(say("devices.files.copySha")) && cards.open.includes(say("devices.files.useAsInput")), `${locale}: menu`);
-      assert.ok(cards.saved.includes(say("devices.files.savedToServer")), `${locale}: saved`);
+      assert.ok(cards.open.includes(say("devices.files.selectFiles")), `${locale}: the way into choosing files`);
+      assert.ok(cards.saved.includes(say("devices.files.savedLine", { files: tn("devices.files.count", 1), original: "116 MB", archive: "41 MB" })), `${locale}: saved, with what packing did`);
       assert.ok(cards.running.includes(say("devices.files.phase.verifying")), `${locale}: running phase`);
       assert.ok(cards.failed.includes(say("devices.problem.gotIt")), `${locale}: acknowledge`);
+      assert.ok(cards.downloaded.includes(say("devices.files.downloaded", { name: "lenovo-20261006-1831.zip", original: "116 MB", archive: "41 MB" })), `${locale}: downloaded, with what packing did`);
+      assert.ok(cards.full.includes(say("devices.files.scopeFull.other", { count: 56 })), `${locale}: a full backup`);
+      assert.ok(cards.partial.includes(say("devices.files.scopePartial.other", { count: 56, chosen: 5 })), `${locale}: a partial backup, on the second line of a named one`);
+      assert.ok(cards.combine.includes(say("devices.files.combineWithOlder")), `${locale}: combine`);
+      assert.ok(cards.confirm.includes(say("devices.files.combineConfirm", { these: tn("devices.files.count", 3), older: tn("devices.files.count", 51) })) && cards.confirm.includes(say("devices.files.combine")), `${locale}: the question before combining`);
+      assert.ok(cards.choosing.includes(say("devices.files.selectedCount", { selected: 2, total: 58, size: "4.0 MB" })), `${locale}: the count`);
+      for (const key of ["selectAll", "selectNone", "downloadSelected", "saveSelected", "selectDone"]) assert.ok(cards.choosing.includes(say(`devices.files.${key}`)), `${locale}: ${key}`);
     }
   } finally {
     setLocale("en");

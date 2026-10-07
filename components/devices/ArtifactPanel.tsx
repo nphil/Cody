@@ -4,7 +4,9 @@ import { FolderInput, Plus, Upload } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useI18n } from "@/lib/i18n";
 import { deviceArtifacts } from "@/lib/devices/artifacts";
+import { olderSetOf } from "@/lib/devices/artifact-sets";
 import { FileRow, SetCard } from "./ArtifactSetCard";
+import { setDeviceName } from "./set-text";
 import type { ArtifactsState } from "./useArtifacts";
 import { Button, Disclosure, Notice, sectionHeadingStyle, TextField } from "./ui";
 
@@ -37,9 +39,10 @@ interface ArtifactPanelProps {
 }
 
 /**
- * Files & backups. What the devices made is listed as SETS (one card per run, with Download all, Save to server and
- * Remove set); what the person added (firmware, a loader) is a short group of its own. Session-owned bytes: there is
- * deliberately no remote URL input, and a server path is fetched only through the existing guarded route.
+ * Files & backups. What the devices made is listed as SETS (one card per backup, with Download all, Save to server,
+ * Remove set, Select files, and Combine with the older backup); what the person added (firmware, a loader) is a short
+ * group of its own. Session-owned bytes: there is deliberately no remote URL input, and a server path is fetched only
+ * through the existing guarded route.
  */
 export function ArtifactPanel({ sessionId, library, selectedInputId, onSelectInput, deviceLabel, verifiedBy, busySetIds, onDetails, reveal, acknowledged, acknowledge }: ArtifactPanelProps): React.ReactElement {
   const { t, locale } = useI18n();
@@ -120,25 +123,30 @@ export function ArtifactPanel({ sessionId, library, selectedInputId, onSelectInp
 
       {(storageError || error) && <Notice tone="error" role="alert">{storageError ?? error}</Notice>}
 
-      {sets.map((set) => (
-        <SetCard
-          key={`${set.id}:${reveal?.setId === set.id ? reveal.token : 0}`}
-          sessionId={sessionId}
-          set={set}
-          artifacts={artifacts}
-          transfers={transfers}
-          deviceName={set.deviceId ? deviceLabel(set.deviceId) : t("devices.files.unknownDevice")}
-          busy={busySetIds.has(set.id)}
-          selectedInputId={selectedInputId}
-          onSelectInput={onSelectInput}
-          onDetails={onDetails}
-          verifiedBy={verifiedBy}
-          acknowledged={acknowledged}
-          acknowledge={acknowledge}
-          defaultOpen={reveal?.setId === set.id}
-          locale={locale}
-        />
-      ))}
+      {sets.map((set) => {
+        const older = olderSetOf(sets, set);
+        return (
+          <SetCard
+            key={`${set.id}:${reveal?.setId === set.id ? reveal.token : 0}`}
+            sessionId={sessionId}
+            set={set}
+            older={older}
+            olderBusy={older !== undefined && busySetIds.has(older.id)}
+            artifacts={artifacts}
+            transfers={transfers}
+            deviceName={setDeviceName(set, deviceLabel, t)}
+            busy={busySetIds.has(set.id)}
+            selectedInputId={selectedInputId}
+            onSelectInput={onSelectInput}
+            onDetails={onDetails}
+            verifiedBy={verifiedBy}
+            acknowledged={acknowledged}
+            acknowledge={acknowledge}
+            defaultOpen={reveal?.setId === set.id}
+            locale={locale}
+          />
+        );
+      })}
 
       <div className="dv-inputs" aria-label={t("devices.files.inputs")} role="group">
         <div className="dv-inputs__head">

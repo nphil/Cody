@@ -10,6 +10,8 @@ export interface MenuItem {
   readonly icon?: ReactNode;
   readonly tone?: "danger";
   readonly disabled?: boolean;
+  /** Why it is disabled, when it is: shown as the item's tooltip like the other locked controls. */
+  readonly title?: string;
   readonly onSelect: () => void;
 }
 
@@ -101,6 +103,7 @@ export function RowMenu({ label, items }: { label: string; items: readonly MenuI
             type="button"
             role="menuitem"
             disabled={item.disabled}
+            title={item.title}
             className="ui-focus-ring dv-menuitem"
             style={item.tone === "danger" ? { color: "var(--status-error)" } : undefined}
             onClick={(event) => {

@@ -12,9 +12,10 @@ import { createJiti } from "jiti";
  */
 
 const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
-const { adviseFlash, EdlBackup, EdlBackupSets, EdlCommands, EdlFlash } = await jiti.import("./devices/EdlWorkflow.tsx");
+const { adviseFlash, planBackup, EdlBackup, EdlBackupSets, EdlCommands, EdlFlash } = await jiti.import("./devices/EdlWorkflow.tsx");
 const { deviceArtifacts } = await jiti.import("../lib/devices/artifacts.ts");
 const { setLocale } = await jiti.import("../lib/i18n/index.tsx");
+const { FILTER_FROM, ROW_CAP } = await jiti.import("./devices/list-view.ts");
 
 const locales = Object.fromEntries(
   await Promise.all(["en", "ja", "zh-CN"].map(async (name) => [name, JSON.parse(await readFile(new URL(`../lib/i18n/locales/${name}.json`, import.meta.url), "utf8"))])),
@@ -58,6 +59,7 @@ test("every EDL card renders in English, Japanese and Chinese with real words: n
         commands: renderToStaticMarkup(React.createElement(EdlCommands, props())),
         backup: renderToStaticMarkup(React.createElement(EdlBackup, props({ operations: [printgpt] }))),
         sets: renderToStaticMarkup(React.createElement(EdlBackupSets, props({ operations: [backup], input: image({ name: "loader.mbn" }) }))),
+        chooser: renderToStaticMarkup(React.createElement(EdlBackupSets, props({ operations: [printgpt, backup], input: image({ name: "loader.mbn" }), defaultPicked: ["boot_a"] }))),
         flash: renderToStaticMarkup(React.createElement(EdlFlash, props({ operations: [printgpt], input: image() }))),
       };
       for (const [name, html] of Object.entries(cards)) {
@@ -72,6 +74,11 @@ test("every EDL card renders in English, Japanese and Chinese with real words: n
       assert.ok(cards.sets.includes(say("devices.edl.restoreIntro")), `${locale}: restore intro`);
       assert.ok(cards.sets.includes(say("devices.edl.setLast", { id: "ab12cd34", count: 2 })), `${locale}: the last set`);
       assert.ok(cards.commands.includes(say("devices.edl.untested")), `${locale}: the honest note about what has been tried`);
+      assert.ok(cards.sets.includes(say("devices.edl.setPartitionsNoTable")), `${locale}: no table read yet`);
+      assert.ok(cards.chooser.includes(say("devices.edl.setPartitionsTitle")) && cards.chooser.includes(say("devices.edl.setPartitionsHint")), `${locale}: the partition list and what a partial backup means`);
+      assert.ok(cards.chooser.includes(say("devices.files.selectedCount", { selected: 1, total: 2, size: "32.0 KiB" })), `${locale}: the count of the whole table`);
+      assert.ok(cards.chooser.includes(say("devices.edl.setStartSome", { selected: 1, total: 2 })), `${locale}: the button for some partitions`);
+      assert.ok(cards.chooser.includes(say("devices.files.selectAll")) && cards.chooser.includes(say("devices.files.selectNone")), `${locale}: All and None`);
     }
   } finally {
     setLocale("en");
@@ -129,4 +136,76 @@ test("a backup set that cannot be restored says why, in place of the success not
   })));
   assert.match(html, /That set cannot be restored by Cody: The boot ROM&#x27;s public-key hash was not read\. Another reason\./);
   assert.doesNotMatch(html, /Last backup set:/);
+});
+
+test("what the backup asks for: everything sends no partition list, only a subset names its partitions, in the order the table lists them", () => {
+  const table = ["gpt-a", "boot_a", "system_a", "userdata"];
+  const everything = { action: "exec", command: "backup" };
+  assert.deepEqual(planBackup(table, null).request, everything, "untouched: every partition");
+  assert.deepEqual(planBackup(table, new Set(table)).request, everything, "everything ticked by hand is the same request");
+  assert.equal("options" in planBackup(table, new Set(table)).request, false, "no options at all, as the card has always asked");
+  const some = planBackup(table, new Set(["userdata", "boot_a"]));
+  assert.deepEqual(some.request, { action: "exec", command: "backup", options: { partitions: ["boot_a", "userdata"] } }, "table order, not tick order");
+  assert.deepEqual([some.kind, some.chosen, some.total], ["some", ["boot_a", "userdata"], 4]);
+  const none = planBackup(table, new Set());
+  assert.deepEqual([none.kind, none.request], ["none", undefined], "nothing chosen starts nothing");
+  assert.equal(planBackup(table, new Set(["not-in-the-table"])).kind, "none", "a tick for a partition the table no longer lists does not count");
+  assert.deepEqual([planBackup([], null).kind, planBackup([], null).request], ["all", everything], "no table read yet: a full backup");
+});
+
+const gpt = (count) => snapshot("printgpt", { partitions: Array.from({ length: count }, (_, index) => ({ index: index + 1, name: `part${index}`, bytes: (index + 1) * 1024 * 1024 })) });
+const setCard = (extra = {}) => renderToStaticMarkup(React.createElement(EdlBackupSets, props({ input: image({ name: "loader.mbn" }), ...extra })));
+const boxesOf = (markup) => [...markup.matchAll(/<button[^>]*role="checkbox"[^>]*>/g)].map((match) => /aria-checked="true"/.test(match[0]));
+
+test("the backup card says to read the partition tables first, and until then still starts a full backup", () => {
+  const markup = setCard();
+  assert.match(markup, /Read the partition tables first \(Commands tab\) to choose partitions\./);
+  assert.deepEqual(boxesOf(markup), []);
+  assert.equal(buttonOf(markup, "Back up everything"), false);
+});
+
+test("once the tables are read, every partition is a checkbox with its size, all ticked, and the button is the one it always was", () => {
+  const markup = setCard({ operations: [gpt(3)] });
+  assert.deepEqual(boxesOf(markup), [true, true, true]);
+  assert.match(markup, /part0<\/span><span class="dv-file__size">1\.0 MiB</);
+  assert.match(markup, /dv-pickbar__count" role="status">3 of 3 selected · 6\.0 MiB</);
+  assert.match(markup, />All<\/span>/);
+  assert.match(markup, />None<\/span>/);
+  assert.match(markup, /A backup of chosen partitions is still one set and one zip\. It is labelled partial and cannot be restored as a set: partitions are flashed back one at a time\./);
+  assert.equal(buttonOf(markup, "Back up everything"), false);
+  assert.doesNotMatch(markup, /Back up \d+ of \d+ partitions/);
+  assert.doesNotMatch(markup, /Find a partition/, "a short table needs no filter box");
+  assert.equal(buttonOf(setCard({ operations: [gpt(3), { id: "op", state: "running", request: { protocol: "edl", action: "exec", command: "connect" } }] }), "Back up everything"), true, "not while another operation runs");
+});
+
+test("choosing some partitions names how many on the button; choosing none leaves it disabled", () => {
+  const some = setCard({ operations: [gpt(3)], defaultPicked: ["part2", "part0"] });
+  assert.deepEqual(boxesOf(some), [true, false, true]);
+  assert.match(some, /2 of 3 selected · 4\.0 MiB</);
+  assert.equal(buttonOf(some, "Back up 2 of 3 partitions"), false);
+  assert.doesNotMatch(some, />Back up everything<\/span>/);
+  const none = setCard({ operations: [gpt(3)], defaultPicked: [] });
+  assert.deepEqual(boxesOf(none), [false, false, false]);
+  assert.match(none, /0 of 3 selected · 0 B</);
+  assert.equal(buttonOf(none, "Back up 0 of 3 partitions"), true);
+  assert.doesNotMatch(none, />Back up everything<\/span>/, "that button is for everything only");
+});
+
+test("a long partition table stays usable: a filter box, a first page and Show all, while All, None and the count are about every partition", () => {
+  const many = FILTER_FROM + ROW_CAP + 34;
+  const markup = setCard({ operations: [gpt(many)] });
+  assert.equal(boxesOf(markup).length, ROW_CAP);
+  assert.match(markup, new RegExp(`Show all ${many}`));
+  assert.match(markup, /<label[^>]*>Find a partition<\/label>/);
+  assert.match(markup, new RegExp(`${many} of ${many} selected`), "the count is of the whole table, not the rows on screen");
+  const one = setCard({ operations: [gpt(many)], defaultPicked: ["part55"] });
+  assert.match(one, new RegExp(`1 of ${many} selected`), "a partition off the first page is still ticked");
+  assert.match(one, new RegExp(`Back up 1 of ${many} partitions`));
+});
+
+test("a partition with no name is listed and chosen as partition N, the way the backup's own record names it", () => {
+  const markup = setCard({ operations: [snapshot("printgpt", { partitions: [{ index: 7, name: "", bytes: 512 }, { index: 8, name: "boot_a", bytes: 1024 }] })], defaultPicked: ["partition 7"] });
+  assert.match(markup, /partition 7<\/span>/);
+  assert.deepEqual(boxesOf(markup), [true, false]);
+  assert.match(markup, /Back up 1 of 2 partitions/);
 });

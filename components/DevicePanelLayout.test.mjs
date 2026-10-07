@@ -9,15 +9,19 @@ import puppeteer from "puppeteer-core";
 import { createJiti } from "jiti";
 
 /**
- * The Devices panel at the widths it really has (a 320 px phone, the 360 px sidebar, 480 px): the server-rendered markup of
- * the activity and the files, laid out by a real browser with the app's own stylesheet. Nothing may scroll sideways and
- * every control must be a full-size target, with every disclosure open. Skipped where there is no Chromium.
+ * The Devices panel at the widths it really has (a 300 px panel, a 320 px phone, the 360 px sidebar, 480 px): the server-rendered markup of
+ * the activity and the files (a named partial backup the server holds, in the mode where its files are checkboxes, the
+ * question before two backups are combined, and a 56-partition list to choose from), laid out by a real browser with the
+ * app's own stylesheet. Nothing may scroll sideways and every control must be a full-size target, with every disclosure
+ * open. Skipped where there is no Chromium.
  */
 
 const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
 const { NeedsYou, LiveJobs } = await jiti.import("./devices/ActivityFeed.tsx");
 const { HistoryJobRow } = await jiti.import("./devices/JobCard.tsx");
 const { ArtifactPanel } = await jiti.import("./devices/ArtifactPanel.tsx");
+const { SetCard, CombineConfirm } = await jiti.import("./devices/ArtifactSetCard.tsx");
+const { EdlBackupSets } = await jiti.import("./devices/EdlWorkflow.tsx");
 const { groupActivity, activityView } = await jiti.import("../lib/devices/activity-groups.ts");
 const { groupArtifactSets } = await jiti.import("../lib/devices/artifact-sets.ts");
 
@@ -45,6 +49,13 @@ function markup() {
     { id: "in-1", name: "prog_emmc_firehose_8953_ddr_with_a_long_name.mbn", size: 1_258_291, mime: "x", sha256: "ee".repeat(32), kind: "input", source: "picker", createdAt: NOW },
   ];
   const set = groupArtifactSets(artifacts)[0];
+  const names = finished.map((op, index) => `vendor_boot_${index}`);
+  const saved = artifacts.map((artifact) => (artifact.kind === "input" ? artifact : {
+    ...artifact,
+    provenance: { ...artifact.provenance, set: "tablet-2026-10-07-before-the-update", scope: { chosen: names.slice(0, 5), all: names } },
+    server: { saveId: "s", archive: "/srv/cody-device-artifacts/Lenovo-QUSB__BULK-a-long-device-name-tablet-2026-10-07-before-the-update.zip", entry: "tablet/vendor_boot_0.bin", archiveBytes: 610 * MB, originalBytes: 3.8 * 1024 * MB, savedAt: NOW, verified: true },
+  }));
+  const partitionTable = { id: "gpt", state: "succeeded", request: { protocol: "edl", action: "exec", command: "printgpt", deviceId: "usb-1" }, result: { summary: "ok", details: { partitions: Array.from({ length: 56 }, (_, index) => ({ index: index + 1, name: `partition_with_a_rather_long_name_${index}`, bytes: (index + 1) * 8 * MB })) } } };
   return renderToStaticMarkup(React.createElement("div", null,
     React.createElement(NeedsYou, { items: pinned, ctx: context }),
     React.createElement(LiveJobs, { jobs: live, ctx: context }),
@@ -53,10 +64,16 @@ function markup() {
       sessionId: "s", library: { artifacts, sets: groupArtifactSets(artifacts), inputs: artifacts.filter((a) => a.kind === "input"), transfers: [], error: null },
       selectedInputId: null, onSelectInput() {}, deviceLabel: () => "L", verifiedBy: () => true, busySetIds: new Set(), onDetails() {}, reveal: { setId: set.id, token: 1 }, acknowledged: new Set(), acknowledge() {},
     }),
+    React.createElement(SetCard, {
+      sessionId: "s", set: groupArtifactSets(saved)[0], older: set, artifacts: saved, transfers: [], deviceName: "L", busy: false, selectedInputId: null, onSelectInput() {}, onDetails() {}, verifiedBy: () => true,
+      acknowledged: new Set(), acknowledge() {}, locale: "en", defaultSelecting: true, defaultSelected: saved.slice(0, 3).map((artifact) => artifact.id),
+    }),
+    React.createElement(CombineConfirm, { files: 3, olderFiles: 51, locked: false, onConfirm() {}, onKeep() {} }),
+    React.createElement(EdlBackupSets, { manager: { startUser() {} }, sessionId: "s-edl", deviceId: "usb-1", operations: [partitionTable], input: undefined, onChooseFile() {}, defaultPicked: names.slice(0, 5).map((_, index) => `partition_with_a_rather_long_name_${index}`) }),
   ));
 }
 
-test("at 320, 360 and 480 px nothing scrolls sideways, nothing sticks out of the panel, and every control is a full-size target", { timeout: 120_000 }, async (t) => {
+test("at 300, 320, 360 and 480 px nothing scrolls sideways, nothing sticks out of the panel, and every control is a full-size target", { timeout: 120_000 }, async (t) => {
   const executablePath = process.env.CODY_CHROMIUM_BIN || (process.platform === "linux" ? "/usr/bin/chromium" : undefined);
   if (!executablePath || !existsSync(executablePath)) {
     t.skip("requires Chromium: set CODY_CHROMIUM_BIN or install /usr/bin/chromium");
@@ -66,7 +83,7 @@ test("at 320, 360 and 480 px nothing scrolls sideways, nothing sticks out of the
   const body = markup();
   const browser = await puppeteer.launch({ executablePath, headless: true, args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"] });
   try {
-    for (const width of [320, 360, 480]) {
+    for (const width of [300, 320, 360, 480]) {
       const page = await browser.newPage();
       await page.setViewport({ width: width + 16, height: 900 });
       const screen = `<!doctype html><html class="dark"><head><meta charset="utf-8"><style>${stylesheet}\n.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}</style></head><body style="margin:0;background:var(--bg);color:var(--text);font:13px system-ui,sans-serif"><div id="panel" style="box-sizing:border-box;width:${width}px;padding:12px;display:flex;flex-direction:column;gap:14px">${body}</div></body></html>`;

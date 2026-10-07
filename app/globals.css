@@ -3602,12 +3602,14 @@ span.linenumber {
 .dv-set__meta { font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .dv-set__status { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 12px; color: var(--text-muted); }
 .dv-set__status > span { display: inline-flex; align-items: center; gap: 4px; }
+.dv-set__scope { font-size: 12px; line-height: 1.35; color: var(--text-muted); overflow-wrap: anywhere; }
 .dv-set__path { margin: 0; font-size: 12px; line-height: 1.4; color: var(--text-dim); overflow-wrap: anywhere; }
 .dv-set__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .dv-set__transfer { display: flex; flex-direction: column; gap: 6px; }
 .dv-set__transfer-line { display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 1.4; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .dv-set__confirm { display: flex; flex-direction: column; gap: 8px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--status-error) 45%, var(--border)); border-radius: var(--radius-control); background: var(--bg); }
 .dv-set__confirm p { margin: 0; font-size: 12px; line-height: 1.45; color: var(--text); }
+.dv-set__confirm--plain { border-color: var(--border); }
 .dv-set__note { margin: 0; display: flex; align-items: center; gap: 6px; font-size: 12px; line-height: 1.4; color: var(--text-muted); overflow-wrap: anywhere; }
 .dv-set__files { display: flex; flex-direction: column; gap: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
 .dv-set__tools { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
@@ -3622,6 +3624,15 @@ span.linenumber {
 .dv-file__size--sub { font-size: 11px; }
 .dv-file--confirm { flex-direction: column; align-items: flex-start; gap: 6px; padding: 8px; background: var(--bg); }
 .dv-file--confirm p { margin: 0; font-size: 12px; line-height: 1.45; color: var(--text); }
+.dv-file--pick { padding-left: 0; }
+.dv-file--pick[data-picked] { background: var(--bg-subtle); }
+/* One checkbox per row, drawn here: the whole row is the button, so the target is the row's 44px, not the 20px box. */
+.dv-pick { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; min-height: 44px; padding: 0 4px 0 8px; border: 0; border-radius: var(--radius-control); background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.dv-pick:hover { background: var(--bg-hover); }
+.dv-pick__box { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 20px; height: 20px; border: 2px solid var(--text-dim); border-radius: 5px; color: var(--on-accent); }
+.dv-pick[aria-checked="true"] .dv-pick__box { border-color: var(--accent); background: var(--accent); }
+.dv-pickbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.dv-pickbar__count { flex: 1 1 120px; min-width: 0; font-size: 12px; line-height: 1.4; color: var(--text-muted); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .dv-inputs { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .dv-inputs__head { display: flex; align-items: center; gap: 8px; }
 .dv-inputs__empty { margin: 0; display: flex; align-items: center; gap: 8px; padding: 8px 12px; border: 1px dashed var(--border); border-radius: var(--radius-control); font-size: 12px; line-height: 1.4; color: var(--text-muted); }

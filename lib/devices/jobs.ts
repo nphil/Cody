@@ -376,6 +376,17 @@ export interface JobTitle {
   readonly vars: Readonly<Record<string, string | number>>;
 }
 
+/**
+ * An EDL backup whose requests all named their partitions (`options.partitions`) took only those, so it is titled by how
+ * many, like a run of single-partition dumps, and not "everything". A backup that named none is a backup of everything,
+ * and so is a job that holds one.
+ */
+function backupTitle(members: Job["members"]): JobTitle {
+  const lists = members.map((member) => member.request.options?.partitions);
+  if (!lists.every((list): list is unknown[] => Array.isArray(list))) return { key: "devices.job.backupSet", vars: {} };
+  return { key: "devices.job.dumpSeries", count: new Set(lists.flat()).size, vars: {} };
+}
+
 /** What a job is called, as a translation key and its values. `protocolName` is the protocol as the person reads it. */
 export function jobTitle(job: Job, protocolName: string): JobTitle {
   const { action, command, protocol, members } = job;
@@ -387,7 +398,7 @@ export function jobTitle(job: Job, protocolName: string): JobTitle {
   const live = job.phase === "waiting" || job.phase === "countdown" || job.phase === "running";
   const counted = (key: string): JobTitle => (live ? { key: `${key}Live`, vars: {} } : { key, count, vars: {} });
   if (action === "exec") {
-    if (command === "backup") return { key: "devices.job.backupSet", vars: {} };
+    if (command === "backup") return backupTitle(members);
     if (command === "restore") return { key: "devices.job.restoreSet", vars: {} };
     if (command === "printgpt") return { key: "devices.job.readTables", vars: {} };
     if (command === "connect") return { key: "devices.job.connect", vars: {} };

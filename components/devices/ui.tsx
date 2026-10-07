@@ -10,7 +10,7 @@
  * the layout does not change between the two.
  */
 
-import { TriangleAlert } from "lucide-react";
+import { Check, TriangleAlert } from "lucide-react";
 import { useId, type CSSProperties, type InputHTMLAttributes, type ReactNode, type Ref } from "react";
 
 export const TOUCH = 44;
@@ -162,6 +162,20 @@ export function Segmented<V extends string>({ label, value, options, onChange }:
         );
       })}
     </div>
+  );
+}
+
+/**
+ * One row that is one checkbox: the whole row is the target (never shorter than TOUCH), the box is drawn here, and the words
+ * inside are what a screen reader calls it. A button with the checkbox role, so it stays a full-size, focusable control and
+ * the Space key toggles it.
+ */
+export function CheckRow({ checked, onToggle, children }: { checked: boolean; onToggle: () => void; children: ReactNode }) {
+  return (
+    <button type="button" role="checkbox" aria-checked={checked} className="ui-focus-ring dv-pick" onClick={onToggle}>
+      <span aria-hidden="true" className="dv-pick__box">{checked && <Check size={14} strokeWidth={3} />}</span>
+      {children}
+    </button>
   );
 }
 
