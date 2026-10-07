@@ -153,6 +153,8 @@ export interface SetCardProps {
   defaultSelecting?: boolean;
   /** The ids of the files ticked at first while choosing. */
   defaultSelected?: readonly string[];
+  /** A question (Remove set, Combine) already asked, about the files the card listed then: for a test. */
+  defaultAsked?: { what: "remove" | "combine"; members: readonly string[] };
   locale: string;
 }
 
@@ -178,12 +180,12 @@ export function CombineConfirm({ files, older, olderTitle, locked, locale, onCon
  * the things to do with all of it (download, save to the server, remove, join the older backup); and, opened, a line per
  * file, which can be turned into a list of checkboxes to download or save only some of them.
  */
-export function SetCard({ sessionId, set, older, olderBusy = false, olderTitle, artifacts, transfers, deviceName, busy, selectedInputId, onSelectInput, onDetails, verifiedBy, acknowledged, acknowledge, defaultOpen = false, defaultSelecting = false, defaultSelected = [], locale }: SetCardProps): React.ReactElement {
+export function SetCard({ sessionId, set, older, olderBusy = false, olderTitle, artifacts, transfers, deviceName, busy, selectedInputId, onSelectInput, onDetails, verifiedBy, acknowledged, acknowledge, defaultOpen = false, defaultSelecting = false, defaultSelected = [], defaultAsked, locale }: SetCardProps): React.ReactElement {
   const { t, tn } = useI18n();
   const [open, setOpen] = useState(defaultOpen || defaultSelecting);
   // A question is about the files the card showed when it was asked: if the set changes under it (a job adds files, a file
   // is removed), the question is dropped rather than answered about files the person never saw.
-  const [asked, setAsked] = useState<{ what: "remove" | "combine"; members: string } | null>(null);
+  const [asked, setAsked] = useState<{ what: "remove" | "combine"; members: string } | null>(defaultAsked ? { what: defaultAsked.what, members: defaultAsked.members.join("\n") } : null);
   const members = set.artifactIds.join("\n");
   const confirming = asked?.members === members ? asked.what : null;
   const setConfirming = (what: "remove" | "combine" | null): void => setAsked(what === null ? null : { what, members });

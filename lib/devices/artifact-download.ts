@@ -51,14 +51,15 @@ export interface DownloadSink {
 export const browserDownloadSink: DownloadSink = {
   async choose(suggestedName) {
     if (typeof window === "undefined" || typeof window.showSaveFilePicker !== "function") return undefined;
+    let handle: FileSystemFileHandle;
     try {
-      const handle = await window.showSaveFilePicker({ suggestedName, types: [{ description: "ZIP archive", accept: { "application/zip": [".zip"] } }] });
-      return await handle.createWritable();
+      handle = await window.showSaveFilePicker({ suggestedName, types: [{ description: "ZIP archive", accept: { "application/zip": [".zip"] } }] });
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") throw new DeviceArtifactError("Saving the archive was cancelled.", "aborted");
       // Blocked here (no user activation, a frame, a policy) or not implemented: the browser's own download still works.
       return undefined;
     }
+    return openForWriting(handle);
   },
   hand(blob, fileName) {
     const url = URL.createObjectURL(blob);
@@ -70,6 +71,20 @@ export const browserDownloadSink: DownloadSink = {
     setTimeout(() => URL.revokeObjectURL(url), 5 * 60_000);
   },
 };
+
+/**
+ * The stream into a file the person chose. A file the browser created but will not let be written is reported, never
+ * quietly replaced by a second copy through the browser's own download; the empty file is removed where the browser
+ * lets a page remove what it created (`FileSystemHandle.remove`, Chromium's extension of the standard).
+ */
+export async function openForWriting(handle: FileSystemFileHandle & { remove?: () => Promise<void> }): Promise<WritableStream<Uint8Array>> {
+  try {
+    return await handle.createWritable();
+  } catch (error) {
+    await handle.remove?.().catch(() => undefined);
+    throw new DeviceArtifactError(`The file you chose cannot be written to (${error instanceof Error ? error.message : String(error)}). Choose another place or name, then download again.`, "unknown");
+  }
+}
 
 export interface ArchiveInput {
   readonly id: string;

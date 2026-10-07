@@ -54,9 +54,9 @@ function truncateBytes(text: string, limit: number): string {
   return stem.join("") + extension;
 }
 
-/** One safe path segment from whatever a browser called a file. */
+/** One safe path segment from whatever a browser called a file. A lone surrogate becomes U+FFFD here, in the open, so two such names are told apart by `uniqueFileNames` rather than silently becoming one inside the archive. */
 export function safeFileName(name: string): string {
-  let base = name.normalize("NFC").replace(/[\\/:*?"<>|\u0000-\u001f\u007f]+/g, "_");
+  let base = name.toWellFormed().normalize("NFC").replace(/[\\/:*?"<>|\u0000-\u001f\u007f]+/g, "_");
   base = base.replace(/^[\s.]+/, "_").replace(/[\s.]+$/, "");
   if (!base) base = "file";
   if (WINDOWS_DEVICE_NAME.test(base)) base = `_${base}`;

@@ -262,6 +262,43 @@ test("an older transfer that is still running keeps the card locked even after a
   assert.doesNotMatch(markup, />Download all<\/span>/, "no second transfer on top of the first");
 });
 
+test("a transfer over the files of two sets (an agent saving everything) locks both cards, so neither can be removed from under it", () => {
+  const { artifacts, older, newer, stranger } = twoBackups();
+  const everything = { id: "all", kind: "save", artifactIds: [...older.artifactIds, ...newer.artifactIds], label: "Device files", state: "running", progress: { phase: "uploading", done: 1, total: 5, bytes: 1, totalBytes: 5 }, startedAt: NOW, origin: "agent" };
+  const markup = panel(artifacts, { transfers: [everything] });
+  for (const [set, name] of [[older, "the older set"], [newer, "the newer set"]]) {
+    const card = cardOf(markup, set);
+    assert.match(card, />Cancel<\/span>/, `${name} shows the transfer`);
+    assert.doesNotMatch(card, />Download all<\/span>/, `${name} offers no second transfer`);
+    assert.equal(isDisabled(menuItemTag(card, "Remove set…")), true, `${name} cannot be removed while the transfer reads its files`);
+  }
+  const untouched = cardOf(markup, stranger);
+  assert.match(untouched, />Download all<\/span>/, "a set the transfer does not read is free");
+  assert.equal(isDisabled(menuItemTag(untouched, "Remove set…")), false);
+  assert.equal(runningTransfer([everything], older)?.id, "all");
+  assert.equal(latestTransfer([everything], older), undefined, "but the note about the last transfer stays the set's own: a transfer of everything is not this set's download");
+});
+
+test("the Remove set question is held like the other controls while a transfer runs, and a question asked about an earlier list of files is dropped when the set changes", () => {
+  const set = groupArtifactSets(backup)[0];
+  const asked = { what: "remove", members: set.artifactIds };
+  const free = cardFor(backup, { defaultAsked: asked });
+  assert.match(free, /Remove 58 files from this browser\?/);
+  assert.equal(isDisabled(buttonTag(free, "Remove")), false);
+  const held = cardFor(backup, { defaultAsked: asked, transfers: [saveJob(set)] });
+  assert.doesNotMatch(held, /from this browser\?/, "a transfer that began after the question was asked takes its place: nothing can be removed from under it");
+  assert.match(held, />Cancel<\/span>/);
+  const busy = cardFor(backup, { defaultAsked: asked, busy: true });
+  assert.match(busy, /Remove 58 files from this browser\?/);
+  assert.equal(isDisabled(buttonTag(busy, "Remove")), true, "the job that is still making the files holds the question, like every other control");
+  assert.match(buttonTag(busy, "Remove"), /title="Wait until it has finished"/);
+  assert.equal(isDisabled(buttonTag(busy, "Keep")), false);
+  // The job added a file since the question was asked: the question was about 58 files, the card now lists 59.
+  const grown = cardFor([...backup, output(99)], { defaultAsked: asked });
+  assert.doesNotMatch(grown, /from this browser\?/, "a question about an earlier list is not answered about files the person never saw");
+  assert.match(grown, />Download all<\/span>/, "the card is back to its actions");
+});
+
 test("while the backup is still being made, nothing is offered that would take half of it", () => {
   const set = groupArtifactSets(backup)[0];
   const markup = panel(backup, { busy: new Set([set.id]) });

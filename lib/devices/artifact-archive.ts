@@ -143,11 +143,14 @@ export class ArchiveError extends Error {
 // Records
 // ---------------------------------------------------------------------------------------------------------------------
 
-/** A name that is safe to extract anywhere: no leading slash, no `.` or `..` segment, no backslash or control character. */
+/**
+ * A name that is safe to extract anywhere: no leading slash, no `.` or `..` segment, no backslash or control character,
+ * and well-formed text (a lone surrogate would be written as U+FFFD, so two names could become one in the archive).
+ */
 function encodeName(name: string): { bytes: Uint8Array<ArrayBuffer>; ascii: boolean } {
   const segments = name.split("/");
   const unsafe = !name || name.startsWith("/") || name.endsWith("/") || segments.some((segment) => segment === "" || segment === "." || segment === "..");
-  if (unsafe || /[\\\u0000-\u001f\u007f]/.test(name)) throw new ArchiveError(`"${name}" is not a safe name for a file inside an archive.`, "unsafe-name");
+  if (unsafe || /[\\\u0000-\u001f\u007f]/.test(name) || !name.isWellFormed()) throw new ArchiveError(`"${name}" is not a safe name for a file inside an archive.`, "unsafe-name");
   const bytes = textEncoder.encode(name);
   if (bytes.length > SATURATED_16) throw new ArchiveError("A file name inside an archive is limited to 65,535 bytes.", "unsafe-name");
   return { bytes, ascii: bytes.length === name.length };
@@ -502,10 +505,11 @@ function openStored(source: ArchiveSource, check: EntryCheck): Body {
  * source is never read further ahead than the compressor needs, however much Node's own queue would accept.
  */
 function openDeflated(source: ArchiveSource, check: EntryCheck): Body {
+  // The source first: an `open()` that throws then leaves no compressor (about 26 KiB of its own) behind.
+  const raw = source.open().getReader();
   const compression = new CompressionStream("deflate-raw");
   const writer = compression.writable.getWriter();
   const output = compression.readable.getReader();
-  const raw = source.open().getReader();
   let wanted = false;
   let stopped = false;
   let wake: (() => void) | undefined;
