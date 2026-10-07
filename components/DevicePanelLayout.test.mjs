@@ -68,7 +68,7 @@ function markup() {
       sessionId: "s", set: groupArtifactSets(saved)[0], older: set, artifacts: saved, transfers: [], deviceName: "L", busy: false, selectedInputId: null, onSelectInput() {}, onDetails() {}, verifiedBy: () => true,
       acknowledged: new Set(), acknowledge() {}, locale: "en", defaultSelecting: true, defaultSelected: saved.slice(0, 3).map((artifact) => artifact.id),
     }),
-    React.createElement(CombineConfirm, { files: 3, olderFiles: 51, locked: false, onConfirm() {}, onKeep() {} }),
+    React.createElement(CombineConfirm, { files: 3, older: set, olderTitle: "L · Backup set", locale: "en", locked: false, onConfirm() {}, onKeep() {} }),
     React.createElement(EdlBackupSets, { manager: { startUser() {} }, sessionId: "s-edl", deviceId: "usb-1", operations: [partitionTable], input: undefined, onChooseFile() {}, defaultPicked: names.slice(0, 5).map((_, index) => `partition_with_a_rather_long_name_${index}`) }),
   ));
 }

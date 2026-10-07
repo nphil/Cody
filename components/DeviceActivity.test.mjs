@@ -283,7 +283,7 @@ test("a file's detail names where it came from, which backup it is part of, and 
   const markup = sheet([artifact]);
   assert.match(markup, /<h3[^>]*>boot_a<\/h3>/, "the partition, not the file name");
   assert.ok(markup.includes("cd".repeat(32)) && markup.includes("file-1") && markup.includes("edl-1-set-p3-boot_a.bin"));
-  assert.match(markup, /Part of<\/dt><dd[^>]*>Lenovo QUSB__BULK · Backup · 5 of 56 partitions<\/dd>/, "the same title the card has");
+  assert.match(markup, /Part of<\/dt><dd[^>]*>Lenovo QUSB__BULK · Incomplete backup · 1 file<\/dd>/, "the same title the card has: one file of a backup of five is not that backup");
   assert.match(markup, /On the server<\/dt><dd[^>]*><code>\/srv\/backups\/lenovo-2026-10-06\.zip<\/code> · checked on the server<\/dd>/, "the archive, not a folder");
   assert.match(markup, /Inside the archive<\/dt><dd[^>]*><code>lenovo-2026-10-06\/edl-1-set-p3-boot_a\.bin<\/code><\/dd>/);
   const unsaved = sheet([{ ...artifact, server: undefined }]);
@@ -299,7 +299,7 @@ test("a file's detail names where it came from, which backup it is part of, and 
       const translated = sheet([artifact]);
       assert.doesNotMatch(translated, /devices\.fact\.|devices\.files\.|\{[a-zA-Z]+\}/, `${locale}: a key shows or a placeholder is unfilled`);
       for (const key of ["devices.fact.backup", "devices.fact.onServer", "devices.fact.inArchive"]) assert.ok(translated.includes(escape(locales[locale][key])), `${locale}: ${key}`);
-      assert.ok(translated.includes(escape(locales[locale]["devices.files.scopePartial.other"].replace("{chosen}", "5").replace("{count}", "56"))), `${locale}: the backup's title`);
+      assert.ok(translated.includes(escape(locales[locale]["devices.files.scopeIncomplete.one"].replace("{count}", "1"))), `${locale}: the backup's title`);
     }
   } finally {
     setLocale("en");
