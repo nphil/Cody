@@ -24,16 +24,12 @@ export const SET_BURST_GAP_MS = 2 * 60_000;
 
 /**
  * How fast a read is assumed to have gone for a file saved before the operation's start was recorded: one MiB a second, a
- * slow read over a USB cable to a flash chip. A file's read began about `size / rate` before the file was saved.
+ * slow read over a USB cable to a flash chip. A file's read began about `size / rate` before the file was saved, but never
+ * before the previous run on the same device ended (a device does one thing at a time), which is what keeps a 4 GiB
+ * file that was really read in three minutes over a fast link from being placed an hour back, before runs that in truth
+ * came before it: see `groupArtifactSets`.
  */
 export const ESTIMATED_READ_BYTES_PER_SECOND = 1024 * 1024;
-
-/**
- * The longest a read is assumed to have taken: the estimate above would place a 4 GiB file read in three minutes over a
- * fast link more than an hour before it was saved, and swallow an unrelated run of the same kind that ended well before
- * it began. Half an hour covers the owner's slowest real reads (a 1.1 GB partition at about 1 MiB/s) with room to spare.
- */
-export const ESTIMATED_READ_MAX_MS = 30 * 60_000;
 
 /**
  * Files of a backup saved before provenance existed: each partition is read twice and only the first read is kept, so
@@ -58,12 +54,13 @@ export function effectiveSetName(artifact: Pick<DeviceArtifact, "setName" | "pro
 
 /**
  * When the work that made this file began: what the operation recorded, or, for a file saved before that was recorded,
- * its save time minus the time a read of its size would have taken, at most ESTIMATED_READ_MAX_MS.
+ * its save time minus the time a read of its size would have taken at ESTIMATED_READ_BYTES_PER_SECOND. The grouping
+ * floors that estimate at the end of the previous run on the device; on its own it is only what the file's size says.
  */
 export function estimatedStart(artifact: DeviceArtifact): number {
   const recorded = artifact.provenance?.startedAt;
   if (recorded !== undefined) return Math.min(recorded, artifact.createdAt);
-  return Math.floor(artifact.createdAt - Math.min((artifact.size / ESTIMATED_READ_BYTES_PER_SECOND) * 1000, ESTIMATED_READ_MAX_MS));
+  return Math.floor(artifact.createdAt - (artifact.size / ESTIMATED_READ_BYTES_PER_SECOND) * 1000);
 }
 
 interface Kind {
@@ -82,6 +79,8 @@ interface Group extends Kind {
   name?: string;
   start: number;
   end: number;
+  /** The start is the operation's own record, not an estimate from the files' sizes. */
+  recorded?: boolean;
   /** The scope each operation declared, by operation id. */
   scopes: Map<string, BackupScope>;
 }
@@ -214,8 +213,10 @@ function finish(group: Group, legacy: boolean): ArtifactSet {
  *   whenever and with whatever command they were made.
  * - Otherwise an operation's files are one run. Consecutive runs on one device with the same protocol, action and command are one
  *   set when no more than SET_BURST_GAP_MS passes between the end of one (its last file) and the start of the next (when its
- *   operation began; estimated from the file's size for a file saved before that was recorded). A different kind of run on
- *   that device in between ends the set.
+ *   operation began). For a file saved before that was recorded the start is estimated from the file's size, and the estimate
+ *   reaches back no further than the end of the run before it on that device: a device does one thing at a time, so the
+ *   estimate can only bridge the gap to the run that really came before it, never place a run before runs it followed. A
+ *   different kind of run on that device in between ends the set.
  * - Files with no provenance and no name are grouped by what their file names say (one EDL unit's backup, its restore copies,
  *   its other dumps) and by time, and the set says `legacy`.
  */
@@ -248,6 +249,7 @@ export function groupArtifactSets(artifacts: readonly DeviceArtifact[]): Artifac
         ...(provenance.label === undefined ? {} : { label: provenance.label }),
         start: estimatedStart(artifact),
         end: artifact.createdAt,
+        recorded: provenance.startedAt !== undefined,
         scopes: new Map(),
       };
       runs.set(provenance.operationId, run);
@@ -286,15 +288,22 @@ export function groupArtifactSets(artifacts: readonly DeviceArtifact[]): Artifac
     }, members.every((member) => !member.provenance)));
   }
 
+  // Runs in the order they ended, which on one device is the order they ran: an estimated start is floored at the end of
+  // the run before it, so it can bridge the quiet time to that run and nothing more.
   const open = new Map<string, Group>();
-  for (const run of [...runs.values()].sort((left, right) => left.start - right.start || (left.operationIds[0]! < right.operationIds[0]! ? -1 : 1))) {
-    const current = open.get(run.deviceId!);
+  const previousEnd = new Map<string, number>();
+  for (const run of [...runs.values()].sort((left, right) => left.end - right.end || (left.operationIds[0]! < right.operationIds[0]! ? -1 : 1))) {
+    const device = run.deviceId!;
+    const before = previousEnd.get(device);
+    if (!run.recorded && before !== undefined) run.start = Math.max(run.start, before);
+    previousEnd.set(device, Math.max(before ?? run.end, run.end));
+    const current = open.get(device);
     if (current && sameKind(current, run) && run.start - current.end <= SET_BURST_GAP_MS) {
       join(current, run);
       continue;
     }
     if (current) sets.push(finish(current, false));
-    open.set(run.deviceId!, run);
+    open.set(device, run);
   }
   for (const group of open.values()) sets.push(finish(group, false));
 

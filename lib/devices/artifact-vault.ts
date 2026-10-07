@@ -625,16 +625,49 @@ function heldBytes(finished: readonly FinishedSave[], unfinished: readonly Store
   return held;
 }
 
-/** The bytes unfinished saves are still owed: every file not yet verified, less what is already stored of it. */
-async function unsentBytes(config: VaultConfig, unfinished: readonly StoredSave[]): Promise<number> {
-  let owed = 0;
+/** How long an unfinished save that nobody is sending to keeps disk room for its missing bytes: a tab closed for longer than this is not about to send them. */
+const OWED_GRACE_MS = 60 * 60 * 1000;
+
+/** When a save's folder was last written to: a slice appended, a file verified, the save announced. */
+async function lastTouched(directory: string): Promise<number> {
+  const names = await fsp.readdir(directory).catch(() => []);
+  let latest = 0;
+  for (const name of names) latest = Math.max(latest, await fsp.stat(path.join(directory, name)).then((stat) => stat.mtimeMs, () => 0));
+  return latest;
+}
+
+/** An unfinished save whose bytes are still to come, and that someone is still sending (touched within OWED_GRACE_MS). */
+interface OwedSave {
+  readonly label: string;
+  readonly saveId: string;
+  readonly bytes: number;
+  /** Milliseconds since it was last written to. */
+  readonly idleMs: number;
+}
+
+/**
+ * The unfinished saves still owed bytes (every file not yet verified, less what is already stored of it) whose sender is
+ * still at it. One untouched for OWED_GRACE_MS is not about to need the room: its folder stays (the retention period
+ * decides that), but a new save is not refused on its account.
+ */
+async function owedSaves(config: VaultConfig, unfinished: readonly StoredSave[], now: number): Promise<OwedSave[]> {
+  const owed: OwedSave[] = [];
   for (const stored of unfinished) {
     const directory = incomingDirectory(config, stored.saveId);
+    let bytes = 0;
     for (const [index, file] of stored.files.entries()) {
-      if (!file.verified) owed += Math.max(0, file.size - (await sizeOf(path.join(directory, partName(index)))));
+      if (!file.verified) bytes += Math.max(0, file.size - (await sizeOf(path.join(directory, partName(index)))));
     }
+    if (bytes === 0) continue;
+    const idleMs = now - (await lastTouched(directory));
+    if (idleMs <= OWED_GRACE_MS) owed.push({ label: stored.label, saveId: stored.saveId, bytes, idleMs });
   }
   return owed;
+}
+
+function describeIdle(idleMs: number): string {
+  const minutes = Math.round(idleMs / 60_000);
+  return minutes < 1 ? "moments ago" : `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
 }
 
 /** Refuses with `disk_full` when the disk under the vault has less than the floor to spare; a disk that cannot be asked is never refused. */
@@ -759,12 +792,7 @@ async function sweepIncoming(config: VaultConfig, now: number, finished: readonl
       builds().delete(entry.name);
       continue;
     }
-    const touched = await fsp.readdir(directory).then(async (names) => {
-      let latest = 0;
-      for (const name of names) latest = Math.max(latest, await fsp.stat(path.join(directory, name)).then((stat) => stat.mtimeMs, () => 0));
-      return latest;
-    }, () => 0);
-    if (now - touched > config.limits.incomingTtlMs) {
+    if (now - (await lastTouched(directory)) > config.limits.incomingTtlMs) {
       await fsp.rm(directory, { recursive: true, force: true }).catch(() => undefined);
       builds().delete(entry.name);
       continue;
@@ -818,10 +846,14 @@ export async function beginSave(config: VaultConfig, actor: SaveActor, raw: unkn
         : `The server's artifact folder holds ${describeBytes(held)} and is limited to ${describeBytes(cap)}, so ${describeBytes(total)} more does not fit. Delete an older save first.`);
     }
     // The files arrive first and the archive is then written beside them, so for a while the disk holds both: the raw
-    // bytes of every unfinished save that are still to come, this save's files, as much again for its archive, and the floor.
-    const owed = await unsentBytes(config, unfinished);
-    requireFreeSpace(config, owed + total + reserve + config.limits.minFreeBytes, (available) =>
-      `The server has ${describeBytes(available)} free and this save needs ${describeBytes(total)} for its files, as much again while its zip is written beside them, ${owed > 0 ? `${describeBytes(owed)} still to arrive for other saves, ` : ""}and ${describeBytes(config.limits.minFreeBytes)} to spare. Free some space or save fewer files at a time.`);
+    // bytes still to come for every unfinished save somebody is sending, this save's files, as much again for its archive, and the floor.
+    const owed = await owedSaves(config, unfinished, now);
+    const owedBytes = owed.reduce((sum, save) => sum + save.bytes, 0);
+    requireFreeSpace(config, owedBytes + total + reserve + config.limits.minFreeBytes, (available) => {
+      const others = owed.map((save) => `${describeBytes(save.bytes)} for "${save.label}" (save ${save.saveId}, last sent to ${describeIdle(save.idleMs)})`).join(", ");
+      const waiting = owed.length === 0 ? "" : ` ${describeBytes(owedBytes)} of that is still to arrive for ${owed.length === 1 ? "another save" : "other saves"}: ${others}. Let ${owed.length === 1 ? "it" : "them"} finish, or an hour after the last slice ${owed.length === 1 ? "it stops" : "they stop"} holding the room.`;
+      return `The server has ${describeBytes(available)} free and this save needs ${describeBytes(total)} for its files, as much again while its zip is written beside them, and ${describeBytes(config.limits.minFreeBytes)} to spare.${waiting} Free some space or save fewer files at a time.`;
+    });
 
     const saveId = randomUUID().replaceAll("-", "");
     const taken = await takenNames(config, unfinished);

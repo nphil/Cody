@@ -4,6 +4,7 @@ import { hashBlobWithCrc } from "./blob-stream";
 import type { StreamArtifact } from "./flasher";
 import { combinedSetName, effectiveSetName, groupArtifactSets, olderSetOf, setFileLabel, setSaveState } from "./artifact-sets";
 import { usableSetName } from "./set-name";
+import { isRecord } from "@/lib/type-guards";
 import { archiveFileName, browserDownloadSink, exportArchive, type ArchiveInput, type DownloadSink } from "./artifact-download";
 import { listServerSaves, uploadToServer, type SaveBegun, type ServerSave, type UploadFile } from "./artifact-upload";
 import {
@@ -65,6 +66,47 @@ interface PersistedSetName {
   readonly sessionId: string;
   readonly artifactId: string;
   readonly setName: string;
+}
+
+/** A filing an earlier 0.54 build wrote into the artifacts store, under this key prefix; see `artifactsFromRows`. */
+const STRAY_FILING_PREFIX = "\u0000set-name:";
+
+interface StrayFiling {
+  readonly key: string;
+  readonly artifactId: string;
+  readonly setName?: string;
+}
+
+/** The artifact a row of the artifacts store holds, or nothing for a row of another shape. */
+function artifactOf(row: unknown): StoredDeviceArtifact | undefined {
+  return isRecord(row) && isRecord(row.artifact) && typeof row.artifact.id === "string" ? (row.artifact as unknown as StoredDeviceArtifact) : undefined;
+}
+
+/**
+ * A session's files from the rows of its artifacts store and the filings of its set-names database. A row that is not an
+ * artifact is skipped, never a reason for the whole list to fail: an earlier 0.54 build kept Combine filings as rows of
+ * this store (`\u0000set-name:` keys), and those are returned apart (`strays`) so the escrow can move them to the
+ * set-names database; until it has, they still name the sets a person combined on that build, unless a newer filing says
+ * otherwise. A row of a shape nothing here knows is left alone.
+ */
+export function artifactsFromRows(rows: readonly unknown[], filed: readonly PersistedSetName[]): { artifacts: StoredDeviceArtifact[]; strays: StrayFiling[] } {
+  const strays: StrayFiling[] = [];
+  const names = new Map<string, string>();
+  for (const row of rows) {
+    if (artifactOf(row) || !isRecord(row) || typeof row.key !== "string" || !row.key.startsWith(STRAY_FILING_PREFIX) || typeof row.artifactId !== "string") continue;
+    const setName = typeof row.setName === "string" ? row.setName : undefined;
+    strays.push({ key: row.key, artifactId: row.artifactId, ...(setName === undefined ? {} : { setName }) });
+    if (setName !== undefined) names.set(row.artifactId, setName);
+  }
+  for (const row of filed) names.set(row.artifactId, row.setName);
+  const artifacts: StoredDeviceArtifact[] = [];
+  for (const row of rows) {
+    const artifact = artifactOf(row);
+    if (!artifact) continue;
+    const setName = names.get(artifact.id);
+    artifacts.push(setName ? { ...artifact, setName } : artifact);
+  }
+  return { artifacts, strays };
 }
 
 export interface AddDeviceArtifactOptions {
@@ -223,27 +265,54 @@ class IndexedDbArtifactPersistence {
   async get(sessionId: string, artifactId: string): Promise<StoredDeviceArtifact | undefined> {
     const database = await this.open();
     const transaction = database.transaction(STORE_NAME, "readonly");
-    const row = await waitForTransaction(transaction, transaction.objectStore(STORE_NAME).get(artifactKey(sessionId, artifactId)) as IDBRequest<PersistedDeviceArtifact | undefined>);
-    if (!row) return undefined;
+    const row = await waitForTransaction(transaction, transaction.objectStore(STORE_NAME).get(artifactKey(sessionId, artifactId)) as IDBRequest<unknown>);
+    const artifact = artifactOf(row);
+    if (!artifact) return undefined;
     const names = await this.openNames();
     const filing = names.transaction(SET_NAMES_STORE, "readonly");
     const setName = await waitForTransaction(filing, filing.objectStore(SET_NAMES_STORE).get(artifactKey(sessionId, artifactId)) as IDBRequest<PersistedSetName | undefined>);
-    return setName ? { ...row.artifact, setName: setName.setName } : row.artifact;
+    return setName ? { ...artifact, setName: setName.setName } : artifact;
   }
 
   async list(sessionId: string): Promise<readonly StoredDeviceArtifact[]> {
     const database = await this.open();
     const transaction = database.transaction(STORE_NAME, "readonly");
-    const rows = await waitForTransaction(transaction, transaction.objectStore(STORE_NAME).index("sessionId").getAll(sessionId) as IDBRequest<PersistedDeviceArtifact[]>);
+    const rows = await waitForTransaction(transaction, transaction.objectStore(STORE_NAME).index("sessionId").getAll(sessionId) as IDBRequest<unknown[]>);
     const names = await this.openNames();
     const filing = names.transaction(SET_NAMES_STORE, "readonly");
     const filed = await waitForTransaction(filing, filing.objectStore(SET_NAMES_STORE).index("sessionId").getAll(sessionId) as IDBRequest<PersistedSetName[]>);
-    const byArtifact = new Map(filed.map((row) => [row.artifactId, row.setName]));
-    // A filing whose file is gone (removed by 0.53.0, which does not know about filings) names nothing and is ignored.
-    return rows.map((row) => {
-      const setName = byArtifact.get(row.artifact.id);
-      return setName ? { ...row.artifact, setName } : row.artifact;
-    });
+    const { artifacts, strays } = artifactsFromRows(rows, filed);
+    if (strays.length > 0) await this.adoptStrays(sessionId, strays);
+    return artifacts;
+  }
+
+  /**
+   * Filings an earlier 0.54 build kept as rows of the artifacts store (`\u0000set-name:` keys) are moved to the set-names
+   * database, where a filing already made there wins, and removed from the artifacts store, so 0.53.0 never meets them.
+   */
+  private async adoptStrays(sessionId: string, strays: readonly StrayFiling[]): Promise<void> {
+    const names = await this.openNames();
+    const filing = names.transaction(SET_NAMES_STORE, "readwrite");
+    const store = filing.objectStore(SET_NAMES_STORE);
+    let last: IDBRequest<PersistedSetName | undefined> | undefined;
+    for (const stray of strays) {
+      const setName = stray.setName;
+      if (setName === undefined) continue;
+      const key = artifactKey(sessionId, stray.artifactId);
+      const existing = store.get(key) as IDBRequest<PersistedSetName | undefined>;
+      // A put issued from the get's own callback lands in the same transaction, before it commits.
+      existing.onsuccess = () => {
+        if (!existing.result) store.put({ key, sessionId, artifactId: stray.artifactId, setName } satisfies PersistedSetName);
+      };
+      last = existing;
+    }
+    if (last) await waitForTransaction(filing, last);
+    const database = await this.open();
+    const cleanup = database.transaction(STORE_NAME, "readwrite");
+    const artifacts = cleanup.objectStore(STORE_NAME);
+    let removed: IDBRequest<undefined> | undefined;
+    for (const stray of strays) removed = artifacts.delete(stray.key);
+    if (removed) await waitForTransaction(cleanup, removed);
   }
 
   /** Files these artifacts under set names, each in a small row of its own: the Blobs are not touched. */

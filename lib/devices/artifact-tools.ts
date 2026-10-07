@@ -133,7 +133,10 @@ const saveHandler: DeviceOperationToolHandler = async (args, { bridge }) => {
   try {
     ack = await bridge.requestArtifactSave(selection, label || undefined);
   } catch (error) {
-    return `Could not start the save: ${error instanceof Error ? error.message : String(error)}`;
+    const message = error instanceof Error ? error.message : String(error);
+    // The server names the unfinished saves whose missing bytes hold the room (see artifact-vault.ts beginSave).
+    const held = /still to arrive for (?:another save|other saves)/.test(message) ? " An unfinished save that nobody will finish can be removed with DELETE /api/devices/artifacts/saves/<saveId>; untouched, it is swept after 7 days." : "";
+    return `Could not start the save: ${message}${held}`;
   }
   const intro = `Save ${ack.saveId} ${ack.alreadySaved ? "was already on the server" : ack.resumed ? "was resumed" : "was started"}: ${count(ack.files)}, ${formatBytes(ack.bytes)}.`;
   const config = vaultConfig();
