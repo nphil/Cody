@@ -22,7 +22,9 @@ const { FILTER_FROM, ROW_CAP, narrow } = await jiti.import("./devices/list-view.
 const { chosenIn, selectAll, selectNone, toggle } = await jiti.import("./devices/selection.ts");
 const { downloadedText, fileLabel, latestTransfer, savedText, scopeText, selectionLabel, selectionText, setKind, setTitle, transferText, verifiedText } = await jiti.import("./devices/set-text.ts");
 const { groupArtifactSets } = await jiti.import("../lib/devices/artifact-sets.ts");
+const { labelSlug } = await jiti.import("../lib/devices/artifact-names.ts");
 const { setLocale } = await jiti.import("../lib/i18n/index.tsx");
+const { whenText } = await jiti.import("./devices/job-text.ts");
 
 const locales = Object.fromEntries(
   await Promise.all(["en", "ja", "zh-CN"].map(async (name) => [name, JSON.parse(await readFile(new URL(`../lib/i18n/locales/${name}.json`, import.meta.url), "utf8"))])),
@@ -82,6 +84,13 @@ const backupFiles = (count, provenance = {}, over = {}) => Array.from({ length: 
   provenance: { operationId: "op-backup", deviceId: "usb-1", protocol: "edl", action: "exec", command: "backup", target: `part${index}`, label: "Lenovo QUSB__BULK", ...provenance },
   ...over,
 }));
+/** The files of ONE EDL backup of `chosen` of `all` partitions, whole: both tables, the partitions, and the manifest the backup writes last. */
+const wholeBackup = (chosen, all, provenance = {}) => [
+  ...["edl-1-set-gpt-primary.bin", ...chosen.map((name, index) => `edl-1-set-p${index}-${name}.bin`), "edl-1-set-gpt-backup.bin", "edl-1-set-0123abcd.manifest.json"].map((name, index) => output(index, {
+    name,
+    provenance: { operationId: "op-backup", deviceId: "usb-1", protocol: "edl", action: "exec", command: "backup", label: "Lenovo QUSB__BULK", scope: { chosen, all }, ...provenance },
+  })),
+];
 /** An older backup of 2 files and a newer one of 3 on one device, and one more on another device. */
 function twoBackups() {
   const made = (prefix, count, operationId, deviceId, at) => Array.from({ length: count }, (_, index) => output(index, {
@@ -326,9 +335,11 @@ test("what a set is, and how a transfer and a verification read", () => {
 
 test("the sentences for what a backup took, what the server holds and what a download wrote", () => {
   const en = words("en");
-  assert.equal(scopeText({ chosen: 56, total: 56 }, en.tn), "Full backup · 56 partitions");
-  assert.equal(scopeText({ chosen: 1, total: 1 }, en.tn), "Full backup · 1 partition");
-  assert.equal(scopeText({ chosen: 5, total: 56 }, en.tn), "Backup · 5 of 56 partitions");
+  assert.equal(scopeText({ chosen: 56, total: 56, complete: true }, 59, en.tn), "Full backup · 56 partitions");
+  assert.equal(scopeText({ chosen: 1, total: 1, complete: true }, 4, en.tn), "Full backup · 1 partition");
+  assert.equal(scopeText({ chosen: 5, total: 56, complete: true }, 8, en.tn), "Backup · 5 of 56 partitions");
+  assert.equal(scopeText({ chosen: 56, total: 56, complete: false }, 3, en.tn), "Incomplete backup · 3 files", "a backup the set does not hold whole never reads as a full one");
+  assert.equal(scopeText({ chosen: 5, total: 56, complete: false }, 1, en.tn), "Incomplete backup · 1 file");
   const saved = { state: "saved", path: "/srv/b/lenovo.zip", savedAt: NOW, verified: true, files: 56, bytes: 3.8 * 1024 ** 3, archiveBytes: 610 * MB, archives: 1 };
   assert.equal(savedText(saved, en.t, en.tn), "Saved · 1 file · 3.8 GB → 610 MB", "the whole save is one archive: one file");
   assert.equal(savedText({ ...saved, bytes: 5 * 1024 ** 3, archiveBytes: 700 * MB, archives: 2 }, en.t, en.tn), "Saved · 2 files · 5.0 GB → 700 MB", "saved in two groups: two archives");
@@ -341,22 +352,27 @@ test("the sentences for what a backup took, what the server holds and what a dow
 
 test("a backup says how much of the device it took: Full backup, or K of N, so a partial one cannot pass for a whole one", () => {
   const all = partitions(56);
-  const full = panel(backupFiles(3, { scope: { chosen: all, all } }));
+  const full = panel(wholeBackup(all, all));
   assert.equal(titleOf(full), "Lenovo QUSB__BULK · Full backup · 56 partitions");
-  const part = panel(backupFiles(3, { scope: { chosen: all.slice(0, 5), all } }));
+  const stopped = panel(backupFiles(3, { scope: { chosen: all, all } }));
+  assert.equal(titleOf(stopped), "Lenovo QUSB__BULK · Incomplete backup · 3 files", "three files of a backup of 56, without its manifest, are a backup that stopped: never a full one");
+  assert.doesNotMatch(stopped, /Full backup/);
+  const trimmed = panel(wholeBackup(all, all).slice(1));
+  assert.equal(titleOf(trimmed), "Lenovo QUSB__BULK · Incomplete backup · 58 files", "a whole backup minus one file is not whole");
+  const part = panel(wholeBackup(all.slice(0, 5), all));
   assert.equal(titleOf(part), "Lenovo QUSB__BULK · Backup · 5 of 56 partitions");
   assert.doesNotMatch(part, /Full backup/);
   // One sentence names the card for a screen reader, in its menu and over its list.
   assert.match(part, /<article class="dv-set" aria-label="Lenovo QUSB__BULK · Backup · 5 of 56 partitions"/);
   assert.match(part, /aria-label="More actions for Lenovo QUSB__BULK · Backup · 5 of 56 partitions"/);
-  assert.match(cardFor(backupFiles(3, { scope: { chosen: all.slice(0, 5), all } }), { defaultOpen: true }), /aria-label="Files in Lenovo QUSB__BULK · Backup · 5 of 56 partitions"/);
-  assert.equal(setTitle(groupArtifactSets(backupFiles(3, { scope: { chosen: all, all } }))[0], "Lenovo now", words("en").t, words("en").tn), "Lenovo QUSB__BULK · Full backup · 56 partitions", "the name the files recorded wins over the device's name now");
+  assert.match(cardFor(wholeBackup(all.slice(0, 5), all), { defaultOpen: true }), /aria-label="Files in Lenovo QUSB__BULK · Backup · 5 of 56 partitions"/);
+  assert.equal(setTitle(groupArtifactSets(wholeBackup(all, all))[0], "Lenovo now", words("en").t, words("en").tn), "Lenovo QUSB__BULK · Full backup · 56 partitions", "the name the files recorded wins over the device's name now");
   assert.equal(titleOf(panel(backupFiles(3))), "Lenovo QUSB__BULK · Backup set", "no scope, no name: what made it, as before");
 });
 
 test("a set an agent named leads with that name and keeps the partitions it took on a second line; a name a person made up by combining is never shown", () => {
   const all = partitions(56);
-  const named = panel(backupFiles(3, { set: "tablet-2026-10-07", scope: { chosen: all.slice(0, 5), all } }));
+  const named = panel(wholeBackup(all.slice(0, 5), all, { set: "tablet-2026-10-07" }));
   assert.equal(titleOf(named), "Lenovo QUSB__BULK · tablet-2026-10-07");
   assert.match(named, /class="dv-set__title">[^<]*<\/span><span class="dv-set__scope">Backup · 5 of 56 partitions<\/span><span class="dv-set__meta"/);
   const plain = panel(backupFiles(3, { set: "tablet-2026-10-07" }));
@@ -395,12 +411,13 @@ test("Combine waits while either backup is being sent or is still being made, an
 });
 
 test("combining asks first: which files join which and what it makes, and the safe choice, Keep, has the focus", () => {
-  const confirm = (props = {}) => html(React.createElement(CombineConfirm, { files: 3, olderFiles: 51, locked: false, onConfirm: noop, onKeep: noop, ...props }));
+  const [olderSet] = groupArtifactSets(backupFiles(51, {}, { createdAt: NOW - 3_600_000 }));
+  const confirm = (props = {}) => html(React.createElement(CombineConfirm, { files: 3, older: olderSet, olderTitle: "Lenovo QUSB__BULK · Backup set", locale: "en", locked: false, onConfirm: noop, onKeep: noop, ...props }));
   const markup = confirm();
-  assert.match(markup, /<p>3 files will join the older backup of 51 files\. The two become one card and one zip file\.<\/p>/);
+  assert.match(markup, /<p>3 files will join Lenovo QUSB__BULK · Backup set \([^)]+, 51 files\)\. The two become one card and one zip file\.<\/p>/, "the question names the backup it would join, with its date and size");
   assert.match(markup, />Combine<\/span>/);
   assert.match(markup, /autofocus=""[^>]*>(?:(?!<\/button>).)*Keep/s);
-  assert.match(confirm({ files: 1, olderFiles: 1 }), /<p>1 file will join the older backup of 1 file\./);
+  assert.match(confirm({ files: 1, older: groupArtifactSets(backupFiles(1))[0] }), /<p>1 file will join Lenovo QUSB__BULK · Backup set \([^)]+, 1 file\)\./);
   assert.equal(isDisabled(buttonTag(markup, "Combine")), false);
   const held = confirm({ locked: true });
   assert.equal(isDisabled(buttonTag(held, "Combine")), true, "a transfer that began after the question was asked holds it");
@@ -468,12 +485,14 @@ test("a selection's label says it is a selection and stays short, because it end
   const [set] = groupArtifactSets(backupFiles(3));
   assert.equal(selectionLabel(set, 3), "Lenovo QUSB__BULK EDL backup (3 files)");
   assert.equal(selectionLabel(set, 1), "Lenovo QUSB__BULK EDL backup (1 file)");
-  const [partial] = groupArtifactSets(backupFiles(3, { scope: { chosen: partitions(5), all: partitions(56) } }));
+  const [partial] = groupArtifactSets(wholeBackup(partitions(5), partitions(56)));
   assert.equal(selectionLabel(partial, 2), "Lenovo QUSB__BULK EDL backup 5 of 56 (2 files)", "a partial backup keeps saying so");
-  const [named] = groupArtifactSets(backupFiles(3, { set: "tablet ".repeat(12).trim() }));
+  const [stopped] = groupArtifactSets(backupFiles(3, { scope: { chosen: partitions(5), all: partitions(56) } }));
+  assert.equal(selectionLabel(stopped, 2), "Lenovo QUSB__BULK EDL backup incomplete (2 files)", "and so does one that stopped part-way");
+  const [named] = groupArtifactSets(wholeBackup(partitions(5), partitions(56), { set: "tablet ".repeat(12).trim() }));
   const long = selectionLabel(named, 12);
-  assert.ok(long.length <= 60, long);
-  assert.ok(long.endsWith(" (12 files)"), long);
+  assert.ok(long.endsWith(" 5 of 56 (12 files)"), long);
+  assert.ok(labelSlug(long).endsWith("-5-of-56-12-files"), `the whole suffix survives the file name: ${labelSlug(long)}`);
 });
 
 test("every card and line of the files list reads in English, Japanese and Chinese with real words", () => {
@@ -498,10 +517,11 @@ test("every card and line of the files list reads in English, Japanese and Chine
         running: panel(backup, { transfers: [running] }),
         failed: panel(backup, { transfers: [failed] }),
         downloaded: panel(backup, { transfers: [downloaded] }),
-        full: panel(backupFiles(3, { scope: { chosen: all, all } })),
-        partial: panel(backupFiles(3, { set: "tablet-2026-10-07", scope: { chosen: all.slice(0, 5), all } })),
+        full: panel(wholeBackup(all, all)),
+        partial: panel(wholeBackup(all.slice(0, 5), all, { set: "tablet-2026-10-07" })),
+        stopped: panel(backupFiles(3, { scope: { chosen: all, all } })),
         combine: panel(twin.artifacts),
-        confirm: html(React.createElement(CombineConfirm, { files: 3, olderFiles: 51, locked: false, onConfirm: noop, onKeep: noop })),
+        confirm: html(React.createElement(CombineConfirm, { files: 3, older: groupArtifactSets(backupFiles(51))[0], olderTitle: "Lenovo QUSB__BULK · Backup set", locale, locked: false, onConfirm: noop, onKeep: noop })),
         choosing: cardFor(backup, { defaultSelecting: true, defaultSelected: ["file-1", "file-2"] }),
       };
       for (const [name, markup] of Object.entries(cards)) {
@@ -521,7 +541,7 @@ test("every card and line of the files list reads in English, Japanese and Chine
       assert.ok(cards.full.includes(say("devices.files.scopeFull.other", { count: 56 })), `${locale}: a full backup`);
       assert.ok(cards.partial.includes(say("devices.files.scopePartial.other", { count: 56, chosen: 5 })), `${locale}: a partial backup, on the second line of a named one`);
       assert.ok(cards.combine.includes(say("devices.files.combineWithOlder")), `${locale}: combine`);
-      assert.ok(cards.confirm.includes(say("devices.files.combineConfirm", { these: tn("devices.files.count", 3), older: tn("devices.files.count", 51) })) && cards.confirm.includes(say("devices.files.combine")), `${locale}: the question before combining`);
+      assert.ok(cards.confirm.includes(escape(say("devices.files.combineConfirm", { these: tn("devices.files.count", 3), title: "Lenovo QUSB__BULK · Backup set", when: whenText(NOW + 50_000, locale), older: tn("devices.files.count", 51) }))) && cards.confirm.includes(say("devices.files.combine")), `${locale}: the question before combining`);
       assert.ok(cards.choosing.includes(say("devices.files.selectedCount", { selected: 2, total: 58, size: "4.0 MB" })), `${locale}: the count`);
       for (const key of ["selectAll", "selectNone", "downloadSelected", "saveSelected", "selectDone"]) assert.ok(cards.choosing.includes(say(`devices.files.${key}`)), `${locale}: ${key}`);
     }

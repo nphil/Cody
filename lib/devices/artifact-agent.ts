@@ -15,7 +15,7 @@
 import type { ArtifactSaveAck, ArtifactSaveSelection, DeviceArtifactSaveFrame } from "./protocol";
 import type { DeviceArtifact, TransferJob } from "./artifact-model";
 import type { SaveBegun } from "./artifact-upload";
-import { effectiveSetName, shortArtifactName } from "./artifact-sets";
+import { effectiveSetName, groupArtifactSets, selectionLabel, setFileLabel, shortArtifactName } from "./artifact-sets";
 import { DeviceArtifactError } from "./artifact-model";
 import { isRecord } from "../type-guards";
 
@@ -33,12 +33,27 @@ export interface AgentSaveStore {
 /** How many file names an error lists before it says "and N more". */
 const LISTED_NAMES = 12;
 
-function stringList(value: unknown): string[] | undefined {
-  return Array.isArray(value) && value.every((item): item is string => typeof item === "string" && item.length > 0 && item.length <= 200) ? value : undefined;
+const MAX_NAME_CHARS = 200;
+
+/** The names in a list, or what is wrong with it: a list with one bad entry is refused whole, never used without that entry (which could widen the save). */
+function nameList(value: unknown, field: string): string[] | string {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) return `${field} must be a list of names.`;
+  for (const [position, item] of value.entries()) {
+    if (typeof item !== "string" || item.length === 0 || item.length > MAX_NAME_CHARS) return `${field}[${position}] must be a name of 1 to ${MAX_NAME_CHARS} characters.`;
+  }
+  return value as string[];
 }
 
-/** The frame the server sent, or null when it is not one. Never trusts more than the selectors and a label. */
-export function parseArtifactSaveFrame(raw: unknown): DeviceArtifactSaveFrame | null {
+/** A save frame whose selection could not be read: the agent is told why instead of getting a wider save than it asked for. */
+export interface RefusedArtifactSaveFrame {
+  type: "artifacts.save";
+  id: string;
+  refused: string;
+}
+
+/** The frame the server sent, null when it is not one, or the reason its selection is refused. Never trusts more than the selectors and a label. */
+export function parseArtifactSaveFrame(raw: unknown): DeviceArtifactSaveFrame | RefusedArtifactSaveFrame | null {
   let payload: unknown = raw;
   if (typeof raw === "string") {
     try {
@@ -48,16 +63,19 @@ export function parseArtifactSaveFrame(raw: unknown): DeviceArtifactSaveFrame | 
     }
   }
   if (!isRecord(payload) || payload.type !== "artifacts.save" || typeof payload.id !== "string" || !isRecord(payload.selection)) return null;
-  const operationIds = stringList(payload.selection.operationIds);
-  const fileIds = stringList(payload.selection.fileIds);
-  const only = stringList(payload.selection.only);
-  const set = typeof payload.selection.set === "string" && payload.selection.set.trim() ? payload.selection.set.trim().slice(0, 200) : undefined;
+  const operationIds = nameList(payload.selection.operationIds, "operationIds");
+  if (typeof operationIds === "string") return { type: "artifacts.save", id: payload.id, refused: `${operationIds} Nothing was saved.` };
+  const fileIds = nameList(payload.selection.fileIds, "fileIds");
+  if (typeof fileIds === "string") return { type: "artifacts.save", id: payload.id, refused: `${fileIds} Nothing was saved.` };
+  const only = nameList(payload.selection.only, "files");
+  if (typeof only === "string") return { type: "artifacts.save", id: payload.id, refused: `${only} Nothing was saved.` };
+  const set = typeof payload.selection.set === "string" && payload.selection.set.trim() ? payload.selection.set.trim().slice(0, MAX_NAME_CHARS) : undefined;
   const selection: ArtifactSaveSelection = {
-    ...(operationIds ? { operationIds } : {}),
-    ...(fileIds ? { fileIds } : {}),
+    ...(operationIds.length > 0 ? { operationIds } : {}),
+    ...(fileIds.length > 0 ? { fileIds } : {}),
     ...(payload.selection.all === true ? { all: true } : {}),
     ...(set ? { set } : {}),
-    ...(only && only.length > 0 ? { only } : {}),
+    ...(only.length > 0 ? { only } : {}),
   };
   const label = typeof payload.label === "string" && payload.label.trim() ? payload.label.trim().slice(0, 120) : undefined;
   return { type: "artifacts.save", id: payload.id, selection, ...(label ? { label } : {}) };
@@ -89,6 +107,12 @@ export function resolveSelection(artifacts: readonly DeviceArtifact[], selection
   }
   if (selection.set !== undefined) {
     const filed = artifacts.filter((artifact) => artifact.kind === "output" && effectiveSetName(artifact) === selection.set);
+    // A name is one backup per DEVICE (the panel shows one card per device under it): two devices' files under one name are two backups, never one zip.
+    const devices = new Map<string | undefined, string>();
+    for (const artifact of filed) devices.set(artifact.provenance?.deviceId, artifact.provenance?.label ?? artifact.provenance?.deviceId ?? "a device without a record of which");
+    if (devices.size > 1) {
+      throw new DeviceArtifactError(`"${selection.set}" names a backup on ${devices.size} devices (${[...devices.values()].join(", ")}), and a save is one device's. Name the operations of one of them with operationIds, or save them one device at a time. Nothing was saved.`, "not-found");
+    }
     if (filed.length === 0) missing.push(`set "${selection.set}"`);
     for (const artifact of filed) chosen.set(artifact.id, artifact);
   }
@@ -118,19 +142,22 @@ export function resolveSelection(artifacts: readonly DeviceArtifact[], selection
 }
 
 /**
- * The archive's label (its name is `<label>-<date>.zip`) for files an agent chose: the backup name they share, else the
- * device, protocol and command that made them, and "5 of 56" when they are one backup of chosen partitions, as the panel
- * names it, so a partial backup never looks like a whole one in a listing.
+ * The archive's label (its name is `<label>-<date>.zip`) for files an agent chose, as the panel names the same files:
+ * the card they are on, with "5 of 56" or "incomplete" where the card says so and "(N files)" when they are only some
+ * of it, so a partial, unfinished or trimmed backup never looks like a whole one in a listing. Files off several cards
+ * get a plain name that claims nothing. A name a person's Combine made up is never used: no card shows it either.
  */
-function labelFor(files: readonly DeviceArtifact[]): string {
+function labelFor(artifacts: readonly DeviceArtifact[], files: readonly DeviceArtifact[]): string {
+  const chosen = new Set(files.map((file) => file.id));
+  const sets = groupArtifactSets(artifacts).filter((set) => set.artifactIds.some((id) => chosen.has(id)));
+  const set = sets.length === 1 ? sets[0] : undefined;
+  if (set) {
+    const onCard = files.filter((file) => set.artifactIds.includes(file.id)).length;
+    return onCard === set.count && onCard === files.length ? setFileLabel(set) : selectionLabel(set, files.length);
+  }
   const first = files[0]?.provenance;
-  if (!first || files.some((file) => file.provenance?.operationId === undefined || file.provenance.deviceId !== first.deviceId || file.provenance.protocol !== first.protocol)) return "Device files";
-  const names = new Set(files.map((file) => effectiveSetName(file)));
-  const name = names.size === 1 ? [...names][0] : undefined;
-  const base = name ?? [first.label, first.protocol.toUpperCase(), first.command ?? first.action].filter((part): part is string => Boolean(part)).join(" ");
-  const operations = new Set(files.map((file) => file.provenance?.operationId));
-  const scope = operations.size === 1 ? files.find((file) => file.provenance?.scope)?.provenance?.scope : undefined;
-  return scope && scope.chosen.length < scope.all.length ? `${base} ${scope.chosen.length} of ${scope.all.length}` : base;
+  if (!first || files.some((file) => !file.provenance || file.provenance.deviceId !== first.deviceId || file.provenance.protocol !== first.protocol)) return "Device files";
+  return [first.label, first.protocol.toUpperCase(), "files"].filter((part): part is string => Boolean(part)).join(" ");
 }
 
 /**
@@ -140,8 +167,9 @@ function labelFor(files: readonly DeviceArtifact[]): string {
  */
 export async function runArtifactSave(store: AgentSaveStore, sessionId: string, frame: DeviceArtifactSaveFrame): Promise<ArtifactSaveAck> {
   await store.hydrate(sessionId);
-  const files = resolveSelection(store.list(sessionId), frame.selection);
-  const run = store.startServerSave(sessionId, files.map((file) => file.id), { label: frame.label ?? labelFor(files), origin: "agent" });
+  const artifacts = store.list(sessionId);
+  const files = resolveSelection(artifacts, frame.selection);
+  const run = store.startServerSave(sessionId, files.map((file) => file.id), { label: frame.label ?? labelFor(artifacts, files), origin: "agent" });
   run.finished.catch(() => undefined);
   const begun = await run.begun;
   return { saveId: begun.saveId, archive: begun.archive, files: begun.files, bytes: begun.bytes, resumed: begun.resumed, alreadySaved: begun.alreadySaved };

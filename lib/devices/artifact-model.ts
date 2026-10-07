@@ -118,6 +118,8 @@ export interface ArtifactSet {
   /** Stable across a reload and while the burst grows at its newer end: `set:` plus the oldest file's id. */
   readonly id: string;
   readonly deviceId?: string;
+  /** For a legacy set of Qualcomm files: the unit tag in their names ("edl-<unit>-…"), the only identity such files have. */
+  readonly unit?: string;
   readonly protocol?: string;
   readonly action?: string;
   readonly command?: string;
@@ -128,10 +130,13 @@ export interface ArtifactSet {
    */
   readonly name?: string;
   /**
-   * What the backup took, when the set holds exactly one backup operation that said which partitions it took: `chosen`
-   * of `total`. A backup of everything has the two equal.
+   * What the set says about partitions, when it is one or more backup operations that said which partitions they took
+   * (and nothing else that could hold a partition): `chosen` of `total`, the union of what they declared, and whether
+   * the set holds every file those backups saved (`complete`). A backup that stopped part-way, or a set a file was
+   * removed from, is not complete, and nothing shows or packs it as a full backup. A backup of everything has `chosen`
+   * and `total` equal.
    */
-  readonly scope?: { readonly chosen: number; readonly total: number };
+  readonly scope?: { readonly chosen: number; readonly total: number; readonly complete: boolean };
   /** When the first run began (recorded, or estimated for files saved before it was). */
   readonly startedAt: number;
   /** When the last file was saved. */

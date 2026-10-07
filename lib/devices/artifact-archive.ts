@@ -30,6 +30,7 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import type { ArtifactProvenance, BackupScope } from "./artifact-model";
 import { MANIFEST_NAME, SUMS_NAME } from "./artifact-names";
+import { holdsWholeBackup } from "./artifact-sets";
 import { Crc32, crc32 as crc32Of } from "./crc32";
 
 const SATURATED_16 = 0xffff;
@@ -766,7 +767,7 @@ function isoTime(milliseconds: number): string {
   return new Date(milliseconds).toISOString();
 }
 
-/** Which operation made a file, as the manifest records it (and as the page announces it to the server). */
+/** Which operation made a file, as the page announces it to the server and as the manifest records it (less the partition lists, which go once into `backups`). */
 export function operationInfo(provenance: ArtifactProvenance): ManifestOperation {
   return {
     id: provenance.operationId,
@@ -782,6 +783,27 @@ export function operationInfo(provenance: ArtifactProvenance): ManifestOperation
   };
 }
 
+/**
+ * The operations of a list of files, for the server's announcement or an archive: a backup's partition lists ride with
+ * the FIRST of its files in the list and are left off the rest, which is where `backups` takes them from. A backup of
+ * N partitions would otherwise carry two lists of N names N times, in every request and every record of the save.
+ */
+export function operationInfos(provenances: readonly (ArtifactProvenance | undefined)[]): (ManifestOperation | undefined)[] {
+  const carried = new Set<string>();
+  return provenances.map((provenance) => {
+    if (!provenance) return undefined;
+    const info = operationInfo(provenance);
+    if (!info.partitions) return info;
+    if (carried.has(info.id)) {
+      const { partitions: _partitions, ...rest } = info;
+      return rest;
+    }
+    carried.add(info.id);
+    return info;
+  });
+}
+
+/** An operation as `manifest.json` records it on each of its files; its partition lists are in `backups`, once. */
 function manifestOperation(operation: ManifestOperation): Record<string, unknown> {
   return {
     id: operation.id,
@@ -793,7 +815,6 @@ function manifestOperation(operation: ManifestOperation): Record<string, unknown
     ...(operation.command ? { command: operation.command } : {}),
     ...(operation.startedAt === undefined ? {} : { startedAt: isoTime(operation.startedAt) }),
     ...(operation.set ? { set: operation.set } : {}),
-    ...(operation.partitions ? { partitions: { chosen: [...operation.partitions.chosen], all: [...operation.partitions.all] } } : {}),
   };
 }
 
@@ -812,17 +833,33 @@ function manifestFile(file: ManifestFile): Record<string, unknown> {
 }
 
 /**
- * Which partitions each backup chose, and every partition the device listed at the time: one entry per operation that
- * said, in the order they first appear. A backup that took fewer than the device listed is `partial`.
+ * What the archive holds of each backup that said which partitions it took: one entry per such operation, in the
+ * order they first appear, with the partitions it chose and every partition the device listed at the time, how many
+ * of its files are in this archive, and whether that is the whole backup (`complete`: it finished, and every file it
+ * saved is here). `kind` is the one word a reader needs: `full` or `partial` only for a complete backup; `incomplete`
+ * for one that stopped part-way or is only partly in this archive, so an archive never calls itself a full backup
+ * when it is not.
  */
 function backupRecords(files: readonly ManifestFile[]): Record<string, unknown>[] {
-  const records = new Map<string, Record<string, unknown>>();
+  const scopes = new Map<string, BackupScope>();
+  const names = new Map<string, string[]>();
   for (const file of files) {
-    const scope = file.operation?.partitions;
-    if (!file.operation || !scope || records.has(file.operation.id)) continue;
-    records.set(file.operation.id, { operationId: file.operation.id, kind: scope.chosen.length < scope.all.length ? "partial" : "full", chosen: [...scope.chosen], all: [...scope.all] });
+    if (!file.operation) continue;
+    if (file.operation.partitions && !scopes.has(file.operation.id)) scopes.set(file.operation.id, file.operation.partitions);
+    names.set(file.operation.id, [...(names.get(file.operation.id) ?? []), file.name]);
   }
-  return [...records.values()];
+  return [...scopes].map(([operationId, scope]) => {
+    const held = names.get(operationId) ?? [];
+    const complete = holdsWholeBackup(held, scope);
+    return {
+      operationId,
+      kind: !complete ? "incomplete" : scope.chosen.length < scope.all.length ? "partial" : "full",
+      complete,
+      files: held.length,
+      chosen: [...scope.chosen],
+      all: [...scope.all],
+    };
+  });
 }
 
 /**

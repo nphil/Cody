@@ -1630,7 +1630,8 @@ export class DeviceBridgeConnection implements PageOperationBridge {
   private async handleMessage(event: MessageEvent): Promise<void> {
     const artifactSave = parseArtifactSaveFrame(event.data);
     if (artifactSave) {
-      await this.handleArtifactSave(artifactSave);
+      if ("refused" in artifactSave) this.send({ type: "result", id: artifactSave.id, status: "error", error: artifactSave.refused });
+      else await this.handleArtifactSave(artifactSave);
       return;
     }
     const operation = operationCommandFrom(event.data);

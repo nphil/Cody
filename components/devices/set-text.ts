@@ -5,7 +5,7 @@
 
 import { formatBytes } from "@/lib/format-bytes";
 import type { ArtifactSet, DeviceArtifact, SetSaveState, TransferJob } from "@/lib/devices/artifacts";
-import { setFileLabel, shortArtifactName } from "@/lib/devices/artifact-sets";
+import { shortArtifactName } from "@/lib/devices/artifact-sets";
 import type { Translate, TranslatePlural } from "./job-text";
 
 export type SetKind = "backupSet" | "restoreCopies" | "dumps" | "pulled" | "files";
@@ -19,8 +19,13 @@ export function setKind(set: ArtifactSet): SetKind {
   return "files";
 }
 
-/** What a backup took, in words that a partial one cannot pass for a whole one: "Full backup · 56 partitions", "Backup · 5 of 56 partitions". */
-export function scopeText(scope: NonNullable<ArtifactSet["scope"]>, tn: TranslatePlural): string {
+/**
+ * What a backup took, in words that a partial or unfinished one cannot pass for a whole one: "Full backup · 56
+ * partitions", "Backup · 5 of 56 partitions", or for a backup the set does not hold whole (it stopped part-way, or a
+ * file was removed since) "Incomplete backup · 3 files".
+ */
+export function scopeText(scope: NonNullable<ArtifactSet["scope"]>, count: number, tn: TranslatePlural): string {
+  if (!scope.complete) return tn("devices.files.scopeIncomplete", count);
   return scope.chosen === scope.total ? tn("devices.files.scopeFull", scope.total) : tn("devices.files.scopePartial", scope.total, { chosen: scope.chosen });
 }
 
@@ -31,13 +36,13 @@ export function scopeText(scope: NonNullable<ArtifactSet["scope"]>, tn: Translat
  * called now).
  */
 export function setTitle(set: ArtifactSet, deviceName: string, t: Translate, tn: TranslatePlural): string {
-  const what = set.name ?? (set.scope ? scopeText(set.scope, tn) : t(`devices.files.kind.${setKind(set)}`));
+  const what = set.name ?? (set.scope ? scopeText(set.scope, set.count, tn) : t(`devices.files.kind.${setKind(set)}`));
   return `${set.label ?? deviceName} · ${what}`;
 }
 
 /** The second line of a named set that also says which partitions it took; a set without a name has that in its title. */
 export function setScopeLine(set: ArtifactSet, tn: TranslatePlural): string | undefined {
-  return set.name !== undefined && set.scope ? scopeText(set.scope, tn) : undefined;
+  return set.name !== undefined && set.scope ? scopeText(set.scope, set.count, tn) : undefined;
 }
 
 /** What the device that made a set is called now, for a set whose files did not record a name. */
@@ -64,19 +69,22 @@ export function transferText(job: TransferJob, t: Translate): string {
   return t("devices.files.transferLine", { phase, done: progress.done, total: progress.total, percent, size: formatBytes(progress.totalBytes) });
 }
 
-/** Whether a transfer is over these files: the set's own, or a group made only of its files. */
-function touches(job: TransferJob, set: ArtifactSet): boolean {
+/** Whether a transfer is the set's own: started for it, or over a group made only of its files. */
+function belongsTo(job: TransferJob, set: ArtifactSet): boolean {
   return job.setId === set.id || (job.artifactIds.length > 0 && job.artifactIds.every((id) => set.artifactIds.includes(id)));
 }
 
-/** The newest transfer that touched these files, if any. */
+/** The newest transfer of this set's own, if any: what its card reports as the last download or save. */
 export function latestTransfer(transfers: readonly TransferJob[], set: ArtifactSet): TransferJob | undefined {
-  return transfers.findLast((job) => touches(job, set));
+  return transfers.findLast((job) => belongsTo(job, set));
 }
 
-/** The newest transfer over these files that is still running: it holds the files even when a newer one has already finished. */
+/**
+ * The newest running transfer that reads ANY file of the set: it holds the files, so the card locks, even when a newer
+ * transfer has already finished and even when the transfer spans several sets (an agent saving everything at once).
+ */
 export function runningTransfer(transfers: readonly TransferJob[], set: ArtifactSet): TransferJob | undefined {
-  return transfers.findLast((job) => job.state === "running" && touches(job, set));
+  return transfers.findLast((job) => job.state === "running" && (job.setId === set.id || job.artifactIds.some((id) => set.artifactIds.includes(id))));
 }
 
 /** "Downloaded as lenovo-edl-backup-20261007-1830.zip · 3.8 GB → 610 MB": the zip a finished download wrote and what packing did to it; nothing for a transfer that is not a finished download. */
@@ -91,15 +99,8 @@ export function savedText(saved: Extract<SetSaveState, { state: "saved" }>, t: T
   return t("devices.files.savedLine", { files: tn("devices.files.count", saved.archives), original: formatBytes(saved.bytes), archive: formatBytes(saved.archiveBytes) });
 }
 
-/** The longest a selection's label gets: it becomes the name of the zip, and the name of the save on the server. */
-const SELECTION_LABEL_MAX = 60;
-
-/** What a download or save of only some of a set's files is called: "Lenovo QUSB__BULK EDL backup (3 files)". Plain English, because it ends up in a file name. */
-export function selectionLabel(set: ArtifactSet, count: number): string {
-  const suffix = ` (${count} ${count === 1 ? "file" : "files"})`;
-  const base = setFileLabel(set);
-  return base.length + suffix.length <= SELECTION_LABEL_MAX ? `${base}${suffix}` : `${base.slice(0, SELECTION_LABEL_MAX - suffix.length).trimEnd()}${suffix}`;
-}
+/** What a download or save of only some of a set's files is called ("Lenovo QUSB__BULK EDL backup (3 files)"): the agent's save names its selections the same way. */
+export { selectionLabel } from "@/lib/devices/artifact-sets";
 
 /** "3 of 58 selected · 6.0 MB": how many of the whole list are ticked (not only the part on screen) and how big that is. `size` is already formatted. */
 export function selectionText(selected: number, total: number, size: string, t: Translate): string {

@@ -84,15 +84,37 @@ export function uniqueFileNames(names: readonly string[]): string[] {
   });
 }
 
-/** A label as a folder name: letters, digits, dot, dash and underscore only, at most 48 characters, never empty. */
-export function labelSlug(label: string): string {
-  const cleaned = label
+const MAX_SLUG_CHARS = 48;
+
+/** The slug of a label before it is cut to length: letters, digits, dot, dash and underscore, no run of dashes, none at either end. */
+function slugOf(label: string): string {
+  return label
     .normalize("NFKD")
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/[^A-Za-z0-9._-]+/g, "-")
     .replace(/-{2,}/g, "-")
-    .replace(/^[-.]+|[-.]+$/g, "")
-    .slice(0, 48)
-    .replace(/[-.]+$/g, "");
-  return cleaned || "artifacts";
+    .replace(/^[-.]+|[-.]+$/g, "");
+}
+
+/**
+ * A label as a folder name: letters, digits, dot, dash and underscore only, at most 48 characters, never empty, and
+ * never one of the names Windows reserves for devices (`nul`, `con.edl`), which it would refuse to create or extract.
+ */
+export function labelSlug(label: string): string {
+  const cleaned = slugOf(label).slice(0, MAX_SLUG_CHARS).replace(/[-.]+$/g, "");
+  if (!cleaned) return "artifacts";
+  return WINDOWS_DEVICE_NAME.test(cleaned) ? `_${cleaned}` : cleaned;
+}
+
+/**
+ * `base` followed by `suffix` ("Lenovo QUSB__BULK EDL backup 5 of 56"), the base cut short enough that the suffix
+ * survives `labelSlug`: what a backup is missing must reach the file name however long the backup's name is. An empty
+ * suffix leaves the base as it is.
+ */
+export function labelWithSuffix(base: string, suffix: string): string {
+  if (!suffix) return base;
+  const room = MAX_SLUG_CHARS - slugOf(suffix).length - 1;
+  let stem = base.trimEnd();
+  while (stem.length > 0 && slugOf(stem).length > room) stem = stem.slice(0, -1).trimEnd();
+  return stem ? `${stem} ${suffix}` : suffix;
 }

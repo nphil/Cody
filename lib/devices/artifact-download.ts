@@ -21,7 +21,7 @@ import {
   blobSource,
   buildArchiveManifest,
   metadataSources,
-  operationInfo,
+  operationInfos,
   writeArchive,
   type ArchiveSource,
   type ManifestFile,
@@ -147,6 +147,7 @@ export async function blobFromStream(stream: ReadableStream<Uint8Array>, foldByt
 /** The archive's entries: every file under one folder, then the checksums and the manifest. */
 function archiveSources(entries: readonly ArchiveInput[], options: { sessionId: string; label: string; folder: string; now: number }): ArchiveSource[] {
   const names = uniqueFileNames(entries.map((entry) => entry.name));
+  const operations = operationInfos(entries.map((entry) => entry.provenance));
   const files: ManifestFile[] = entries.map((entry, index) => ({
     name: entry.name,
     path: names[index]!,
@@ -156,7 +157,7 @@ function archiveSources(entries: readonly ArchiveInput[], options: { sessionId: 
     source: entry.source,
     createdAt: entry.createdAt,
     artifactId: entry.id,
-    ...(entry.provenance ? { operation: operationInfo(entry.provenance) } : {}),
+    ...(operations[index] ? { operation: operations[index] } : {}),
   }));
   const manifest = buildArchiveManifest({ label: options.label, sessionId: options.sessionId, createdAt: options.now, files });
   return [
