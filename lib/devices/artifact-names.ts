@@ -1,7 +1,6 @@
 /**
- * Names for files and folders that leave the browser: inside a zip, and on the
- * server. One implementation, so the archive a person downloads and the folder
- * the server keeps name every file the same way.
+ * Names for files that leave the browser: inside a zip, in the one a person downloads and in the one the server keeps.
+ * One implementation, so both archives name every file the same way.
  *
  * What a browser called a file is DATA, never a path. Each name here is reduced
  * to one safe segment: no separator, drive letter, control character or
@@ -9,9 +8,9 @@
  * space (the leading dot would hide it, the trailing one is stripped by
  * Windows), and the two names a save writes itself are moved aside.
  *
- * The vault keeps its own bookkeeping files (`STATE_NAME`, `partName`) in the same folder the files are finished in, so
- * they must never be able to share a name with one. Every one of them starts with a dot, which no name made here can,
- * and `isVaultInternalName` reserves them a second time so a change to one rule cannot quietly break the other.
+ * The vault keeps its own bookkeeping files (`STATE_NAME`, `partName`) while a save is still arriving, and none of
+ * them may share a name with a file made here: every one of them starts with a dot, which no name made here can, and
+ * `isVaultInternalName` reserves them a second time so a change to one rule cannot quietly break the other.
  *
  * Pure and browser-safe.
  */

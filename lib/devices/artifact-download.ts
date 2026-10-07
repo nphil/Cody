@@ -1,31 +1,33 @@
 /**
- * "Download all": one .zip of any number of artifacts, however large.
+ * "Download all": one compressed .zip of any number of artifacts, however large.
  *
- * Nothing is read into memory beyond one slice. Each file's CRC-32 is taken from
- * when it was saved (files saved before that existed are read once, here, and the
- * answer remembered), the archive is planned from exact sizes (./artifact-zip.ts),
- * and then it goes to disk one of two ways:
+ * Nothing is read into memory beyond one slice. The shared writer (./artifact-archive.ts) deflates each file as it
+ * streams through and takes its CRC-32 on the way, so there is nothing to measure first, and then the archive goes to
+ * disk one of two ways:
  *
- *  - Where the browser has a Save-as picker (desktop Chrome and Edge) the person
- *    chooses the file first and the archive is streamed into it, each entry's
- *    CRC re-proved on the way, so a stored copy that has gone bad stops the write
- *    instead of becoming a quietly broken archive. A cancel discards the
- *    half-written file.
- *  - Everywhere else (Android Chrome has no picker) the archive is one lazy Blob
- *    made of the stored Blobs by reference, handed to the browser's own download,
- *    which reads it from disk as it saves it.
+ *  - Where the browser has a Save-as picker (desktop Chrome and Edge) the person chooses the file first and the archive
+ *    is streamed into it. A stored copy that has gone bad stops the write instead of becoming a quietly broken archive,
+ *    and a cancel or a failure discards the half-written file.
+ *  - Everywhere else (Android Chrome has no picker) the compressed chunks are gathered into ONE Blob, which is handed to
+ *    the browser's own download. The Blob is rebuilt around its pending chunks every ~64 MiB so the page's JavaScript
+ *    memory stays flat: the browser pages a Blob's bytes out to disk by itself, but not an array of chunks it cannot see.
  *
- * Inside the zip, beside the files, are `SHA256SUMS` and `manifest.json` (the same
- * two a save to the server writes), so the copy can be verified on any machine
- * with `sha256sum -c SHA256SUMS`.
+ * Inside the zip, beside the files, are `SHA256SUMS` and `manifest.json` (the same two a save to the server writes), so
+ * the copy can be verified on any machine with `sha256sum -c SHA256SUMS`.
  */
 
-import { sha256 } from "@noble/hashes/sha2.js";
-import { bytesToHex } from "@noble/hashes/utils.js";
-import { crc32, Crc32 } from "./crc32";
-import { labelSlug, MANIFEST_NAME, SUMS_NAME, uniqueFileNames } from "./artifact-names";
+import {
+  ArchiveError,
+  blobSource,
+  buildArchiveManifest,
+  metadataSources,
+  operationInfo,
+  writeArchive,
+  type ArchiveSource,
+  type ManifestFile,
+} from "./artifact-archive";
 import { DeviceArtifactError, type ArtifactProvenance, type DownloadResult, type TransferProgress } from "./artifact-model";
-import { planZip, zipBlob, zipStream, ZipPlanError, type ZipSource } from "./artifact-zip";
+import { labelSlug, uniqueFileNames } from "./artifact-names";
 
 declare global {
   interface Window {
@@ -79,7 +81,7 @@ export interface ArchiveInput {
   readonly createdAt: number;
   readonly provenance?: ArtifactProvenance;
   readonly blob: Blob;
-  /** CRC-32 taken when the file was saved; absent for files saved before it was recorded. */
+  /** CRC-32 taken when the file was saved. The write checks the bytes against it; absent for files saved before it was recorded. */
   readonly crc32?: number;
 }
 
@@ -92,33 +94,15 @@ export interface ExportOptions {
   readonly chosen: Promise<WritableStream<Uint8Array> | undefined>;
   readonly signal?: AbortSignal;
   readonly onProgress?: (progress: TransferProgress) => void;
-  /** A checksum worked out earlier this page session, or undefined. */
-  readonly knownCrc?: (entry: ArchiveInput) => number | undefined;
-  readonly rememberCrc?: (entry: ArchiveInput, crc: number) => void;
   readonly now?: number;
   readonly forceZip64?: boolean;
 }
 
+/** Pending chunks are folded into the Blob once they add up to this much. */
+const FOLD_BYTES = 64 * 1024 * 1024;
+
 function cancelled(): DeviceArtifactError {
   return new DeviceArtifactError("The download was cancelled.", "aborted");
-}
-
-/** The CRC-32 of a Blob, read a slice at a time. */
-export async function crcOfBlob(blob: Blob, signal?: AbortSignal, onBytes?: (bytes: number) => void): Promise<number> {
-  const crc = new Crc32();
-  const reader = blob.stream().getReader();
-  try {
-    for (;;) {
-      if (signal?.aborted) throw cancelled();
-      const next = await reader.read();
-      if (next.done) return crc.digest();
-      crc.update(next.value);
-      onBytes?.(next.value.byteLength);
-    }
-  } finally {
-    await reader.cancel().catch(() => undefined);
-    reader.releaseLock();
-  }
 }
 
 function pad(value: number): string {
@@ -131,50 +115,80 @@ export function archiveFileName(label: string, now: number): string {
   return `${labelSlug(label)}-${moment.getFullYear()}${pad(moment.getMonth() + 1)}${pad(moment.getDate())}-${pad(moment.getHours())}${pad(moment.getMinutes())}.zip`;
 }
 
-function isoTime(milliseconds: number): string {
-  return new Date(milliseconds).toISOString();
+/**
+ * One Blob of everything the stream delivers. The chunks are folded into the Blob every `foldBytes`: a Blob made of a
+ * Blob and a few fresh chunks keeps the old bytes by reference, where one long array of chunks would sit in the heap.
+ */
+export async function blobFromStream(stream: ReadableStream<Uint8Array>, foldBytes = FOLD_BYTES): Promise<Blob> {
+  const type = "application/zip";
+  const reader = stream.getReader();
+  let blob = new Blob([], { type });
+  let pending: Uint8Array<ArrayBuffer>[] = [];
+  let pendingBytes = 0;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      // The archive writer's chunks are ordinary, never shared, memory; the stream type just does not say so.
+      pending.push(next.value as Uint8Array<ArrayBuffer>);
+      pendingBytes += next.value.length;
+      if (pendingBytes >= foldBytes) {
+        blob = new Blob([blob, ...pending], { type });
+        pending = [];
+        pendingBytes = 0;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return pending.length === 0 ? blob : new Blob([blob, ...pending], { type });
 }
 
 /** The archive's entries: every file under one folder, then the checksums and the manifest. */
-export function archiveSources(entries: readonly ArchiveInput[], crcs: readonly number[], options: { sessionId: string; label: string; folder: string; now: number }): ZipSource[] {
+function archiveSources(entries: readonly ArchiveInput[], options: { sessionId: string; label: string; folder: string; now: number }): ArchiveSource[] {
   const names = uniqueFileNames(entries.map((entry) => entry.name));
-  const encoder = new TextEncoder();
-  const manifest = {
-    format: "cody-device-artifacts/1",
-    createdAt: isoTime(options.now),
-    label: options.label,
-    sessionId: options.sessionId,
-    totalBytes: entries.reduce((total, entry) => total + entry.size, 0),
-    files: entries.map((entry, index) => ({
-      name: entry.name,
-      path: names[index],
-      size: entry.size,
-      sha256: entry.sha256,
-      kind: entry.kind,
-      source: entry.source,
-      createdAt: isoTime(entry.createdAt),
-      artifactId: entry.id,
-      ...(entry.provenance
-        ? { operation: { id: entry.provenance.operationId, deviceId: entry.provenance.deviceId, protocol: entry.provenance.protocol, action: entry.provenance.action, ...(entry.provenance.label ? { deviceLabel: entry.provenance.label } : {}), ...(entry.provenance.target ? { target: entry.provenance.target } : {}), ...(entry.provenance.command ? { command: entry.provenance.command } : {}) } }
-        : {}),
-    })),
-  };
-  const manifestBytes = encoder.encode(`${JSON.stringify(manifest, null, 2)}\n`);
-  const sumsBytes = encoder.encode([...entries.map((entry, index) => `${entry.sha256}  ${names[index]}\n`), `${bytesToHex(sha256(manifestBytes))}  ${MANIFEST_NAME}\n`].join(""));
+  const files: ManifestFile[] = entries.map((entry, index) => ({
+    name: entry.name,
+    path: names[index]!,
+    size: entry.size,
+    sha256: entry.sha256,
+    kind: entry.kind,
+    source: entry.source,
+    createdAt: entry.createdAt,
+    artifactId: entry.id,
+    ...(entry.provenance ? { operation: operationInfo(entry.provenance) } : {}),
+  }));
+  const manifest = buildArchiveManifest({ label: options.label, sessionId: options.sessionId, createdAt: options.now, files });
   return [
-    ...entries.map((entry, index) => ({ name: `${options.folder}/${names[index]}`, data: entry.blob, crc32: crcs[index]!, modified: entry.createdAt })),
-    { name: `${options.folder}/${SUMS_NAME}`, data: sumsBytes, crc32: crc32(sumsBytes), modified: options.now },
-    { name: `${options.folder}/${MANIFEST_NAME}`, data: manifestBytes, crc32: crc32(manifestBytes), modified: options.now },
+    // The size is the one the manifest and the checksums list: a Blob that holds another number of bytes stops the write.
+    ...entries.map((entry, index) => ({ ...blobSource(`${options.folder}/${names[index]}`, entry.blob, entry.createdAt, entry.crc32), size: entry.size })),
+    ...metadataSources({ folder: options.folder, files, manifest: manifest.bytes, modified: options.now }),
   ];
 }
 
-function isAbort(error: unknown): boolean {
-  return error instanceof Error && error.name === "AbortError";
+/**
+ * Settles like `promise`, or as cancelled the moment `signal` fires. A sink stuck in a write holds its stream's abort
+ * back until the write ends, and a cancelled download must not stay "running" because of that.
+ */
+function untilCancelled<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  const aborted = new Promise<never>((_, reject) => {
+    if (signal.aborted) reject(cancelled());
+    else signal.addEventListener("abort", () => reject(cancelled()), { once: true });
+  });
+  return Promise.race([promise, aborted]);
+}
+
+/** What went wrong, as the person and the transfer code understand it: a cancel, a stored copy that no longer matches, or a plain message. */
+function failure(error: unknown, signal: AbortSignal | undefined): DeviceArtifactError {
+  if (error instanceof DeviceArtifactError) return error;
+  if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) return cancelled();
+  if (error instanceof ArchiveError) return new DeviceArtifactError(error.message, error.code === "damaged" || error.code === "changed" ? "hash-mismatch" : "unknown");
+  return new DeviceArtifactError(error instanceof Error ? `The archive could not be written: ${error.message}` : "The archive could not be written.", "unknown");
 }
 
 /**
- * Writes the archive and says how it went. `chosen` is the picker's answer, which the caller asked for in the click: the
- * checksums are worked out while the picker is open, so a legacy backup does not wait for them afterwards.
+ * Writes the archive and says how it went. `chosen` is the picker's answer, which the caller asked for in the click.
+ * A failure or a cancel leaves no half-written file behind: the chosen target is aborted, and nothing is handed on.
  */
 export async function exportArchive(entries: readonly ArchiveInput[], options: ExportOptions): Promise<DownloadResult> {
   if (entries.length === 0) throw new DeviceArtifactError("There is nothing to download.", "not-found");
@@ -186,67 +200,42 @@ export async function exportArchive(entries: readonly ArchiveInput[], options: E
   const stop = (): void => work.abort();
   signal?.addEventListener("abort", stop, { once: true });
   if (signal?.aborted) stop();
-  const report = (phase: TransferProgress["phase"], done: number, bytes: number, currentName?: string): void => {
-    options.onProgress?.({ phase, done, total: entries.length, bytes, totalBytes, ...(currentName ? { currentName } : {}) });
+  // The writer's progress also counts the checksums and the manifest it adds; the person's numbers are their own files.
+  const report = (done: number, bytes: number): void => {
+    options.onProgress?.({ phase: "writing", done: Math.min(done, entries.length), total: entries.length, bytes: Math.min(bytes, totalBytes), totalBytes });
   };
+  let target: WritableStream<Uint8Array> | undefined;
 
   try {
-    const crcs: number[] = [];
-    const checking = (async () => {
-      let read = 0;
-      for (const [index, entry] of entries.entries()) {
-        let crc = entry.crc32 ?? options.knownCrc?.(entry);
-        if (crc === undefined) {
-          report("checking", index, read, entry.name);
-          crc = await crcOfBlob(entry.blob, work.signal, (bytes) => {
-            read += bytes;
-            report("checking", index, read, entry.name);
-          });
-          options.rememberCrc?.(entry, crc);
-        } else {
-          read += entry.size;
-        }
-        crcs.push(crc);
-      }
-    })();
-    // If the picker is closed first the checking is abandoned, and whatever it would have thrown is not news.
-    checking.catch(() => undefined);
-    let target: WritableStream<Uint8Array> | undefined;
     try {
       target = await options.chosen;
     } catch (error) {
       stop();
       throw error;
     }
-    await checking;
     if (work.signal.aborted) throw cancelled();
 
-    const plan = planZip(archiveSources(entries, crcs, { sessionId: options.sessionId, label: options.label, folder, now }), { ...(options.forceZip64 ? { forceZip64: true } : {}) });
-    const ends = plan.layout.slice(0, entries.length).map((entry) => entry.dataOffset + entry.size);
+    const archive = writeArchive(archiveSources(entries, { sessionId: options.sessionId, label: options.label, folder, now }), {
+      signal: work.signal,
+      ...(options.forceZip64 ? { forceZip64: true } : {}),
+      onProgress: (progress) => report(progress.entriesDone, progress.readBytes),
+    });
+    report(0, 0);
+    let method: DownloadResult["method"];
     if (target) {
-      let written = 0;
-      report("writing", 0, 0);
-      const archive = zipStream(plan, {
-        signal: work.signal,
-        verify: true,
-        onBytes: (bytes) => {
-          written += bytes;
-          const done = Math.min(ends.filter((end) => end <= written).length, entries.length);
-          report("writing", done, Math.min(written, totalBytes));
-        },
-      });
-      await archive.pipeTo(target, { signal: work.signal });
-      report("writing", entries.length, totalBytes);
-      return { fileName: options.fileName, files: entries.length, bytes: totalBytes, method: "file-picker" };
+      await untilCancelled(archive.stream.pipeTo(target, { signal: work.signal }), work.signal);
+      method = "file-picker";
+    } else {
+      options.sink.hand(await blobFromStream(archive.stream), options.fileName);
+      method = "browser-download";
     }
-    options.sink.hand(zipBlob(plan), options.fileName);
-    report("writing", entries.length, totalBytes);
-    return { fileName: options.fileName, files: entries.length, bytes: totalBytes, method: "browser-download" };
+    const summary = await archive.summary;
+    report(entries.length, totalBytes);
+    return { fileName: options.fileName, files: entries.length, bytes: totalBytes, archiveBytes: summary.bytes, method };
   } catch (error) {
-    if (error instanceof DeviceArtifactError) throw error;
-    if (signal?.aborted || isAbort(error)) throw cancelled();
-    if (error instanceof ZipPlanError) throw new DeviceArtifactError(error.message, /checksum|changed size/.test(error.message) ? "hash-mismatch" : "unknown");
-    throw new DeviceArtifactError(error instanceof Error ? `The archive could not be written: ${error.message}` : "The archive could not be written.", "unknown");
+    // The pipe throws away the file it was writing when the archive fails; a file that never got that far is thrown away here.
+    if (target && !target.locked) await target.abort(error).catch(() => undefined);
+    throw failure(error, signal);
   } finally {
     signal?.removeEventListener("abort", stop);
   }

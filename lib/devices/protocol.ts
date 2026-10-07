@@ -274,13 +274,18 @@ export interface DeviceOperationRequestFrame {
 }
 
 /**
- * Which of a chat's files an agent wants saved to the server: every file an operation made, explicit files, or every
- * output. The page resolves it against its own files; the server never names a file the page does not hold.
+ * Which of a chat's files an agent wants saved to the server: every file an operation made, explicit files, every file
+ * filed under a backup name, or every output; `only` then keeps just some of those by name or partition. The page
+ * resolves it against its own files; the server never names a file the page does not hold.
  */
 export interface ArtifactSaveSelection {
   operationIds?: readonly string[];
   fileIds?: readonly string[];
   all?: boolean;
+  /** Every output filed under this set name (the `set` the agent gave the operations that made them). */
+  set?: string;
+  /** Keep only files whose name, target or short partition name is one of these, on top of the selectors above. */
+  only?: readonly string[];
 }
 
 /** Server -> page: an agent asked for files to be saved to the server. The page answers with a `result` frame carrying an `ArtifactSaveAck`. */
@@ -295,8 +300,8 @@ export interface DeviceArtifactSaveFrame {
 /** What the page tells the agent once the server has accepted the save, before the bytes have moved. */
 export interface ArtifactSaveAck {
   saveId: string;
-  /** Where the save is, or will be once it completes. */
-  folder: string;
+  /** The one .zip the save is, or will be once it completes. */
+  archive: string;
   files: number;
   bytes: number;
   resumed: boolean;

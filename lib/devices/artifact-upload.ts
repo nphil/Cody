@@ -1,6 +1,7 @@
 /**
  * The page's half of "Save to server": a resumable upload of browser-held
- * files to the artifact vault (./artifact-vault.ts).
+ * files to the artifact vault (./artifact-vault.ts), which packs them into ONE
+ * compressed archive.
  *
  * Nothing is read into memory beyond one slice. The save is announced with every
  * file's name, size and SHA-256 and a key made of those, so announcing the same
@@ -8,17 +9,25 @@
  * instead of starting over, and a save that is already complete answers as such.
  * Each file goes up in 4 MiB slices at the offset the server says it has, is
  * re-read from the server's disk to check its SHA-256, and only then does the
- * save finish. A dropped connection, a slice the framework cut short and a
- * response that never arrived are retried after asking the server what it holds;
- * a file that arrives damaged is sent again once.
+ * server write the archive. A dropped connection, a slice the framework cut short
+ * and a response that never arrived are retried after asking the server what it
+ * holds; a file that arrives damaged is sent again once.
+ *
+ * Writing the archive of a large save takes longer than a request should wait, so
+ * the server answers `building` and this asks again about once a second until it
+ * is `complete`. A build that fails is reported with the server's own words; the
+ * files stay on the server, so pressing Save again starts the packing again and
+ * sends nothing twice.
  *
  * Cancelling stops at once and keeps what already arrived, so pressing Save
- * again carries on instead of repeating the part that went through.
+ * again carries on instead of repeating the part that went through. A build the
+ * server is already running carries on; saving again finds it finished.
  */
 
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { isRecord } from "../type-guards";
+import { operationInfo } from "./artifact-archive";
 import { DeviceArtifactError, type ArtifactProvenance, type ServerSaveResult, type TransferProgress } from "./artifact-model";
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -27,6 +36,14 @@ export const SAVES_ROUTE = "/api/devices/artifacts/saves";
 /** Well under the 10 MB a request body is buffered to, and under the server's 8 MiB cap. */
 export const UPLOAD_SLICE_BYTES = 4 * 1024 * 1024;
 const RETRY_DELAYS_MS: readonly number[] = [400, 1500, 4000, 9000];
+/** How often a build in progress is asked about. */
+const BUILD_POLL_MS = 1000;
+/** A server that has forgotten the build this many times in a row is not going to finish it. */
+const MAX_BUILD_RESTARTS = 3;
+/** What the server calls a build that stopped for want of room. */
+const NO_ROOM_CODES: readonly string[] = ["disk_full", "quota_exceeded"];
+/** What the server calls a build that failed: a second `complete` would only fail the same way, so it is not retried blindly. */
+const BUILD_FAILED_CODES: readonly string[] = ["archive_check_failed", "changed", "build_failed"];
 
 export interface UploadFile {
   readonly artifactId: string;
@@ -44,20 +61,32 @@ export interface UploadFile {
 export interface ServerSaveFile {
   readonly index: number;
   readonly name: string;
-  readonly path: string;
+  /** The file's full path inside the archive. */
+  readonly entry: string;
   readonly size: number;
   readonly sha256: string;
   readonly received: number;
   readonly verified: boolean;
 }
 
+export interface ServerSaveBuildError {
+  /** `disk_full`, `quota_exceeded`, `archive_check_failed`, `changed` or `build_failed`. */
+  readonly code: string;
+  readonly message: string;
+}
+
 export interface ServerSave {
   readonly saveId: string;
-  readonly state: "uploading" | "complete";
+  /** `building`: every file is verified and the server is writing the archive. */
+  readonly state: "uploading" | "building" | "complete";
   readonly label: string;
   readonly sessionId: string;
-  readonly folder: string;
-  readonly manifestPath?: string;
+  /** The one .zip the save is, or will be once it completes. */
+  readonly archive: string;
+  /** What the finished archive is on the server's disk. */
+  readonly archiveBytes?: number;
+  /** While building: the original bytes packed so far. */
+  readonly packedBytes?: number;
   readonly files: readonly ServerSaveFile[];
   readonly totalBytes: number;
   readonly receivedBytes: number;
@@ -66,13 +95,14 @@ export interface ServerSave {
   readonly verified: boolean;
   readonly existing?: boolean;
   readonly resumed?: boolean;
+  readonly buildError?: ServerSaveBuildError;
 }
 
 /** What the caller learns as soon as the server has accepted the announcement, before any byte moves. */
 export interface SaveBegun {
   readonly saveId: string;
-  /** Where the save will be, or already is. */
-  readonly folder: string;
+  /** Where the archive will be, or already is. */
+  readonly archive: string;
   readonly files: number;
   readonly bytes: number;
   readonly resumed: boolean;
@@ -88,7 +118,9 @@ export interface UploadOptions {
   readonly fetch?: FetchLike;
   readonly sliceBytes?: number;
   readonly retryDelaysMs?: readonly number[];
-  /** The person's IANA time zone, so the folder is dated the day they made the save. */
+  /** How often a build in progress is asked about; a second by default. */
+  readonly pollMs?: number;
+  /** The person's IANA time zone, so the archive is dated the day they made the save. */
   readonly timeZone?: string;
 }
 
@@ -128,10 +160,28 @@ async function readFailure(response: Response): Promise<Failure> {
 
 /** A save description from the server, checked on the fields this module reads: anything else is a server that is not ours. */
 function saveFrom(value: unknown): ServerSave {
-  if (!isRecord(value) || typeof value.saveId !== "string" || typeof value.folder !== "string" || !Array.isArray(value.files) || (value.state !== "uploading" && value.state !== "complete")) {
+  if (
+    !isRecord(value) ||
+    typeof value.saveId !== "string" ||
+    typeof value.archive !== "string" ||
+    !Array.isArray(value.files) ||
+    (value.state !== "uploading" && value.state !== "building" && value.state !== "complete") ||
+    (value.state === "complete" && typeof value.archiveBytes !== "number")
+  ) {
     throw new DeviceArtifactError("The server did not answer with a save description. Cody on the server may be an older version without this feature.", "server-refused");
   }
   return value as unknown as ServerSave;
+}
+
+/** Why the server's last attempt to write the archive stopped, if it did and said so. */
+function buildErrorOf(save: ServerSave): ServerSaveBuildError | undefined {
+  const failure: unknown = save.buildError;
+  return isRecord(failure) && typeof failure.code === "string" && typeof failure.message === "string" ? { code: failure.code, message: failure.message } : undefined;
+}
+
+/** The server's own words, with the code that tells the caller whether more room would help. */
+function buildFailure(failure: ServerSaveBuildError): DeviceArtifactError {
+  return new DeviceArtifactError(failure.message, NO_ROOM_CODES.includes(failure.code) ? "disk-full" : "server-refused");
 }
 
 function receivedFrom(value: unknown): number {
@@ -151,6 +201,7 @@ function explain(failure: Failure): DeviceArtifactError {
 
 /** True for a failure another attempt can fix: the network, a gateway, or a slice the framework cut short. */
 function worthRetrying(failure: Failure): boolean {
+  if (failure.code !== undefined && BUILD_FAILED_CODES.includes(failure.code)) return false;
   return (failure.status >= 500 && failure.status !== 507) || failure.status === 408 || failure.status === 429 || failure.code === "truncated";
 }
 
@@ -179,11 +230,10 @@ export function saveKey(sessionId: string, label: string, files: readonly { name
 }
 
 function toResult(save: ServerSave, resumed: boolean, alreadySaved: boolean): ServerSaveResult {
-  const separator = save.folder.includes("\\") && !save.folder.includes("/") ? "\\" : "/";
   return {
     saveId: save.saveId,
-    path: save.folder,
-    manifestPath: save.manifestPath ?? `${save.folder}${separator}manifest.json`,
+    archive: save.archive,
+    archiveBytes: save.archiveBytes ?? 0,
     files: save.files.length,
     bytes: save.totalBytes,
     verified: save.verified,
@@ -202,8 +252,12 @@ export async function listServerSaves(sessionId: string, fetchImpl: FetchLike = 
 }
 
 /**
- * Uploads `files` and returns where they are. Throws a DeviceArtifactError whose message can be shown as it is:
- * `aborted` for a cancel, `unreachable`, `unauthorized`, `too-large`, `disk-full`, `hash-mismatch` or `server-refused`.
+ * Uploads `files`, has the server pack them into one archive, and returns where it is. Throws a DeviceArtifactError
+ * whose message can be shown as it is: `aborted` for a cancel, `unreachable`, `unauthorized`, `too-large`, `disk-full`
+ * (also when the server ran out of room while packing), `hash-mismatch` or `server-refused`.
+ *
+ * Progress: `uploading` and `verifying` count the bytes sent; `writing` is the server packing, and its `bytes` start
+ * again from 0 and count the original bytes packed so far.
  */
 export async function uploadToServer(files: readonly UploadFile[], options: UploadOptions): Promise<ServerSaveResult> {
   if (files.length === 0) throw new DeviceArtifactError("There are no files to save.", "not-found");
@@ -211,6 +265,7 @@ export async function uploadToServer(files: readonly UploadFile[], options: Uplo
   const { signal } = options;
   const sliceBytes = options.sliceBytes ?? UPLOAD_SLICE_BYTES;
   const delays = options.retryDelaysMs ?? RETRY_DELAYS_MS;
+  const pollMs = options.pollMs ?? BUILD_POLL_MS;
   const totalBytes = files.reduce((total, file) => total + file.size, 0);
   const progress = { done: 0, bytes: 0 };
   const report = (phase: TransferProgress["phase"], currentName?: string): void => {
@@ -230,14 +285,19 @@ export async function uploadToServer(files: readonly UploadFile[], options: Uplo
   const unreachable = (cause: NetworkFailure): DeviceArtifactError =>
     new DeviceArtifactError(`Could not reach the Cody server (${cause.message}). Check the connection and press Save to server again: what already arrived is kept.`, "unreachable");
 
-  /** A call that is safe to repeat, retried on a network failure or a 5xx; anything else the server said is final. */
-  const repeatable = async (url: string, init: RequestInit): Promise<Response> => {
+  /**
+   * A call that is safe to repeat, retried on a network failure or a 5xx; anything else the server said is final.
+   * `describe` gets the first word on a failure the caller knows better than the generic explanation.
+   */
+  const repeatable = async (url: string, init: RequestInit, describe?: (failure: Failure) => DeviceArtifactError | undefined): Promise<Response> => {
     for (let attempt = 0; ; attempt += 1) {
       let failure: Failure | undefined;
       try {
         const response = await request(url, init);
         if (response.ok) return response;
         failure = await readFailure(response);
+        const known = describe?.(failure);
+        if (known) throw known;
         if (!worthRetrying(failure)) throw explain(failure);
       } catch (error) {
         if (!(error instanceof NetworkFailure)) throw error;
@@ -261,16 +321,14 @@ export async function uploadToServer(files: readonly UploadFile[], options: Uplo
       source: file.source,
       createdAt: file.createdAt,
       artifactId: file.artifactId,
-      ...(file.provenance
-        ? { operation: { id: file.provenance.operationId, deviceId: file.provenance.deviceId, protocol: file.provenance.protocol, action: file.provenance.action, ...(file.provenance.label ? { deviceLabel: file.provenance.label } : {}), ...(file.provenance.target ? { target: file.provenance.target } : {}), ...(file.provenance.command ? { command: file.provenance.command } : {}) } }
-        : {}),
+      ...(file.provenance ? { operation: operationInfo(file.provenance) } : {}),
     })),
   };
   const announce = async (): Promise<ServerSave> =>
     saveFrom(await (await repeatable(SAVES_ROUTE, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(announcement) })).json());
 
   let save = await announce();
-  const begun: SaveBegun = { saveId: save.saveId, folder: save.folder, files: files.length, bytes: totalBytes, resumed: save.resumed === true, alreadySaved: save.state === "complete" };
+  const begun: SaveBegun = { saveId: save.saveId, archive: save.archive, files: files.length, bytes: totalBytes, resumed: save.resumed === true, alreadySaved: save.state === "complete" };
   options.onBegun?.(begun);
   if (save.state === "complete") {
     progress.done = files.length;
@@ -346,9 +404,44 @@ export async function uploadToServer(files: readonly UploadFile[], options: Uplo
     report("uploading", file.name);
   }
 
-  report("verifying");
-  const finished = saveFrom(await (await repeatable(route(), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "complete" }) })).json());
+  // Every file is on the server and verified: it packs them into the archive. A small save is done within one answer;
+  // for a large one the server says `building` and is asked again until it is done.
+  progress.done = files.length;
+  progress.bytes = 0;
+  report("writing");
+  // A save the server no longer has (somebody deleted it, or it was cleaned up) is the same news whichever question finds out.
+  const gone = (failure: Failure): DeviceArtifactError | undefined =>
+    failure.status === 404 && failure.code === "unknown_save"
+      ? new DeviceArtifactError("The server no longer has this save, so its archive could not be finished: it was deleted, or cleaned up. Press Save to server again.", "server-refused")
+      : undefined;
+  const complete = async (): Promise<ServerSave> =>
+    saveFrom(await (await repeatable(route(), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "complete" }) }, gone)).json());
+  const building = async (): Promise<ServerSave> => saveFrom(await (await repeatable(route(), { method: "GET" }, gone)).json());
+
+  let finished = await complete();
+  for (let restarts = 0; ; ) {
+    const failed = buildErrorOf(finished);
+    if (failed) throw buildFailure(failed);
+    if (finished.state === "complete") break;
+    if (finished.state === "building") {
+      progress.bytes = finished.packedBytes ?? 0;
+      report("writing");
+      await pause(pollMs, signal);
+      finished = await building();
+      continue;
+    }
+    // `uploading` with every file verified and no error: the server forgot the build (it restarted). Ask again, but a
+    // server that keeps forgetting is not going to finish it.
+    if (!finished.files.every((file) => file.verified)) {
+      throw new DeviceArtifactError("The server lost some of the uploaded files before it could pack them. Press Save to server again: only the lost files are sent again.", "server-refused");
+    }
+    restarts += 1;
+    if (restarts > MAX_BUILD_RESTARTS) {
+      throw new DeviceArtifactError("The server keeps stopping before it finishes packing the archive. Your files are on the server, so press Save to server again later: nothing is sent twice.", "server-refused");
+    }
+    finished = await complete();
+  }
   progress.bytes = totalBytes;
-  report("verifying");
+  report("writing");
   return toResult(finished, resumed, false);
 }

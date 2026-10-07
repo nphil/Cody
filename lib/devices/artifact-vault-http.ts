@@ -130,7 +130,7 @@ export async function handleBegin(request: Request, config: VaultConfig = vaultC
   }
 }
 
-/** GET: finished saves this caller may open, optionally one chat's, newest first. */
+/** GET: finished saves (one archive each) this caller may open, optionally one chat's, newest first. */
 export async function handleList(request: Request, config: VaultConfig = vaultConfig()): Promise<NextResponse> {
   const caller = identify(request, config);
   if (caller instanceof NextResponse) return caller;
@@ -171,7 +171,11 @@ export async function handleSlice(request: Request, saveId: string, config: Vaul
   }
 }
 
-/** POST `{action: "verify", file}` re-reads one finished file from disk; `{action: "complete"}` finishes the save. */
+/**
+ * POST `{action: "verify", file}` re-reads one finished file from disk; `{action: "complete"}` builds the save's one
+ * archive: it answers `complete` when that is quick, `building` (with `packedBytes`) when it is not, and the sender then
+ * asks with GET until it is `complete`. A second `complete` joins the build that is running.
+ */
 export async function handleAction(request: Request, saveId: string, config: VaultConfig = vaultConfig()): Promise<NextResponse> {
   const caller = identify(request, config);
   if (caller instanceof NextResponse) return caller;

@@ -592,7 +592,7 @@ export class DeviceBridge {
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
-    if (!isRecord(answer) || typeof answer.saveId !== "string" || typeof answer.folder !== "string") {
+    if (!isRecord(answer) || typeof answer.saveId !== "string" || typeof answer.archive !== "string") {
       throw new Error("The browser answered the save request with something this server does not understand.");
     }
     const ack = answer as unknown as ArtifactSaveAck;
