@@ -30,7 +30,7 @@ import { getDiskSpace } from "../disk-space";
 import { readEnv } from "../env";
 import { getAgentDir } from "../omp/paths";
 import { isRecord } from "../type-guards";
-import { labelSlug, MANIFEST_NAME, SUMS_NAME, uniqueFileNames } from "./artifact-names";
+import { isVaultInternalName, labelSlug, MANIFEST_NAME, partName, STATE_NAME, SUMS_NAME, uniqueFileNames } from "./artifact-names";
 
 const MiB = 1024 * 1024;
 const GiB = 1024 * MiB;
@@ -198,7 +198,6 @@ interface Manifest {
 }
 
 const INCOMING = ".incoming";
-const STATE_NAME = "state.json";
 const SAVE_ID = /^[a-f0-9]{32}$/;
 const SHA256 = /^[a-f0-9]{64}$/i;
 const KEY = /^[a-f0-9]{16,64}$/;
@@ -254,7 +253,8 @@ async function ensureRoot(config: VaultConfig): Promise<string> {
 }
 
 async function writeJson(file: string, value: unknown): Promise<void> {
-  const temporary = `${file}.${randomUUID().slice(0, 8)}.tmp`;
+  // Dotted like every file the vault keeps for itself, so it cannot be mistaken for, or overwritten by, a person's file.
+  const temporary = path.join(path.dirname(file), `.${path.basename(file)}.${randomUUID().slice(0, 8)}.tmp`);
   const handle = await fsp.open(temporary, "w", FILE_MODE);
   try {
     await handle.writeFile(JSON.stringify(value, null, 2) + "\n");
@@ -353,7 +353,7 @@ async function statusOfIncoming(config: VaultConfig, stored: StoredSave): Promis
       path: file.fileName,
       size: file.size,
       sha256: file.sha256,
-      received: file.verified ? file.size : Math.min(await sizeOf(path.join(directory, `${index}.part`)), file.size),
+      received: file.verified ? file.size : Math.min(await sizeOf(path.join(directory, partName(index))), file.size),
       verified: file.verified === true,
     });
   }
@@ -561,6 +561,9 @@ export async function beginSave(config: VaultConfig, actor: SaveActor, raw: unkn
   let folderName = base;
   for (let counter = 2; taken.has(folderName.toLowerCase()); counter += 1) folderName = `${base}-${counter}`;
   const names = uniqueFileNames(request.files.map((file) => file.name));
+  // The vault's own files share the folder the finished ones end up in. Names made by uniqueFileNames can never be one of
+  // them; if a change ever broke that, a save must stop here rather than overwrite its own bookkeeping.
+  if (names.some((name) => isVaultInternalName(name))) throw new VaultError(500, "unsafe_name", "A file name could not be made safe, so nothing was saved.");
   const stored: StoredSave = {
     version: 1,
     saveId,
@@ -607,17 +610,26 @@ export async function appendChunk(config: VaultConfig, saveId: string, index: nu
     const stored = await requireIncoming(config, saveId);
     const file = fileAt(stored, index);
     if (file.verified) throw new VaultError(409, "already_verified", `"${file.name}" is already stored and verified.`, { received: file.size });
-    const part = path.join(incomingDirectory(config, saveId), `${index}.part`);
+    const part = path.join(incomingDirectory(config, saveId), partName(index));
     const received = await sizeOf(part);
     if (offset !== received) throw new VaultError(409, "offset_mismatch", `"${file.name}" has ${received} bytes stored, not ${offset}.`, { received });
     if (received + bytes.byteLength > file.size) throw new VaultError(400, "too_long", `That slice runs past the end of "${file.name}" (${file.size} bytes).`, { received });
     const handle = await fsp.open(part, "a", FILE_MODE);
+    let written = 0;
     try {
-      await handle.write(bytes);
+      // One write may take only part of the slice (a disk filling up, a network share): go on until it is all down.
+      while (written < bytes.byteLength) {
+        const { bytesWritten } = await handle.write(bytes, written, bytes.byteLength - written);
+        if (bytesWritten <= 0) break;
+        written += bytesWritten;
+      }
     } finally {
       await handle.close();
     }
-    return { received: received + bytes.byteLength };
+    if (written < bytes.byteLength) {
+      throw new VaultError(507, "disk_full", `The server's disk stopped taking data after ${written} of the ${bytes.byteLength} bytes of this slice. Free some space and press Save to server again: what already arrived is kept.`, { received: received + written });
+    }
+    return { received: received + written };
   });
 }
 
@@ -631,7 +643,7 @@ export async function verifyFile(config: VaultConfig, saveId: string, index: num
     const stored = await requireIncoming(config, saveId);
     const file = fileAt(stored, index);
     if (file.verified) return { sha256: file.sha256 };
-    const part = path.join(directory, `${index}.part`);
+    const part = path.join(directory, partName(index));
     // A file with no bytes is never sent a slice, so there is no partial copy until now.
     if (file.size === 0 && !(await exists(part))) await fsp.writeFile(part, "", { mode: FILE_MODE });
     const received = await sizeOf(part);
@@ -663,7 +675,7 @@ export async function completeSave(config: VaultConfig, saveId: string, now = Da
     const directory = incomingDirectory(config, saveId);
     const missing: { index: number; name: string; received: number; size: number }[] = [];
     for (const [index, file] of stored.files.entries()) {
-      const received = file.verified ? file.size : await sizeOf(path.join(directory, `${index}.part`));
+      const received = file.verified ? file.size : await sizeOf(path.join(directory, partName(index)));
       if (!file.verified || received !== file.size) missing.push({ index, name: file.name, received, size: file.size });
     }
     if (missing.length > 0) {
@@ -673,7 +685,7 @@ export async function completeSave(config: VaultConfig, saveId: string, now = Da
 
     // Safe to repeat after an interruption: a file already renamed to its final name is left where it is.
     for (const [index, file] of stored.files.entries()) {
-      const part = path.join(directory, `${index}.part`);
+      const part = path.join(directory, partName(index));
       const target = path.join(directory, file.fileName);
       if (await exists(part)) {
         if (await sizeOf(part) !== file.size) throw new VaultError(409, "changed", `"${file.name}" changed on the server after it was verified. Save again.`);

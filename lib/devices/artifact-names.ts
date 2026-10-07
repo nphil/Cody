@@ -9,12 +9,29 @@
  * space (the leading dot would hide it, the trailing one is stripped by
  * Windows), and the two names a save writes itself are moved aside.
  *
+ * The vault keeps its own bookkeeping files (`STATE_NAME`, `partName`) in the same folder the files are finished in, so
+ * they must never be able to share a name with one. Every one of them starts with a dot, which no name made here can,
+ * and `isVaultInternalName` reserves them a second time so a change to one rule cannot quietly break the other.
+ *
  * Pure and browser-safe.
  */
 
 /** The two files every save carries beside the artifacts. */
 export const MANIFEST_NAME = "manifest.json";
 export const SUMS_NAME = "SHA256SUMS";
+
+/** The vault's record of an unfinished save, inside that save's folder. */
+export const STATE_NAME = ".state.json";
+
+/** The partial copy of file number `index` while it is still arriving. */
+export function partName(index: number): string {
+  return `.${index}.part`;
+}
+
+/** Whether a name is one the vault keeps for itself (any case: a share seen from Windows is case-insensitive). */
+export function isVaultInternalName(name: string): boolean {
+  return name.toLowerCase() === STATE_NAME || /^\.\d+\.part$/.test(name);
+}
 
 const RESERVED_FILE_NAMES = new Set([MANIFEST_NAME, SUMS_NAME.toLowerCase()]);
 const WINDOWS_DEVICE_NAME = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
@@ -44,7 +61,7 @@ export function safeFileName(name: string): string {
   base = base.replace(/^[\s.]+/, "_").replace(/[\s.]+$/, "");
   if (!base) base = "file";
   if (WINDOWS_DEVICE_NAME.test(base)) base = `_${base}`;
-  if (RESERVED_FILE_NAMES.has(base.toLowerCase())) base = `file-${base}`;
+  if (RESERVED_FILE_NAMES.has(base.toLowerCase()) || isVaultInternalName(base)) base = `file-${base}`;
   return truncateBytes(base, MAX_NAME_BYTES);
 }
 
