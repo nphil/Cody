@@ -29,8 +29,8 @@ import { throwIfAborted } from "./serial";
  *   exec check    does the table's span agree with the capacity the programmer
  *                 reports, and is the backup table where it should be
  *   exec reset    leave EDL
- *   exec backup   every partition and both partition tables, saved as session files with a manifest that names them and
- *                 the unit they came from (edl-backup.ts)
+ *   exec backup   every partition (or only the ones options.partitions names) and both partition tables, saved as session
+ *                 files with a manifest that names them and the unit they came from (edl-backup.ts)
  *   exec restore  put such a set back on the same unit: matched by chip serial, public-key hash, eMMC serial and disk GUID,
  *                 what it overwrites saved first, partition tables last, every region read back
  *   exec setbootablestoragedrive  choose the storage drive the boot ROM starts from (target = the drive number), always
@@ -109,7 +109,7 @@ const COMMAND_NAMES: Readonly<Record<string, EdlCommand>> = {
 export function parseEdlCommand(command: string | undefined): EdlCommand {
   const word = (command ?? "").trim().replace(/^edl\s+/i, "").toLowerCase();
   const found = Object.hasOwn(COMMAND_NAMES, word) ? COMMAND_NAMES[word] : undefined;
-  if (!found) throw new EdlError(`"${(command ?? "").trim().slice(0, 40)}" is not an EDL command Cody offers. Use connect, printgpt, check, erase (the partition name goes in target), backup, restore (options.manifestSha256 names the set), setbootablestoragedrive (the drive number goes in target) or reset.`, "refused");
+  if (!found) throw new EdlError(`"${(command ?? "").trim().slice(0, 40)}" is not an EDL command Cody offers. Use connect, printgpt, check, erase (the partition name goes in target), backup (options.partitions optionally lists the partitions to back up), restore (options.manifestSha256 names the set), setbootablestoragedrive (the drive number goes in target) or reset.`, "refused");
   return found;
 }
 

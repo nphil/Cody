@@ -1,7 +1,7 @@
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { sha256 as noblesha256 } from "@noble/hashes/sha2.js";
 import { fileNamePart, parseBackupRegion, parsePrimaryRegion, partitionWriteProblem } from "./edl-disk";
-import { evaluateSpan } from "./edl-gpt";
+import { evaluateSpan, type GptPartition } from "./edl-gpt";
 import { EdlError } from "./edl-link";
 import { classifyEdlPartition } from "./edl-protect";
 
@@ -12,6 +12,10 @@ import { classifyEdlPartition } from "./edl-protect";
  * partition, the backup partition table at the end of the disk - and one JSON manifest that names each by its SHA-256 and
  * says which unit they came from. Nothing here trusts the manifest alone: a restore parses the SAVED table files too and
  * requires the manifest to agree with them, and it re-hashes every file it is about to write.
+ *
+ * A backup of chosen partitions saves both tables but only those partitions, so its manifest lists some of the table's
+ * partitions and says it is not restorable. It is a complete record of what was read, but Cody restores only a whole set,
+ * and `planRestore` says so instead of calling the shorter list a mismatch.
  */
 
 export const BACKUP_SET_FORMAT = "cody-edl-backup-set";
@@ -338,15 +342,22 @@ export function planRestore(manifest: BackupSetManifest, primaryBytes: Uint8Arra
   const span = evaluateSpan(measuredSectors, sectorSize, primary.table, { lastSectorReadable: true, backup: { header: tail.header, table: tail.table, problem: null } });
   if (!span.ok) refuse(`The saved partition tables do not describe a disk of ${measuredSectors} sectors consistently: ${span.reasons.join(" ")} Restoring them would write a broken table. Nothing was written.`);
 
-  const listed = [...manifest.partitions].sort((left, right) => left.index - right.index);
-  const table = [...primary.table.partitions].sort((left, right) => left.index - right.index);
-  const same = listed.length === table.length && listed.every((entry, position) => {
-    const found = table[position]!;
-    return entry.index === found.index && entry.name === found.name && entry.firstLba === found.firstLba && entry.sectors === found.sectors;
+  // Every partition the manifest lists must be exactly the table's entry of that index, and a whole set lists all of them.
+  const tableByIndex = new Map(primary.table.partitions.map((part): [number, GptPartition] => [part.index, part]));
+  const listedInTable = manifest.partitions.every((entry) => {
+    const found = tableByIndex.get(entry.index);
+    return found !== undefined && entry.name === found.name && entry.firstLba === found.firstLba && entry.sectors === found.sectors;
   });
-  if (!same) refuse("The manifest's partition list is not the one in the saved partition table. Nothing was written.");
+  if (!listedInTable || manifest.partitions.length !== tableByIndex.size) {
+    // What is listed is some of the table's own partitions: a backup of chosen partitions, not a damaged or edited set.
+    if (listedInTable) {
+      refuse(`This set holds only ${manifest.partitions.length} of the ${tableByIndex.size} partitions on the disk (a backup of chosen partitions), and Cody restores only a whole set. Put these partitions back one at a time with device_flash from their saved files. Nothing was written.`);
+    }
+    refuse("The manifest's partition list is not the one in the saved partition table. Nothing was written.");
+  }
 
   for (const part of primary.table.partitions) {
+    if (part.name.trim() === "") refuse(`Partition ${part.index} has no name, so Cody cannot tell whether it is safe to write. The set cannot be restored. Nothing was written.`);
     const kind = classifyEdlPartition(part.name);
     if (kind.level === "refused") refuse(`${kind.reason} The set cannot be restored, because it would write ${part.name}. Nothing was written.`);
     const problem = partitionWriteProblem(primary, part, measuredSectors, sectorSize);

@@ -1,3 +1,4 @@
+import type { BackupScope } from "./artifact-model";
 import { hashBlob } from "./blob-stream";
 import {
   describeRange,
@@ -17,6 +18,7 @@ import {
   unitTag,
 } from "./edl-disk";
 import { FirehoseRejection, grantWrites } from "./edl-firehose";
+import type { GptPartition } from "./edl-gpt";
 import { EdlError } from "./edl-link";
 import {
   bootRomMismatches,
@@ -43,8 +45,10 @@ import { throwIfAborted } from "./serial";
 /**
  * Backup sets and their restore.
  *
- *   exec backup    the partition tables and every partition, each saved as a session file, plus a manifest that names
- *                  them by SHA-256 and says which unit they came from. Read-only.
+ *   exec backup    the partition tables and every partition (or only the ones options.partitions names), each saved as a
+ *                  session file, plus a manifest that names them by SHA-256 and says which unit they came from. Read-only.
+ *                  A backup of chosen partitions is one set like any other, says so wherever it is shown, declares which
+ *                  partitions it holds to the operation (`declareScope`), and is not restorable: Cody restores only a whole set.
  *   exec restore   puts a set back on the SAME unit: it is matched to the unit by chip serial, public-key hash (both from a
  *                  boot ROM that is read in this very operation), eMMC serial and disk GUID before the loader is even
  *                  declared; what it will overwrite is saved first; the exact ranges are declared once
@@ -61,9 +65,9 @@ function refused(message: string): EdlError {
   return new EdlError(message, "refused");
 }
 
-function listed(labels: readonly string[]): string {
+function listed(labels: readonly string[], limit = LISTED_NAMES): string {
   if (labels.length === 0) return "none";
-  return `${labels.slice(0, LISTED_NAMES).join(", ")}${labels.length > LISTED_NAMES ? ` and ${labels.length - LISTED_NAMES} more` : ""}`;
+  return `${labels.slice(0, limit).join(", ")}${labels.length > limit ? ` and ${labels.length - limit} more` : ""}`;
 }
 
 /** Joins lines but stops adding when the text would no longer fit the declared risk's details (the manager refuses more than 8 KiB). */
@@ -79,12 +83,74 @@ function fitted(lines: readonly string[]): string {
 
 // ---- backup ------------------------------------------------------------------------------------------------------------
 
+/** A partition table holds at most this many entries (see edl-gpt.ts), so a longer list cannot be names of its partitions. */
+const MAX_CHOSEN_PARTITIONS = 1024;
+/** The longest partition name a manifest and a backup's scope carry. */
+const MAX_PARTITION_NAME_CHARS = 80;
+/** How many of the disk's partition names a refusal lists, so the caller can correct its list. */
+const NAMES_SHOWN = 64;
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
+
+/**
+ * What a partition is called to the person, to the agent and in a backup's scope: its name, with a control character shown
+ * as the replacement mark (a manifest cannot carry one), or "partition N" (N is its place in the table) when it has none.
+ */
+function partitionLabel(part: GptPartition): string {
+  return part.name.replace(/[\u0000-\u001f\u007f]/g, "\uFFFD") || `partition ${part.index}`;
+}
+
+/**
+ * The partitions the caller chose, by name, or undefined for every partition. Checked before the device is touched: a list
+ * that is not a plain list of names is refused with nothing read, and a name that is listed twice is one name.
+ */
+function chosenNames(run: EdlRun): readonly string[] | undefined {
+  const options = run.request.options ?? {};
+  const extra = Object.keys(options).filter((key) => key !== "partitions");
+  if (extra.length > 0) {
+    throw refused(`A backup takes only options.partitions (the partitions to back up); ${extra.slice(0, 3).join(", ")} ${extra.length === 1 ? "is" : "are"} not accepted. Nothing was read.`);
+  }
+  const list = options.partitions;
+  if (list === undefined) return undefined;
+  if (!Array.isArray(list) || list.length === 0 || list.length > MAX_CHOSEN_PARTITIONS) {
+    throw refused(`options.partitions must be a list of 1 to ${MAX_CHOSEN_PARTITIONS} partition names; leave it out to back up every partition. Nothing was read.`);
+  }
+  for (const [position, name] of list.entries()) {
+    if (typeof name !== "string" || name.length === 0 || name.length > MAX_PARTITION_NAME_CHARS || CONTROL_CHARACTER.test(name)) {
+      throw refused(`options.partitions[${position}] must be a partition name of 1 to ${MAX_PARTITION_NAME_CHARS} characters without control characters. Nothing was read.`);
+    }
+  }
+  return [...new Set<string>(list)];
+}
+
+/**
+ * The partitions a backup reads, in disk order: all of them, or the ones named. A name the disk does not have, or that two of
+ * its partitions share (so it does not pick one), is refused before any partition is read.
+ */
+function partitionsToSave(parts: readonly GptPartition[], wanted: readonly string[] | undefined): GptPartition[] {
+  if (wanted === undefined) return [...parts];
+  const counts = new Map<string, number>();
+  for (const part of parts) {
+    const label = partitionLabel(part);
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  const unknown = wanted.filter((name) => !counts.has(name));
+  if (unknown.length > 0) {
+    throw refused(`The disk has no ${unknown.length === 1 ? "partition" : "partitions"} named ${listed(unknown.map((name) => `"${name}"`))}. Its partitions are ${listed(parts.map(partitionLabel), NAMES_SHOWN)}. No partition was read and nothing was saved.`);
+  }
+  const shared = wanted.filter((name) => counts.get(name)! > 1);
+  if (shared.length > 0) {
+    throw refused(`More than one partition is named ${listed(shared.map((name) => `"${name}"`))}, so ${shared.length === 1 ? "that name does" : "those names do"} not pick one. No partition was read and nothing was saved.`);
+  }
+  const chosen = new Set(wanted);
+  return parts.filter((part) => chosen.has(partitionLabel(part)));
+}
+
 export async function backupSet(run: EdlRun): Promise<HardwareResult> {
   const { context, request, say } = run;
   if (request.target !== undefined || request.offset !== undefined || request.length !== undefined) {
-    throw refused("A backup set covers the whole disk and takes no target, offset or length. Nothing was read.");
+    throw refused("A backup set takes no target, offset or length: it covers the whole disk, or the partitions options.partitions names. Nothing was read.");
   }
-  if (request.options && Object.keys(request.options).length > 0) throw refused("A backup set takes no options. Nothing was read.");
+  const wanted = chosenNames(run);
 
   const opened = await openFirehose(run, { identity: "try" }, context.input);
   const { sectorSize, totalSectors } = opened.storage;
@@ -100,11 +166,24 @@ export async function backupSet(run: EdlRun): Promise<HardwareResult> {
   const parts = [...primary.table.partitions].sort((left, right) => left.firstLba - right.firstLba);
   if (parts.length === 0) throw refused("The partition table lists no partitions, so there is nothing to save as a set. Nothing was saved.");
 
+  const chosenParts = partitionsToSave(parts, wanted);
+  const partial = chosenParts.length < parts.length;
+  // `all` as the table lists them; `chosen` in the order they are read, which is the order they lie on the disk.
+  const scope: BackupScope = { chosen: chosenParts.map(partitionLabel), all: primary.table.partitions.map(partitionLabel) };
+  // How the backup describes itself everywhere: "every partition (56)", or "5 of 56 partitions (boot_a, ...)".
+  const holds = partial ? `${chosenParts.length} of ${parts.length} partitions (${listed(scope.chosen)})` : `every partition (${parts.length})`;
+  const leftOut = parts.length - chosenParts.length;
+  const leftOutText = `${leftOut} ${leftOut === 1 ? "partition is" : "partitions are"} not read`;
+  say(`Backing up ${holds} and both partition tables${partial ? `; the other ${leftOutText}` : ""}.`);
+
   // What a restore would refuse to write is still worth saving, but the set is then not restorable and says so.
   const problems: string[] = [];
-  for (const part of parts) {
-    const kind = classifyEdlPartition(part.name);
-    if (kind.level === "refused") problems.push(`${kind.reason} A restore would have to write ${part.name}.`);
+  if (partial) problems.push(`This backup holds ${chosenParts.length} of the ${parts.length} partitions on the disk. Cody restores only a whole set; put these partitions back one at a time with device_flash from their saved files.`);
+  for (const part of chosenParts) {
+    // A restore judges a partition by its name, and an unnamed one has none to judge by: Cody will not write what it cannot classify.
+    const kind = part.name.trim() === "" ? undefined : classifyEdlPartition(part.name);
+    if (kind === undefined) problems.push(`Partition ${part.index} has no name, so Cody cannot tell whether it is safe to write. A restore would refuse to write it.`);
+    else if (kind.level === "refused") problems.push(`${kind.reason} A restore would have to write ${part.name}.`);
     const unsafe = partitionWriteProblem(primary, part, totalSectors, sectorSize);
     if (unsafe) problems.push(`${unsafe} A restore would refuse to write it.`);
     if (/[\u0000-\u001f\u007f]/.test(part.name)) problems.push(`The name of partition ${part.index} contains a control character, which a manifest cannot carry.`);
@@ -121,13 +200,13 @@ export async function backupSet(run: EdlRun): Promise<HardwareResult> {
     diskGuid: guid,
   };
 
-  const totalBytes = (primary.regionSectors + backupSectors + parts.reduce((sum, part) => sum + part.sectors, 0)) * sectorSize;
+  const totalBytes = (primary.regionSectors + backupSectors + chosenParts.reduce((sum, part) => sum + part.sectors, 0)) * sectorSize;
   await context.confirm({
     action: "edl backup",
-    target: `backup set of disk ${guid}`,
+    target: partial ? `backup of ${chosenParts.length} of ${parts.length} partitions of disk ${guid}` : `backup set of disk ${guid}`,
     backup: "Not applicable: read-only. Nothing is written to the device; the bytes become session files with a SHA-256 each, and a manifest that names them.",
     details: fitted([
-      `Read both partition tables and ${parts.length} partition(s) of disk ${guid}, ${formatBytes(totalBytes)} in all, from the eMMC user area (physical partition 0), and save each as a session file.`,
+      `Read both partition tables and ${holds} of disk ${guid}, ${formatBytes(totalBytes)} in all, from the eMMC user area (physical partition 0), and save each as a session file.${partial ? ` The other ${leftOutText}.` : ""}`,
       `${describeStorage(opened)}. The span check passed: the tables, the capacity and the end of the disk agree.`,
       identity
         ? `Unit: chip serial 0x${identity.serial}, public-key hash ${identity.pkHash ?? "not available"}, eMMC serial ${unit.emmcSerial ?? "not reported"}.`
@@ -138,6 +217,8 @@ export async function backupSet(run: EdlRun): Promise<HardwareResult> {
       await storageNote(totalBytes),
     ]),
   });
+  // Declared before the first file is saved, so that every file this backup saves says which partitions it holds.
+  context.declareScope?.(scope);
 
   const tag = unitTag(opened);
   let savedCount = 0;
@@ -154,10 +235,10 @@ export async function backupSet(run: EdlRun): Promise<HardwareResult> {
     savedCount += 1;
     say(`Saved the primary partition table (sectors 0-${primary.regionSectors - 1}) as ${primaryFile.fileId}.`);
     await readAgain("the primary partition table", 0, primary.regionSectors, primaryFile.sha256);
-    for (const [position, part] of parts.entries()) {
+    for (const [position, part] of chosenParts.entries()) {
       const fileName = `edl-${tag}-set-p${part.index}-${fileNamePart(part.name)}.bin`;
-      const label = part.name || `partition ${part.index}`;
-      const { saved } = await streamToArtifact(run, opened, part.firstLba, part.sectors, fileName, "read", `Reading ${label} (${position + 1} of ${parts.length})`);
+      const label = partitionLabel(part);
+      const { saved } = await streamToArtifact(run, opened, part.firstLba, part.sectors, fileName, "read", `Reading ${label} (${position + 1} of ${chosenParts.length})`);
       savedCount += 1;
       say(`Saved ${label} (${describeRange(part.firstLba, part.sectors, sectorSize)}) as ${saved.fileId}, SHA-256 ${saved.sha256}.`);
       await readAgain(label, part.firstLba, part.sectors, saved.sha256);
@@ -185,7 +266,7 @@ export async function backupSet(run: EdlRun): Promise<HardwareResult> {
     const manifestFile = await saveSmall(context, manifestName, bytes);
     savedCount += 1;
     const restorable = manifest.restorable;
-    const summary = `Backup set ${manifestShort(digest)} saved: ${parts.length} partition(s) and both partition tables of disk ${guid}, ${formatBytes(totalBytes)}. Manifest ${manifestFile.fileId}, SHA-256 ${digest}. ${restorable
+    const summary = `Backup set ${manifestShort(digest)} saved: ${holds} and both partition tables of disk ${guid}, ${formatBytes(totalBytes)}. Manifest ${manifestFile.fileId}, SHA-256 ${digest}. ${restorable
       ? "To put it back on this unit, put the device into EDL mode again and run exec restore with the loader as the file and options.manifestSha256 set to that SHA-256."
       : `NOT RESTORABLE by Cody: ${manifest.notRestorableBecause.join(" ")}`}`;
     say(summary);
@@ -198,6 +279,8 @@ export async function backupSet(run: EdlRun): Promise<HardwareResult> {
         manifest: { fileId: manifestFile.fileId, sha256: digest, name: manifestName },
         restorable,
         notRestorableBecause: manifest.notRestorableBecause,
+        scope,
+        partial,
         unit,
         geometry: manifest.geometry,
         diskGuid: guid,
