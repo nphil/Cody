@@ -815,6 +815,8 @@
   "devices.files.saveFailedTitle": "{label} のサーバーへの保存に失敗しました",
   "devices.files.downloadFailedTitle": "{label} のダウンロードに失敗しました",
   "devices.files.showTheFiles": "ファイルを表示",
+  "devices.files.cancelledSave": "サーバーへの保存をキャンセルしました。すでに届いた分は残っており、「サーバーに保存」でその続きから再開できます。",
+  "devices.files.cancelledDownload": "ダウンロードをキャンセルしました。ファイルは書き込まれていません。",
   "directoryPicker.cancel": "キャンセル",
   "directoryPicker.checking": "確認中…",
   "directoryPicker.close": "閉じる",

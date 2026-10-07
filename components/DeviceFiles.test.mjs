@@ -162,6 +162,49 @@ test("a transfer that failed stays on the card until it is acknowledged, in the 
   assert.doesNotMatch(panel(backup, { transfers: [failed], acknowledged: new Set(["t2"]) }), /role="alert"/);
 });
 
+const { runningTransfer } = await jiti.import("./devices/set-text.ts");
+const saveJob = (set, over) => ({ id: "j", kind: "save", setId: set.id, artifactIds: set.artifactIds, label: "x", state: "running", progress: { phase: "uploading", done: 12, total: 58, bytes: 41, totalBytes: 100 }, startedAt: NOW, origin: "user", ...over });
+
+test("a transfer that was cancelled says so on the card, and what is kept, until it is acknowledged", () => {
+  const set = groupArtifactSets(backup)[0];
+  const save = panel(backup, { transfers: [saveJob(set, { id: "c-save", state: "cancelled", endedAt: NOW + 1 })] });
+  assert.match(save, /role="status"[^>]*>(?:(?!<\/div>).)*Saving to the server was cancelled\. What already arrived is kept; Save to server carries on from there\./s);
+  assert.match(save, />Got it<\/span>/);
+  assert.match(save, />Download all<\/span>/, "a cancelled transfer no longer holds the card");
+  assert.match(panel(backup, { transfers: [saveJob(set, { id: "c-zip", kind: "download", state: "cancelled", endedAt: NOW + 1 })] }), /The download was cancelled\. No file was written\./);
+  assert.doesNotMatch(panel(backup, { transfers: [saveJob(set, { id: "c-save", state: "cancelled" })], acknowledged: new Set(["c-save"]) }), /was cancelled/);
+});
+
+test("while a transfer of the set runs, taking one file out of it is as locked as taking the set out", () => {
+  const t = (key) => locales.en[key] ?? key;
+  const actions = { sessionId: "s", selectedInputId: null, onSelectInput: noop, onDetails: noop, onRemove: noop, flash: noop };
+  const items = (locked) => fileMenuItems(backup[1], actions, t, { input: false, locked });
+  assert.equal(items(true).find((item) => item.id === "remove").disabled, true);
+  assert.notEqual(items(false).find((item) => item.id === "remove").disabled, true);
+  assert.notEqual(items(undefined).find((item) => item.id === "remove").disabled, true);
+  assert.ok(items(true).filter((item) => item.id !== "remove").every((item) => item.disabled !== true), "downloading, copying and details stay available");
+});
+
+test("a confirmation that was already open when a transfer began cannot be used to take the file away", () => {
+  const actions = { sessionId: "s", selectedInputId: null, onSelectInput: noop, onDetails: noop, onRemove: noop, flash: noop };
+  const markup = html(React.createElement(FileRow, { artifact: backup[3], verified: true, actions, confirming: true, locked: true, onCancelRemove: noop, onConfirmRemove: noop }));
+  assert.match(markup, /<button[^>]*disabled=""[^>]*title="Wait until it has finished"[^>]*>(?:(?!<\/button>).)*Remove/s);
+  assert.match(markup, />Keep<\/span>/);
+  assert.doesNotMatch(html(React.createElement(FileRow, { artifact: backup[3], verified: true, actions, confirming: true, onCancelRemove: noop, onConfirmRemove: noop })), /disabled=""/);
+});
+
+test("an older transfer that is still running keeps the card locked even after a newer one has finished", () => {
+  const set = groupArtifactSets(backup)[0];
+  const older = saveJob(set, { id: "old", state: "running", startedAt: NOW });
+  const newer = saveJob(set, { id: "new", kind: "download", state: "succeeded", startedAt: NOW + 5, endedAt: NOW + 6 });
+  assert.equal(runningTransfer([older, newer], set)?.id, "old");
+  assert.equal(latestTransfer([older, newer], set)?.id, "new");
+  assert.equal(runningTransfer([newer], set), undefined);
+  const markup = panel(backup, { transfers: [older, newer] });
+  assert.match(markup, />Cancel<\/span>/);
+  assert.doesNotMatch(markup, />Download all<\/span>/, "no second transfer on top of the first");
+});
+
 test("while the backup is still being made, nothing is offered that would take half of it", () => {
   const set = groupArtifactSets(backup)[0];
   const markup = panel(backup, { busy: new Set([set.id]) });

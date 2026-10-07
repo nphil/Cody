@@ -166,6 +166,7 @@ export function ArtifactPanel({ sessionId, library, selectedInputId, onSelectInp
                 input
                 actions={fileActions}
                 confirming={removing === artifact.id}
+                locked={transfers.some((job) => job.state === "running" && job.artifactIds.includes(artifact.id))}
                 onCancelRemove={() => setRemoving(null)}
                 onConfirmRemove={() => {
                   setRemoving(null);

@@ -9,7 +9,7 @@ import { setSaveState } from "@/lib/devices/artifact-sets";
 import { whenText } from "./job-text";
 import { FILTER_FROM, narrow } from "./list-view";
 import { RowMenu, type MenuItem } from "./RowMenu";
-import { downloadedName, fileLabel, latestTransfer, setTitle, transferText, verifiedText } from "./set-text";
+import { downloadedName, fileLabel, latestTransfer, runningTransfer, setTitle, transferText, verifiedText } from "./set-text";
 import { Button, Notice, ProgressLine, Segmented, TextField } from "./ui";
 
 export type FileSort = "order" | "name" | "size";
@@ -45,7 +45,7 @@ interface FileActions {
 }
 
 /** What the ⋯ of a file offers. Every one of these existed on the big card; none is on the row itself. */
-export function fileMenuItems(artifact: DeviceArtifact, actions: FileActions, t: (key: string, vars?: Record<string, string | number>) => string, options: { input: boolean }): MenuItem[] {
+export function fileMenuItems(artifact: DeviceArtifact, actions: FileActions, t: (key: string, vars?: Record<string, string | number>) => string, options: { input: boolean; locked?: boolean }): MenuItem[] {
   const name = fileLabel(artifact);
   const copy = (text: string, what: string): void => {
     if (!navigator.clipboard) {
@@ -61,12 +61,12 @@ export function fileMenuItems(artifact: DeviceArtifact, actions: FileActions, t:
     { id: "id", label: t("devices.files.copyId"), icon: <Copy size={16} />, onSelect: () => copy(artifact.id, "id") },
     ...(options.input ? [] : [{ id: "use", label: selected ? t("devices.files.stopUsing") : t("devices.files.useAsInput"), icon: <FileCheck size={16} />, onSelect: () => actions.onSelectInput(selected ? null : artifact.id) }]),
     { id: "details", label: t("devices.files.details"), icon: <Info size={16} />, onSelect: () => actions.onDetails(artifact.id) },
-    { id: "remove", label: t("devices.removeArtifact"), icon: <Trash2 size={16} />, tone: "danger", onSelect: () => actions.onRemove(artifact.id) },
+    { id: "remove", label: t("devices.removeArtifact"), icon: <Trash2 size={16} />, tone: "danger", disabled: options.locked === true, onSelect: () => actions.onRemove(artifact.id) },
   ];
 }
 
 /** One file as one line: its name as a person says it, how big, whether the device's own read-back agreed, and its menu. */
-export function FileRow({ artifact, verified, actions, confirming, onCancelRemove, onConfirmRemove, input = false }: {
+export function FileRow({ artifact, verified, actions, confirming, onCancelRemove, onConfirmRemove, input = false, locked = false }: {
   artifact: DeviceArtifact;
   verified: boolean;
   actions: FileActions;
@@ -74,6 +74,8 @@ export function FileRow({ artifact, verified, actions, confirming, onCancelRemov
   onCancelRemove: () => void;
   onConfirmRemove: () => void;
   input?: boolean;
+  /** A transfer is reading this file: taking it out would stop that transfer, so Remove waits (as Remove set does). */
+  locked?: boolean;
 }): React.ReactElement {
   const { t } = useI18n();
   const name = input ? artifact.name : fileLabel(artifact);
@@ -83,7 +85,7 @@ export function FileRow({ artifact, verified, actions, confirming, onCancelRemov
       <li className="dv-file dv-file--confirm" data-file={artifact.id}>
         <p>{t("devices.files.removeOne", { name, size: formatBytes(artifact.size) })}</p>
         <div className="dv-job__actions">
-          <Button tone="danger" icon={<Trash2 size={14} />} onClick={onConfirmRemove}>{t("devices.files.removeConfirm")}</Button>
+          <Button tone="danger" icon={<Trash2 size={14} />} disabled={locked} title={locked ? t("devices.files.stillSaving") : undefined} onClick={onConfirmRemove}>{t("devices.files.removeConfirm")}</Button>
           <Button autoFocus onClick={onCancelRemove}>{t("devices.files.keep")}</Button>
         </div>
       </li>
@@ -104,7 +106,7 @@ export function FileRow({ artifact, verified, actions, confirming, onCancelRemov
         </>
       )}
       {input && <Button tone={selected ? "primary" : "normal"} pressed={selected} onClick={() => actions.onSelectInput(selected ? null : artifact.id)}>{selected ? t("devices.inputSelected") : t("devices.useInput")}</Button>}
-      <RowMenu label={t("devices.files.menu", { name })} items={fileMenuItems(artifact, actions, t, { input })} />
+      <RowMenu label={t("devices.files.menu", { name })} items={fileMenuItems(artifact, actions, t, { input, locked })} />
     </li>
   );
 }
@@ -149,9 +151,12 @@ export function SetCard({ sessionId, set, artifacts, transfers, deviceName, busy
   const files = useMemo(() => set.artifactIds.flatMap((id) => byId.get(id) ?? []), [set.artifactIds, byId]);
   const verified = files.filter((file) => file.provenance && verifiedBy(file.provenance.operationId) === true).length;
   const saved = setSaveState(set, files);
-  const transfer = latestTransfer(transfers, set);
-  const running = transfer?.state === "running";
+  // A transfer still running over these files holds the card, even when a newer one has already finished.
+  const active = runningTransfer(transfers, set);
+  const transfer = active ?? latestTransfer(transfers, set);
+  const running = active !== undefined;
   const failed = transfer?.state === "failed" && !acknowledged.has(transfer.id) ? transfer : undefined;
+  const cancelled = transfer?.state === "cancelled" && !acknowledged.has(transfer.id) ? transfer : undefined;
   const name = set.label ?? deviceName;
   const title = setTitle(set, name, t);
   const checked = verifiedText(files.length, verified, t, tn);
@@ -178,6 +183,11 @@ export function SetCard({ sessionId, set, artifacts, transfers, deviceName, busy
   };
   const removeFile = (artifactId: string): void => {
     setConfirmFile(null);
+    // Taking a file out stops every transfer that reads it; the lock is the same one Remove set waits for.
+    if (locked) {
+      flash(t("devices.files.stillSaving"));
+      return;
+    }
     deviceArtifacts.removeMany(sessionId, [artifactId]).then((removed) => { if (removed > 0 && artifactId === selectedInputId) onSelectInput(null); }, (cause: unknown) => flash(cause instanceof Error ? cause.message : String(cause)));
   };
 
@@ -259,6 +269,12 @@ export function SetCard({ sessionId, set, artifacts, transfers, deviceName, busy
           <span style={{ display: "block", marginTop: 6 }}><Button onClick={() => acknowledge([failed.id])}>{t("devices.problem.gotIt")}</Button></span>
         </Notice>
       )}
+      {cancelled && (
+        <Notice tone="info" role="status">
+          {cancelled.kind === "save" ? t("devices.files.cancelledSave") : t("devices.files.cancelledDownload")}
+          <span style={{ display: "block", marginTop: 6 }}><Button onClick={() => acknowledge([cancelled.id])}>{t("devices.problem.gotIt")}</Button></span>
+        </Notice>
+      )}
       {note && <p className="dv-set__note" role="status">{note}</p>}
 
       {open && (
@@ -282,6 +298,7 @@ export function SetCard({ sessionId, set, artifacts, transfers, deviceName, busy
                 verified={file.provenance !== undefined && verifiedBy(file.provenance.operationId) === true}
                 actions={actions}
                 confirming={confirmFile === file.id}
+                locked={locked}
                 onCancelRemove={() => setConfirmFile(null)}
                 onConfirmRemove={() => removeFile(file.id)}
               />

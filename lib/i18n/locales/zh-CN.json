@@ -815,6 +815,8 @@
   "devices.files.saveFailedTitle": "保存 {label} 到服务器失败",
   "devices.files.downloadFailedTitle": "下载 {label} 失败",
   "devices.files.showTheFiles": "查看文件",
+  "devices.files.cancelledSave": "已取消保存到服务器。已传到服务器的部分会保留，再次点击“保存到服务器”会从中断处继续。",
+  "devices.files.cancelledDownload": "已取消下载，没有写入任何文件。",
   "directoryPicker.cancel": "取消",
   "directoryPicker.checking": "检查中…",
   "directoryPicker.close": "关闭",

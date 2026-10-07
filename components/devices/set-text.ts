@@ -43,10 +43,19 @@ export function transferText(job: TransferJob, t: Translate): string {
   return t("devices.files.transferLine", { phase, done: progress.done, total: progress.total, percent, size: formatBytes(progress.totalBytes) });
 }
 
+/** Whether a transfer is over these files: the set's own, or a group made only of its files. */
+function touches(job: TransferJob, set: ArtifactSet): boolean {
+  return job.setId === set.id || (job.artifactIds.length > 0 && job.artifactIds.every((id) => set.artifactIds.includes(id)));
+}
+
 /** The newest transfer that touched these files, if any. */
 export function latestTransfer(transfers: readonly TransferJob[], set: ArtifactSet): TransferJob | undefined {
-  const members = new Set(set.artifactIds);
-  return transfers.findLast((job) => job.setId === set.id || (job.artifactIds.length > 0 && job.artifactIds.every((id) => members.has(id))));
+  return transfers.findLast((job) => touches(job, set));
+}
+
+/** The newest transfer over these files that is still running: it holds the files even when a newer one has already finished. */
+export function runningTransfer(transfers: readonly TransferJob[], set: ArtifactSet): TransferJob | undefined {
+  return transfers.findLast((job) => job.state === "running" && touches(job, set));
 }
 
 /** The name of the zip a finished download wrote, when the job was a download and said so. */

@@ -815,6 +815,8 @@
   "devices.files.saveFailedTitle": "Saving {label} to the server failed",
   "devices.files.downloadFailedTitle": "Downloading {label} failed",
   "devices.files.showTheFiles": "Show the files",
+  "devices.files.cancelledSave": "Saving to the server was cancelled. What already arrived is kept; Save to server carries on from there.",
+  "devices.files.cancelledDownload": "The download was cancelled. No file was written.",
   "directoryPicker.cancel": "Cancel",
   "directoryPicker.checking": "Checking…",
   "directoryPicker.close": "Close",
