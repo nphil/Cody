@@ -73,6 +73,10 @@ const TERMINAL_ONLY_KEYS = new Set([
   // tool opens tabs as picture-in-pictures over omp's pane. Cody's rpc-ui child
   // never runs in one, so it only matters to a CLI started in a Tern terminal.
   "browser.tern",
+  // omp 18.6.3: keeps finished thinking blocks expanded in a Tern terminal
+  // pane (interactive-mode.ts setExpandThinkingBlocks). Nothing on the rpc-ui
+  // protocol reads it; Cody has its own "Expand thinking blocks" control.
+  "expandThinkingBlocks",
 ]);
 
 /** Dotted-path prefixes (matched at a segment boundary) that are terminal-only
@@ -163,6 +167,22 @@ const SETTING_NOTES: Record<string, string> = {
   // tool_approval_* handlers. Cody's own extension registers none of those.
   "task.speculativeLaunch":
     "Subagents of a batch task call start as soon as each item has streamed in, so they can appear in Cody before the assistant has finished writing the call. It does not apply when the task tool needs your approval or an extension watches tool calls; the call then launches normally.",
+  // omp 18.5.0 task/completion-probe.ts: `isCompletionProbeEnabled` is
+  // `parentDepth === 0 && isInteractiveHost() && task.completionProbe`. The
+  // probe is a TUI-only readout, so a Cody session (`--mode rpc-ui`) never
+  // asks a subagent for an estimate whatever this is set to.
+  "task.completionProbe":
+    "No effect in Cody: the engine only asks subagents for a completion estimate in its own terminal session, never when driven over RPC, so Cody shows none whatever this is set to.",
+  // omp 18.4.11+ modes/rpc/rpc-goal.ts: `#continuationWanted()` re-reads this
+  // setting at every decision (each terminal agent_end, `goal create`/`resume`),
+  // and it continues only when the list includes "rpc" — omp's default is
+  // ["interactive"], so a goal driven from Cody (`--mode rpc-ui`) never carries
+  // on by itself until "rpc" is added. A running engine watches config.yml and
+  // applies the edit live (verified on 18.7: the very next turn end continues),
+  // so the Goal panel's "Keep working automatically" switch writes this key
+  // without restarting anything (a restart would pause an active goal).
+  "goal.continuationModes":
+    "In Cody add \"rpc\" to let an active goal carry on by itself between turns (the Goal panel's \"Keep working automatically\" switch does exactly this). Without it a goal only works when you send a message, because Cody's engine runs in rpc mode, not interactive mode. It applies to every chat, takes effect at the next turn end without restarting anything, and the goal still stops when the agent makes no new progress, you press Stop, or its token budget runs out.",
 };
 
 /** The Cody-specific caveat for a setting, when one applies. */

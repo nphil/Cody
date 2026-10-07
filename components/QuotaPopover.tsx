@@ -20,7 +20,7 @@
 import React, { useCallback, useRef, useState } from "react";
 import { ChevronRight, Info, RefreshCw } from "lucide-react";
 import { toast } from "@/components/ui/toast";
-import { formatRelativeTime, usageToneColor } from "@/lib/format";
+import { formatRelativeTime, formatResetTime, usageToneColor } from "@/lib/format";
 import { QuotaBar, clampQuotaPercent } from "@/components/QuotaBar";
 import { OpenRouterCredits } from "./OpenRouterCredits";
 import type { UseResetCreditsResult, ResetCreditAccount } from "@/hooks/useUsage";
@@ -35,6 +35,8 @@ import { translate, useI18n } from "@/lib/i18n";
 import type { SessionActiveModel } from "@/lib/session-active-models";
 import { Tooltip, Collapsible, CollapsibleTrigger, CollapsiblePanel } from "./ui/primitives";
 import { ConfirmDialog } from "./ui/field";
+import type { UsageLimitState } from "@/lib/pi-types";
+import { describeUsageLimit } from "@/lib/slow-mode-state";
 
 /** Stable empty list keeps quota derivation memo-friendly when no session is live. */
 const NO_ACTIVE_MODELS: readonly SessionActiveModel[] = [];
@@ -633,19 +635,6 @@ export function buildQuotaView(
   };
 }
 
-/** "18:20" for a reset later today, "Sun 09:00" once it crosses a day —
- *  matching how MessageView renders wall-clock times. */
-export function formatResetTime(iso: string | null, locale: string, now: number): string | null {
-  if (!iso) return null;
-  const at = new Date(iso);
-  const ts = at.getTime();
-  if (!Number.isFinite(ts)) return null;
-  const sameDay = at.toDateString() === new Date(now).toDateString();
-  return sameDay
-    ? at.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" })
-    : at.toLocaleString(locale, { weekday: "short", hour: "2-digit", minute: "2-digit" });
-}
-
 /** Usage-window labels are presentation text, unlike opaque plan and model
  * identifiers. Give case-aware locales a readable capital to every visible
  * window segment without changing the reported value itself. */
@@ -864,6 +853,7 @@ export function QuotaPopover({
   openRouter,
   quota,
   activeModels = NO_ACTIVE_MODELS,
+  usageLimit = null,
   provider,
   modelName,
   now,
@@ -896,8 +886,11 @@ export function QuotaPopover({
   onRefresh?: () => void;
   anchorTop?: number | null;
   anchorRight?: number | null;
+  /** The account's usage-limit stage (omp 18.6.3+), shown as one line under the hero. */
+  usageLimit?: UsageLimitState | null;
 }) {
   const { t, locale } = useI18n();
+  const usageLimitText = usageLimit ? describeUsageLimit(usageLimit, t, (iso) => formatResetTime(iso, locale, now)) : null;
   const formatUse = (use: SessionActiveModel["uses"][number]): string => {
     if (use.kind === "main") return t("usage.useMain", { label: use.label });
     if (use.kind === "smart") return t("usage.useSmart", { label: use.label });
@@ -1049,6 +1042,23 @@ export function QuotaPopover({
             </div>
           )}
         </div>
+
+        {/* The provider's usage-limit stage (low-priority lane / wrap-up
+            allowance), one line right under the hero. Colour marks state;
+            the full sentence is the tooltip. */}
+        {usageLimitText && usageLimit && (
+          <div
+            data-testid="quota-usage-limit"
+            title={usageLimitText.notice}
+            style={{
+              marginTop: 4, fontSize: 11, fontWeight: 600,
+              color: usageLimit.stage === "wrap_up" ? "var(--status-error)" : "var(--status-warning)",
+              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+            }}
+          >
+            {usageLimitText.line}
+          </div>
+        )}
 
         {quota.known ? (
           <>

@@ -3,7 +3,7 @@ import { getHarness } from "../harness";
 import { getEngineSession } from "../harness/engine-sessions";
 import { EngineCommandError } from "../harness/errors";
 import type { EngineSession } from "../harness/types";
-import { alignSessionTimeZone, getRpcSession, resolveSpawnCwd, startRpcSession, WebRpcError } from "../rpc-manager";
+import { alignSessionTimeZone, getRpcSession, resolveSpawnCwd, startRpcSession, unrestorableModelOf, WebRpcError } from "../rpc-manager";
 import { getSessionEntries, isSidebarSessionPath, readSessionHeader, resolveSessionPath } from "../session-reader";
 import { ownerTimeZone } from "../time-zone-prefs";
 import { isRecord } from "../type-guards";
@@ -101,6 +101,14 @@ function classify(error: unknown): ScheduledDeliveryError {
   if (error instanceof EngineCommandError) {
     const transient = error.code === "session_busy" || error.code === "session_dead" || error.code === "session_restarting";
     return new ScheduledDeliveryError(message, transient);
+  }
+  // A chat whose saved model is gone cannot be opened by a timer: only a person picking another model reopens it, so retrying forever would never end.
+  const unrestorable = unrestorableModelOf(error);
+  if (unrestorable) {
+    return new ScheduledDeliveryError(
+      `This chat used ${unrestorable.provider}/${unrestorable.modelId}, which is no longer available. Open the chat and pick another model, then schedule the message again.`,
+      false,
+    );
   }
   if (error instanceof WebRpcError) return new ScheduledDeliveryError(message, true);
   return new ScheduledDeliveryError(message, true);

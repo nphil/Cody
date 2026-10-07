@@ -62,6 +62,22 @@ export function groupHasThinking(
   return false;
 }
 
+/** Custom messages the transcript never shows. The last three are how omp's
+ * goal mode talks to the model: `goal-mode-context` is re-sent before EVERY
+ * turn while a goal is active (token budget and all), `goal-continuation` is
+ * the hidden "carry on" steer an auto-continuing goal sends between turns, and
+ * `goal-budget-limit` tells the model to wrap up. They arrive as `display:false`
+ * custom messages, which would otherwise each draw an "Engine note" row — two
+ * of them per turn of a goal that runs by itself. The Goal panel above the
+ * composer is where a goal is read. */
+const HIDDEN_CUSTOM_TYPES: Record<string, true> = {
+  "xdev-mount-notice": true,
+  "cody-local-time": true,
+  "goal-mode-context": true,
+  "goal-continuation": true,
+  "goal-budget-limit": true,
+};
+
 /**
  * Messages the engine gives the model that the transcript never shows: no row,
  * no spacing, not counted as a turn. The one predicate every reader
@@ -72,7 +88,7 @@ export function groupHasThinking(
  * import does not resolve; lib/time-zone.test.mjs pins the two together.
  */
 export function isHiddenFromTranscript(message: { role?: string; customType?: string }): boolean {
-  return message.role === "custom" && (message.customType === "xdev-mount-notice" || message.customType === "cody-local-time");
+  return message.role === "custom" && message.customType !== undefined && Object.hasOwn(HIDDEN_CUSTOM_TYPES, message.customType);
 }
 
 /** Shared visibility boundary so hidden activity leaves no transcript wrapper. */

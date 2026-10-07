@@ -439,3 +439,78 @@ test("selectVisibleSubagents orders stably and caps all-terminal rosters", async
   );
 });
 
+
+function goalView(status, goalOverrides = {}, stateOverrides = {}) {
+  const goal = { id: "g1", objective: "Ship the export feature", status, tokensUsed: 12_400, timeUsedSeconds: 307, createdAt: 1, updatedAt: 2, ...goalOverrides };
+  const enabled = status === "active" || status === "budget-limited";
+  return { state: { enabled, mode: status === "complete" ? "exiting" : "active", goal, ...stateOverrides }, receivedAt: Date.now(), ageMs: 0 };
+}
+
+function renderGoal(props) {
+  return renderToStaticMarkup(React.createElement(ComposerPanels, { todoPhases: [], subagents: [], onSelectSubagent: noop, ...props }));
+}
+
+test("a goal alone is enough to show the panel row", () => {
+  const html = renderGoal({ goal: goalView("active") });
+  assert.match(html, /aria-label="Goal"/);
+  assert.match(html, /Ship the export feature/);
+});
+
+test("an active goal starts collapsed with its status, objective and spend in the header", () => {
+  const html = renderGoal({ goal: goalView("active", { tokenBudget: 200_000 }) });
+  assert.match(html, /aria-expanded="false"/);
+  assert.match(html, /Active/);
+  assert.match(html, /12k tokens/);
+  assert.match(html, /5m 07s/);
+  assert.doesNotMatch(html, /data-goal-action/, "no buttons until it is opened");
+});
+
+test("a paused goal opens itself and offers Resume and Drop, never Pause", () => {
+  const html = renderGoal({ goal: goalView("paused", {}, { enabled: false }), onGoalOp: noop });
+  assert.match(html, /aria-expanded="true"/);
+  assert.match(html, /data-goal-action="resume"/);
+  assert.match(html, /data-goal-action="drop"/);
+  assert.doesNotMatch(html, /data-goal-action="pause"/);
+  assert.match(html, /the agent leaves the goal alone until you resume it/);
+});
+
+test("a goal that used up its budget can only be dropped, and says how far over it went", () => {
+  const html = renderGoal({ goal: goalView("budget-limited", { tokenBudget: 10_000, tokensUsed: 12_400 }), onGoalOp: noop });
+  assert.match(html, /data-goal-action="drop"/);
+  assert.doesNotMatch(html, /data-goal-action="(pause|resume)"/);
+  assert.match(html, /Budget reached/);
+  assert.match(html, /12,400 of 10,000/);
+  assert.match(html, /role="progressbar"[^>]*aria-valuenow="100"/, "the bar stops at full");
+  assert.match(html, /The token budget is used up/);
+});
+
+test("a finished goal stays on screen as complete, with only a way to dismiss it", () => {
+  const html = renderGoal({ goal: goalView("complete", { tokenBudget: 50_000 }), onGoalOp: noop, onGoalDismiss: noop });
+  assert.match(html, /Complete/);
+  assert.match(html, /data-goal-action="dismiss"/);
+  assert.doesNotMatch(html, /data-goal-action="(pause|resume|drop)"/);
+  assert.doesNotMatch(html, /data-goal-auto-continue/, "nothing left to keep working on");
+  assert.match(html, /The agent says this goal is done/);
+});
+
+test("Keep working automatically shows its state and what it means", () => {
+  const off = renderGoal({ goal: goalView("paused", {}, { enabled: false }), goalAutoContinue: { enabled: false, pending: false, onChange: noop } });
+  assert.match(off, /role="switch"[^>]*aria-checked="false"/);
+  assert.match(off, /Keep working automatically/);
+  assert.match(off, /the agent works on the goal when you send a message/);
+  const on = renderGoal({ goal: goalView("paused", {}, { enabled: false }), goalAutoContinue: { enabled: true, pending: false, onChange: noop } });
+  assert.match(on, /aria-checked="true"/);
+  assert.match(on, /carries on by itself/);
+  const absent = renderGoal({ goal: goalView("paused", {}, { enabled: false }), goalAutoContinue: null });
+  assert.doesNotMatch(absent, /role="switch"/, "no switch when the setting cannot be read");
+});
+
+test("an engine without goal mode leaves a note that can be dismissed, not controls it cannot honour", () => {
+  const html = renderGoal({ fallbackGoal: { objective: "Ship the export feature", startedAt: Date.now() - 65_000 }, onGoalOp: noop, onGoalDismiss: noop, engineName: "pi" });
+  assert.match(html, /Ship the export feature/);
+  assert.match(html, /1m 05s/);
+  assert.match(html, /aria-expanded="false"/);
+  // The engine's own goal wins when both exist.
+  const both = renderGoal({ goal: goalView("paused", {}, { enabled: false }), fallbackGoal: { objective: "an old note", startedAt: 0 } });
+  assert.doesNotMatch(both, /an old note/);
+});

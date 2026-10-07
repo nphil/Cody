@@ -21,7 +21,7 @@ import {
   type ScheduleBlock,
   type ScheduleChip,
 } from "@/lib/scheduled/ui";
-import { formatResetTime } from "./QuotaPopover";
+import { formatResetTime } from "@/lib/format";
 
 /**
  * The menu behind the Send pill's ▾: Send now, When quota resets, and Send at…

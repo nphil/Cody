@@ -14,6 +14,8 @@ import { subagentActivityIntent } from "@/lib/subagent-types";
 import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
 import { TodoList } from "./TodoList";
 import { SubagentStatusIcon } from "./SubagentStatusIcon";
+import { GoalPanel, type FallbackGoal, type GoalAutoContinueControl } from "./GoalPanel";
+import type { GoalView } from "@/lib/goal-state";
 
 const SUBAGENT_STATE_KEYS: Record<SubagentInfo["status"], string> = {
   started: "chatWindow.subagentState.started",
@@ -304,17 +306,18 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
   );
 }
 
-/** Session panels attached to the composer: live todo plan + running
- * subagent roster. Both render as FULL-WIDTH stacked rows aligned to the
- * composer, whatever their expansion state — a collapsed panel is a slim
- * full-width header bar, an expanded one the same bar plus its body. The
+/** Session panels attached to the composer: the goal, the live todo plan and
+ * the running subagent roster. All render as FULL-WIDTH stacked rows aligned
+ * to the composer, whatever their expansion state — a collapsed panel is a
+ * slim full-width header bar, an expanded one the same bar plus its body. The
  * earlier fit-content/side-by-side layout produced every combination of
- * floating chip beside tall card at a different width; rows keep the two
- * headers (icon · title · count · chevron) vertically aligned in all four
- * states. Each panel is independently collapsible via its header and starts
- * collapsed; the headers always show live progress / running-summary over
- * the full roster, even while the chip list is truncated. */
-export function ComposerPanels({ todoPhases, planOverlay = null, subagents, onSelectSubagent, defaultExpanded = false }: {
+ * floating chip beside tall card at a different width; rows keep the headers
+ * (icon · title · count · chevron) vertically aligned in every state. Each
+ * panel is independently collapsible via its header and starts collapsed (the
+ * goal opens itself when it needs a decision); the headers always show live
+ * progress / running-summary over the full roster, even while the chip list is
+ * truncated. */
+export function ComposerPanels({ todoPhases, planOverlay = null, subagents, onSelectSubagent, defaultExpanded = false, goal = null, fallbackGoal = null, goalBusy = null, onGoalOp, onGoalDismiss, goalAutoContinue = null, engineName }: {
   todoPhases: TodoPhase[];
   /** Plan-keeper overlay (subtasks + auto-mark contents) for the in-progress
    * task. Absent/null renders the plan exactly as it did before the keeper
@@ -324,10 +327,22 @@ export function ComposerPanels({ todoPhases, planOverlay = null, subagents, onSe
   onSelectSubagent: (subagent: SubagentInfo) => void;
   /** Initial expansion of both panels (default: collapsed). */
   defaultExpanded?: boolean;
+  /** The engine's own goal (omp 18.4.11+). */
+  goal?: GoalView | null;
+  /** The note an engine without goal mode leaves; shown only while `goal` is absent. */
+  fallbackGoal?: FallbackGoal | null;
+  goalBusy?: "pause" | "resume" | "drop" | null;
+  onGoalOp?: (op: "pause" | "resume" | "drop") => void;
+  onGoalDismiss?: () => void;
+  /** "Keep working automatically"; absent hides the switch. */
+  goalAutoContinue?: GoalAutoContinueControl | null;
+  engineName?: string;
 }) {
-  if (todoPhases.length === 0 && subagents.length === 0) return null;
+  const note = goal ? null : fallbackGoal;
+  if (todoPhases.length === 0 && subagents.length === 0 && !goal && !note) return null;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 8 }}>
+      <GoalPanel goal={goal} fallback={note} busy={goalBusy} onOp={onGoalOp} onDismiss={onGoalDismiss} autoContinue={goalAutoContinue} engineName={engineName} />
       <TodoList phases={todoPhases} overlay={planOverlay} collapsible defaultExpanded={defaultExpanded} />
       <SubagentsPanel subagents={subagents} onSelectSubagent={onSelectSubagent} defaultExpanded={defaultExpanded} />
     </div>

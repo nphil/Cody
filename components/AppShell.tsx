@@ -42,6 +42,7 @@ import { ALL_CAPABILITIES, normalizeCapabilities, type ActiveEngineInfo, type En
 import type { SettingsRequest } from "./SettingsConfig";
 import { SettingsOpenerContext, type SettingsOpenOptions } from "./settings/shell-context";
 import { loadEngineInfo } from "@/lib/engine-capabilities";
+import { forkChatWithFeedback, useForkAvailable } from "@/hooks/useForkChat";
 import type { EnginesPayload } from "./settings/EngineRoster";
 import { STORAGE_KEYS } from "@/lib/storage-keys";
 import { createPreviewAutoOpener, type PreviewAutoOpener } from "@/lib/preview-autoopen";
@@ -297,6 +298,7 @@ export function AppShell() {
   const [capabilities, setCapabilities] = useState<EngineCapabilities>(ALL_CAPABILITIES);
   const [activeEngine, setActiveEngine] = useState<ActiveEngineInfo | null>(null);
   const [capabilitiesLoaded, setCapabilitiesLoaded] = useState(false);
+  const forkAvailable = useForkAvailable(activeEngine?.id);
   // Onboarding is ONE flow driven by readiness (lib/setup-status.ts), not a
   // picker overlay followed by an unrelated dialog. `setupDone` only stops
   // Cody opening it unprompted; whether the instance actually works is
@@ -979,17 +981,25 @@ export function AppShell() {
     setRefreshKey((k) => k + 1);
   }, []);
 
-  const handleSessionForked = useCallback((newSessionId: string) => {
+  const handleSessionForked = useCallback((newSessionId: string, from?: SessionInfo) => {
     setRefreshKey((k) => k + 1);
     setSessionKey((k) => k + 1);
     setNewSessionCwd(null);
+    // `from`: a copy made from the sidebar or the palette, which may not be the open chat.
     setSelectedSession((prev) => ({
-      ...(prev ?? { path: "", cwd: "", created: "", modified: "", messageCount: 0, firstMessage: "" }),
+      ...(from ?? prev ?? { path: "", cwd: "", created: "", modified: "", messageCount: 0, firstMessage: "" }),
       id: newSessionId,
     }));
     hydrateSelectedSession(newSessionId);
     router.replace(`?session=${encodeURIComponent(newSessionId)}`, { scroll: false });
   }, [router, hydrateSelectedSession]);
+
+  // "Duplicate chat" (a sidebar row's menu, the command palette): omp copies the
+  // chat into a new one, listed under the original, and this page moves onto it.
+  const handleDuplicateSession = useCallback(async (session: SessionInfo) => {
+    const copyId = await forkChatWithFeedback(session.id, undefined, "duplicate");
+    if (copyId) handleSessionForked(copyId, session);
+  }, [handleSessionForked]);
 
   const handleInitialRestoreDone = useCallback(() => {
     setInitialSessionRestored(true);
@@ -1153,12 +1163,14 @@ export function AppShell() {
         onSelectSession={handleSelectSession}
         onNewSession={() => handleNewSession(`palette-${Date.now()}`, activeCwd ?? "")}
         currentModel={null}
+        onDuplicateSession={forkAvailable && selectedSession?.path ? () => { void handleDuplicateSession(selectedSession); } : undefined}
       />
       <SessionSidebar
         selectedSessionId={selectedSession?.id ?? null}
         optimisticSession={selectedSession?.path === "" ? selectedSession : null}
         onSelectSession={handleSelectSession}
         onAwaitingInputChange={setHasAwaitingInput}
+        onDuplicateSession={handleDuplicateSession}
         onNewSession={handleNewSession}
         initialSessionId={initialSessionId}
         skipInitialProjectSelection={initialNavigation.requestedCwd !== null}

@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { basename, dirname, join } from "path";
 import { isMap, isScalar, isSeq, parseDocument, stringify, type Document } from "yaml";
 import { getModelsConfigPath } from "./paths";
+import { kindApiMismatch } from "../model-kinds";
 import { isRecord } from "../type-guards";
 
 /**
@@ -90,6 +91,9 @@ export function validateModelsConfig(config: ModelsFileConfig): void {
       if (!provider.api && !model.api) {
         throw new Error(`Provider ${providerName}, model ${model.id}: no "api" specified. Set at provider or model level.`);
       }
+      const modelApi = (model.api ?? provider.api) as string | undefined;
+      const mismatch = kindApiMismatch(providerName, `model ${model.id}`, model.kind as string | undefined, modelApi);
+      if (mismatch) throw new Error(mismatch);
       if (typeof model.contextWindow === "number" && model.contextWindow <= 0) {
         throw new Error(`Provider ${providerName}, model ${model.id}: invalid contextWindow`);
       }
@@ -105,6 +109,15 @@ export function validateModelsConfig(config: ModelsFileConfig): void {
             throw new Error(`Provider ${providerName}, model ${model.id}: cost.${key} is required (cost needs input, output, cacheRead, and cacheWrite)`);
           }
         }
+      }
+    }
+    if (isRecord(provider.modelOverrides)) {
+      for (const [modelId, override] of Object.entries(provider.modelOverrides)) {
+        if (!isRecord(override) || typeof override.kind !== "string") continue;
+        const declared = models.find((m) => isRecord(m) && m.id === modelId);
+        const api = (override.api ?? (declared ? (declared.api ?? provider.api) : undefined)) as string | undefined;
+        const mismatch = kindApiMismatch(providerName, `modelOverrides.${modelId}`, override.kind, api);
+        if (mismatch) throw new Error(mismatch);
       }
     }
   }

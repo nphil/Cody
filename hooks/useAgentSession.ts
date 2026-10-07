@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useReducer } from "react";
+import { describeMcpMountChange } from "@/lib/mount-notice";
 import type {
   AgentMessage,
   CustomMessage,
@@ -23,23 +24,26 @@ import type { ExtensionDialogRequest, ExtensionDialogResponse, PendingInput, Pen
 import { extractLoopbackUrls, normalizePreviewUrl } from "@/lib/preview-url";
 import { derivePersistedContextUsage, type ContextUsageValue } from "@/lib/context-usage";
 import type { ThinkingModelMeta } from "@/lib/thinking-levels";
-import { AgentCommandError, getPromptDeliveryLedger, sendAgentCommand, sendPromptDelivery } from "@/lib/agent-client";
+import { AgentCommandError, getPromptDeliveryLedger, recoverSessionModel, sendAgentCommand, sendPromptDelivery, type PromptDeliveryResponse } from "@/lib/agent-client";
 import { deviceTimeZoneField } from "@/lib/device-time-zone";
 import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
 import {
   applyOutcome,
   applyServerDelivery,
   beginAttempt,
+  blockWaiting,
   classifyDeliveryOutcome,
   type DeliveryOutcome,
   createClientMessageId,
   createOutboxEntry,
+  idsNeedingResumeCheck,
   mutatePersistedOutbox,
   persistOutbox,
   readPersistedOutbox,
   reconcileTranscriptDeliveries,
   restoreForEdit,
   retryEntry,
+  releaseBlocked,
   reviveForResume,
   type OutboxEntry,
   type OutboxImage,
@@ -47,10 +51,13 @@ import {
 } from "@/lib/outbox";
 import { clearDraft, getDraft, setDraft } from "@/lib/draft-store";
 import { engineSupports } from "@/lib/engine-capabilities";
-import { translate } from "@/lib/i18n";
+import { currentLocale, translate } from "@/lib/i18n";
+import { formatResetTime } from "@/lib/format";
+import { deriveSlowModeState, describeUsageLimit, readUsageLimit, sameUsageLimit, usageLimitStageToAnnounce, type SlowModeState } from "@/lib/slow-mode-state";
 import { describeEngineError, errorDedupeKey, type ErrorKind } from "@/lib/error-text";
 import { shelfItemFor } from "@/lib/devices/operation-notices";
 import { useDeviceTrustRequests } from "@/hooks/useDeviceTrustRequests";
+import { useSideQuestions, type SideQuestions } from "@/hooks/useSideQuestions";
 import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { createMessageUpdateCoalescer, type MessageUpdateCoalescer } from "@/lib/message-update-coalescer";
@@ -92,10 +99,12 @@ import {
 } from "@/hooks/session-control-scope";
 import { SESSION_PROMPT_IMAGE, SESSION_PROMPT_STEERING, sessionPromptCapabilityBits } from "@/hooks/session-prompt-capabilities";
 import { toast } from "@/components/ui/toast";
+import { forkChatWithFeedback } from "@/hooks/useForkChat";
 import { compactionStatusReducer, type CompactionStatus } from "@/lib/compaction-status";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import { createActiveGoal, parseActiveGoal, type ActiveGoal, type ActivePlan } from "@/lib/web-mode-state";
-import type { HostToolDefinition, HostUriSchemeDefinition, PlanOverlay, RpcAvailableSlashCommand, SessionStatsInfo, TodoPhase } from "@/lib/pi-types";
+import { adoptGoal, goalErrorKey, parseGoalCommand, parseGoalModeState, readGoalUpdate, type GoalModeState, type GoalView } from "@/lib/goal-state";
+import type { HostToolDefinition, HostUriSchemeDefinition, PlanOverlay, RpcAvailableSlashCommand, SessionStatsInfo, TodoPhase, UsageLimitState } from "@/lib/pi-types";
 import { asCount, asNumber, asString, isRecord } from "@/lib/type-guards";
 import { addUsageTotals, aggregateMessageUsage, emptyUsageTotals, usageTokenTotal, type UsageTotals } from "@/lib/session-usage";
 import { SESSION_STORAGE_PREFIXES } from "@/lib/storage-keys";
@@ -103,6 +112,7 @@ import { getCachedSessionData, setCachedSessionData } from "@/lib/session-transc
 import { captureTranscriptAnchor, restoreTranscriptAnchor, type TranscriptAnchor } from "@/lib/transcript-anchor";
 import {
   activityFromProgressChange,
+  isUnsupportedCommandError,
   parseSubagentLifecycle,
   parseSubagentProgress,
   parseSubagentSnapshot,
@@ -127,6 +137,8 @@ export interface SessionData {
     thinkingLevel: string;
     model: { provider: string; modelId: string } | null;
     todoPhases: TodoPhase[];
+    /** The goal the session file leaves it in (lib/goal-state.ts), read when no engine is running. */
+    goal?: unknown;
   };
 }
 
@@ -222,6 +234,10 @@ type AgentStateResponse = {
   thinkingLevel?: string;
   fastModeEnabled?: boolean;
   fastModeActive?: boolean;
+  slowModeSupported?: boolean;
+  slowModeEnabled?: boolean;
+  slowModeScope?: "session" | "global";
+  usageLimit?: UsageLimitState;
   autoRetryEnabled?: boolean;
   interruptMode?: "immediate" | "wait";
   autoCompactionEnabled?: boolean;
@@ -248,6 +264,11 @@ type AgentStateResponse = {
   // buildWebState addition, not an omp-reported field; absent/null means no
   // keeper data exists yet for this session.
   planOverlay?: PlanOverlay | null;
+  // The engine's own goal (omp 18.4.11+): the KEY is the capability, so a state
+  // without it (older omp, pi, ACP) says nothing about goals. `goalAgeMs` is how
+  // long the engine had been waiting to count the goal's time.
+  goal?: unknown;
+  goalAgeMs?: number;
   // The engine's OWN model catalog, for engines that carry model selection as
   // per-SESSION state instead of a sessionless registry (every ACP engine:
   // the list an agent publishes depends on the account the session opened
@@ -687,6 +708,20 @@ export type StreamAlert =
   | { kind: "send_failed"; detail?: string }
   | null;
 
+/**
+ * A chat omp refuses to reopen because the model it saved is gone or has no
+ * credentials (omp 18.6.3+, `model_unrestorable`). The chat shows "continue with
+ * another model"; `busy` is the reopen in flight, `error` its failure.
+ */
+export interface ModelRecovery {
+  sessionId: string;
+  /** The model the chat used. */
+  provider: string;
+  modelId: string;
+  busy: boolean;
+  error?: string;
+}
+
 export interface CompactResultInfo {
   reason: "manual" | "threshold" | "overflow" | "auto" | string;
   tokensBefore: number;
@@ -717,6 +752,10 @@ export interface UseAgentSessionOptions {
   /** False when the active engine has no subagents: skip the roster call
    * entirely rather than provoking an "unsupported" rejection per send. */
   subagentsCapable?: boolean;
+  /** True when this chat can have side questions (`/btw`): omp, a chat that
+   * already exists. Absent/false (the sidebar chat, every other engine) keeps
+   * the whole surface inert — no history read, no frames applied. */
+  sideQuestionsCapable?: boolean;
   /** What to call the engine in notices and toasts. These fire on any slow
    * first connect and on any fallback event, so hardcoding "omp" told users
    * of other engines that omp was starting up. */
@@ -953,8 +992,9 @@ function extractMessageText(message: Partial<AgentMessage>): string {
     .join("\n");
 }
 
-function describeMcpMountNotice(message: CustomMessage): string {
-  return extractMessageText(message).trim() || "The MCP tool inventory changed.";
+/** Toast text for an engine mount notice, or null when it is not about MCP tools (see lib/mount-notice.ts). */
+function describeMcpMountNotice(message: CustomMessage): string | null {
+  return describeMcpMountChange(message.details, extractMessageText(message));
 }
 
 function imageSignature(block: unknown): string {
@@ -1162,6 +1202,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [fastModeActive, setFastModeActive] = useState<boolean | undefined>(undefined);
   const [fastModePending, setFastModePending] = useState(false);
   const [fastModeUnavailable, setFastModeUnavailable] = useState(false);
+  // omp 18.6.3+ `/slow`. `null` = this engine/model has no slow mode, which
+  // hides the switch; it is re-derived from every get_state because support
+  // follows the active model.
+  const [slowMode, setSlowMode] = useState<SlowModeState | null>(null);
+  const [slowModePending, setSlowModePending] = useState(false);
+  const [usageLimit, setUsageLimit] = useState<UsageLimitState | null>(null);
   const [promptCapabilities, setPromptCapabilities] = useState<SessionPromptCapabilities>({ imageSupported: false });
   const [steeringSupported, setSteeringSupported] = useState(false);
   // Runtime session modes returned by get_state and changed via RPC
@@ -1234,6 +1280,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // as a healthy "Waiting for model…" against a stream that is not delivering.
   const [streamDegraded, setStreamDegraded] = useState(false);
   const [streamAlert, setStreamAlert] = useState<StreamAlert>(null);
+  // The chat's saved model is gone (omp 18.6.3+ will not reopen it): the model it
+  // used, and where an attempt to continue on another stands.
+  const [modelRecovery, setModelRecovery] = useState<ModelRecovery | null>(null);
   const [slashCommands, setSlashCommands] = useState<SlashCommandInfo[]>([]);
   const [slashCommandsLoading, setSlashCommandsLoading] = useState(false);
   const [noticeState, dispatchNotice] = useReducer(noticeReducer, { visible: [], pending: [] });
@@ -1262,6 +1311,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [subagentTranscriptVersions, setSubagentTranscriptVersions] = useState<Record<string, number>>({});
   const [planOverlay, setPlanOverlay] = useState<PlanOverlay | null>(null);
   const [activeGoal, setActiveGoal] = useState<ActiveGoal | null>(null);
+  // The engine's own goal (omp 18.4.11+; lib/goal-state.ts). `activeGoal` above
+  // is the web-hosted fallback for an engine that has none.
+  const [goal, setGoal] = useState<GoalView | null>(null);
+  const goalRef = useRef<GoalView | null>(goal);
+  goalRef.current = goal;
+  const [goalBusy, setGoalBusy] = useState<"pause" | "resume" | "drop" | null>(null);
   const [activePlan, setActivePlan] = useState<ActivePlan | null>(null);
   const activeSubagentCount = subagents.filter((subagent) => subagent.source !== "history" && subagent.status === "started").length;
 
@@ -1298,6 +1353,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const thinkingLevelPendingRequestRef = useRef(0);
   const fastModeActiveRef = useRef<boolean | undefined>(undefined);
   const fastModeInactiveNoticeScopeRef = useRef<string | null>(null);
+  const slowModePendingLatchRef = useRef(false);
+  /** The usage-limit stage this chat last saw, so a notice fires on a change only. */
+  const usageLimitSeenRef = useRef<{ sessionId: string; limit: UsageLimitState | null } | null>(null);
   const addNoticeRef = useRef<(notice: { id?: string; message: string; type?: NoticeType; dedupeKey?: string; errorKind?: ErrorKind }) => void>(() => {});
   const modelSwitchDispatchingSessionRef = useRef<string | null>(null);
   const dispatchPendingModelSwitchRef = useRef<(() => void) | null>(null);
@@ -1362,6 +1420,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const bashRunningRef = useRef(false);
   const bashRecoveryIdRef = useRef(0);
   const handleAgentEventRef = useRef<((event: AgentEvent) => void) | null>(null);
+  // Assigned after useSideQuestions below: connectEvents (declared earlier)
+  // hands side-question frames to it without taking it as a dependency.
+  const sideQuestionsRef = useRef<SideQuestions | null>(null);
   const initialScrollDoneRef = useRef(false);
   const pendingScrollToUserRef = useRef(false);
   // "Following": the viewport is pinned to the live tail. False once the user
@@ -1443,6 +1504,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const outboxOptimisticRunIdRef = useRef<Map<string, number>>(new Map());
   const loadedTranscriptSessionIdRef = useRef<string | null>(initialCachedData?.sessionId ?? null);
   const outboxInFlightRef = useRef<Set<string>>(new Set());
+  // Ids of messages THIS page sent. While one is still `sending` its own delivery
+  // owns it, so the reload recovery (transcript match / re-send) must leave it
+  // alone: the optimistic bubble on screen is not proof the engine received it.
+  const outboxLiveIdsRef = useRef<Set<string>>(new Set());
+  // When the person last picked a model for a chat whose saved one was gone. A
+  // send that was already out when they picked comes back refused afterwards, and
+  // that refusal is stale: it goes out again instead of waiting for a pick.
+  const modelRecoveredAtRef = useRef(0);
   const handledPromptResultErrorsRef = useRef<Set<string>>(new Set());
   const refreshOutboxLedgerRef = useRef<((sid: string) => void) | null>(null);
   const eventCoalescerRef = useRef<MessageUpdateCoalescer | null>(null);
@@ -1539,8 +1608,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } satisfies SessionStatsInfo;
   }, [messages, sessionStatsOverride, subagentUsage, engineUsage, contextUsage, data?.filePath, session?.id, session?.name]);
 
-  // Goal mode is web-hosted because omp's native /goal is TUI-only. Keep it
-  // scoped to its session so switching conversations never leaks objectives.
+  // The web-hosted goal below is the FALLBACK for an engine with no native goal
+  // mode (older omp, pi, ACP). Keep it scoped to its session so switching
+  // conversations never leaks objectives; the native goal is re-read from the
+  // engine's state for the session being opened.
   useEffect(() => {
     const sid = session?.id;
     const smart = sid ? readPersistedSmartModel(sid) : null;
@@ -1549,6 +1620,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setPromptCapabilities((current) => current.imageSupported ? { imageSupported: false } : current);
     setSteeringSupported((current) => current ? false : current);
     setActivePlan(null);
+    setGoal(null);
+    setGoalBusy(null);
     if (!sid) {
       setActiveGoal(null);
       return;
@@ -1719,6 +1792,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // Another session's configured selector is unknown until its own
       // thinking_level_changed says so: fall back to the effective level.
       thinkingConfiguredAutoRef.current = false;
+      // Another session's usage-limit stage is unknown until its own read.
+      setUsageLimit(null);
     }
     const pendingModelSwitch = modelSwitchPendingRef.current;
     if (pendingModelSwitch && pendingModelSwitch.scope.sessionId !== next.sessionId) {
@@ -1730,6 +1805,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       fastModeInactiveNoticeScopeRef.current = null;
       setFastModeActive(undefined);
       setFastModeUnavailable(false);
+      // Slow-mode support follows the model: unknown until the new one's read.
+      setSlowMode(null);
       if (!preserveFastModePending) {
         fastModePendingRequestRef.current += 1;
         fastModePendingLatchRef.current = false;
@@ -1830,6 +1907,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setPromptCapabilities((current) => current.imageSupported === imageSupported ? current : { imageSupported });
     setSteeringSupported((current) => current === steering ? current : steering);
   }, []);
+  /** Fold the goal a state read reported into the panel. A state without the
+   *  `goal` key (older omp, pi, ACP) says nothing about goals and changes
+   *  nothing; `null` means the engine has none. Reports can arrive out of order
+   *  (a poll answered from cache racing a frame), which `adoptGoal` resolves by
+   *  the engine's own change stamps. */
+  const adoptGoalState = useCallback((state: AgentStateResponse | null | undefined, sid: string) => {
+    if (!state || !("goal" in state) || sessionIdRef.current !== sid) return;
+    const ageMs = typeof state.goalAgeMs === "number" ? state.goalAgeMs : 0;
+    const reported = parseGoalModeState(state.goal);
+    setGoal((prev) => adoptGoal(prev, { state: reported, now: Date.now(), ageMs }));
+  }, []);
   /** Adopt Fast only after the owning model snapshot won its race. */
   const adoptFastModeState = useCallback((state: AgentStateResponse | null | undefined, sid: string): boolean => {
     if (sessionIdRef.current !== sid || !sameSessionControlScope(fastModeScopeRef.current, sessionControlScope(sid, state?.model ? {
@@ -1851,6 +1939,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } else if (enabled === true && wasActive === true && fastModeInactiveNoticeScopeRef.current !== scopeKey) {
       fastModeInactiveNoticeScopeRef.current = scopeKey;
       addNoticeRef.current({ type: "info", message: translate("agentSession.fastModeInactive") });
+    }
+
+    // `/slow` and the usage-limit stage ride the same get_state snapshot and
+    // the same model scope: whether a model has a slow mode, and the account
+    // the stage belongs to, both change with the model.
+    const slow = deriveSlowModeState(state);
+    setSlowMode((current) => (current && slow && current.enabled === slow.enabled && current.scope === slow.scope ? current : slow));
+    const limit = readUsageLimit(state?.usageLimit);
+    setUsageLimit((current) => (sameUsageLimit(current, limit) ? current : limit));
+    const seen = usageLimitSeenRef.current;
+    const previousLimit = seen && seen.sessionId === sid ? seen.limit : undefined;
+    usageLimitSeenRef.current = { sessionId: sid, limit };
+    const announce = usageLimitStageToAnnounce(previousLimit, limit);
+    if (limit && announce) {
+      const text = describeUsageLimit(limit, translate, (iso) => formatResetTime(iso, currentLocale(), Date.now()));
+      addNoticeRef.current({ type: "warning", message: text.notice, dedupeKey: `usage-limit:${sid}:${announce}` });
     }
     return true;
   }, []);
@@ -1945,6 +2049,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // catch here does not consume the rejection: the real await below still
     // observes and handles it independently.
     stateFetch?.catch(() => {});
+    // What the session FILE says about the goal; it only decides when no engine
+    // is running for this session (the state read below answers for a live one).
+    let persistedGoal: GoalModeState | null = null;
 
     try {
       const res = await transcriptFetch;
@@ -1979,6 +2086,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setMessages(d.context.messages);
       setEntryIds(d.context.entryIds ?? []);
       setTodoPhases(d.context.todoPhases ?? []);
+      persistedGoal = parseGoalModeState(d.context.goal);
       // Child-transcript usage for the headline. The roster is NOT seeded
       // from history — it is a live view of the current run only.
       void refreshSubagentUsage(sid);
@@ -2048,6 +2156,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (liveState.pendingPermissions !== undefined) adoptPermissionRequests(liveState.pendingPermissions);
         if (liveState.todoPhases !== undefined) setTodoPhases(liveState.todoPhases ?? []);
         if (liveState.planOverlay !== undefined) setPlanOverlay(readPlanOverlay(liveState.planOverlay) ?? null);
+        adoptGoalState(liveState, sid);
       } else if (!agentState.running) {
         // No live engine at all (confirmed — not merely a stale/timed-out
         // read), so nothing can be blocked on an approval. A card carried
@@ -2059,6 +2168,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // definitive read arrives.
         setPendingRefusalDecision(null);
         adoptPermissionRequests(undefined);
+        // Nobody is running this chat, so its goal is the one the file left.
+        setGoal((prev) => adoptGoal(prev, { state: persistedGoal, now: Date.now() }));
       }
       return agentState;
     } catch (e) {
@@ -2066,7 +2177,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       console.error("Failed to load agent state:", e);
       return null;
     }
-  }, [refreshSubagentUsage, adoptFastModeState, adoptThinkingLevel, applyAuthoritativeModel, beginAuthoritativeModelSync, adoptPermissionRequests, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities]);
+  }, [refreshSubagentUsage, adoptFastModeState, adoptGoalState, adoptThinkingLevel, applyAuthoritativeModel, beginAuthoritativeModelSync, adoptPermissionRequests, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities]);
 
   const loadContext = useCallback(async (sid: string, leafId: string | null) => {
     const seq = ++contextRequestSeqRef.current;
@@ -2311,6 +2422,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
                 dispatchCompactionStatus({ type: "reconcile", sessionId: sid, active, now: Date.now(), observedAt: compactionStateReadStartedAt, generation: compactionStateReadGeneration });
               })
               .catch(() => {});
+            // Side-question frames sent while this page was not connected were
+            // missed; read the topics again.
+            sideQuestionsRef.current?.noteStreamConnected();
+          }
+          // A side question runs beside the turn and never enters its
+          // transcript. Its frames skip the coalescer: they carry no transcript
+          // state, and routed through it every delta would flush the pending
+          // message_update early and defeat the coalescing the main reply needs.
+          if (event.type === "btw_delta" || event.type === "btw_record") {
+            sideQuestionsRef.current?.applyFrame(event);
+            return;
           }
           // message_update frames arrive at network rate (often 30-100+/s);
           // the coalescer buffers the latest one and dispatches at display
@@ -2857,6 +2979,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     throw new EventStreamConnectionError(result.status);
   }, [addNotice, connectEvents]);
 
+  // Side questions (omp's `/btw`). An ask from a chat whose event stream is
+  // not open opens it first, which also starts a cold chat's engine: the
+  // answer streams over that stream, and a page that is not listening would
+  // only see it once it had ended.
+  const ensureSideQuestionStream = useCallback(async (sid: string) => {
+    if (eventSourceRef.current && eventSourceRef.current.readyState !== EventSource.CLOSED) return;
+    await ensureEventsConnected(sid);
+  }, [ensureEventsConnected]);
+  const sideQuestions = useSideQuestions({
+    sessionId: session ? (sessionIdRef.current ?? session.id) : null,
+    capable: opts.sideQuestionsCapable === true && session !== null,
+    ensureStream: ensureSideQuestionStream,
+  });
+  sideQuestionsRef.current = sideQuestions;
+
   const handleExtensionUiRequest = useCallback((request: IncomingExtensionUiRequest) => {
     switch (request.method) {
       case "select":
@@ -3081,6 +3218,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // Also mid-run: this poll is the only todo-phase refresh while streaming.
       if (state?.todoPhases !== undefined) setTodoPhases(state.todoPhases ?? []);
       if (state?.planOverlay !== undefined) setPlanOverlay(readPlanOverlay(state.planOverlay) ?? null);
+      // The engine's change frames keep the goal live; this poll is the net for
+      // one lost with a dropped stream.
+      adoptGoalState(state, sid);
       // Approvals are mirrored BEFORE the busy check below, because a turn
       // blocked on one is precisely a busy turn — reading them after the early
       // return would only ever see a session that no longer has any. This is
@@ -3103,7 +3243,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch {
       // Network still down — the next poll / visibility / online tick retries.
     }
-  }, [finishPromptWithoutStream, refreshSubagentRoster, adoptPermissionRequests, adoptSessionPromptCapabilities]);
+  }, [finishPromptWithoutStream, refreshSubagentRoster, adoptPermissionRequests, adoptSessionPromptCapabilities, adoptGoalState]);
 
   // todo_auto_update means "todoPhases (and planOverlay) changed, go
   // refetch" — unlike todo_reminder/todo_auto_clear (omp-native frames that
@@ -3230,6 +3370,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // freshly composed workspace.
   useEffect(() => {
     setStreamAlert(null);
+    setModelRecovery(null);
     setStreamDegraded(false);
     streamAttachedRef.current = false;
     streamUnhealthySinceRef.current = null;
@@ -3337,8 +3478,59 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, []);
   refreshOutboxLedgerRef.current = refreshOutboxLedger;
 
+  /** Undo the optimistic start of a send that never reached the engine: drop
+   *  the optimistic user bubble and fall back to idle. Says nothing to the user —
+   *  the caller decides whether that is a failure or just a wait. */
+  const undoOptimisticRun = useCallback(() => {
+    const optimisticKey = optimisticUserMessageKeyRef.current;
+    if (optimisticKey) {
+      setMessages((prev) => {
+        const last = prev[prev.length - 1];
+        return last?.role === "user" && userMessageKey(last) === optimisticKey
+          ? prev.slice(0, -1)
+          : prev;
+      });
+    }
+    optimisticUserMessageKeyRef.current = null;
+    agentRunningRef.current = false;
+    assistantProviderCallRef.current = false;
+    setAgentRunning(false);
+    setAgentPhase(null);
+    dispatch({ type: "end" });
+  }, []);
+
+  /** The chat could not be reopened because its saved model is gone: raise the
+   *  way out, and drop the event stream. The server ends it after telling us, and
+   *  a browser re-opens an ended stream by itself — into the same failure, every
+   *  second. Recovery opens a fresh one. */
+  const noteModelUnrestorable = useCallback((sid: string, provider: string, modelId: string) => {
+    if (sessionIdRef.current !== sid) return;
+    eventSourceRef.current?.close();
+    eventSourceRef.current = null;
+    streamAttachedRef.current = false;
+    // A send is waiting on a refusal that has just come: nothing is running, so
+    // the "Waiting for model…" spinner and Stop button come down. A turn the
+    // engine confirmed is real and stays (the refusal cannot be about it).
+    if (agentRunningRef.current && !runConfirmedRef.current) undoOptimisticRun();
+    // Every message still on its way waits for the pick, shown as such. The
+    // banner can arrive before the message's own answer does.
+    setOutbox(mutatePersistedOutbox(sid, blockWaiting));
+    setModelRecovery((current) => (
+      current?.sessionId === sid && current.provider === provider && current.modelId === modelId
+        ? current
+        : { sessionId: sid, provider, modelId, busy: false }
+    ));
+  }, [undoOptimisticRun]);
+
   const handleAgentEvent = useCallback((event: AgentEvent) => {
     switch (event.type) {
+      case "model_unrestorable": {
+        const provider = typeof event.provider === "string" ? event.provider : "";
+        const modelId = typeof event.modelId === "string" ? event.modelId : "";
+        const sid = sessionIdRef.current;
+        if (sid && provider && modelId) noteModelUnrestorable(sid, provider, modelId);
+        break;
+      }
       case "cody_refusal_decision": {
         setPendingRefusalDecision(event.decision === null ? null : readRefusalDecision(event.decision));
         break;
@@ -3382,8 +3574,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const images = returned.flatMap((message) => readReturnedImages(message.images));
         if (text || images.length) {
           opts.chatInputRef?.current?.prependDraft({ text, images, source: "queue" });
-          addNotice({ type: "info", message: translate("agentSession.queueReturnedOnStop", { count: returned.length }) });
+          addNotice({ type: "info", message: returned.length === 1 ? translate("agentSession.queueReturnedOnStopOne") : translate("agentSession.queueReturnedOnStop", { count: returned.length }) });
         }
+        // omp could not fit everything in its one answer: say what is missing
+        // rather than let the draft look complete.
+        if (event.truncated === true) addNotice({ type: "warning", message: translate("stopQueue.truncated") });
+        if (event.imagesDropped === true) addNotice({ type: "warning", message: translate("stopQueue.imagesDropped") });
         break;
       }
       case "cody_session_moved": {
@@ -3462,6 +3658,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           fetch(`/api/agent/${encodeURIComponent(endedSid)}`)
             .then((r) => (r.ok ? r.json() as Promise<{ state?: AgentStateResponse }> : null))
             .then((d) => {
+              // The engine clears a finished goal's state at the end of the turn
+              // without an event; adoptGoal keeps the "complete" card through it.
+              adoptGoalState(d?.state, endedSid);
               if (!d?.state?.model) return;
               // Stale terminal snapshot: the user switched sessions or started
               // the next run while this request was in flight — drop it.
@@ -3526,13 +3725,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "notice": {
         const level = event.level as string | undefined;
         const message = (event.message as string | undefined)?.trim() ?? "";
-        if (/^xd:\/\/:\s*mounted\s+mcp__/i.test(message)) {
-          toast.info("MCP tools updated", message, { clamp: true });
+        if (event.source === "xdev" || /^xd:\/\/:\s*(un)?mounted\s/i.test(message)) {
+          // omp's own `xd://: mounted …; unmounted …` line. A fresh child mounts
+          // Cody's host and browser tools (open_url, notify, device_list, …)
+          // every time it starts; only an MCP server's tools changing is news.
+          if (/\bmcp__/i.test(message)) toast.info("MCP tools updated", message, { clamp: true });
         } else if (event.source === "device") {
           // Hardware pop-ups are decided on the server (lib/devices/operation-notices.ts), so the few that arrive are
           // worth showing, in plain words. Run through the engine-error describer they would read as provider faults.
           const item = shelfItemFor(event);
           if (item) addNotice(item);
+        } else if (event.source === "btw-history") {
+          // omp could not save a side-question topic. It belongs to the panel
+          // that shows those topics, not to the chat's engine-error shelf.
+          sideQuestionsRef.current?.noteHistoryNotice(message);
         } else if (event.source === "session-persistence" && level === "warning") {
           // omp moved this live session to a new file (cody_session_moved
           // adopts the new id): worth saying, but not an engine failure.
@@ -3702,7 +3908,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // appending it again would duplicate it.
           if (!agentRunningRef.current) break;
           if (completed?.role === "custom" && (completed as CustomMessage).customType === "xdev-mount-notice") {
-            toast.info("MCP tools updated", describeMcpMountNotice(completed as CustomMessage), { clamp: true });
+            const summary = describeMcpMountNotice(completed as CustomMessage);
+            if (summary) toast.info("MCP tools updated", summary, { clamp: true });
           } else if (completed?.role === "assistant" && completed.stopReason === "error") {
             // The engine could not produce a reply at all — no credentials, an
             // invalid key, a provider outage. Both rpc-dialect engines report it
@@ -3793,6 +4000,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "todo_auto_update":
         if (sessionIdRef.current) refreshTodoState(sessionIdRef.current);
         break;
+      case "goal_updated": {
+        // The engine announces every change to the goal: created, paused,
+        // resumed, dropped, each flush of its tokens and time, the budget
+        // running out, completion. Same shape as the state's `goal`.
+        const update = readGoalUpdate(event as { goal?: unknown; state?: unknown });
+        if (update !== undefined) setGoal((prev) => adoptGoal(prev, { state: update, now: Date.now() }));
+        break;
+      }
       case "plan_overlay_update": {
         const overlay = readPlanOverlay(event.overlay);
         if (overlay) setPlanOverlay(overlay);
@@ -4048,7 +4263,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as unknown as IncomingExtensionUiRequest);
         break;
     }
-  }, [addNotice, addEngineErrorNotice, announceFallbackApplied, announceFallbackSucceeded, applyAuthoritativeModel, adoptFastModeState, adoptThinkingLevel, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities, applyOutboxDelivery, beginAuthoritativeModelSync, dispatchPendingModelSwitch, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, holdTailForReader, loadSession, maybeAutoNameSession, mergeSubagents, onAgentEnd, onPreviewUrlsSeen, onSessionForked, opts.chatInputRef, publishRewoundDraft, reconcileAgentState, refreshTodoState, resetSubagentActivityState]);
+  }, [addNotice, addEngineErrorNotice, announceFallbackApplied, announceFallbackSucceeded, applyAuthoritativeModel, adoptFastModeState, adoptGoalState, adoptThinkingLevel, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities, applyOutboxDelivery, beginAuthoritativeModelSync, dispatchPendingModelSwitch, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, holdTailForReader, loadSession, maybeAutoNameSession, mergeSubagents, noteModelUnrestorable, onAgentEnd, onPreviewUrlsSeen, onSessionForked, opts.chatInputRef, publishRewoundDraft, reconcileAgentState, refreshTodoState, resetSubagentActivityState]);
   handleAgentEventRef.current = handleAgentEvent;
 
   /** Shared recovery for a send that never actually started a run: undo the
@@ -4059,15 +4274,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    *  "this turn never started", never "silently repeat a mutating
    *  instruction the user cannot see". */
   const rollBackFailedSend = useCallback((typedMessage: string, detail: string, streamErrorMessage?: string, restoreText = true) => {
-    const optimisticKey = optimisticUserMessageKeyRef.current;
-    if (optimisticKey) {
-      setMessages((prev) => {
-        const last = prev[prev.length - 1];
-        return last?.role === "user" && userMessageKey(last) === optimisticKey
-          ? prev.slice(0, -1)
-          : prev;
-      });
-    }
+    undoOptimisticRun();
     addNotice({
       type: "error",
       message: streamErrorMessage ?? translate("agentSession.sendFailed", { detail }),
@@ -4080,13 +4287,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // shell-command recovery in executeBash; insertIfEmpty avoids clobbering
     // anything typed since.
     if (restoreText && typedMessage) opts.chatInputRef?.current?.insertIfEmpty(typedMessage);
-    optimisticUserMessageKeyRef.current = null;
-    agentRunningRef.current = false;
-    assistantProviderCallRef.current = false;
-    setAgentRunning(false);
-    setAgentPhase(null);
-    dispatch({ type: "end" });
-  }, [addNotice, opts.chatInputRef]);
+  }, [addNotice, opts.chatInputRef, undoOptimisticRun]);
 
   /**
    * Drives one outbox entry (lib/outbox.ts) to a settled state: attempt,
@@ -4102,12 +4303,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     outboxInFlightRef.current.add(entryId);
     try {
     outboxTimersRef.current.delete(entryId);
+    outboxLiveIdsRef.current.add(entryId);
+    const attemptStartedAt = Date.now();
     const started = mutatePersistedOutbox(sid, (current) => beginAttempt(current, entryId));
     if (sessionIdRef.current === sid) setOutbox(started);
     const entry = started.find((candidate) => candidate.id === entryId);
     if (!entry) return;
 
-    const settle = (outcome: DeliveryOutcome) => {
+    const settle = (outcome: DeliveryOutcome, response?: PromptDeliveryResponse) => {
       const settled = mutatePersistedOutbox(sid, (current) => applyOutcome(current, entryId, outcome));
       if (sessionIdRef.current === sid) setOutbox(settled);
       const resolved = settled.find((candidate) => candidate.id === entryId);
@@ -4115,6 +4318,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (resolved.status === "sending" && resolved.nextRetryAt !== null) {
         const delay = Math.max(0, resolved.nextRetryAt - Date.now());
         outboxTimersRef.current.set(entryId, setTimeout(() => { void deliverOutboxEntry(sid, entryId); }, delay));
+        return;
+      }
+      if (resolved.blocked) {
+        outboxOptimisticRunIdRef.current.delete(entryId);
+        // The person picked a model while this attempt was still out, so the
+        // refusal describes a chat that has since been reopened: send it again
+        // now rather than leave it waiting for a pick that already happened.
+        if (modelRecoveredAtRef.current >= attemptStartedAt && sessionIdRef.current === sid) {
+          const freed = mutatePersistedOutbox(sid, (current) => releaseBlocked(current).entries);
+          setOutbox(freed);
+          setTimeout(() => { void deliverOutboxEntry(sid, entryId); }, 0);
+          return;
+        }
+        // Not a failure: the chat's saved model is gone and the message waits,
+        // untouched, for a model pick (recoverModel sends it afterwards). Nothing
+        // is running, so the optimistic start comes down with the banner going up.
+        const provider = response?.provider;
+        const modelId = response?.modelId;
+        if (provider && modelId) noteModelUnrestorable(sid, provider, modelId);
         return;
       }
       if (resolved.status !== "failed") return;
@@ -4157,11 +4379,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       streamingBehavior: entry.behavior,
       clientMessageId: entry.id,
     }, { timeoutMs: PROMPT_SEND_TIMEOUT_MS });
-    settle(classifyDeliveryOutcome(response));
+    settle(classifyDeliveryOutcome(response), response);
     } finally {
       outboxInFlightRef.current.delete(entryId);
     }
-  }, [ensureEventsConnected, rollBackFailedSend]);
+  }, [ensureEventsConnected, noteModelUnrestorable, rollBackFailedSend]);
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[], behaviorOverride?: OutboxEntry["behavior"]): Promise<boolean> => {
     const trimmedMessage = message.trim();
@@ -4256,6 +4478,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             }
           }
           const entry = createOutboxEntry({ sessionId: sid, text: trimmedMessage, images: outboxImages, behavior });
+          outboxLiveIdsRef.current.add(entry.id);
           const nextOutbox = mutatePersistedOutbox(sid, (entries) => [...entries, entry]);
           if (sessionIdRef.current === sid) setOutbox(nextOutbox);
           outboxOptimisticRunIdRef.current.set(entry.id, promptRunId);
@@ -4293,6 +4516,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return false;
     }
     const entry = createOutboxEntry({ sessionId: sid, text: trimmedMessage, images: outboxImages, behavior });
+    outboxLiveIdsRef.current.add(entry.id);
 
     const wasIdle = !agentRunningRef.current;
     if (wasIdle) {
@@ -4469,6 +4693,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
     } catch (e) {
       console.error("Fork failed:", e);
+    } finally {
+      setForkingEntryId(null);
+    }
+  }, [onSessionForked]);
+
+  /** "Fork from here" under a reply: omp's own `fork` keeps the conversation
+   *  through that reply in a new chat, and this page moves to it. Only an idle
+   *  chat can be forked, which the button's own visibility already follows. */
+  const handleForkHere = useCallback(async (entryId: string) => {
+    if (bashRunningRef.current || agentRunningRef.current) return;
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    setForkingEntryId(entryId);
+    try {
+      const newSessionId = await forkChatWithFeedback(sid, entryId, "fork");
+      if (newSessionId) onSessionForked?.(newSessionId);
     } finally {
       setForkingEntryId(null);
     }
@@ -4657,6 +4897,40 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
       }
     }, [addNotice, beginAuthoritativeModelSync, ensureNewSession, refreshLiveModelState]);
+
+  /** Turn omp's `/slow` on or off for the active model. The scope is the
+   * engine's call (a Claude subscription's low priority is global config, an
+   * OpenAI/Google flex tier is this chat's own), so the result is re-read
+   * rather than assumed — the usage-limit stage can change with it. */
+  const handleSlowModeChange = useCallback(async (enabled: boolean) => {
+    const sid = sessionIdRef.current;
+    if (!sid || slowModePendingLatchRef.current) return;
+    slowModePendingLatchRef.current = true;
+    setSlowModePending(true);
+    const scope = fastModeScopeRef.current;
+    try {
+      const result = await sendAgentCommand<{ enabled?: boolean }>(sid, { type: "set_slow_mode", enabled });
+      if (sessionIdRef.current === sid && sameSessionControlScope(fastModeScopeRef.current, scope)) {
+        const applied = typeof result?.enabled === "boolean" ? result.enabled : enabled;
+        setSlowMode((current) => (current ? { ...current, enabled: applied } : current));
+      }
+      void refreshLiveModelState(sid);
+    } catch (error) {
+      // An engine that predates the command has no slow mode: hide the switch.
+      if (isUnsupportedCommandError(error)) {
+        setSlowMode(null);
+        return;
+      }
+      console.error("Failed to change slow mode:", error);
+      const described = noticeFromCaughtError(error);
+      if (described) addNotice({ type: described.type, message: described.message, dedupeKey: described.dedupeKey, errorKind: described.kind });
+      // The model may have changed under the switch; re-read what it supports.
+      void refreshLiveModelState(sid);
+    } finally {
+      slowModePendingLatchRef.current = false;
+      setSlowModePending(false);
+    }
+  }, [addNotice, refreshLiveModelState]);
 
   /** Toggle automatic retry for transient model failures. */
   const handleAutoRetryChange = useCallback(async (enabled: boolean) => {
@@ -4946,7 +5220,53 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // shows these instead (CLIENT_BUILTIN_COMMAND_NAMES drops omp's
           // copies). handleSend runs the full prompt pipeline — optimistic
           // bubble, running state, settlement — with the expanded text.
-          const expansion = expandWebSlashCommand(text);
+          // /goal creates the engine's own goal when it has one (omp 18.4.11+).
+          // An engine that answers "unsupported" / "Unknown command" (older omp,
+          // pi, ACP) falls through to the web-hosted behaviour below.
+          let webText = text;
+          let fallbackGoalObjective = args;
+          if (commandName === "goal") {
+            const parsed = parseGoalCommand(args);
+            if (!parsed.ok) {
+              return complete({
+                handled: true,
+                error: parsed.reason === "budget"
+                  ? translate("goal.budgetInvalid")
+                  : translate("agentSession.commandRequiresArgs", { command: "/goal", usage: translate("chatInput.cmdGoalArg") }),
+              });
+            }
+            const heldStatus = goalRef.current?.state.goal.status;
+            if (heldStatus === "active" || heldStatus === "paused" || heldStatus === "budget-limited") {
+              return complete({ handled: true, error: translate("goal.alreadyActive") });
+            }
+            if (!sid) return complete({ handled: true, error: translate("goal.startFailed") });
+            try {
+              const created = await sendAgentCommand<{ goal?: unknown; state?: unknown } | null>(sid, {
+                type: "goal",
+                op: "create",
+                objective: parsed.value.objective,
+                ...(parsed.value.tokenBudget !== undefined ? { token_budget: parsed.value.tokenBudget } : {}),
+              });
+              const update = readGoalUpdate(created ?? {});
+              if (update !== undefined && sessionIdRef.current === sid) setGoal((prev) => adoptGoal(prev, { state: update, now: Date.now() }));
+              // Like the terminal, the objective is the goal's first prompt. As a
+              // STEER: with Keep working automatically on, the engine starts a turn
+              // of its own the moment the goal exists, and a plain prompt would race it.
+              await handleSend(parsed.value.objective, undefined, "steer");
+              return { handled: true };
+            } catch (error) {
+              if (!isUnsupportedCommandError(error)) {
+                const message = error instanceof Error ? error.message : String(error);
+                const known = goalErrorKey(message);
+                return complete({ handled: true, error: known ? translate(known) : message });
+              }
+              // No native goal mode here: the old behaviour, minus a budget it cannot honour.
+              if (parsed.value.tokenBudget !== undefined) addNotice({ type: "info", message: translate("goal.budgetIgnored", { name: engineNameRef.current }) });
+              fallbackGoalObjective = parsed.value.objective;
+              webText = `/goal ${parsed.value.objective}`;
+            }
+          }
+          const expansion = expandWebSlashCommand(webText);
           if (expansion.kind === "not-web") return { handled: false };
           if (expansion.kind === "usage-error") {
             // error keeps the user's text in the input so they can append args.
@@ -4965,10 +5285,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             return { handled: true, retainInput: true };
           }
           if (commandName === "goal") {
-            const goal = createActiveGoal(args);
-            setActiveGoal(goal);
+            const webGoal = createActiveGoal(fallbackGoalObjective);
+            setActiveGoal(webGoal);
             const activeSessionId = sessionIdRef.current;
-            if (activeSessionId) sessionStorage.setItem(`${SESSION_STORAGE_PREFIXES.goal}${activeSessionId}`, JSON.stringify(goal));
+            if (activeSessionId) sessionStorage.setItem(`${SESSION_STORAGE_PREFIXES.goal}${activeSessionId}`, JSON.stringify(webGoal));
           }
           return { handled: true };
         }
@@ -4982,6 +5302,50 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
     }
   }, [addNotice, ensureNewSession, handleSend, isCompacting, loadModels, loadSession, loadSlashCommands, promoteNewSession, onSessionStatsPanelOpen]);
+
+  /** Pause, resume or drop the engine's goal. The answer is the engine's own new
+   *  state; the `goal_updated` frame that precedes it says the same, and both
+   *  fold in through adoptGoal. */
+  const runGoalOp = useCallback(async (op: "pause" | "resume" | "drop") => {
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    setGoalBusy(op);
+    try {
+      const answer = await sendAgentCommand<{ goal?: unknown; state?: unknown } | null>(sid, { type: "goal", op });
+      const update = readGoalUpdate(answer ?? {});
+      if (update !== undefined && sessionIdRef.current === sid) setGoal((prev) => adoptGoal(prev, { state: update, now: Date.now() }));
+    } catch (error) {
+      toast.error(translate(op === "pause" ? "goal.pauseFailed" : op === "resume" ? "goal.resumeFailed" : "goal.dropFailed"), error instanceof Error ? error.message : String(error));
+    } finally {
+      setGoalBusy((current) => (current === op ? null : current));
+    }
+  }, []);
+
+  /** Remove a finished goal's card, or the web-hosted fallback's note. */
+  const dismissGoal = useCallback(() => {
+    setGoal((prev) => (prev?.state.goal.status === "complete" ? null : prev));
+    setActiveGoal(null);
+    const sid = sessionIdRef.current;
+    if (sid) sessionStorage.removeItem(`${SESSION_STORAGE_PREFIXES.goal}${sid}`);
+  }, []);
+
+  /** "Keep working automatically" was just switched on. An engine decides to
+   *  continue only when a turn ends or a goal starts or resumes, so an active
+   *  goal sitting idle would wait for the next reply; `resume` does nothing for
+   *  a goal that is already active, hence pause then resume. The engine watches
+   *  its config file (a 200 ms debounce), so it gets a moment to have read the
+   *  change first. */
+  const kickGoal = useCallback(async () => {
+    const sid = sessionIdRef.current;
+    const idleAndActive = () => sessionIdRef.current === sid && !agentRunningRef.current && goalRef.current?.state.goal.status === "active";
+    if (!sid || !idleAndActive()) return;
+    const { promise: configPickedUp, resolve: afterPickup } = Promise.withResolvers<void>();
+    setTimeout(afterPickup, 800);
+    await configPickedUp;
+    if (!idleAndActive()) return;
+    await runGoalOp("pause");
+    await runGoalOp("resume");
+  }, [runGoalOp]);
 
   // The subagent steer action keeps its explicit behavior while sharing the
   // durable delivery path used by the main composer.
@@ -5029,6 +5393,47 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setOutbox(entries);
     void deliverOutboxEntry(sid, retryId);
   }, [addNotice, applyOutboxDelivery, deliverOutboxEntry]);
+
+  /** Continue a chat whose saved model is gone on the model the person picked:
+   *  the server reopens it on that model and records the choice, the event stream
+   *  comes back, and every message that was waiting for a model goes out under
+   *  its own id. A failed reopen leaves the chat as it was, with the reason. */
+  const recoverModel = useCallback(async (provider: string, modelId: string) => {
+    const sid = sessionIdRef.current;
+    const current = modelRecovery;
+    if (!sid || !current || current.sessionId !== sid || current.busy) return;
+    const setBusy = (next: Partial<ModelRecovery>) => setModelRecovery((prev) => (prev?.sessionId === sid ? { ...prev, ...next } : prev));
+    setBusy({ busy: true, error: undefined });
+    try {
+      await recoverSessionModel(sid, provider, modelId);
+    } catch (error) {
+      setBusy({ busy: false, error: error instanceof Error ? error.message : String(error) });
+      return;
+    }
+    if (sessionIdRef.current !== sid) return;
+    modelRecoveredAtRef.current = Date.now();
+    setModelRecovery(null);
+    // The composer still names the model the chat used to have (read from the
+    // session file when it opened): show the one it now runs on, then let the
+    // engine's own state confirm it.
+    setCurrentModelOverride({ provider, modelId });
+    void refreshLiveModelState(sid);
+    reconnectAttemptRef.current = 0;
+    reconnectFailingSinceRef.current = null;
+    // Stream first, as an idle send does: the held message's events must find it open.
+    await connectEvents(sid).catch(() => undefined);
+    if (sessionIdRef.current !== sid) return;
+    reconnectActionsRef.current?.(sid);
+    void reconcileAgentState(sid);
+    let ids: string[] = [];
+    const released = mutatePersistedOutbox(sid, (entries) => {
+      const freed = releaseBlocked(entries);
+      ids = freed.ids;
+      return freed.entries;
+    });
+    setOutbox(released);
+    for (const id of ids) void deliverOutboxEntry(sid, id);
+  }, [connectEvents, deliverOutboxEntry, modelRecovery, reconcileAgentState, refreshLiveModelState]);
 
   /** Remove a failed outbox entry and hand its text + images back to the
    *  composer for editing — the next Enter creates a fresh entry and
@@ -5399,13 +5804,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const resume = resumeLedger;
     if (!resume || session?.id !== resume.sessionId
       || loadedTranscriptSessionIdRef.current !== resume.sessionId) return;
-    if (resume.unknownIds.length === 0) {
+    const sid = resume.sessionId;
+    // Messages this page is still sending are driven by their own delivery.
+    const pendingIds = idsNeedingResumeCheck(readPersistedOutbox(sid), resume.unknownIds, outboxLiveIdsRef.current);
+    if (pendingIds.length === 0) {
       setResumeLedger(null);
       return;
     }
 
-    const sid = resume.sessionId;
-    const unknownIds = new Set(resume.unknownIds);
+    const unknownIds = new Set(pendingIds);
     const reconciled = mutatePersistedOutbox(sid, (current) =>
       reconcileTranscriptDeliveries(current, messages, unknownIds));
     if (sessionIdRef.current === sid) setOutbox(reconciled);
@@ -5664,6 +6071,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     data, loading, error, activeLeafId, messages, entryIds, streamState,
     agentRunning, modelNames: effectiveModelNames, modelList: effectiveModelList, modelSelectable, modelsLoading, modelError, modelErrorCode, modelThinkingLevels, newSessionModel, toolPreset, thinkingLevel, thinkingLevelPending, thinkingLevelTarget, fastModeEnabled, fastModeActive, fastModePending, fastModeUnavailable, promptCapabilities, steeringSupported, autoRetryEnabled, interruptMode, autoCompactionEnabled, steeringMode, followUpMode,
     liveModelMeta,
+    slowMode, slowModePending, usageLimit,
     // Keep provenance session-scoped at the public boundary too: consumers
     // must never infer this conversation's routing from a prior session's pin.
     smartPinnedModel: smartModelForSession(smartPinnedModel, session?.id ?? sessionIdRef.current),
@@ -5702,8 +6110,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // label while the stream is not delivering; `streamAlert` is the banner for
     // a lost turn or an exhausted reconnect, with its two actions.
     streamDegraded, streamAlert, dismissStreamAlert, retryEventStream,
+    // The chat's saved model is gone: the notice's state and its way out.
+    modelRecovery, recoverModel,
+    // Side questions (omp's `/btw`): topics, live answers and the ways to ask.
+    sideQuestions,
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases, planOverlay,
     activeGoal, activePlan,
+    goal, goalBusy, runGoalOp, dismissGoal, kickGoal,
     localOnly,
     isNew,
     // Refs
@@ -5714,8 +6127,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // stay unfolded under them.
     followingRef: completionScrollAllowedRef, readerAnchorRef, readerHoldsTail,
     // Actions
-    handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, selectSmartModel, selectLocalOnly, handleFastModeChange, handleAutoRetryChange, handleInterruptModeChange, handleAutoCompactionChange, handleSteeringModeChange, handleFollowUpModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, handleInterruptAndReply,
+    handleSend, handleAbort, handleFork, handleForkHere, handleNavigate, handleModelChange, selectSmartModel, selectLocalOnly, handleFastModeChange, handleAutoRetryChange, handleInterruptModeChange, handleAutoCompactionChange, handleSteeringModeChange, handleFollowUpModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, handleInterruptAndReply,
     handleCompact, handleHandoff, handleSteer, handleAbortCompaction,
+    handleSlowModeChange,
     respondToRefusalDecision,
     pendingInputs, respondToInput,
     handleRetryOutboxEntry, handleEditOutboxEntry,

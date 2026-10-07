@@ -8,6 +8,12 @@
  * effective prompts sent through the normal prompt pipeline, so the agent
  * actually receives a clear instruction rather than a stray "/goal ..." line.
  *
+ * `/goal` is the one exception to "TUI-only": omp 18.4.11+ has a goal over RPC,
+ * and the dispatcher (hooks/useAgentSession) creates THAT first, sending the
+ * objective as the goal's first prompt. The expansion below is what an engine
+ * without goal mode (older omp, pi, ACP) falls back to, and what a scheduled
+ * `/goal` carries, since nothing creates an engine goal at delivery time.
+ *
  * Pure definitions — no I/O. Prompt text is deliberately concise; the args are
  * user-supplied and embedded verbatim.
  */

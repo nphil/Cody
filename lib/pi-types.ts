@@ -2,6 +2,8 @@
 // Bun-only, so these types are hand-maintained against
 // oh-my-pi/packages/coding-agent/src/modes/rpc/rpc-types.ts (protocol v1).
 
+import type { GoalModeState } from "./goal-state";
+
 export interface ContextUsage {
   percent: number | null;
   contextWindow: number;
@@ -86,6 +88,17 @@ export interface TodoAutoUpdateFrame {
   type: "todo_auto_update";
 }
 
+/** Where `/slow` is stored: `global` is persisted config every session
+ * shares (Claude subscriptions' low priority), `session` is this session's
+ * own flex service tier. */
+export type SlowModeScope = "session" | "global";
+
+/** Mirror of omp's UsageLimitState (`get_state.usageLimit`): the stage a
+ * provider account is in once past its usage limit. */
+export type UsageLimitState =
+  | { stage: "low_priority"; resetsAtSec: number; allowanceLeftPercent?: number }
+  | { stage: "wrap_up"; resetsAtSec?: number; extraUsage: boolean };
+
 /** Mirror of omp's RpcSessionState (the raw `get_state` payload). */
 export interface RpcSessionState {
   model?: OmpModel;
@@ -113,6 +126,14 @@ export interface RpcSessionState {
   fastMode?: boolean;
   fastModeEnabled?: boolean;
   fastModeActive?: boolean;
+  /** omp 18.6.3+. Absent on older omp, pi and ACP engines. */
+  slowModeSupported?: boolean;
+  slowModeEnabled?: boolean;
+  slowModeScope?: SlowModeScope;
+  usageLimit?: UsageLimitState;
+  /** omp 18.4.11+: the session's goal, `null` when it has none. The KEY is
+   * the capability — it is absent on older omp, pi and the ACP engines. */
+  goal?: GoalModeState | null;
 }
 
 /**
@@ -148,6 +169,19 @@ export interface WebSessionState {
   thinkingLevel: string;
   fastModeEnabled: boolean;
   fastModeActive?: boolean;
+  /** Slow-mode and usage-limit fields pass through untouched: the browser
+   * derives what to show from them (lib/slow-mode-state.ts), and absence
+   * means the engine has no such surface. */
+  slowModeSupported?: boolean;
+  slowModeEnabled?: boolean;
+  slowModeScope?: SlowModeScope;
+  usageLimit?: UsageLimitState;
+  /** Native goal mode (lib/goal-state.ts): passed through only when the engine
+   * reported the key, so absence means "no native goals here", never "no goal".
+   * `goalAgeMs` is how long the engine had been waiting to count the goal's
+   * time when this was read (the server shares the engine's clock). */
+  goal?: GoalModeState | null;
+  goalAgeMs?: number;
   autoRetryEnabled?: boolean;
   todoPhases: TodoPhase[];
   /** Absent when the plan keeper has never touched this session. */

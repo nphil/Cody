@@ -416,6 +416,7 @@ notes are missing, and is what clients should key any "stale" caveat off.
 | `/api/sessions/<id>/auto-name` | POST | name a session: engine title, else a short model-written name, else a first-message truncation |
 | `/api/sessions/<id>/subagents` | GET | subagent roster |
 | `/api/sessions/<id>/subagents/<subagentId>` | GET | one subagent's transcript, read by byte range (never the whole file): `?tail=1` newest page, `?beforeByte=N` the page before offset N, `?fromByte=N` the page from offset N; `?mode=completion` the final output |
+| `/api/sessions/<id>/btw` | GET | side-question (`/btw`) topics, newest first; never starts an engine (omp only) |
 | `/api/sessions/<id>/media` | GET | attachments referenced by the transcript |
 | `/api/sessions/<id>/entries/<entryId>/thinking` | GET | expanded reasoning for one entry |
 | `/api/sessions/<id>/archive` | POST | archive the session and its artifacts |
@@ -453,6 +454,27 @@ Top-level keys: `sessionId`, `filePath`, `info`, `leafId`, `tree`, `context`.
 - `leafId` is the current head entry, which is what a client resumes from.
 
 `404` when the session does not exist *or* is owned by another account.
+
+### `GET /api/sessions/<id>/btw` — Incidental
+
+The side-question topics of one chat (omp 18.7's `/btw`), newest first:
+
+```json
+{"records":[{"id":"159c283649af351e","leafId":"eb8a5d6c","question":"what is two plus two",
+             "answer":"Four.","status":"complete","createdAt":1791326989304,"updatedAt":1791326990001,
+             "followUps":[{"question":"and times three","answer":"Twelve.","status":"complete",
+                           "createdAt":1791326995000,"updatedAt":1791326995800}]}],
+ "source":"live","supported":true}
+```
+
+`status` is `running`, `complete`, `cancelled`, `error` or `interrupted`; a topic's
+latest turn is the last of `followUps`, else the record itself. `source:"live"`
+came from the running engine (`supported:false` with no records when that engine
+predates `/btw`); `source:"disk"` was read from omp's sidecar beside the session
+file with no engine involved — a `running` turn is reported as `interrupted`
+there (its writer is gone) and `supported` is `null`. The route never starts an
+engine. `400 unsupported` under any engine but omp; `404 session_not_found` for
+another account's session, exactly like a missing one.
 
 ## Scheduled messages — Stable envelope
 
@@ -531,6 +553,7 @@ MCP server.
 | `/api/agent/<id>` | POST | send a command to a session |
 | `/api/agent/<id>` | GET | `{running}` (+ `state` when live) |
 | `/api/agent/<id>/events` | GET | **SSE stream** |
+| `/api/agent/<id>/recover-model` | POST | continue a chat whose saved model is gone on another model |
 | `/api/agent/<id>/bash-output` | GET | tail a long-running command's output |
 | `/api/agent/<id>/display` | GET, POST | the preview/display request for a session |
 | `/api/agent/running/events` | GET | SSE: which sessions are running |
@@ -569,7 +592,88 @@ Commands a newer omp adds are forwarded the same way, and an older omp answers
 them with an ordinary command error whose message is `Unknown command: <type>`
 — read that as "this engine predates it" and fall back. Today that covers
 `cancel_subagent`, `steer_subagent`, `predict_word`, `predict_word_feedback`,
-`remove_queued_message` and `promote_queued_message`.
+`remove_queued_message`, `promote_queued_message`, `set_slow_mode`,
+`abort_and_restore_queue` (what `abort` sends) and `fork` (what `fork_session` sends).
+
+`get_state` (and the web `state` payload) also carries, from omp 18.6.3, the
+optional `slowModeSupported`, `slowModeEnabled`, `slowModeScope`
+(`"session"` or `"global"`) and `usageLimit` (`{stage:"low_priority",
+resetsAtSec, allowanceLeftPercent?}` or `{stage:"wrap_up", resetsAtSec?,
+extraUsage}`) fields, passed through untouched; absent means the engine or the
+model has no such surface. `set_slow_mode {enabled}` answers `{enabled}`; with
+`slowModeScope:"global"` it persists `providers.anthropic.slowMode` in omp's
+`config.yml`, shared by every session. pi and ACP engines refuse it.
+
+`btw {question, recordId?}` (omp 18.7+, answers `{record}`) asks a **side
+question**: it runs beside the current turn, one at a time, and never enters the
+transcript; `recordId` continues that topic (a follow-up). `btw_cancel
+{recordId?}` answers `{cancelled}` (`false` when nothing was running, and also
+for a chat with no live engine, which it never starts) and `get_btw_history`
+answers `{records}`. omp's refusals arrive as ordinary command errors in its
+plain words (`A /btw question is still running; cancel it first`, `No active
+model available for /btw.`, …); a `btw` that waits over 30 s on an engine busy
+with another command fails with code `btw_ack_timeout` and nothing is
+restarted. Read topics with `GET /api/sessions/<id>/btw`, which never starts an
+engine. pi and ACP engines refuse all three as `unsupported`.
+
+`goal {op, objective?, token_budget?}` (omp 18.4.11+) manages the session's
+native goal: `op` is `get`, `create`, `resume`, `pause` or `drop`; only `create`
+takes an `objective` (non-empty) and an optional `token_budget` (positive whole
+number). It answers the engine's own `{goal, state}` — `goal` is `{id,
+objective, status, tokenBudget?, tokensUsed, timeUsedSeconds, createdAt,
+updatedAt}` with `status` one of `active`, `paused`, `budget-limited`,
+`complete`, `dropped`, and `state` is `{enabled, mode:"active"|"exiting",
+reason?:"completed", goal}`; after `drop` both are `null`. A malformed request
+is `400` `invalid_goal` and never reaches the engine; the engine's own refusals
+(`Goal mode is disabled (goal.enabled).`, `A goal is already active. Drop it
+before creating another.`, `No paused goal to resume.`) are ordinary command
+errors. An older omp answers `Unknown command: goal`; pi and the ACP engines
+answer `400` `unsupported` at once. The goal is also in `get_state` (and the web
+`state` payload) as `goal` — `null` when there is none — plus `goalAgeMs`, how
+long the engine had been waiting to count the goal's time (it adds seconds only
+when something happens, idle time included), so a client can show
+`timeUsedSeconds + goalAgeMs` and tick from there. **The `goal` key itself is
+the capability: it is absent on every engine without goal mode.** `GET
+/api/sessions/<id>` carries `context.goal` too, derived from the session file
+(an active goal reads as `paused`, which is what omp makes of it when a process
+reopens the file) for a chat no process is running. A goal does not carry on by
+itself unless omp's `goal.continuationModes` includes `"rpc"` (default
+`["interactive"]`); a running engine applies an edit of that setting at its
+next turn end, no restart needed. Abort pauses an active goal.
+
+`abort` stops the main agent and, on an omp that has `abort_and_restore_queue`
+(18.7+), first takes every message still queued in omp back out, instead of
+letting the abort resume the run on them. Its answer is `null` either way. What
+omp gave back, with the follow-ups the server itself was holding, arrives on the
+event stream as one `cody_queue_returned` frame (below), and those messages'
+delivery rows end `withdrawn`. An older omp, and pi, only abort.
+`remove_queued_message`'s `images` (18.7+) go back to the person for Edit.
+
+`fork_session {entryId?}` forks the chat with omp's own `fork` (18.4.11+): with
+`entryId` (a message entry) the new chat keeps the conversation through that
+message and the session's artifacts; without it the whole chat is copied. The
+live session moves onto the new chat, answered as
+`{"success":true,"data":{"cancelled":false,"newSessionId":"…"}}` (`cancelled:true`
+when an omp hook vetoed it). The chat must be idle: while it is running the
+answer is `400` `session_busy`. An omp without `fork` answers `Unknown command:
+fork`; pi and ACP engines answer `unsupported`. (The web command `fork` is a
+different thing: omp's `branch`, which drops the user message it is given.)
+
+A command that would have to start the engine for a chat whose saved model is
+gone answers `400` `{"error":"…","code":"model_unrestorable","provider":"…",
+"modelId":"…"}` (omp 18.6.3+ refuses to resume such a chat; 18.4.x silently fell
+back to another model). Nothing was sent. The Cody UI holds the message, shows
+a model picker, and sends it after recovery under the same `clientMessageId`.
+
+### `POST /api/agent/<id>/recover-model` — Stable
+
+Body `{"provider":"…","modelId":"…"}` (both required, else `400
+model_required`). Reopens the chat once on that model and writes it into the
+session file, so every later start resumes normally. `{"success":true,
+"data":{"provider":"…","modelId":"…"}}`; a chat that is already running answers
+success with `"alreadyRunning":true` and is not touched. Sidebar chats answer
+`400 unsupported`. A model that cannot start either answers the same
+`model_unrestorable` error as above.
 
 A `type: "prompt"` command takes a workspace checkpoint before the agent runs,
 so "restore to before that message" works. Checkpoint failure never blocks a
@@ -608,6 +712,11 @@ Wire format, all **Stable**:
   The engine may add a `source` (omp: `session-persistence`, `agent-end`);
   `session-persistence` at `warning` means the live session moved to a new
   file — see `cody_session_moved` below.
+- `{"type":"model_unrestorable","provider":"…","modelId":"…","message":"…"}`
+  (omp 18.6.3+; **Stable**) — the session's saved model no longer exists or has
+  no credentials, so omp would not reopen the chat. The server sends it once
+  and then ends the stream; do not auto-reconnect, pick a model and call
+  `POST /api/agent/<id>/recover-model`, then open a new stream.
 - Opening this stream **starts the session** if it is not already running. It is
   not a passive observer.
 - Backpressure: while a consumer is behind, consecutive `message_update` frames
@@ -628,11 +737,28 @@ it is the engine's. For reference, what the web client currently handles:
 `subagent_progress`, `subagent_event`, `host_tool_call`, `host_uri_request`,
 `extension_ui_request`.
 
+`goal_updated` (omp 18.4.11+) carries `{goal, state}` on every change to a goal:
+created, paused, resumed, dropped (`goal.status:"dropped"`), each flush of its
+tokens and time, the budget running out, and completion (`goal.status:
+"complete"`, `state.mode:"exiting"`). The engine clears a completed goal's state
+at that turn's terminal `agent_end` **without** another frame, after which
+`get_state.goal` is `null`. Goal mode also sends hidden `custom` messages
+(`goal-mode-context`, `goal-continuation`, `goal-budget-limit`, all `display:
+false`) into the transcript; a client should not draw them.
+
 omp 18.4.4+ also emits `queue_update` (`{steering:[…], followUp:[…]}`, the
 queued message *text*, only when it changes) and 18.4.5+ emits
 `cache_warming_start` / `cache_warming_end` while an idle session's prompt cache
 is refreshed. The web client ignores both, and neither ever changes a
 session's running state.
+
+omp 18.7+ emits `btw_delta` (`{recordId, delta}`: text appended to the side-question
+answer being written) and `btw_record` (`{record}`: the whole topic on every change;
+the last one of a turn carries the full answer) for side questions. Neither is a
+transcript or running-state frame. A topic's first `btw_record` arrives *before* the
+answer to its `btw` command, so apply frames by `recordId` and treat that answer as a
+snapshot. A `notice` with `source:"btw-history"` (level `error`) means a topic could
+not be saved to omp's history sidecar.
 
 Frames the **server** adds are prefixed `cody_`; ignore the ones you do not
 know. One matters to any client that stays attached to a session:
@@ -652,6 +778,18 @@ frozen file. It is sent once to every attached stream, after the new file
 exists, and follows omp's own `notice` (`source:"session-persistence"`). A
 fork's new id is not announced this way: the `fork` command's answer carries
 `newSessionId`.
+
+```json
+{"type":"cody_queue_returned","messages":[{"clientMessageId":"c1","text":"  fix the typo  ","images":[]}],
+ "truncated":true,"imagesDropped":true}
+```
+
+A Stop gave queued messages back instead of running them (see `abort`).
+`messages` are oldest send first and carry omp's own text (raw, whitespace kept;
+`[Image]` for a message that was only pictures) and images; `clientMessageId` is
+absent for one the server has no delivery row for. Put them back in the input
+box: they will not be sent. `truncated` and `imagesDropped` appear only when omp
+could not fit the whole queue, or its pictures, in its one answer.
 
 Ignore unknown types silently — that is the only forward-compatible policy, and
 a lesser engine simply never emits most of them. Two shapes worth knowing

@@ -639,6 +639,16 @@ export interface OmpSessionInfo {
 
 const SESSION_LIST_PREFIX_BYTES = 4096;
 const SESSION_LIST_SUFFIX_BYTES = 32_768;
+/**
+ * omp 18.7 persists an `xdev-mount-notice` for the host tools Cody registers
+ * at spawn — before the first user message, ~3 KB with Cody's roster — which
+ * pushes that message past the 4 KiB window: the list read "(no messages)"
+ * and the session namer, which needs the first message, never named the chat.
+ * A prefix that holds no user message is therefore read once more, wider.
+ * Scans are memoized per (size, mtime), so this costs one extra read per
+ * file version, and only for such files.
+ */
+const SESSION_LIST_WIDE_PREFIX_BYTES = 65_536;
 
 function decodeJsonStringFragment(value: string): string {
   const safeValue = value.endsWith("\\") ? value.slice(0, -1) : value;
@@ -881,29 +891,41 @@ function readTextSlices(filePath: string, prefixBytes: number, suffixBytes: numb
  */
 export function scanSessionInfo(filePath: string, withStatus = true): OmpSessionInfo | undefined {
   try {
-    const [content, suffix, size, mtime] = readTextSlices(
+    const [prefix, suffix, size, mtime] = readTextSlices(
       filePath,
       SESSION_LIST_PREFIX_BYTES,
       withStatus ? SESSION_LIST_SUFFIX_BYTES : 0,
     );
-    const entries = parseJsonlLenient<Record<string, unknown>>(content);
+    let content = prefix;
+    let entries = parseJsonlLenient<Record<string, unknown>>(content);
     const header = parseSessionListHeader(content, entries);
     if (!header) return undefined;
 
     let parsedMessageCount = 0;
     let firstMessage = "";
     let shortSummary: string | undefined;
-    for (let i = 1; i < entries.length; i++) {
-      const entry = entries[i] as { type?: string; message?: { role?: string; content?: unknown }; shortSummary?: string };
-      if (entry.type === "compaction" && typeof entry.shortSummary === "string") {
-        shortSummary = entry.shortSummary;
-      }
-      if (entry.type === "message" && entry.message) {
-        parsedMessageCount++;
-        if (entry.message.role === "user" && !firstMessage) {
-          firstMessage = extractTextFromContent(entry.message.content);
+    const scanEntries = () => {
+      parsedMessageCount = 0;
+      firstMessage = "";
+      shortSummary = undefined;
+      for (let i = 1; i < entries.length; i++) {
+        const entry = entries[i] as { type?: string; message?: { role?: string; content?: unknown }; shortSummary?: string };
+        if (entry.type === "compaction" && typeof entry.shortSummary === "string") {
+          shortSummary = entry.shortSummary;
+        }
+        if (entry.type === "message" && entry.message) {
+          parsedMessageCount++;
+          if (entry.message.role === "user" && !firstMessage) {
+            firstMessage = extractTextFromContent(entry.message.content);
+          }
         }
       }
+    };
+    scanEntries();
+    if (!firstMessage && size > SESSION_LIST_PREFIX_BYTES) {
+      [content] = readTextSlices(filePath, SESSION_LIST_WIDE_PREFIX_BYTES, 0);
+      entries = parseJsonlLenient<Record<string, unknown>>(content);
+      scanEntries();
     }
 
     firstMessage ||= extractFirstDisplayMessageFromPrefix(content) ?? "";

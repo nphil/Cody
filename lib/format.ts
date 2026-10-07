@@ -59,6 +59,20 @@ export function formatRelativeTime(value: string, locale: string, now: number): 
   return formatter.format(-Math.floor(hours / 24), "day");
 }
 
+/** "18:20" for a reset later today, "Sun 09:00" once it crosses a day —
+ *  matching how MessageView renders wall-clock times. Rendered in the
+ *  browser's own zone, because that is where the person reading it is. */
+export function formatResetTime(iso: string | null, locale: string, now: number): string | null {
+  if (!iso) return null;
+  const at = new Date(iso);
+  const ts = at.getTime();
+  if (!Number.isFinite(ts)) return null;
+  const sameDay = at.toDateString() === new Date(now).toDateString();
+  return sameDay
+    ? at.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" })
+    : at.toLocaleString(locale, { weekday: "short", hour: "2-digit", minute: "2-digit" });
+}
+
 /**
  * Shipped fullness thresholds, shared by the composer ring, the quota bars, the
  * context ring and the top-bar context chip: under 70 is the accent, 70–89

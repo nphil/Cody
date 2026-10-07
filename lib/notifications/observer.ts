@@ -305,6 +305,9 @@ export function createSessionObserver(session: ObservedSession, overrides: Parti
   }
 
   function onNotice(event: EngineEvent): void {
+    // A failed /btw checkpoint save is about a side question, never about the
+    // run: its error level must not become the push text of an unrelated failure.
+    if (event.source === "btw-history") return;
     const reason = asString(event.reason);
     if (reason === "awaiting_reply") {
       if (waitingRunId !== runId) sendReplyEnded(deps.now(), true);

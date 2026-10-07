@@ -22,6 +22,7 @@ import type {
 } from "./types";
 import { normalizeToolCalls } from "./normalize";
 import { isRecord } from "./type-guards";
+import { goalFromPersistedMode } from "./goal-state";
 import { taskResultRetryFailure, taskResultStructuredOutput, taskResultUsageCost } from "./task-result-details";
 import type { TodoPhase } from "./pi-types";
 import { sessionPathKey } from "./session-path";
@@ -550,7 +551,7 @@ export function buildSessionContext(
     toolResultImageUrl?: (entryId: string, index: number) => string;
   } = {},
 ): SessionContext {
-  const emptyContext: SessionContext = { messages: [], entryIds: [], thinkingLevel: "off", model: null, todoPhases: [] };
+  const emptyContext: SessionContext = { messages: [], entryIds: [], thinkingLevel: "off", model: null, todoPhases: [], goal: null };
   const byId = new Map<string, SessionEntry>();
   for (const e of entries) byId.set(e.id, e);
 
@@ -574,13 +575,17 @@ export function buildSessionContext(
   }
   path.reverse();
 
-  // Settings scan along the path: thinking level, model roles, last compaction.
+  // Settings scan along the path: thinking level, model roles, last compaction,
+  // and the last mode change (omp records a goal as `goal` / `goal_paused` /
+  // `none` entries, so the newest one on the path is the goal the chat is in).
   let thinkingLevel = "off";
   const models: Record<string, string> = {};
   // Once an explicit default model_change is on the path, assistant-message
   // inference must not overwrite it (temporary fallbacks carry the wrong id).
   let hasExplicitDefaultModel = false;
   let compaction: CompactionEntry | null = null;
+  let mode = "none";
+  let modeData: Record<string, unknown> | undefined;
   for (const entry of path) {
     if (entry.type === "thinking_level_change") {
       thinkingLevel = entry.thinkingLevel ?? "off";
@@ -600,6 +605,9 @@ export function buildSessionContext(
       }
     } else if (entry.type === "compaction") {
       compaction = entry;
+    } else if (entry.type === "mode_change") {
+      mode = entry.mode;
+      modeData = entry.data;
     }
   }
 
@@ -645,7 +653,7 @@ export function buildSessionContext(
       : { provider: "", modelId: defaultModel };
   }
 
-  return { messages, entryIds, thinkingLevel, model, todoPhases: getTodoPhasesFromEntries(entries, leafId) };
+  return { messages, entryIds, thinkingLevel, model, todoPhases: getTodoPhasesFromEntries(entries, leafId), goal: goalFromPersistedMode(mode, modeData) };
 }
 
 function parseEntryTimestamp(timestamp: string): number | undefined {

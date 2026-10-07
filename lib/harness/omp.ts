@@ -86,7 +86,7 @@ export const ompHarness: HarnessAdapter = {
   // schema like any other, and the auto-redeem consent prompt arrives as an
   // ordinary rpc-ui select. It also needs Bun >= 1.3.14, which the image's
   // `oven/bun:1` satisfies.
-  verifiedVersion: "18.4.10",
+  verifiedVersion: "18.7.0",
   capabilities: {
     liveSessions: true,
     models: true,

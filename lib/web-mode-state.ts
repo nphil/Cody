@@ -1,3 +1,5 @@
+/** The web-hosted goal: the FALLBACK for an engine with no native goal mode
+ * (older omp, pi, ACP). An engine that has one reports its own (lib/goal-state.ts). */
 export interface ActiveGoal {
   objective: string;
   startedAt: number;
@@ -24,11 +26,4 @@ export function parseActiveGoal(value: string | null): ActiveGoal | null {
   } catch {
     return null;
   }
-}
-
-export function formatGoalElapsed(elapsedMs: number): string {
-  const elapsedMinutes = Math.max(0, Math.floor(elapsedMs / 60_000));
-  const hours = Math.floor(elapsedMinutes / 60);
-  const minutes = elapsedMinutes % 60;
-  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
 }

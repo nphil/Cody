@@ -123,6 +123,8 @@ interface Props {
   onOpenFile?: (filePath: string) => void;
   entryId?: string;
   onFork?: (entryId: string) => void;
+  /** "Fork from here" under a reply (omp's own `fork`, 18.4.11+): a new chat that keeps the conversation through this reply. */
+  onForkHere?: (entryId: string) => void;
   forking?: boolean;
   onNavigate?: (entryId: string) => void;
   prevAssistantEntryId?: string;
@@ -165,13 +167,13 @@ function haveSameRelevantToolResults(
   return true;
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp, sessionId, thinkingDefaultExpanded = false, activityDisplayMode = "compact", allowDistill = true }: Props) {
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, onFork, onForkHere, forking, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp, sessionId, thinkingDefaultExpanded = false, activityDisplayMode = "compact", allowDistill = true }: Props) {
   if (!isVisibleTranscriptMessage(message, activityDisplayMode, toolResults)) return null;
   if (message.role === "user") {
     return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} onNavigate={onNavigate} prevAssistantEntryId={prevAssistantEntryId} onEditContent={onEditContent} />;
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} thinkingDefaultExpanded={thinkingDefaultExpanded} activityDisplayMode={activityDisplayMode} allowDistill={allowDistill} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} onForkHere={onForkHere} forking={forking} thinkingDefaultExpanded={thinkingDefaultExpanded} activityDisplayMode={activityDisplayMode} allowDistill={allowDistill} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -200,6 +202,7 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     && prev.onOpenFile === next.onOpenFile
     && prev.entryId === next.entryId
     && prev.onFork === next.onFork
+    && prev.onForkHere === next.onForkHere
     && prev.forking === next.forking
     && prev.onNavigate === next.onNavigate
     && prev.prevAssistantEntryId === next.prevAssistantEntryId
@@ -416,6 +419,8 @@ function AssistantMessageView({
   prevTimestamp,
   sessionId,
   entryId,
+  onForkHere,
+  forking,
   thinkingDefaultExpanded,
   allowDistill,
   activityDisplayMode,
@@ -431,6 +436,8 @@ function AssistantMessageView({
   prevTimestamp?: number;
   sessionId?: string;
   entryId?: string;
+  onForkHere?: (entryId: string) => void;
+  forking?: boolean;
   thinkingDefaultExpanded: boolean;
   allowDistill: boolean;
 }) {
@@ -762,6 +769,36 @@ function AssistantMessageView({
             >
               {copied ? <Check size={11} strokeWidth={1.8} /> : <Copy size={11} strokeWidth={1.8} />}
               {copied ? t("messageView.copied") : t("messageView.copy")}
+            </button>
+          </Tooltip>
+        )}
+        {textContent && !isStreaming && entryId && onForkHere && (
+          <Tooltip content={forking ? t("fork.forking") : t("fork.fromHereTitle")}>
+            <button
+              className="touch-reveal"
+              onClick={() => onForkHere(entryId)}
+              disabled={forking}
+              aria-label={forking ? t("fork.forking") : t("fork.fromHere")}
+              style={{
+                display: "flex", alignItems: "center", gap: 4,
+                padding: "3px 8px", height: 22,
+                background: "none", border: "none",
+                borderRadius: 5,
+                color: forking ? "var(--accent)" : "var(--text-dim)",
+                cursor: forking ? "not-allowed" : "pointer",
+                fontSize: 11, fontWeight: 400,
+                whiteSpace: "nowrap",
+                opacity: (hovered || actionsActive || forking) ? 1 : 0,
+                pointerEvents: (hovered || actionsActive || forking) ? "auto" : "none",
+                transition: "opacity var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
+              }}
+              onFocus={() => setActionsActive(true)}
+              onBlur={() => setActionsActive(false)}
+              onMouseEnter={(e) => { if (!forking) e.currentTarget.style.color = "var(--accent)"; }}
+              onMouseLeave={(e) => { if (!forking) e.currentTarget.style.color = "var(--text-dim)"; }}
+            >
+              <GitFork size={11} strokeWidth={1.8} />
+              <span className="fork-here-label">{forking ? t("fork.forking") : t("fork.fromHere")}</span>
             </button>
           </Tooltip>
         )}

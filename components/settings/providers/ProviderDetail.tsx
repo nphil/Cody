@@ -31,6 +31,7 @@ import type { ProviderLoginAccount } from "@/lib/harness/types";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { providerGlob } from "@/lib/model-allow-list";
 import { omitUntouchedModelDrafts } from "@/lib/models-config-drafts";
+import { firstKindApiMismatch } from "@/lib/model-kinds";
 import { formatModelDisplayName } from "@/lib/model-display";
 import { isSubscriptionLogin, type ProviderMethod, type ProviderMethodVariable, type ProviderRow, type ProvidersResponse } from "@/lib/provider-directory";
 import { selectBindingWindow } from "@/lib/usage/select";
@@ -669,6 +670,7 @@ function AdvancedForm({ row, onDirtyChange, onSaved }: {
   }
 
   const models = draft.models ?? [];
+  const kindError = firstKindApiMismatch(name, draft);
   const updateModel = (index: number, model: ModelEntry) => setDraft({ ...draft, models: models.map((entry, i) => (i === index ? model : entry)) });
   const removeModel = (index: number) => {
     const next = models.filter((_, i) => i !== index);
@@ -717,9 +719,10 @@ function AdvancedForm({ row, onDirtyChange, onSaved }: {
         )}
       </div>
       {saveError && <ErrorLine>{saveError}</ErrorLine>}
+      {kindError && <ErrorLine>{kindError}</ErrorLine>}
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
         <button type="button" className="ui-focus-ring" onClick={cancel} disabled={!dirty || saving} style={{ ...quietButtonStyle, opacity: dirty ? 1 : 0.6 }}>Cancel</button>
-        <button type="button" className="ui-focus-ring" onClick={() => void save()} disabled={!dirty || saving} style={{ ...primaryButtonStyle, opacity: dirty ? 1 : 0.6 }}>
+        <button type="button" className="ui-focus-ring" onClick={() => void save()} disabled={!dirty || saving || kindError !== null} style={{ ...primaryButtonStyle, opacity: dirty && kindError === null ? 1 : 0.6 }}>
           {saving ? <Loader2 size={13} className="icon-spin" aria-hidden="true" /> : null}
           {saving ? "Saving…" : "Save"}
         </button>

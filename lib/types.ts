@@ -1,5 +1,6 @@
 // Types mirrored from oh-my-pi coding-agent session-entries (v3 format).
 import type { TodoPhase } from "./pi-types";
+import type { GoalModeState } from "./goal-state";
 
 // Cody cannot import the Bun-only @oh-my-pi packages, so the on-disk
 // shapes are re-declared here. Legacy pi v1/v2 fields are kept optional.
@@ -451,6 +452,10 @@ export interface SessionContext {
   model: { provider: string; modelId: string } | null;
   /** Latest persisted todo snapshot on the selected session branch. */
   todoPhases: TodoPhase[];
+  /** The goal this session's file leaves it in (omp 18.4.11+), as a chat nobody
+   *  is running would show it. `null`: none. Live sessions report their own via
+   *  `get_state`, which wins over this. */
+  goal?: GoalModeState | null;
 }
 
 /** Answer to `steer_now`. `interrupted`: the model's reply was cut short and

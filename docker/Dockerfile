@@ -16,7 +16,10 @@ COPY package.json package-lock.json ./
 # toolchain so the slim runtime below does not have to.
 RUN npm ci --no-audit --no-fund
 COPY . .
-RUN npm run build && npm prune --omit=dev
+# .next/cache is webpack's incremental-build cache (~730 MB by 0.51): it only
+# speeds up the NEXT build, the server never reads it, and copying .next whole
+# shipped it in every image as its single largest layer.
+RUN npm run build && npm prune --omit=dev && rm -rf .next/cache
 
 FROM node:22-bookworm-slim AS runtime
 

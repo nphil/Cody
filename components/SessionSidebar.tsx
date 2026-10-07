@@ -11,6 +11,7 @@ import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import { Tooltip } from "./ui/primitives";
 import { toast } from "./ui/toast";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
+import { useForkAvailable } from "@/hooks/useForkChat";
 import { clearLastOpenSession, setLastOpenSession, workspaceKeyOf } from "@/lib/workspace-memory";
 import { groupSessionsByProject, projectActivityCounts, retainPendingSessions, sortManagedProjects } from "@/lib/project-ordering";
 import { comparableProjectPath } from "@/lib/comparable-path";
@@ -37,6 +38,13 @@ declare global {
  */
 const ActiveEngineContext = createContext<ActiveEngineInfo | null>(null);
 
+/**
+ * "Duplicate chat" for the same rows. The handler lives in AppShell — it moves
+ * the page onto the copy — and reaches a row through context for the same
+ * reason as the engine above. Null: no handler, no menu item.
+ */
+const DuplicateSessionContext = createContext<((session: SessionInfo) => void) | null>(null);
+
 interface Props {
   selectedSessionId: string | null;
   /** The active session can exist in memory before its JSONL file is flushed. */
@@ -61,6 +69,8 @@ interface Props {
    * /api/info answers. */
   engine?: ActiveEngineInfo | null;
   onAwaitingInputChange?: (awaiting: boolean) => void;
+  /** Copy a chat into a new one and switch to it ("Duplicate chat" in a row's menu). */
+  onDuplicateSession?: (session: SessionInfo) => void;
 }
 
 interface WorktreeEntry {
@@ -538,7 +548,7 @@ function CodyTitle() {
     </button>
   );
 }
-export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, onAtMentions, onAwaitingInputChange, engine = null }: Props) {
+export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onAtMention, onAtMentions, onAwaitingInputChange, onDuplicateSession, engine = null }: Props) {
   const engineId = engine?.id ?? null;
   // Import writes an omp .jsonl into omp's sessions layout and Archive moves
   // one with omp's gc layout; both routes answer 400 "unsupported" under any
@@ -1355,6 +1365,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
 
   return (
     <ActiveEngineContext.Provider value={engine}>
+    <DuplicateSessionContext.Provider value={onDuplicateSession ?? null}>
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
       {addProjectOpen && (
         <DirectoryPicker
@@ -1698,6 +1709,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
       )}
 
     </div>
+    </DuplicateSessionContext.Provider>
     </ActiveEngineContext.Provider>
   );
 }
@@ -2522,6 +2534,8 @@ const SessionItem = memo(function SessionItem({
   // layout; the route refuses under any other engine while Delete, one item
   // below it in the same menu, dispatches per engine and keeps working.
   const canArchive = useContext(ActiveEngineContext)?.id === OMP_ENGINE_ID;
+  const duplicateSession = useContext(DuplicateSessionContext);
+  const canDuplicate = useForkAvailable(useContext(ActiveEngineContext)?.id) && duplicateSession !== null;
   const [hovered, setHovered] = useState(false);
   const [focusWithin, setFocusWithin] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -2712,6 +2726,7 @@ const SessionItem = memo(function SessionItem({
               minWidth={128}
             >
               {canArchive && <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); setConfirmArchive(true); }} disabled={hasChildren} title={hasChildren ? t("sessionSidebar.archiveLeafOnly") : t("sessionSidebar.archive")} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: hasChildren ? "var(--text-dim)" : "var(--text-muted)", cursor: hasChildren ? "not-allowed" : "pointer", textAlign: "left", fontSize: 11, opacity: hasChildren ? 0.55 : 1 }}>{t("sessionSidebar.archive")}</button>}
+              {canDuplicate && <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); duplicateSession?.(session); }} disabled={isRunning} title={isRunning ? t("fork.busy") : t("fork.duplicate")} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: isRunning ? "var(--text-dim)" : "var(--text-muted)", cursor: isRunning ? "not-allowed" : "pointer", textAlign: "left", fontSize: 11, opacity: isRunning ? 0.55 : 1 }}>{t("fork.duplicate")}</button>}
               <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { startRename(event); setActionMenuOpen(false); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>{t("sessionSidebar.rename")}</button>
               <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); setConfirmDelete(true); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--status-error)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>{t("sessionSidebar.delete")}</button>
             </SidebarPortalMenu>

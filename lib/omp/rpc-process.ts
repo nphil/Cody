@@ -56,6 +56,37 @@ export class RpcCommandTimeoutError extends Error {
   }
 }
 
+/**
+ * omp 18.6.3+ refuses to start (`--resume <file>`, exit 1, before `ready`)
+ * when the session's saved model no longer exists or has no credentials:
+ * `error: Could not restore model <provider>/<id>`. 18.4 silently fell back
+ * to another model, so this is the one engine start failure a person can fix
+ * from the chat (pick another model), and it must not read as "omp crashed".
+ */
+export class ModelUnrestorableError extends Error {
+  readonly code = "model_unrestorable";
+  readonly provider: string;
+  readonly modelId: string;
+
+  constructor(provider: string, modelId: string) {
+    super(`Could not restore model ${provider}/${modelId}`);
+    this.name = "ModelUnrestorableError";
+    this.provider = provider;
+    this.modelId = modelId;
+  }
+}
+
+/** The saved model named by omp's restore failure in a stderr capture, or null.
+ * The id may itself contain slashes (`openrouter/vendor/model`): only the first
+ * one separates the provider. */
+export function parseModelUnrestorable(stderr: string): { provider: string; modelId: string } | null {
+  const match = /error: Could not restore model (\S+)/.exec(stderr);
+  if (!match) return null;
+  const slash = match[1].indexOf("/");
+  if (slash <= 0 || slash === match[1].length - 1) return null;
+  return { provider: match[1].slice(0, slash), modelId: match[1].slice(slash + 1) };
+}
+
 interface PendingCommand {
   command: string;
   resolve: (data: unknown) => void;
@@ -231,9 +262,12 @@ export class RpcProcess {
       if (this.exited) return;
       this.exited = true;
       this.exitInfo = { code, signal };
-      const exitError = new Error(
-        `${this.label} exited (code ${code ?? "null"}, signal ${signal ?? "none"})${this.stderrTail ? `: ${this.stderrTail.slice(-500)}` : ""}`,
-      );
+      const restoreFailure = parseModelUnrestorable(this.stderrTail);
+      const exitError = restoreFailure
+        ? new ModelUnrestorableError(restoreFailure.provider, restoreFailure.modelId)
+        : new Error(
+          `${this.label} exited (code ${code ?? "null"}, signal ${signal ?? "none"})${this.stderrTail ? `: ${this.stderrTail.slice(-500)}` : ""}`,
+        );
       rejectReady(exitError);
       for (const [, entry] of this.pending) {
         if (entry.timer) clearTimeout(entry.timer);

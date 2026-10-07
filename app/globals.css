@@ -3492,3 +3492,10 @@ span.linenumber {
 @media (prefers-reduced-motion: reduce) {
   .schedule-sheet { animation: none; }
 }
+
+/* "Fork from here" under a reply sits in the footer's one-line row beside Copy and the
+   time. On a phone there is no room for its words: the icon stays, and the tooltip and
+   aria-label keep the name. (Same 640px breakpoint as useIsMobile.) */
+@media (max-width: 640px) {
+  .fork-here-label { display: none; }
+}

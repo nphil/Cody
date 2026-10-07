@@ -14,14 +14,19 @@ import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { SubagentTranscriptDialog } from "./SubagentTranscriptDialog";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ComposerPanels } from "./ComposerPanels";
+import { SideQuestionsPanel } from "./SideQuestionsPanel";
+import { useGoalAutoContinue } from "@/hooks/useGoalAutoContinue";
+import { toast } from "@/components/ui/toast";
 import { StatusTextCrossfade } from "./StatusTextCrossfade";
+import { ModelRecoveryBanner } from "./ModelRecoveryBanner";
 import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-layout";
 import { useAgentSession, type AgentPhase, type NoticeItem, type RunningToolInfo, type StreamAlert, type SubagentInfo } from "@/hooks/useAgentSession";
-import { ALL_CAPABILITIES, type ActiveEngineInfo, type EngineCapabilities } from "./SettingsTabs";
+import { ALL_CAPABILITIES, OMP_ENGINE_ID, type ActiveEngineInfo, type EngineCapabilities } from "./SettingsTabs";
 import { loadEngineInfo } from "@/lib/engine-capabilities";
 import { useAudio } from "@/hooks/useAudio";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useForkAvailable } from "@/hooks/useForkChat";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
 import { resolveAvailableThinkingLevels } from "@/lib/thinking-levels";
@@ -396,6 +401,9 @@ interface CommittedTranscriptProps {
   /** Forking is omp-only; false renders the transcript without fork actions. */
   canFork: boolean;
   handleFork: (entryId: string) => void;
+  /** "Fork from here" under a reply (omp's own `fork`); false where the engine, or this omp, has none. */
+  canForkHere: boolean;
+  handleForkHere: (entryId: string) => void;
   handleNavigate: (entryId: string) => void;
   handleEditContent: (content: string) => void;
   modelNames: Record<string, string>;
@@ -531,7 +539,7 @@ function turnClassName(live: boolean, compact: boolean): string {
  */
 const CommittedTranscript = memo(function CommittedTranscript({
   messages, entryIds, conversationMeta, messageRefs, isStreaming, sessionBusy, isNew, forkingEntryId,
-  canFork, handleFork, handleNavigate, handleEditContent, modelNames, messageCwd, onOpenFile, sessionId,
+  canFork, handleFork, canForkHere, handleForkHere, handleNavigate, handleEditContent, modelNames, messageCwd, onOpenFile, sessionId,
   activityDisplayMode, thinkingDefaultExpanded, visibleCount, nearBottom, holdLiveTail, sentinelRef, handleLoadMoreClick,
 }: CommittedTranscriptProps) {
   const { t } = useI18n();
@@ -589,6 +597,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
         onOpenFile={onOpenFile}
         entryId={entryIds[idx]}
         onFork={!canFork || sessionBusy || isNew || (idx === 0 && msg.role === "user") ? undefined : handleFork}
+        onForkHere={!canForkHere || sessionBusy || isNew ? undefined : handleForkHere}
         forking={forkingEntryId === entryIds[idx]}
         onNavigate={sessionBusy ? undefined : handleNavigate}
         prevAssistantEntryId={sessionBusy ? undefined : prevAssistantEntryId}
@@ -746,7 +755,11 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
   const chatExtras = capabilities.chatExtras;
   const fastModeCapable = capabilities.fastMode;
   const subagentsCapable = capabilities.subagents;
+  // `/btw` side questions are omp's: no other engine has the commands, and an
+  // engine with a `/btw` of its own (Claude Code) must receive it untouched.
+  const sideQuestionsCapable = engine?.id === OMP_ENGINE_ID && chatExtras;
   const advisorEnabled = capabilities.advisor && advisorPreferred;
+  const canForkHere = useForkAvailable(engine?.id);
   const { playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
 
@@ -807,17 +820,20 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     loading, error, messages, entryIds, streamState,
     agentRunning, bashRunning, pendingBash, modelNames, modelList, modelSelectable, modelsLoading, modelError, modelErrorCode, modelThinkingLevels, thinkingLevel, thinkingLevelPending, thinkingLevelTarget, fastModeEnabled, fastModeActive, fastModePending, fastModeUnavailable, promptCapabilities, steeringSupported,
     liveModelMeta, smartPinnedModel, availableModes, currentModeId,
+    slowMode, slowModePending, usageLimit, handleSlowModeChange,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactResult, compactionStatus, displayModel: displayModelValue, sessionStats,
     slashCommands, slashCommandsLoading, outbox,
     notices, extensionCustomUi, extensionStatuses, extensionWidgets, sendExtensionCustomInput,
     pendingInputs, respondToInput, rewoundDraft,
     isAutoModelSelection, autoModelSwitch, modelSwitchPending, localOnly, selectLocalOnly,
-    agentPhase, streamDegraded, streamAlert, dismissStreamAlert, retryEventStream, activeGoal, activePlan,
+    agentPhase, streamDegraded, streamAlert, dismissStreamAlert, retryEventStream, modelRecovery, recoverModel, activeGoal, activePlan,
+    sideQuestions,
+    goal, goalBusy, runGoalOp, dismissGoal, kickGoal,
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases, planOverlay,
     isNew,
     sessionIdRef, messagesEndRef, scrollContainerRef, followingRef, readerAnchorRef, readerHoldsTail,
-    handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, selectSmartModel,
+    handleSend, handleAbort, handleFork, handleForkHere, handleNavigate, handleModelChange, selectSmartModel,
     handleSteer, handleAbortCompaction,
     handleRetryOutboxEntry, handleEditOutboxEntry,
     removeQueuedMessage, editQueuedMessage, steerQueuedNow,
@@ -829,7 +845,16 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
     onOpenFile, onOpenPreview, onPreviewUrlsSeen,
     newSessionPresetId: presetState.newSessionPresetId,
+    sideQuestionsCapable,
   });
+  // "Keep working automatically" is omp's `goal.continuationModes`, a global
+  // setting; only a chat with an engine goal offers it.
+  const goalAutoContinue = useGoalAutoContinue(goal !== null && capabilities.nativeSettings);
+  const changeGoalAutoContinue = useCallback((on: boolean) => {
+    goalAutoContinue.set(on)
+      .then((changed) => { if (changed && on) return kickGoal(); })
+      .catch((error: unknown) => toast.error(translate("goal.autoContinueSaveFailed"), error instanceof Error ? error.message : String(error)));
+  }, [goalAutoContinue, kickGoal]);
   const restoredDraftDecisionIdRef = useRef<string | null>(null);
   useEffect(() => {
     if (!rewoundDraft || restoredDraftDecisionIdRef.current === rewoundDraft.decisionId) return;
@@ -1270,11 +1295,14 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
          ? modelList.find((entry) => entry.provider === displayModelValue.provider && entry.id === displayModelValue.modelId)?.supportsFastMode
          : undefined}
       onFastModeChange={fastModeCapable && (session || isNew) ? handleFastModeChange : undefined}
+      slowMode={slowMode}
+      slowModePending={slowModePending}
+      usageLimit={usageLimit}
+      onSlowModeChange={fastModeCapable && session ? handleSlowModeChange : undefined}
       onAbortRetry={session ? handleAbortRetry : undefined}
       availableThinkingLevels={availableThinkingLevels}
       modelNameOverride={liveModelMeta?.name ?? null}
       retryInfo={retryInfo}
-      activeGoal={activeGoal}
       activePlan={activePlan}
       advisorEnabled={advisorEnabled}
       inputHistory={inputHistory}
@@ -1285,6 +1313,8 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       slashCommandsLoading={slashCommandsLoading}
       onLoadSlashCommands={loadSlashCommands}
       onBuiltinCommand={handleBuiltinSlashCommand}
+      onSideQuestion={sideQuestionsCapable ? sideQuestions.askFromComposer : undefined}
+      sideQuestionsAvailable={sideQuestions.available}
       onAudioUnlock={unlockAudio}
       draftKey={session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined)}
       cwd={session?.cwd ?? newSessionCwd}
@@ -1494,6 +1524,8 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
               forkingEntryId={forkingEntryId}
               canFork={chatExtras}
               handleFork={handleFork}
+              canForkHere={canForkHere}
+              handleForkHere={handleForkHere}
               handleNavigate={handleNavigate}
               handleEditContent={handleEditContent}
               modelNames={modelNames}
@@ -1551,6 +1583,17 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
                 alert={streamAlert}
                 onRetry={retryEventStream}
                 onDismiss={dismissStreamAlert}
+              />
+            )}
+
+            {/* The chat's saved model is gone (omp 18.6.3+ will not reopen it):
+                say so and let the person continue on another model. */}
+            {modelRecovery && (
+              <ModelRecoveryBanner
+                recovery={modelRecovery}
+                modelList={modelList}
+                hasHeldMessage={outbox.some((entry) => entry.blocked === true)}
+                onRecover={recoverModel}
               />
             )}
 
@@ -1664,7 +1707,30 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
               planOverlay={planOverlay}
               subagents={subagentsCapable && chatExtras ? subagents : []}
               onSelectSubagent={setSelectedSubagent}
+              goal={goal}
+              fallbackGoal={activeGoal}
+              goalBusy={goalBusy}
+              onGoalOp={runGoalOp}
+              onGoalDismiss={dismissGoal}
+              goalAutoContinue={goalAutoContinue.enabled === null ? null : { enabled: goalAutoContinue.enabled, pending: goalAutoContinue.pending, onChange: changeGoalAutoContinue }}
+              engineName={engine?.shortName}
             />
+            {sideQuestions.available && (
+              <SideQuestionsPanel
+                records={sideQuestions.records}
+                runActive={agentRunning}
+                answering={sideQuestions.answering}
+                asking={sideQuestions.asking}
+                open={sideQuestions.open}
+                onOpenChange={sideQuestions.setOpen}
+                error={sideQuestions.error}
+                onDismissError={sideQuestions.dismissError}
+                focusRequest={sideQuestions.focusRequest}
+                onAsk={sideQuestions.askFromPanel}
+                onCancel={sideQuestions.cancel}
+                cwd={session?.cwd}
+              />
+            )}
             <ExtensionWidgets widgets={belowEditorWidgets} />
           </div>
         </div>

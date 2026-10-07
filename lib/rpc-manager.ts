@@ -11,11 +11,12 @@ import { FORGE_HOST_TOOL, runForgeTool } from "./forge/tool";
 import { getHarness } from "./harness";
 import type { EngineSession, EngineSessionOptions, HarnessAdapter, RpcUiSpawn } from "./harness/types";
 import { validateAgentImages } from "./image-attachments";
+import { inSendOrder, matchRestoredQueue, parseQueueRestore, readRestoredImages, type QueueRestore, type QueueRow, type ReturnedMessage, type StopRestoreOutcome } from "./queue-restore";
 import { APP_LOG_SHADOW_NOTE, DEFAULT_LIMIT, MAX_LIMIT, appLogNotice, formatAppLogDigest, markAppLogsRead, parseSince, readAppLogs } from "./logs/ring";
 import { APP_LOG_LEVELS, type AppLogQuery } from "./logs/types";
 import { invalidateModelsCache } from "./models-cache";
 import { MAX_RPC_FRAME_BYTES } from "./omp/rpc-frame";
-import { RpcCommandError, RpcCommandTimeoutError, RpcProcess, type RpcFrame, type RpcProcessLaunch } from "./omp/rpc-process";
+import { ModelUnrestorableError, RpcCommandError, RpcCommandTimeoutError, RpcProcess, type RpcFrame, type RpcProcessLaunch } from "./omp/rpc-process";
 import { readNativeSettings } from "./omp/settings-config";
 import { getSidebarChatsDir, getSessionDirNameForCwd } from "./omp/paths";
 import { linkIsolatedAgentDir } from "./omp/isolated-agent-dir";
@@ -32,6 +33,7 @@ import { copySessionPreset, renameSessionPreset, sessionPresetOverlay } from "./
 import { selectPromptProfileId, type PromptProfileId } from "./local-model-profile";
 import { PRESET_FULL } from "./tool-presets";
 import { isRecord } from "./type-guards";
+import { goalAgeMs, parseGoalModeState, validateGoalRequest } from "./goal-state";
 import { LOCAL_TIME_CUSTOM_TYPE, normalizeTimeZone, serverTimeZone } from "./time-zone";
 import { ownerTimeZone } from "./time-zone-prefs";
 import { SIDEBAR_CONTEXT_TOOLS } from "./sidebar-context-tools";
@@ -210,6 +212,13 @@ interface HeldMessage {
 /** How long after a "Steer now" abort the engine gets to start the run that
  *  reads the steer before the aborted run's end is treated as a real end. */
 const STEER_CONTINUATION_GRACE_MS = 3_000;
+
+/** Why a queued message a Stop did not give back is reported failed: the stop
+ *  won before the engine read it. */
+const STOPPED_BEFORE_READ = "Stopped before this message was read.";
+
+/** What `fork_session` says while the chat is running: omp only forks an idle one. */
+const FORK_BUSY_MESSAGE = "Wait for the current run to finish before forking this chat.";
 
 export type ServerDeliveryLedgerSnapshot =
   | (Omit<ServerDeliveryLedgerEntry, "status" | "submitted"> & { status: ServerDeliveryStatus })
@@ -439,6 +448,12 @@ const PROMPT_ACK_TIMEOUT_MS = 30_000;
  * normalization can legitimately run ~20 s before omp admits the prompt, and
  * timing out then would recycle a child that was about to accept it. */
 const IMAGE_PROMPT_ACK_TIMEOUT_MS = 60_000;
+/** Cap on the acknowledgement of a `btw` side question. omp acks it in
+ * milliseconds (the answer streams back as btw_delta / btw_record frames); it
+ * only waits when omp's serial command queue is blocked by a long command such
+ * as `compact`. Unlike a prompt, a timeout here proves nothing about the
+ * child's health (it may well be mid-turn), so it is never recycled for it. */
+const BTW_ACK_TIMEOUT_MS = 30_000;
 /** How long a session move waits for the new session file to land on disk
  * before the page is told to adopt it (see announceSessionMove). */
 const SESSION_MOVE_FILE_WAIT_MS = 3_000;
@@ -462,12 +477,26 @@ const bashExcludeMessage = (engine: string) =>
  */
 export class WebRpcError extends Error {
   readonly code: string;
+  /** Extra string fields the route forwards beside `code` (e.g. the model a
+   * resumed chat could not restore), so a client can act on the failure. */
+  readonly details?: Readonly<Record<string, string>>;
 
-  constructor(message: string, code: string) {
+  constructor(message: string, code: string, details?: Record<string, string>) {
     super(message);
     this.name = "WebRpcError";
     this.code = code;
+    if (details) this.details = details;
   }
+}
+
+/** The saved model a failed resume could not restore (`model_unrestorable`),
+ * or null when `error` is anything else. Callers answer it with a prompt to
+ * pick another model rather than a generic failure. */
+export function unrestorableModelOf(error: unknown): { provider: string; modelId: string } | null {
+  if (!(error instanceof WebRpcError) || error.code !== "model_unrestorable") return null;
+  const provider = error.details?.provider;
+  const modelId = error.details?.modelId;
+  return provider && modelId ? { provider, modelId } : null;
 }
 
 // Extension UI methods that stay pending until the client answers (replayed to
@@ -510,6 +539,9 @@ const PASSTHROUGH_COMMANDS = new Set([
   "predict_word_feedback",
   "remove_queued_message",
   "promote_queued_message",
+  // omp 18.7: side questions (/btw). `btw` itself has a dedicated case in send().
+  "get_btw_history",
+  "btw_cancel",
 ]);
 
 /** Read-only, argument-free snapshots. omp answers commands one at a time,
@@ -517,7 +549,7 @@ const PASSTHROUGH_COMMANDS = new Set([
  *  joins it instead of queuing a second copy: after a stall, a page's
  *  pollers had stacked dozens of get_state calls that the child then worked
  *  through one by one ahead of the user's next message. */
-const COALESCED_READS: Record<string, true> = { get_state: true, get_subagents: true };
+const COALESCED_READS: Record<string, true> = { get_state: true, get_subagents: true, get_btw_history: true };
 
 // Commands the wrapper settles locally (or forwards conditionally) — exempt
 // from the engine RPC-vocabulary gate below, because rejecting them would
@@ -667,6 +699,11 @@ export function buildEngineRpcLaunch(
     advisor?: boolean;
     profile?: LocalModelProfileLaunch;
     kind?: "sidebar";
+    /** One-shot override for resuming a chat whose saved model is gone
+     * (`model_unrestorable`): `--model <provider>/<id>` for THIS spawn only.
+     * Never part of `relaunch`, so a later restart reads the model the
+     * recovery wrote into the session instead of forcing this one again. */
+    restoreModel?: { provider: string; modelId: string };
   },
 ): RpcProcessLaunch {
   const spec = harness.rpcUi;
@@ -698,6 +735,15 @@ export function buildEngineRpcLaunch(
   // intentionally untouched unless a local profile explicitly replaces them.
   if (opts.sessionFile && opts.profile?.toolNames?.length) {
     args.push("--tools", opts.profile.toolNames.join(","));
+  }
+  if (opts.restoreModel && opts.sessionFile) {
+    const { provider, modelId } = opts.restoreModel;
+    // One argv element, never a shell line — but a value starting with "-"
+    // would still be parsed by the engine as a flag of its own.
+    if (!provider || !modelId || provider.startsWith("-") || provider.includes("/")) {
+      throw new WebRpcError("That model cannot be used to reopen this chat.", "invalid_model");
+    }
+    args.push("--model", `${provider}/${modelId}`);
   }
   if (opts.profile?.systemPromptPath) args.push("--system-prompt", opts.profile.systemPromptPath);
   // Main omp sessions carry Cody's two extensions (lib/omp/extensions): the
@@ -966,14 +1012,26 @@ export class AgentSessionWrapper {
   private extensionStatuses = new Map<string, string>();
   /**
    * A user Stop keeps the MAIN agent stopped until the user sends again.
-   * omp's RPC `abort` leaves queued steers in its queue and then resumes the
-   * run on them (only omp's terminal UI clears that queue before aborting, and
-   * RPC has no command for it); a finished background job can wake it too.
-   * While set, a run the engine starts on its own is aborted at its first
-   * model reply — after any queued message is recorded in the conversation,
-   * before a tool can run. Subagents are separate sessions and never touched.
+   * A plain RPC `abort` leaves queued steers in omp's queue and then resumes
+   * the run on them; a finished background job can wake it too. omp 18.7's
+   * `abort_and_restore_queue` withdraws the queue first (see stopRestore), but
+   * an older omp has no such command, so the latch stays. While set, a run
+   * the engine starts on its own is aborted at its first model reply — after
+   * any queued message is recorded in the conversation, before a tool can
+   * run. Subagents are separate sessions and never touched.
    */
   private stopLatch: { aborting: boolean } | null = null;
+  /**
+   * Set while a Stop's `abort_and_restore_queue` is in flight. For every
+   * queued prompt it withdrew, omp's own `prompt_result` says `aborted`, and
+   * those frames can land BEFORE the answer that says which messages went
+   * back to the composer. A row that would be failed for it waits here until
+   * that answer maps it to `withdrawn` (the rest are failed as before).
+   */
+  private stopRestore: { deferred: Set<string> } | null = null;
+  /** This omp answered `Unknown command: abort_and_restore_queue` (before
+   *  18.7): Stop keeps the plain abort without asking again. */
+  private queueRestoreUnsupported = false;
   /**
    * Follow-ups sent while a run is live are held HERE, not in the engine's
    * queue, so they can be edited, deleted and handed back on Stop on every
@@ -1717,6 +1775,14 @@ export class AgentSessionWrapper {
       this.emit(event);
       return;
     }
+    // A side question's answer streams on the chat's event stream but is not
+    // a turn: it never changes the running state, the delivery ledger or the
+    // sidebar. A child busy answering one must not be idled out, though.
+    if (event.type === "btw_delta" || event.type === "btw_record") {
+      this.resetIdleTimer();
+      this.emit(event);
+      return;
+    }
     this.resetIdleTimer();
     let refreshSessionList = false;
     if (event.type === "permission_request" && typeof event.requestId === "string") {
@@ -1885,11 +1951,14 @@ export class AgentSessionWrapper {
           // (Retry/Edit) rather than claim a delivery nobody saw — if the engine
           // drains it later anyway, its user message_end still flips it to
           // delivered. Everything else yielded with the message consumed.
+          // While a Stop's restore is in flight the answer decides instead:
+          // the messages it hands back are withdrawn, not failed.
           const entry = this.deliveryLedger.get(clientMessageId);
           if (event.status === "error" && event.agentInvoked === false) {
             this.transitionDelivery(clientMessageId, "failed", error);
           } else if (event.status === "aborted" && entry?.status === "queued") {
-            this.transitionDelivery(clientMessageId, "failed", "Stopped before this message was read.");
+            if (this.stopRestore && !entry.held) this.stopRestore.deferred.add(clientMessageId);
+            else this.transitionDelivery(clientMessageId, "failed", STOPPED_BEFORE_READ);
           } else {
             this.transitionDelivery(clientMessageId, "delivered");
           }
@@ -2971,6 +3040,21 @@ export class AgentSessionWrapper {
       // The wrapper's own flag is only the spawn-time cache.
       fastModeEnabled: state.fastModeEnabled ?? state.fastMode ?? this.fastModeEnabled,
       fastModeActive: state.fastModeActive,
+      // omp 18.6.3+: whether the ACTIVE model has a slow mode (it follows the
+      // model, so every state poll re-reads it), whether it is on, where it is
+      // stored, and the account's usage-limit stage. Passed through as-is — an
+      // older omp and every other engine simply omit them.
+      slowModeSupported: state.slowModeSupported,
+      slowModeEnabled: state.slowModeEnabled,
+      slowModeScope: state.slowModeScope,
+      usageLimit: state.usageLimit,
+      // omp 18.4.11+: the session's goal (`null` while there is none). Passed
+      // through ONLY when the engine reported the key, so an older omp, pi and
+      // the ACP engines carry no `goal` at all — absence is how the browser
+      // learns there are no native goals here. The engine adds a goal's time
+      // only when something happens, so how long it has been waiting is
+      // answered here, on the clock the engine shares with this server.
+      ...("goal" in state ? { goal: state.goal ?? null, goalAgeMs: goalAgeMs(parseGoalModeState(state.goal), Date.now()) } : {}),
       todoPhases: state.todoPhases ?? [],
       // Absent when the plan keeper has never touched this session — the
       // client treats that the same as an empty overlay.
@@ -3272,19 +3356,25 @@ export class AgentSessionWrapper {
     if (entry.status !== "queued" || entry.held || !submitted || !this.engineHasCommand("remove_queued_message")) {
       return { withdrawn: false, reason: "already_sent" };
     }
+    let images = submitted.images;
     try {
-      const result = await this.proc.sendCommand<{ removed?: boolean } | undefined>({
+      const result = await this.proc.sendCommand<{ removed?: boolean; images?: unknown } | undefined>({
         type: "remove_queued_message",
         message: submitted.message,
         queue: entry.behavior === "steer" ? "steering" : "followUp",
       });
       if (result?.removed !== true) return { withdrawn: false, reason: "already_sent" };
+      // omp 18.7 hands back the images it queued; an older one cannot, so the
+      // ones the message was sent with go back (as does a message whose
+      // images omp left out of an oversized answer: `imagesDropped`).
+      const restored = readRestoredImages(result.images);
+      if (restored.length > 0) images = restored;
     } catch (error) {
       if (isUnknownCommandError(error)) return { withdrawn: false, reason: "already_sent" };
       throw error;
     }
     this.transitionDelivery(clientMessageId, "withdrawn");
-    return { withdrawn: true, text: submitted.message, images: submitted.images };
+    return { withdrawn: true, text: submitted.message, images };
   }
 
   /**
@@ -3358,18 +3448,93 @@ export class AgentSessionWrapper {
   }
 
   /** Stop hands every held message back instead of letting it start a run —
-   *  the same thing omp's own terminal does with its queue on Esc. */
-  private returnHeldOnStop(): void {
-    const returned = this.heldQueue.splice(0);
-    for (const held of returned) this.transitionDelivery(held.clientMessageId, "withdrawn");
-    if (returned.length === 0) return;
-    this.emit({
-      type: "cody_queue_returned",
-      messages: returned.map((held) => ({
+   *  the same thing omp's own terminal does with its queue on Esc. They go to
+   *  the composer together with what the engine returns (emitQueueReturned). */
+  private takeHeldOnStop(): ReturnedMessage[] {
+    return this.heldQueue.splice(0).map((held) => {
+      const acceptedAt = this.deliveryLedger.get(held.clientMessageId)?.acceptedAt;
+      this.transitionDelivery(held.clientMessageId, "withdrawn");
+      return {
         clientMessageId: held.clientMessageId,
         text: held.message,
         images: Array.isArray(held.images) ? held.images : [],
+        ...(acceptedAt !== undefined ? { acceptedAt } : {}),
+      };
+    });
+  }
+
+  /** The ledger rows omp's own queue can still hold at a Stop: acknowledged
+   *  into it before the Stop (`queued`, not held by Cody), oldest first. */
+  private engineQueuedRows(acceptedBefore: number): QueueRow[] {
+    const rows: QueueRow[] = [];
+    for (const entry of this.deliveryLedger.values()) {
+      if (entry.status !== "queued" || entry.held || entry.acceptedAt > acceptedBefore) continue;
+      rows.push({
+        clientMessageId: entry.clientMessageId,
+        behavior: entry.behavior,
+        text: entry.text,
+        imageCount: entry.imageCount,
+        acceptedAt: entry.acceptedAt,
+        submittedText: entry.submitted?.message,
+      });
+    }
+    return rows.sort((a, b) => a.acceptedAt - b.acceptedAt);
+  }
+
+  /**
+   * Stop the run. An omp that has it (18.7+) first takes every queued message
+   * back out of its queue (`abort_and_restore_queue`): a plain abort would
+   * resume the run on them. What it hands back is settled against the ledger
+   * here and returned for the composer. Any other engine — or an omp that
+   * answers `Unknown command` — only aborts, as before.
+   */
+  private async abortRestoringQueue(requestedAt: number): Promise<StopRestoreOutcome | null> {
+    if (this.queueRestoreUnsupported || !this.engineHasCommand("abort_and_restore_queue")) {
+      await this.proc.sendCommand({ type: "abort" });
+      return null;
+    }
+    const window = { deferred: new Set<string>() };
+    this.stopRestore = window;
+    let answer: unknown;
+    try {
+      answer = await this.proc.sendCommand({ type: "abort_and_restore_queue" });
+    } catch (error) {
+      // Nothing says which prompts omp withdrew: they are failed as before.
+      if (this.stopRestore === window) this.stopRestore = null;
+      for (const id of window.deferred) this.transitionDelivery(id, "failed", STOPPED_BEFORE_READ);
+      if (!isUnknownCommandError(error)) throw error;
+      this.queueRestoreUnsupported = true;
+      await this.proc.sendCommand({ type: "abort" });
+      return null;
+    }
+    if (this.stopRestore === window) this.stopRestore = null;
+    const restore = parseQueueRestore(answer);
+    const { messages, unclaimed } = matchRestoredQueue(restore, this.engineQueuedRows(requestedAt));
+    for (const message of messages) this.transitionDelivery(message.clientMessageId, "withdrawn");
+    // omp emptied its queue, so a row it did not hand back is in none any more
+    // (cut from an oversized answer, or read an instant before). A `steer` or
+    // `follow_up` send gets no prompt_result to say so: report it failed, with
+    // Retry and Edit, as an aborted prompt always was.
+    for (const row of unclaimed) this.transitionDelivery(row.clientMessageId, "failed", STOPPED_BEFORE_READ);
+    return { messages, restore };
+  }
+
+  /** One frame carries everything a Stop gives back, oldest send first, so the
+   *  composer takes it as one draft. `truncated` / `imagesDropped` say omp could
+   *  not fit all of it in its answer. */
+  private emitQueueReturned(messages: ReturnedMessage[], restore: QueueRestore | undefined): void {
+    const truncated = restore?.truncated === true;
+    const imagesDropped = restore?.imagesDropped === true;
+    if (messages.length === 0 && !truncated && !imagesDropped) return;
+    this.emit({
+      type: "cody_queue_returned",
+      messages: messages.map(({ clientMessageId, text, images }) => ({
+        ...(clientMessageId ? { clientMessageId } : {}),
+        text,
+        images,
       })),
+      ...(truncated ? { truncated: true } : {}),
+      ...(imagesDropped ? { imagesDropped: true } : {}),
     });
   }
 
@@ -3659,14 +3824,20 @@ export class AgentSessionWrapper {
       case "abort": {
         // Stop means the MAIN agent stops and stays stopped until the user
         // sends again (stopLatch); subagents are never aborted from here.
+        // Whatever was still queued — held here or in omp — goes back to the
+        // composer instead of running (abortRestoringQueue).
         const requestedAt = Date.now();
         this.stopLatch = { aborting: false };
         this.notifyObservers({ type: "cody_run_stopped" });
         this.clearSteerInterrupt();
-        this.returnHeldOnStop();
-        await this.withFinalRunningNotification(async () => {
-          await this.proc.sendCommand({ type: "abort" });
-        });
+        const held = this.takeHeldOnStop();
+        let restored: StopRestoreOutcome | null = null;
+        try {
+          restored = await this.withFinalRunningNotification(() => this.abortRestoringQueue(requestedAt));
+        } finally {
+          // Even when the abort failed: a message taken out of the hold must come back.
+          this.emitQueueReturned(inSendOrder([restored?.messages ?? [], held]), restored?.restore);
+        }
         this.settleAfterStop(requestedAt);
         return null;
       }
@@ -3674,6 +3845,26 @@ export class AgentSessionWrapper {
       case "get_state": {
         const state = await this.coalescedRead<RpcSessionState>("get_state");
         return this.buildWebState(state);
+      }
+
+      case "btw": {
+        // A side question never touches the running state, the stop latch or
+        // the delivery machinery. Only the fields omp defines are forwarded;
+        // a missing question becomes "" so omp's own "non-empty question"
+        // error answers.
+        const frame: { type: "btw"; question: string; recordId?: string } = {
+          type: "btw",
+          question: typeof command.question === "string" ? command.question : "",
+        };
+        if (typeof command.recordId === "string" && command.recordId) frame.recordId = command.recordId;
+        try {
+          return (await this.proc.sendCommand(frame, BTW_ACK_TIMEOUT_MS)) ?? null;
+        } catch (error) {
+          if (error instanceof RpcCommandTimeoutError) {
+            throw new WebRpcError("The engine is busy with another command, so the side question could not start.", "btw_ack_timeout");
+          }
+          throw error;
+        }
       }
 
       case "set_model": {
@@ -3699,6 +3890,26 @@ export class AgentSessionWrapper {
         return { enabled: this.fastModeEnabled, active: result?.active ?? false };
       }
 
+      case "set_slow_mode": {
+        // An omp that predates it answers `Unknown command: set_slow_mode`,
+        // which the browser reads as "no slow mode here" and hides the switch.
+        const enabled = command.enabled === true;
+        const result = await this.proc.sendCommand<{ enabled?: boolean }>({ type: "set_slow_mode", enabled });
+        return { enabled: result?.enabled ?? enabled };
+      }
+
+      case "goal": {
+        // omp 18.4.11+: create, inspect, pause, resume or drop the session's
+        // goal; the answer is the engine's `{goal, state}`. An omp that
+        // predates it answers `Unknown command: goal`, which the browser reads
+        // as "no native goals" and falls back to a plain prompt. pi (restricted
+        // vocabulary) and the ACP engines refuse it as `unsupported` before
+        // anything is sent.
+        const requested = validateGoalRequest(command);
+        if (!requested.ok) throw new WebRpcError(requested.error, "invalid_goal");
+        return await this.proc.sendCommand({ ...requested.request });
+      }
+
       case "fork": {
         // omp's `branch` is pi-web's fork: it creates a branched session file
         // and switches this live process onto it (entryId must be a user
@@ -3717,6 +3928,35 @@ export class AgentSessionWrapper {
           const newSessionId = await this.refreshIdentityAfterSessionChange();
           // A branch keeps its parent resumable, so clone rather than move the
           // frozen Local-only snapshot and account ownership sidecars.
+          this.carrySessionState(parentSessionId, newSessionId);
+          return { cancelled: false, newSessionId };
+        } finally {
+          this.requestedIdentityChanges -= 1;
+        }
+      }
+
+      case "fork_session": {
+        // omp's own `fork` (18.4.11+), unlike `branch` above: it KEEPS the
+        // entry it is given — any message, so "Fork from here" on a reply —
+        // and the session's artifacts; with no entry it copies the whole chat
+        // ("Duplicate chat"). Either way this live process moves onto the new
+        // file, so the identity change is handled exactly like a branch's.
+        // omp only forks an idle session: a busy one is refused here, and an
+        // omp that sees work begin in the meantime answers `session_busy`.
+        if (this.isRunning()) throw new WebRpcError(FORK_BUSY_MESSAGE, "session_busy");
+        const entryId = typeof command.entryId === "string" && command.entryId ? command.entryId : undefined;
+        const parentSessionId = this._sessionId;
+        this.requestedIdentityChanges += 1;
+        try {
+          let result: { cancelled: boolean };
+          try {
+            result = await this.proc.sendCommand<{ cancelled: boolean }>({ type: "fork", ...(entryId ? { entryId } : {}) });
+          } catch (error) {
+            if (error instanceof RpcCommandError && error.code === "session_busy") throw new WebRpcError(FORK_BUSY_MESSAGE, "session_busy");
+            throw error;
+          }
+          if (result.cancelled) return { cancelled: true };
+          const newSessionId = await this.refreshIdentityAfterSessionChange();
           this.carrySessionState(parentSessionId, newSessionId);
           return { cancelled: false, newSessionId };
         } finally {
@@ -4251,8 +4491,10 @@ export async function startRpcSession(
   sidebar?: { contextSessionId?: string | null; user?: UserRecord | null },
   /** The zone the child starts under: that of the message that caused the
    * start. Omitted for a start nobody typed for (a session merely viewed),
-   * which uses the session owner's. */
-  spawn?: { timeZone?: string },
+   * which uses the session owner's. `restoreModel` is the recovery for a chat
+   * whose saved model is gone (`model_unrestorable`): this one spawn resumes
+   * with `--model`, and the choice is then written into the session. */
+  spawn?: { timeZone?: string; restoreModel?: { provider: string; modelId: string } },
 ): Promise<{ session: EngineSession; realSessionId: string }> {
   const registry = getRegistry();
   const locks = getLocks();
@@ -4279,7 +4521,7 @@ export async function startRpcSession(
     const holder: { wrapper?: AgentSessionWrapper; renamed: boolean } = { renamed: false };
     const proc = new RpcProcess({
       cwd,
-      launch: buildEngineRpcLaunch(harness, { cwd, sessionFile, toolNames, advisor, profile: launchProfile, kind }),
+      launch: buildEngineRpcLaunch(harness, { cwd, sessionFile, toolNames, advisor, profile: launchProfile, kind, restoreModel: spawn?.restoreModel }),
       timeZone,
       onExit: ({ stderrTail }) => holder.wrapper?.handleProcessExit(stderrTail),
     });
@@ -4312,6 +4554,13 @@ export async function startRpcSession(
     created.start();
     try {
       await created.waitUntilReady();
+      // `--model` only chooses the model for this process: omp writes no
+      // model_change for it, so the next restart (an idle child, a settings
+      // change) would hit the same missing model. set_model records it in the
+      // session, after which every later spawn resumes normally.
+      if (spawn?.restoreModel && sessionFile) {
+        await created.send({ type: "set_model", provider: spawn.restoreModel.provider, modelId: spawn.restoreModel.modelId });
+      }
       if (!profileTarget) await created.synchronizeLocalModelProfile();
     } catch (error) {
       // Await the child's full exit before the `finally` releases the startup
@@ -4319,6 +4568,13 @@ export async function startRpcSession(
       // OMP child while the failed one is still flushing/exiting, and
       // concurrent resume/delete/archive paths could race that old child.
       await created.destroyAndWait();
+      if (error instanceof ModelUnrestorableError) {
+        throw new WebRpcError(
+          `This chat used ${error.provider}/${error.modelId}, which is no longer available.`,
+          "model_unrestorable",
+          { provider: error.provider, modelId: error.modelId },
+        );
+      }
       throw error;
     }
 

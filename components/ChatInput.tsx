@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
-import { AlertTriangle, ChevronDown, Clock, Footprints, Gauge, ListChecks, Loader2, Paperclip, Pin, RefreshCw, ShieldCheck, SlidersHorizontal, Sparkles, Split, Target, TriangleAlert, Zap, ZapOff } from "lucide-react";
+import { AlertTriangle, ChevronDown, Clock, Footprints, Gauge, ListChecks, Loader2, Paperclip, Pin, RefreshCw, ShieldCheck, SlidersHorizontal, Sparkles, Split, Target, TriangleAlert, Turtle, Zap, ZapOff } from "lucide-react";
 import type { SessionModeOption } from "@/hooks/useAgentSession";
 import type { OutboxEntry } from "@/lib/outbox";
 import type { PendingInput, PendingInputResponse, RewoundDraft } from "@/lib/pending-input";
@@ -11,10 +11,11 @@ import type { BuiltinSlashCommandResult, CompactResultInfo, SlashCommandInfo } f
 import type { SessionPresetResponse } from "@/lib/model-presets/types";
 import { formatSmartTriggerLabel, type ComposerPresetOption, type PendingPresetPick } from "@/hooks/session-preset-state";
 import type { ParsedPresetSelector } from "@/lib/model-presets/selector";
-import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
-import { formatGoalElapsed } from "@/lib/web-mode-state";
+import type { ActivePlan } from "@/lib/web-mode-state";
 import { toast } from "@/components/ui/toast";
-import { formatCompactNumber } from "@/lib/format";
+import { formatCompactNumber, formatResetTime } from "@/lib/format";
+import { describeUsageLimit, type SlowModeState } from "@/lib/slow-mode-state";
+import type { UsageLimitState } from "@/lib/pi-types";
 import { clearDraft, getDraft, setDraft, type ChatDraftFile, type ChatDraftImage } from "@/lib/draft-store";
 import { WEB_SLASH_COMMANDS, expandWebSlashCommand } from "@/lib/web-slash-commands";
 import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-layout";
@@ -62,7 +63,7 @@ import { useSettingsOpener } from "./settings/shell-context";
 import { formatModelDisplayName } from "@/lib/model-display";
 import type { SessionActiveModel } from "@/lib/session-active-models";
 import { PromptProfileIndicator, type LocalModelProfileBody } from "./LocalModelProfile";
-import { QuotaPopover, buildQuotaView, isPrepaidProvider, modelLimitReached, formatResetTime } from "./QuotaPopover";
+import { QuotaPopover, buildQuotaView, isPrepaidProvider, modelLimitReached } from "./QuotaPopover";
 import { usageProviderFor } from "@/lib/usage/provider-map";
 import { useScheduledMessages } from "@/hooks/useScheduledMessages";
 import { SendPill } from "./SendPill";
@@ -70,6 +71,7 @@ import { ScheduledRows } from "./ScheduledRows";
 import type { ScheduleChoice } from "./ScheduleMenu";
 import type { ScheduledItemView } from "@/lib/scheduled/types";
 import { scheduleBlock, scheduleErrorMessage, type QuotaResetSource } from "@/lib/scheduled/ui";
+import { BTW_COMMAND_NAME, parseSideQuestionCommand } from "@/lib/btw";
 
 export interface AttachedImage {
   data: string;   // base64, no prefix (already compressed if it needed to be)
@@ -189,6 +191,13 @@ interface Props {
   /** The engine explicitly rejected Fast for this model/session. */
   fastModeUnavailable?: boolean;
   onFastModeChange?: (enabled: boolean) => void;
+  /** omp `/slow` for the ACTIVE model (lib/slow-mode-state.ts). `null`/absent
+   * = the engine or model has none, and the switch does not render. */
+  slowMode?: SlowModeState | null;
+  slowModePending?: boolean;
+  /** The account's usage-limit stage, shown on the quota ring and its popover. */
+  usageLimit?: UsageLimitState | null;
+  onSlowModeChange?: (enabled: boolean) => void;
   onAbortCompaction?: () => void;
   isCompacting?: boolean;
   compactResult?: CompactResultInfo | null;
@@ -231,11 +240,20 @@ interface Props {
   slashCommandsLoading?: boolean;
   onLoadSlashCommands?: () => Promise<SlashCommandInfo[]> | SlashCommandInfo[];
   onBuiltinCommand?: (message: string) => Promise<BuiltinSlashCommandResult>;
+  /**
+   * `/btw <question>` typed here asks a side question instead of being sent as
+   * a message. Present only for an engine that owns the command: any other
+   * engine receives the text untouched. Resolves `ok` when the engine took the
+   * question; a refusal comes back in plain words and the composer keeps the
+   * draft. An empty question opens the side-question panel instead.
+   */
+  onSideQuestion?: (question: string) => Promise<{ ok: true } | { ok: false; message: string }>;
+  /** Side questions can be asked right now: the slash palette offers /btw, mid-run too. */
+  sideQuestionsAvailable?: boolean;
   onAudioUnlock?: () => void;
   draftKey?: string;
   /** Session working directory — enables the @ file autocomplete menu */
   cwd?: string | null;
-  activeGoal?: ActiveGoal | null;
   activePlan?: ActivePlan | null;
   advisorEnabled?: boolean;
 }
@@ -261,10 +279,13 @@ const USAGE_FRESHNESS_TICK_MS = 30_000;
  * mirrors the Smart and Local-only rows exactly — checkmark slot, glyph,
  * label over a muted hint — so the panel reads as one list of decisions
  * rather than a menu with widgets bolted on. */
-function DropdownToggleRow({ icon, label, hint, pressed, pending, isMobile, testId, onToggle }: {
+function DropdownToggleRow({ icon, label, hint, hintWraps = false, pressed, pending, isMobile, testId, onToggle }: {
   icon: React.ReactNode;
   label: string;
   hint: string;
+  /** Let a long explanation wrap (up to 300px) instead of ellipsising, for a
+   * hint that carries the whole answer to "what does this do?". */
+  hintWraps?: boolean;
   pressed: boolean;
   pending: boolean;
   isMobile: boolean;
@@ -298,7 +319,7 @@ function DropdownToggleRow({ icon, label, hint, pressed, pending, isMobile, test
       {icon}
       <span style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
         <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{label}</span>
-        <span style={{ fontSize: 11, color: "var(--text-dim)", fontWeight: 400, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{hint}</span>
+        <span style={{ fontSize: 11, color: "var(--text-dim)", fontWeight: 400, ...(hintWraps ? { whiteSpace: "normal", maxWidth: 300 } : { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }) }}>{hint}</span>
       </span>
     </button>
   );
@@ -556,47 +577,11 @@ export function ModelErrorBanner({ error, code }: {
   );
 }
 
-function ComposerModeStatus({ goal, plan }: { goal?: ActiveGoal | null; plan?: ActivePlan | null }) {
+function ComposerModeStatus({ plan }: { plan?: ActivePlan | null }) {
   const { t } = useI18n();
-  const [expanded, setExpanded] = useState(false);
-  const [now, setNow] = useState(() => Date.now());
-
-  useEffect(() => {
-    if (!goal) return;
-    setExpanded(false);
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
-    return () => window.clearInterval(timer);
-  }, [goal]);
-
-  if (!goal && !plan) return null;
+  if (!plan) return null;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 8 }}>
-      {goal && (
-        <button
-          type="button"
-          aria-expanded={expanded}
-          onClick={() => setExpanded((value) => !value)}
-          title={expanded ? t("chatInput.collapseGoal") : t("chatInput.expandGoal")}
-          style={{
-            display: "flex", alignItems: expanded ? "flex-start" : "center", gap: 8,
-            width: "100%", padding: "6px 9px",
-            border: "1px solid color-mix(in srgb, var(--accent) 32%, var(--border))",
-            borderRadius: "var(--radius-control)",
-            background: "color-mix(in srgb, var(--accent) 7%, var(--bg-panel))",
-            color: "var(--text)", cursor: "pointer", textAlign: "left",
-            transition: "background var(--dur-fast) var(--ease-out-warm), border-color var(--dur-fast) var(--ease-out-warm)",
-          }}
-        >
-          <Target size={14} strokeWidth={2} style={{ flexShrink: 0, marginTop: expanded ? 1 : 0, color: "var(--accent)" }} aria-hidden="true" />
-          <span style={{ flexShrink: 0, color: "var(--text-dim)", fontSize: 10, fontFamily: "var(--font-mono)", textTransform: "uppercase", letterSpacing: "0.04em" }}>
-            {t("chatInput.goalActive")} · {formatGoalElapsed(now - goal.startedAt)}
-          </span>
-          <span style={{ minWidth: 0, flex: 1, overflow: expanded ? "visible" : "hidden", textOverflow: expanded ? undefined : "ellipsis", whiteSpace: expanded ? "pre-wrap" : "nowrap", fontSize: 12, lineHeight: 1.4 }}>
-            {goal.objective}
-          </span>
-        </button>
-      )}
       {plan && (
         <div role="status" aria-live="polite" style={{ display: "flex", alignItems: "center", gap: 7, padding: "5px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text-muted)", fontSize: 12 }}>
           <ListChecks size={14} strokeWidth={2} style={{ flexShrink: 0, color: "var(--accent)" }} aria-hidden="true" />
@@ -610,11 +595,13 @@ function ComposerModeStatus({ goal, plan }: { goal?: ActiveGoal | null; plan?: A
 
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onAbort, isStreaming, canSendWhileStreaming = false, canAttachWhileStreaming = false, canAttachImagesWhileStreaming = false, capabilities = ALL_CAPABILITIES, engine = null, model, sessionId, activeModels = NO_ACTIVE_MODELS, isAutoModelSelection, modelNames, modelList, modelError, modelErrorCode, modelsLoading, modelsRefreshKey, onModelChange, onSelectSmartModel, localOnly, onSelectLocalOnly, presets = NO_PRESETS, baseDefaultModel = null, activePresetId, pendingPresetPick = null, onPresetChange, autoModelSwitch, modelSwitchPending, modelChangeWhileStreaming = false, fastModeEnabled, fastModeActive, fastModeCapable, fastModeSupported, fastModePending, fastModeUnavailable, onFastModeChange,
+  slowMode, slowModePending, usageLimit, onSlowModeChange,
   onAbortCompaction, isCompacting, compactResult,
   thinkingLevel, onThinkingLevelChange, thinkingLevelPending, thinkingLevelTarget, availableModes = NO_MODES, currentModeId = null, onModeChange, availableThinkingLevels, modelNameOverride,
   retryInfo, inputHistory = [], onAbortRetry,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
+  onSideQuestion, sideQuestionsAvailable = false,
   onAudioUnlock,
   outbox = NO_OUTBOX,
   pendingInputs = NO_PENDING_INPUTS,
@@ -626,7 +613,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   onSteerQueuedNow,
   draftKey,
   cwd,
-  activeGoal,
   activePlan,
   advisorEnabled,
 }: Props, ref) {
@@ -1185,6 +1171,30 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const handleSend = useCallback(async () => {
     const msg = value.trim();
     if (!msg && !attachedImages.length && !attachedTextFiles.length) return;
+    // `/btw <question>` is a side question, never a message. It is taken here,
+    // before the run-state gate below (it is asked precisely while a run is
+    // going) and before anything that would hand the text to the model.
+    const sideQuestion = onSideQuestion ? parseSideQuestionCommand(msg) : null;
+    if (sideQuestion && onSideQuestion) {
+      if (attachedImages.length || attachedTextFiles.length) {
+        toast.error(t("btw.toastTitle"), t("btw.attachmentsRefused"));
+        return;
+      }
+      if (sendInFlightRef.current) return;
+      sendInFlightRef.current = true;
+      const textSnapshot = value;
+      clearInput();
+      try {
+        const outcome = await onSideQuestion(sideQuestion.question);
+        if (!outcome.ok) {
+          restoreComposer(textSnapshot, [], [], outcome.message);
+          toast.error(t("btw.toastTitle"), outcome.message);
+        }
+      } finally {
+        sendInFlightRef.current = false;
+      }
+      return;
+    }
     if (isStreaming && !canSendWhileStreaming) return;
     if (preparingImageCount > 0 || sendInFlightRef.current) return;
     sendInFlightRef.current = true;
@@ -1210,7 +1220,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     try {
       onAudioUnlock?.();
       const composedMessage = composeMessageWithTextAttachments(msg, attachedTextFiles);
-      if (!isStreaming && !attachedImages.length && !attachedTextFiles.length && msg.startsWith("/") && onBuiltinCommand) {
+      // /goal goes to the dispatcher even mid-run: it creates the engine's own goal
+      // (hooks/useAgentSession) rather than sending prose the way the other web
+      // commands are while a run is live.
+      if ((!isStreaming || /^\/goal(\s|$)/.test(msg)) && !attachedImages.length && !attachedTextFiles.length && msg.startsWith("/") && onBuiltinCommand) {
         const result = await onBuiltinCommand(msg).catch((error) => {
           restoreSnapshot();
           throw error;
@@ -1248,7 +1261,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       setSendPreparing(false);
       sendInFlightRef.current = false;
     }
-  }, [value, attachedImages, attachedTextFiles, isStreaming, canSendWhileStreaming, preparingImageCount, prepareOutgoingImages, onBuiltinCommand, onSend, clearInput, restoreComposer, onAudioUnlock, t]);
+  }, [value, attachedImages, attachedTextFiles, isStreaming, canSendWhileStreaming, preparingImageCount, prepareOutgoingImages, onBuiltinCommand, onSideQuestion, onSend, clearInput, restoreComposer, onAudioUnlock, t]);
 
   // ── Scheduled send ──────────────────────────────────────────────────────
   // The Send pill's ▾ menu (components/SendPill.tsx). Choosing a row hands
@@ -1262,6 +1275,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     hasContent: hasComposerContent,
     preparing: sendPreparing || preparingImageCount > 0,
     shellMode: bashMode,
+    // A scheduled message arrives as an ordinary prompt, so `/btw x` would reach the model as text.
+    sideQuestion: onSideQuestion !== undefined && parseSideQuestionCommand(value) !== null,
   });
   const scheduleInFlightRef = useRef(false);
   const scheduleCreate = scheduled.create;
@@ -1376,6 +1391,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     [t, chatExtras],
   );
 
+  // `/btw` is offered while a run is going too (that is when a side question is
+  // asked), unlike the other built-ins, which wait for an idle chat.
+  const sideQuestionCommand: SlashCommandPaletteItem[] = React.useMemo(
+    () => sideQuestionsAvailable
+      ? [{ name: BTW_COMMAND_NAME, description: t("btw.cmdDescription"), argumentHint: t("btw.cmdArgumentHint"), source: "builtin" as const }]
+      : [],
+    [t, sideQuestionsAvailable],
+  );
+
   // Externally reported commands (extension/prompt/skill/engineBuiltin) group
   // below the client built-ins; any name the web UI intercepts itself —
   // whether an omp builtin or a user extension — is dropped so each command
@@ -1383,7 +1407,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const externalSlashCommands: SlashCommandPaletteItem[] = React.useMemo(
     () => (slashCommands ?? []).flatMap((command): SlashCommandPaletteItem[] => {
       const source = command.source as string;
-      if (CLIENT_BUILTIN_COMMAND_NAMES.has(command.name)) return [];
+      if (CLIENT_BUILTIN_COMMAND_NAMES.has(command.name) || (onSideQuestion && command.name === BTW_COMMAND_NAME)) return [];
       // Whatever the engine calls its own builtins on the wire ("builtin"
       // from pi's get_commands, "ompBuiltin" from omp's), they are the
       // ENGINE's, not the web UI's, and group under the engine's own name.
@@ -1392,12 +1416,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       }
       return [command];
     }),
-    [slashCommands],
+    [slashCommands, onSideQuestion],
   );
 
   const filteredSlashCommands = (() => {
     if (slashQuery === null) return [];
-    const commands = [...(isStreaming ? [] : builtinSlashCommands), ...externalSlashCommands];
+    const commands = [...(isStreaming ? [] : builtinSlashCommands), ...sideQuestionCommand, ...externalSlashCommands];
     return [...commands]
       .filter((command) => {
         const name = command.name.toLowerCase();
@@ -2055,6 +2079,25 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     );
   })() : null;
 
+  // omp `/slow`: a cheaper, lower-priority service tier. It renders only while
+  // the engine says the ACTIVE model has one (an older omp, pi and the ACP
+  // engines never do), so there is no disabled or "unsupported" state to draw.
+  const slowRow = slowMode && onSlowModeChange ? (
+    <DropdownToggleRow
+      testId="slow-mode-toggle"
+      icon={slowModePending
+        ? <Loader2 size={13} strokeWidth={1.8} aria-hidden="true" style={{ flexShrink: 0, marginTop: 2, animation: "spin 0.8s linear infinite" }} />
+        : <Turtle size={13} strokeWidth={1.8} aria-hidden="true" style={{ flexShrink: 0, marginTop: 2, color: slowMode.enabled ? "var(--accent)" : "var(--text-dim)" }} />}
+      label={slowMode.enabled ? t("slowMode.on") : t("slowMode.off")}
+      hint={slowMode.scope === "global" ? t("slowMode.hintGlobal") : t("slowMode.hintSession")}
+      hintWraps
+      pressed={slowMode.enabled}
+      pending={Boolean(slowModePending)}
+      isMobile={isMobile}
+      onToggle={() => { if (!slowModePending) onSlowModeChange(!slowMode.enabled); }}
+    />
+  ) : null;
+
   const prewalkValues = prewalkRoute.data?.values;
   const prewalkEnabled = prewalkValues?.["prewalk.enabled"] === true;
   const taskPrewalkEnabled = prewalkValues?.["task.prewalk"] === true;
@@ -2348,6 +2391,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         ? t("usage.ringDetailsModel", { model: displayModelName, label: quota.label, percent: Math.round(quota.percent) })
         : t("usage.ringDetails", { label: quota.label, percent: Math.round(quota.percent) }))
     : quotaRingTitle;
+  // The usage-limit stage, in the words the chat notice uses, bound to this
+  // reader's locale and zone. It rides on the ring's own tooltip and label
+  // because the ring is where a person looks when replies slow down or stop.
+  const usageLimitText = React.useMemo(
+    () => (usageLimit ? describeUsageLimit(usageLimit, t, (iso) => formatResetTime(iso, locale, Date.now())) : null),
+    [usageLimit, t, locale],
+  );
+  const quotaRingTitleShown = usageLimitText ? `${quotaRingTitle} \u00b7 ${usageLimitText.line}` : quotaRingTitle;
+  const quotaRingLabelShown = usageLimitText ? `${quotaRingLabel} \u00b7 ${usageLimitText.line}` : quotaRingLabel;
   // Only ticks while the popover is open — "updated 2 min ago" has to stay
   // true while someone reads it, but nothing else in the composer cares.
   const [usageNow, setUsageNow] = useState(() => Date.now());
@@ -2499,7 +2551,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             catalog error at all — an empty global list is the honest answer
             there, not a failure — so what survives this gate is a real one. */}
         <ModelErrorBanner error={onModelChange ? modelError : null} code={onModelChange ? modelErrorCode : null} />
-        <ComposerModeStatus goal={activeGoal} plan={activePlan} />
+        <ComposerModeStatus plan={activePlan} />
         {/* Retry banner */}
         {retryInfo && (
           <div style={{
@@ -2998,6 +3050,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           const failed = entry.status === "failed";
           // A row Cody's server still holds is shown as an editable follow-up.
           const held = entry.status === "queued" && entry.held === true;
+          // Refused only because the chat's saved model is gone: it waits for a model pick, it is not retrying.
+          const waitingForModel = entry.blocked === true && entry.status === "sending";
           // Delete, Edit and Steer are offered on every queued row: a held one is
           // simply taken back, and one the engine already has is asked back out of
           // omp's own queue (omp 18.4.4+; moving a follow-up ahead needs 18.4.6+).
@@ -3024,7 +3078,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             >
               {failed
                 ? <AlertTriangle size={11} strokeWidth={2.2} style={{ flexShrink: 0, color: "var(--status-error)" }} aria-hidden="true" />
-                : held
+                : held || waitingForModel
                   ? <Clock size={11} strokeWidth={2.2} style={{ flexShrink: 0, color: "var(--text-dim)" }} aria-hidden="true" />
                   : <Loader2 size={11} strokeWidth={2.2} style={{ flexShrink: 0, animation: "spin 0.8s linear infinite" }} aria-hidden="true" />}
               <span style={{
@@ -3036,6 +3090,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 color: failed ? "var(--status-error)" : "var(--text-muted)",
               }}>
                 {failed ? t("chatInput.outboxFailed")
+                  : waitingForModel ? t("engineRecovery.rowWaiting")
                   : held ? t("chatInput.queuedFollowUp")
                   : entry.status === "queued" ? t("chatInput.outboxHandedOver")
                   : entry.status === "started" ? t("chatInput.outboxStarted")
@@ -3326,6 +3381,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                       <ShieldCheck size={13} strokeWidth={2} aria-hidden="true" />
                     </span>
                   )}
+                  {slowMode?.enabled && (
+                    // The turtle is the same glyph as the dropdown's Slow row.
+                    // Inline like the Advisor and Smart marks, never a box of
+                    // its own: it only takes 17px from the name (phoneBudget).
+                    <span role="img" title={t("slowMode.on")} aria-label={t("slowMode.on")} style={{ display: "flex", flexShrink: 0, color: "var(--accent)" }}>
+                      <Turtle size={12} strokeWidth={2} aria-hidden="true" />
+                    </span>
+                  )}
                   {(localOnly?.active || isAutoModelSelection) && (
                     <span
                       role="img"
@@ -3451,9 +3514,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                       </button>
                     )}
                     {presetRows}
-                    {(fastRow || prewalkRows) && (
+                    {(fastRow || slowRow || prewalkRows) && (
                       <div style={{ borderBottom: "1px solid var(--border)", background: "var(--bg-panel)" }}>
                         {fastRow}
+                        {slowRow}
                         {prewalkRows}
                       </div>
                     )}
@@ -3824,8 +3888,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               >
                 <button
                   type="button"
-                  title={quotaRingTitle}
-                  aria-label={quotaRingLabel}
+                  title={quotaRingTitleShown}
+                  aria-label={quotaRingLabelShown}
                   aria-expanded={contextPopoverOpen}
                   aria-haspopup="dialog"
                   onClick={(e) => {
@@ -3868,6 +3932,21 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     )}
                     <circle cx="13" cy="13" r="2" fill="currentColor" opacity="0.72" />
                   </svg>
+                  {usageLimit && (
+                    // A stage marker inside the ring's existing box (no new
+                    // control): amber on the slower lane, red on the wrap-up
+                    // allowance. The words are in the tooltip and the popover.
+                    <span
+                      data-testid="usage-limit-dot"
+                      aria-hidden="true"
+                      style={{
+                        position: "absolute", top: isMobile ? 7 : 2, right: isMobile ? 7 : 2,
+                        width: 7, height: 7, borderRadius: "50%",
+                        background: usageLimit.stage === "wrap_up" ? "var(--status-error)" : "var(--status-warning)",
+                        border: "1.5px solid var(--bg-panel)", boxSizing: "content-box",
+                      }}
+                    />
+                  )}
                 </button>
 
                 {contextPopoverOpen && (
@@ -3875,6 +3954,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     resetCredits={resetCredits}
                     openRouter={openRouterActive ? openRouterAccount : undefined}
                     quota={quota}
+                    usageLimit={usageLimit ?? null}
                     activeModels={activeModels}
                     provider={quotaProvider ?? null}
                     modelName={displayModelName}

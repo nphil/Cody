@@ -48,6 +48,10 @@ export interface OutboxEntry {
   /** Queued and still held by Cody's server (not yet handed to the engine):
    *  the only state in which it can really be edited or deleted. */
   held?: boolean;
+  /** Refused only because the chat's saved model is gone (`model_unrestorable`):
+   *  not a failure and not a retry — it waits, untouched, for the person to pick
+   *  a model (releaseBlocked), then goes out under the same id. */
+  blocked?: boolean;
 }
 
 /** Whitespace outside a submitted message is not significant in a transcript. */
@@ -132,6 +136,7 @@ export type DeliveryOutcome =
   | { kind: "success"; delivery: ServerDeliveryStatus; held?: boolean }
   | { kind: "pending" }
   | { kind: "retry"; detail?: string }
+  | { kind: "blocked"; detail?: string }
   | { kind: "failed"; detail: string; origin: "server" };
 
 /**
@@ -151,6 +156,7 @@ export function classifyDeliveryOutcome(response: RawDeliveryResponse): Delivery
   }
   if (response.status === 202 && response.pending) return { kind: "pending" };
   if (response.status === 409 && response.code === "session_restarting") return { kind: "retry", detail: response.error };
+  if (response.code === "model_unrestorable") return { kind: "blocked", detail: response.error };
   if (response.status === 503) return { kind: "retry", detail: response.error };
   return { kind: "failed", detail: response.error || response.code || `HTTP ${response.status}`, origin: "server" };
 }
@@ -163,7 +169,7 @@ export function classifyDeliveryOutcome(response: RawDeliveryResponse): Delivery
  *  clears any stale scheduled-retry timestamp. */
 export function beginAttempt(entries: readonly OutboxEntry[], id: string): OutboxEntry[] {
   return entries.map((entry) => (entry.id === id && entry.status !== "delivered" && entry.status !== "failed"
-    ? { ...entry, attempt: entry.attempt + 1, nextRetryAt: null, status: "sending" as const }
+    ? { ...entry, attempt: entry.attempt + 1, nextRetryAt: null, status: "sending" as const, blocked: undefined }
     : entry));
 }
 
@@ -185,10 +191,51 @@ export function applyOutcome(
         return shouldGiveUpRetrying(entry, now)
           ? { ...entry, status: "failed", failureOrigin: "client", nextRetryAt: null, error: outcome.detail ?? entry.error }
           : { ...entry, nextRetryAt: now + backoffDelayMs(entry.attempt), error: outcome.detail ?? entry.error };
+      case "blocked":
+        return { ...entry, blocked: true, nextRetryAt: null, error: outcome.detail ?? entry.error };
       case "failed":
         return { ...entry, status: "failed", failureOrigin: outcome.origin, nextRetryAt: null, error: outcome.detail };
     }
   });
+}
+
+/** Frees every entry waiting on a model choice, with a fresh retry budget: the
+ *  hours it waited are not a streak of failed attempts. Returns the ids to send. */
+export function releaseBlocked(entries: readonly OutboxEntry[], now: number = Date.now()): { entries: OutboxEntry[]; ids: string[] } {
+  const ids: string[] = [];
+  const next = entries.map((entry): OutboxEntry => {
+    if (!entry.blocked || entry.status !== "sending") return entry;
+    ids.push(entry.id);
+    return { ...entry, blocked: undefined, attempt: 0, nextRetryAt: null, retryingSince: now, error: undefined };
+  });
+  return { entries: next, ids };
+}
+
+/** The chat's saved model is gone, so every message still on its way to the
+ *  engine from this page waits for a model pick instead of racing the refusal:
+ *  the banner can appear before each message's own answer has come back, and the
+ *  pick must find them all. Only `sending` entries; a queued or started one
+ *  already reached a running engine. */
+export function blockWaiting(entries: readonly OutboxEntry[]): OutboxEntry[] {
+  return entries.map((entry) => (entry.status === "sending" && !entry.blocked
+    ? { ...entry, blocked: true, nextRetryAt: null }
+    : entry));
+}
+
+/** Which entries the ledger could not account for still need the reload-recovery
+ *  (settle against the loaded transcript, or re-send). An entry this page sent
+ *  and still owns — `sending` and live — is driven by its own delivery
+ *  (in flight, retry timer, or waiting for a model): the transcript on screen then
+ *  holds its OPTIMISTIC bubble, which is not proof the engine ever got it. Treating
+ *  it as proof marks the message delivered while its request is still out, and a
+ *  refused one is lost for good. */
+export function idsNeedingResumeCheck(
+  entries: readonly OutboxEntry[],
+  unknownIds: readonly string[],
+  liveIds: ReadonlySet<string>,
+): string[] {
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
+  return unknownIds.filter((id) => !(liveIds.has(id) && byId.get(id)?.status === "sending"));
 }
 
 export type ServerDeliveryStatus = "queued" | "started" | "delivered" | "failed" | "withdrawn";
@@ -386,7 +433,7 @@ export function reviveForResume(entries: readonly OutboxEntry[], now: number = D
     .filter((entry) => entry.status !== "delivered")
     .map((entry) => (entry.status === "failed" && entry.failureOrigin === "server"
       ? entry
-      : { ...entry, status: "sending" as const, attempt: 0, nextRetryAt: null, retryingSince: now, failureOrigin: undefined }));
+      : { ...entry, status: "sending" as const, attempt: 0, nextRetryAt: null, retryingSince: now, failureOrigin: undefined, blocked: undefined }));
 }
 
 // ---- persistence (sessionStorage; best-effort, size-bounded) ---------------
@@ -423,7 +470,8 @@ function isOutboxEntry(value: unknown): value is OutboxEntry {
     && typeof value.createdAt === "number"
     && (value.error === undefined || typeof value.error === "string")
     && (value.failureOrigin === undefined || value.failureOrigin === "client" || value.failureOrigin === "server")
-    && (value.held === undefined || typeof value.held === "boolean");
+    && (value.held === undefined || typeof value.held === "boolean")
+    && (value.blocked === undefined || typeof value.blocked === "boolean");
 }
 
 export function serializeOutboxEntries(entries: readonly OutboxEntry[]): string {

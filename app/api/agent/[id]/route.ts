@@ -112,6 +112,12 @@ export async function POST(
       return NextResponse.json(body.type === "predict_word" ? { success: true, data: { suffix: null } } : { success: true });
     }
 
+    // A side question can only be cancelled in a live engine; with none there is
+    // nothing to cancel, and asking must never start one.
+    if (body.type === "btw_cancel" && !getRpcSession(id)?.isAlive()) {
+      return NextResponse.json({ success: true, data: { cancelled: false } });
+    }
+
     // Fast path: already-running session
     const existing = getRpcSession(id);
     if (existing?.isAlive()) {

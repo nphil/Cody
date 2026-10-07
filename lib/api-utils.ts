@@ -80,7 +80,10 @@ export function agentCommandErrorResponse(error: unknown): NextResponse {
     return NextResponse.json({ error: error.message, code: error.code }, { status: RETRYABLE_COMMAND_STATUS[error.code] ?? 400 });
   }
   if (error instanceof WebRpcError) {
-    return NextResponse.json({ error: error.message, code: error.code }, { status: RETRYABLE_COMMAND_STATUS[error.code] ?? 400 });
+    return NextResponse.json(
+      { error: error.message, code: error.code, ...(error.details ?? {}) },
+      { status: RETRYABLE_COMMAND_STATUS[error.code] ?? 400 },
+    );
   }
   return apiErrorResponse(error);
 }

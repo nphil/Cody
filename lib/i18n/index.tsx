@@ -71,6 +71,12 @@ export function setLocale(locale: Locale): void {
   listeners.forEach((cb) => cb());
 }
 
+/** The active locale outside React, for formatting a time or number into a
+ * string built where no hook is available (a notice posted from an event). */
+export function currentLocale(): Locale {
+  return getLocale();
+}
+
 /** Translate outside React (toasts, error helpers). Falls back key → en → key. */
 export function translate(key: string, vars?: Record<string, string | number>): string {
   const locale = getLocale();

@@ -88,6 +88,9 @@ export interface PromptDeliveryResponse {
   success?: boolean;
   pending?: boolean;
   code?: string;
+  /** With `model_unrestorable`: the saved model the chat could not reopen on. */
+  provider?: string;
+  modelId?: string;
   error?: string;
   data?: { delivery?: "started" | "queued"; clientMessageId?: string; status?: "delivered" };
 }
@@ -127,6 +130,23 @@ export async function sendPromptDelivery(
   }
   const body = (await res.json().catch(() => ({}))) as Omit<PromptDeliveryResponse, "status">;
   return { status: res.status, ...body };
+}
+
+/**
+ * Reopen a chat whose saved model is gone (omp 18.6.3+ will not resume it), on
+ * the model the person picked: POST /api/agent/[id]/recover-model. The server
+ * starts the chat once with that model and records it in the session.
+ */
+export async function recoverSessionModel(sessionId: string, provider: string, modelId: string): Promise<void> {
+  const res = await fetch(`/api/agent/${encodeURIComponent(sessionId)}/recover-model`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider, modelId }),
+  });
+  const body = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
+  if (!res.ok || body.error) {
+    throw new AgentCommandError(body.error || body.code ? formatApiError(body) : "HTTP " + res.status, body.code);
+  }
 }
 
 export type PromptDeliveryLedgerStatus = "queued" | "started" | "delivered" | "failed" | "withdrawn" | "unknown";

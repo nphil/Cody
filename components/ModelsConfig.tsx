@@ -28,6 +28,14 @@ import {
 } from "@/components/ui/field";
 import { Select, type SelectOption } from "@/components/ui/Select";
 import { Trash2, RefreshCw, AlertCircle, Cpu, Settings, Sparkles, Check as CheckIcon } from "lucide-react";
+import {
+  isResponsesFamilyApi,
+  kindApiMismatch,
+  MODEL_KIND_OPTIONS,
+  RUNNER_API_KINDS,
+  RUNNER_API_OPTIONS,
+  withCompatFlag,
+} from "@/lib/model-kinds";
 import { toast } from "@/components/ui/toast";
 // Color icons (have their own fill colors — no background needed)
 import AnthropicIcon from "@lobehub/icons/es/Anthropic/components/Mono";
@@ -133,6 +141,7 @@ export interface ModelEntry {
   id: string;
   name?: string;
   api?: string;
+  kind?: string;
   reasoning?: boolean;
   thinking?: ThinkingConfig;
   input?: string[];
@@ -175,6 +184,42 @@ const API_OPTIONS: SelectOption[] = [
   "google-gemini-cli",
   "google-vertex",
 ].map((value) => ({ value, label: value }));
+
+const RUNNER_API_SELECT_OPTIONS: SelectOption[] = RUNNER_API_OPTIONS.map((value) => ({
+  value,
+  label: `${value} (${RUNNER_API_KINDS[value]})`,
+}));
+
+const KIND_SELECT_OPTIONS: SelectOption[] = [
+  { value: "", label: "chat / default" },
+  ...MODEL_KIND_OPTIONS.filter((kind) => kind !== "chat").map((value) => ({ value, label: value })),
+];
+
+/** compat.statefulResponses as default / on / off. Default means the key is
+ * ABSENT from the file, never a sentinel; on/off write true/false. */
+function StatefulResponsesField({ compat, onChange }: {
+  compat: Record<string, unknown> | undefined;
+  onChange: (compat: Record<string, unknown> | undefined) => void;
+}) {
+  const current = compat?.statefulResponses;
+  return (
+    <FormField
+      label="Stateful responses"
+      hint="OpenAI Responses chaining (compat.statefulResponses). Default leaves it to omp."
+    >
+      <Select
+        value={current === true ? "on" : current === false ? "off" : ""}
+        onChange={(v) => onChange(withCompatFlag(compat, "statefulResponses", v === "on" ? true : v === "off" ? false : undefined))}
+        options={[
+          { value: "", label: "Default" },
+          { value: "on", label: "On" },
+          { value: "off", label: "Off" },
+        ]}
+        size="md"
+      />
+    </FormField>
+  );
+}
 
 // ── Form field helpers ────────────────────────────────────────────────────────
 
@@ -411,6 +456,10 @@ export function ProviderEntryEditor({ name, provider, onChange, onRename }: {
             size="md"
           />
         </FormField>
+
+        {isResponsesFamilyApi(provider.api ?? "openai-completions") && (
+          <StatefulResponsesField compat={provider.compat} onChange={(compat) => set("compat", compat)} />
+        )}
       </FieldGroup>
 
     </div>
@@ -612,6 +661,8 @@ export function ModelEntryEditor({
     onChange({ ...model, cost: { ...(model.cost ?? {}), [k]: isNaN(n) ? undefined : n } });
   };
   const idValidate = () => (!model.id.trim() ? t("modelsConfig.errorIdRequired") : null);
+  const effectiveApi = model.api ?? provider.api ?? "openai-completions";
+  const kindError = kindApiMismatch(providerName, `model ${model.id}`, model.kind, effectiveApi) ?? undefined;
   const idV = useFieldValidation(idValidate);
   const testSummary = (() => {
     if (testState.phase === "idle") return null;
@@ -701,10 +752,30 @@ export function ModelEntryEditor({
           <Select
             value={model.api ?? ""}
             onChange={(v) => set("api", v || undefined)}
-            options={[{ value: "", label: t("modelsConfig.inheritNone") }, ...API_OPTIONS]}
+            options={[{ value: "", label: t("modelsConfig.inheritNone") }, ...API_OPTIONS, ...RUNNER_API_SELECT_OPTIONS]}
             size="md"
           />
         </FormField>
+
+        <FormField
+          label="Kind"
+          hint="What the model is for. Chat / default leaves kind out of the file; a runner API only serves its own kind."
+          error={kindError}
+        >
+          <Select
+            value={model.kind ?? ""}
+            onChange={(v) => set("kind", v || undefined)}
+            options={KIND_SELECT_OPTIONS}
+            size="md"
+          />
+        </FormField>
+
+        {isResponsesFamilyApi(effectiveApi) && (
+          <StatefulResponsesField
+            compat={model.compat}
+            onChange={(compat) => set("compat", compat)}
+          />
+        )}
 
         <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
           <FormCheck

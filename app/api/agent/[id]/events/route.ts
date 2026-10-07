@@ -1,5 +1,5 @@
 import { readSessionHeader, resolveSessionPath, isSidebarSessionPath } from "@/lib/session-reader";
-import { getRpcSession, resolveSpawnCwd, startRpcSession } from "@/lib/rpc-manager";
+import { getRpcSession, resolveSpawnCwd, startRpcSession, unrestorableModelOf } from "@/lib/rpc-manager";
 import { getRequestUser } from "@/lib/auth/guard";
 import { canAccessSession } from "@/lib/auth/session-owners";
 import { getHarness } from "@/lib/harness";
@@ -160,7 +160,12 @@ export async function GET(
               ? await startRpcSession(id, "", cwd, undefined, false, id)
               : await startRpcSession(id, filePath, cwd, undefined, false, undefined, undefined, kind));
           } catch (error) {
-            encode({ type: "notice", level: "error", message: `Failed to start agent: ${error}` });
+            // A resumed chat whose saved model is gone: a structured event the
+            // client turns into "pick another model", not a failure banner.
+            const unrestorable = unrestorableModelOf(error);
+            encode(unrestorable
+              ? { type: "model_unrestorable", ...unrestorable, message: (error as Error).message }
+              : { type: "notice", level: "error", message: `Failed to start agent: ${error}` });
             cleanup();
             return;
           }

@@ -91,10 +91,12 @@ app/api/
   sessions/[id]/scheduled/route.ts GET list / POST schedule a message for later (owner-checked)
   sessions/[id]/scheduled/[itemId]/route.ts  PATCH change text/time / DELETE cancel
   sessions/[id]/scheduled/[itemId]/send-now/route.ts  POST send it now (a failed one's Retry)
+  sessions/[id]/btw/route.ts      GET side-question (/btw) topics: the live engine's get_btw_history (3 s bound) else omp's sidecar on disk; omp only, owner-checked, never spawns
   preview/screenshot/route.ts     POST server-side screenshot of a loopback URL
   agent/new/route.ts              POST { cwd, message, toolNames?, provider?, modelId? }
   agent/[id]/route.ts             GET state | POST any RPC command
   agent/[id]/events/route.ts      GET SSE stream
+  agent/[id]/recover-model/route.ts POST {provider, modelId} reopen a chat whose saved model is gone
   agent/running/events/route.ts   GET SSE stream of currently-running session ids
   agent/[id]/display/route.ts     POST publish a display request | GET latest (auth-gated)
   agent/[id]/display/events/route.ts GET SSE stream of display requests (snapshot + live)
@@ -427,6 +429,8 @@ lib/
                        resolveSessionPath() which searches cody-sidebar-chats/** as fallback;
                        listAllSessions() excludes sidebar (scans only main sessions root);
                        isSidebarSessionPath() gates access control in DELETE /api/sidebar-chats/[id]
+  btw.ts               side questions (omp 18.7 `/btw`), pure + browser-safe: topic types, parseSideQuestionCommand, the frame/snapshot merge rules (applyBtwFrame, mergeBtwSnapshot), describeBtwError, the omp-version gate
+  btw-history.ts       server-only bounded reader of omp's btw-history sidecar beside the session file (running → interrupted when no engine is live)
   skills-service.ts    pure-Node skill discovery mirroring the ACTIVE engine's
                        providers (omp's list, pi's narrower one) + getSkillsSurface(): what the surface can do here
   engine-capabilities.ts  THE client read of /api/info: capability flags, the
@@ -483,7 +487,9 @@ components/
                       thinking OPTION, not an absence: unset means "the model's own
                       default", which is what the main composer shows and sends, and
                       without the row the trigger rendered blank
-  ComposerPanels.tsx  composer-attached todo + subagent panels (collapsible, live states)
+  ComposerPanels.tsx  composer-attached goal + todo + subagent panels (collapsible, live states)
+  SideQuestionsPanel.tsx  the /btw panel under ComposerPanels: slim "ask aside" bar while a run goes, topics newest first with streaming markdown answers, Cancel, Copy and a follow-up box per topic (presentational; state lives in useSideQuestions)
+  GoalPanel.tsx      the Goal row of ComposerPanels: the engine's goal (objective, status, tokens vs budget, live time, Pause/Resume/Drop with a two-tap Drop, "Keep working automatically") or the fallback note
   TodoList.tsx        todo phase grid with preview/show-all (used by ComposerPanels)
   SubagentTranscriptDialog.tsx  header + Result → Task → Transcript in ONE scroll container + steer footer (wide, fixed height)
   SubagentTranscript.tsx the transcript section of that dialog: rows drawn by
@@ -639,6 +645,7 @@ hooks/
                            and the Send menu: read on open, tab focus, network
                            return, a run ending and at the next due time —
                            never polled (lib/scheduled/sync.ts holds the rules)
+  useSideQuestions.ts      this chat's /btw topics: history read on open and on every stream (re)connect, deltas applied once per animation frame, ask / follow-up / cancel, the omp-version and `Unknown command` latch
   useDistill.ts            the client store over POST /api/distill: SSE framing,
                            per-key in-memory cache, FIFO queue capped at two
                            concurrent streams (a queued request for a key is
@@ -867,6 +874,25 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   Reasoning-level changes are allowed during a run, lock only while awaiting
   engine acknowledgement, and apply to the next model invocation (including a
   tool continuation), never the stream already in progress.
+- **Slow mode and the usage-limit stage are engine-reported and follow the
+  active model** (`lib/slow-mode-state.ts`, omp 18.6.3+). `get_state` carries
+  `slowModeSupported`/`slowModeEnabled`/`slowModeScope` and `usageLimit`;
+  `deriveSlowModeState` returns `null` — and the **Slow** switch in the model
+  dropdown does not render at all, never as a disabled control — when the
+  engine omits them (older omp, pi, ACP) or the model has no slow mode. The
+  switch sends `set_slow_mode {enabled}` (`Unknown command` hides it, like the
+  other newer-omp commands) and re-reads state. Scope matters in the words:
+  `session` is this chat's own flex tier; `global` is persisted config
+  (`providers.anthropic.slowMode` in `config.yml`) that EVERY chat shares, and
+  the switch's hint says plainly that it is saved for every chat. A missing
+  scope is read as `session` so the switch never promises reach it cannot
+  confirm. `usageLimit` (`low_priority` with a reset time, or `wrap_up` with
+  `extraUsage`) is shown as a status dot on the quota ring, a suffix on its
+  tooltip, one line right under the QuotaPopover hero (tooltip = the full
+  sentence), and ONE chat notice when a chat first sees a stage or moves
+  between stages — never on leaving one, because the field also vanishes on a
+  model switch. All copy is `slowMode.*` (en/ja/zh-CN) via
+  `describeUsageLimit`; times go through `formatResetTime` in the reader's zone.
 - **A capability flag is a UI convenience; the ROUTE is the boundary**
   (`lib/engine-guard.ts`). Every omp-shaped endpoint used to answer 200
   whichever engine was selected — probed directly under another engine they served
@@ -1129,7 +1155,7 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   every binary, because a cache HIT never expires and the companion CLI's bin
   name is not something the installer models.
 - **HarnessAdapter.verifiedVersion** is the exact engine version this Cody
-  build was last audited against — every adapter carries one (omp: 18.4.10,
+  build was last audited against — every adapter carries one (omp: 18.7.0,
   claude-agent-acp: 0.73.0, codex-acp: 1.8.0, pi: 0.73.1).
   It is shown verbatim on the System hub's engine roster card (Settings ›
   System › Engines) ("Built to vX.Y.Z", served through /api/engines), and
@@ -1569,7 +1595,7 @@ must name the panel that fixes it.
   attached stream. The browser adopts it through the fork path
   (`onSessionForked`: AppShell swaps the selected session, remounts and
   rewrites `?session=`), carrying the tab's per-id state (unsent outbox rows,
-  Smart pick, goal, draft) to the new id and explaining itself in a global
+  Smart pick, the web-hosted fallback goal, draft) to the new id and explaining itself in a global
   toast that outlives the remount. A fork/new_session/switch_session in
   flight (`requestedIdentityChanges`) owns its own change and announces
   nothing. Reproduce for real by resuming one session file in two omp
@@ -3014,6 +3040,8 @@ vendor CLI parity, elevated capability, CMSIS-DAP, or generic UF2 flashing.
 ### Two kinds of branching — don't confuse them
 - **Fork** (Fork button on user message): creates a new independent `.jsonl` file. Shown as a child in the sidebar tree via `parentSession` header field.
 - **In-session branch** (Continue button / BranchNavigator): navigates the entry tree within the same file. Multiple entries share the same `parentId`. Switching between them calls `/api/sessions/[id]/context?leafId=`.
+- **Fork from here** (footer of a reply, omp 18.4.11+): omp's own `fork {entryId}`, sent as the web command `fork_session` (never `fork`, which is `branch` above). It KEEPS everything through that reply (a cut inside a tool-call batch is extended through its results) and the artifacts; this live process moves onto the new file like a branch, and the page follows through `onSessionForked`. `parentSession` is the parent's file path.
+- **Duplicate chat** (a session row's menu, ⌘K): `fork_session` with no entry, a whole-chat copy (`parentSession` is the parent's bare id; the sidebar links both forms). It works on a chat with no live child — the route starts one first. omp only forks an IDLE chat, so the wrapper refuses up front while it is running and omp's own `session_busy` reads the same (`fork.busy`); the controls are disabled or hidden while it works. An `Unknown command`/`unsupported` answer hides both for the page (`lib/fork-session.ts`); pi and ACP never offer them (`useForkAvailable`: omp only).
 
 ### ToolCall field normalization
 Sessions store toolCall blocks as `{type:"toolCall", id, name, arguments}` but `ToolCallContent` uses `{toolCallId, toolName, input}`. `normalizeToolCalls()` in `lib/normalize.ts` handles this — called in both `session-reader.ts` (file load) and streaming event handling.
@@ -3035,6 +3063,16 @@ a new file (see "RPC session lifecycle"), at `error` a persistence failure;
 `agent-end` a failed post-turn maintenance. `extension_ui_request`
 `method:"ask"` is a structured multi-question dialog (answered with `answers`,
 or `cancelled`), and `method:"cancel"` retires an expired dialog.
+**Mount notices are for the model, not the person.** omp announces `xd://`
+tool roster changes twice: a `notice` (`source: "xdev"`, text
+`xd://: mounted …; unmounted …`) and, persisted, an `xdev-mount-notice`
+custom message whose `content` is a model prompt (`<system-notice>` plus every
+tool's description) and whose `details` is `{added, removed}`. A fresh child
+mounts every Cody host and browser tool, and from omp 18.7 the persisted one
+is written for that spawn-time roster too, before the first user message.
+Only an MCP server's tools (`mcp__*`) changing is news: `describeMcpMountChange`
+(lib/mount-notice.ts) words the toast from `details`, and the `notice` path
+drops every non-MCP line. Never toast the message `content`.
 
 ### Todo reminder: quiet, and never over a question
 omp auto-continues an unfinished todo list after a terminal turn (unless its
@@ -3175,6 +3213,9 @@ own last-line check says the agent asked something) by appending a
   5. A one-line freshness footer.
 
   Explanations live in tooltips, never inline, and colour marks state only.
+  The one thing allowed between the hero and its meter is the usage-limit
+  stage line (`usageLimit` prop, one ellipsised line, warning/error colour,
+  full sentence in its tooltip) and only while the account is past its limit.
   About 320 px tall collapsed.
 - **The ring says whose quota it is, and how old the reading is.** With more
   than one account on a provider, every window label carries the account's
@@ -3379,6 +3420,39 @@ second Enter was silently ignored while the first was in flight.
   network error, 202, 409 `session_restarting` and 503 back off up to 2 minutes,
   then stop at failed. Nothing is ever dropped without a visible row; unfinished
   entries resume only after the ledger-first check above.
+- **A chat whose saved model is gone** (omp 18.6.3+ exits `--resume` with
+  `error: Could not restore model <provider/id>` when the saved model no longer
+  exists or has no credentials; 18.4.x silently fell back). `rpc-process.ts`
+  turns that stderr line into `ModelUnrestorableError`; `startRpcSession` turns it
+  into `WebRpcError` code `model_unrestorable` `{provider, modelId}` (HTTP 400,
+  the details are forwarded by `agentCommandErrorResponse`), and the events
+  route sends it as a `model_unrestorable` frame, then ends the stream (the
+  client closes its EventSource, otherwise the browser reopens it every second).
+  The outbox classifies it as `blocked`, NOT retry and NOT failed: the row stays
+  `sending` with `blocked: true`, reads "Waiting for a model" with a clock icon,
+  and the optimistic bubble is undone. `ModelRecoveryBanner` (ChatWindow) says
+  "This chat used X, which is no longer available" and offers the current
+  catalog (composer visibility honoured; the chat's Smart default pre-selected).
+  The pick calls `POST /api/agent/[id]/recover-model`, which respawns ONCE with
+  `--model provider/id` (`restoreModel`) and then `set_model`s — `--model` alone
+  does NOT write the session's `model_change` entry, so without that later plain
+  restarts would fail again. Then the hook reconnects the stream and
+  `releaseBlocked` sends every held entry under its own id (fresh retry budget).
+  Viewing a chat never spawns the engine, so the notice is reactive (first send
+  or stream attach); scheduled sends surface it as a non-retryable delivery error.
+  Traps found live: (1) the `connected` frame starts a ledger lookup whose
+  "unknown" answer sends the reload recovery to match the on-screen transcript
+  against unsent entries — and the OPTIMISTIC bubble matches, so a message still
+  being sent was marked delivered and a refused one vanished. Entries this page
+  sent and still owns (`sending`, `outboxLiveIdsRef`) are skipped
+  (`idsNeedingResumeCheck`). (2) The banner can arrive (events frame) before the
+  message's own 400, so `noteModelUnrestorable` blocks every `sending` entry
+  (`blockWaiting`) and takes the unconfirmed optimistic run down (no "Waiting for
+  model…" spinner or Stop); a refusal for an attempt that began before the pick
+  (`modelRecoveredAtRef`) is stale and re-sends. (3) After the pick the composer's
+  model comes from `setCurrentModelOverride` + `refreshLiveModelState`, not the
+  session file read when the chat opened. The picker is `components/ui/Select.tsx`
+  (searchable), never a native `<select>`.
 - Brand-new-session prompts and SidebarChatPanel sends also enter the same
    outbox. Queue rows are derived from outbox state. The composer snapshots and
    clears text, images and files before preparation; preparation failure restores
@@ -3417,6 +3491,31 @@ second Enter was silently ignored while the first was in flight.
   steer; an omp without that command keeps the old refusal (`not_steer`),
   because after an abort it would leave the follow-up waiting. A user Stop
   clears a pending steer interrupt.
+- **Stop takes the queue back** (`abortRestoringQueue`, omp 18.7+ `abort_and_restore_queue`).
+  A plain `abort` makes omp carry on into EVERY queued steer and follow-up in a
+  new run (measured: five more model calls). The 18.7 command withdraws every
+  user-authored queued message first — input a run took but never recorded
+  included — then aborts, and answers `{steering, followUp, imagesDropped?,
+  truncated?}` oldest first: omp's own text (raw, whitespace kept, `[Image]`
+  for a picture-only message) and its own re-encoded images. The web `abort`
+  sends it when the engine has it; an `Unknown command` answer is remembered
+  (`queueRestoreUnsupported`) and falls back to the plain abort, as pi does.
+  `steerNow`, the stop latch, the todo pause and `abort_compaction` keep the
+  plain abort: they WANT the queue to run. Everything a Stop gives back leaves
+  in ONE `cody_queue_returned` frame (`messages`, `truncated?`,
+  `imagesDropped?`) with the held follow-ups merged in by send order
+  (`lib/queue-restore.ts`), so the composer takes one draft. The composer gets
+  omp's text and images, never the ledger's; a ledger row only decides WHICH
+  row becomes `withdrawn` (exact submitted text, then trimmed, then the
+  picture-only stand-in; the same queue first), and a message no row accounts
+  for still comes back. A `queued` engine row omp did not hand back is in no
+  queue any more (cut from an oversized answer, or read an instant before), so
+  it is failed with Retry/Edit — a `steer`/`follow_up` send gets no
+  `prompt_result` to say so. omp reports each withdrawn `prompt` `aborted`
+  before OR after the answer, so while the restore is in flight
+  (`stopRestore`) those results are deferred instead of failing rows the
+  answer is about to withdraw. `truncated`/`imagesDropped` become notices
+  (`stopQueue.*`).
 - **Delete and Edit reach into omp's own queue** (`AgentSessionWrapper.withdrawQueued`).
   A message Cody still holds is simply dropped from the hold. One already
   handed to the engine is taken back with `remove_queued_message` (omp
@@ -3431,7 +3530,10 @@ second Enter was silently ignored while the first was in flight.
   (`already_sent` / `not_steer`). Since 18.4.6 the ack means ADMITTED, so a
   `queued` row really is in omp's queue. The page still offers Delete/Edit
   only on held rows (`ChatInput` `editable`), so engine-held rows need that
-  gate loosened before users can reach this.
+  gate loosened before users can reach this. omp 18.7 also returns the pictures
+  it queued (`images`, its own copies; `imagesDropped` when an oversized answer
+  left them out): Edit gets those, or the ones the message was sent with when
+  omp has none.
 - **A missed frame cannot strand a row.** While any outbox row is `queued`
   or `started`, the client re-reads the ledger every 3 s
   (`OUTBOX_LEDGER_POLL_MS`, a map lookup on the server, never an engine round
@@ -3509,6 +3611,83 @@ second Enter was silently ignored while the first was in flight.
   (`auto-fill minmax(240px,1fr)`) instead of a ragged content-hugging wrap,
   and the show-all toggle is a footer link mirroring TodoList's "Show all
   tasks" footer. Pinned by `ComposerPanels.test.mjs`.
+
+### Native goals (`lib/goal-state.ts`, `components/GoalPanel.tsx`)
+- **omp 18.4.11+ owns the goal; Cody mirrors it.** The engine creates it, counts
+  the tokens and seconds spent on it, pauses it on Stop, persists it in the
+  session file and (optionally) keeps working on it. Three carriers share one
+  shape (`GoalModeState`): `get_state.goal`, the `goal_updated` frame and the
+  `{goal, state}` answer of the `goal` command (`op`: get|create|resume|pause|
+  drop; `token_budget` only on create). `lib/goal-state.ts` is the pure reading
+  of all three (parse, `adoptGoal` reducer, elapsed/age maths, `/goal` and
+  budget syntax, controls per status, continuation-mode helpers); it imports
+  only `type-guards`.
+- **The `goal` KEY in `get_state` is the capability probe**, never a flag:
+  `buildWebState` passes `goal` (and `goalAgeMs`) through only when the engine
+  reported the key. Absent = older omp (answers `Unknown command: goal`), pi
+  (restricted vocabulary) or ACP (`send()` refuses unknown commands) — all of
+  them refuse `goal` as `unsupported` before anything is sent. `/goal` tries
+  the native create first and, on `isUnsupportedCommandError`, falls back to the
+  old web-hosted behaviour (expanded prompt + sessionStorage note, shown in the
+  same panel as a dismissible note; a `--budget` is dropped with a notice).
+  Never write the sessionStorage goal when native works.
+- **State is folded, never overwritten** (`adoptGoal`): the engine stamps every
+  change (`updatedAt`), reports can race (a state poll answered from cache vs a
+  frame), so the newest stamp wins; a `complete` goal never goes back to
+  working; a `dropped` one leaves nothing; and the engine CLEARS a completed
+  goal's state at the turn's terminal `agent_end` WITHOUT an event (`get_state.goal`
+  becomes `null`), so `null` must not erase the finished card — it stays, with
+  what the goal cost, until dismissed or a new goal starts. The terminal
+  agent_end, `reconcileAgentState` and `loadSession` all adopt `state.goal`.
+- **Time ticks locally between flushes**, and the engine counts IDLE time too
+  (wall clock while the goal is active, flushed only when something happens),
+  so the server stamps `goalAgeMs = now - goal.updatedAt` (it shares the
+  engine's clock) and `goalElapsedSeconds` adds age + time since receipt.
+  Tokens move per tool completion / turn end (that is when the engine flushes).
+- **A chat nobody is running still shows its goal**: `buildSessionContext`
+  derives `context.goal` from the newest `mode_change` entry on the branch
+  (`goal` / `goal_paused` / `none`; `goalFromPersistedMode` maps an active goal
+  to paused, which is what omp does when a process reopens the file). The live
+  state wins; the file only decides when `GET .../state` says `running:false`.
+  Resume/Drop on such a goal spawn the engine first like any command.
+- **Hidden steering never draws a row**: omp sends `goal-mode-context` before
+  EVERY turn while a goal is active, `goal-continuation` between auto-continued
+  turns and `goal-budget-limit` at the budget as `display:false` custom messages;
+  `isHiddenFromTranscript` hides all three (they would be two "Engine note" rows
+  per turn).
+- **"Keep working automatically" = `goal.continuationModes` + `rpc`**
+  (`hooks/useGoalAutoContinue.ts`). omp's default is `["interactive"]`, so a goal
+  driven from Cody only works when you send a message. The switch adds/removes
+  `rpc` through the ordinary config writer WITHOUT `applyNow`: a running engine
+  watches config.yml (directory watch, 200 ms debounce, atomic renames fine) and
+  re-reads the setting at every continue decision — verified live: flipping it
+  mid-chat makes the next turn end continue — while `applyNow` restarts idle
+  children and an engine that starts up PAUSES an active goal. It is one global
+  setting (every chat), and nothing starts by itself when it is switched on for an
+  idle active goal (the engine decides only at turn end / create / resume), so
+  `kickGoal` waits for the file watcher and then does pause + resume (`resume`
+  is a no-op on an enabled goal). Any child restart (routing change, idle
+  recycle, `applyNow` from another control) pauses an active goal: the panel
+  shows it paused with Resume.
+- **`/goal [--budget N] <objective>`** (also mid-run — ChatInput routes it to the
+  dispatcher while streaming): `goal create` then the objective as the first
+  prompt, sent as a STEER (with rpc continuation on the engine starts its own turn
+  the moment the goal exists; the steer folds into it, never races it). `N` takes
+  `200000`, `200k`, `1.5m`, `200,000`. A scheduled `/goal` still carries the
+  expanded prompt (`GOAL_PROMPT`, no native goal). Budget-limited goals offer only
+  Drop (resume is a no-op, the budget cannot be raised over RPC).
+- The panel starts collapsed while active and opens itself for paused /
+  budget-limited / complete (they wait on a decision); Drop needs a second tap
+  within 4 s. `lib/web-mode-state.ts` keeps `ActiveGoal` only for the fallback.
+
+### Side questions: `/btw` (`lib/btw.ts`, `hooks/useSideQuestions.ts`, `components/SideQuestionsPanel.tsx`)
+- **omp 18.7's `/btw`**: a question asked WHILE the main reply keeps running, answered in its own panel, never entering the transcript. omp keeps every topic in a sidecar beside the session file (`<session minus .jsonl>/btw-history/entry-<id>.json`, shared with its own TUI), one question at a time. RPC: `btw {question, recordId?}` → `{record}` (`recordId` = a follow-up in that topic), `btw_cancel {recordId?}`, `get_btw_history`; frames `btw_delta {recordId, delta}` and `btw_record {record}`. An older omp answers `Unknown command`, and Cody hides the whole surface (latched per page; `ompVersionHasBtw` reads the installed version from `loadEngineInfo()` first). pi/ACP engines never see it: the route is `requireEngine("omp")`, their vocabularies answer `unsupported`.
+- **Typed `/btw <question>` is intercepted, never sent.** omp's own `/btw` is a TUI command: over the RPC `prompt` path it would reach the model as literal text. `ChatInput.handleSend` takes it (`parseSideQuestionCommand`) BEFORE the streaming gate, so it works idle and mid-run; attachments → refused with a toast (draft kept); a refusal restores the draft; an empty `/btw` opens and focuses the panel. `scheduleBlock` refuses it (`btw.scheduleReason`). Another engine's own `/btw` (Claude Code has one) is untouched: `onSideQuestion` is only passed for omp (ChatWindow `sideQuestionsCapable`). The palette offers `/btw` while a run is live too and drops omp's engine-reported copy.
+- **Frames never touch the chat.** `rpc-manager.handleFrame` takes `btw_delta`/`btw_record` on an early path (resets the idle timer so an answering child is not idled out, emits, returns): never `notifyRunningChange`, run flags or the delivery ledger. The browser hands them to `useSideQuestions.applyFrame` BEFORE the message-update coalescer (routed through it, every delta would flush the pending `message_update` early). A `notice` with `source:"btw-history"` (omp could not save a topic) goes to the panel's error row, and `lib/notifications/observer.ts` ignores it (its `level:"error"` would become the text of an unrelated failed run).
+- **Merge rules are the bug magnet (`lib/btw.ts`).** omp writes the first `btw_record` BEFORE the `btw` response, the response can reach the browser after the first deltas, and a history read can be older than a frame that arrived while it was in flight. A frame is authoritative (`btw_record` replaces; the last one of a turn carries the full answer, healing any missed delta). A command answer or history read is a snapshot: `mergeBtwSnapshot` replaces a topic only when it is at least as far along (more turns; finished beats running, so an `interrupted` read ends a stale running one) and NEVER grows a topic the page shows as running (its deltas may still arrive as frames and would be appended twice). A snapshot never removes a topic.
+- **History without spawning.** `GET /api/sessions/<id>/btw` (omp only, owner-checked like `local-routing`): a live child answers `get_btw_history` inside a 3 s bound (`supported:true`; `Unknown command` → `supported:false`; a timeout → the sidecar read WITHOUT recovery, since a live writer's `running` is real); no child → `lib/btw-history.ts` reads the sidecar (≤ 200 files, ≤ 1 MiB each, ≤ 8 MiB total, symlinks refused) and maps `running` → `interrupted` (the writer died, as omp itself does on reopen). Opening a cold chat spawns nothing. The page reads it on open and on every stream (re)connect, and every 4 s while a topic shows as answering, so a dropped stream never leaves "Answering…" on screen.
+- **Asking from a chat with no stream open** (`ensureSideQuestionStream`) opens it first: that also starts a cold chat's engine, and frames only reach an attached page. `btw` is NOT part of the outbox/prompt machinery (no ledger row, no run state, no stop latch). The wrapper bounds its ack at 30 s (`BTW_ACK_TIMEOUT_MS` → `btw_ack_timeout`) and never recycles the child for it; `btw_cancel` with no live child answers `{cancelled:false}` without spawning. A follow-up is offered only after a COMPLETE answer (omp's own TUI rule); a cancelled/failed/interrupted topic is followed by a new question instead.
+- **UI.** `SideQuestionsPanel` sits under `ComposerPanels` as its own full-width row, collapsed by default: the header shows the live "Answering…" or the topic count, and while a run is going with no topics it is a slim bar reading "Ask a side question…". Newest three topics, the rest behind Show all; body scroll cap `min(36vh, 320px)`; 16px inputs, ≥ 38px controls. There is deliberately no composer-row button: the phone budget is spent (`phoneBudget()`).
 
 ### Composer context gauge
 - An icon-only context ring sits beside Send. It uses the accent color below
@@ -3891,6 +4070,13 @@ second Enter was silently ignored while the first was in flight.
   side still self-heals separately: `signalWhenSessionFileAppears()` in
   `lib/rpc-manager.ts` polls for the file after `agent_start` and re-signals
   the sidebar once it lands.
+- **The list reads a 4 KiB prefix, and omp 18.7 can fill it before the first
+  message.** The spawn-time `xdev-mount-notice` (~3 KB with Cody's roster)
+  pushed the first user message past the window: the row said "(no messages)"
+  and the session namer, which needs that message, never named the chat.
+  `scanSessionInfo` reads a 64 KiB prefix once more when the 4 KiB one holds
+  no user message; scans are memoized per (size, mtime), so that is one extra
+  read per file version. Regression test: `lib/omp/session-list-window.test.mjs`.
 
 ### Session switching: paint from cache, never wait on the engine
 
@@ -4243,6 +4429,7 @@ instance data dir (`cody-model-presets.json`), never in `config.yml`.
 ### Auth and model config
 - Auth flows go through RPC commands (`get_login_providers`, `login`) against the omp child process; credentials live in omp's `agent.db` (SQLite) which Cody never touches directly.
 - `models.yml` in the omp agent directory (`~/.omp/agent/models.yml`, `.yaml` fallback) is read and written from the Providers hub's detail drawer, in a custom endpoint's "Advanced" form (`components/ModelsConfig.tsx`'s editors, rendered by `settings/providers/ProviderDetail.tsx`) — not the Models hub, which only reads the resulting catalog.
+  - Model `kind` (chat/tiny/image/tts/stt/judge/embedding/rerank/video, never `search`), runner `api`s and `compat.statefulResponses` (Responses-family apis only) follow omp 18.7. The kind↔api rule and omp's exact message live in `lib/model-kinds.ts`, shared by the editor (inline error, Save disabled) and `validateModelsConfig`. Unset kind / default statefulResponses persist as the key ABSENT (`withCompatFlag` drops an emptied `compat`). There is no `modelOverrides` editor UI; overrides are only validated and preserved.
 - API-key status endpoints must never return the raw key.
 
 ### RPC transport limit — the utility process MUST negotiate v2
@@ -4482,6 +4669,11 @@ palette (`components/CommandPalette.tsx`, ⌘K/Ctrl+K) is built on `cmdk`.
   glyph carries the state the words did (accent + filled bg = requested,
   `TriangleAlert` = inactive/unavailable, `ZapOff` = off, `Zap` = unverified,
   spinner = checking), and the full sentence stays in `title`/`aria-label`.
+- The Slow switch (`slow-mode-toggle`) lives in the model dropdown, not on the
+  row. The only phone cost of slow mode is the 12px turtle glyph INSIDE the
+  model button while it is on (17px with its gap, `PHONE_COMPOSER.stateGlyph`,
+  taken from the name — no new box). The usage-limit stage is a 7px dot inside
+  the quota ring's existing box (`usage-limit-dot`): it adds no width.
 - ChatInput's own 16px sides ARE the chat column's gutter. Neither dock may
   wrap it in a second one.
 

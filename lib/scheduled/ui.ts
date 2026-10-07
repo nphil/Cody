@@ -231,7 +231,7 @@ export function nextDueTransition(items: readonly { status: ScheduledStatus; at:
 
 /* ──────────────────────── why a menu row is switched off ──────────────────────── */
 
-export type ScheduleBlock = "preparing" | "empty" | "no-session" | "images" | "shell";
+export type ScheduleBlock = "preparing" | "empty" | "no-session" | "images" | "shell" | "side-question";
 
 export const SCHEDULE_BLOCK_KEYS: Record<ScheduleBlock, string> = {
   preparing: "schedule.reasonPreparing",
@@ -239,6 +239,7 @@ export const SCHEDULE_BLOCK_KEYS: Record<ScheduleBlock, string> = {
   "no-session": "schedule.reasonNoSession",
   images: "schedule.reasonImages",
   shell: "schedule.reasonShell",
+  "side-question": "btw.scheduleReason",
 };
 
 /**
@@ -247,14 +248,17 @@ export const SCHEDULE_BLOCK_KEYS: Record<ScheduleBlock, string> = {
  * the first message (which it must do whatever the picture), not about the
  * picture. A `!` shell line is the last reason: a scheduled message arrives as
  * an ordinary prompt, so the shell command would reach the model as text
- * instead of running.
+ * instead of running. The same goes for `/btw <question>`: it is answered
+ * right away by a command of its own, and a scheduled copy would reach the
+ * model as literal text.
  */
-export function scheduleBlock(input: { hasSession: boolean; hasImages: boolean; hasContent: boolean; preparing: boolean; shellMode: boolean }): ScheduleBlock | null {
+export function scheduleBlock(input: { hasSession: boolean; hasImages: boolean; hasContent: boolean; preparing: boolean; shellMode: boolean; sideQuestion?: boolean }): ScheduleBlock | null {
   if (input.preparing) return "preparing";
   if (!input.hasContent) return "empty";
   if (!input.hasSession) return "no-session";
   if (input.hasImages) return "images";
   if (input.shellMode) return "shell";
+  if (input.sideQuestion) return "side-question";
   return null;
 }
 
@@ -539,6 +543,10 @@ export const PHONE_COMPOSER = {
   sendZone: 24,
   ringMargin: 4,
   modelChrome: 8 + 8 + 13 + 5 + 5 + 12,
+  /** One state glyph inside the model button (the slow-mode turtle): the 12 px
+   * icon and the 5 px gap that follows it. Not a box of its own — it only
+   * takes from the name. */
+  stateGlyph: 12 + 5,
 } as const;
 
 /** What sits on the row besides the model selector. Attach and Send always do. */
@@ -551,6 +559,8 @@ export interface PhoneControls {
   mode: boolean;
   /** The engine-switched-the-model marker. */
   autoSwitch: boolean;
+  /** The slow-mode glyph inside the model button: only while slow mode is on. */
+  slow?: boolean;
 }
 
 export interface PhoneBudget {
@@ -573,5 +583,5 @@ export function phoneBudget(viewport: number, controls: PhoneControls): PhoneBud
   const gaps = (boxes + 3 - 1) * c.gap;
   const fixed = boxes * c.control + (c.control + c.sendZone) + gaps + (controls.ring ? c.ringMargin : 0);
   const model = row - fixed;
-  return { row, fixed, model, name: model - c.modelChrome };
+  return { row, fixed, model, name: model - c.modelChrome - (controls.slow ? c.stateGlyph : 0) };
 }
