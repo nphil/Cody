@@ -236,12 +236,13 @@ function flagsOf(entry: ArchiveEntryRecord, ascii: boolean): number {
 export function encodeLocalHeader(entry: ArchiveEntryRecord): Uint8Array<ArrayBuffer> {
   const name = encodeName(entry.name);
   const { time, date } = dosDateTime(entry.modified);
-  // A descriptor entry's sizes are not known yet: zeros, both in the 32-bit fields and in the ZIP64 field that tells a
-  // streaming reader a 64-bit descriptor will follow. A stored entry's sizes are known: classic fields, or all ones
-  // with the real values in the ZIP64 field.
+  // A descriptor entry's sizes are not known yet: zeros, which its descriptor replaces. A stored entry's sizes are
+  // known: classic fields. An entry with 64-bit sizes saturates both classic fields (all ones) either way and carries
+  // the values, or zeros for a descriptor entry, in the ZIP64 field: the specification allows that field only where
+  // the classic one is saturated, and 7-Zip 18.05 to 21.03 report "Headers Error" on a ZIP64 field next to a zero.
   const known = !entry.descriptor;
-  const compressedField = known ? (entry.wideSizes ? SATURATED_32 : entry.compressedSize) : 0;
-  const sizeField = known ? (entry.wideSizes ? SATURATED_32 : entry.size) : 0;
+  const compressedField = entry.wideSizes ? SATURATED_32 : known ? entry.compressedSize : 0;
+  const sizeField = entry.wideSizes ? SATURATED_32 : known ? entry.size : 0;
   const wide = entry.wideSizes ? new Bytes(20).u16(EXTRA_ZIP64).u16(16).u64(known ? entry.size : 0).u64(known ? entry.compressedSize : 0).bytes : new Uint8Array(0);
   const modified = modifiedField(entry.modified);
   const extraLength = wide.length + modified.length;

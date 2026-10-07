@@ -290,7 +290,8 @@ async function readLocalHeader(handle: FileHandle, entry: Entry, label: string, 
     size = values.size ?? size;
     compressedSize = values.compressed ?? compressedSize;
   }
-  // With a data descriptor the header may carry zeros (the vault's writer does) or the real values; with none, the real ones.
+  // With a data descriptor the header may carry zeros (the vault's writer does, pointing a saturated classic field at a
+  // ZIP64 field of zeros for a wide entry) or the real values; with none, the real ones.
   const descriptor = (flags & FLAG_DESCRIPTOR) !== 0;
   const agrees = (local: number, central: number): boolean => local === central || (descriptor && local === 0);
   if (!agrees(crc, entry.crc) || !agrees(compressedSize, entry.compressedSize) || !agrees(size, entry.size)) {
