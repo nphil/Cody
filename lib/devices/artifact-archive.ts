@@ -793,13 +793,13 @@ export function operationInfos(provenances: readonly (ArtifactProvenance | undef
   return provenances.map((provenance) => {
     if (!provenance) return undefined;
     const info = operationInfo(provenance);
-    if (!info.partitions) return info;
-    if (carried.has(info.id)) {
-      const { partitions: _partitions, ...rest } = info;
-      return rest;
+    if (!info.partitions || !carried.has(info.id)) {
+      carried.add(info.id);
+      return info;
     }
-    carried.add(info.id);
-    return info;
+    const { partitions, ...rest } = info;
+    void partitions;
+    return rest;
   });
 }
 
