@@ -11,20 +11,22 @@
  */
 
 import { TriangleAlert } from "lucide-react";
-import { useId, type CSSProperties, type InputHTMLAttributes, type ReactNode } from "react";
+import { useId, type CSSProperties, type InputHTMLAttributes, type ReactNode, type Ref } from "react";
 
 export const TOUCH = 44;
 
-export type Tone = "normal" | "primary" | "danger" | "warning";
+export type Tone = "normal" | "primary" | "danger" | "warning" | "quiet";
 
 const toneStyle: Record<Tone, CSSProperties> = {
   normal: { background: "var(--bg-panel)", color: "var(--text)", border: "1px solid var(--border)" },
   primary: { background: "var(--accent)", color: "var(--on-accent)", border: "1px solid var(--accent)" },
   danger: { background: "var(--bg-panel)", color: "var(--status-error)", border: "1px solid color-mix(in srgb, var(--status-error) 55%, var(--border))" },
   warning: { background: "var(--bg-panel)", color: "var(--status-warning)", border: "1px solid color-mix(in srgb, var(--status-warning) 60%, var(--border))" },
+  // No outline until it is touched: for a row's second action, which must stay a full-size target without a box around every one.
+  quiet: { background: "transparent", color: "var(--text-muted)", border: "1px solid transparent" },
 };
 
-export function Button({ children, onClick, tone = "normal", icon, disabled = false, type = "button", full = false, ariaLabel, title, pressed, style }: {
+export function Button({ children, onClick, tone = "normal", icon, disabled = false, type = "button", full = false, ariaLabel, title, pressed, expanded, haspopup, controls, popoverTarget, autoFocus, id, buttonRef, style }: {
   children?: ReactNode;
   onClick?: () => void;
   tone?: Tone;
@@ -35,16 +37,33 @@ export function Button({ children, onClick, tone = "normal", icon, disabled = fa
   ariaLabel?: string;
   title?: string;
   pressed?: boolean;
+  /** The button opens and closes something it names with `controls`. */
+  expanded?: boolean;
+  haspopup?: "menu" | "dialog";
+  controls?: string;
+  /** The id of a `popover` element this button opens and closes by itself: the browser does the toggling. */
+  popoverTarget?: string;
+  /** Takes focus when it appears: for the safe choice of a confirmation. */
+  autoFocus?: boolean;
+  id?: string;
+  buttonRef?: Ref<HTMLButtonElement>;
   style?: CSSProperties;
 }) {
   return (
     <button
+      ref={buttonRef}
+      id={id}
       type={type}
       className={`ui-focus-ring dv-btn dv-btn--${tone}`}
       onClick={onClick}
       disabled={disabled}
       aria-label={ariaLabel}
       aria-pressed={pressed}
+      aria-expanded={expanded}
+      aria-haspopup={haspopup}
+      aria-controls={controls}
+      popoverTarget={popoverTarget}
+      autoFocus={autoFocus}
       title={title}
       style={{
         display: "inline-flex",
@@ -234,5 +253,18 @@ export function Disclosure({ summary, children, defaultOpen = false }: { summary
       </summary>
       <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: "4px 12px 12px" }}>{children}</div>
     </details>
+  );
+}
+
+/**
+ * A thin, truthful bar: `fraction` is 0..1 of something that is really measured. Never drawn for work whose size is not
+ * known: a bar that is not measuring anything is decoration. The label is what a screen reader hears.
+ */
+export function ProgressLine({ fraction, label }: { fraction: number; label: string }) {
+  const percent = Math.round(Math.min(1, Math.max(0, fraction)) * 100);
+  return (
+    <div role="progressbar" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent} className="dv-progress">
+      <div className="dv-progress__fill" style={{ transform: `scaleX(${percent / 100})` }} />
+    </div>
   );
 }

@@ -78,12 +78,13 @@ The panel tells what happened in the words a person would use, not one card per 
   an estimate needs a measured rate (the newest ten seconds of progress), and a total it cannot know is not shown.
   While a run is going its title carries no count (`Back up partitions`), because the count would disagree with
   *47 of 58*; once it ends the title says `Back up 58 partitions`.
-- **Top to bottom by how much it needs the person:** *Needs you* (pinned; a countdown that can still be cancelled,
-  the one question waiting in the chat with how many commands queue behind it, a failed or system-stopped job, a failed
-  zip or save) - at most two rows show, the rest fold; *Running now*; connect; the devices and their actions; *History*
-  by device (only when several have any) and by day (today open, older days closed and counted); *Files & backups*.
-  A failure stays pinned until the person presses *Got it* (`useAcknowledged`, kept per session in the page); a new
-  failure in an acknowledged job raises it again. A stop the person made, and a refusal, are history, not alarms.
+- **Top to bottom by how much it needs the person:** *Needs you* (first, in reading order, never sticky: a pinned
+  block of two cards would swallow a 360 px panel; a countdown that can still be cancelled, the one question waiting
+  in the chat with how many commands queue behind it, a failed or system-stopped job, a failed zip or save) - at most
+  two rows show, the rest fold; *Running now*; connect; the devices and their actions; *History* by device (only when
+  several have any) and by day (today open, older days closed and counted); *Files & backups*. A failure stays at the
+  top until the person presses *Got it* (`useAcknowledged`, kept per session in the page); a new failure in an
+  acknowledged job raises it again. A stop the person made, and a refusal, are history, not alarms.
 - **A command that merely looks routine** (an agent read with no risk declared) is not drawn while it runs unless it
   runs longer than two seconds (`ROUTINE_QUIET_MS`), so a dozen `getvar`s do not flash cards in and out of the top.
 - **Nothing technical is written out in the feed.** Hashes, ids, logs and JSON live in ONE place, the detail sheet

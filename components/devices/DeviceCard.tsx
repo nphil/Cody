@@ -6,10 +6,8 @@ import type { DeviceOperationManager, DeviceOperationSnapshot } from "@/lib/devi
 import type { DeviceActivity, DeviceInfo } from "@/lib/devices/protocol";
 import type { DeviceArtifact } from "@/lib/devices/artifacts";
 import { adbBannerState, availableGroups, deviceMode, formActions, offeredProtocols, type ActionGroup, type DeviceMode } from "@/lib/devices/ui-model";
-import { entrySize, groupActivity } from "@/lib/devices/activity-groups";
 import { useI18n } from "@/lib/i18n";
 import { ActionForm } from "./ActionForm";
-import { ActivityFeed } from "./ActivityFeed";
 import { ActivityLine } from "./ActivityLine";
 import { DeviceTerminal } from "./DeviceTerminal";
 import { FastbootCommand } from "./FastbootCommand";
@@ -30,9 +28,6 @@ const GROUP_ICON: Record<ActionGroup, React.ReactNode> = {
   backup: <ArchiveRestore size={16} />,
   ports: <Network size={16} />,
 };
-
-/** How many entries of a device's activity are open to view before the rest fold into "Earlier activity". */
-const VISIBLE_ENTRIES = 3;
 
 function hex4(value: number | undefined): string {
   return (value ?? 0).toString(16).padStart(4, "0");
@@ -161,10 +156,6 @@ export function DeviceCard({ sessionId, manager, device, activity, operations, s
   const awaitingTrust = operations.some((operation) => operation.state === "awaiting-trust");
   const counting = operations.some((operation) => operation.state === "countdown");
   const running = operations.some((operation) => !isTerminalState(operation.state));
-  // A user terminal shows its own output on the Terminal tab; listing it again here would repeat every line.
-  const entries = useMemo(() => groupActivity(operations.filter((operation) => !(operation.origin === "user" && operation.request.action === "monitor"))), [operations]);
-  const recent = entries.slice(0, VISIBLE_ENTRIES);
-  const earlier = entries.slice(VISIBLE_ENTRIES);
   const label = modeLabel(mode, operations, t);
 
   const adbCandidates = device.protocolCandidates?.filter((candidate) => candidate.protocol === "adb") ?? [];
@@ -342,18 +333,6 @@ export function DeviceCard({ sessionId, manager, device, activity, operations, s
           {renderGroup(group)}
         </div>
       ))}
-
-      {manager && entries.length > 0 && (
-        <section aria-label={t("devices.activityTitle")} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <h4 style={sectionHeadingStyle}>{t("devices.activityTitle")}</h4>
-          <ActivityFeed manager={manager} entries={recent} />
-          {earlier.length > 0 && (
-            <Disclosure summary={t("devices.earlierActivity", { count: earlier.reduce((total, entry) => total + entrySize(entry), 0) })}>
-              <ActivityFeed manager={manager} entries={earlier} />
-            </Disclosure>
-          )}
-        </section>
-      )}
     </article>
   );
 }

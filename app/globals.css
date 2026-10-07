@@ -3459,6 +3459,194 @@ span.linenumber {
   .dv-btn, .dv-disclosure > summary::after { transition: none; }
 }
 
+/* Devices panel: jobs, history, files and the detail sheet (components/devices/*). Tokens only. Rows have no resting
+   shadow; a row is told apart by its hover wash and its keyboard ring (.ui-focus-ring), never by raising it. Every
+   control is at least 44px, and nothing here scrolls inside the panel's own scroll: the sheet's body is the only other one. */
+.device-panel .dv-scroll { overscroll-behavior: contain; }
+.dv-attention {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.dv-need {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg-panel);
+}
+.dv-need--countdown { border-color: color-mix(in srgb, var(--accent) 60%, var(--border)); }
+.dv-need--problem { border-color: color-mix(in srgb, var(--status-error) 50%, var(--border)); }
+.dv-need__head { display: flex; align-items: flex-start; gap: 10px; }
+.dv-need__head > svg { margin-top: 1px; }
+.dv-need__text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.dv-need__title { margin: 0; font-size: 13px; font-weight: 600; line-height: 1.35; color: var(--text); overflow-wrap: anywhere; }
+.dv-need__line { margin: 0; font-size: 12px; line-height: 1.45; color: var(--text-muted); overflow-wrap: anywhere; }
+.dv-live, .dv-history { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.dv-job {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-panel);
+}
+.dv-job__head { display: flex; align-items: flex-start; gap: 10px; }
+.dv-job__head > svg { margin-top: 2px; }
+.dv-job__text { flex: 1; min-width: 0; }
+.dv-job__title { margin: 0; font-size: 13px; font-weight: 600; line-height: 1.35; color: var(--text); overflow-wrap: anywhere; }
+.dv-job__meta { margin: 2px 0 0; font-size: 12px; line-height: 1.45; color: var(--text-muted); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.dv-job__state { flex-shrink: 0; font-size: 12px; color: var(--text-muted); }
+.dv-job__bar { display: flex; align-items: center; gap: 10px; }
+.dv-job__percent { flex-shrink: 0; min-width: 3ch; text-align: right; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--text-muted); }
+.dv-job__now { margin: 0; font-size: 12px; line-height: 1.45; color: var(--text-muted); overflow-wrap: anywhere; }
+.dv-job__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.dv-progress { flex: 1; min-width: 0; height: 4px; border-radius: 99px; background: var(--border); overflow: hidden; }
+/* The fill is scaled, not resized: a width change lays the row out again on every progress event, a transform does not. */
+.dv-progress__fill { height: 100%; width: 100%; border-radius: 99px; background: var(--accent); transform-origin: left center; transition: transform var(--dur-med) linear; }
+.dv-row { min-width: 0; border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--bg-panel); overflow: hidden; }
+.dv-row__summary { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 6px 12px; cursor: pointer; }
+.dv-row__summary:hover { background: var(--bg-hover); }
+.dv-row__text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.dv-row__title { font-size: 13px; font-weight: 600; line-height: 1.35; color: var(--text); overflow-wrap: anywhere; }
+.dv-row__meta { font-size: 12px; line-height: 1.4; color: var(--text-muted); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.dv-row__body { display: flex; flex-direction: column; gap: 8px; padding: 4px 12px 12px; }
+.dv-history__device { display: flex; flex-direction: column; gap: 4px; }
+.dv-history__name { margin: 8px 0 0; font-size: 12px; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+.dv-day > summary { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 4px; cursor: pointer; font-size: 12px; font-weight: 600; color: var(--text-muted); }
+.dv-day > summary > span:first-child { flex: 1; }
+.dv-day__count { font-weight: 400; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.dv-day__body { display: flex; flex-direction: column; gap: 6px; padding-bottom: 8px; }
+.dv-more > summary { display: flex; align-items: center; min-height: 44px; padding: 0 4px; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--text-muted); }
+.dv-more__body { display: flex; flex-direction: column; gap: 8px; padding-top: 4px; }
+.dv-row > summary, .dv-day > summary, .dv-more > summary { list-style: none; }
+.dv-row > summary::-webkit-details-marker, .dv-day > summary::-webkit-details-marker, .dv-more > summary::-webkit-details-marker { display: none; }
+.dv-row > summary::after, .dv-day > summary::after, .dv-more > summary::after {
+  content: "";
+  margin-left: auto;
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid var(--text-muted);
+  border-bottom: 2px solid var(--text-muted);
+  transform: rotate(45deg);
+  transition: transform var(--dur-fast) var(--ease-out-warm);
+}
+.dv-row[open] > summary::after, .dv-day[open] > summary::after, .dv-more[open] > summary::after { transform: rotate(-135deg); }
+.dv-items, .dv-files { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.dv-items > li + li, .dv-files > li + li { border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent); }
+.dv-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 44px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.dv-item:hover { background: var(--bg-hover); }
+.dv-item__name { flex: 1; min-width: 0; font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; }
+.dv-item__meta { flex-shrink: 0; font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.dv-item--stacked { padding-block: 6px; }
+.dv-item__stack { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.dv-item__sub { font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
+.dv-sheet {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  outline: none;
+  animation: dv-sheet-in var(--dur-med) var(--ease-out-warm) both;
+}
+@keyframes dv-sheet-in {
+  from { opacity: 0; transform: translateX(16px); }
+  to { opacity: 1; transform: none; }
+}
+.dv-sheet__head { display: flex; align-items: center; gap: 4px; flex-shrink: 0; padding: 4px 8px; border-bottom: 1px solid var(--border); background: var(--bg-panel); }
+.dv-sheet__title { flex: 1; min-width: 0; margin: 0; padding-left: 4px; font-size: 14px; font-weight: 600; line-height: 1.3; color: var(--text); overflow-wrap: anywhere; }
+.dv-sheet__body { flex: 1; min-height: 0; overflow-y: auto; padding: 12px; overscroll-behavior: contain; }
+.dv-log {
+  margin: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.dv-files-panel { display: flex; flex-direction: column; gap: 10px; min-width: 0; border-radius: var(--radius-card); }
+.dv-files-panel[data-dragging] { outline: 2px dashed var(--accent); outline-offset: 4px; }
+.dv-set { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 8px 12px 12px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--bg-panel); }
+.dv-set__top { display: flex; align-items: flex-start; gap: 4px; }
+.dv-set__head { display: flex; align-items: flex-start; gap: 8px; flex: 1; min-width: 0; min-height: 44px; padding: 4px 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.dv-set__chevron { display: inline-flex; margin-top: 3px; color: var(--text-muted); }
+.dv-set__text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.dv-set__title { font-size: 13px; font-weight: 600; line-height: 1.35; color: var(--text); overflow-wrap: anywhere; }
+.dv-set__meta { font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.dv-set__status { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 12px; color: var(--text-muted); }
+.dv-set__status > span { display: inline-flex; align-items: center; gap: 4px; }
+.dv-set__path { margin: 0; font-size: 12px; line-height: 1.4; color: var(--text-dim); overflow-wrap: anywhere; }
+.dv-set__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.dv-set__transfer { display: flex; flex-direction: column; gap: 6px; }
+.dv-set__transfer-line { display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 1.4; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.dv-set__confirm { display: flex; flex-direction: column; gap: 8px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--status-error) 45%, var(--border)); border-radius: var(--radius-control); background: var(--bg); }
+.dv-set__confirm p { margin: 0; font-size: 12px; line-height: 1.45; color: var(--text); }
+.dv-set__note { margin: 0; display: flex; align-items: center; gap: 6px; font-size: 12px; line-height: 1.4; color: var(--text-muted); overflow-wrap: anywhere; }
+.dv-set__files { display: flex; flex-direction: column; gap: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+.dv-set__tools { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
+.dv-set__tools > :first-child { flex: 1 1 200px; min-width: 0; }
+.dv-set__tools > :last-child { flex: 0 1 auto; }
+.dv-file { display: flex; align-items: center; gap: 8px; min-height: 44px; padding-left: 8px; border-radius: var(--radius-control); }
+.dv-file[data-selected] { background: var(--bg-selected); }
+.dv-file__icon { display: inline-flex; flex-shrink: 0; }
+.dv-file__name { flex: 1; min-width: 0; font-family: var(--font-mono); font-size: 12px; color: var(--text); overflow-wrap: anywhere; }
+.dv-file__size { flex-shrink: 0; font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.dv-file__stack { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; padding-block: 4px; }
+.dv-file__size--sub { font-size: 11px; }
+.dv-file--confirm { flex-direction: column; align-items: flex-start; gap: 6px; padding: 8px; background: var(--bg); }
+.dv-file--confirm p { margin: 0; font-size: 12px; line-height: 1.45; color: var(--text); }
+.dv-inputs { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.dv-inputs__head { display: flex; align-items: center; gap: 8px; }
+.dv-inputs__empty { margin: 0; display: flex; align-items: center; gap: 8px; padding: 8px 12px; border: 1px dashed var(--border); border-radius: var(--radius-control); font-size: 12px; line-height: 1.4; color: var(--text-muted); }
+.dv-menu {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  padding: 4px;
+  min-width: 200px;
+  max-width: min(320px, calc(100vw - 16px));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg-panel);
+  color: var(--text);
+  box-shadow: var(--shadow-pop);
+}
+.dv-menu:popover-open { display: flex; flex-direction: column; }
+.dv-menuitem { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 0 12px; border: 0; border-radius: calc(var(--radius-control) - 2px); background: transparent; color: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.dv-menuitem:hover:not(:disabled) { background: var(--bg-hover); }
+.dv-menuitem:disabled { opacity: 0.5; cursor: default; }
+@media (prefers-reduced-motion: reduce) {
+  .dv-progress__fill, .dv-row > summary::after, .dv-day > summary::after, .dv-more > summary::after { transition: none; }
+  .dv-sheet { animation: none; }
+}
+
 /* Scheduled send (components/SendPill.tsx, ScheduleMenu.tsx, ScheduledRows.tsx).
    The Send pill is one rounded shape with two buttons in it; its hover and
    focus are drawn from the text colour (`currentColor`), because the pill is
