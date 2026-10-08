@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { scanSessionInfo, setSessionTitle } from "@/lib/omp/session-files";
-import { deriveSessionTitleFromFirstMessage, sanitizeSessionTitle } from "@/lib/session-title";
+import { deriveSessionTitleFromFirstMessage, displaySessionTitle } from "@/lib/session-title";
 import { generateSessionName } from "@/lib/session-namer";
 import { getRpcSession } from "@/lib/rpc-manager";
 import { invalidateSessionListCache } from "@/lib/session-reader";
@@ -34,7 +34,7 @@ export async function POST(
     if (running && typeof rpc?.send === "function") {
       try {
         const state = await rpc.send({ type: "get_state" }) as { sessionName?: string } | null;
-        const liveTitle = sanitizeSessionTitle(state?.sessionName);
+        const liveTitle = displaySessionTitle(state?.sessionName);
         if (liveTitle) {
           invalidateSessionListCache();
           return NextResponse.json({ title: liveTitle, usage: null });
@@ -49,7 +49,7 @@ export async function POST(
     const filePath = resolved.filePath;
 
     const info = scanSessionInfo(filePath, false);
-    const storedTitle = sanitizeSessionTitle(info?.title);
+    const storedTitle = displaySessionTitle(info?.title);
     if (storedTitle) {
       return NextResponse.json({ title: storedTitle, usage: null });
     }

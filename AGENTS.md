@@ -1155,7 +1155,7 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   every binary, because a cache HIT never expires and the companion CLI's bin
   name is not something the installer models.
 - **HarnessAdapter.verifiedVersion** is the exact engine version this Cody
-  build was last audited against — every adapter carries one (omp: 18.7.0,
+  build was last audited against — every adapter carries one (omp: 18.8.3,
   claude-agent-acp: 0.73.0, codex-acp: 1.8.0, pi: 0.73.1).
   It is shown verbatim on the System hub's engine roster card (Settings ›
   System › Engines) ("Built to vX.Y.Z", served through /api/engines), and
@@ -1311,7 +1311,10 @@ setting added upstream appears without a Cody change.
     frozen copy, which is the exact failure reading the source prevents.
   - A BARE import is bridged rather than stubbed: the dependency's own source
     is loaded (with all of ITS imports stubbed, one hop only) and handed to
-    the parent through a generated CJS module. This is what keeps
+    the parent through a generated CJS module (which reads the value off
+    `globalThis`, never `require(__filename)`: in the built server that is a
+    webpack chunk, and requiring it back blanked the schema in production
+    while every jiti-run test passed). This is what keeps
     `treeFilterMode` in the panel at all — under the plain stub its enum had
     no values and the row dropped out. Relative imports stay stubbed on
     purpose: their behaviour is unchanged from before the split, and

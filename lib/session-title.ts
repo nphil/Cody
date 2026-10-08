@@ -17,6 +17,29 @@ export function sanitizeSessionTitle(value: string | undefined): string | undefi
   return stripped.length > 0 ? stripped : undefined;
 }
 
+/** omp 18.8's card form, `<icon> <CODE>: <title>` (omp `utils/title-card.ts`). */
+const CARD_TITLE = /^(\S+) ([A-Z0-9]{1,6}): (\S.*)$/u;
+
+/** omp reads a card icon as 1-8 characters, none of them ASCII. */
+function isCardIcon(icon: string): boolean {
+  const characters = Array.from(icon);
+  return characters.length > 0 && characters.length <= 8 && characters.every((char) => char.charCodeAt(0) >= 0x80);
+}
+
+/**
+ * The title a person should see. omp 18.8+ writes generated titles as a card,
+ * `<icon> <CODE>: <title>`, and by default the icon is a Nerd Font glyph — a
+ * private-use character a browser draws as an empty box. The card is terminal
+ * chrome, so Cody shows only the title part; a plain title passes through.
+ */
+export function displaySessionTitle(value: string | undefined): string | undefined {
+  const sanitized = sanitizeSessionTitle(value);
+  if (!sanitized) return undefined;
+  const card = CARD_TITLE.exec(sanitized);
+  if (!card || !isCardIcon(card[1]!)) return sanitized;
+  return card[3]!.trim() || sanitized;
+}
+
 /**
  * Derive a fallback title from a session's first user message: first line,
  * truncated to ~60 characters by code points. Returns null when the message

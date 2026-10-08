@@ -29,6 +29,7 @@ import { sessionPathKey } from "./session-path";
 import { foldSystemReminder } from "./system-reminder";
 import { isHiddenFromTranscript } from "./message-display";
 import { resolveProject, type ProjectInfo } from "./worktree";
+import { displaySessionTitle } from "./session-title";
 
 export { getAgentDir };
 
@@ -81,7 +82,7 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
       id: s.id,
       cwd: s.cwd,
       // omp renamed the display field to `title`; the internal shape keeps `name`.
-      name: s.title,
+      name: displaySessionTitle(s.title),
       created: s.created instanceof Date && !Number.isNaN(s.created.getTime())
         ? s.created.toISOString()
         : s.modified.toISOString(),

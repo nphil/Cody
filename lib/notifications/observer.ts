@@ -4,6 +4,7 @@ import { getEngineSession } from "../harness/engine-sessions";
 import { readPermissionOptions } from "../permission-request";
 import { assistantReplyText, replyAsksUser } from "../reply-question";
 import { readSessionHeader } from "../session-reader";
+import { displaySessionTitle } from "../session-title";
 import { asString, isRecord } from "../type-guards";
 import {
   answerOfferForPermission,
@@ -76,10 +77,10 @@ const UNTITLED = "Untitled chat";
  * WHICH chat rather than "Untitled chat".
  */
 function describeSession(session: ObservedSession, liveTitle: string | null, firstPrompt: string | null): { chatTitle: string; project: string | null } {
-  let chatTitle = liveTitle?.trim() || null;
+  let chatTitle = displaySessionTitle(liveTitle ?? undefined) ?? null;
   try {
-    if (!chatTitle && session.sessionFile) chatTitle = readSessionHeader(session.sessionFile)?.title?.trim() || null;
-    if (!chatTitle) chatTitle = getEngineSession(session.sessionId)?.title.trim() || null;
+    if (!chatTitle && session.sessionFile) chatTitle = displaySessionTitle(readSessionHeader(session.sessionFile)?.title) ?? null;
+    if (!chatTitle) chatTitle = displaySessionTitle(getEngineSession(session.sessionId)?.title) ?? null;
   } catch {
     // A title is a nicety; a notification without one is still a notification.
   }

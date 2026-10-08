@@ -33,6 +33,7 @@ import { copySessionPreset, renameSessionPreset, sessionPresetOverlay } from "./
 import { selectPromptProfileId, type PromptProfileId } from "./local-model-profile";
 import { PRESET_FULL } from "./tool-presets";
 import { isRecord } from "./type-guards";
+import { displaySessionTitle } from "./session-title";
 import { goalAgeMs, parseGoalModeState, validateGoalRequest } from "./goal-state";
 import { LOCAL_TIME_CUSTOM_TYPE, normalizeTimeZone, serverTimeZone } from "./time-zone";
 import { ownerTimeZone } from "./time-zone-prefs";
@@ -4015,7 +4016,7 @@ export class AgentSessionWrapper {
 
       case "get_session_stats": {
         const stats = await this.proc.sendCommand<Omit<SessionStatsInfo, "sessionName">>({ type: "get_session_stats" });
-        return { ...stats, sessionName: this._sessionName };
+        return { ...stats, sessionName: displaySessionTitle(this._sessionName) };
       }
 
       case "get_last_assistant_text": {

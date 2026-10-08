@@ -249,7 +249,10 @@ function loadOmpSourceFile(
 
 /** Values a stubbed import would have destroyed, keyed for the bridge modules
  * below. Process-global because a generated CJS file is the only thing jiti's
- * alias map can point at. */
+ * alias map can point at, and that file reads it straight off `globalThis`:
+ * requiring this module back by `__filename` works under jiti, but in the
+ * built server `__filename` is a webpack chunk that exports none of it, which
+ * left the whole settings schema unreadable in production. */
 const bridgedModules = ((globalThis as typeof globalThis & { __codyOmpBridgedModules?: Record<string, Record<string, unknown>> }).__codyOmpBridgedModules ??= {});
 let bridgeCounter = 0;
 
@@ -281,16 +284,11 @@ function bridgeModule(exported: Record<string, unknown>, stubDir: string): strin
   bridgedModules[id] = exported;
   const bridgePath = path.join(stubDir, id + ".cjs");
   try {
-    fs.writeFileSync(bridgePath, "module.exports = require(" + JSON.stringify(__filename) + ").__codyBridgedModule(" + JSON.stringify(id) + ");", "utf8");
+    fs.writeFileSync(bridgePath, "module.exports = globalThis.__codyOmpBridgedModules[" + JSON.stringify(id) + "] || {};", "utf8");
   } catch {
     return null;
   }
   return bridgePath;
-}
-
-/** Bridge accessor. Exported only so a generated module can reach it. */
-export function __codyBridgedModule(id: string): Record<string, unknown> {
-  return bridgedModules[id] ?? {};
 }
 
 /**
