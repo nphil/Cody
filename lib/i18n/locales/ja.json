@@ -346,6 +346,7 @@
   "schedule.rowQuota": "クォータ回復時 ({time})",
   "schedule.rowQuotaChecking": "クォータを確認中…",
   "schedule.rowSending": "送信中…",
+  "schedule.rowWaiting": "現在の返信が終わるのを待っています…",
   "schedule.rowAria": "予約メッセージ、{when}",
   "schedule.byAgent": "エージェントが予約",
   "schedule.byAgentTitle": "エージェントが予約したメッセージ",

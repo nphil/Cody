@@ -360,7 +360,7 @@ export async function DELETE(
     if (getHarness().createSession) {
       const engine = resolveEngineSessionOr404(id, req);
       if ("response" in engine) return engine.response;
-      await getRpcSession(id)?.destroyAndWait?.();
+      await getRpcSession(id)?.destroyAndWait?.("the chat was deleted");
       removeEngineSession(id);
       forgetSession(id);
       forgetSessionLocalRouting(id);
@@ -484,7 +484,7 @@ export async function DELETE(
 
     // Await the child's exit before unlinking: omp flushes session state on
     // shutdown and would recreate the file if it were still running.
-    await getRpcSession(id)?.destroyAndWait?.();
+    await getRpcSession(id)?.destroyAndWait?.("the chat was deleted");
     deleteSessionFileWithArtifacts(filePath);
     invalidateSessionPathCache(id);
     invalidateSessionListCache();

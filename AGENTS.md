@@ -396,6 +396,18 @@ lib/
                        the ownership gate, the condensed transcript (messages
                        and tool NAMES only), snapshot-only — nothing here
                        blocks on another session's run
+  session-acquire.ts   a chat's live engine session for work nobody is typing
+                       for (scheduled messages, run recovery): reuses a live
+                       child or starts one exactly as POST /api/agent/[id]
+                       would; `SessionUnavailableError` (gone / sidebar)
+  run-recovery/        keeps unattended runs going ("Overnight runs" below):
+                       `supervisor.ts` (observer per main chat, the one-minute
+                       watchdog, recovery, crash and boot resume; state on
+                       globalThis), `journal.ts` (cody-run-journal.json: runs
+                       in flight), `judge.ts` (tool-overdue rules),
+                       `limits.ts` (every threshold), `text.ts` (the recovery
+                       turn and push wording), `notify.ts`, `shutdown.ts`
+                       (import-free "server is going down" flag)
   scheduled/           scheduled send ("Scheduled messages" below). Browser-safe:
                        `types.ts` (item views, SCHEDULED_LIMITS, error codes),
                        `client.ts` (fetch helpers), `ui.ts` (every composer
@@ -1557,6 +1569,17 @@ must name the panel that fixes it.
 - Idle sessions are disposed after a timeout — never while an event stream is
   attached (see "A viewed session stays warm" below); concurrent
   `startRpcSession()` calls must share a single start promise.
+- **One child per session, even across a close.** A wrapper leaves the
+  registry the moment its destroy begins, but its child holds the session file
+  until it has exited (stdin closed, SIGTERM after 5 s, SIGKILL after 10 s).
+  `startRpcSession` therefore waits for a RETIRING child of the same id first
+  (`noteRetiring` in each registry `onDestroy`, `waitForRetiringChild`, at most
+  30 s). Without it a page's event stream, which reconnects within a second of
+  a close, spawned a second child beside the first; omp then moved the second
+  one's writes to a NEW session file because the first still owned the
+  original. That is how the LumaShow chat split in two on 2026-10-09, with an
+  engine running on each half. Pinned by "a session closed a moment ago is not
+  started again until its old child has exited" in `lib/rpc-manager.test.mjs`.
 - **Every ack the wrapper awaits is bounded** (`PROMPT_ACK_TIMEOUT_MS`, 30 s;
   `IMAGE_PROMPT_ACK_TIMEOUT_MS`, 60 s when the prompt carries images):
   `RpcProcess.sendCommand` never times out unless told to, and a child that
@@ -2157,17 +2180,33 @@ and nothing repeats (one-off, by design).
   as an attempt. Different chats are served side by side, one chat's messages
   in the order they were due.
 - **Delivery is the composer's own path** (`delivery.ts`): the chat's child is
-  started if none is alive (`startRpcSession`, in the OWNER's zone), then a
-  `prompt` with `streamingBehavior: "followUp"` (a chat mid-turn holds it until
-  the turn ends) and a `clientMessageId` that is stable for the life of one
-  delivery (`sched-<id>[-<n>]`), so a retry rejoins the wrapper's ledger instead
-  of sending twice; a retry after a crash also looks for its own message in the
+  started if none is alive (`acquireSession` in `lib/session-acquire.ts`, in
+  the OWNER's zone; shared with run recovery), then a `prompt` with
+  `streamingBehavior: "followUp"` (a chat mid-turn holds it until the turn
+  ends) and a `clientMessageId` that is stable for the life of one delivery
+  (`sched-<id>[-<n>]`), so a retry rejoins the wrapper's ledger instead of
+  sending twice; a retry after a crash also looks for its own message in the
   transcript first. A send that could not be handed over retries on a back-off
   (15 s, 1, 3, 10, 30 min), then stays `failed` for the person — Retry, Edit or
   Cancel; an engine's own refusal is final at once. A message is sent exactly
-  once: it is claimed (`pending` → `sending`) before delivery and removed after.
-  Sent and failed both notify the owner (the `scheduled` kind: progress group,
-  on by default, priority 3; `notify.ts`).
+  once: it is claimed (`pending` → `sending`) before delivery and removed only
+  once the chat has STARTED it. Sent and failed both notify the owner (the
+  `scheduled` kind: progress group, on by default, priority 3; `notify.ts`).
+- **Queued is not delivered.** A chat that is mid-turn only HOLDS a follow-up
+  (the wrapper's in-memory `heldQueue`, or omp's own queue), and an engine loss
+  or a server restart takes the hold with it: two overnight check-ins were lost
+  exactly that way on 2026-10-08. So a send that comes back queued keeps its
+  item `sending` with `handedAt` and the exact `handedClientMessageId`
+  (`isHandedOver`), and every round asks the live wrapper's ledger about it
+  (`checkHandedOver`, never starting a session; re-read every 30 s,
+  `HANDED_CHECK_MS`): started/delivered → removed and "sent"; still queued →
+  waits; withdrawn (the person's Stop handed it back to the composer) → removed
+  silently; failed → retried under a fresh id (that wrapper memoizes the old
+  id's outcome); unknown or no live wrapper (engine replaced, server restarted)
+  → retried on the usual back-off, transcript check first. The composer row
+  reads "waiting for the current reply to finish…" (`schedule.rowWaiting`).
+  An engine without a ledger (ACP) keeps the old rule: a taken send is
+  delivered.
 - **"When quota resets"** is about THE CHAT'S OWN model — the composer sends the
   model it shows, an agent's call asks the chat (`resolveChatModel`) — and the
   account the chat is on (`planQuotaForChat`: the same ranking the ring uses).
@@ -2226,6 +2265,86 @@ and nothing repeats (one-off, by design).
   listens to. The ▾ menu's chips compute from the moment it OPENED, but "In 1
   hour" is resolved when it is CHOSEN. A failed read of the list keeps the rows
   the page already has rather than blanking them.
+
+### Overnight runs: stalls, crashes and restarts carry on (`lib/run-recovery/`)
+
+Two nights running (2026-10-08, 2026-10-09) a long unattended LumaShow run died
+without anyone being told. Once a host script stopped Cody's container mid-run
+and nothing picked the run up again. Once the container hit its process limit
+and the main agent's `edit`/`bash` calls (and one tool in each of eight
+subagents) never returned: the omp process stayed alive, said nothing for
+4.5 h, and Cody showed the chat as running the whole time. The run supervisor
+is the part of Cody that notices both.
+
+- **An observer, never a listener** (`superviseRun`, called beside
+  `observeSessionForNotifications` in `startRpcSession` and
+  `startEngineSession`; never for a sidebar chat). It uses only
+  `observeEvents` and `onClose`: `onDestroy`/`onIdentityChange` hold ONE
+  callback each and belong to the registry. Its state lives on
+  `globalThis.__codyRunRecovery`, because the custom server owns the timer
+  while the Next bundle registers sessions, and they are separate module
+  instances; anything that imports the session manager is reached through a
+  lazy `import()`.
+- **The run journal** (`journal.ts`, `cody-run-journal.json` in the instance
+  data dir, 0600, atomic): one entry from `agent_start` until a terminal
+  `agent_end` or the person's Stop, heartbeat at most once a minute, re-keyed
+  when omp moves the session to a new id. A close while a run is in flight
+  KEEPS the entry only when the server is shutting down
+  (`markServerShuttingDown`, the first thing in `bin/cody-server.js`'s
+  shutdown and in the registry's exit cleanup), the engine crashed (the
+  wrapper's `engine_exit` notice — the terminal `agent_end` that follows it is
+  not the run finishing), or the supervisor itself is recycling the engine.
+  Every other close (delete, archive, engine switch or update) drops it.
+  Pruned at 24 h and 200 entries. An ending run leaves its recoveries in the
+  file's `history`, and the chat's next run takes them back: the cap counts a
+  CHAT's restarts, so recovered runs that end and wedge again cannot reset it.
+- **Three verdicts**, one look a minute; every number is in `limits.ts`.
+  (1) A main-agent tool is overdue (`judge.ts`, omp only): a tool with its own
+  timeout — bash 300 s, eval 30, browser 30, computer 120, ssh 60, fetch 20,
+  lsp 20, debug 30, ida 120, or its `timeout` argument; `0` means none — is
+  overdue 15 min past it; a known-quick tool (read, edit, write, grep, …)
+  after 20 min with no `tool_execution_update` (a `write xd://github`
+  run_watch streams one per poll); `wait`, `ask`, `task`, `yield`, `goal`
+  and any other tool name never. (2) No frame for 10 min, then a `get_state`
+  left unanswered for 10 more (omp is known to freeze 3–5 min on its own
+  databases after a turn, so the bound stays above that). (3) No progress at
+  all for 60 min, unless a tool is still inside its own deadline. The clocks
+  stand still while the chat waits on the person or compacts; cache-warming
+  frames are not activity, and a /btw answer proves the engine is alive but
+  not that the run is moving.
+- **Recovery** (`recoverRun`): `destroyAndWait("stalled: …")`, then
+  `acquireSession` (the retiring-child guard keeps the old and new engines
+  from overlapping), then ONE user turn, `streamingBehavior: "steer"`,
+  `clientMessageId: recover-<id>-<n>`, that says Cody wrote it, names what
+  went wrong and when, says in-flight tool results are unknown and subagents
+  and background jobs were stopped, and asks the agent to check what finished
+  before it carries on (`text.ts`). The run it starts is watched from the
+  send (`expectRun`), so an engine that wedges before its `agent_start` is
+  still caught. An engine that died on its own is recovered after 30 s. At
+  boot, every journal entry younger than 6 h is resumed, one chat at a time
+  and 3 s apart, with "Cody's server restarted at …"; an older one is
+  dropped with a "Not resumed" push. At most 3 recoveries per chat in 12 h
+  (counted across its runs), then one "stopped trying" push and the entry
+  goes. Pushes use the `error` kind (`notify.ts`, same pattern as
+  `lib/scheduled/notify.ts`).
+- **Every stop leaves a reason in the log.** `destroy(reason)` /
+  `destroyAndWait(reason)` log `[rpc-manager] stopping the engine of running
+  chat <id>: <reason>` when the stop cuts a run short, and an engine that
+  exits mid-run logs its last stderr line. Before this nothing recorded why a
+  chat lost its engine: the 07:07 stop on 2026-10-09 could not be explained
+  afterwards. Each recovery and give-up also writes one `[run-recovery]` line.
+- `CODY_RUN_RECOVERY=0` turns off the watchdog, crash recovery and boot
+  resume (the journal is still written).
+- **Known gaps.** An ACP agent that exits on its own emits no `engine_exit`
+  notice, so it is not crash-recovered (its close drops the entry). Tool
+  deadlines are judged for omp only; other engines get verdicts 2 and 3.
+- **Host limits matter as much as Cody.** The 2026-10-09 wedge was Docker's
+  default pids limit (2048, threads included) refusing forks: omp's native
+  thread pool failed to start (`ThreadPoolBuildError … WouldBlock` in
+  `~/.omp/logs/native-panic-*`) and tool promises never settled. The
+  container template now carries `--pids-limit 16384`; check
+  `/sys/fs/cgroup/pids.events` (`max` counts refused forks) before blaming
+  the engine.
 
 ### Browser-hosted hardware (`lib/devices/`)
 
@@ -3381,6 +3500,11 @@ second Enter was silently ignored while the first was in flight.
   same ID join the original delivery instead of sending a duplicate.
   An ack is `{ delivery: "queued" | "started", clientMessageId, status?: "delivered" }`;
   the optional status prevents a late ack from re-adding a delivered message.
+  Only SETTLED rows age out (an hour) or yield to the cap: a row the engine
+  has not finished with (`sending`/`queued`/`started`, `isUnsettledDelivery`)
+  lives as long as the wrapper, because a follow-up can wait behind an
+  all-night run, and a pruned row reads `unknown` — the scheduler and a
+  resuming page would then send it a second time.
 - **Resume checks the server before retrying.** The browser asks
   `GET /api/agent/<sessionId>?clientMessageId=<id>` for each unfinished outbox
   entry. The response is `{ deliveries: [...] }`; known entries adopt their

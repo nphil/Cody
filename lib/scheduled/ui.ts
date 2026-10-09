@@ -162,11 +162,12 @@ export function previewMessage(message: string, max = 240): string {
   return line.length > max ? `${line.slice(0, max - 1).trimEnd()}…` : line;
 }
 
-export type ScheduledRowState = "pending" | "checking" | "sending" | "failed";
+/** `waiting`: the chat has the message queued behind a reply that is still running — it starts when that reply ends, which can be hours away. */
+export type ScheduledRowState = "pending" | "checking" | "sending" | "waiting" | "failed";
 
 export interface ScheduledRowText {
   state: ScheduledRowState;
-  /** "at 11:40 PM" · "tomorrow 9:00 AM" · "when quota resets (11:40 PM)" · "checking quota…" · "sending…" */
+  /** "at 11:40 PM" · "tomorrow 9:00 AM" · "when quota resets (11:40 PM)" · "checking quota…" · "sending…" · "waiting for the current reply to finish…" */
   when: string;
   /** The server's sentence: why it failed, or what its retry is for. */
   note: string | null;
@@ -183,9 +184,12 @@ export function describeScheduledItem(item: ScheduledItemView, now: number, loca
   const at = Date.parse(item.at);
   const known = Number.isFinite(at);
   const due = known ? formatScheduledWhen(at, now, locale, t) : "";
-  const state: ScheduledRowState = item.mode === "quota" && item.status === "pending" && known && at <= now ? "checking" : item.status;
+  const state: ScheduledRowState = item.mode === "quota" && item.status === "pending" && known && at <= now ? "checking"
+    : item.status === "sending" && item.handedOver ? "waiting"
+    : item.status;
   let when: string;
-  if (state === "sending") when = t("schedule.rowSending");
+  if (state === "waiting") when = t("schedule.rowWaiting");
+  else if (state === "sending") when = t("schedule.rowSending");
   else if (state === "checking") when = t("schedule.rowQuotaChecking");
   else if (item.mode === "quota") when = t("schedule.rowQuota", { time: due });
   else when = known && localDayOffset(at, now) === 0 ? t("schedule.rowAt", { time: due }) : due;
@@ -473,6 +477,8 @@ export const SCHEDULED_REFRESH = {
   followUpMs: [5_000, 10_000, 15_000],
   /** How many such re-reads in a row before the list waits for the next visit, focus or change. */
   maxFollowUps: 20,
+  /** While a message waits in the chat for a reply to end — which can take hours — the row is re-read this often, with no limit, so it never stays on screen after it has started. */
+  waitingMs: 30_000,
   /** A far-off due time is still re-checked now and then; `setTimeout` cannot hold 30 days. */
   maxTimerMs: 6 * HOUR_MS,
 } as const;
@@ -490,7 +496,7 @@ export type ScheduledRefreshPlan =
  * again when it becomes visible.
  */
 export function planScheduledRefresh(input: {
-  items: readonly { status: ScheduledStatus; at: string }[];
+  items: readonly { status: ScheduledStatus; at: string; handedOver?: boolean }[];
   now: number;
   visible: boolean;
   /** Follow-up reads already made in a row. */
@@ -498,9 +504,13 @@ export function planScheduledRefresh(input: {
 }): ScheduledRefreshPlan {
   if (!input.visible) return { kind: "none" };
   let waiting = false;
+  let queued = false;
   let soonest = Infinity;
   for (const item of input.items) {
-    if (item.status === "sending") waiting = true;
+    if (item.status === "sending") {
+      if (item.handedOver) queued = true;
+      else waiting = true;
+    }
     if (item.status !== "pending") continue;
     const at = Date.parse(item.at);
     if (!Number.isFinite(at)) continue;
@@ -511,9 +521,11 @@ export function planScheduledRefresh(input: {
     ? Math.min(soonest - input.now + SCHEDULED_REFRESH.graceMs, SCHEDULED_REFRESH.maxTimerMs)
     : null;
   const steps = SCHEDULED_REFRESH.followUpMs;
-  const followUp = waiting && input.followUps < SCHEDULED_REFRESH.maxFollowUps
+  const quick = waiting && input.followUps < SCHEDULED_REFRESH.maxFollowUps
     ? steps[Math.min(input.followUps, steps.length - 1)]
     : null;
+  // A message waiting in the chat is read about slowly but for as long as it waits; a quick follow-up for something else wins while it lasts.
+  const followUp = quick ?? (queued ? SCHEDULED_REFRESH.waitingMs : null);
   if (transition !== null && (followUp === null || transition <= followUp)) return { kind: "transition", delayMs: transition };
   if (followUp !== null) return { kind: "follow-up", delayMs: followUp };
   return { kind: "none" };

@@ -39,7 +39,7 @@ export async function POST(
 
     // OMP owns writes while a child is live; wait for its final flush before
     // moving the file so the archive contains the complete native transcript.
-    await getRpcSession(id)?.destroyAndWait?.();
+    await getRpcSession(id)?.destroyAndWait?.("the chat was archived");
     const archivedPath = archiveSessionFileWithArtifacts(filePath);
     invalidateSessionPathCache(id);
     invalidateSessionListCache();

@@ -414,8 +414,11 @@ export interface EngineSession {
   onClose(listener: () => void): () => void;
   onIdentityChange(cb: (oldId: string, newId: string) => void): void;
   send(command: Record<string, unknown>): Promise<unknown>;
-  destroy(): void;
-  destroyAndWait(): Promise<void>;
+  /** `reason` says why the engine is being stopped, in a few plain words; a
+   *  session logs it when the stop cuts a run short, because nothing else
+   *  records why a chat lost its engine. */
+  destroy(reason?: string): void;
+  destroyAndWait(reason?: string): Promise<void>;
   /** Resolves once an in-flight destroy finishes; null when idle. */
   destroyPromise: Promise<void> | null;
   /**

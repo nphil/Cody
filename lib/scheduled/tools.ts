@@ -85,7 +85,7 @@ async function listScheduledMessages(args: SessionToolArgs, ctx: SessionToolCont
   const now = Date.now();
   const lines = items.map((item) => {
     const what = item.mode === "quota" ? `when ${item.quota?.label ?? "the model"}'s quota resets, ${when(item, zone, now)}` : when(item, zone, now);
-    const state = item.status === "failed" ? `failed: ${item.error ?? "could not be sent"}` : item.status;
+    const state = item.status === "failed" ? `failed: ${item.error ?? "could not be sent"}` : item.handedOver ? "queued in the chat behind the current reply" : item.status;
     return `${item.id} | ${what} | by ${item.source === "agent" ? "the agent" : "the user"} | ${state} | ${preview(item.message)}`;
   });
   return `${items.length} scheduled for ${owner} (at most ${SCHEDULED_LIMITS.perChat}):\n${lines.join("\n")}`;

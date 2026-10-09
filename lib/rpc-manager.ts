@@ -26,6 +26,8 @@ import { assistantReplyText, replyAsksUser } from "./reply-question";
 import { readRefusalPolicyConfig, writeRefusalPolicyConfig } from "./refusal/config";
 import { PlanKeeper } from "./plan-keeper/keeper";
 import { observeSessionForNotifications } from "./notifications/observer";
+import { markServerShuttingDown } from "./run-recovery/shutdown";
+import { superviseRun } from "./run-recovery/supervisor";
 import { readPlanOverlay, writePlanOverlay } from "./plan-keeper/overlay";
 import { materializeLocalModelProfile, resolveLocalModelPromptProfile, type LocalModelProfileLaunch, type ModelProfileTarget, type ResolvedLocalModelProfile } from "./local-model-profile-runtime";
 import { copySessionLocalRouting, materializeLocalRoutingOverlay, readLocalRoutingIntent, renameSessionLocalRouting, validateLocalRoutingModelSelection } from "./local-model-routing";
@@ -835,6 +837,12 @@ function normalizeDeliveryText(text: string): string {
   return text.trim();
 }
 
+/** A message the engine has not finished with: a restart would fail it, and
+ *  its ledger row must outlive the ledger's hour. */
+function isUnsettledDelivery(status: ServerDeliveryLedgerEntry["status"]): boolean {
+  return status === "sending" || status === "queued" || status === "started";
+}
+
 function deliveryMessageParts(event: AgentEvent): { timestamp: number; text: string; imageCount: number } | null {
   const message = isRecord(event.message) ? event.message : event;
   if (message.role !== "user") return null;
@@ -1403,7 +1411,7 @@ export class AgentSessionWrapper {
   /** A message the engine has not finished with is one a restart would fail. */
   private hasUnsettledDelivery(): boolean {
     for (const entry of this.deliveryLedger.values()) {
-      if (entry.status === "sending" || entry.status === "queued" || entry.status === "started") return true;
+      if (isUnsettledDelivery(entry.status)) return true;
     }
     return false;
   }
@@ -1753,6 +1761,9 @@ export class AgentSessionWrapper {
     // A restart disposes the old child on purpose — not a crash.
     if (!this._alive || this.restarting) return;
     const detail = stderrTail.trim().split("\n").pop() ?? "";
+    if (this.streaming || this.promptRunning) {
+      console.warn(`[rpc-manager] the engine of running chat ${this._sessionId || "(new)"} exited unexpectedly${detail ? `: ${detail}` : ""}`);
+    }
     this.emit({
       type: "notice",
       level: "error",
@@ -1763,7 +1774,7 @@ export class AgentSessionWrapper {
     // instead of waiting for the reconcile poll.
     if (this.streaming || this.promptRunning) this.emit({ type: "agent_end", isTerminal: true, messages: [] });
     this.settleDeliveriesOnEngineLoss("The engine stopped before it read this message.");
-    this.destroy();
+    this.destroy("the engine exited");
   }
 
   private handleFrame(frame: RpcFrame): void {
@@ -2980,7 +2991,7 @@ export class AgentSessionWrapper {
       if (expired) {
         // Nothing on this child will ever resolve the waiter; recycle it like
         // the prompt-ack timeout path so the next request gets a fresh child.
-        await this.destroyAndWait();
+        await this.destroyAndWait("the engine did not acknowledge /mcp list within 30 s");
         throw new WebRpcError("The session stopped responding and was reset.", "session_unresponsive");
       }
       throw error;
@@ -3144,7 +3155,7 @@ export class AgentSessionWrapper {
         this.unsubscribeFrames?.();
         this.unsubscribeFrames = null;
         void proc.dispose();
-        this.destroy();
+        this.destroy("the engine failed to restart");
         throw error;
       }
     } finally {
@@ -3176,15 +3187,23 @@ export class AgentSessionWrapper {
     }
   }
 
+  /** Settled rows age out after an hour and the oldest settled ones go first
+   *  past the cap. A row whose message the engine has not finished with
+   *  (`sending`, `queued` — held behind a run that can last all night —
+   *  `started`) is never pruned while this wrapper lives: dropped, it would
+   *  read `unknown`, and the scheduler or a resuming page would send the
+   *  message a second time while the first copy still waits its turn. Such
+   *  rows are bounded by what is actually in flight; the hold itself is the
+   *  heldQueue. */
   private pruneDeliveryLedger(): void {
     const now = Date.now();
     for (const [id, entry] of this.deliveryLedger) {
-      if (entry.updatedAt + DELIVERY_LEDGER_TTL_MS <= now) this.deliveryLedger.delete(id);
+      if (!isUnsettledDelivery(entry.status) && entry.updatedAt + DELIVERY_LEDGER_TTL_MS <= now) this.deliveryLedger.delete(id);
     }
-    while (this.deliveryLedger.size > DELIVERY_LEDGER_CAP) {
-      const oldest = this.deliveryLedger.keys().next().value;
-      if (oldest === undefined) break;
-      this.deliveryLedger.delete(oldest);
+    if (this.deliveryLedger.size <= DELIVERY_LEDGER_CAP) return;
+    for (const [id, entry] of this.deliveryLedger) {
+      if (this.deliveryLedger.size <= DELIVERY_LEDGER_CAP) break;
+      if (!isUnsettledDelivery(entry.status)) this.deliveryLedger.delete(id);
     }
   }
 
@@ -3766,7 +3785,7 @@ export class AgentSessionWrapper {
               // to a wedged one. Unreachable for any streamingBehavior send (no
               // timeout was passed above), so a child is never recycled here for
               // one — idle-looking or genuinely running.
-              await this.destroyAndWait();
+              await this.destroyAndWait("the engine did not acknowledge a new prompt within its bound");
               throw new WebRpcError("The session stopped responding and was reset.", "session_unresponsive");
             }
             throw error;
@@ -4133,18 +4152,24 @@ export class AgentSessionWrapper {
     }
   }
 
-  destroy(): void {
-    void this.destroyAndWait();
+  destroy(reason?: string): void {
+    void this.destroyAndWait(reason);
   }
 
   /** Destroy and resolve only after the omp child has fully exited. Callers
    * that delete the session file afterwards must await this — omp flushes
    * session state on shutdown and would otherwise recreate the file. */
-  async destroyAndWait(): Promise<void> {
+  async destroyAndWait(reason?: string): Promise<void> {
     // Re-entrant calls join the in-flight dispose; without this a new spawn
     // can overlap the old child's shutdown (see startRpcSession).
     if (this.destroyPromise) return this.destroyPromise;
     if (!this._alive) return;
+    // A running chat should lose its engine only on purpose, and nothing else
+    // records why: the LumaShow engine stopped at 07:07 on 2026-10-09 and no
+    // log could say what stopped it. One line per such stop.
+    if (this.isRunning()) {
+      console.warn(`[rpc-manager] stopping the engine of running chat ${this._sessionId || "(new)"}: ${reason ?? "no reason given"}`);
+    }
     this._alive = false;
     if (this.idleTimer) clearTimeout(this.idleTimer);
     clearInterval(this.heldGuard ?? undefined);
@@ -4206,13 +4231,20 @@ export interface RunningSessionUpdate {
 declare global {
   var __ompSessions: Map<string, EngineSession> | undefined;
   var __ompStartLocks: Map<string, Promise<{ session: EngineSession; realSessionId: string }>> | undefined;
+  var __ompRetiring: Map<string, Promise<void>> | undefined;
   var __ompRunningListeners: Set<(update: RunningSessionUpdate) => void> | undefined;
 }
 
 function getRegistry(): Map<string, EngineSession> {
   if (!globalThis.__ompSessions) {
     globalThis.__ompSessions = new Map();
-    const cleanup = () => globalThis.__ompSessions?.forEach((s) => s.destroy());
+    // Every session closed here is closed BECAUSE the process is going away: a
+    // run in flight was cut off, not abandoned, so the run journal must keep
+    // its entry for the next boot (lib/run-recovery). Marked before any destroy.
+    const cleanup = () => {
+      markServerShuttingDown();
+      globalThis.__ompSessions?.forEach((s) => s.destroy("Cody's server is shutting down"));
+    };
     process.once("exit", cleanup);
     process.once("SIGINT", cleanup);
     process.once("SIGTERM", cleanup);
@@ -4223,6 +4255,55 @@ function getRegistry(): Map<string, EngineSession> {
 function getLocks(): Map<string, Promise<{ session: EngineSession; realSessionId: string }>> {
   if (!globalThis.__ompStartLocks) globalThis.__ompStartLocks = new Map();
   return globalThis.__ompStartLocks;
+}
+
+/**
+ * Children still shutting down, by every session id their wrapper answered to.
+ *
+ * A wrapper leaves the registry the moment its destroy begins, but its child
+ * keeps the session file open until it has actually exited: dispose() closes
+ * stdin, waits 5 s, then signals. A start for the same session in that window
+ * (the page's event stream reconnects within a second of a close) used to
+ * spawn a second child beside the first. omp then moves the second one's
+ * writes to a NEW session file, because the first still holds the original —
+ * one conversation split in two with an engine running on each. Every start
+ * waits here for the old child first.
+ */
+function getRetiring(): Map<string, Promise<void>> {
+  if (!globalThis.__ompRetiring) globalThis.__ompRetiring = new Map();
+  return globalThis.__ompRetiring;
+}
+
+/** How long a start waits for a retiring child. dispose() escalates to SIGKILL
+ *  after 10 s, so a child still not gone well past that cannot be waited out:
+ *  the start goes ahead rather than leave the chat unopenable. */
+const RETIRING_WAIT_MS = 30_000;
+
+function noteRetiring(ids: Iterable<string>, exited: Promise<void> | null): void {
+  if (!exited) return;
+  const retiring = getRetiring();
+  for (const id of new Set(ids)) {
+    if (!id) continue;
+    retiring.set(id, exited);
+    void exited.finally(() => {
+      if (retiring.get(id) === exited) retiring.delete(id);
+    });
+  }
+}
+
+async function waitForRetiringChild(sessionId: string): Promise<void> {
+  const exited = getRetiring().get(sessionId);
+  if (!exited) return;
+  let timer: NodeJS.Timeout | undefined;
+  const bound = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, RETIRING_WAIT_MS);
+    timer.unref?.();
+  });
+  try {
+    await Promise.race([exited.catch(() => {}), bound]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export function getRpcSession(sessionId: string): EngineSession | undefined {
@@ -4367,7 +4448,7 @@ export async function restartAllRpcSessions(): Promise<number> {
   // teardown of every session that started fine.
   await Promise.allSettled([...getLocks().values()]);
   const sessions = [...new Set(getRegistry().values())];
-  await Promise.all(sessions.map((session) => session.destroyAndWait()));
+  await Promise.all(sessions.map((session) => session.destroyAndWait("the engine was switched, updated or reinstalled")));
   return sessions.length;
 }
 
@@ -4443,6 +4524,7 @@ async function startEngineSession(
   created.onDestroy(() => {
     if (registry.get(created.sessionId) === created) registry.delete(created.sessionId);
     if (registry.get(realSessionId) === created) registry.delete(realSessionId);
+    noteRetiring([created.sessionId, realSessionId], created.destroyPromise);
     notifyRunningChange();
   });
   created.onIdentityChange((oldId, newId) => {
@@ -4467,6 +4549,8 @@ async function startEngineSession(
   });
   registry.set(realSessionId, created);
   observeSessionForNotifications(created);
+  // An ACP engine's tools are not omp's, so only the supervisor's silence rules judge it, never a tool's own deadline.
+  superviseRun(created);
   notifyRunningChange();
   return { session: created, realSessionId };
 }
@@ -4503,6 +4587,11 @@ export async function startRpcSession(
   const existing = registry.get(sessionId);
   if (existing?.isAlive()) return { session: existing, realSessionId: sessionId };
   if (existing?.destroyPromise) await existing.destroyPromise;
+  // A child destroyed a moment ago is no longer in the registry but may still
+  // hold the session file: wait for it to exit before starting another.
+  await waitForRetiringChild(sessionId);
+  const current = registry.get(sessionId);
+  if (current?.isAlive()) return { session: current, realSessionId: sessionId };
 
   const inflight = locks.get(sessionId);
   if (inflight) return inflight;
@@ -4605,6 +4694,7 @@ export async function startRpcSession(
     created.onDestroy(() => {
       if (registry.get(created.sessionId) === created) registry.delete(created.sessionId);
       if (registry.get(realSessionId) === created) registry.delete(realSessionId);
+      noteRetiring([created.sessionId, realSessionId], created.destroyPromise);
     });
     created.onIdentityChange((oldId, newId) => {
       if (registry.get(oldId) === created) registry.delete(oldId);
@@ -4612,6 +4702,8 @@ export async function startRpcSession(
     });
     registry.set(realSessionId, created);
     observeSessionForNotifications(created, { kind });
+    // Only omp's tool deadlines are known (lib/run-recovery/judge.ts); another engine's tools of the same name are not held to them.
+    superviseRun(created, { kind, judgesTools: harness.id === "omp" });
     return { session: created, realSessionId };
   })().finally(() => locks.delete(sessionId));
 

@@ -135,6 +135,24 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Docker caps how many processes AND threads a container may run (the pids
+# cgroup), and Unraid applies 2048 unless Extra Parameters say otherwise. A
+# long agent run with subagents and builds passes that, and then every fork
+# fails: the engine stays alive while its tool calls never return (a 4.5-hour
+# silent stall on 2026-10-09). The bundled template raises it; an install made
+# from an older template still has the default, so say so where it is seen.
+_pids_max="$(cat /sys/fs/cgroup/pids.max 2>/dev/null || true)"
+case "${_pids_max}" in
+  '' | max) ;;
+  *[!0-9]*) ;;
+  *)
+    if [ "${_pids_max}" -lt 8192 ]; then
+      echo "[Cody] WARNING: this container may run at most ${_pids_max} processes and threads; long agent runs need more. Add --pids-limit 16384 to the container's Extra Parameters."
+    fi
+    ;;
+esac
+
+# ---------------------------------------------------------------------------
 # GPU capability probe. Passthrough is opt-in on the host (Unraid: a --device
 # for /dev/dri, and/or the Nvidia Driver plugin's runtime), so on a default
 # install these devices are simply absent — a fully supported configuration,

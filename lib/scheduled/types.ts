@@ -28,10 +28,34 @@ export type ScheduledSource = "user" | "agent";
 
 /**
  * pending: waiting for its time (a quota item past its reset is still pending
- * while it re-checks); sending: handed to the delivery path right now;
- * failed: gave up — the person decides (Retry, Edit or Cancel).
+ * while it re-checks); sending: handed to the delivery path right now — or,
+ * once the chat has taken it but only queued it behind a running reply, kept
+ * here (`handedOver` in the view) until the reply is over and it really
+ * starts; failed: gave up — the person decides (Retry, Edit or Cancel).
  */
 export type ScheduledStatus = "pending" | "sending" | "failed";
+
+/**
+ * What the chat did with a message it accepted: `delivered` — it is in the
+ * conversation (started, or an engine that cannot tell queued from started);
+ * `queued` — it only sits behind a reply that is still running, which an engine
+ * loss or a restart would lose.
+ */
+export type ScheduledHandOver = "delivered" | "queued";
+
+/**
+ * Where a message that was handed over (queued) stands, read from the chat's own
+ * ledger on every scheduler round. `lost` means the chat no longer has it (the
+ * engine stopped, the child was replaced, the server restarted): it goes back to
+ * waiting as a retry. `freshId` is for a ledger row that says `failed` on a
+ * wrapper that still remembers the old id's outcome, so only a new id is sent
+ * for real.
+ */
+export type HandedOverCheck =
+  | { state: "done" }
+  | { state: "waiting" }
+  | { state: "withdrawn" }
+  | { state: "lost"; reason: string; freshId: boolean };
 
 /** What a quota-mode message is waiting on. Never an email address. */
 export interface ScheduledQuotaView {
@@ -53,6 +77,8 @@ export interface ScheduledItemView {
   status: ScheduledStatus;
   createdAt: string;
   quota?: ScheduledQuotaView;
+  /** Sending only: the chat has the message queued behind a reply that is still running. It waits there, possibly for hours. */
+  handedOver?: true;
   /** Failed: why, in a sentence. Pending after a failed attempt: what the retry is for. */
   error?: string;
 }

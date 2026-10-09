@@ -137,6 +137,7 @@ npm start              # …在 127.0.0.1:30177 提供服务（0.0.0.0 用 start
 | `CODY_ACCOUNTS_DIR` | 用户账户的存储位置（默认 `<agent dir>/cody-accounts`） |
 | `PI_CODING_AGENT_DIR` | 实例数据目录（默认 `~/.omp/agent`；容器中为 `/data/agent`） |
 | `CODY_NO_OPEN` | 设为 `1`/`true` 可跳过自动打开浏览器 |
+| `CODY_RUN_RECOVERY` | 设为 `0` 后，当运行卡住、引擎崩溃或被服务器重启打断时，Cody 不再自动重启该对话的引擎（默认开启；每个对话 12 小时内最多 3 次） |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | 服务器端请求所使用的标准代理变量 |
 
 每个 `CODY_` 变量同样接受分叉前的 `OMP_WEB_` 写法，因此已有的 ompweb 配置在升级后依然可用；浏览器端的偏好设置也会在首次加载时从 ompweb 的存储键迁移过来。

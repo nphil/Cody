@@ -4,7 +4,7 @@ import { getHarness } from "../harness";
 import { ScheduledError } from "./errors";
 import { planQuotaForChat, readModelRef } from "./quota";
 import { fireItem, liveSchedulerDeps, wakeScheduledSender, type SchedulerDeps } from "./scheduler";
-import { findItem, insertItem, listItemsForSession, mutateItem, type StoredItem } from "./store";
+import { findItem, insertItem, isHandedOver, listItemsForSession, mutateItem, type StoredItem } from "./store";
 import { parseInstant } from "./time";
 import {
   QUOTA_GIVE_UP_MS,
@@ -58,6 +58,7 @@ export function viewOf(item: StoredItem): ScheduledItemView {
     status: item.status,
     createdAt: new Date(item.createdAt).toISOString(),
     ...(item.quota ? { quota: { label: item.quota.label, giveUpAt: new Date(item.quota.giveUpAt).toISOString() } } : {}),
+    ...(isHandedOver(item) ? { handedOver: true as const } : {}),
     ...(item.error ? { error: item.error } : {}),
   };
 }
@@ -251,5 +252,7 @@ export async function sendScheduledNow(
 
   await fireItem(itemId, armed.rev, deps, { manual: true });
   const after = findItem(itemId);
+  // A chat that only queued it behind a running reply is watched by the timer, which may be asleep with nothing else to do.
+  if (after && isHandedOver(after)) wakeScheduledSender();
   return after ? { delivered: false, item: viewOf(after) } : { delivered: true };
 }

@@ -62,7 +62,7 @@ function byDue(a: ScheduledItemView, b: ScheduledItemView): number {
 function sameItems(a: readonly ScheduledItemView[], b: readonly ScheduledItemView[]): boolean {
   return a.length === b.length && a.every((item, index) => {
     const other = b[index];
-    return item.id === other.id && item.at === other.at && item.status === other.status
+    return item.id === other.id && item.at === other.at && item.status === other.status && item.handedOver === other.handedOver
       && item.message === other.message && item.error === other.error && item.mode === other.mode
       && item.quota?.label === other.quota?.label;
   });

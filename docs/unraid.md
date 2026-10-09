@@ -153,6 +153,22 @@ behind an authenticating reverse proxy.
   the image's own `ENTRYPOINT` entirely. The hook then execs `entrypoint.sh`, so
   the arrangement survives — but an `ENTRYPOINT`-based init would not, and would
   fail silently.
+- **Raise the process limit.** Docker caps how many processes *and threads* a
+  container may run, and Unraid applies 2048 unless the template's **Extra
+  Parameters** say otherwise. A long agent run with subagents, builds and tests
+  goes past that, and then every new process is refused: the engine stays
+  alive while its tool calls never return, with nothing in the chat to say why.
+  The bundled template sets `--pids-limit 16384`; an install made from an older
+  template keeps the default until you add it to Extra Parameters yourself (the
+  container log prints a warning at boot while the limit is under 8192). To
+  check a running container: `cat /sys/fs/cgroup/pids.max` inside it, and
+  `/sys/fs/cgroup/pids.events` (`max` counts refused forks).
+- **Overnight runs carry on by themselves.** If a chat's engine stops making
+  progress (a tool call that never answers), dies, or the container restarts
+  in the middle of a run, Cody restarts the engine and tells the agent what
+  happened so it can continue (at most 3 times per chat in 12 hours), and
+  sends a push notification if you set them up. Set `CODY_RUN_RECOVERY=0` to
+  turn this off.
 
 ## Full-fidelity previews behind HTTPS (optional)
 

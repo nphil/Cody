@@ -346,6 +346,7 @@
   "schedule.rowQuota": "when quota resets ({time})",
   "schedule.rowQuotaChecking": "checking quota…",
   "schedule.rowSending": "sending…",
+  "schedule.rowWaiting": "waiting for the current reply to finish…",
   "schedule.rowAria": "Scheduled message, {when}",
   "schedule.byAgent": "by the agent",
   "schedule.byAgentTitle": "Scheduled by the agent",

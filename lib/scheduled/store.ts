@@ -61,6 +61,10 @@ export interface StoredItem {
   attempts: number;
   /** Epoch ms of the first time the item was handed to the delivery path since it was last armed: a retry searches the chat's transcript from here for a copy an earlier attempt left. */
   firstAttemptAt?: number;
+  /** Epoch ms the chat took the message but only queued it behind a running reply (set only while `sending`): the scheduler keeps checking the chat's ledger until it starts, is lost, or is taken back. */
+  handedAt?: number;
+  /** The exact `clientMessageId` that went to the chat, so the ledger is asked about the very send that was made. */
+  handedClientMessageId?: string;
   error?: string;
   quota?: StoredQuota;
 }
@@ -83,6 +87,11 @@ export function scheduledStorePath(): string {
 /** The id a send is made under: stable for the life of one delivery, so a retry joins it instead of duplicating it. */
 export function clientMessageIdFor(item: Pick<StoredItem, "id" | "deliveryNo">): string {
   return item.deliveryNo === 0 ? `sched-${item.id}` : `sched-${item.id}-${item.deliveryNo}`;
+}
+
+/** The chat has this message, but only queued behind a running reply: it is still `sending` and still ours to watch. */
+export function isHandedOver(item: Pick<StoredItem, "status" | "handedAt">): boolean {
+  return item.status === "sending" && item.handedAt !== undefined;
 }
 
 const STATUSES: readonly ScheduledStatus[] = ["pending", "sending", "failed"];
@@ -130,6 +139,13 @@ function readStoredItem(value: unknown): StoredItem | null {
   if (notBefore !== undefined) item.notBefore = notBefore;
   const firstAttemptAt = asNumber(value.firstAttemptAt);
   if (firstAttemptAt !== undefined) item.firstAttemptAt = firstAttemptAt;
+  // Only a sending item can have been handed over; a stray pair on any other status would make a settled message look like it still waits in a chat.
+  const handedAt = asNumber(value.handedAt);
+  const handedClientMessageId = asString(value.handedClientMessageId);
+  if (status === "sending" && handedAt !== undefined && handedClientMessageId) {
+    item.handedAt = handedAt;
+    item.handedClientMessageId = handedClientMessageId;
+  }
   const error = asString(value.error);
   if (error) item.error = error;
   if (quota) item.quota = quota;

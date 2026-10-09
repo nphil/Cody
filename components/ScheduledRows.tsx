@@ -2,7 +2,7 @@
 
 import { memo, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { AlertTriangle, Bot, CalendarClock, ChevronDown, ChevronUp, Gauge, Loader2, RefreshCw, SendHorizontal, X } from "lucide-react";
+import { AlertTriangle, Bot, CalendarClock, ChevronDown, ChevronUp, Gauge, Hourglass, Loader2, RefreshCw, SendHorizontal, X } from "lucide-react";
 import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
 import { useI18n } from "@/lib/i18n";
 import type { ScheduledItemView } from "@/lib/scheduled/types";
@@ -116,11 +116,14 @@ export const ScheduledRows = memo(function ScheduledRows({ items, busy, roundTop
         const row = describeScheduledItem(item, now, locale, t);
         const failed = row.state === "failed";
         const sending = row.state === "sending";
+        // In the chat's queue behind a reply that may run for hours: nothing is spinning, and — as for a send in flight — it can no longer be edited or cancelled here.
+        const waiting = row.state === "waiting";
         const working = busy.has(item.id);
-        const Icon = failed ? AlertTriangle : sending ? Loader2 : item.mode === "quota" ? Gauge : CalendarClock;
+        const Icon = failed ? AlertTriangle : sending ? Loader2 : waiting ? Hourglass : item.mode === "quota" ? Gauge : CalendarClock;
         const whenLabel = (
           <span
             data-testid="scheduled-row-when"
+            title={row.when}
             style={{
               flexShrink: 0,
               maxWidth: isMobile ? undefined : "55%",
@@ -169,7 +172,7 @@ export const ScheduledRows = memo(function ScheduledRows({ items, busy, roundTop
             data-scheduled-status={row.state}
             data-scheduled-mode={item.mode}
             data-scheduled-source={item.source}
-            role={failed || sending ? "status" : "group"}
+            role={failed || sending || waiting ? "status" : "group"}
             aria-label={t("schedule.rowAria", { when: row.when })}
             style={{
               border: "1px solid var(--border)",
@@ -214,7 +217,7 @@ export const ScheduledRows = memo(function ScheduledRows({ items, busy, roundTop
                 </span>
               </>
             )}
-            {!sending && (
+            {!sending && !waiting && (
               <>
                 {failed ? (
                   <RowButton onClick={() => onSendNow(item)} title={t("schedule.rowRetryTitle")} label={isMobile ? t("schedule.rowRetry") : undefined} accent disabled={working} touch={touch}>

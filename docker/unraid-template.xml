@@ -13,7 +13,7 @@
   <WebUI>http://[IP]:[PORT:30177]/</WebUI>
   <TemplateURL/>
   <Icon>https://raw.githubusercontent.com/nphil/Cody/main/docker/icon.png</Icon>
-  <ExtraParams/>
+  <ExtraParams>--pids-limit 16384</ExtraParams>
   <PostArgs/>
   <DonateText/>
   <DonateLink/>

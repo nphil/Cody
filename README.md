@@ -212,6 +212,7 @@ updates.
 | `CODY_ACCOUNTS_DIR` | Where user accounts are stored (default `<agent dir>/cody-accounts`) |
 | `PI_CODING_AGENT_DIR` | The instance data dir (default `~/.omp/agent`; `/data/agent` in the container) |
 | `CODY_NO_OPEN` | Set to `1`/`true` to skip auto-opening the browser |
+| `CODY_RUN_RECOVERY` | Set `0` to stop Cody restarting a chat's engine when a run stalls, crashes or is cut off by a server restart (on by default; at most 3 times per chat in 12 hours) |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | Standard proxy variables for server-side requests |
 
 Every `CODY_` variable also accepts its pre-fork `OMP_WEB_` spelling, so an

@@ -346,6 +346,7 @@
   "schedule.rowQuota": "额度重置时（{time}）",
   "schedule.rowQuotaChecking": "正在检查额度…",
   "schedule.rowSending": "正在发送…",
+  "schedule.rowWaiting": "正在等待当前回复结束…",
   "schedule.rowAria": "定时消息，{when}",
   "schedule.byAgent": "由智能体安排",
   "schedule.byAgentTitle": "由智能体安排的消息",
