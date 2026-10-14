@@ -169,6 +169,8 @@ export interface ScheduledRowText {
   state: ScheduledRowState;
   /** "at 11:40 PM" · "tomorrow 9:00 AM" · "when quota resets (11:40 PM)" · "checking quota…" · "sending…" · "waiting for the current reply to finish…" */
   when: string;
+  /** The same without the "at": "11:40 PM" · "tomorrow 9:00 AM", for a list that already says these are times. Other states read as in `when`. */
+  whenShort: string;
   /** The server's sentence: why it failed, or what its retry is for. */
   note: string | null;
   byAgent: boolean;
@@ -193,9 +195,11 @@ export function describeScheduledItem(item: ScheduledItemView, now: number, loca
   else if (state === "checking") when = t("schedule.rowQuotaChecking");
   else if (item.mode === "quota") when = t("schedule.rowQuota", { time: due });
   else when = known && localDayOffset(at, now) === 0 ? t("schedule.rowAt", { time: due }) : due;
+  const whenShort = state === "pending" && item.mode === "at" && known ? due : when;
   return {
     state,
     when,
+    whenShort,
     note: item.error?.trim() || null,
     byAgent: item.source === "agent",
     quotaLabel: item.mode === "quota" ? item.quota?.label ?? null : null,
@@ -204,18 +208,36 @@ export function describeScheduledItem(item: ScheduledItemView, now: number, loca
   };
 }
 
-/** How many rows show while the list is collapsed. */
-export const SCHEDULED_ROWS_COLLAPSED = 3;
+/** What the composer's one summary bar says about every scheduled message in the chat. */
+export interface ScheduledSummary {
+  count: number;
+  failedCount: number;
+  /** "2 scheduled" · "1 failed to send" */
+  title: string;
+  /** "next 9:30 PM" · "9:30 PM · run the tests" · "waiting for the current reply to finish…" · "1 more scheduled" */
+  detail: string;
+}
 
 /**
- * Which rows to draw. Up to twenty can be waiting in one chat, and they sit
- * between the transcript and the input, so a long list folds behind one
- * "N more" row. Folding a single row would save nothing (the toggle takes its
- * place), so a list only one longer than the fold shows in full.
+ * The bar's words. A failed message leads (it needs a decision); otherwise the
+ * soonest one that has not started. One message gets its text beside its
+ * time, several get just "next <time>" — the list has the rest. `items` are
+ * soonest first, as the hook returns them. Null when nothing is scheduled.
  */
-export function visibleScheduledRows<T>(rows: readonly T[], expanded: boolean): { shown: readonly T[]; hidden: number } {
-  if (expanded || rows.length <= SCHEDULED_ROWS_COLLAPSED + 1) return { shown: rows, hidden: 0 };
-  return { shown: rows.slice(0, SCHEDULED_ROWS_COLLAPSED), hidden: rows.length - SCHEDULED_ROWS_COLLAPSED };
+export function summarizeScheduled(items: readonly ScheduledItemView[], now: number, locale: string, t: Translate): ScheduledSummary | null {
+  if (items.length === 0) return null;
+  const rows = items.map((item) => describeScheduledItem(item, now, locale, t));
+  const failedCount = rows.filter((row) => row.state === "failed").length;
+  const firstFailed = rows.findIndex((row) => row.state === "failed");
+  const firstWaiting = rows.findIndex((row) => row.state === "pending" || row.state === "checking");
+  const leadIndex = firstFailed >= 0 ? firstFailed : Math.max(0, firstWaiting);
+  const lead = rows[leadIndex];
+  const title = failedCount > 0 ? t("schedule.barFailed", { count: failedCount }) : t("schedule.barTitle", { count: items.length });
+  let detail: string;
+  if (items.length === 1) detail = lead.state === "failed" ? lead.preview : `${lead.whenShort} · ${lead.preview}`;
+  else if (failedCount > 0) detail = failedCount < items.length ? t("schedule.barAlsoScheduled", { count: items.length - failedCount }) : lead.preview;
+  else detail = lead.state === "pending" && items[leadIndex].mode === "at" ? t("schedule.barNext", { when: lead.whenShort }) : lead.whenShort;
+  return { count: items.length, failedCount, title, detail };
 }
 
 /**
@@ -542,7 +564,10 @@ export function planScheduledRefresh(input: {
  * spends 51 px of its own on chrome (8 + 8 padding, the provider mark, the
  * chevron and the two gaps between) before a letter of the name fits. Two
  * costs are easy to miss: the row's zero-width spacer is a flex item, so it
- * brings a gap of its own, and the ring's box keeps 4 px to its right.
+ * brings a gap of its own, and the ring's box keeps 4 px to its right. The
+ * daily-limit circle (`timer`) is one more box of that size, not a narrower
+ * one: its diameter is the Send pill's own 38 px height, and nothing keeps
+ * to its right, so it costs 38 + one 4 px gap like reasoning does.
  */
 export const PHONE_COMPOSER = {
   gutter: 16,
@@ -573,6 +598,8 @@ export interface PhoneControls {
   autoSwitch: boolean;
   /** The slow-mode glyph inside the model button: only while slow mode is on. */
   slow?: boolean;
+  /** The daily time-limit circle, only while that limit is on. */
+  timer?: boolean;
 }
 
 export interface PhoneBudget {
@@ -590,7 +617,7 @@ export interface PhoneBudget {
 export function phoneBudget(viewport: number, controls: PhoneControls): PhoneBudget {
   const c = PHONE_COMPOSER;
   const row = viewport - 2 * c.gutter - 2 * c.shellBorder - c.shellPaddingLeft - c.shellPaddingRight;
-  const boxes = 1 + Number(controls.reasoning) + Number(controls.ring) + Number(controls.mode) + Number(controls.autoSwitch);
+  const boxes = 1 + Number(controls.reasoning) + Number(controls.ring) + Number(controls.mode) + Number(controls.autoSwitch) + (controls.timer ? 1 : 0);
   // The model selector, the Send pill and the zero-width spacer join the boxes in the gap count.
   const gaps = (boxes + 3 - 1) * c.gap;
   const fixed = boxes * c.control + (c.control + c.sendZone) + gaps + (controls.ring ? c.ringMargin : 0);

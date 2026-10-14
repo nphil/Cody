@@ -1,9 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type CSSProperties, type KeyboardEvent } from "react";
+import { memo, useCallback, useEffect, useMemo, useReducer, useRef, useState, type ClipboardEvent, type CSSProperties, type KeyboardEvent } from "react";
 import { Folder, History, MessageSquarePlus, Paperclip, Send, Square, Trash2, X } from "lucide-react";
 import { useAgentSession, type AttachedImage } from "@/hooks/useAgentSession";
 import { useDragDrop } from "@/hooks/useDragDrop";
+import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
+import { useIsMobile } from "@/hooks/useIsMobile";
+import { NO_SIDE_QUESTIONS_REQUEST, useBridgedSideQuestions, type SideQuestionsBridge, type SideQuestionsRequest } from "@/hooks/useSideQuestionsBridge";
 import { comparableProjectPath } from "@/lib/comparable-path";
 import { getFileName } from "@/lib/file-paths";
 import { useI18n } from "@/lib/i18n";
@@ -15,20 +18,26 @@ import {
   UnsupportedImageError,
 } from "@/lib/image-compress";
 import { formatModelDisplayName } from "@/lib/model-display";
+import { INITIAL_SIDEBAR_MODE, sidebarModeReducer } from "@/lib/sidebar-mode";
 import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
 import type { AgentMessage, SessionInfo } from "@/lib/types";
 import { MessageView } from "./MessageView";
+import { SegmentedControl } from "./settings/SegmentedControl";
+import { AnsweringDot, SidebarSideQuestions } from "./SidebarSideQuestions";
 import { LiveDot } from "./ui/LiveDot";
 import { Select, type SelectGroup, type SelectOption } from "./ui/Select";
 import { toast } from "./ui/toast";
 
 /**
- * The sidebar chat: an ordinary omp session spawned with `kind: "sidebar"`
- * (no tools, skills, extensions or rules; its own session dir under
- * cody-sidebar-chats/), driven by the SAME hook and renderer as the main
- * chat, so streaming, thinking blocks, usage and every provider the engine
- * can reach behave identically. This panel is only chrome: a toolbar, the
- * transcript, a composer. Everything stateful lives in useAgentSession.
+ * The Side Bar. Its "New chat" view is the sidebar chat: an ordinary omp
+ * session spawned with `kind: "sidebar"` (no tools, skills, extensions or
+ * rules; its own session dir under cody-sidebar-chats/), driven by the SAME
+ * hook and renderer as the main chat, so streaming, thinking blocks, usage and
+ * every provider the engine can reach behave identically. That view is only
+ * chrome: a toolbar, the transcript, a composer. Everything stateful lives in
+ * useAgentSession. Beside it, wherever side questions exist, sits the "This
+ * chat" view (components/SidebarSideQuestions.tsx), reached by a switch at the
+ * top.
  */
 
 interface SidebarChatSummary {
@@ -78,12 +87,7 @@ async function fetchSidebarChats(cwd: string): Promise<SidebarChatSummary[]> {
   return Array.isArray(body) ? body : body.chats ?? [];
 }
 
-export function SidebarChatPanel({
-  cwd,
-  active = true,
-  mainSessionId = null,
-  onContextTargetChange,
-}: {
+interface SidebarChatPanelProps {
   cwd: string;
   active?: boolean;
   /** The session id currently open in the main chat pane. The context
@@ -96,7 +100,120 @@ export function SidebarChatPanel({
    * `mainSessionId` moved and the picker is still following it (no manual
    * override yet). `null` means no session is available to read. */
   onContextTargetChange?: (sessionId: string | null) => void;
-}) {
+  /** Where the main chat's side questions (`/btw`) are published. Without it,
+   * or while the main chat has none (another engine, an omp older than 18.7, a
+   * chat that does not exist yet), the panel is only the New chat view. */
+  sideQuestionsBridge?: SideQuestionsBridge;
+  /** AppShell asking for the This chat view: a `/btw` typed in the main composer. */
+  sideQuestionsRequest?: SideQuestionsRequest;
+}
+
+/**
+ * Two ways to ask, one switch between them. "This chat" puts side questions to
+ * the main conversation (omp's `/btw`: it sees the conversation and answers
+ * while the agent is running); "New chat" is the separate sidebar chat. The
+ * switch is offered only where side questions exist; everywhere else the panel
+ * is exactly the New chat view. Both views stay mounted, so flipping the switch
+ * never stops a sidebar answer that is still streaming or loses a draft.
+ */
+export function SidebarChatPanel({
+  cwd,
+  active = true,
+  mainSessionId = null,
+  onContextTargetChange,
+  sideQuestionsBridge,
+  sideQuestionsRequest = NO_SIDE_QUESTIONS_REQUEST,
+}: SidebarChatPanelProps) {
+  const { t } = useI18n();
+  const isMobile = useIsMobile();
+  const isCoarsePointer = useIsCoarsePointer();
+  const published = useBridgedSideQuestions(sideQuestionsBridge);
+  // Side questions exist here only while the main chat says so.
+  const sideQuestions = published?.available ? published : null;
+  const available = sideQuestions !== null;
+  // What was chosen and a cursor still waiting to land: the rules are pure
+  // (lib/sidebar-mode.ts), this only feeds them what happened.
+  const [{ mode, focusPending }, dispatch] = useReducer(sidebarModeReducer, INITIAL_SIDEBAR_MODE);
+  const thisChat = available && mode === "session";
+  const focusDone = useCallback(() => dispatch({ type: "focused" }), []);
+
+  useEffect(() => {
+    if (!available) dispatch({ type: "gone" });
+  }, [available]);
+
+  // A `/btw` typed in the main composer. Each request is taken once, also when
+  // it arrives with this panel's first mount (the tab loads on first use).
+  useEffect(() => {
+    dispatch({ type: "request", token: sideQuestionsRequest.token, focus: sideQuestionsRequest.focus });
+  }, [sideQuestionsRequest]);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, background: "var(--bg)" }}>
+      {sideQuestions && (
+        <div style={{ padding: "6px 8px", borderBottom: "1px solid var(--border)" }}>
+          <SegmentedControl
+            label={t("btw.modeLabel")}
+            value={thisChat ? "session" : "new"}
+            onChange={(id) => dispatch({ type: "choose", mode: id === "session" ? "session" : "new" })}
+            idPrefix="sidebar-mode"
+            panelIdPrefix="sidebar-mode-panel"
+            fullWidth
+            segmentMinHeight={isMobile || isCoarsePointer ? 40 : 30}
+            options={[
+              {
+                id: "session",
+                label: t("btw.modeThisChat"),
+                // An answer arriving while New chat is showing would otherwise go unseen.
+                badge: sideQuestions.answering && !thisChat
+                  ? <><AnsweringDot /><span className="sr-only">{t("btw.statusRunning")}</span></>
+                  : undefined,
+              },
+              { id: "new", label: t("btw.modeNewChat") },
+            ]}
+          />
+        </div>
+      )}
+      <div
+        {...(sideQuestions ? { id: "sidebar-mode-panel-new", role: "tabpanel", "aria-labelledby": "sidebar-mode-new" } : {})}
+        style={{ display: thisChat ? "none" : "flex", flexDirection: "column", flex: 1, minHeight: 0 }}
+      >
+        <SidebarNewChat cwd={cwd} active={active} mainSessionId={mainSessionId} onContextTargetChange={onContextTargetChange} />
+      </div>
+      {sideQuestions && (
+        <div
+          id="sidebar-mode-panel-session"
+          role="tabpanel"
+          aria-labelledby="sidebar-mode-session"
+          style={{ display: thisChat ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0 }}
+        >
+          <SidebarSideQuestions
+            key={sideQuestions.sessionId ?? ""}
+            records={sideQuestions.records}
+            answering={sideQuestions.answering}
+            asking={sideQuestions.asking}
+            error={sideQuestions.error}
+            onDismissError={sideQuestions.dismissError}
+            onAsk={sideQuestions.askFromPanel}
+            onCancel={sideQuestions.cancel}
+            cwd={cwd}
+            visible={active && thisChat}
+            focusPending={focusPending}
+            onFocused={focusDone}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Memoised: the panel above re-renders once per animation frame while a side
+ *  question streams, and this subtree is a whole chat transcript. */
+const SidebarNewChat = memo(function SidebarNewChat({
+  cwd,
+  active = true,
+  mainSessionId = null,
+  onContextTargetChange,
+}: Pick<SidebarChatPanelProps, "cwd" | "active" | "mainSessionId" | "onContextTargetChange">) {
   const { t } = useI18n();
   const [chats, setChats] = useState<SidebarChatSummary[]>([]);
   // `chosenId` is what the user picked (history entry or New chat) and keys
@@ -191,7 +308,7 @@ export function SidebarChatPanel({
   }, [contextTargetId, onContextTargetChange]);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, background: "var(--bg)" }}>
+    <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, background: "var(--bg)" }}>
       <div
         className="workspace-subtitle-bar"
         style={{
@@ -274,7 +391,7 @@ export function SidebarChatPanel({
       />
     </div>
   );
-}
+});
 
 function SidebarChatSession({ session, cwd, contextSessionId, onSessionCreated, onTurnEnd }: {
   session: SessionInfo | null;

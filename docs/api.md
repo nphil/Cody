@@ -329,6 +329,52 @@ a new zone restarts an idle engine child before it is delivered (a child that
 is mid-turn is never restarted; the agent is told its shell still reports the
 old zone).
 
+## `/api/daily-limit` — Incidental
+
+The personal daily screen-time limit (Settings › Preferences › Daily time
+limit; the circle in the composer). It counts only ACTIVE use of Cody — the page
+visible and focused with real input in the last 60 s — and the total is shared
+by every device on the account. Per account, or one `__instance` record on an
+open instance, in `<accounts dir>/daily-limit.json` (0600, atomic; the last 14
+days of wall-clock intervals). Off by default. Every route needs the usual
+credential and answers `Cache-Control: no-store`. Nothing here ever blocks a
+chat or stops a run.
+
+Every route answers today's state:
+
+```json
+{"enabled":true,"limitMinutes":120,"day":"2026-10-13","zone":"Europe/Paris",
+ "dayStartsAt":1760306400000,"dayEndsAt":1760392800000,"serverNow":1760330000000,
+ "usedSeconds":2880,"extraSeconds":0,"limitSeconds":7200,"remainingSeconds":4320,
+ "noticeDue":false}
+```
+
+`usedSeconds` is every device together; `remainingSeconds` is zero or negative
+once the limit is reached (`-720` is "12m over"); `noticeDue` is whether the
+"you've reached today's limit" notice should show.
+
+- `GET /api/daily-limit?timeZone=<IANA zone of the asking browser>` → state. The
+  day is the local date in the zone the person chose in Preferences, else
+  `timeZone`, else where they were last seen, else the server's (as `GET
+  /api/time-zone` resolves it); usage resets at that zone's midnight. A read
+  never writes.
+- `PUT /api/daily-limit` — any of `{enabled?: boolean, limitMinutes?: 5…1440,
+  addMinutes?: 1…240, dismissNotice?: true, timeZone?: string}` → state.
+  `addMinutes` raises TODAY's limit only; `dismissNotice` ("Done for today")
+  hides the notice at the current limit, so it comes back only when a larger one
+  is reached. Turning the limit off keeps today's usage. A bad value is `400
+  invalid_daily_limit` and changes nothing; an unreadable body or one over 1 KB
+  is `400 invalid_body`.
+- `POST /api/daily-limit/beat` `{activeSeconds, endedSecondsAgo?, timeZone?}` →
+  state. One finished stretch of active use, measured on the browser's own clock
+  (so a wrong device clock cannot move it): how long it was (capped at 90 s) and
+  how long before this request it ended (≤ 120 s, 0 while the person is active
+  right now). The server places it on ITS clock and merges it into the account's
+  ledger as a union, so a second tab or device reporting the same seconds adds
+  nothing. Ignored while the limit is off. `400 invalid_beat` for a missing or
+  non-positive `activeSeconds`; body ≤ 1 KB, any content type (a `sendBeacon` is
+  accepted).
+
 ## `/api/notifications` — Incidental
 
 Push notifications to the account's own ntfy topic (Settings › Notifications).
@@ -358,6 +404,45 @@ accounts) they act for the instance. Responses are `Cache-Control: no-store`.
   `410 gone` (the request is no longer waiting, or has changed); `503
   session_restarting` (tap again). A token is single-use and answers one request
   with one answer; it is never issued for an "always" option.
+
+## `/api/machines` — Incidental
+
+The machines whose CPU and memory the top bar shows: the server Cody runs on
+plus any machine it reaches over ssh (Settings › System › Machines). Responses
+are `Cache-Control: no-store`; on an open instance (no accounts) the writes are
+open too.
+
+- `GET /api/machines` → `{machines, canEdit, sshAvailable}`. `machines[0]` is
+  always `{id:"local", kind:"local", name}` (default name `This server`); the
+  rest are `{id, kind:"ssh", name, destination}`. `destination` (an ssh alias
+  or `user@host`) is present only when `canEdit` is true. `sshAvailable` is
+  false when the server has no `ssh` program.
+- `PUT /api/machines` — admin only. `{localName?, machines?}`; a field left out
+  is left alone. `machines` is the whole ssh list as it should be afterwards:
+  an entry with the `id` of a saved machine keeps it, one without is added, a
+  saved machine missing from the list is removed. Answers like `GET`. Anything
+  invalid is `400 {error, code}` and nothing is saved: `machine_name_required`
+  / `_too_long` / `_invalid`, `machine_destination_required` / `_too_long` /
+  `_invalid` (letters, digits and `. _ - : @` only, one optional `user@`),
+  `machine_duplicate_name`, `machine_duplicate_destination`,
+  `too_many_machines` (12 in all), `invalid_request`. Body ≤ 16 KB.
+- `POST /api/machines/test` `{destination}` — admin only. Connects and takes one
+  real reading; HTTP 200 either way: `{ok:true, ms, cpuPercent, cores, load1,
+  memPercent, memTotalBytes, memUsedBytes}` or `{ok:false, reason, detail}`
+  (`reason` is one of `no_ssh auth host_key unknown_host refused unreachable
+  dropped failed not_linux`; `detail` is ssh's own first line). `400
+  machine_destination_*` for a bad destination, `429 machine_test_busy` while
+  two tests are already running.
+- `GET /api/machines/stream` — SSE, any signed-in account. `data:` frames of
+  `{type:"machines", at, machines:[{id, name, kind, status, reason, metrics}]}`
+  (the first frame at once, then one whenever a reading lands) and
+  `{type:"heartbeat", at}` every 10 s. `status` is `online | connecting |
+  offline | unavailable`; `reason` is a code or null; `metrics` is `{cpuPercent
+  (null until a second reading), cores, load1, memTotalBytes, memUsedBytes,
+  memPercent, at}` or null. No address and no ssh output ever appear in it.
+  Holding the stream open is what makes the server sample: it starts with the
+  first viewer and stops a minute after the last one leaves. `503
+  too_many_viewers` past 64 open streams.
 
 ## `GET /api/engines` — Stable
 
@@ -1153,7 +1238,9 @@ the credential is shared by every user's sessions.
   explains an empty roster (the engine is not installed). `accounts` (an
   engine that can enumerate its own stored credentials, e.g. omp) is
   `[{"id","label","position","state":"serving"|"standby"|"limited"|"disabled","planType","resetsAt","canRemove"}]`;
-  absent, not empty, means the engine cannot enumerate per-account state.
+  an account the user already removed is never listed (only one the engine
+  itself disabled, which is removable like any other); absent, not empty,
+  means the engine cannot enumerate per-account state.
 - `GET /api/auth/login/{provider}` is an SSE stream of the flow: `auth
   {url, instructions, token}` (open the URL), `device_code {userCode,
   verificationUri, expiresInSeconds}` (type the code there), `prompt_request
@@ -1161,12 +1248,22 @@ the credential is shared by every user's sessions.
   `progress {message}`, then `success`, `error {message}` or `cancelled`.
   `POST /api/auth/login/{provider}` with `{"token","code"}` hands the pasted
   value back; a value posted before the engine asks is held for it.
-- `POST /api/auth/logout/{provider}` → `{"ok":true}`; `400 unsupported` for
-  an engine whose only logout is interactive. With a JSON body
+- `POST /api/auth/logout/{provider}` → `{"ok":true,"provider","removed"?,
+  "count"?,"restarted","active"}`; `400 unsupported` for an engine whose only
+  logout is interactive. `removed:false` means nothing was stored for that
+  sign-in (a credential only the server's environment holds cannot be signed
+  out of from here) — never a silent success; `count` is how many stored
+  accounts an engine that can tell signed out. With a JSON body
   `{"accountId"}` it removes just that one stored credential instead of
   every credential for the provider → `{"ok":true,"provider","accountId",
-  "providerRemoved"}`; `404 not_found` when that id no longer exists, `400
+  "providerRemoved","restarted","active"}`; `404 not_found` when that id no
+  longer exists (a stale list — the caller refreshes), `400
   unsupported` for an engine with no per-account removal (only omp has one).
+  On omp a removal DELETES the credential row (omp itself only soft-deletes,
+  leaving the key or token in the store), and every answer above — including
+  the stale-list 404 — has already dropped what Cody cached about the
+  provider and restarted idle engine children (`restarted`; `active` engines
+  are mid-reply and keep the old state until that reply ends).
 
 ## `GET|PUT /api/provider-keys` — Incidental
 
@@ -1175,7 +1272,11 @@ the omp/pi RPC processes and the terminal — as environment variables, so one
 key works the same under every engine. `GET` (any signed-in user) reports the
 catalogue for the active engine with `stored` / `fromEnvironment` flags and
 never a value; `PUT {"name","value"}` (admin) stores one variable from the
-catalogue, and an empty value clears it. Keys live in the instance data dir
+catalogue, and an empty value clears it. A clear also restarts idle engine
+children (their environment carried the key). `409 set_in_environment` —
+`Set in the server's environment — remove it there.` — answers a clear of a
+variable only the server's own environment sets (Cody cannot remove that).
+Keys live in the instance data dir
 (`cody-provider-keys.json`, mode 0600) and therefore survive engine switches
 without touching any engine's own config.
 

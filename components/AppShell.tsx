@@ -22,6 +22,7 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { useSetupStatus } from "@/hooks/useSetupStatus";
 import { useVisualViewportHeight } from "@/hooks/useVisualViewportHeight";
 import { useDeviceTimeZone } from "@/hooks/useDeviceTimeZone";
+import { useDailyLimitTracker } from "@/hooks/useDailyLimit";
 import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
 import { useDisplayRequests } from "@/hooks/useDisplayRequests";
 import { useNotificationPresence } from "@/hooks/useNotificationPresence";
@@ -36,6 +37,8 @@ import type { GitStatusResponse } from "@/lib/git-types";
 import type { ActivityDisplayMode, SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ChatInputHandle } from "./ChatInput";
 import { ProviderIcon } from "./ProviderIcon";
+import { MachineMeters } from "./machines/MachineMeters";
+import { MachinesPanel } from "./machines/MachinesPanel";
 import { providerBrand } from "@/lib/provider-brand";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import { ALL_CAPABILITIES, normalizeCapabilities, type ActiveEngineInfo, type EngineCapabilities, type SettingsTab } from "./SettingsTabs";
@@ -43,6 +46,7 @@ import type { SettingsRequest } from "./SettingsConfig";
 import { SettingsOpenerContext, type SettingsOpenOptions } from "./settings/shell-context";
 import { loadEngineInfo } from "@/lib/engine-capabilities";
 import { forkChatWithFeedback, useForkAvailable } from "@/hooks/useForkChat";
+import { createSideQuestionsBridge, NO_SIDE_QUESTIONS_REQUEST, type SideQuestionsRequest } from "@/hooks/useSideQuestionsBridge";
 import type { EnginesPayload } from "./settings/EngineRoster";
 import { STORAGE_KEYS } from "@/lib/storage-keys";
 import { createPreviewAutoOpener, type PreviewAutoOpener } from "@/lib/preview-autoopen";
@@ -210,6 +214,9 @@ export function AppShell() {
   // Tell the server which time zone this device is in, and again when it
   // changes. AppShell only mounts past the login screen (/login is its own page).
   useDeviceTimeZone();
+  // The daily time limit: loads today's state and, only while it is on, counts
+  // this page's ACTIVE time (visible, focused, real input within 60 s).
+  useDailyLimitTracker();
   const { isDesktop } = useDesktopShell();
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
   // When user clicks +, we only store the cwd — no fake session id
@@ -433,6 +440,7 @@ export function AppShell() {
   const systemBtnRef = useRef<HTMLButtonElement>(null);
   const historyBtnRef = useRef<HTMLButtonElement>(null);
   const sessionStatsBtnRef = useRef<HTMLButtonElement>(null);
+  const machinesBtnRef = useRef<HTMLButtonElement>(null);
 
   const handleSystemPromptChange = useCallback((prompt: string | null) => {
     setSystemPrompt(prompt);
@@ -474,10 +482,10 @@ export function AppShell() {
   }, []);
 
   // Single active panel — only one dropdown open at a time
-  const [activeTopPanel, setActiveTopPanel] = useState<"history" | "branches" | "system" | "session" | null>(null);
+  const [activeTopPanel, setActiveTopPanel] = useState<"history" | "branches" | "system" | "session" | "machines" | null>(null);
   const [topPanelPos, setTopPanelPos] = useState<{ top: number; left: number; width: number } | null>(null);
 
-  const toggleTopPanel = useCallback((panel: "history" | "branches" | "system" | "session") => {
+  const toggleTopPanel = useCallback((panel: "history" | "branches" | "system" | "session" | "machines") => {
     if (isMobile) setSidebarOpen(false);
     setActiveTopPanel((cur) => cur === panel ? null : panel);
   }, [isMobile]);
@@ -587,6 +595,7 @@ export function AppShell() {
       if (systemBtnRef.current?.contains(event.target as Node)) return;
       if (historyBtnRef.current?.contains(event.target as Node)) return;
       if (sessionStatsBtnRef.current?.contains(event.target as Node)) return;
+      if (machinesBtnRef.current?.contains(event.target as Node)) return;
       setActiveTopPanel(null);
     };
     const onKeyDown = (event: KeyboardEvent) => {
@@ -615,6 +624,19 @@ export function AppShell() {
     setMountedPanels((prev) => (prev.has(mode) ? prev : new Set([...prev, mode])));
     try { localStorage.setItem(STORAGE_KEYS.workspacePanel, mode); } catch { /* storage may be unavailable */ }
   }, []);
+  // Side questions (`/btw`) are asked about the main chat and shown in the Side
+  // Bar tab. The chat publishes its state on this bridge and the Side Bar reads
+  // it there, so a streaming answer never re-renders AppShell. A `/btw` typed in
+  // the composer asks for the tab through the request token.
+  const [sideQuestionsBridge] = useState(createSideQuestionsBridge);
+  const [sideQuestionsRequest, setSideQuestionsRequest] = useState<SideQuestionsRequest>(NO_SIDE_QUESTIONS_REQUEST);
+  const handleOpenSideQuestions = useCallback((focus: boolean) => {
+    setSideQuestionsRequest((previous) => ({ token: previous.token + 1, focus }));
+    setRightPanelMode("chat");
+    setRightPanelOpen(true);
+    // On mobile the workspace panel is full-screen; close the drawer so it shows.
+    if (isMobile) setSidebarOpen(false);
+  }, [isMobile, setRightPanelMode]);
   const handleLiveDisplayRequest = useCallback((request: DisplayRequestV1) => {
     // A live request marks its (session, url) pair handled so follow-up prose
     // mentions of the same URL do not re-open a panel the user closed.
@@ -1400,6 +1422,18 @@ export function AppShell() {
             />
           )}
         </button>
+          {/* Live CPU and memory of every machine Cody uses. It owns all the
+              room left between the controls above and the session figures
+              below (and measures it), so the session button simply sits at its
+              right end. */}
+          <MachineMeters
+            ref={machinesBtnRef}
+            isMobile={isMobile}
+            active={activeTopPanel === "machines"}
+            onToggle={() => toggleTopPanel("machines")}
+            followedByStats={showChat && !!(sessionStats || contextUsage)}
+            cornerPad={isMobile ? (rightPanelOpen ? 0 : 44) : rightPanelOpen ? 12 : 48}
+          />
           {/* Session stats — right-aligned in top bar */}
           {showChat && (sessionStats || contextUsage) && (() => {
             const tok = sessionStats?.tokens;
@@ -1478,7 +1512,6 @@ export function AppShell() {
                 aria-label={t("appShell.sessionInfo")}
                 aria-pressed={activeTopPanel === "session"}
                 style={{
-                  marginLeft: "auto",
                   display: "flex", alignItems: "center", justifyContent: "center", gap: 10,
                   paddingLeft: isMobile ? 0 : 12,
                   // Reserve the corner for the always-visible file-panel
@@ -1510,37 +1543,13 @@ export function AppShell() {
                   e.currentTarget.style.color = activeTopPanel === "session" ? "var(--text)" : "var(--text-muted)";
                 }}
               >
-                {isMobile && (
+                {/* A phone's bar is tight: the machine indicator needs those
+                    pixels, and a button that already carries the context
+                    figure does not need an info icon to say it is a button. */}
+                {isMobile && !ctxStr && (
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                     <circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" />
                   </svg>
-                )}
-                {/* Token counts are already compact ("34k"); they hold their
-                    width so a narrow bar spends its shrink on the two figures
-                    below, which know how to ellipsise. */}
-                {!isMobile && tok && tok.input > 0 && (
-                  <span style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
-                    <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
-                      <line x1="5" y1="8.5" x2="5" y2="1.5" /><polyline points="2 4 5 1.5 8 4" />
-                    </svg>
-                    {formatCompactNumber(tok.input)}
-                  </span>
-                )}
-                {!isMobile && tok && tok.output > 0 && (
-                  <span style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
-                    <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
-                      <line x1="5" y1="1.5" x2="5" y2="8.5" /><polyline points="2 6 5 8.5 8 6" />
-                    </svg>
-                    {formatCompactNumber(tok.output)}
-                  </span>
-                )}
-                {!isMobile && tok && tok.cacheRead > 0 && (
-                  <span style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
-                    <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M8.5 5a3.5 3.5 0 1 1-1-2.45" /><polyline points="6.5 1.5 8.5 2.5 7.5 4.5" />
-                    </svg>
-                    {formatCompactNumber(tok.cacheRead)}
-                  </span>
                 )}
                 {/* The last two figures are the ones that meet the right edge,
                     so each carries its own ellipsis. `text-overflow` needs a
@@ -1566,7 +1575,7 @@ export function AppShell() {
               branch panel renders inside BranchNavigator itself; never mount
               an empty fixed layer for it (it would sit over the top-bar
               region and swallow clicks). */}
-          {(activeTopPanel === "history" || activeTopPanel === "system" || activeTopPanel === "session") && topPanelPos && (
+          {(activeTopPanel === "history" || activeTopPanel === "system" || activeTopPanel === "session" || activeTopPanel === "machines") && topPanelPos && (
             <div data-top-panel className="dropdown-surface" style={{
               position: "fixed",
               top: topPanelPos.top,
@@ -1646,6 +1655,15 @@ export function AppShell() {
                     </div>
                   )}
                 </TopPanelSection>
+              )}
+              {activeTopPanel === "machines" && (
+                <MachinesPanel
+                  isMobile={isMobile}
+                  onManage={() => {
+                    setActiveTopPanel(null);
+                    openSettings("system", { highlight: "machines" });
+                  }}
+                />
               )}
               {activeTopPanel === "session" && (
                 <div className="session-info-popover" style={{
@@ -1944,6 +1962,8 @@ export function AppShell() {
               engine={activeEngine}
               activityDisplayMode={activityDisplayMode}
               thinkingDefaultExpanded={thinkingDefaultExpanded}
+              sideQuestionsBridge={sideQuestionsBridge}
+              onOpenSideQuestions={handleOpenSideQuestions}
             />
           ) : initialCwdStatus === "validating" ? (
             <div
@@ -2147,7 +2167,15 @@ export function AppShell() {
           {/* The sidebar reads context on demand, so it needs to know which
               main chat "this session" means: its picker follows this id until
               the user points it somewhere else. */}
-          {mountedPanels.has("chat") && <SidebarChatPanel cwd={activeCwd || "."} active={rightPanelMode === "chat"} mainSessionId={selectedSession?.id ?? null} />}
+          {mountedPanels.has("chat") && (
+            <SidebarChatPanel
+              cwd={activeCwd || "."}
+              active={rightPanelMode === "chat"}
+              mainSessionId={selectedSession?.id ?? null}
+              sideQuestionsBridge={sideQuestionsBridge}
+              sideQuestionsRequest={sideQuestionsRequest}
+            />
+          )}
         </div>
 
         <div

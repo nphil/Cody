@@ -16,6 +16,7 @@ const SUITES = [
   "lib/forge/*.test.mjs",
   "lib/harness/*.test.mjs",
   "lib/i18n/*.test.mjs",
+  "lib/machines/*.test.mjs",
   "lib/model-plan/*.test.mjs",
   "lib/notifications/*.test.mjs",
   "lib/omp/*.test.mjs",

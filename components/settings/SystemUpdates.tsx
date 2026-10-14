@@ -9,6 +9,7 @@ import { translate, useI18n } from "@/lib/i18n";
 import type { EngineCapabilities } from "../SettingsTabs";
 import { actionButtonStyle, cardStyle, cardTitleStyle, CommandCard, dimLineStyle, ENGINE_UPDATES_ROUTE, ENGINES_ROUTE, EngineRoster, LoadingLine, mutedLineStyle, Spinner, VersionDelta, type EnginesPayload } from "./EngineRoster";
 import { SettingsHighlightContext } from "./primitives";
+import { MachinesSection } from "./MachinesSection";
 
 /**
  * Settings › System: the Cody card (this instance's version and how it
@@ -215,6 +216,9 @@ export function SystemUpdates({ capabilities, onOmpUpdateAvailabilityChange }: {
           </a>
         )}
       </section>
+
+      {/* ── Machines in the top bar ──────────────────────────────────── */}
+      <MachinesSection />
 
       {/* ── Agent engines + Danger zone ──────────────────────────────── */}
       <EngineRoster mode="manage" capabilities={capabilities} checkSeq={checkSeq} onOmpUpdateAvailabilityChange={onOmpUpdateAvailabilityChange} />

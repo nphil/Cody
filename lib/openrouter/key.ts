@@ -51,6 +51,12 @@ export interface ResolvedOpenRouterKey {
  * is swallowed: an absent file, a schema that moved, a WAL mid-write and a
  * build without `node:sqlite` must all degrade to "no engine key", never to a
  * broken usage meter.
+ *
+ * ACTIVE rows only (`disabled_cause IS NULL`). omp's remove only soft-deletes:
+ * the "deleted by user" row keeps the old key. Without this filter a key the
+ * user removed was still found, so Cody kept reading that account's balance
+ * and spend, kept an "out of credits" blackout alive for it, and the
+ * OpenRouter row in Usage never went away.
  */
 function readEngineKey(): string | null {
   const file = path.join(getAgentDir(), "agent.db");
@@ -59,7 +65,7 @@ function readEngineKey(): string | null {
   try {
     db = new DatabaseSync(file, { readOnly: true });
     const row: unknown = db
-      .prepare("SELECT data FROM auth_credentials WHERE provider = ? AND credential_type = 'api_key' LIMIT 1")
+      .prepare("SELECT data FROM auth_credentials WHERE provider = ? AND credential_type = 'api_key' AND disabled_cause IS NULL ORDER BY id ASC LIMIT 1")
       .get("openrouter");
     if (!isRecord(row)) return null;
     const data = asString(row.data);

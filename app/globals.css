@@ -2113,6 +2113,80 @@ span.linenumber {
   }
 }
 
+/* Machine meters in the top bar (components/machines/MachineMeters.tsx). One
+   button holds a chip per machine: its name beside a CPU bar and a memory bar.
+   How much of each chip is drawn (`data-density`) is chosen in JS from the room
+   the bar really has, using the widths in METER_LAYOUT
+   (lib/machines/present.ts): change a width here, change it there. Colours are
+   tokens; each fill's colour is set inline from the shared usage thresholds
+   (accent, warning from 70, error from 90). */
+.mm-button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 100%;
+  max-width: 100%;
+  min-width: 0;
+  padding: 0 6px;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+  overflow: hidden;
+  font-variant-numeric: tabular-nums;
+  transition: color var(--dur-fast) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm);
+}
+.mm-button:hover { background: var(--bg-hover); color: var(--text); }
+.mm-button[aria-pressed="true"] { background: var(--bg-selected); color: var(--text); }
+/* What is shown is the last thing heard, not live (page hidden, stream down). */
+.mm-button[data-live="false"] .mm-chip { opacity: 0.5; }
+.mm-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  transition: opacity var(--dur-med) var(--ease-out-warm);
+}
+.mm-name { max-width: 84px; overflow: hidden; text-overflow: ellipsis; font-weight: 600; color: var(--text); }
+.mm-button[data-density="compact"] .mm-name { max-width: 64px; }
+.mm-chip[data-status="offline"] .mm-name { color: var(--text-muted); }
+.mm-rows { display: flex; flex-direction: column; gap: 2px; }
+.mm-row { display: grid; align-items: center; column-gap: 4px; height: 12px; line-height: 12px; }
+.mm-button[data-density="full"] .mm-row { grid-template-columns: 22px 34px 28px; }
+.mm-button[data-density="compact"] .mm-row { grid-template-columns: 10px 28px 28px; }
+.mm-label { font-size: 9px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-dim); }
+.mm-icon { display: block; color: var(--text-dim); }
+.mm-track { display: block; height: 4px; border-radius: 2px; background: var(--bg-selected); overflow: hidden; }
+.mm-fill { display: block; height: 100%; border-radius: 2px; transition: width 600ms var(--ease-out-warm), background-color 300ms var(--ease-out-warm); }
+.mm-value { text-align: right; font-size: 10.5px; color: var(--text-muted); }
+.mm-note { display: inline-flex; align-items: center; gap: 4px; color: var(--text-dim); }
+.mm-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  border-radius: 4px;
+  background: var(--bg-selected);
+  color: var(--text);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+}
+.mm-chip[data-status="offline"] .mm-badge { background: none; box-shadow: inset 0 0 0 1px var(--status-error); color: var(--status-error); }
+.mm-bars { display: flex; flex-direction: column; gap: 2px; width: 18px; }
+.mm-button[data-single="true"] .mm-bars { width: 28px; }
+/* The slim chips and the lone indicator are also the tightest buttons:
+   METER_LAYOUT.mini and .dot. */
+.mm-button[data-density="mini"] { gap: 8px; padding: 0 4px; }
+.mm-button[data-density="dot"] { padding: 0 4px; }
+.mm-button[data-density="mini"] .mm-chip { gap: 4px; }
+@media (prefers-reduced-motion: reduce) {
+  .mm-fill, .mm-chip { transition: none; }
+}
+
 /* Collapsible "Process details" row: quiet when collapsed, subtle hover,
    small chevron that flips when expanded. */
 .process-details-toggle {
@@ -3658,7 +3732,7 @@ span.linenumber {
   .dv-sheet { animation: none; }
 }
 
-/* Scheduled send (components/SendPill.tsx, ScheduleMenu.tsx, ScheduledRows.tsx).
+/* Scheduled send (components/SendPill.tsx, ScheduleMenu.tsx, ScheduledBar.tsx).
    The Send pill is one rounded shape with two buttons in it; its hover and
    focus are drawn from the text colour (`currentColor`), because the pill is
    accent-filled when there is something to send and plain when there is not,

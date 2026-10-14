@@ -67,7 +67,9 @@ import { QuotaPopover, buildQuotaView, isPrepaidProvider, modelLimitReached } fr
 import { usageProviderFor } from "@/lib/usage/provider-map";
 import { useScheduledMessages } from "@/hooks/useScheduledMessages";
 import { SendPill } from "./SendPill";
-import { ScheduledRows } from "./ScheduledRows";
+import { ScheduledBar } from "./ScheduledBar";
+import { DailyLimitNotice } from "./DailyLimitNotice";
+import { DailyLimitRing } from "./DailyLimitRing";
 import type { ScheduleChoice } from "./ScheduleMenu";
 import type { ScheduledItemView } from "@/lib/scheduled/types";
 import { scheduleBlock, scheduleErrorMessage, type QuotaResetSource } from "@/lib/scheduled/ui";
@@ -174,8 +176,9 @@ interface Props {
     to: string;
     role?: string;
     reason?: string;
-    /** Classified reason; decides which sentence the detail toast uses. */
-    reasonKind?: "refusal" | "usage" | null;
+    /** Classified reason; decides which sentence the detail toast uses.
+     * "credits": the Claude plan hit its limit and the API credits took over. */
+    reasonKind?: "refusal" | "usage" | "credits" | null;
     job?: { kind: "main" | "subagent"; subagentId?: string; agent?: string; roleLabelKey: string };
   } | null;
   /** RPC-dialect engines can queue a safe model switch while a turn is running. */
@@ -245,7 +248,7 @@ interface Props {
    * a message. Present only for an engine that owns the command: any other
    * engine receives the text untouched. Resolves `ok` when the engine took the
    * question; a refusal comes back in plain words and the composer keeps the
-   * draft. An empty question opens the side-question panel instead.
+   * draft. An empty question brings up the Side Bar's side-question view instead.
    */
   onSideQuestion?: (question: string) => Promise<{ ok: true } | { ok: false; message: string }>;
   /** Side questions can be asked right now: the slash palette offers /btw, mid-run too. */
@@ -2264,16 +2267,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   // re-pick the model by hand instead of pointing at a healthy quota.
   const autoSwitchDetail = autoModelSwitch == null
     ? null
-    : autoModelSwitch.reasonKind === "refusal"
-      ? t("chatInput.autoSwitchDetailRefusal", { job: autoSwitchJob, from: autoModelSwitch.from, to: autoModelSwitch.to })
-      : autoModelSwitch.reasonKind === "usage"
-        ? t("chatInput.autoSwitchDetailUsage", { job: autoSwitchJob, from: autoModelSwitch.from, to: autoModelSwitch.to })
-        : t("chatInput.autoSwitchDetail", {
-            job: autoSwitchJob,
-            from: autoModelSwitch.from,
-            reason: autoModelSwitch.reason ?? t("chatInput.autoSwitchUnknownReason"),
-            to: autoModelSwitch.to,
-          });
+    : autoModelSwitch.reasonKind === "credits"
+      ? t("chatInput.autoSwitchDetailCredits")
+      : autoModelSwitch.reasonKind === "refusal"
+        ? t("chatInput.autoSwitchDetailRefusal", { job: autoSwitchJob, from: autoModelSwitch.from, to: autoModelSwitch.to })
+        : autoModelSwitch.reasonKind === "usage"
+          ? t("chatInput.autoSwitchDetailUsage", { job: autoSwitchJob, from: autoModelSwitch.from, to: autoModelSwitch.to })
+          : t("chatInput.autoSwitchDetail", {
+              job: autoSwitchJob,
+              from: autoModelSwitch.from,
+              reason: autoModelSwitch.reason ?? t("chatInput.autoSwitchUnknownReason"),
+              to: autoModelSwitch.to,
+            });
 
   // Smart row on a LIVE session: there is no "auto" runtime state to fall
   // back into (the session already has a resolved model), so this reaches
@@ -2508,12 +2513,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const scheduleQuotaSource: QuotaResetSource | null = quota.known
     ? { known: true, provider: quota.provider, resetsAt: quota.resetsAt, accounts: quota.accounts }
     : null;
-  // The scheduled rows sit under the waiting strip, the outbox rows and the
-  // failed-preparation rows; only the topmost row of the whole stack rounds its
-  // corners, so they do when nothing is above them.
-  const scheduledRoundTop = !(turnWaiting && !outbox.some((entry) => entry.status === "queued"))
-    && !outbox.some((entry) => entry.status !== "delivered")
-    && failedPreparations.length === 0;
 
   return (
     <div
@@ -3014,6 +3013,20 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               </div>
             );
           })()}
+        {/* Daily time limit, once it is spent: a calm bar above the stack with
+            "Add 15 minutes" and "Done for today". Draws nothing unless due, and
+            never blocks a send or stops a run. */}
+        <DailyLimitNotice />
+        {/* Scheduled messages — one slim bar above the whole stack, so the
+            waiting/outbox rows below it still sit flush on the input. */}
+        <ScheduledBar
+          items={scheduled.items}
+          busy={scheduled.busy}
+          isMobile={isMobile}
+          onEdit={handleScheduledEdit}
+          onSendNow={handleScheduledSendNow}
+          onCancel={handleScheduledCancel}
+        />
         {/* Waiting strip — shown when the engine cannot take anything until
             the current turn ends and nothing is queued yet. Visible even once
             the user has typed, which the placeholder alone would not be. */}
@@ -3155,15 +3168,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             </div>
           );
         })}
-        <ScheduledRows
-          items={scheduled.items}
-          busy={scheduled.busy}
-          roundTop={scheduledRoundTop}
-          isMobile={isMobile}
-          onEdit={handleScheduledEdit}
-          onSendNow={handleScheduledSendNow}
-          onCancel={handleScheduledCancel}
-        />
         <div
             className="chat-input-shell"
             style={{
@@ -3864,6 +3868,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             {/* Pushes the gauge and Send right on a wide toolbar; on a phone
                 the model selector is the one that takes the slack instead. */}
             <div style={{ flex: isMobile ? "0 0 0px" : 1 }} />
+            {/* Daily time limit: one circle that fills like liquid as the day's
+                active time is used, as tall as the Send/Stop pill. Draws nothing
+                while the limit is off. On a phone it is one more 38px box on the
+                row, counted by phoneBudget() (`timer`). */}
+            <DailyLimitRing isMobile={isMobile} />
 
             {/* Icon-only plan-quota gauge. The arc tracks the binding quota
                 window; context usage lives in the top bar and, in detail,

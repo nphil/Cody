@@ -24,7 +24,8 @@ export interface OmpCredentialRow {
   pinHash: string | null;
 }
 export interface OmpCredentialsSnapshot { available: boolean; credentials: OmpCredentialRow[]; reason?: string; }
-export interface OmpCredentialRemoval { removed: boolean; providerRemoved: boolean; code?: string; message?: string; }
+/** `count` (provider-wide removal only): how many stored accounts that signed out. */
+export interface OmpCredentialRemoval { removed: boolean; providerRemoved: boolean; count?: number; code?: string; message?: string; }
 
 interface ListRequest { operation: "list"; packageRoot: string; agentDir: string }
 interface RemoveRequest { operation: "remove"; packageRoot: string; agentDir: string; provider: string; credentialId: number }
@@ -110,7 +111,8 @@ function normalizeRemoval(frame: Record<string, unknown> | null, expectedType: "
   if (frame.ok !== true) return { removed: false, providerRemoved: false, code: safeString(frame.code) ?? "unsupported", message: safeString(frame.message) ?? "Account removal is unavailable." };
   const removed = frame.removed === true;
   const providerRemoved = expectedType === "remove_provider" ? removed : frame.providerRemoved === true;
-  return { removed, providerRemoved };
+  const count = expectedType === "remove_provider" && typeof frame.count === "number" && Number.isSafeInteger(frame.count) && frame.count >= 0 ? frame.count : undefined;
+  return { removed, providerRemoved, ...(count !== undefined ? { count } : {}) };
 }
 
 export async function listOmpCredentials(deps: OmpCredentialBridgeDeps = {}): Promise<OmpCredentialsSnapshot> {

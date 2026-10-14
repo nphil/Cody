@@ -28,6 +28,7 @@ import { useModelCatalog } from "@/hooks/useModelCatalog";
 import { useSettingsRoute } from "@/hooks/useSettingsData";
 import { useUsage } from "@/hooks/useUsage";
 import type { ProviderLoginAccount } from "@/lib/harness/types";
+import { useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { providerGlob } from "@/lib/model-allow-list";
 import { omitUntouchedModelDrafts } from "@/lib/models-config-drafts";
@@ -41,11 +42,12 @@ import { DangerZone } from "../DangerZone";
 import { Drawer } from "../Drawer";
 import { ModelCurationDialog } from "../models/ModelCurationDialog";
 import { chipStyle, nativeInputStyle, ToggleSwitch } from "../primitives";
-import { ProviderLoginFlow, type ProviderLoginRow } from "../ProviderLoginFlow";
+import { activeChatNote, postLogout, ProviderLoginFlow, type ProviderLoginRow } from "../ProviderLoginFlow";
 import { useSaveStatus } from "../SaveStatus";
 import { useSettingsShell } from "../shell-context";
 import { buttonStyle, cardStyle, dangerButtonStyle, describeModels, describeWinning, invalidateProviderReads, missingOptionalHint, pluralModels, primaryButtonStyle, ProviderTile, quietButtonStyle, sectionTitleStyle } from "./controls";
 import { OpenRouterCreditsSection, OpenRouterKeyLimitsSection, OpenRouterRoutingSection } from "./OpenRouterSettings";
+import { ClaudeCreditsSection } from "./ClaudeCreditsSection";
 
 export const PROVIDERS_PANEL_ID = "providers";
 
@@ -164,6 +166,7 @@ export function LoginMethodCard({ row, method, canEdit, shortName, autoStart, on
    * account row exactly as it did before per-account usage existed. */
   usageAccounts?: readonly UsageAccount[];
 }) {
+  const { t } = useI18n();
   const [expanded, setExpanded] = useState(autoStart);
   const [starting, setStarting] = useState(autoStart);
   const [logoutError, setLogoutError] = useState<string | null>(null);
@@ -181,20 +184,18 @@ export function LoginMethodCard({ row, method, canEdit, shortName, autoStart, on
   const logout = async () => {
     setLogoutError(null);
     setLoggingOut(true);
-    try {
-      const response = await fetch(`/api/auth/logout/${encodeURIComponent(provider.id)}`, { method: "POST" });
-      const body = await response.json().catch(() => null) as { error?: string; code?: string } | null;
-      if (!response.ok) {
-        setLogoutError(body?.error || body?.code ? formatApiError(body ?? {}) : `HTTP ${response.status}`);
-        return;
-      }
-      setExpanded(false);
-      onChanged();
-    } catch (failure) {
-      setLogoutError(failure instanceof Error ? failure.message : String(failure));
-    } finally {
-      setLoggingOut(false);
+    const answer = await postLogout(provider.id);
+    setLoggingOut(false);
+    if (!answer.ok && !answer.notFound) {
+      setLogoutError(answer.message);
+      toast.error(t("providerRemoval.signOutFailed", { name: provider.name }), answer.message);
+      return;
     }
+    if (!answer.ok) toast.info(t("providerRemoval.alreadyRemoved"), t("providerRemoval.alreadyGoneSignIn"));
+    else if (answer.removed) toast.success(t("providerRemoval.signedOut", { name: provider.name }), activeChatNote(answer.active, t));
+    else toast.info(t("providerRemoval.nothingToRemove"), t("providerRemoval.nothingSaved", { name: provider.name }));
+    setExpanded(false);
+    onChanged();
   };
 
   const removeAccount = async (account: ProviderLoginAccount) => {
@@ -202,25 +203,23 @@ export function LoginMethodCard({ row, method, canEdit, shortName, autoStart, on
     removingRef.current = true;
     setRemovingId(account.id);
     setRemoveError(null);
-    try {
-      const response = await fetch(`/api/auth/logout/${encodeURIComponent(provider.id)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ accountId: account.id }),
-      });
-      const body = await response.json().catch(() => null) as { error?: string; code?: string } | null;
-      if (!response.ok) {
-        setRemoveError(body?.error || body?.code ? formatApiError(body ?? {}) : `HTTP ${response.status}`);
-        return;
-      }
-      setRemoveTarget(null);
-      onChanged();
-    } catch (failure) {
-      setRemoveError(failure instanceof Error ? failure.message : String(failure));
-    } finally {
-      removingRef.current = false;
-      setRemovingId(null);
+    const answer = await postLogout(provider.id, account.id);
+    removingRef.current = false;
+    setRemovingId(null);
+    if (!answer.ok && !answer.notFound) {
+      setRemoveError(answer.message);
+      toast.error(t("providerRemoval.removeFailed", { name: account.label }), answer.message);
+      return;
     }
+    if (!answer.ok) {
+      // A stale list: the account is already gone. Refresh instead of alarming.
+      toast.info(t("providerRemoval.alreadyRemoved"), t("providerRemoval.alreadyGoneAccount"));
+    } else {
+      const detail = [answer.providerRemoved ? t("providerRemoval.providerSignedOut", { name: row.name }) : null, activeChatNote(answer.active, t)].filter(Boolean).join(" ");
+      toast.success(t("providerRemoval.removedTitle", { name: account.label }), detail || undefined);
+    }
+    setRemoveTarget(null);
+    onChanged();
   };
 
   return (
@@ -280,6 +279,10 @@ export function LoginMethodCard({ row, method, canEdit, shortName, autoStart, on
         <p style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.45 }}>
           {shortName} rotates between these accounts automatically and skips a limited one until it resets.
         </p>
+      ) : connected && accounts.length === 0 ? (
+        <p style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.45 }}>
+          {t("providerRemoval.notStoredNote", { shortName })}
+        </p>
       ) : null}
       {logoutError && <ErrorLine>{logoutError}</ErrorLine>}
       {removeError && <ErrorLine>{removeError}</ErrorLine>}
@@ -328,26 +331,32 @@ function VariableRow({ variable, stored, canEdit, onWritten, onSaved }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedTick, setSavedTick] = useState(false);
+  const { t } = useI18n();
   const inputId = `provider-key-${variable.name}`;
 
   const submit = async (value: string) => {
+    const clearing = value.trim().length === 0;
     setBusy(true);
     setError(null);
     try {
       await putProviderKey(variable.name, value);
       setDraft("");
-      onWritten(value.trim().length > 0);
+      onWritten(!clearing);
       setSavedTick(true);
       setTimeout(() => setSavedTick(false), 1800);
+      if (clearing) toast.success(t("providerRemoval.cleared", { name: variable.name }), variable.fromEnvironment ? t("providerRemoval.clearedUsesServer") : undefined);
       onSaved();
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : String(failure));
+      // A 409 `set_in_environment` lands here too, with the server's words.
+      const message = failure instanceof Error ? failure.message : String(failure);
+      setError(message);
+      toast.error(t(clearing ? "providerRemoval.clearFailed" : "providerRemoval.saveFailed", { name: variable.name }), message);
     } finally {
       setBusy(false);
     }
   };
 
-  const status = stored ? "Saved in Cody" : variable.fromEnvironment ? "Set on the container" : "Not set";
+  const status = stored ? "Saved in Cody" : variable.fromEnvironment ? t("providerRemoval.statusServer") : "Not set";
   const present = stored || variable.fromEnvironment;
 
   return (
@@ -383,6 +392,9 @@ function VariableRow({ variable, stored, canEdit, onWritten, onSaved }: {
       </div>
       {stored && variable.fromEnvironment && (
         <span style={{ fontSize: 11, color: "var(--text-dim)" }}>Saved in Cody overrides the container value.</span>
+      )}
+      {!stored && variable.fromEnvironment && (
+        <span style={{ fontSize: 11, color: "var(--text-dim)" }}>{t("providerRemoval.removeItThere")}</span>
       )}
       {error && <ErrorLine>{error}</ErrorLine>}
     </div>
@@ -759,6 +771,186 @@ function AdvancedForm({ row, onDirtyChange, onSaved }: {
   );
 }
 
+// ── Removing a whole provider ───────────────────────────────────────────────
+
+/** Everything "Remove" would take off one provider row, worked out from the
+ * row alone so the button, its confirmation and the toasts all say the same. */
+export interface RemovalPlan {
+  name: string;
+  modelCount: number;
+  /** Sign-ins to sign out of: holding stored accounts, or connected with a
+   * sign-out Cody can drive. */
+  logins: { loginId: string; name: string; accounts: number }[];
+  accountCount: number;
+  /** Key variables saved in Cody. */
+  storedNames: string[];
+  /** A custom endpoint declared in models.yml. */
+  custom: boolean;
+  /** Variables the server's own environment sets: Cody cannot clear these. */
+  environmentNames: string[];
+  /** There is something Cody can remove. */
+  removable: boolean;
+}
+
+export function planRemoval(row: ProviderRow): RemovalPlan {
+  const logins = row.methods.flatMap((method) => {
+    if (!method.loginId) return [];
+    const accounts = method.accounts?.length ?? 0;
+    if (accounts === 0 && !(method.state === "connected" && method.canLogout)) return [];
+    return [{ loginId: method.loginId, name: method.name ?? method.loginId, accounts }];
+  });
+  const variables = row.methods.flatMap((method) => method.variables ?? []);
+  const storedNames = [...new Set(variables.filter((variable) => variable.stored).map((variable) => variable.name))];
+  const environmentNames = [...new Set(variables.filter((variable) => variable.fromEnvironment).map((variable) => variable.name))];
+  const custom = row.methods.some((method) => method.kind === "custom");
+  return {
+    name: row.name,
+    modelCount: row.modelCount ?? 0,
+    logins,
+    accountCount: logins.reduce((sum, login) => sum + login.accounts, 0),
+    storedNames,
+    custom,
+    environmentNames,
+    removable: logins.length > 0 || storedNames.length > 0 || custom,
+  };
+}
+
+/** `useI18n()`'s translators, as the pure helpers below take them so they
+ * run without React. */
+export type Translate = (key: string, vars?: Record<string, string | number>) => string;
+export type TranslatePlural = (key: string, count: number, vars?: Record<string, string | number>) => string;
+
+/** The consequence of Remove in short plain sentences, e.g. "This signs you
+ * out of 2 Claude accounts. This forgets the key Cody saved: OPENROUTER_API_KEY.
+ * Something set on the server itself stays. Remove it there." Empty when
+ * nothing is removable. */
+export function describeRemoval(plan: RemovalPlan, t: Translate, tn: TranslatePlural): string {
+  const sentences = [
+    ...plan.logins.map((login) => (login.accounts > 0
+      ? tn("providerRemoval.signOutAccounts", login.accounts, { name: login.name })
+      : t("providerRemoval.signOutLogin", { name: login.name }))),
+    ...(plan.storedNames.length > 0
+      ? [tn("providerRemoval.forgetKeys", plan.storedNames.length, { names: plan.storedNames.join(t("providerRemoval.listJoin")) })]
+      : []),
+    ...(plan.custom ? [tn("providerRemoval.removeEndpoint", plan.modelCount, { name: plan.name })] : []),
+  ];
+  if (sentences.length === 0) return "";
+  if (plan.environmentNames.length > 0) sentences.push(t("providerRemoval.serverLeftover"));
+  return sentences.join(" ");
+}
+
+/** The server's environment is the only thing left to remove: Cody can only
+ * offer Disable. */
+export function isEnvironmentOnly(plan: RemovalPlan): boolean {
+  return !plan.removable && plan.environmentNames.length > 0;
+}
+
+/** The network calls Remove makes, injected so the order and the stop-at-
+ * the-first-failure rule can be tested without a server. */
+export interface RemovalSteps {
+  signOut: (loginId: string) => Promise<{ removed: boolean; active: number }>;
+  clearKey: (name: string) => Promise<void>;
+  deleteEndpoint: () => Promise<void>;
+}
+
+export interface RemovalOutcome {
+  /** What was actually taken off, in plain words, in the order it happened. */
+  done: string[];
+  /** The first step that failed, in plain words; the rest were not tried. */
+  failure: string | null;
+  /** Chats mid-reply that keep the old state until that reply ends. */
+  active: number;
+  /** Variables still set in the server's environment. */
+  leftover: string[];
+}
+
+const reasonOf = (failure: unknown) => (failure instanceof Error ? failure.message : String(failure));
+
+/** Sign-ins first, then saved keys, then the custom endpoint; stops at the
+ * first failure so the report says exactly what was and was not removed. */
+export async function runRemoval(plan: RemovalPlan, steps: RemovalSteps, t: Translate): Promise<RemovalOutcome> {
+  const done: string[] = [];
+  let active = 0;
+  const outcome = (failure: string | null): RemovalOutcome => ({ done, failure, active, leftover: plan.environmentNames });
+  for (const login of plan.logins) {
+    try {
+      const answer = await steps.signOut(login.loginId);
+      active = Math.max(active, answer.active);
+      if (answer.removed) done.push(t("providerRemoval.doneSignedOut", { name: login.name }));
+    } catch (failure) {
+      return outcome(t("providerRemoval.failSignOut", { name: login.name, reason: reasonOf(failure) }));
+    }
+  }
+  for (const name of plan.storedNames) {
+    try {
+      await steps.clearKey(name);
+      done.push(t("providerRemoval.doneForgot", { name }));
+    } catch (failure) {
+      return outcome(t("providerRemoval.failForget", { name, reason: reasonOf(failure) }));
+    }
+  }
+  if (plan.custom) {
+    try {
+      await steps.deleteEndpoint();
+      done.push(t("providerRemoval.doneRemoved", { name: plan.name }));
+    } catch (failure) {
+      return outcome(t("providerRemoval.failRemove", { name: plan.name, reason: reasonOf(failure) }));
+    }
+  }
+  return outcome(null);
+}
+
+export interface RemovalReport {
+  kind: "removed" | "nothing" | "failed";
+  title: string;
+  description?: string;
+  /** Close the drawer: everything is gone and nothing lingers. */
+  close: boolean;
+}
+
+/** The toast for a finished `runRemoval`. */
+export function reportRemoval(outcome: RemovalOutcome, name: string, t: Translate, tn: TranslatePlural): RemovalReport {
+  if (outcome.failure) {
+    const partial = outcome.done.length > 0;
+    return {
+      kind: "failed",
+      title: t(partial ? "providerRemoval.partlyRemoved" : "providerRemoval.removeFailed", { name }),
+      description: [
+        outcome.failure,
+        partial ? t("providerRemoval.doneSoFar", { list: outcome.done.join(t("providerRemoval.listJoin")) }) : t("providerRemoval.nothingRemoved"),
+        t("providerRemoval.restUntouched"),
+      ].join(" "),
+      close: false,
+    };
+  }
+  const leftover = outcome.leftover.length > 0
+    ? tn("providerRemoval.stillOnServer", outcome.leftover.length, { names: outcome.leftover.join(t("providerRemoval.listJoin")) })
+    : null;
+  const description = [leftover, activeChatNote(outcome.active, t)].filter(Boolean).join(" ");
+  if (outcome.done.length === 0) {
+    return {
+      kind: "nothing",
+      title: t("providerRemoval.nothingToRemove"),
+      description: [t("providerRemoval.nothingSaved", { name }), description].filter(Boolean).join(" "),
+      close: false,
+    };
+  }
+  return { kind: "removed", title: t("providerRemoval.removedTitle", { name }), ...(description ? { description } : {}), close: leftover === null };
+}
+
+/** Deletes one custom endpoint from the saved list; refuses to write if the
+ * list could not be read, so a failed read can never wipe the other endpoints. */
+async function deleteCustomEndpoint(id: string, t: Translate): Promise<void> {
+  const read = await fetch("/api/models-config");
+  if (!read.ok) throw new Error(t("providerRemoval.readFailed", { status: read.status }));
+  const current = await read.json().catch(() => null) as { providers?: Record<string, unknown> } | null;
+  const providers = { ...(current?.providers ?? {}) };
+  delete providers[id];
+  const response = await fetch("/api/models-config", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ providers }) });
+  const body = await response.json().catch(() => null) as { error?: string } | null;
+  if (!response.ok || body?.error) throw new Error(body?.error || `HTTP ${response.status}`);
+}
+
 // ── The drawer ──────────────────────────────────────────────────────────────
 
 export interface ProviderDetailProps {
@@ -774,6 +966,7 @@ export interface ProviderDetailProps {
 
 export function ProviderDetail({ row, response, open, onClose, initialLoginId = null, autoStart = false, onChanged }: ProviderDetailProps) {
   const { capabilities, engine } = useSettingsShell();
+  const { t, tn } = useI18n();
   const shortName = response.engine.shortName;
   const canEdit = response.canEdit;
   const readOnly = response.instanceSource === "readonly";
@@ -803,7 +996,6 @@ export function ProviderDetail({ row, response, open, onClose, initialLoginId = 
   const status = describeWinning(row, shortName);
   const models = describeModels(row);
   const hint = missingOptionalHint(row);
-  const storedVariables = (keyMethod?.variables ?? []).filter((variable) => variable.stored);
   const showCuration = engine?.id === "omp" && capabilities.models && capabilities.configEditor && row.connected && !custom
     && ((row.modelCount ?? 0) > CURATION_THRESHOLD || row.group === "gateway" || row.group === "local");
   // Disabling writes omp's own `disabledProviders`, the counterpart of the
@@ -829,8 +1021,11 @@ export function ProviderDetail({ row, response, open, onClose, initialLoginId = 
         if (!response.ok || body?.error) throw new Error(body?.error || `HTTP ${response.status}`);
       }
       changed();
+      toast.success(t("providerRemoval.enabled", { name: row.name }));
     } catch (failure) {
-      setActionError(failure instanceof Error ? failure.message : String(failure));
+      const message = failure instanceof Error ? failure.message : String(failure);
+      setActionError(message);
+      toast.error(t("providerRemoval.enableFailed", { name: row.name }), message);
     }
   };
 
@@ -842,35 +1037,46 @@ export function ProviderDetail({ row, response, open, onClose, initialLoginId = 
       const next = [...new Set([...current, ...row.orderIds])];
       await nativeSettings.patchTop({ disabledProviders: next });
       changed();
+      toast.success(t("providerRemoval.disabled", { name: row.name }), t("providerRemoval.disabledNote"), { action: { label: t("providerRemoval.undo"), onClick: () => { void enable(); } } });
     } catch (failure) {
-      setActionError(failure instanceof Error ? failure.message : String(failure));
+      const message = failure instanceof Error ? failure.message : String(failure);
+      setActionError(message);
+      toast.error(t("providerRemoval.disableFailed", { name: row.name }), message);
     } finally {
       setDisabling(false);
     }
   };
 
+  const plan = planRemoval(row);
+
   const remove = async () => {
     setRemoving(true);
     setActionError(null);
-    try {
-      if (custom) {
-        const current = await fetch("/api/models-config").then((r) => (r.ok ? r.json() : null)) as { providers?: Record<string, unknown> } | null;
-        const providers = { ...(current?.providers ?? {}) };
-        delete providers[row.id];
-        const response = await fetch("/api/models-config", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ providers }) });
-        const body = await response.json().catch(() => null) as { error?: string } | null;
-        if (!response.ok || body?.error) throw new Error(body?.error || `HTTP ${response.status}`);
-      }
-      for (const variable of storedVariables) await putProviderKey(variable.name, "");
-      setRemoveOpen(false);
-      changed();
-      toast.success(`${row.name} removed`);
-      onClose();
-    } catch (failure) {
-      setActionError(failure instanceof Error ? failure.message : String(failure));
-    } finally {
-      setRemoving(false);
+    const outcome = await runRemoval(plan, {
+      signOut: async (loginId) => {
+        const answer = await postLogout(loginId);
+        // Not found: that sign-in is already gone, so there is nothing to undo.
+        if (!answer.ok && answer.notFound) return { removed: false, active: 0 };
+        if (!answer.ok) throw new Error(answer.message);
+        return { removed: answer.removed, active: answer.active };
+      },
+      clearKey: (name) => putProviderKey(name, ""),
+      deleteEndpoint: () => deleteCustomEndpoint(row.id, t),
+    }, t);
+    const report = reportRemoval(outcome, row.name, t, tn);
+    setRemoving(false);
+    setRemoveOpen(false);
+    // Even a half-finished removal changed something: re-read either way.
+    if (outcome.done.length > 0 || !outcome.failure) changed();
+    if (report.kind === "failed") {
+      setActionError(`${report.title}. ${report.description ?? ""}`.trim());
+      toast.error(report.title, report.description);
+    } else if (report.kind === "nothing") {
+      toast.info(report.title, report.description);
+    } else {
+      toast.success(report.title, report.description);
     }
+    if (report.close) onClose();
   };
 
   const dangerRows = [
@@ -886,17 +1092,22 @@ export function ProviderDetail({ row, response, open, onClose, initialLoginId = 
         ),
       }]
       : []),
-    ...(canEdit && (custom || storedVariables.length > 0)
+    ...(canEdit && plan.removable
       ? [{
-        title: custom ? `Remove ${row.name}` : `Clear the saved ${storedVariables.length === 1 ? "key" : "keys"}`,
-        description: custom
-          ? `Deletes ${row.name} and its ${pluralModels(row.modelCount ?? 0)} from models.yml.`
-          : `Forgets ${storedVariables.map((variable) => variable.name).join(", ")} saved in Cody. A value set on the container stays.`,
+        title: t("providerRemoval.removeTitle", { name: row.name }),
+        description: describeRemoval(plan, t, tn),
         action: (
-          <button type="button" className="ui-focus-ring" onClick={() => setRemoveOpen(true)} disabled={readOnly && custom} style={dangerButtonStyle}>
-            <Trash2 size={13} aria-hidden="true" /> {custom ? "Remove" : "Clear"}
+          <button type="button" className="ui-focus-ring" onClick={() => setRemoveOpen(true)} disabled={readOnly && plan.custom} style={dangerButtonStyle}>
+            <Trash2 size={13} aria-hidden="true" /> {t("providerRemoval.removeButton")}
           </button>
         ),
+      }]
+      : []),
+    ...(canEdit && isEnvironmentOnly(plan)
+      ? [{
+        title: t("providerRemoval.statusServer"),
+        description: t("providerRemoval.serverOnlyBody"),
+        action: <span style={{ ...chipStyle, color: "var(--text-dim)" }}>{t("providerRemoval.serverOnlyChip")}</span>,
       }]
       : []),
   ];
@@ -951,6 +1162,10 @@ export function ProviderDetail({ row, response, open, onClose, initialLoginId = 
         </Section>
       )}
 
+      {row.id === "anthropic" && engine?.id === "omp" && capabilities.providerLogin && currentLogin && (
+        <ClaudeCreditsSection canEdit={canEdit} onChanged={changed} planAccounts={currentLogin.accounts} />
+      )}
+
       {keyMethod && (
         <Section title="API key">
           <KeyMethodCard method={keyMethod} canEdit={canEdit} shortName={shortName} onSaved={changed} />
@@ -1003,11 +1218,9 @@ export function ProviderDetail({ row, response, open, onClose, initialLoginId = 
       <ConfirmDialog
         open={removeOpen}
         onOpenChange={setRemoveOpen}
-        title={custom ? `Remove ${row.name}?` : `Clear the saved key for ${row.name}?`}
-        description={custom
-          ? `${row.name} and its ${pluralModels(row.modelCount ?? 0)} are deleted from models.yml. Sessions using them lose the provider on their next start.`
-          : `${storedVariables.map((variable) => variable.name).join(", ")} saved in Cody will be forgotten. Sessions started afterwards run without it${keyMethod?.variables?.some((variable) => variable.fromEnvironment) ? ", falling back to the container's value" : ""}.`}
-        confirmLabel={custom ? "Remove" : "Clear"}
+        title={t("providerRemoval.removeConfirmTitle", { name: row.name })}
+        description={describeRemoval(plan, t, tn)}
+        confirmLabel={t("providerRemoval.removeButton")}
         danger
         busy={removing}
         onConfirm={() => void remove()}

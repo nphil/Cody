@@ -21,6 +21,7 @@
  * exported types — the client.
  */
 import { groupForRow, POPULAR_ORDER, popularityRank, PROVIDER_VARIANTS, SUBSCRIPTION_IDS, type ProviderGroup } from "@/components/settings/providers/provider-groups";
+import { claudeCreditsSlot } from "@/lib/claude-credits";
 import type { ProviderDefinition } from "@/lib/harness/provider-catalog";
 import type { ProviderDirectoryInfo, ProviderLoginAccount, ProviderLoginOption } from "@/lib/harness/types";
 
@@ -352,10 +353,14 @@ export function buildProviderDirectory(input: BuildProviderDirectoryInput): Prov
   // 4. Catalog provider ids that serve models but belong to no row: the
   //    engine resolved a credential Cody knows nothing about. Listed, not
   //    hidden — 5 Bedrock Mantle models are 5 models the composer offers.
+  //    The one exception is Cody's own Claude API credits providers
+  //    (`anthropic-api`, `anthropic-api-2`, …): they are the Anthropic row's
+  //    business (its "API credits (backup)" section), and listed here each
+  //    would be a second provider whose removal silently breaks the credits.
   if (input.counts) {
     const claimed = new Set(rows.flatMap((row) => row.catalogIds));
     for (const [id, count] of Object.entries(input.counts)) {
-      if (claimed.has(id) || count <= 0) continue;
+      if (claimed.has(id) || count <= 0 || claudeCreditsSlot(id) !== null) continue;
       push({
         id,
         name: id,

@@ -76,8 +76,11 @@ const defaultDeps: Required<OmpProviderLoginDeps> = {
 /** Every credential stored for one provider, with the state omp reports for
  * it. With no conversation in scope, "in use" is the account that most
  * recently served a live request. `position` is the index in omp's own
- * id-ascending order (disabled credentials included), so removing one account
- * never renumbers the ones left behind. */
+ * id-ascending order. An account omp disabled itself (a failed token refresh)
+ * keeps its slot until it is removed, so it never renumbers its neighbours;
+ * a REMOVED account is gone — the list never carries "deleted by user"
+ * leftovers (bin/cody-omp-credentials.mjs) — and the ones after it move up,
+ * exactly as omp's own usage report numbers them. */
 function buildProviderAccounts(
   credentials: readonly OmpCredentialRow[],
   usageAccounts: readonly UsageAccount[],
@@ -224,10 +227,11 @@ export function createOmpProviderLogins(overrides: OmpProviderLoginDeps = {}): P
     }
   }
 
-  async function logout(providerId: string): Promise<void> {
+  async function logout(providerId: string): Promise<{ removed: boolean; count: number }> {
     const outcome = await deps.removeProvider(providerId);
     if (outcome.code) throw new Error(outcome.message ?? `Cody could not disconnect "${providerId}".`);
     disposeUtilityRpc();
+    return { removed: outcome.removed, count: outcome.count ?? 0 };
   }
 
   async function removeAccount(providerId: string, accountId: string): Promise<{ removed: boolean; providerRemoved: boolean }> {

@@ -148,6 +148,13 @@ export function markStale(): void {
   if (state.entry) state.entry.expiresAt = 0;
 }
 
+/** The cached snapshot, or null when nothing is cached — never a read. For a
+ * caller that wants to know which account a credential was serving without
+ * paying for an `omp usage` spawn. */
+export function peekUsageSnapshot(): UsageSnapshot | null {
+  return getUsageCacheState().entry?.snapshot ?? null;
+}
+
 /** Drop everything, including any in-flight read (engine switch, logout, tests). */
 export function resetUsageCache(): void {
   const state = getUsageCacheState();

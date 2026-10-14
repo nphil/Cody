@@ -10,6 +10,7 @@ import {
   writeModelsConfig,
   type ModelsFileConfig,
 } from "@/lib/omp/models-config";
+import { settleProviderChange } from "@/lib/provider-state";
 
 export const dynamic = "force-dynamic";
 
@@ -46,6 +47,11 @@ export async function PUT(req: Request) {
     } catch (error) {
       return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 });
     }
+    // A provider the file had and the new body no longer has is a REMOVAL (the
+    // Providers drawer's Remove on a custom endpoint, or deleting it in the
+    // editor). An engine child read models.yml at spawn, so an idle one would
+    // keep offering the endpoint's models until it next restarted.
+    const before = Object.keys(readModelsConfigFile().config.providers ?? {});
     try {
       writeModelsConfig(body, { overwriteUnparseable });
     } catch (error) {
@@ -61,6 +67,12 @@ export async function PUT(req: Request) {
     // The utility process loads models.yml once at startup. A cache flush alone
     // would still query that stale registry after a provider was added.
     disposeUtilityRpc();
+    const kept = new Set(Object.keys(body.providers ?? {}));
+    const removed = before.filter((name) => !kept.has(name));
+    if (removed.length > 0) {
+      const settled = await settleProviderChange({ engineId: gate.harness.id, removedProviders: removed });
+      return NextResponse.json({ success: true, ...settled });
+    }
     return NextResponse.json({ success: true });
   } catch (error) {
     return apiErrorResponse(error);

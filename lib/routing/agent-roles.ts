@@ -34,6 +34,7 @@
 
 import { resolveModelAvailability } from "../usage/availability";
 import type { UsageSnapshot } from "../usage/types";
+import { coveredByClaudeCredits, type ClaudeCreditsCover } from "./credits-cover";
 import { parseRoleSelector } from "./role-binding";
 
 /** Role alias each known agent should resolve through. The mapping follows
@@ -64,6 +65,8 @@ export interface AgentRoleInput {
 	/** Every `provider/id` the live catalog serves, for the resolvable check. */
 	catalog: readonly string[];
 	snapshot: UsageSnapshot | null;
+	/** Saved Claude API credits: a Claude pin they carry is not "blacked out". */
+	claudeCredits?: ClaudeCreditsCover | null;
 }
 
 export interface AgentRoleResult {
@@ -100,7 +103,7 @@ export function planAgentRoleOverrides(input: AgentRoleInput): AgentRoleResult {
 			const parsed = parseRoleSelector(current);
 			const key = parsed ? `${parsed.provider}/${parsed.modelId}` : current;
 			if (!parsed || !catalog.has(key)) reason = "unresolvable";
-			else if (resolveModelAvailability(input.snapshot, parsed.provider, parsed.modelId).state === "exhausted") reason = "exhausted";
+			else if (resolveModelAvailability(input.snapshot, parsed.provider, parsed.modelId).state === "exhausted" && !coveredByClaudeCredits(input.snapshot, parsed.provider, parsed.modelId, input.claudeCredits)) reason = "exhausted";
 			else reason = "concrete_model";
 		}
 

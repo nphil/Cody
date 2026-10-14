@@ -123,7 +123,12 @@ export function deriveBlackouts(
  *
  * Clearing a blackout needs positive evidence too: the read must actually
  * have looked at the target and found headroom. A prepaid balance is covered
- * only by a successful balance read. A quota blackout is covered only by a
+ * by a successful balance read — or by a read that found NO key anywhere
+ * (`no_key`): a key that was removed has nothing left to spend, and a
+ * balance read can never succeed for it, so without this the blackout would
+ * hold forever and keep fabricating an OpenRouter account in Usage. A failed
+ * read (unreachable, rate-limited, a rejected key) covers nothing. A quota
+ * blackout is covered only by a
  * fresh, successful usage read that reports that exact account; a stale
  * cached read is last hour's news, and a missing account is silence. The
  * one exception is an account the provider no longer reports while its
@@ -137,7 +142,7 @@ export function blackoutCoverage(
 	const fresh = Boolean(snapshot?.available) && !snapshot?.stale;
 	const accounts = fresh ? (snapshot?.accounts ?? []) : [];
 	return (blackout) => {
-		if (blackout.kind === "credits") return openRouter?.available === true;
+		if (blackout.kind === "credits") return openRouter?.available === true || openRouter?.error?.code === "no_key";
 		const siblings = accounts.filter((account) => account?.provider === blackout.provider);
 		if (siblings.length === 0) return false;
 		if (blackout.accountId === null) return true;
@@ -167,6 +172,18 @@ export function lapseResetWindows(snapshot: UsageSnapshot, now = Date.now()): Us
 		return { ...account, windows };
 	});
 	return changed ? { ...snapshot, accounts } : snapshot;
+}
+
+/**
+ * The snapshot minus every account of `providers` — the providers the engine's
+ * own config switches off (omp `disabledProviders`). A disabled provider is
+ * hidden from models by the engine itself, so it must not stay in the one
+ * snapshot routing and Usage read: its accounts would keep drawing quota rows,
+ * and its remembered exhaustion would keep fabricating an account.
+ */
+export function withoutProviders(snapshot: UsageSnapshot, providers: ReadonlySet<string>): UsageSnapshot {
+	if (providers.size === 0 || !(snapshot.accounts ?? []).some((account) => providers.has(account.provider))) return snapshot;
+	return { ...snapshot, accounts: snapshot.accounts.filter((account) => !providers.has(account.provider)) };
 }
 
 function blackoutWindow(blackout: ProviderBlackout): UsageWindow {

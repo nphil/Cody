@@ -74,12 +74,14 @@ export function slugify(value: string): string {
 /** The search result the dialog wants scrolled to and outlined, or null. */
 export const SettingsHighlightContext = createContext<string | null>(null);
 
-export function ToggleSwitch({ checked, onChange, disabled }: { checked: boolean; onChange: (checked: boolean) => void; disabled?: boolean }) {
+/** `label` names the switch for a screen reader where no wrapping <label> does (a card whose other controls forbid wrapping it). */
+export function ToggleSwitch({ checked, onChange, disabled, label }: { checked: boolean; onChange: (checked: boolean) => void; disabled?: boolean; label?: string }) {
   return (
     <button
       type="button"
       role="switch"
       aria-checked={checked}
+      aria-label={label}
       disabled={disabled}
       onClick={() => onChange(!checked)}
       style={{

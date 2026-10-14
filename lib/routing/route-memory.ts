@@ -347,3 +347,18 @@ export function clearBlackout(provider: string, accountId: string | null): boole
 	writeFile({ ...file, blackouts });
 	return true;
 }
+
+/** Forget EVERY remembered blackout of a provider, whichever account it names:
+ * the provider's credentials were removed, so there is nothing left to be
+ * spent. A blackout outlives its provider otherwise — a prepaid-balance one
+ * has no expiry and is lifted only by a successful balance read, which a
+ * removed key can never give (measured: "out of credits" held since
+ * 2026-09-14 kept an OpenRouter row alive in Usage after the key was
+ * removed). Returns how many were forgotten. */
+export function clearProviderBlackouts(provider: string): number {
+	const file = readFile();
+	const blackouts = file.blackouts.filter((blackout) => blackout.provider !== provider);
+	if (blackouts.length === file.blackouts.length) return 0;
+	writeFile({ ...file, blackouts });
+	return file.blackouts.length - blackouts.length;
+}

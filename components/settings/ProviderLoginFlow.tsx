@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useContext, useRef } from "react";
 import { useI18n } from "@/lib/i18n";
+import { toast } from "@/components/ui/toast";
 import { isSafeExternalUrl } from "@/lib/safe-url";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { ShellContext } from "./shell-context";
@@ -56,6 +57,47 @@ type LoginFlowState =
   | { phase: "progress"; message: string }
   | { phase: "success" }
   | { phase: "error"; message: string };
+
+/** What `POST /api/auth/logout/<id>` answered, in the one shape every sign-out
+ * control reads. `notFound` is a stale list (that account is already gone),
+ * not a failure; `message` is the server's plain-English reason. */
+export type LogoutAnswer =
+  | { ok: true; removed: boolean; providerRemoved: boolean; restarted: number; active: number }
+  | { ok: false; notFound: boolean; message: string };
+
+/** Provider-wide sign-out when `accountId` is omitted, else one account. */
+export async function postLogout(loginId: string, accountId?: string): Promise<LogoutAnswer> {
+  try {
+    const response = await fetch(
+      `/api/auth/logout/${encodeURIComponent(loginId)}`,
+      accountId === undefined
+        ? { method: "POST" }
+        : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ accountId }) },
+    );
+    const body = await response.json().catch(() => null) as { error?: string; code?: string; removed?: boolean; providerRemoved?: boolean; restarted?: number; active?: number } | null;
+    if (!response.ok || body?.error) {
+      return {
+        ok: false,
+        notFound: response.status === 404 && body?.code === "not_found",
+        message: body?.error || body?.code ? formatApiError(body ?? {}) : `HTTP ${response.status}`,
+      };
+    }
+    return {
+      ok: true,
+      removed: body?.removed !== false,
+      providerRemoved: body?.providerRemoved === true,
+      restarted: body?.restarted ?? 0,
+      active: body?.active ?? 0,
+    };
+  } catch (failure) {
+    return { ok: false, notFound: false, message: failure instanceof Error ? failure.message : String(failure) };
+  }
+}
+
+/** The sentence about chats that are mid-reply, only when there are some. */
+export function activeChatNote(active: number, t: (key: string) => string): string | undefined {
+  return active > 0 ? t("providerRemoval.activeChat") : undefined;
+}
 
 function SectionTitle({ children }: { children: React.ReactNode }) {
   return <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 2 }}>{children}</div>;
@@ -165,21 +207,25 @@ export function ProviderLoginFlow({ provider, onChanged, autoStart = false, comp
   }, [provider.id, onChanged, t]);
 
   const handleLogout = useCallback(async () => {
-    try {
-      const res = await fetch(`/api/auth/logout/${encodeURIComponent(provider.id)}`, { method: "POST" });
-      const d = await res.json().catch(() => ({})) as { error?: string; code?: string };
-      if (!res.ok || d.error) {
-        // An engine with no non-interactive logout answers 400 `unsupported`
-        // with its own words; show those rather than a generic failure.
-        setLoginState({ phase: "error", message: d.error || d.code ? formatApiError(d) : `HTTP ${res.status}` });
+    const answer = await postLogout(provider.id);
+    if (!answer.ok) {
+      if (answer.notFound) {
+        setLoginState({ phase: "idle" });
+        toast.info(t("providerRemoval.alreadyRemoved"), t("providerRemoval.alreadyGoneSignIn"));
+        onChanged();
         return;
       }
-      setLoginState({ phase: "idle" });
-      onChanged();
-    } catch (e) {
-      setLoginState({ phase: "error", message: e instanceof Error ? e.message : String(e) });
+      // An engine with no non-interactive logout answers 400 `unsupported`
+      // with its own words; show those rather than a generic failure.
+      setLoginState({ phase: "error", message: answer.message });
+      toast.error(t("providerRemoval.disconnectFailed", { name: provider.name }), answer.message);
+      return;
     }
-  }, [provider.id, onChanged]);
+    setLoginState({ phase: "idle" });
+    if (answer.removed) toast.success(t("providerRemoval.disconnected", { name: provider.name }), activeChatNote(answer.active, t));
+    else toast.info(t("providerRemoval.nothingToRemove"), t("providerRemoval.nothingSaved", { name: provider.name }));
+    onChanged();
+  }, [provider.id, provider.name, onChanged, t]);
 
   // `allowEmpty`: a prompt can be optional (pi's GitHub Copilot flow asks
   // for an enterprise domain, blank meaning github.com), so an empty answer

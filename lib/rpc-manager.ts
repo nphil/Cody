@@ -32,6 +32,7 @@ import { readPlanOverlay, writePlanOverlay } from "./plan-keeper/overlay";
 import { materializeLocalModelProfile, resolveLocalModelPromptProfile, type LocalModelProfileLaunch, type ModelProfileTarget, type ResolvedLocalModelProfile } from "./local-model-profile-runtime";
 import { copySessionLocalRouting, materializeLocalRoutingOverlay, readLocalRoutingIntent, renameSessionLocalRouting, validateLocalRoutingModelSelection } from "./local-model-routing";
 import { copySessionPreset, renameSessionPreset, sessionPresetOverlay } from "./model-presets/overlay";
+import { materializeClaudeCreditsOverlay } from "./omp/claude-credits-overlay";
 import { selectPromptProfileId, type PromptProfileId } from "./local-model-profile";
 import { PRESET_FULL } from "./tool-presets";
 import { isRecord } from "./type-guards";
@@ -926,11 +927,27 @@ function withPresetOverlay(profile: LocalModelProfileLaunch | undefined, session
   };
 }
 
+/** Put the Claude API credits first in this chat's fallback chains (lib/omp/claude-credits.ts).
+ * AFTER the preset overlay, because it reads the chains the chat will actually have, and still
+ * before Local-only, which replaces the launch wholesale: a Local-only chat must never reach a
+ * paid cloud API. With no key saved there is no overlay and the profile passes through untouched. */
+function withClaudeCreditsOverlay(profile: LocalModelProfileLaunch | undefined): LocalModelProfileLaunch | undefined {
+  const inherited = profile?.env?.PI_CONFIG_FILES ?? process.env.PI_CONFIG_FILES;
+  const layers = (inherited ?? "").split(path.delimiter).filter((layer) => layer.length > 0);
+  const overlay = materializeClaudeCreditsOverlay(layers);
+  if (!overlay) return profile;
+  return {
+    ...(profile ?? { profileId: "full" as const }),
+    env: { ...profile?.env, PI_CONFIG_FILES: [...layers, overlay].join(path.delimiter) },
+  };
+}
+
 /** Every per-conversation overlay, in precedence order: the launch profile,
- * then the chat's model preset, then Local-only. Relaunches rebuild this from
- * the persisted state, so a restart always picks up the chat's current preset. */
+ * then the chat's model preset, then the Claude API credits, then Local-only.
+ * Relaunches rebuild this from the persisted state, so a restart always picks
+ * up the chat's current preset. */
 export function launchWithSessionOverlays(profile: LocalModelProfileLaunch | undefined, sessionId: string): LocalModelProfileLaunch | undefined {
-  return launchWithLocalRouting(withPresetOverlay(profile, sessionId), sessionId);
+  return launchWithLocalRouting(withClaudeCreditsOverlay(withPresetOverlay(profile, sessionId)), sessionId);
 }
 
 /** Append a session-owned Local-only overlay after the prompt overlay. The

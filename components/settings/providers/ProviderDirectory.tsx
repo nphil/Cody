@@ -20,6 +20,8 @@ import { runtimeEndpointUrl, runtimeLabel, runtimeProviderName, useLocalAiScan, 
 import { useOpenRouterAccount } from "@/hooks/useOpenRouterAccount";
 import { useSettingsRoute } from "@/hooks/useSettingsData";
 import { useUsage } from "@/hooks/useUsage";
+import { toast } from "@/components/ui/toast";
+import { useI18n } from "@/lib/i18n";
 import { formatRelativeTime } from "@/lib/format";
 import { sortConnectedRows, type ProviderRow, type ProvidersResponse } from "@/lib/provider-directory";
 import { Directory, type DirectoryRow, type DirectorySection } from "../Directory";
@@ -70,6 +72,7 @@ export function ProviderDirectory() {
   const openRouterAccount = useOpenRouterAccount(true);
   const writer = useConfigWriter();
   const { track } = useSaveStatus(PROVIDERS_PANEL_ID);
+  const { t } = useI18n();
   const [detail, setDetail] = useState<DetailTarget | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [endpointForm, setEndpointForm] = useState<{ name?: string; baseUrl?: string } | null>(null);
@@ -90,9 +93,16 @@ export function ProviderDirectory() {
     if (detail && response && !detailRow) setDetail(null);
   }, [detail, detailRow, response]);
 
+  const refreshUsageRead = usage.refresh;
+  const refreshBalanceRead = openRouterAccount.refresh;
+  // Besides the settings routes, the Usage block and the OpenRouter balance
+  // are separate reads: refresh them too so a removed account drops out now,
+  // not at the next 90 s poll.
   const reload = useCallback(() => {
     invalidateProviderReads();
-  }, []);
+    refreshUsageRead();
+    refreshBalanceRead();
+  }, [refreshUsageRead, refreshBalanceRead]);
 
   const openAccountProvider = useCallback((provider: string) => {
     const match = rows.find((row) => row.id === provider || row.catalogIds.includes(provider));
@@ -149,8 +159,11 @@ export function ProviderDirectory() {
         if (!result.ok || body?.error) throw new Error(body?.error || `HTTP ${result.status}`);
       }
       reload();
+      toast.success(t("providerRemoval.enabled", { name: row.name }));
     } catch (failure) {
-      setEnableError(failure instanceof Error ? failure.message : String(failure));
+      const message = failure instanceof Error ? failure.message : String(failure);
+      setEnableError(message);
+      toast.error(t("providerRemoval.enableFailed", { name: row.name }), message);
     }
   };
 
@@ -232,7 +245,7 @@ export function ProviderDirectory() {
 
       <UsageSummary
         accounts={usage.snapshot?.accounts ?? []}
-        openRouter={openRouterAccount.snapshot}
+        openRouter={rows.some((row) => row.id === "openrouter" && row.disabled) ? null : openRouterAccount.snapshot}
         unavailableProviders={usage.snapshot?.unavailableProviders ?? []}
         updatedText={usageUpdatedText}
         refreshing={usage.loading || openRouterAccount.loading}

@@ -34,10 +34,12 @@ export interface SegmentedControlProps {
   panelIdPrefix?: string;
   /** Stretch to the container; defaults to the shell's `isMobile`. */
   fullWidth?: boolean;
+  /** Segment height in px; 30 by default. A surface used by touch (the phone Side Bar) asks for more. */
+  segmentMinHeight?: number;
   style?: CSSProperties;
 }
 
-export function SegmentedControl({ label, value, options, onChange, idPrefix = "settings-subtab", panelIdPrefix = "settings-subpanel", fullWidth, style }: SegmentedControlProps) {
+export function SegmentedControl({ label, value, options, onChange, idPrefix = "settings-subtab", panelIdPrefix = "settings-subpanel", fullWidth, segmentMinHeight = 30, style }: SegmentedControlProps) {
   const shell = useContext(ShellContext);
   const stretch = fullWidth ?? shell?.isMobile ?? false;
   const enabled = options.filter((option) => !option.disabled);
@@ -97,7 +99,7 @@ export function SegmentedControl({ label, value, options, onChange, idPrefix = "
               justifyContent: "center",
               gap: 6,
               padding: "5px 14px",
-              minHeight: 30,
+              minHeight: segmentMinHeight,
               border: "none",
               borderRadius: "calc(var(--radius-control) - 2px)",
               background: selected ? "var(--bg-panel)" : "transparent",

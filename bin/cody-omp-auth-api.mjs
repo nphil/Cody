@@ -37,6 +37,21 @@ export function authApi(storage) {
     listDisabled: () => call(storage, "disabled credentials", "credentials", "listDisabled", "listDisabledCredentials", []),
     removeById: (provider, id) => call(storage, "credential removal", "credentials", "removeById", "removeCredential", [provider, id]),
     removeProvider: (provider) => call(storage, "provider logout", "credentials", "remove", "remove", [provider]),
+    /**
+     * Store ONE more credential for a provider without disturbing its others.
+     * The namespaced build upserts (identical API keys collapse into one row,
+     * a different key adds a row); a build without `upsert` appends through
+     * `set`, which replaces the provider's whole list, so the existing rows are
+     * read back and re-written beside the new one — all inside this process.
+     */
+    addCredential: async (provider, credential) => {
+      const upsert = method(storage?.credentials, "upsert");
+      if (upsert) return void await upsert(provider, credential);
+      const set = method(storage?.credentials, "set") ?? method(storage, "set");
+      const list = method(storage?.credentials, "list") ?? method(storage, "listStoredCredentials");
+      if (!set || !list) throw new Error("Installed OMP does not expose credential storage.");
+      await set(provider, [...list(provider).map((row) => row.credential), credential]);
+    },
     listBlocks: (ids) => call(storage, "credential blocks", "blocks", "list", "listCredentialBlocks", [ids]),
     /**
      * Drop one credential's block rows. The whole-credential delete is one

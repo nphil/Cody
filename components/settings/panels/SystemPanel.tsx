@@ -23,6 +23,8 @@ const TRAIL: readonly string[] = ["Cody", "System"];
 
 export const SEARCH_ENTRIES: readonly SearchEntry[] = [
   { id: "cody-application", tab: "system", label: "Cody application", description: "This instance's version and how it updates.", keywords: ["version", "update", "docker", "image", "upgrade"], breadcrumb: TRAIL, action: "jump" },
+  { id: "machines", tab: "system", label: "Machines", description: "Choose which machines show CPU and memory meters in the top bar.", keywords: ["cpu", "memory", "ram", "ssh", "server", "monitor", "top bar", "meter", "proxmox", "unraid", "runner"], breadcrumb: TRAIL, scope: "Cody only", action: "jump" },
+  { id: "add-machine", tab: "system", label: "Add a machine", description: "Show another computer's CPU and memory in the top bar, reached over SSH.", keywords: ["ssh", "remote", "host", "address", "computer", "server"], breadcrumb: TRAIL, scope: "Cody only", action: "jump" },
   { id: "agent-engines", tab: "system", label: "Agent engines", description: "Install, switch, update, revert or reinstall the coding agents this server can run.", keywords: ["install", "switch", "update", "revert", "reinstall", "changelog", "engine", "active"], breadcrumb: TRAIL, action: "jump" },
   { id: "engine-danger-zone", tab: "system", label: "Restart all sessions", description: "Restart every agent session, or uninstall an engine Cody installed.", keywords: ["uninstall", "remove", "restart", "danger"], breadcrumb: [...TRAIL, "Danger zone"], action: "jump" },
 ];

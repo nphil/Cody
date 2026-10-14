@@ -27,6 +27,7 @@
  */
 
 import { resolveModelAvailability } from "../usage/availability";
+import { coveredByClaudeCredits, type ClaudeCreditsCover } from "./credits-cover";
 import type { UsageSnapshot } from "../usage/types";
 import { readModelRoles, writeModelRoles } from "../omp/model-roles";
 import { clearRoleBinding, readRouteMemory, writeRoleBinding, type RoleBinding } from "./route-memory";
@@ -73,6 +74,8 @@ export interface RoleBindingInput {
 	snapshot: UsageSnapshot | null;
 	/** `retry.fallbackChains` exactly as configured, in the user's order. */
 	chains: Record<string, string[]>;
+	/** Saved Claude API credits, when there are any: a Claude plan model they carry is NOT routed around. */
+	claudeCredits?: ClaudeCreditsCover | null;
 }
 
 export interface RoleBindingResult {
@@ -81,12 +84,15 @@ export interface RoleBindingResult {
 	roles: Record<string, string>;
 }
 
-function usable(snapshot: UsageSnapshot | null, selector: string): boolean {
+/** "usable": the model can answer. "covered": exhausted on the plan, carried by the Claude API credits
+ * (omp's own chain tries the credits first, so routing around it would jump ahead of them). */
+function standing(snapshot: UsageSnapshot | null, selector: string, cover: ClaudeCreditsCover | null | undefined): "usable" | "covered" | "exhausted" {
 	const parsed = parseRoleSelector(selector);
 	// An unparseable selector (a bare role alias, a wildcard) is left alone:
 	// Cody cannot reason about it, and guessing would be worse than nothing.
-	if (!parsed) return true;
-	return resolveModelAvailability(snapshot, parsed.provider, parsed.modelId).state !== "exhausted";
+	if (!parsed) return "usable";
+	if (resolveModelAvailability(snapshot, parsed.provider, parsed.modelId).state !== "exhausted") return "usable";
+	return coveredByClaudeCredits(snapshot, parsed.provider, parsed.modelId, cover) ? "covered" : "exhausted";
 }
 
 /**
@@ -105,19 +111,20 @@ export function reconcileRoleBindings(input: RoleBindingInput): RoleBindingResul
 		// Rule 2: an assignment Cody did not write is the user's word.
 		const baseline = binding && binding.active === current ? binding.baseline : current;
 
-		if (usable(input.snapshot, baseline)) {
+		const baselineStanding = standing(input.snapshot, baseline, input.claudeCredits);
+		if (baselineStanding !== "exhausted") {
 			if (binding) {
 				clearRoleBinding(role);
 				if (current !== baseline) {
 					next[role] = baseline;
-					changes.push({ role, from: current, to: baseline, kind: "restored", reason: "quota restored" });
+					changes.push({ role, from: current, to: baseline, kind: "restored", reason: baselineStanding === "covered" ? "Claude API credits cover it" : "quota restored" });
 				}
 			}
 			continue;
 		}
 
 		const chain = input.chains[role] ?? [];
-		const alternative = chain.find((entry) => entry !== baseline && usable(input.snapshot, entry));
+		const alternative = chain.find((entry) => entry !== baseline && standing(input.snapshot, entry, input.claudeCredits) !== "exhausted");
 		if (!alternative) {
 			// Nothing in the user's chain can serve either. Leave the role as
 			// configured: omp's own retry is still there, and inventing a

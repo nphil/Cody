@@ -34,6 +34,7 @@ import { isMap, parseDocument } from "yaml";
 import { getSettingsPath } from "../omp/paths";
 import { resolveModelAvailability } from "../usage/availability";
 import type { UsageSnapshot } from "../usage/types";
+import { coveredByClaudeCredits, type ClaudeCreditsCover } from "./credits-cover";
 import { parseRoleSelector } from "./role-binding";
 import {
 	clearChainBinding,
@@ -61,6 +62,9 @@ export interface ChainBindingInput {
 	blackouts?: readonly ProviderBlackout[];
 	/** `retry.fallbackChains` exactly as it is on disk now. */
 	chains: Record<string, string[]>;
+	/** Saved Claude API credits: a Claude plan entry they carry stays in the chain, so the credits
+	 * keep serving it (and the walk keeps its place) while the plan is spent. */
+	claudeCredits?: ClaudeCreditsCover | null;
 }
 
 export interface ChainBindingResult {
@@ -83,6 +87,7 @@ function droppedEntry(input: ChainBindingInput, entry: string): DroppedChainEntr
 	const { provider } = parsed;
 	const availability = resolveModelAvailability(input.snapshot, provider, parsed.modelId);
 	if (availability.state !== "exhausted" || availability.allAccountsExhausted !== true) return null;
+	if (coveredByClaudeCredits(input.snapshot, provider, parsed.modelId, input.claudeCredits)) return null;
 
 	const credits = input.blackouts?.find((blackout) => blackout.provider === provider && blackout.kind === "credits");
 	if (credits) return { entry, provider, reason: credits.reason || "out of credits", until: null, source: "credits" };

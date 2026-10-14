@@ -14,7 +14,7 @@ import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { SubagentTranscriptDialog } from "./SubagentTranscriptDialog";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ComposerPanels } from "./ComposerPanels";
-import { SideQuestionsPanel } from "./SideQuestionsPanel";
+import { usePublishSideQuestions, type SideQuestionsBridge } from "@/hooks/useSideQuestionsBridge";
 import { useGoalAutoContinue } from "@/hooks/useGoalAutoContinue";
 import { toast } from "@/components/ui/toast";
 import { StatusTextCrossfade } from "./StatusTextCrossfade";
@@ -75,6 +75,12 @@ interface Props {
    * per SESSION (ACP) rather than in a registry: what Settings › Models
    * lists for them. Null under an engine with a global registry. */
   onSessionModelsChange?: (models: { provider: string; id: string; name: string }[] | null) => void;
+  /** Where this chat's side questions (`/btw`) are shown: the Side Bar, in
+   * AppShell's right panel. The chat publishes its state on this bridge. */
+  sideQuestionsBridge?: SideQuestionsBridge;
+  /** Bring up the Side Bar's "This chat" view once a `/btw` typed in the
+   * composer was taken; `focus` also puts the cursor in its question box. */
+  onOpenSideQuestions?: (focus: boolean) => void;
 }
 
 /** Token traffic one model produced in the loaded conversation. */
@@ -743,7 +749,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
     </>
   );
 });
-export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, advisorEnabled: advisorPreferred, capabilities = ALL_CAPABILITIES, engine = null, activityDisplayMode = "compact", thinkingDefaultExpanded = false, onAgentEnd, onSessionNamed, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onModelUsageChange, onOpenFile, onOpenPreview, onPreviewUrlsSeen, onSessionModelsChange }: Props) {
+export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, advisorEnabled: advisorPreferred, capabilities = ALL_CAPABILITIES, engine = null, activityDisplayMode = "compact", thinkingDefaultExpanded = false, onAgentEnd, onSessionNamed, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onModelUsageChange, onOpenFile, onOpenPreview, onPreviewUrlsSeen, onSessionModelsChange, sideQuestionsBridge, onOpenSideQuestions }: Props) {
 /** Memoized: AppShell holds ~60 state values (git badge polls, update checks,
  *  the context-usage tick ChatWindow itself pushes up), and each of those
  *  re-renders would otherwise rebuild this whole tree. */
@@ -847,6 +853,16 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     newSessionPresetId: presetState.newSessionPresetId,
     sideQuestionsCapable,
   });
+  // The topics are shown in the Side Bar, not under this composer: hand them over.
+  usePublishSideQuestions(sideQuestionsBridge, sideQuestions);
+  // `/btw <question>` typed here: ask, then bring the Side Bar up on the answer.
+  // A bare `/btw` brings it up with the cursor in its question box.
+  const { askFromComposer } = sideQuestions;
+  const askSideQuestion = useCallback(async (question: string) => {
+    const outcome = await askFromComposer(question);
+    if (outcome.ok) onOpenSideQuestions?.(question === "");
+    return outcome;
+  }, [askFromComposer, onOpenSideQuestions]);
   // "Keep working automatically" is omp's `goal.continuationModes`, a global
   // setting; only a chat with an engine goal offers it.
   const goalAutoContinue = useGoalAutoContinue(goal !== null && capabilities.nativeSettings);
@@ -1313,7 +1329,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       slashCommandsLoading={slashCommandsLoading}
       onLoadSlashCommands={loadSlashCommands}
       onBuiltinCommand={handleBuiltinSlashCommand}
-      onSideQuestion={sideQuestionsCapable ? sideQuestions.askFromComposer : undefined}
+      onSideQuestion={sideQuestionsCapable ? askSideQuestion : undefined}
       sideQuestionsAvailable={sideQuestions.available}
       onAudioUnlock={unlockAudio}
       draftKey={session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined)}
@@ -1715,22 +1731,6 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
               goalAutoContinue={goalAutoContinue.enabled === null ? null : { enabled: goalAutoContinue.enabled, pending: goalAutoContinue.pending, onChange: changeGoalAutoContinue }}
               engineName={engine?.shortName}
             />
-            {sideQuestions.available && (
-              <SideQuestionsPanel
-                records={sideQuestions.records}
-                runActive={agentRunning}
-                answering={sideQuestions.answering}
-                asking={sideQuestions.asking}
-                open={sideQuestions.open}
-                onOpenChange={sideQuestions.setOpen}
-                error={sideQuestions.error}
-                onDismissError={sideQuestions.dismissError}
-                focusRequest={sideQuestions.focusRequest}
-                onAsk={sideQuestions.askFromPanel}
-                onCancel={sideQuestions.cancel}
-                cwd={session?.cwd}
-              />
-            )}
             <ExtensionWidgets widgets={belowEditorWidgets} />
           </div>
         </div>

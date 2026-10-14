@@ -1,4 +1,6 @@
 import path from "path";
+import { claudeCreditsSlot } from "../claude-credits";
+import { isClaudeCreditsBlock } from "../omp/claude-credits";
 import { readModelsConfigFile } from "../omp/models-config";
 import { getOmpVersion, resolveOmpBin } from "../omp/omp-cli";
 import { getAgentDir } from "../omp/paths";
@@ -21,6 +23,10 @@ function readOmpProviderDirectory(): ProviderDirectoryInfo {
     const file = readModelsConfigFile();
     if (!file.parseError) {
       for (const [name, provider] of Object.entries(file.config.providers ?? {})) {
+        // Cody's own `anthropic-api…` blocks (the Claude API credits, set up from the
+        // Anthropic row) are that row's business: listed here each would be a second,
+        // deletable "provider" whose removal silently breaks the credits.
+        if (claudeCreditsSlot(name) !== null && isClaudeCreditsBlock(provider)) continue;
         // An entry that declares NO endpoint and NO models is not a provider
         // the user configured — it is an override-only entry (a `cost` or
         // `modelOverrides` block against a provider the engine already

@@ -29,6 +29,7 @@ import { NativeSetting, ToggleSwitch, slugify } from "../primitives";
 import { SaveStatusCorner, useSaveStatus } from "../SaveStatus";
 import type { SearchEntry } from "../search-index";
 import { useSettingsShell } from "../shell-context";
+import { DailyLimitSetting } from "../DailyLimitSetting";
 import { TimeZoneSetting } from "../TimeZoneSetting";
 import { TrustedDevicesSetting } from "../TrustedDevicesSetting";
 
@@ -55,6 +56,7 @@ export const PREFERENCE_CARDS: readonly PreferenceCard[] = [
   { id: "submit", label: "Message during active run", description: "What composer does on submit while agent runs. Steer interrupts; Queue follow-up delivers after finish.", scope: "Cody only", needsCapability: "chatExtras", keywords: ["steer", "queue"] },
   { id: "agent-tools", label: "Agent tools", description: "Choose the built-in tools given to new sessions. Core keeps read, bash, edit and write; No tools starts with none. Changes affect new sessions only.", scope: "Cody only", needsCapability: "chatExtras", keywords: ["tools", "core", "subagents", "tasks", "github", "web search", "new sessions"] },
   { id: "soft-keys", label: "Terminal soft keys", description: "Choose the buttons shown below the terminal on touch devices. Shift Tab moves backward through terminal UI modes.", scope: "Cody only", keywords: ["touch", "keyboard"] },
+  { id: "daily-limit", label: "Daily time limit", description: "A daily limit on how long you use Cody, shared across your devices. It counts only while you are actively using Cody. It never blocks you or stops a run.", scope: "Cody only", keywords: ["screen time", "usage", "timer", "limit", "quota", "break", "minutes", "hours", "active time", "daily", "daily limit", "time limit"] },
   { id: "distill", label: "Distill", description: "Shorten finished assistant replies, and summarize the model's thinking while its box is collapsed. The full text is always one click away.", scope: "Cody only", keywords: ["summary", "summarize", "shorten", "condense", "verbosity", "thinking", "reply", "plain language", "jargon", "non-technical"] },
   { id: "plan-keeper", label: "Live plan keeper", description: "A small background model watches this session and checks off finished tasks and subtasks automatically, so the plan stays current without the agent pausing to update it.", scope: "Cody only", keywords: ["auto", "automatic", "subtasks", "todo", "keeper"] },
   { id: "trusted-devices", label: "Trusted devices", description: "Devices you let the agent control without asking again. Forget one and the agent has to ask next time. This list can only remove trust; trust is only ever given from the prompt in the chat.", scope: "Cody only", keywords: ["usb", "adb", "fastboot", "flash", "hardware", "permission", "remember", "forget", "revoke", "trust"] },
@@ -291,6 +293,12 @@ export function PreferencesPanel() {
           </NativeSetting>
         )}
       </div>
+      <DailyLimitSetting
+        panelId={PREFERENCES_PANEL_ID}
+        label={t("preferences.dailyLimitLabel")}
+        description={t("preferences.dailyLimitDescription")}
+        searchId={slugify(card("daily-limit").label)}
+      />
       {distillAvailable && (
         <NativeSetting
           label={t("preferences.distillLabel")}

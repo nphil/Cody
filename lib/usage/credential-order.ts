@@ -127,7 +127,10 @@ export function applyCredentialBlocks(
   if (!snapshot.available || credentials.length === 0) return snapshot;
   const blocked = new Map<number, string>();
   for (const row of credentials) {
-    if (!row.blockedUntil) continue;
+    // A disabled row (removed, or disabled by omp) can no longer serve, so a
+    // block still recorded against it is not a fact about routing. Surfacing
+    // it fabricated a blocked account for a credential the user had removed.
+    if (!row.blockedUntil || row.disabledCause) continue;
     const until = Date.parse(row.blockedUntil);
     // An expired block is not a block; the helper already filters, but the
     // snapshot may be served from cache across the expiry.
@@ -148,6 +151,12 @@ export function applyCredentialBlocks(
   });
 
   const claimed = new Set<number>();
+  // Which providers the snapshot itself reports accounts for, decided BEFORE any
+  // block is folded in: a provider that reports nothing (an API key) must give
+  // EVERY blocked key its own account — asking `accounts` below would find the
+  // account just synthesized for the first blocked key and leave the second one
+  // invisible (two saved keys, both refused, read as one spent and one usable).
+  const reporting = new Set(snapshot.accounts.map((account) => account.provider));
   const accounts = snapshot.accounts.map((account) => {
     const until = account.credentialId === null ? undefined : blocked.get(account.credentialId);
     if (!until || account.credentialId === null) return account;
@@ -164,10 +173,10 @@ export function applyCredentialBlocks(
     const until = blocked.get(row.id);
     if (!until || claimed.has(row.id)) continue;
     if (accounts.some((account) => account.provider === row.provider && account.credentialId === row.id)) continue;
-    // Only synthesize when the provider has NO account: an unmatched
+    // Only synthesize when the provider reports NO account of its own: an unmatched
     // credential beside a reporting sibling is an identity join Cody could
     // not make, not proof that the reporting account is blocked.
-    if (accounts.some((account) => account.provider === row.provider)) continue;
+    if (reporting.has(row.provider)) continue;
     accounts.push({
       provider: row.provider,
       id: `${row.provider}#${row.id}`,

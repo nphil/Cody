@@ -12,12 +12,16 @@
 import { readdirSync } from "fs";
 import { homedir } from "os";
 import path from "path";
+import { getHarness } from "../harness";
 import { peekCatalogCache } from "../models-cache";
+import { readClaudeCreditsRouting } from "../omp/claude-credits";
 import { getAgentDir } from "../omp/paths";
+import { readNativeSettings } from "../omp/settings-config";
 import { getOpenRouterAccount } from "../openrouter/account";
 import { restartIdleRpcSessions } from "../rpc-manager";
 import type { UsageSnapshot } from "../usage/types";
 import { DEFAULT_AGENT_ROLES } from "./agent-roles";
+import type { ClaudeCreditsCover } from "./credits-cover";
 import { reconcileRouting, type RoutingReconciliation } from "./reconcile";
 
 /** Agents omp embeds in the binary; they exist on every installation. */
@@ -61,6 +65,29 @@ function cachedCatalogKeys(): string[] {
 	return Array.isArray(list) ? list.map((model) => `${model.provider}/${model.id}`) : [];
 }
 
+/** The providers omp's config switches off. Only omp has the setting, and a
+ * config that cannot be read means "none": routing must not depend on it. */
+function disabledProviders(): string[] {
+	if (getHarness().id !== "omp") return [];
+	try {
+		return readNativeSettings().settings.disabledProviders ?? [];
+	} catch {
+		return [];
+	}
+}
+
+/** The saved Claude API credits, as far as routing needs them; null when there are none. Two small
+ * file reads (omp only), never a child process. */
+function claudeCreditsCover(): ClaudeCreditsCover | null {
+	if (getHarness().id !== "omp") return null;
+	try {
+		const routing = readClaudeCreditsRouting();
+		return routing.active ? { modelIds: routing.modelIds, keyCount: routing.keyCount } : null;
+	} catch {
+		return null;
+	}
+}
+
 export async function reconcileRoutingForRequest(snapshot: UsageSnapshot): Promise<RoutingReconciliation> {
 	// A prepaid balance decides an OpenRouter blackout, but only from cache:
 	// `refresh` is the top-up flow's business, not a background poll's.
@@ -69,6 +96,8 @@ export async function reconcileRoutingForRequest(snapshot: UsageSnapshot): Promi
 		agents: discoverAgentNames(),
 		catalog: cachedCatalogKeys(),
 		openRouter,
+		disabledProviders: disabledProviders(),
+		claudeCredits: claudeCreditsCover(),
 	});
 	// A running omp child read `modelRoles` and `retry.fallbackChains` once,
 	// at start; only subagent spawns re-read them. So a live session would

@@ -98,6 +98,8 @@ import {
   type ScopedModel,
 } from "@/hooks/session-control-scope";
 import { SESSION_PROMPT_IMAGE, SESSION_PROMPT_STEERING, sessionPromptCapabilityBits } from "@/hooks/session-prompt-capabilities";
+import { PLAN_LIMIT_NOTICE_HOLD_MS, PLAN_LIMIT_RETRY_BANNER_HOLD_MS, creditsNoticeKind, modelSelector, shouldHoldPlanLimitNotice, shouldHoldRetryBanner } from "@/hooks/claude-credits-notices";
+import { isClaudeCreditsSelector } from "@/lib/claude-credits";
 import { toast } from "@/components/ui/toast";
 import { forkChatWithFeedback } from "@/hooks/useForkChat";
 import { compactionStatusReducer, type CompactionStatus } from "@/lib/compaction-status";
@@ -544,8 +546,10 @@ export interface AutoModelSwitchInfo {
   role?: string;
   reason?: string;
   /** Classified `reason`: a refusal needs a manual re-pick, a usage limit
-   * resolves itself at the reset. Null when the text is unrecognized. */
-  reasonKind?: FallbackReasonKind | null;
+   * resolves itself at the reset. Null when the text is unrecognized.
+   * "credits": the Claude plan hit its limit and the Claude API credits
+   * took over — omp returns to the plan by itself. */
+  reasonKind?: FallbackReasonKind | "credits" | null;
   job: AutoModelSwitchJob;
 }
 
@@ -585,6 +589,14 @@ function fallbackAppliedMessage(attribution: ModelFallbackAttribution, from: str
         ? translate("agentSession.fallbackApplied", { job, from, to, reason })
         : translate("agentSession.fallbackAppliedUnknownReason", { job, from, to });
   }
+}
+
+/** The Claude plan hit its limit and the API credits took over: one plain
+ * sentence. A subagent's switch names the job first (and never toasts). */
+function claudeCreditsSwitchMessage(attribution: ModelFallbackAttribution): string {
+  return attribution.job.kind === "main"
+    ? translate("agentSession.fallbackToClaudeCredits")
+    : translate("agentSession.fallbackToClaudeCreditsJob", { job: fallbackJobLabel(attribution) });
 }
 
 function fallbackSucceededMessage(attribution: ModelFallbackAttribution, model: string): string {
@@ -2944,9 +2956,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const announceFallbackApplied = useCallback((attribution: ModelFallbackAttribution, from: string, to: string) => {
     const reason = retryErrorByJobRef.current.get(fallbackJobKey(attribution.job));
-    const message = fallbackAppliedMessage(attribution, from, to, reason);
+    // Plan -> API credits is the one hand-off with its own plain sentence:
+    // the provider's limit text would only repeat what the sentence says.
+    const toCredits = creditsNoticeKind(from, to) === "switch";
+    const message = toCredits ? claudeCreditsSwitchMessage(attribution) : fallbackAppliedMessage(attribution, from, to, reason);
     if (attribution.job.kind === "main" && sessionIdRef.current) {
-      setAutoModelSwitch({ from, to, role: attribution.role, reason, reasonKind: classifyFallbackReason(reason), job: attribution.job, forSession: sessionIdRef.current });
+      setAutoModelSwitch({ from, to, role: attribution.role, reason, reasonKind: toCredits ? "credits" : classifyFallbackReason(reason), job: attribution.job, forSession: sessionIdRef.current });
       setSmartPinnedModel(null);
     }
     // A subagent's switch already has a home in the subagent panel; it is
@@ -2956,8 +2971,71 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const announceFallbackSucceeded = useCallback((attribution: ModelFallbackAttribution, model: string) => {
     retryErrorByJobRef.current.delete(fallbackJobKey(attribution.job));
+    // The credits switch notice already said the chat is on the credits.
+    if (isClaudeCreditsSelector(model)) return;
     queueRoutingNotice(fallbackSucceededMessage(attribution, model), "success", attribution.job.kind !== "main");
   }, [queueRoutingNotice]);
+
+  // omp restored the Claude plan after the API credits served a while.
+  const announceClaudeCreditsReturn = useCallback((sid: string) => {
+    setAutoModelSwitch((current) => (current && current.forSession === sid ? null : current));
+    queueRoutingNotice(translate("agentSession.claudeCreditsReturned"), "success", false);
+  }, [queueRoutingNotice]);
+
+  // Plan-limit warnings waiting to see whether the credits take over (one per
+  // session). Cancelled by auto_retry_start; posted by the timer otherwise.
+  const heldPlanLimitNoticeRef = useRef(new Map<string, number>());
+  const cancelHeldPlanLimitNotice = useCallback((sid: string | null) => {
+    if (!sid) return;
+    clearTimeout(heldPlanLimitNoticeRef.current.get(sid));
+    heldPlanLimitNoticeRef.current.delete(sid);
+  }, []);
+  const holdPlanLimitNotice = useCallback((sid: string, post: () => void) => {
+    const held = heldPlanLimitNoticeRef.current;
+    // A second failure before the first resolved: post nothing twice, keep the latest.
+    clearTimeout(held.get(sid));
+    held.set(sid, window.setTimeout(() => {
+      held.delete(sid);
+      if (sessionIdRef.current === sid) post();
+    }, PLAN_LIMIT_NOTICE_HOLD_MS));
+  }, []);
+
+  // The retry banner for a Claude plan limit waits to see whether the credits
+  // take over, so the plan's raw limit text never flashes (one timer per
+  // session; a second retry replaces it). `lastFailedProviderRef` is the
+  // provider of the latest failed call: by auto_retry_start the model itself
+  // may already read as the credits.
+  const lastFailedProviderRef = useRef<string | null>(null);
+  const heldRetryBannerRef = useRef(new Map<string, number>());
+  /** Take the retry banner down, and cancel one still waiting to appear. */
+  const dropRetryBanner = useCallback((sid: string | null) => {
+    if (sid) {
+      clearTimeout(heldRetryBannerRef.current.get(sid));
+      heldRetryBannerRef.current.delete(sid);
+    }
+    setRetryInfo(null);
+  }, []);
+  const holdRetryBanner = useCallback((sid: string, info: NonNullable<typeof retryInfo>) => {
+    const held = heldRetryBannerRef.current;
+    clearTimeout(held.get(sid));
+    setRetryInfo(null);
+    held.set(sid, window.setTimeout(() => {
+      held.delete(sid);
+      if (sessionIdRef.current === sid) setRetryInfo(info);
+    }, PLAN_LIMIT_RETRY_BANNER_HOLD_MS));
+  }, []);
+  // A held warning or banner belongs to the chat that raised it: leaving the
+  // chat or closing the hook drops it.
+  useEffect(() => {
+    const heldNotices = heldPlanLimitNoticeRef.current;
+    const heldBanners = heldRetryBannerRef.current;
+    return () => {
+      for (const timer of heldNotices.values()) clearTimeout(timer);
+      heldNotices.clear();
+      for (const timer of heldBanners.values()) clearTimeout(timer);
+      heldBanners.clear();
+    };
+  }, [session?.id]);
 
   // Declared after addNotice: the dependency array below is evaluated during
   // render, so addNotice must already be initialized.
@@ -3094,7 +3172,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       void dispatchPendingModelSwitch();
       setAgentRunning(false);
       setAgentPhase(null);
-      setRetryInfo(null);
+      dropRetryBanner(sid);
       retryErrorByJobRef.current.clear();
       // The run is over: its finished children leave the roster. Children
       // still working in the background (async tasks) stay, and one missing
@@ -3109,7 +3187,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       dispatch({ type: "end" });
       onAgentEnd?.();
     }
-  }, [dispatchPendingModelSwitch, holdTailForReader, loadSession, onAgentEnd, refreshSubagentUsage, resetSubagentActivityState]);
+  }, [dispatchPendingModelSwitch, dropRetryBanner, holdTailForReader, loadSession, onAgentEnd, refreshSubagentUsage, resetSubagentActivityState]);
 
   // The engine restarted (container restart, crash) while this client was
   // waiting for a turn: the resumed engine is idle and no agent_end will ever
@@ -3641,7 +3719,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         void dispatchPendingModelSwitch();
         setAgentRunning(false);
         setAgentPhase(null);
-        setRetryInfo(null);
+        dropRetryBanner(endedSid);
         retryErrorByJobRef.current.clear();
         setSubagents((prev) => keepRunningSubagents(prev));
         subagentRosterGenerationRef.current += 1;
@@ -3832,13 +3910,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             recentUserModelPicksRef.current = recentPicks;
             const isOwnEcho = recentPicks.some((pick) => pick.provider === next.provider && pick.modelId === next.modelId);
             if (!isOwnEcho && previous && (previous.provider !== next.provider || previous.modelId !== next.modelId)) {
-              const from = `${previous.provider}/${previous.modelId}`;
-              const to = `${next.provider}/${next.modelId}`;
-              setAutoModelSwitch((current) => (
-                current && current.forSession === sid && current.to.endsWith(next.modelId)
-                  ? current
-                  : { from, to, job: fallbackAttributionForRole("default", subagentsRef.current).job, forSession: sid }
-              ));
+              const from = modelSelector(previous);
+              const to = modelSelector(next);
+              if (creditsNoticeKind(from, to) === "return") {
+                // omp put the Claude plan back after the API credits served a
+                // while: not a downgrade to explain, the good news instead.
+                announceClaudeCreditsReturn(sid);
+              } else {
+                setAutoModelSwitch((current) => (
+                  current && current.forSession === sid && current.to.endsWith(next.modelId)
+                    ? current
+                    : { from, to, job: fallbackAttributionForRole("default", subagentsRef.current).job, forSession: sid }
+                ));
+              }
               setSmartPinnedModel((current) => (
                 current && current.provider === next.provider && current.modelId === next.modelId ? current : null
               ));
@@ -3924,7 +4008,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             // outdated-engine error from a plain outage, and cleans out the
             // JSON/request-id/URL junk a provider body carries; the auth branch
             // still gets the one hint that actually fixes it, the keys panel.
-            addEngineErrorNotice(detail, engineNameRef.current);
+            // A Claude plan at its limit is usually followed at once by the
+            // switch to the API credits, which gets its own single notice —
+            // so that one warning waits a moment to see if a retry starts.
+            lastFailedProviderRef.current = typeof completed.provider === "string" ? completed.provider : null;
+            const heldSid = sessionIdRef.current;
+            if (heldSid && shouldHoldPlanLimitNotice(completed)) {
+              holdPlanLimitNotice(heldSid, () => addEngineErrorNotice(detail, engineNameRef.current));
+            } else {
+              addEngineErrorNotice(detail, engineNameRef.current);
+            }
             const hasContent = Array.isArray(completed.content) ? completed.content.length > 0 : Boolean(completed.content);
             if (hasContent) setMessages((prev) => [...prev, normalizeToolCalls(completed)]);
           } else if (completed) {
@@ -4025,14 +4118,29 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // "Retrying 2/5".
         const errorMessage = rawErrorMessage ? describeEngineError(rawErrorMessage).detail : undefined;
         if (attribution.job.kind === "main") {
-          setRetryInfo({ attempt: event.attempt as number, maxAttempts: event.maxAttempts as number, errorMessage });
+          const sid = sessionIdRef.current;
+          const retryInfoNow = { attempt: event.attempt as number, maxAttempts: event.maxAttempts as number, errorMessage };
+          // A Claude plan at its limit is expected to hand over to the API
+          // credits within ~1.2 s; its raw limit text must not flash first.
+          // The failed call's provider is what counts (the model may already
+          // read as the credits by now).
+          const failedProvider = lastFailedProviderRef.current ?? lastAuthoritativeModelRef.current?.provider;
+          if (sid && shouldHoldRetryBanner({ job: "main", provider: failedProvider, errorMessage: rawErrorMessage })) {
+            holdRetryBanner(sid, retryInfoNow);
+          } else {
+            dropRetryBanner(sid);
+            setRetryInfo(retryInfoNow);
+          }
         }
         if (rawErrorMessage) retryErrorByJobRef.current.set(fallbackJobKey(attribution.job), rawErrorMessage);
+        // The retry follows a held plan-limit warning within milliseconds: the
+        // credits (or the next model) take over, and their own notice speaks.
+        if (attribution.job.kind === "main") cancelHeldPlanLimitNotice(sessionIdRef.current);
         break;
       }
       case "auto_retry_end": {
         const attribution = fallbackAttributionForRole(event.role, subagentsRef.current);
-        if (attribution.job.kind === "main") setRetryInfo(null);
+        if (attribution.job.kind === "main") dropRetryBanner(sessionIdRef.current);
         break;
       }
       case "retry_fallback_applied": {
@@ -4040,6 +4148,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const from = typeof event.from === "string" ? event.from : "?";
         const to = typeof event.to === "string" ? event.to : "?";
         announceFallbackApplied(attribution, from, to);
+        // The credits took over: the held retry banner is never shown.
+        if (attribution.job.kind === "main" && creditsNoticeKind(from, to) === "switch") dropRetryBanner(sessionIdRef.current);
         break;
       }
       case "retry_fallback_succeeded": {
@@ -4263,7 +4373,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as unknown as IncomingExtensionUiRequest);
         break;
     }
-  }, [addNotice, addEngineErrorNotice, announceFallbackApplied, announceFallbackSucceeded, applyAuthoritativeModel, adoptFastModeState, adoptGoalState, adoptThinkingLevel, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities, applyOutboxDelivery, beginAuthoritativeModelSync, dispatchPendingModelSwitch, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, holdTailForReader, loadSession, maybeAutoNameSession, mergeSubagents, noteModelUnrestorable, onAgentEnd, onPreviewUrlsSeen, onSessionForked, opts.chatInputRef, publishRewoundDraft, reconcileAgentState, refreshTodoState, resetSubagentActivityState]);
+  }, [addNotice, addEngineErrorNotice, announceClaudeCreditsReturn, announceFallbackApplied, announceFallbackSucceeded, applyAuthoritativeModel, adoptFastModeState, adoptGoalState, adoptThinkingLevel, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities, applyOutboxDelivery, beginAuthoritativeModelSync, cancelHeldPlanLimitNotice, dispatchPendingModelSwitch, dropRetryBanner, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, holdPlanLimitNotice, holdRetryBanner, holdTailForReader, loadSession, maybeAutoNameSession, mergeSubagents, noteModelUnrestorable, onAgentEnd, onPreviewUrlsSeen, onSessionForked, opts.chatInputRef, publishRewoundDraft, reconcileAgentState, refreshTodoState, resetSubagentActivityState]);
   handleAgentEventRef.current = handleAgentEvent;
 
   /** Shared recovery for a send that never actually started a run: undo the
@@ -5034,7 +5144,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleAbortRetry = useCallback(async () => {
     const sid = sessionIdRef.current;
     if (!sid) return;
-    setRetryInfo(null);
+    dropRetryBanner(sid);
     try {
       await sendAgentCommand(sid, { type: "abort_retry" });
     } catch (error) {
@@ -5042,7 +5152,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const described = noticeFromCaughtError(error);
       if (described) addNotice({ type: described.type, message: described.message, dedupeKey: described.dedupeKey, errorKind: described.kind });
     }
-  }, [addNotice]);
+  }, [addNotice, dropRetryBanner]);
 
   const handleHandoff = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -6102,7 +6212,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         && displayModelProvider === smartPinnedModel.provider
         && displayModelId === smartPinnedModel.modelId),
     autoModelSwitch: autoModelSwitch && autoModelSwitch.forSession === (session?.id ?? sessionIdRef.current)
-      ? { from: autoModelSwitch.from, to: autoModelSwitch.to, role: autoModelSwitch.role, reason: autoModelSwitch.reason, job: autoModelSwitch.job }
+      ? { from: autoModelSwitch.from, to: autoModelSwitch.to, role: autoModelSwitch.role, reason: autoModelSwitch.reason, reasonKind: autoModelSwitch.reasonKind, job: autoModelSwitch.job }
       : null,
     agentPhase,
     pendingRefusalDecision, rewoundDraft,

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgentCommandError, sendAgentCommand } from "@/lib/agent-client";
 import {
   applyBtwFrame,
@@ -32,6 +32,12 @@ const ANSWER_RECONCILE_MS = 4_000;
 // one refusal turns the surface off until the page reloads.
 let unsupportedForPage = false;
 
+// Whether the installed omp has /btw, once /api/info has said (one shared read
+// per page). It holds for the whole page, so a chat opened later starts with
+// the answer instead of "unknown": the Side Bar keeps its "This chat" switch
+// across the moment between one chat and the next.
+let engineOkForPage: boolean | null = null;
+
 export type SideQuestionOutcome = { ok: true } | { ok: false; message: string };
 
 export interface SideQuestionsOptions {
@@ -46,6 +52,10 @@ export interface SideQuestionsOptions {
 }
 
 export interface SideQuestions {
+  /** The chat these topics belong to; null while it has no id. Whatever shows
+   *  them keys itself on this, so a half-typed question never follows the
+   *  reader into another chat. */
+  sessionId: string | null;
   /** The surface exists here: omp, a real chat, an engine that has /btw. */
   available: boolean;
   /** Newest topic first. */
@@ -54,16 +64,13 @@ export interface SideQuestions {
   answering: boolean;
   /** A question was sent and the engine has not taken it yet. */
   asking: boolean;
-  open: boolean;
-  setOpen: (open: boolean) => void;
   /** The last failure in plain words, until dismissed or the next ask. */
   error: string | null;
   dismissError: () => void;
-  /** Bumps when the new-question box should take focus. */
-  focusRequest: number;
-  /** The panel's own boxes. Resolves true when the engine took the question. */
+  /** The Side Bar's own boxes. Resolves true when the engine took the question. */
   askFromPanel: (question: string, recordId?: string) => Promise<boolean>;
-  /** `/btw <question>` typed in the composer; an empty question opens the panel. */
+  /** `/btw <question>` typed in the composer. A bare `/btw` only checks that
+   *  asking is possible here; the caller opens the Side Bar either way. */
   askFromComposer: (question: string) => Promise<SideQuestionOutcome>;
   cancel: (recordId: string) => void;
   /** A `btw_delta` / `btw_record` frame off the event stream. */
@@ -108,11 +115,9 @@ export function useSideQuestions({ sessionId, capable, ensureStream }: SideQuest
   const [records, setRecords] = useState<readonly BtwRecord[]>([]);
   const [supported, setSupported] = useState<boolean | null>(unsupportedForPage ? false : null);
   // Null until /api/info has said which engine version is installed.
-  const [engineOk, setEngineOk] = useState<boolean | null>(null);
+  const [engineOk, setEngineOk] = useState<boolean | null>(engineOkForPage);
   const [asking, setAsking] = useState(false);
-  const [open, setOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [focusRequest, setFocusRequest] = useState(0);
 
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
@@ -145,7 +150,8 @@ export function useSideQuestions({ sessionId, capable, ensureStream }: SideQuest
     if (!capable) return;
     let cancelled = false;
     void loadEngineInfo().then((info) => {
-      if (!cancelled) setEngineOk(ompVersionHasBtw(info.version));
+      engineOkForPage = ompVersionHasBtw(info.version);
+      if (!cancelled) setEngineOk(engineOkForPage);
     });
     return () => { cancelled = true; };
   }, [capable]);
@@ -187,7 +193,6 @@ export function useSideQuestions({ sessionId, capable, ensureStream }: SideQuest
     if (previous === null || previous === sessionId) return;
     pendingDeltasRef.current.clear();
     setRecords([]);
-    setOpen(false);
     setError(null);
     setSupported(unsupportedForPage ? false : null);
   }, [sessionId]);
@@ -273,11 +278,6 @@ export function useSideQuestions({ sessionId, capable, ensureStream }: SideQuest
     }
   }, [load]);
 
-  const openAsk = useCallback(() => {
-    setOpen(true);
-    setFocusRequest((value) => value + 1);
-  }, []);
-
   const askFromPanel = useCallback(async (question: string, recordId?: string): Promise<boolean> => {
     setError(null);
     const outcome = await ask(question, recordId);
@@ -287,17 +287,15 @@ export function useSideQuestions({ sessionId, capable, ensureStream }: SideQuest
 
   const askFromComposer = useCallback(async (question: string): Promise<SideQuestionOutcome> => {
     if (!question) {
+      // A bare `/btw` only asks to be taken to the question box; the caller opens the Side Bar.
       if (unsupportedForPage || engineOkRef.current === false) return { ok: false, message: translate("btw.errorUnsupported") };
       if (!sessionIdRef.current || !capableRef.current) return { ok: false, message: translate("btw.noSession") };
-      openAsk();
       return { ok: true };
     }
     setError(null);
-    const outcome = await ask(question);
     // Success shows the answer arriving; a refusal goes back to the composer as a toast, not into the panel.
-    if (outcome.ok && aliveRef.current) setOpen(true);
-    return outcome;
-  }, [ask, openAsk]);
+    return ask(question);
+  }, [ask]);
 
   const cancel = useCallback((recordId: string) => {
     const sid = sessionIdRef.current;
@@ -326,21 +324,22 @@ export function useSideQuestions({ sessionId, capable, ensureStream }: SideQuest
 
   const dismissError = useCallback(() => setError(null), []);
 
-  return {
-    available: capable && engineOk === true && supported !== false && !unsupportedForPage,
+  const available = capable && engineOk === true && supported !== false && !unsupportedForPage;
+  // One identity per real change. The main chat renders far more often than its
+  // side questions change, and whatever shows them is told only when they do.
+  return useMemo(() => ({
+    sessionId,
+    available,
     records,
     answering,
     asking,
-    open,
-    setOpen,
     error,
     dismissError,
-    focusRequest,
     askFromPanel,
     askFromComposer,
     cancel,
     applyFrame,
     noteStreamConnected,
     noteHistoryNotice,
-  };
+  }), [sessionId, available, records, answering, asking, error, dismissError, askFromPanel, askFromComposer, cancel, applyFrame, noteStreamConnected, noteHistoryNotice]);
 }

@@ -3,6 +3,7 @@ import { requireEngine } from "@/lib/engine-guard";
 import { invalidateModelsCache } from "@/lib/models-cache";
 import { disposeUtilityRpc } from "@/lib/omp/rpc-utility";
 import { deleteNativeSettingsPaths, deleteNativeSettingsSections, readNativeSettings, writeNativeSettings, type NativeSettings } from "@/lib/omp/settings-config";
+import { settleProviderChange } from "@/lib/provider-state";
 import { restartIdleRpcSessions } from "@/lib/rpc-manager";
 
 export const dynamic = "force-dynamic";
@@ -31,6 +32,13 @@ export function GET() {
   }
 }
 
+/** The set a `disabledProviders` list names, order-free. */
+function sameProviderSet(a: readonly string[] | undefined, b: readonly string[] | undefined): boolean {
+  const left = new Set(a ?? []);
+  const right = new Set(b ?? []);
+  return left.size === right.size && [...left].every((provider) => right.has(provider));
+}
+
 export async function PUT(request: Request) {
   try {
     const gate = requireEngine("omp", SURFACE);
@@ -39,12 +47,25 @@ export async function PUT(request: Request) {
     if (!body.settings || typeof body.settings !== "object" || Array.isArray(body.settings)) {
       return NextResponse.json({ error: "settings must be an object" }, { status: 400 });
     }
+    const disabledBefore = readNativeSettings().settings.disabledProviders;
     writeNativeSettings(body.settings);
     if (body.settings.enabledModels !== undefined || body.settings.disabledProviders !== undefined || body.settings.modelProviderOrder !== undefined) {
       invalidateModelsCache();
       disposeUtilityRpc();
     }
-    return NextResponse.json({ success: true, settings: readNativeSettings().settings });
+    const settings = readNativeSettings().settings;
+    // Disabling or enabling a provider is read by an engine child at spawn: a
+    // live idle one would keep offering (and spending) a provider the user
+    // just switched off. Only a CHANGED list restarts them — the Models hub
+    // spreads the whole object on every curation write. A newly disabled
+    // provider is gone from routing too: what Cody remembered about it (an
+    // "out of credits" blackout has no expiry) must not keep it in Usage.
+    if (!sameProviderSet(disabledBefore, settings.disabledProviders)) {
+      const switchedOff = (settings.disabledProviders ?? []).filter((provider) => !(disabledBefore ?? []).includes(provider));
+      const settled = await settleProviderChange({ engineId: gate.harness.id, removedProviders: switchedOff });
+      return NextResponse.json({ success: true, settings, ...settled });
+    }
+    return NextResponse.json({ success: true, settings });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 400 });
   }

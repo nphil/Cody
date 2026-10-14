@@ -147,11 +147,17 @@ app/api/
                                    instance-wide hide plus each user's own hide/pin.
                                    `instanceHidden` is refused `unsupported` on omp,
                                    whose instance hide is its own `enabledModels`
-  models-config/route.ts          GET/PUT — read/write ~/.omp/agent/models.yml (omp only)
+  models-config/route.ts          GET/PUT — read/write ~/.omp/agent/models.yml (omp only);
+                                   a PUT that drops a provider the file had is a
+                                   REMOVAL: idle engines restart (settleProviderChange)
   models-config/test/route.ts     POST test a configured model/provider (omp only)
   omp-settings/route.ts           GET/PUT omp's OWN config.yml — `configEditor`,
                                    not `nativeSettings`: pi declares the latter for
-                                   its OWN schema panel and must not land here
+                                   its OWN schema panel and must not land here. A PUT
+                                   that CHANGES `disabledProviders` restarts idle
+                                   engines and forgets the newly disabled provider's
+                                   blackouts (the Models hub spreads the whole object
+                                   on every curation write, so an unchanged list is a no-op)
   omp-settings/schema/route.ts    GET the ACTIVE engine's own settings schema +
                                    values; PUT a dotted-path patch. Engine-NEUTRAL:
                                    it dispatches on HarnessAdapter.settings and
@@ -162,7 +168,10 @@ app/api/
   provider-keys/route.ts          GET the provider-key catalogue for the active
                                    engine with stored/fromEnvironment flags (never
                                    values); PUT {name,value} (admin) stores or clears
-                                   one — every engine, no capability gate
+                                   one — every engine, no capability gate. A CLEAR
+                                   restarts idle engines (their env carried the key)
+                                   and answers 409 `set_in_environment` when only the
+                                   server's environment holds the variable
   providers/route.ts              GET the Providers hub's one list for the active
                                    engine: sign-in roster + key store + effective
                                    catalog + registry file, joined per provider.
@@ -172,7 +181,8 @@ app/api/
                                    count what a provider now serves (admin-only,
                                    `unsupported` on an ACP engine)
   providers/enable/route.ts       POST {provider} — omp only: clears a provider from
-                                   `disabledProviders`
+                                   `disabledProviders` (restarts idle engines when it
+                                   really was disabled)
   plugins/route.ts                GET/POST plugin management (shells out to `omp plugin`)
   plugins/marketplace/route.ts    GET browse configured marketplaces + catalogs | POST
                                    add/remove/update marketplace, install/uninstall/upgrade
@@ -203,6 +213,23 @@ app/api/
   notifications/presence/route.ts POST {sessionId|null}: the chat this tab shows
   notifications/action/route.ts   POST {t} PUBLIC: an ntfy answer button; the signed
                                    single-use token is the only credential (CORS *)
+  daily-limit/route.ts            GET/PUT the personal daily time limit: today's state
+                                   (active time used on every device, time left, notice
+                                   due) | on/off, length, "Add 15 minutes", "Done for today"
+  daily-limit/beat/route.ts       POST {activeSeconds, endedSecondsAgo?}: one finished
+                                   stretch of ACTIVE use, merged into the account's union
+  machines/route.ts               GET the machines the top bar meters (this server +
+                                   ssh ones; an ssh address only for someone who may
+                                   edit) | PUT (admin, or an open instance) the list
+  machines/stream/route.ts        GET SSE: every machine's status and CPU/memory, a
+                                   frame per reading, a 10 s heartbeat. Holding it
+                                   open IS what makes the server sample at all
+  machines/test/route.ts          POST {destination} (admin) one real ssh sample;
+                                   200 either way, `ok:false` carries a reason code
+  claude-credits/route.ts         GET (omp only) each Claude plan account and its backup
+                                  API key, last four only | PUT {accountId, key} /
+                                  DELETE {keyId} (admin): "Claude API credits as the
+                                  backup behind the Claude plans"
 
 lib/
   omp/                 shared omp foundations (paths, CLI probe, RpcProcess,
@@ -211,6 +238,13 @@ lib/
                         isolated-agent-dir.ts's shared empty-mcp.json symlink
                         dance for sidebar chat, Distill, the session namer
                         and the web-research planner)
+  claude-credits.ts    browser-safe half of the Claude API credits backup: the
+                       `anthropic-api`, `anthropic-api-2`, … provider ids (one per
+                       key), plan <-> credits selector helpers and the
+                       /api/claude-credits payload types. Server half:
+                       omp/claude-credits.ts (models.yml blocks, keys, status),
+                       omp/claude-credits-store.ts, omp/claude-credits-overlay.ts
+                       (the per-chat chain overlay) and routing/credits-cover.ts
   agent-client.ts      typed fetch helper for /api/agent commands
   time-zone.ts         zones in one pure, browser-and-server-safe place: IANA
                        validation/canonicalisation (`normalizeTimeZone`), the
@@ -233,6 +267,13 @@ lib/
                        does), `quota-watch.ts`
   device-time-zone.ts  browser: `deviceTimeZoneField()`, the zone to spread into
                        a request body, read fresh on every call
+  daily-limit/         the personal daily time limit ("Daily time limit" below).
+                       Pure and browser-safe: `active-time.ts` (what counts as
+                       active, the 15 s beat controller), `ledger.ts` (the
+                       wall-clock interval union, local-day bounds), `state.ts`
+                       (settings, the arithmetic, beat parsing), `view.ts` (phase,
+                       tone, level, durations); `store.ts` is server only
+                       (`<accounts dir>/daily-limit.json`)
   draft-store.ts       composer drafts: in-memory per session key, with the TEXT
                         mirrored to sessionStorage (`cody:draft:<key>`, 64 K cap)
                         so a reload or navigation never loses an unsent prompt;
@@ -266,6 +307,20 @@ lib/
                        (bin/cody-display-mcp.js) is a separate process holding no
                        Cody state, and giving it the forge would mean a new
                        authenticated HTTP surface proxying arbitrary host calls
+  machines/            the machines the top bar shows CPU/memory meters for:
+                       this server plus any ssh machine (see "Machine meters
+                       in the top bar"). Browser-safe: `types.ts` (statuses,
+                       reason codes, the strict name/destination checks, API
+                       payloads) and `present.ts` (which machine is "worst",
+                       how much of each fits in the room the bar has).
+                       Server only: `proc.ts` (/proc/stat, meminfo, loadavg
+                       to CPU % from deltas, memory and load; the ssh stream
+                       framing), `ssh.ts` (the ONE fixed sampling loop, the ssh
+                       argv, a failure to a reason code), `store.ts`
+                       (`cody-machines.json`, 0600, atomic), `sampler.ts`
+                       (collectors and the viewer-driven lifecycle).
+                       bin/cody-server.js loads sampler.ts to stop it at
+                       shutdown, so nothing in here may use `@/`
   engine-guard.ts      requireEngine()/requireCapability(): the SERVER half of the
                        capability rule. An omp-only route (models.yml, model roles,
                        config.yml, `omp usage`, agent.db credentials, session
@@ -318,7 +373,11 @@ lib/
     codex-login.ts     `codex login --device-auth` / `login status` / `logout`
     omp-credentials.ts omp's stored credentials, read and removed through
                        bin/cody-omp-credentials.mjs (never agent.db directly);
-                       feeds the per-account rows in lib/omp/provider-login.ts
+                       feeds the per-account rows in lib/omp/provider-login.ts;
+                       a removal really deletes the row (omp only soft-deletes)
+    omp-claude-credits.ts the Claude API keys in omp's store under `anthropic-api`:
+                       list/add through bin/cody-omp-claude-credits.mjs (key on
+                       stdin, never argv); removal reuses omp-credentials.ts
     pi-login.ts        pi's pi-ai OAuth flows, run in bin/cody-pi-login.mjs (a
                        child that imports the INSTALLED pi package) and bridged
                        over JSON lines
@@ -352,6 +411,13 @@ lib/
                        per provider (composeProviderDirectory, server-only —
                        provider-directory.ts holds the pure/shared shapes and
                        helpers, e.g. isSubscriptionLogin)
+  provider-state.ts    `settleProviderChange`: everything Cody remembers about a
+                       provider that must be forgotten when its credentials, key
+                       or enablement change — models / roster / usage / OpenRouter
+                       balance / saved-reset caches, the route-memory blackouts of a
+                       REMOVED provider, and a restart of idle engine children.
+                       Every route that removes or disables a provider calls it
+                       (logout, provider-keys, omp-settings, providers/enable)
   model-allow-list.ts  helpers for omp's native `enabledModels` glob allow-list
                        (Cody edits it, never re-filters by it — see "Model
                        curation" below); modelKey()/providerGlob() are the
@@ -443,6 +509,7 @@ lib/
                        isSidebarSessionPath() gates access control in DELETE /api/sidebar-chats/[id]
   btw.ts               side questions (omp 18.7 `/btw`), pure + browser-safe: topic types, parseSideQuestionCommand, the frame/snapshot merge rules (applyBtwFrame, mergeBtwSnapshot), describeBtwError, the omp-version gate
   btw-history.ts       server-only bounded reader of omp's btw-history sidecar beside the session file (running → interrupted when no engine is live)
+  sidebar-mode.ts      the Side Bar's pure view state (browser-safe reducer): which view is chosen (This chat / New chat), a `/btw` request taken exactly once, a bare `/btw`'s cursor still waiting to land, and the choice dropped when This chat goes away
   skills-service.ts    pure-Node skill discovery mirroring the ACTIVE engine's
                        providers (omp's list, pi's narrower one) + getSkillsSurface(): what the surface can do here
   engine-capabilities.ts  THE client read of /api/info: capability flags, the
@@ -488,19 +555,27 @@ components/
   ScheduleMenu.tsx    that menu: a popover on a mouse, a bottom sheet on touch —
                       Send now · When quota resets · Send at… (quick times and a
                       native date-time field)
-  ScheduledRows.tsx   the scheduled messages stacked above the input: when, what,
-                      "by the agent", Edit / Send now / Cancel (Retry when failed)
-  SidebarChatPanel.tsx sidebar chat: rpc-managed session, model picker (grouped by
-                      provider) + thinking level, message display, composer (no file
-                      editing, no tools). Image attachments go through the MAIN
-                      composer's engine — `prepareImageBatchForAttachment`
+  ScheduledBar.tsx    the scheduled messages as one slim bar above the composer
+                      (collapsed summary; opened: one row each with Edit / Send now
+                      / Cancel icon buttons, Retry when failed)
+  DailyLimitRing.tsx  the daily time limit's circle in the controls row (liquid fill,
+                      popover) and the glyph the other surfaces reuse
+  DailyLimitNotice.tsx the calm "you've reached today's limit" bar above the composer
+  SidebarChatPanel.tsx the Side Bar: a "This chat | New chat" switch (a SegmentedControl,
+                      shown only where side questions exist) over two views that both
+                      stay mounted, so flipping it never stops a streaming sidebar
+                      answer. New chat = the sidebar chat: rpc-managed session, model
+                      picker (grouped by provider) + thinking level, message display,
+                      composer (no file editing, no tools). Image attachments go
+                      through the MAIN composer's engine — `prepareImageBatchForAttachment`
                       (lib/image-compress.ts), same 900 KiB prompt-frame budget and
                       WebP fallback — by click, drop or paste. `auto` is a real
                       thinking OPTION, not an absence: unset means "the model's own
                       default", which is what the main composer shows and sends, and
-                      without the row the trigger rendered blank
+                      without the row the trigger rendered blank. This chat =
+                      SidebarSideQuestions
+  SidebarSideQuestions.tsx  the Side Bar's "This chat" view (omp's /btw): topics newest first (ten, the rest behind Show all) with streaming markdown answers, Cancel, Copy and a follow-up box per topic, and the new-question box at the bottom built like the New chat composer. Presentational: the state lives in useSideQuestions and arrives over useSideQuestionsBridge
   ComposerPanels.tsx  composer-attached goal + todo + subagent panels (collapsible, live states)
-  SideQuestionsPanel.tsx  the /btw panel under ComposerPanels: slim "ask aside" bar while a run goes, topics newest first with streaming markdown answers, Cancel, Copy and a follow-up box per topic (presentational; state lives in useSideQuestions)
   GoalPanel.tsx      the Goal row of ComposerPanels: the engine's goal (objective, status, tokens vs budget, live time, Pause/Resume/Drop with a two-tap Drop, "Keep working automatically") or the fallback note
   TodoList.tsx        todo phase grid with preview/show-all (used by ComposerPanels)
   SubagentTranscriptDialog.tsx  header + Result → Task → Transcript in ONE scroll container + steer footer (wide, fixed height)
@@ -611,9 +686,12 @@ components/
                         like every Settings panel
     providers/          the Providers hub: ProviderDirectory (the Connected /
                         Discovered list), ProviderDetail (the sign-in / keys /
-                        custom-endpoint drawer), AddProviderPicker,
-                        LocalEndpointForm, provider-groups.ts (the Add
-                        picker's sections), controls.tsx (shared row bits)
+                        custom-endpoint drawer), ClaudeCreditsSection (the
+                        Anthropic drawer's "API credits (backup)" key rows;
+                        claude-credits-view.ts is its pure half),
+                        AddProviderPicker, LocalEndpointForm,
+                        provider-groups.ts (the Add picker's sections),
+                        controls.tsx (shared row bits)
     models/             the Models hub: ModelCatalog, ModelCurationDialog
                         (omp's per-provider selection), ModelAssignments +
                         ModelRoles (role → model), DistillAssignment
@@ -624,6 +702,19 @@ components/
                         recommended-cards.ts (the curated-card table),
                         SchemaSettingsList (the engine's complete schema,
                         chip-grouped, secrets masked)
+    MachinesSection.tsx the System hub's "Machines" card: rename this server,
+                        add / edit / remove ssh machines (a removal answers with an
+                        Undo toast that re-adds it), a Test button
+                        (`/api/machines`, admin writes). Highlight id `machines`
+  machines/           the top-bar machine meters: MachineMeters.tsx (the
+                      measured slot, a chip per machine at the density that
+                      fits — this server wears a server glyph, not an initial,
+                      in the slim chip — the phone's one-indicator ring) and
+                      MachinesPanel.tsx (the dropdown's per-machine cards).
+                      This server's DEFAULT name ("This server") is stored in
+                      English and shown in the reader's language by
+                      `machineDisplayName` (lib/machines/present.ts); a name
+                      the person chose is shown as typed
   ui/                 shared primitives: Dialog/Tooltip/Collapsible, fields, toast
 
 hooks/
@@ -645,9 +736,23 @@ hooks/
   useSettingsHistory.ts    mirrors the phone stack's depth into browser history
                            so a back gesture pops exactly one level
   useAgentSession.ts       messages + streaming + SSE + fork/navigate/reconciliation logic
+  claude-credits-notices.ts  the pure decisions behind the "plan limit -> API credits"
+                           chat notices: which event is the switch, what silences the
+                           plan's own warning, when the plan is back
   useAudio.ts              completion sound + browser AudioContext unlock
   useDragDrop.ts           shared drag/drop state
   useDisplayRequests.ts    display-request SSE → snapshot/live request state
+  useMachineMeters.ts      the machines SSE as a page-wide store (useSyncExternalStore):
+                           MachineMeters and MachinesPanel subscribe, AppShell does
+                           NOT (a frame a second would re-render the whole shell);
+                           one stream, opened with the first subscriber, closed
+                           with the last and while the page is hidden (that is
+                           what lets the server stop sampling); reconnects, and a
+                           30 s silence watchdog
+  useDailyLimit.ts         the daily time limit's one client store (`useDailyLimit`),
+                           its actions, and `useDailyLimitTracker` (mounted once in
+                           AppShell): counts ACTIVE time only, a timer only inside a
+                           stretch of activity, never while hidden or idle
   useNotificationPresence.ts  tells the server which chat this tab is showing
                            (POST /api/notifications/presence: on change, on
                            visible, every 30 s while visible, null on hide /
@@ -657,7 +762,8 @@ hooks/
                            and the Send menu: read on open, tab focus, network
                            return, a run ending and at the next due time —
                            never polled (lib/scheduled/sync.ts holds the rules)
-  useSideQuestions.ts      this chat's /btw topics: history read on open and on every stream (re)connect, deltas applied once per animation frame, ask / follow-up / cancel, the omp-version and `Unknown command` latch
+  useSideQuestions.ts      this chat's /btw topics: history read on open and on every stream (re)connect, deltas applied once per animation frame, ask / follow-up / cancel, the omp-version and `Unknown command` latch; returns ONE memoised object (it carries `sessionId`), so it changes only when a topic, flag or error does
+  useSideQuestionsBridge.ts  how those topics reach the Side Bar: AppShell makes the bridge, ChatWindow publishes into it (`usePublishSideQuestions`), SidebarChatPanel subscribes (`useBridgedSideQuestions`, `useSyncExternalStore`); also the `SideQuestionsRequest` token a typed `/btw` uses to ask AppShell for the Side Bar's This chat view
   useDistill.ts            the client store over POST /api/distill: SSE framing,
                            per-key in-memory cache, FIFO queue capped at two
                            concurrent streams (a queued request for a key is
@@ -675,7 +781,8 @@ bin/
 
   cody-server.js           custom server; also WS upgrade for /api/display/socket
                            (stream frames + input) and native-gateway host routing;
-                           mints the display capability secret at boot
+                           mints the display capability secret at boot; stops the
+                           machine sampler (every ssh child) at shutdown
   cody-display-mcp.js      bundled stdio MCP server exposing open_preview (plus the session and
                            device tools) to Claude/Codex engines (posts to /api/internal/*)
   cody-pi-login.mjs        pi's provider sign-in helper: imports the INSTALLED pi
@@ -684,9 +791,14 @@ bin/
                            logout), so pi's own auth.json holds the credential
   cody-omp-credentials.mjs omp's credential list/remove helper: runs omp's own
                            AuthStorage under Bun (list / remove / removeProvider),
-                           emits identities and block state only, never a token
+                           emits identities and block state only, never a token;
+                           purges omp's soft-delete tombstones (see "Removal is
+                           real" under Several accounts)
   cody-omp-auth-api.mjs    the one AuthStorage surface the omp Bun helpers call:
                            namespaced (omp 18.3.4+) first, flat names as fallback
+  cody-omp-claude-credits.mjs  list / add the Claude API keys (`anthropic-api`) through
+                           omp's own AuthStorage under Bun: the key arrives on STDIN,
+                           only ids and the last four characters come back
   cody-session-tail.js     read-only live view of a chat session for the FIRST
                            web terminal of a workspace (spawned by
                            lib/terminal-manager.ts); renders + follows the
@@ -1004,6 +1116,21 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   never pass through Cody: a driver relays a URL out and a code in and reads
   the engine's answer. `/api/auth/all-providers` stays omp-only (it reads
   omp's model catalog to list configured API-key providers).
+  **Every removal control reports its real outcome** (toast, plain words; a
+  failure also stays as an inline error): the per-account trash and the
+  provider-wide "Disconnect" read `postLogout()` (ProviderLoginFlow.tsx);
+  a 404 `not_found` is an info toast + refresh (the account was already
+  gone), never an alarm. The drawer's danger zone is `Disable in {engine}`
+  (toast with Undo) and ONE `Remove {provider}` that signs out every
+  sign-in holding accounts, forgets every key saved in Cody and deletes a
+  custom endpoint (`planRemoval` / `runRemoval` / `reportRemoval`, pure and
+  unit-tested; stops at the first failure and says what was and was not
+  removed). A key only the SERVER'S ENVIRONMENT sets is not Cody's to
+  remove: the row says "Set in the server's environment — remove it there"
+  (no button; `PUT /api/provider-keys` answers 409 `set_in_environment`),
+  and Disable is the way to hide it. The directory re-reads usage and the
+  OpenRouter balance after every change so a removed account leaves the
+  Usage block at once.
 - **Several accounts can serve one provider, and which one is IN USE is the
   engine's fact, never a Cody guess** (omp only today). omp's `agent.db` may
   hold more than one OAuth credential per provider (two Claude subscriptions,
@@ -1047,12 +1174,45 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   `ProviderLoginOption.accounts` (`ProviderLoginAccount {id, position,
   label, state, planType, resetsAt, canRemove}`) and implements
   `removeAccount`/`logout`. `POST /api/auth/logout/[provider]` with a JSON
-  body `{accountId}` removes ONE credential (404 `not_found` if gone, 400
-  `unsupported` on an engine without `removeAccount`); no body is the
-  provider-wide logout it always was. `accounts` is `undefined` (never
-  `[]`) when the read fails, and the sign-in row then behaves exactly as
-  before. No restart of live children is needed: omp reads credentials from
-  `AuthStorage` per turn, unlike `config.yml`.
+  body `{accountId}` removes ONE credential (404 `not_found` = already gone,
+  a stale list, never shown as a failure; 400 `unsupported` on an engine
+  without `removeAccount`); no body is the provider-wide logout and answers
+  `{removed, count}` (`removed:false` = nothing was stored, never a silent
+  success). `accounts` is `undefined` (never `[]`) when the read fails, and
+  the sign-in row then behaves exactly as before. `accounts: []` on a
+  CONNECTED sign-in means the credential is not in omp's store at all (it
+  comes from the server's environment or a config file): the card says it can
+  only be removed there.
+  **Removal is real, and it sticks.** omp's `removeById` / `remove` only
+  SOFT-delete: the row stays with `disabled_cause` set (`deleted by user`),
+  the API key or refresh token still inside, and they can only act on ACTIVE
+  rows. Cody used to list those tombstones as removable "Disabled" accounts,
+  so Remove answered 404 "no account matching that id" forever (the owner's
+  OpenRouter: a key deleted weeks earlier, listed, un-removable, and still
+  READ — `lib/openrouter/key.ts` ignored `disabled_cause`, so its balance,
+  an "out of credits" blackout and a Usage row outlived the removal). Now:
+  the helper's `remove` / `remove_provider` delete the tombstone row, its
+  block and lease rows after omp's own soft delete (`purgeTombstones` — the
+  ONE raw SQL write in the Bun helpers, guarded by `disabled_cause IS NOT
+  NULL` so it can never delete a credential that can still serve); `list`
+  omits `deleted by user` / `replaced by` tombstones (omp's own `omp usage`
+  omits the same two) and sweeps the `deleted by user` ones; an
+  auto-disabled account (failed refresh) is still listed and now IS
+  removable. `position` therefore renumbers after a removal, in Settings and
+  the composer alike. `lib/openrouter/key.ts` reads ACTIVE rows only.
+  After ANY removal, key clear or enable/disable, the route calls
+  `settleProviderChange` (`lib/provider-state.ts`): models, roster, usage
+  (`resetUsageCache` — a 60 s cache served stale while it refreshed), the
+  OpenRouter balance (a `no_key` read is final, never served "stale", and an
+  in-flight read from before the change is not cached), the saved-reset
+  balances, the removed provider's route-memory blackouts, and **idle engine
+  children restart** (`restartIdleRpcSessions`): a live child holds the
+  credential it loaded and the key's environment variable it was spawned
+  with, and an environment variable is never re-read, so a removal cannot
+  depend on the child noticing. A child mid-reply is left alone and the
+  response says how many (`restarted`, `active`). (The earlier note that no
+  restart is needed held for the credential store alone — never for a key
+  Cody put in the child's environment.)
   **Every AuthStorage call in the three Bun helpers
   (`cody-omp-credentials`, `-reset-credits`, `-unblock`) goes through
   `bin/cody-omp-auth-api.mjs`**, which prefers omp 18.3.4+'s namespaced API
@@ -1061,7 +1221,11 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   never touch `storage.credentials`). 18.3.4 renamed the flat methods away
   and every hand-written fixture kept passing, so
   `lib/harness/omp-auth-helpers.test.mjs` runs all three helpers against
-  the REAL installed omp on an empty store.
+  the REAL installed omp (an empty store, and stores seeded through omp's own
+  API by `lib/omp/omp-test-store.mjs` for the soft-delete cases — a
+  hand-written fixture cannot soft-delete);
+  `lib/settings-routes-logout.test.mjs` drives the route end to end against
+  such a store.
 - **The composer reads whichever catalog is real.** `useAgentSession` keeps
   `modelCatalogSource` from `/api/models` and, when it says `"session"`,
   serves the composer the list it adopted off `get_state` instead (a
@@ -1424,6 +1588,11 @@ setting added upstream appears without a Cody change.
 ## Key Design Decisions & Traps
 
 ### Sidebar chat: a tiny baseline, context on demand, sized for a local GPU
+
+The Side Bar has two views behind a switch: **New chat** (everything below: the
+isolated small-model chat) and, wherever omp has `/btw`, **This chat** (side
+questions about the main conversation, which see it — see "Side questions:
+`/btw`"). Nothing below changes for New chat.
 
 The sidebar is meant to run on small LOCAL models (the owner's llama-swap P40:
 8,192–24,576 windows, 2k–8k reserved for output — so the smallest leaves
@@ -2240,7 +2409,7 @@ and nothing repeats (one-off, by design).
   user RULES.md carries one line telling every session and subagent the
   capability exists.
 - **The composer** (`components/SendPill.tsx`, `ScheduleMenu.tsx`,
-  `ScheduledRows.tsx`, `hooks/useScheduledMessages.ts`). The Send pill gains a
+  `ScheduledBar.tsx`, `hooks/useScheduledMessages.ts`). The Send pill gains a
   joined ▾ zone (+22 px on a desktop, +24 px on a phone, where Send stays an
   icon); the ▾, a right-click and a long press (450 ms, touch/pen) on Send open
   the menu — a popover on a mouse, a bottom sheet with 48 px rows on a touch
@@ -2250,10 +2419,19 @@ and nothing repeats (one-off, by design).
   an empty box or attachments still preparing, a chat that does not exist yet,
   images attached, a `!` shell line (a scheduled message arrives as a plain
   prompt, so the command would reach the model as text), or no reset time
-  known. "Tonight 11 PM" disappears once it has passed. Rows above the input
-  show the time, the text, "by the agent" and Edit / Send now / Cancel; Edit
-  cancels the item and puts its text back in the box ahead of whatever is typed
-  there. More than four rows fold behind "N more scheduled". The list is never
+  known. "Tonight 11 PM" disappears once it has passed. The queued messages are
+  ONE slim full-width bar above the composer (the Tasks/Agents bars' look: icon ·
+  title · detail · chevron), collapsed by default: "2 scheduled · next 9:30 PM",
+  "1 scheduled · 9:30 PM · <first words>", "waiting for the current reply…", and
+  in the error colour "1 failed to send" (it never opens by itself). The words
+  come from `summarizeScheduled` (`lib/scheduled/ui.ts`, tested). Opened it is a
+  list (max height, scrolls) with one row per message: time, "by the agent", the
+  text ellipsised, and icon buttons Edit / Send now / Cancel (Retry / Edit /
+  Cancel when failed; none while it is sending), 38 px on a touch screen; a
+  failed row adds a second line with the reason, and on a phone the time sits over
+  the text. The bar renders in `ChatInput` above the waiting/outbox rows because
+  the hook lives there (the Send menu shares it). Edit cancels the item and puts
+  its text back in the box ahead of whatever is typed there. The list is never
   polled: it is read when the chat opens, the tab or the network returns, a run
   ends (an agent may have scheduled something during it) and at the next due
   time (`sync.ts`, `planScheduledRefresh`).
@@ -2265,6 +2443,78 @@ and nothing repeats (one-off, by design).
   listens to. The ▾ menu's chips compute from the moment it OPENED, but "In 1
   hour" is resolved when it is CHOSEN. A failed read of the list keeps the rows
   the page already has rather than blanking them.
+
+### Machine meters in the top bar (`lib/machines/`, `components/machines/`)
+
+Live CPU and memory for every machine Cody runs on or uses: "This server" plus
+any ssh machine an admin adds under Settings › System › Machines. They sit left
+of the session's `$` cost; the three token figures that used to be there are
+gone (tokens stay in the session popover and the button's tooltip).
+
+- **The list** is `cody-machines.json` in the instance data dir (0600, atomic).
+  The local entry is always there, its name editable, default "This server": a
+  fresh install shows nothing of anyone's network, and no owner's hosts are in
+  code. An ssh machine is a name plus a destination (an alias from
+  `~/.ssh/config`, or `user@host`). `checkMachineDestination` is a WHITELIST
+  (letters, digits, `. _ - : @`, never a leading `-`): the value is an ssh
+  argument and, through `ProxyCommand … %h`, part of a shell line. Names are
+  one collapsed line, 24 characters at most; 12 machines at most.
+- **Sampling happens only while somebody looks.** `GET /api/machines/stream`
+  is the subscription: the first viewer starts a collector per machine (a timer
+  reading `/proc` for this server; ONE long-lived `ssh` per other machine
+  running the fixed loop in `ssh.ts`), the last viewer leaving starts a 60 s
+  countdown, and then every ssh process is killed. The hook closes the stream
+  while the page is hidden. One record per machine, no history. The live state
+  is a page-wide store the two drawing components subscribe to, never
+  `AppShell` state: a frame every second or two would re-render the whole shell.
+  It is one more long-lived stream per visible page: over plain HTTP/1.1 the
+  browser's six connections per host are shared with the chat's own streams.
+- **ssh is given nothing a person typed** except the checked destination (one
+  argv entry after `--`, no local shell). The remote command is the constant
+  `SAMPLE_COMMAND`: `sh -c '…'` with no quote, backslash or `!` inside, so a
+  fish or csh login shell can parse it. `BatchMode`, `ConnectTimeout`,
+  keep-alives and `ControlMaster=no`/`ControlPath=none` (a `ControlPersist`
+  config would leave a process behind) are set; the host-key policy is NOT: the
+  person's own `ssh_config` rules, and `host_key` tells them to connect once from
+  a terminal. Failures only a person can fix (`auth`, `host_key`,
+  `unknown_host`, `no_ssh`) are retried every 5 minutes, not every few seconds:
+  a loop of refused logins is how fail2ban or CrowdSec bans Cody's address.
+- **The far loop dies with Cody, however Cody dies.** An orphaned `ssh` does
+  NOT exit when its parent does (it ignores the broken output pipe; one test
+  orphan carried on for 54 minutes, keeping its loop alive on the far machine).
+  So ssh's stdin is a pipe Cody holds open and never writes to (no `-n`), and
+  the loop's background `cat` kills it at EOF: a normal `stop()` ends stdin, and
+  a `SIGKILL` or an out-of-memory kill closes it for us. `ssh.test.mjs` proves
+  both, including a SIGKILLed parent. Never put `-n` back, and never hand
+  ssh's stdin to something that outlives the server.
+- **Statuses** are `online | connecting | offline | unavailable` (reachable but
+  not Linux) with a `reason` CODE; the browser turns codes into plain copy
+  (`machines.reason.*`) and `lib/machines/present.test.mjs` holds all three
+  locales to every status, reason and API error code. A machine that drops
+  loses its numbers (never stale ones) and gets one quiet "connecting" retry
+  before it shows offline. The stream carries no address and no ssh output;
+  `GET /api/machines` hides destinations from non-editors; only the admin-only
+  `POST /api/machines/test` returns ssh's own first line.
+- **The sampler lives on `globalThis`** (`__codyMachineSampler`).
+  `bin/cody-server.js` loads `sampler.ts` through jiti only to call
+  `stopMachineSampler()` at shutdown, while the routes load it through Next's
+  bundler: two module copies, one sampler. Nothing under `lib/machines/` may use
+  `@/` (`lib/server-import-graph.test.mjs`). Timers and the ssh pipes are
+  `unref`'d, so a stuck connection can never hold the server open.
+- **Top bar layout** (`MachineMeters.tsx`). The component owns a `flex: 1 1 0`
+  slot between the left controls and the session button and measures it with a
+  ResizeObserver; `pickMeterDensity` picks the richest of `full` (name, labelled
+  bars) → `compact` (icon labels) → `mini` (an initial and two 18 px bars: two
+  machines fit in the 89 px that 1280 px with the sidebar and workspace panel
+  open leaves) → `dot` → nothing. Widths are in `METER_LAYOUT` and MUST match
+  the `.mm-*` CSS in `app/globals.css`. A phone always gets the 24 px `dot` (a
+  ring for the machine that needs a look, or a struck-through server when one
+  is down); to make room the session button drops its ⓘ icon while it shows a
+  context figure, and no divider is drawn. Under about 385 px with omp's extra
+  buttons even that does not fit, and it is left out rather than overlapped.
+- The dropdown is the shared top-panel pattern (`activeTopPanel ===
+  "machines"`); its "Manage machines" opens Settings › System with
+  `highlight: "machines"`.
 
 ### Overnight runs: stalls, crashes and restarts carry on (`lib/run-recovery/`)
 
@@ -3807,14 +4057,16 @@ second Enter was silently ignored while the first was in flight.
   budget-limited / complete (they wait on a decision); Drop needs a second tap
   within 4 s. `lib/web-mode-state.ts` keeps `ActiveGoal` only for the fallback.
 
-### Side questions: `/btw` (`lib/btw.ts`, `hooks/useSideQuestions.ts`, `components/SideQuestionsPanel.tsx`)
-- **omp 18.7's `/btw`**: a question asked WHILE the main reply keeps running, answered in its own panel, never entering the transcript. omp keeps every topic in a sidecar beside the session file (`<session minus .jsonl>/btw-history/entry-<id>.json`, shared with its own TUI), one question at a time. RPC: `btw {question, recordId?}` → `{record}` (`recordId` = a follow-up in that topic), `btw_cancel {recordId?}`, `get_btw_history`; frames `btw_delta {recordId, delta}` and `btw_record {record}`. An older omp answers `Unknown command`, and Cody hides the whole surface (latched per page; `ompVersionHasBtw` reads the installed version from `loadEngineInfo()` first). pi/ACP engines never see it: the route is `requireEngine("omp")`, their vocabularies answer `unsupported`.
-- **Typed `/btw <question>` is intercepted, never sent.** omp's own `/btw` is a TUI command: over the RPC `prompt` path it would reach the model as literal text. `ChatInput.handleSend` takes it (`parseSideQuestionCommand`) BEFORE the streaming gate, so it works idle and mid-run; attachments → refused with a toast (draft kept); a refusal restores the draft; an empty `/btw` opens and focuses the panel. `scheduleBlock` refuses it (`btw.scheduleReason`). Another engine's own `/btw` (Claude Code has one) is untouched: `onSideQuestion` is only passed for omp (ChatWindow `sideQuestionsCapable`). The palette offers `/btw` while a run is live too and drops omp's engine-reported copy.
-- **Frames never touch the chat.** `rpc-manager.handleFrame` takes `btw_delta`/`btw_record` on an early path (resets the idle timer so an answering child is not idled out, emits, returns): never `notifyRunningChange`, run flags or the delivery ledger. The browser hands them to `useSideQuestions.applyFrame` BEFORE the message-update coalescer (routed through it, every delta would flush the pending `message_update` early). A `notice` with `source:"btw-history"` (omp could not save a topic) goes to the panel's error row, and `lib/notifications/observer.ts` ignores it (its `level:"error"` would become the text of an unrelated failed run).
+### Side questions: `/btw` (`lib/btw.ts`, `hooks/useSideQuestions.ts`, `hooks/useSideQuestionsBridge.ts`, `components/SidebarSideQuestions.tsx`)
+- **omp 18.7's `/btw`**: a question asked WHILE the main reply keeps running, answered in the Side Bar's "This chat" view, never entering the transcript. omp keeps every topic in a sidecar beside the session file (`<session minus .jsonl>/btw-history/entry-<id>.json`, shared with its own TUI), one question at a time. RPC: `btw {question, recordId?}` → `{record}` (`recordId` = a follow-up in that topic), `btw_cancel {recordId?}`, `get_btw_history`; frames `btw_delta {recordId, delta}` and `btw_record {record}`. An older omp answers `Unknown command`, and Cody hides the whole surface (latched per page; `ompVersionHasBtw` reads the installed version from `loadEngineInfo()` first). pi/ACP engines never see it: the route is `requireEngine("omp")`, their vocabularies answer `unsupported`.
+- **Typed `/btw <question>` is intercepted, never sent.** omp's own `/btw` is a TUI command: over the RPC `prompt` path it would reach the model as literal text. `ChatInput.handleSend` takes it (`parseSideQuestionCommand`) BEFORE the streaming gate, so it works idle and mid-run; attachments → refused with a toast (draft kept); a refusal restores the draft; an empty `/btw` only checks that asking is possible. Once the engine took the question (or for a bare `/btw`) `ChatWindow.askSideQuestion` calls `onOpenSideQuestions`: AppShell's `handleOpenSideQuestions` opens the right panel on the Side Bar tab (on a phone the panel is full-screen, so it also closes the session drawer) and bumps a request token the Side Bar consumes once — it flips to This chat, and a bare `/btw` also puts the cursor in the question box. A refusal opens nothing. `scheduleBlock` refuses it (`btw.scheduleReason`). Another engine's own `/btw` (Claude Code has one) is untouched: `onSideQuestion` is only passed for omp (ChatWindow `sideQuestionsCapable`). The palette offers `/btw` while a run is live too and drops omp's engine-reported copy.
+- **Frames never touch the chat.** `rpc-manager.handleFrame` takes `btw_delta`/`btw_record` on an early path (resets the idle timer so an answering child is not idled out, emits, returns): never `notifyRunningChange`, run flags or the delivery ledger. The browser hands them to `useSideQuestions.applyFrame` BEFORE the message-update coalescer (routed through it, every delta would flush the pending `message_update` early). A `notice` with `source:"btw-history"` (omp could not save a topic) goes to the Side Bar's error row, and `lib/notifications/observer.ts` ignores it (its `level:"error"` would become the text of an unrelated failed run).
 - **Merge rules are the bug magnet (`lib/btw.ts`).** omp writes the first `btw_record` BEFORE the `btw` response, the response can reach the browser after the first deltas, and a history read can be older than a frame that arrived while it was in flight. A frame is authoritative (`btw_record` replaces; the last one of a turn carries the full answer, healing any missed delta). A command answer or history read is a snapshot: `mergeBtwSnapshot` replaces a topic only when it is at least as far along (more turns; finished beats running, so an `interrupted` read ends a stale running one) and NEVER grows a topic the page shows as running (its deltas may still arrive as frames and would be appended twice). A snapshot never removes a topic.
 - **History without spawning.** `GET /api/sessions/<id>/btw` (omp only, owner-checked like `local-routing`): a live child answers `get_btw_history` inside a 3 s bound (`supported:true`; `Unknown command` → `supported:false`; a timeout → the sidecar read WITHOUT recovery, since a live writer's `running` is real); no child → `lib/btw-history.ts` reads the sidecar (≤ 200 files, ≤ 1 MiB each, ≤ 8 MiB total, symlinks refused) and maps `running` → `interrupted` (the writer died, as omp itself does on reopen). Opening a cold chat spawns nothing. The page reads it on open and on every stream (re)connect, and every 4 s while a topic shows as answering, so a dropped stream never leaves "Answering…" on screen.
 - **Asking from a chat with no stream open** (`ensureSideQuestionStream`) opens it first: that also starts a cold chat's engine, and frames only reach an attached page. `btw` is NOT part of the outbox/prompt machinery (no ledger row, no run state, no stop latch). The wrapper bounds its ack at 30 s (`BTW_ACK_TIMEOUT_MS` → `btw_ack_timeout`) and never recycles the child for it; `btw_cancel` with no live child answers `{cancelled:false}` without spawning. A follow-up is offered only after a COMPLETE answer (omp's own TUI rule); a cancelled/failed/interrupted topic is followed by a new question instead.
-- **UI.** `SideQuestionsPanel` sits under `ComposerPanels` as its own full-width row, collapsed by default: the header shows the live "Answering…" or the topic count, and while a run is going with no topics it is a slim bar reading "Ask a side question…". Newest three topics, the rest behind Show all; body scroll cap `min(36vh, 320px)`; 16px inputs, ≥ 38px controls. There is deliberately no composer-row button: the phone budget is spent (`phoneBudget()`).
+- **UI: the Side Bar, never the composer.** Nothing sits under the composer. The state stays with the main chat (`useSideQuestions` inside its `useAgentSession`, next to the event stream that carries the frames) but is SHOWN in the Side Bar tab (`SidebarChatPanel` → `SidebarSideQuestions`), on another branch of the tree. `useSideQuestionsBridge` carries it across: AppShell owns one bridge, `ChatWindow` publishes `sideQuestions` into it, `SidebarChatPanel` subscribes with `useSyncExternalStore`, so AppShell itself never re-renders for a streaming answer. A release only counts for the publisher that made it (the old chat's cleanup cannot clear the new chat's state when one replaces the other), and the view is keyed on `sideQuestions.sessionId`, so a half-typed question never follows the reader into another chat. `engineOkForPage` (useSideQuestions) lets a chat opened later start with the omp-version answer instead of "unknown", so the switch does not blink away between two chats.
+- **The "This chat | New chat" switch** is a `SegmentedControl` (ids `sidebar-mode-*`, 40px segments on touch) at the top of the Side Bar, shown only while the bridge holds an `available` state. With none (another engine, an omp older than 18.7, no main chat yet) the Side Bar is exactly the New chat view. The rules live in the pure reducer `lib/sidebar-mode.ts` (tested; the component only dispatches `choose` / `request` / `gone` / `focused`): the choice is dropped when This chat goes away, so it cannot jump back by itself when another chat appears, and a request token is consumed once even when it arrives with the Side Bar's first mount (the tab loads on first use). BOTH views stay mounted (a streaming sidebar answer and any draft survive the flip), and while an answer arrives with New chat showing, the This chat segment wears a pulsing dot.
+- **This chat** lists topics newest first (ten, the rest behind Show all), scrolls back to the top when a new topic appears, and puts the new-question box at the bottom, built like the New chat composer: Enter sends, Shift+Enter adds a line, no attach button (side questions are text only), `.composer-textarea` keeps it 16px on touch, `.chat-input-shell` gives it the main composer's focus glow. Send is disabled while any answer runs (omp answers one at a time) and says why in its title; the box stays editable. Follow-up boxes live inside each topic and appear only after a COMPLETE answer. Sizes follow the pointer (`touch` prop, defaulting to `useIsMobile() || useIsCoarsePointer()`): a finger gets 16px inputs and ≥ 38px controls, a mouse the 30px / 13px of the New chat composer's Send button. A card's footer line is its one statement of state (Answered / Cancelled / Interrupted / Failed); a note under the answer appears only when it adds something (why it was interrupted, the engine's reason for a failure), never to repeat the footer.
 
 ### Composer context gauge
 - An icon-only context ring sits beside Send. It uses the accent color below
@@ -3835,6 +4087,98 @@ second Enter was silently ignored while the first was in flight.
   mounted instead of removing the control.
 - Per-model token totals include input, output, cache-read, and cache-write
   tokens.
+
+### Daily time limit: active time only, one union across devices (`lib/daily-limit/`, `hooks/useDailyLimit.ts`)
+
+A personal screen-time limit, off by default (Settings › Preferences › Daily
+time limit). It counts how long the person is ACTIVELY using Cody, never how
+long Cody is open or how long an agent works, and the total is shared by every
+device on the account. Nothing it does ever blocks a send or stops a run.
+- **What counts** (`active-time.ts`): the page is visible AND focused AND there
+  was real input in the last 60 s. A second counts only inside that window; the
+  60 s grace is what lets reading a long reply (no key, no click) keep counting.
+  Hiding or blurring closes the running stretch at that instant (the grace left
+  over is not banked), input that arrives while the page is not present is
+  ignored, and coming back counts nothing until the first real input. Real input
+  = keydown, pointerdown, a pointer that actually MOVED, wheel, touchstart/move,
+  a non-collapsed text selection. Input inside the Preview iframe is invisible
+  to the page (the browser keeps those events in the frame), so it does not
+  extend the grace.
+- **A `scroll` event is NOT input — the one deliberate departure from "scrolling
+  keeps it alive".** The chat's own auto-scroll fires `scroll` for every word an
+  agent streams, so counting it would make an agent working in a tab nobody is
+  touching count forever. Scrolling by hand is already covered by the wheel,
+  touch, keys and pointer that cause it. For the same reason a `pointermove` at
+  the position the pointer already had (the browser repeats it when content
+  scrolls under a parked mouse) and every untrusted event (`isTrusted` false) are
+  ignored.
+- **Reports are durations, not timestamps.** The page sends `{activeSeconds,
+  endedSecondsAgo}` every 15 s (`BEAT_INTERVAL_MS`): how long it was active and
+  how long before sending that ended. The server places it on ITS clock, so a
+  device whose clock is minutes off lands on the right seconds. The 15 s timer
+  exists only while a stretch can still be reported (it starts at the first
+  input and stops when the grace runs out or the page is hidden or blurred): a
+  hidden or idle tab owns no timer. The last report goes as a beacon only when
+  the page is hidden or closing (`pagehide`); a merely blurred page sends a
+  normal request and reads the answer. Capped at 90 s per beat on the server
+  (`parseBeat`).
+- **The server keeps a UNION, not counters** (`ledger.ts`, `store.ts`):
+  `<accounts dir>/daily-limit.json` (0600, atomic, keyed by account id plus
+  `__instance`) holds, per person, the settings, the per-day notes
+  (`extraSeconds`, the limit the notice was dismissed at) and the ledger of
+  wall-clock intervals. Intervals that overlap or sit within 1 s merge, so two
+  tabs or devices reporting the same seconds add nothing and a day of beats is a
+  handful of intervals. Pruned on every write to 14 days and 5000 intervals; a
+  deleted account's record goes with it (nothing is pruned while the account
+  store reads empty). Beats are ignored while the limit is off, and the file is
+  only rewritten when the union grew. Reads degrade field by field; writes are
+  strict (`400 invalid_daily_limit`).
+- **The day is the local date in the person's zone.** GET resolves it with
+  `effectiveTimeZone` (a read never writes the remembered device), PUT and beat
+  with `zoneForMessage`: chosen > this browser > last seen > server > UTC, as
+  under "Time zones". The day's edges are FOUND, not computed from an offset
+  (`localDayBounds`: a binary search over the zone's own date), so a 23- or
+  25-hour DST day and a zone whose clocks change at midnight come out right,
+  usage resets at the zone's midnight, and an interval across it splits there.
+  Usage is a window over the ledger chosen at read time, so a zone change needs
+  no rewrite; "Add 15 minutes" and the notice's dismissal are keyed by that
+  local date.
+- **The ring** (`DailyLimitRing`, `LimitGlyph`): ONE circle in the controls row,
+  no text beside it: a thin outline and an inside that fills like liquid from the
+  bottom as the day is used (a rect clipped to the inner circle, slid by a CSS
+  `transform` transition; the global `prefers-reduced-motion` rule zeroes it, so
+  the level jumps for anyone who asked for less motion). Its diameter IS the
+  Send/Stop pill's height: 28px on a desktop, 38px on a phone. Accent normally,
+  warning at 15 minutes left or less (`WARNING_SECONDS`), error at zero and below
+  ("reached" for the first minute over, then "over"). Tooltip and aria-label:
+  "1h 12m left today", "Daily limit reached", "12m over today's limit". A click
+  opens the popover (time left in big numbers, used today, the limit, "Add 15
+  minutes" once spent, a link to Settings › Preferences). It sits before the
+  quota ring and costs 42px on a phone row (see "Phone composer").
+- **Time's up** (`DailyLimitNotice`): one slim bar above the composer's stack
+  ("You've reached today's 2h limit", "Add 15 minutes", "Done for today"). The
+  SERVER decides it is due (`noticeDue`: on, limit reached, not dismissed at this
+  limit), so answering on the tablet clears it on the PC. It stays until one of
+  the two is pressed (it never hides itself and never blocks a send). Adding time
+  raises today's limit, so reaching the new one is a new occasion. The quiet
+  "12m over" state is just the ring for the rest of the day.
+- **One counter per page.** `useDailyLimitTracker()` is mounted once in AppShell;
+  every surface reads the same store (`useDailyLimit`, on `globalThis`). The
+  state is refreshed on load, focus, visible and online (never faster than every
+  5 s) and on the first input after midnight; each beat's answer is today's total
+  across devices. Turning the limit off hides every surface and detaches every
+  listener and timer.
+- **Traps.** `LimitGlyph`'s clip-path id comes from `useId`, which is unique only
+  inside ONE React root: a harness that renders circles with separate
+  `renderToStaticMarkup` calls shares ids, and every circle is clipped by the
+  first one's. Headless Chromium reports no hover, which Cody reads as a touch
+  screen (taller notice buttons): launch with
+  `--blink-settings=primaryPointerType=4,availablePointerTypes=4,primaryHoverType=2,availableHoverTypes=2`
+  to look at the desktop layout. A puppeteer `screenshot({clip})` fires `resize`
+  and closed an open popover, so capture the viewport and crop afterwards.
+- **Not done on purpose:** a push notification at the limit. The person is
+  looking at Cody when it happens (the notice is their signal), and a new kind
+  would touch the notification catalog, its settings page and its tests.
 
 ### Token rate: measured from the engine's own numbers, never guessed
 - The transcript's `t/s` badge is the provider's **output-token count over
@@ -4416,6 +4760,23 @@ config").
   days, every turn. A `credits` blackout (prepaid: OpenRouter) has **no
   expiry**: money does not return on a timer, so it clears only when a read
   sees a positive balance, and a FAILED balance read is never a zero one.
+  **A blackout must not outlive its provider.** `applyBlackouts` fabricates
+  an account for a blacked-out provider the live report no longer has, so a
+  remembered blackout keeps a provider in Usage after it is gone. Three
+  rules: a read that finds NO key at all (`no_key`) covers the `credits`
+  blackout and lifts it (a removed key can never give a positive balance;
+  any other failed read still covers nothing); removing a provider's last
+  credential or key forgets its blackouts outright
+  (`clearProviderBlackouts`, called through `settleProviderChange`); and a
+  provider omp's config DISABLES (`disabledProviders`) leaves the one
+  snapshot routing and Usage read (`withoutProviders` in `reconcileRouting`,
+  fed by `reconcileRoutingForRequest`), derives no blackout, and has the
+  ones already remembered forgotten (a newly disabled one through
+  `settleProviderChange`, a long-disabled one on the next usage read — the
+  owner's OpenRouter was already disabled when this was found); a live
+  read re-derives the truth when it is enabled again. A
+  credential that is disabled or removed never yields a "blocked account"
+  (`applyCredentialBlocks` skips rows with a `disabledCause`).
 - **Roles follow the quota** (`lib/routing/role-binding.ts`). When a role's
   configured model is blacked out, Cody re-points `modelRoles.<role>` at the
   first entry of the USER's own `retry.fallbackChains` that is not — never
@@ -4424,7 +4785,8 @@ config").
   an assignment that no longer matches what Cody wrote is adopted as the new
   baseline. Nothing usable in the chain means the role is left exactly as
   configured; inventing a destination the user never listed is not Cody's
-  call.
+  call. A Claude plan model that saved API credits cover is left alone: the
+  credits are its next hop ("Claude API credits as the backup" below).
 - **Chains skip what cannot answer** (`lib/routing/chain-binding.ts`). omp's
   REACTIVE fallback (`#tryRetryModelFallback`) only checks that a candidate
   has a key, so a provider out of credits or blocked on every account was
@@ -4438,7 +4800,7 @@ config").
   walks the baselines. Any chain or role change restarts idle sessions.
   Also: a failed usage read never lifts a blackout (only a fresh read that
   sees the account does), and a cached window past its own reset counts as
-  reset.
+  reset. A Claude plan entry the saved API credits cover is kept as well.
 - **Subagents must resolve through a ROLE, not a model name**
   (`lib/routing/agent-roles.ts`). In omp's `resolveEffectiveAgentModelSelection`,
   `role` is `undefined` for any source that is not a `@alias` — and the role
@@ -4494,6 +4856,102 @@ config").
   panel). The composer's persistent `autoModelSwitch` marker is unchanged —
   it is the durable signal.
 
+### Claude API credits as the backup behind the Claude plans
+
+The owner signs two Claude plan accounts into omp and holds a prepaid API key for
+each. The keys are a BACKUP: used only once the plans are out, as the SAME model
+on the SAME vendor (never a jump to Codex/OpenRouter while a key exists), and the
+chat returns to the plan by itself when the limit lifts. Settings › Providers ›
+Anthropic › "API credits (backup)" holds one key per plan account
+(`ClaudeCreditsSection`, masked to the last four). omp only.
+The Providers directory never lists `anthropic-api…` as rows of their own
+(`buildProviderDirectory` skips them when it adds unclaimed catalog ids, as
+`harness/omp.ts` skips their models.yml blocks): they are the Anthropic row's
+business, and a row for each would be a second, deletable "provider" whose
+removal silently breaks the credits.
+
+- **What omp does with an Anthropic API key (omp 18.8.3, measured with its own
+  `AuthStorage` and fake credentials; `lib/omp/claude-credits-omp.test.mjs` pins
+  it).** Key order: runtime `--api-key` → models.yml `apiKey` → stored OAuth →
+  login-stored API key → `ANTHROPIC_API_KEY` → other stored keys. The OAuth step
+  has a last-resort pass (`allowBlocked`) that returns a BLOCKED plan account so
+  the provider's own limit error comes back — it never falls through to a key.
+  `limits.rotate` only rotates between credentials of the SAME type. So with a
+  plan signed in, an API key under `anthropic` (stored, env or Cody's key box) is
+  never used, even with both plans blocked; it wins only if every plan is
+  removed. Today a plan limit goes to the next entry of `retry.fallbackChains`.
+- **Mechanism: one extra provider PER KEY that omp's own chain walks to.** The
+  first key lives under `anthropic-api`, the second under `anthropic-api-2`, …
+  (`claudeCreditsProvider(slot)`, up to 8), each serving the plans' models with
+  its key. Not one shared pool, because omp rotates to a sibling credential of ONE
+  provider only when the error reads like a quota, and Anthropic's reply for an
+  empty prepaid balance ("credit balance is too low", HTTP 400) does not. Measured
+  against real omp: with both keys in one provider 2 of 6 fresh chats picked the
+  empty key and fell to the next vendor with the other key unused; with one
+  provider per key 6 of 6 went plan → key 1 (400) → key 2, and omp then skips the
+  empty key's selector for about 5 minutes. Each piece exists only while a key does:
+  1. the keys, in omp's AuthStorage, one per provider
+     (`bin/cody-omp-claude-credits.mjs`: it refuses any provider outside the
+     `anthropic-api*` family and answers with the existing row when the same key is
+     already stored under another; removal also purges omp's soft-delete
+     tombstone, though SQLite keeps freed pages until overwritten).
+     `cody-claude-credits.json` (0600, no secret) records which plan account each
+     key belongs to and which provider holds it (routing reads that without
+     starting omp); a replaced key stays in its provider, a new one takes the first
+     free provider;
+  2. one Cody block per key's provider in models.yml (`syncClaudeCreditsProviders`):
+     model IDs only (omp fills the rest from its bundled catalog — measured
+     identical), names suffixed " (API credits)" / " (API credits 2)", `auth: none`.
+     Never omit `auth`: omp then forces OAuth-style request shaping; with `none` an
+     `sk-ant-api…` key goes as `X-Api-Key` with no `Authorization` header. A
+     hand-written provider of one of those names is never touched, a block keeps its
+     `baseUrl` (a new one inherits the first's), the Providers directory hides them,
+     and every chat launch levels them with omp's catalog (a new Claude model gets
+     its twins at once, not when someone opens Settings);
+  3. a per-chat config overlay (`cody-claude-credits/<digest>.yml`) appended to
+     `PI_CONFIG_FILES` by `withClaudeCreditsOverlay` (profile → preset → credits →
+     Local-only, which replaces the launch so a Local-only chat never reaches a
+     paid API). It rewrites every EFFECTIVE chain (config.yml + the chat's preset,
+     `effectiveFallbackChains`): `anthropic-api/*`, `anthropic-api-2/*`, … FIRST in
+     key order (omp resolves a wildcard against the model that just failed, so one
+     entry serves every role and a non-Claude model skips it) and the exact twins
+     after each `anthropic/<id>` entry (a Claude model parked at the END of a chain
+     is backed too). Launch-only: config.yml, presets and the Model plan are never
+     edited; the last key removed removes the overlay; content-addressed, newest 12
+     kept, none deleted before 7 days.
+- **Order, proven against real omp with fake backends**: plan accounts first (omp's
+  own rotation) → key 1 after every plan's limit error → key 2 when key 1 is
+  refused → no other provider before them → every key spent, the chain goes on to
+  its next provider. omp returns to the plan itself at cooldown expiry
+  (`retry.fallbackRevertPolicy` default `cooldown-expiry`; the settings row warns
+  when it is `never`). The switch costs one refused plan request per chat start.
+  `retry.usageAwareFallback` is untouched: with it on omp pins the fallback and
+  never reverts.
+- **Routing never jumps ahead of the credits** (`lib/routing/credits-cover.ts`).
+  A spent Claude plan model the saved keys can answer for is "covered": role
+  binding leaves the role alone, chain filtering keeps the entry, the agent-role
+  repair does not call a covered pin exhausted. Covered stops when every saved key
+  is blocked itself: omp's block on a refused key shows in the usage snapshot as an
+  exhausted account of that key's provider (`applyCredentialBlocks` gives EACH
+  blocked key its own), so "spent" means as many blocked credits accounts as keys.
+- **Chat UX** (`hooks/claude-credits-notices.ts`, `useAgentSession`): ONE notice,
+  "Claude plan limit reached — now using your Claude API credits." (the
+  `retry_fallback_applied` from `anthropic/` to any `anthropic-api*/`); the plan's
+  own limit warning is held 1 s and dropped when `auto_retry_start` arrives; the
+  "fallback succeeded" notice is skipped; the model chip reads "… (API credits)";
+  the silent restore (a bare `model_changed`) says "Claude plan is back". The
+  generic "Retrying (1/3)…" banner for a Claude plan usage limit is held 1.6 s
+  (`PLAN_LIMIT_RETRY_BANNER_HOLD_MS`, longer than rpc-manager's 1.2 s hold on the
+  switch frame) and never shows when the credits take over; any other retry shows
+  at once. A key that is empty adds a second hop (key 1 → key 2): it is announced
+  by the generic fallback notice, which carries the provider's reason.
+- **Not covered**: Cody's background one-shots (`lib/model-plan/one-shot.ts`:
+  session titles, the plan researcher; Distill's own chain) are separate omp runs
+  without the credits overlay, so on a Claude limit they still follow the normal
+  chain (a title may be written by the next provider); the Claude Code engine has
+  its own login; no balance is shown (Anthropic exposes none for a plain key); the
+  generic `ANTHROPIC_API_KEY` box is unused by omp while a plan is signed in.
+
 ### Model orchestration: roles, plans, chains, resets
 - **OMP defaults and role scope.** With no `modelRoles` in config.yml, OMP owns role resolution. Its fifteen built-in roles (omp 18.4.9; read from the engine, `FALLBACK_MODEL_ROLE_IDS` mirrors them) are `default`, `smol`, `slow`, `vision`, `plan`, `commit`, `tiny`, `memory`, `task`, `advisor`, `image`, `web`, `speech`, `dictation`, and `judge`; no removed or custom role is implicit. Preserve saved custom-role mappings. “Reset to OMP defaults” deletes only Cody's overrides: `DELETE /api/model-roles` drops `modelRoles`, `DELETE /api/omp-settings` `{sections:["retry"]}` removes the retry section, and `DELETE /api/model-plan` removes the plan's roles, fallback chains, and usage-aware flag while preserving unrelated retry tuning. Deletion allow-lists live in `lib/omp/settings-config.ts` (`RESETTABLE_SECTIONS`/`RESETTABLE_PATHS`).
 - **Live config takes a restart.** An OMP child reads config.yml at spawn (only subagent preflight reloads it), so plan apply and every reset call `restartIdleRpcSessions()` (rpc-manager): idle children reconnect on demand with the new config; running turns complete on their old config. Responses carry `{restarted, active}` for the UI to announce the result.
@@ -4517,8 +4975,9 @@ instance data dir (`cody-model-presets.json`), never in `config.yml`.
 - **Per conversation, never global.** A chat is bound to one preset
   (`cody-session-presets.json`); the binding is materialized as an omp config
   layer (`cody-model-presets/<hash>.yml`) appended to `PI_CONFIG_FILES` at
-  spawn (`launchWithSessionOverlays` in rpc-manager: preset overlay first,
-  Local-only routing last, so Local-only still wins). Switching presets in
+  spawn (`launchWithSessionOverlays` in rpc-manager: preset overlay first, then
+  the Claude credits overlay, Local-only routing last, so Local-only still wins
+  and never reaches a paid API). Switching presets in
   one chat never touches another chat or the user's own `config.yml`. The
   binding follows omp's temp-id -> real-id rename, is copied on fork and is
   forgotten on delete; a deleted preset reads as base settings.
@@ -4554,7 +5013,7 @@ instance data dir (`cody-model-presets.json`), never in `config.yml`.
   entry list.
 
 ### Auth and model config
-- Auth flows go through RPC commands (`get_login_providers`, `login`) against the omp child process; credentials live in omp's `agent.db` (SQLite) which Cody never touches directly.
+- Auth flows go through RPC commands (`get_login_providers`, `login`) against the omp child process; credentials live in omp's `agent.db` (SQLite). Cody reads and removes them only through the Bun helper over omp's own AuthStorage (`bin/cody-omp-credentials.mjs`) — plus one read-only SELECT of ACTIVE `openrouter` api keys in `lib/openrouter/key.ts` and the helper's guarded tombstone purge (see "Several accounts can serve one provider").
 - `models.yml` in the omp agent directory (`~/.omp/agent/models.yml`, `.yaml` fallback) is read and written from the Providers hub's detail drawer, in a custom endpoint's "Advanced" form (`components/ModelsConfig.tsx`'s editors, rendered by `settings/providers/ProviderDetail.tsx`) — not the Models hub, which only reads the resulting catalog.
   - Model `kind` (chat/tiny/image/tts/stt/judge/embedding/rerank/video, never `search`), runner `api`s and `compat.statefulResponses` (Responses-family apis only) follow omp 18.7. The kind↔api rule and omp's exact message live in `lib/model-kinds.ts`, shared by the editor (inline error, Save disabled) and `validateModelsConfig`. Unset kind / default statefulResponses persist as the key ABSENT (`withCompatFlag` drops an emptied `compat`). There is no `modelOverrides` editor UI; overrides are only validated and preserved.
 - API-key status endpoints must never return the raw key.
@@ -4801,6 +5260,13 @@ palette (`components/CommandPalette.tsx`, ⌘K/Ctrl+K) is built on `cmdk`.
   model button while it is on (17px with its gap, `PHONE_COMPOSER.stateGlyph`,
   taken from the name — no new box). The usage-limit stage is a 7px dot inside
   the quota ring's existing box (`usage-limit-dot`): it adds no width.
+- The daily-limit circle (`DailyLimitRing`, only while that limit is on) is one
+  more 38px box on the row, as tall as Send, with nothing kept to its right: it
+  costs 38 + 4px like reasoning (`phoneBudget(…, { timer: true })`). With
+  reasoning and the quota ring beside it the name gets 7px at 360px, 37px at
+  390px and 59px at 412px; Chromium measured the model button at 390px at
+  exactly the computed 88px, the row 330px wide on one line. Add the agent-mode
+  button too and a 360px row spills, as it already did.
 - ChatInput's own 16px sides ARE the chat column's gutter. Neither dock may
   wrap it in a second one.
 

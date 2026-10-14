@@ -22,6 +22,7 @@ const { startQuotaWatch, stopQuotaWatch } = jiti("../lib/notifications/quota-wat
 const { startScheduledSender, stopScheduledSender } = jiti("../lib/scheduled/scheduler.ts");
 const { startRunRecovery, stopRunRecovery } = jiti("../lib/run-recovery/supervisor.ts");
 const { markServerShuttingDown } = jiti("../lib/run-recovery/shutdown.ts");
+const { stopMachineSampler } = jiti("../lib/machines/sampler.ts");
 
 function parseArgs(argv) {
   const options = { dev: false, hostname: "127.0.0.1", port: 3000 };
@@ -174,6 +175,7 @@ async function main(argv = process.argv.slice(2)) {
     stopEngineHousekeeping();
     stopQuotaWatch();
     stopScheduledSender();
+    stopMachineSampler();
     terminalWs.close();
     void disposeDisplayProviders();
     closeNativeGateway();

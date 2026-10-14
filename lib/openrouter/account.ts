@@ -61,6 +61,9 @@ interface CacheEntry {
 interface CacheState {
   entry: CacheEntry | null;
   inFlight: Promise<OpenRouterAccountSnapshot> | null;
+  /** Bumped by `invalidateOpenRouterAccount`: a read that started before a key
+   * changed describes the OLD key and must not be cached when it lands. */
+  generation: number;
 }
 
 declare global {
@@ -68,7 +71,7 @@ declare global {
 }
 
 function state(): CacheState {
-  if (!globalThis.__codyOpenRouterAccount) globalThis.__codyOpenRouterAccount = { entry: null, inFlight: null };
+  if (!globalThis.__codyOpenRouterAccount) globalThis.__codyOpenRouterAccount = { entry: null, inFlight: null, generation: 0 };
   return globalThis.__codyOpenRouterAccount;
 }
 
@@ -150,11 +153,17 @@ export function getOpenRouterAccount(options: GetAccountOptions = {}): Promise<O
   if (cache.inFlight) return cache.inFlight;
 
   const previous = cache.entry?.snapshot ?? null;
+  const generation = cache.generation;
   const request = readAccount(options)
     .then((snapshot) => {
+      // A key changed while this read was out: it describes the old one.
+      if (cache.generation !== generation) return snapshot;
       // A failed refresh must not discard a good balance the user can still
       // act on: serve the last one, flagged, exactly as the usage cache does.
-      if (!snapshot.available && previous?.available) {
+      // `no_key` is not a failed refresh but the answer — the key is gone, so
+      // its last balance is no longer anyone's to show (it used to be served
+      // stale forever after a removal).
+      if (!snapshot.available && previous?.available && snapshot.error?.code !== "no_key") {
         const fallback: OpenRouterAccountSnapshot = { ...previous, stale: true, error: snapshot.error };
         cache.entry = { snapshot: fallback, expiresAt: Date.now() + FAILURE_BACKOFF_MS };
         return fallback;
@@ -171,11 +180,11 @@ export function getOpenRouterAccount(options: GetAccountOptions = {}): Promise<O
         code: "unreachable",
         message: error instanceof Error ? error.message : String(error),
       });
-      cache.entry = { snapshot, expiresAt: Date.now() + FAILURE_BACKOFF_MS };
+      if (cache.generation === generation) cache.entry = { snapshot, expiresAt: Date.now() + FAILURE_BACKOFF_MS };
       return snapshot;
     })
     .finally(() => {
-      cache.inFlight = null;
+      if (cache.inFlight === request) cache.inFlight = null;
     });
 
   cache.inFlight = request;
@@ -183,8 +192,11 @@ export function getOpenRouterAccount(options: GetAccountOptions = {}): Promise<O
 }
 
 /** Drop the cached entry — after a key changes, its numbers belong to a
- * different account and must never be shown for the new one. */
+ * different account and must never be shown for the new one. A read already
+ * in flight is abandoned too: it would otherwise cache the old key's balance. */
 export function invalidateOpenRouterAccount(): void {
   const cache = state();
+  cache.generation += 1;
   cache.entry = null;
+  cache.inFlight = null;
 }

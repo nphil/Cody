@@ -282,10 +282,10 @@ export interface ProviderLoginAccount {
    * a neutral fallback when the engine reports neither. */
   label: string;
   /** 0-based index among this provider's credentials, ordered by the
-   * engine's own stable ordering (omp: credential row id ascending,
-   * disabled credentials included so a removal never renumbers the rest).
-   * The composer's compact views label position 0 "Primary", 1 "Secondary";
-   * Settings shows `label` instead. */
+   * engine's own stable ordering (omp: credential row id ascending; an
+   * account omp disabled keeps its slot until removed, a removed account is
+   * gone and the later ones move up). The composer's compact views label
+   * position 0 "Primary", 1 "Secondary"; Settings shows `label` instead. */
   position: number;
   state: UsageAccountService;
   planType: string | null;
@@ -327,8 +327,13 @@ export interface ProviderLoginSurface {
   list(): Promise<ProviderLoginList>;
   /** Resolves when the credential is stored; rejects with the engine's own words otherwise. */
   login(providerId: string, ui: ProviderLoginUi): Promise<void>;
-  /** Absent when the engine has no non-interactive logout; the row then offers none. */
-  logout?(providerId: string): Promise<void>;
+  /**
+   * Absent when the engine has no non-interactive logout; the row then offers none.
+   * An engine that can tell reports what it signed out (`removed: false` = there
+   * was nothing stored for this sign-in, `count` = stored accounts removed);
+   * resolving with nothing means "done" and says no more.
+   */
+  logout?(providerId: string): Promise<void | { removed: boolean; count?: number }>;
   /**
    * Removes exactly one stored credential (an `accounts[].id` from `list()`).
    * Absent when the engine cannot enumerate/remove individual accounts.

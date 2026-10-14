@@ -30,9 +30,10 @@
 import { getHarness } from "../harness";
 import { readAgentModelOverrides, writeAgentModelOverrides } from "../omp/agent-model-overrides";
 import { readNativeSettings } from "../omp/settings-config";
-import { applyBlackouts, blackoutCoverage, deriveBlackouts, lapseResetWindows } from "./blackouts";
+import { applyBlackouts, blackoutCoverage, deriveBlackouts, lapseResetWindows, withoutProviders } from "./blackouts";
 import { planAgentRoleOverrides, type AgentRoleChange } from "./agent-roles";
 import { reconcileChainBindings, type ChainBindingChange } from "./chain-binding";
+import type { ClaudeCreditsCover } from "./credits-cover";
 import { reconcileRoleBindings, type RoleBindingChange } from "./role-binding";
 import { autoBindEnabled, recordBlackouts, type ProviderBlackout } from "./route-memory";
 import type { OpenRouterAccountSnapshot } from "../openrouter/account";
@@ -56,6 +57,16 @@ export interface ReconcileDeps {
 	agents?: readonly string[];
 	catalog?: readonly string[];
 	openRouter?: OpenRouterAccountSnapshot | null;
+	/** Providers the engine's own config switches off (omp `disabledProviders`).
+	 * The engine offers none of their models, so they leave the snapshot every
+	 * consumer reads, derive no blackout, and any blackout remembered about them
+	 * is forgotten (a live read re-derives the truth when they are enabled again). */
+	disabledProviders?: readonly string[];
+	/** Saved Claude API credits, when there are any. omp's own fallback chain tries them FIRST (the
+	 * per-chat credits overlay), so a spent Claude plan model they carry is not routed around:
+	 * no role is re-pointed at another provider and no chain entry is dropped while the credits
+	 * can still answer for it. */
+	claudeCredits?: ClaudeCreditsCover | null;
 }
 
 /**
@@ -71,9 +82,16 @@ export function reconcileRouting(snapshot: UsageSnapshot, deps: ReconcileDeps = 
 		// Observation is unconditional and writes nothing to the engine's
 		// config: blackouts are Cody's own state, and folding them into the
 		// snapshot only makes the ring and availability honest.
-		const current = lapseResetWindows(snapshot);
-		const blackouts = deriveBlackouts(current, deps.openRouter);
-		const remembered = recordBlackouts(blackouts, Date.now(), blackoutCoverage(current, deps.openRouter));
+		const disabled = new Set(deps.disabledProviders ?? []);
+		const current = withoutProviders(lapseResetWindows(snapshot), disabled);
+		const openRouter = disabled.has("openrouter") ? null : deps.openRouter;
+		const blackouts = deriveBlackouts(current, openRouter);
+		// A disabled provider is routed to by nobody, so what was remembered about
+		// it is forgotten rather than kept out of sight: a blackout that outlives
+		// its provider is what fabricated an OpenRouter row in Usage for weeks. A
+		// live read re-derives whatever is true the moment it is enabled again.
+		const covers = blackoutCoverage(current, openRouter);
+		const remembered = recordBlackouts(blackouts, Date.now(), (blackout) => disabled.has(blackout.provider) || covers(blackout));
 		const effective = applyBlackouts(current, { blackouts: remembered });
 		const autoBind = getHarness().id === "omp" && autoBindEnabled();
 		if (!autoBind) return { blackouts: remembered, roleChanges: [], chainChanges: [], agentChanges: [], autoBind, snapshot: effective };
@@ -81,8 +99,8 @@ export function reconcileRouting(snapshot: UsageSnapshot, deps: ReconcileDeps = 
 		// Chains first, and role binding walks the user's BASELINE chains: the
 		// filtered copy on disk is what omp reads, not what the user chose.
 		const onDisk = readNativeSettings().settings.retry?.fallbackChains ?? {};
-		const { changes: chainChanges, baselines: chains } = reconcileChainBindings({ snapshot: effective, blackouts: remembered, chains: onDisk });
-		const { changes: roleChanges } = reconcileRoleBindings({ snapshot: effective, chains });
+		const { changes: chainChanges, baselines: chains } = reconcileChainBindings({ snapshot: effective, blackouts: remembered, chains: onDisk, claudeCredits: deps.claudeCredits });
+		const { changes: roleChanges } = reconcileRoleBindings({ snapshot: effective, chains, claudeCredits: deps.claudeCredits });
 
 		let agentChanges: AgentRoleChange[] = [];
 		if (deps.agents && deps.agents.length > 0) {
@@ -92,6 +110,7 @@ export function reconcileRouting(snapshot: UsageSnapshot, deps: ReconcileDeps = 
 				agents: deps.agents,
 				catalog: deps.catalog ?? [],
 				snapshot: effective,
+				claudeCredits: deps.claudeCredits,
 			});
 			if (planned.changes.length > 0) {
 				writeAgentModelOverrides(planned.overrides);

@@ -78,3 +78,12 @@ export function getNotificationsSecretPath(): string {
 export function getNotificationsStatePath(): string {
   return path.join(getAccountsDir(), "notifications-state.json");
 }
+
+/** Each account's daily time limit and the stretches it was actively used:
+ * one record per account plus `__instance` for an OPEN instance
+ * (lib/daily-limit/store.ts). Written 0600. It sits in the accounts directory
+ * so a deployment that persists accounts persists it too, and a test that
+ * redirects CODY_ACCOUNTS_DIR redirects it. */
+export function getDailyLimitPath(): string {
+  return path.join(getAccountsDir(), "daily-limit.json");
+}
