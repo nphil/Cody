@@ -329,6 +329,29 @@ a new zone restarts an idle engine child before it is delivered (a child that
 is mid-turn is never restarted; the agent is told its shell still reports the
 old zone).
 
+## `GET /api/homelabber` — Incidental
+
+Where HomeLabber's web UI lives, for the chat's approval card. HomeLabber (an
+MCP server named `homelabber`) can hold a tool call until its owner approves it
+with Face ID on his phone; the card under that call links to the HomeLabber
+app and to the web page where a backup code approves it, and this route says
+which origin that page is on. Any signed-in user (or an open instance).
+
+```json
+{"base":"https://homelabber.example.test","source":"mcp"}
+```
+
+- `base` is an ORIGIN — scheme, host and port, nothing else. Never a path, a
+  query, a user:password or a header: an MCP server's URL can itself be a
+  credential, and only the origin leaves the server.
+- `source` is where it came from, in this order: `env` (`CODY_HOMELABBER_URL`),
+  `mcp` (the `homelabber` server in omp's user-level `mcp.json`; read only
+  while omp is the active engine) or `default` (the built-in
+  `https://homelabber.nateshome.net`). A value that names an IP address,
+  `localhost` or anything but http(s) is skipped: it is not a place a person
+  signs in.
+- `Cache-Control: no-store`. Nothing is written.
+
 ## `/api/daily-limit` — Incidental
 
 The personal daily screen-time limit (Settings › Preferences › Daily time

@@ -165,6 +165,11 @@ app/api/
                                    never on an engine id
   mcp/route.ts                    GET/POST/PUT/DELETE MCP servers in either
                                    scope (`scope: "project"` default, `"user"`)
+  homelabber/route.ts             GET {base, source}: the web origin of HomeLabber for the
+                                   approval card's backup-code link — CODY_HOMELABBER_URL,
+                                   else the ORIGIN (only) of the `homelabber` server in
+                                   omp's user mcp.json, else the built-in default; any
+                                   signed-in user, never a header or a path
   provider-keys/route.ts          GET the provider-key catalogue for the active
                                    engine with stored/fromEnvironment flags (never
                                    values); PUT {name,value} (admin) stores or clears
@@ -237,7 +242,8 @@ lib/
                         shared `omp plugin` execFile/JSON helpers,
                         isolated-agent-dir.ts's shared empty-mcp.json symlink
                         dance for sidebar chat, Distill, the session namer
-                        and the web-research planner)
+                        and the web-research planner, homelabber-base.ts: the
+                        origin of the `homelabber` MCP server for /api/homelabber)
   claude-credits.ts    browser-safe half of the Claude API credits backup: the
                        `anthropic-api`, `anthropic-api-2`, … provider ids (one per
                        key), plan <-> credits selector helpers and the
@@ -278,6 +284,13 @@ lib/
                         mirrored to sessionStorage (`cody:draft:<key>`, 64 K cap)
                         so a reload or navigation never loses an unsent prompt;
                         images/files stay in memory only
+  homelabber-approval.ts the pure half of HomeLabber's Face ID approvals in the
+                       chat: which tool calls are HomeLabber's, parsing a
+                       result (text, structured content or both) into a
+                       request's id/status/expiry/item outcomes, folding every
+                       call into one state per request id, phases/tones, the
+                       deep link and web URL, and the base-URL rules — see
+                       "HomeLabber approvals in the chat"
   image-compress.ts    browser-side source-first batch preparation: exact 900 KiB prompt-frame budget, adaptive WebP fallback, explicit decode/budget errors
   image-attachments.ts defensive server validation for base64 image command payloads (10-image bound)
   context-usage.ts     derives idle/reconnect gauge usage from persisted messages
@@ -583,6 +596,9 @@ components/
                       MessageView, the one "Show earlier" control, "Jump to
                       latest", loading / error / empty states
   MessageView.tsx     renders one message (user/assistant/toolCall/toolResult)
+  HomelabberApproval.tsx the React half of those approvals: the transcript-wide
+                      index (context + provider), `useApprovalCard`, the status
+                      row with the live countdown and the two ways to approve
   CommandPalette.tsx  ⌘K/Ctrl+K palette (cmdk): session switch, new session, theme
   ImageLightbox.tsx   click-to-preview lightbox for chat images (ClickableImage)
   BranchNavigator.tsx in-session branch switcher
@@ -3530,6 +3546,115 @@ own last-line check says the agent asked something) by appending a
   `{cancelled:true}`. Typing "Other" on a single-select clears the radio and
   picking a radio clears the text; multi-select keeps both. A reconnect replays
   the request with the same id, so the InputDock-keyed form keeps its draft.
+
+### HomeLabber approvals in the chat (`lib/homelabber-approval.ts`, `components/HomelabberApproval.tsx`, `/api/homelabber`)
+- **What it is.** HomeLabber (the owner's homelab admin server, an MCP server
+  named `homelabber`) answers a tool call that needs his Face ID with a PENDING
+  request instead of acting; the HomeLabber app pings his phone, and after he
+  approves, HomeLabber runs the stored action itself. The agent follows with
+  `approval_wait {id}` until the request settles (`pending → approved →
+  executing → executed`, or `failed`, `denied`, `expired`, `cancelled`).
+  This is NOT the ACP approval prompt above: nothing here blocks the turn, no
+  button answers it, and Cody never approves anything. The card only shows the
+  state and links to where he approves.
+- **The pending answer arrives flagged as an error** (`ok:false` becomes the
+  MCP `isError`, so omp prefixes `Error: `), and so do `failed`, `denied`,
+  `expired` and `cancelled`. `ToolCallBlock` asks `useApprovalCard(block,
+  result)` first: a recognised approval draws its own tone (warning while
+  waiting or expired, accent while running, success when done, error for
+  denied or failed, neutral when cancelled or lapsed) and is never
+  auto-expanded as a failure. Everything else, a refusal such as "approvals
+  are paused" included, keeps the red error card. The raw JSON and result stay
+  one chevron away.
+- **Recognising the call** (`homelabberCall`): `mcp__homelabber_<tool>` (omp),
+  `mcp__homelabber__<tool>` (Claude Code), and omp's `write` to
+  `xd://mcp__homelabber_<tool>` with the JSON arguments in `content` — omp
+  mounts MCP tools as `xd://` devices, so that is the usual spelling in a
+  Cody chat. Any HomeLabber tool can be gated, so the tool id is no allow-list.
+- **Reading the answer** (`parseHomelabberApproval`) works from the TEXT alone:
+  `session-reader.ts`'s `stripToolResultDetails` drops `details`, so
+  `structuredContent` never reaches a reloaded chat. omp joins HomeLabber's two
+  text blocks (the message, the JSON of `data`) with a blank line and appends
+  the whole `structuredContent` as a fenced json block; the parser takes every
+  top-level JSON object in the text, then `details.structuredContent` (also
+  under `details.xdev.inner` for a device call) when a live frame has it, then
+  the sentence `(request <id>, expires <HH:MM>)` as a last resort. Shapes:
+  pending `data.approval = {id, status, expiresAt}`; `approval_wait`
+  `data = {id, status, expiresAt?, items[{seq, tool, status, message,
+  changeId}]}`. Any `waitSeconds` is fine — the answer's `status` decides,
+  never the arguments. An id is `[A-Za-z0-9_-]{8,64}` because it goes into URLs.
+  A gated call can only come back `pending` (a retry returns the same
+  request; every later state arrives through `approval_wait`), so an
+  `approval` object in any other state on another tool's answer — a read tool
+  listing past requests — draws no card.
+- **`items[].data` is never read.** HomeLabber returns a tool's own result
+  data once in that field (an issued SSH certificate, say). The parser does not
+  copy it, so no card can print a secret; the expanded raw result shows what
+  any tool's result shows.
+- **One state per request id, shared by context.** `buildApprovalIndex`
+  folds every HomeLabber call into the latest `ApprovalState` per id (a request
+  only moves forward: a late `pending` poll never undoes `approved`), and
+  `HomelabberApprovalProvider` (ChatWindow, around the transcript) publishes it
+  with the SAME identity until a request really changes — a chat with no
+  approvals, nearly every chat, never re-renders for it. The gated call's card
+  follows the index; an `approval_wait` poll only labels itself (a header chip)
+  with what it saw, so five polls are not five cards. It is a context, not a
+  prop, because `MessageView`'s memo re-renders a message only for ITS OWN tool
+  results and the poll that says "done" lives in a later message. The subagent
+  dialog and the side bar have no provider: their cards render from their own
+  result and do not follow later polls.
+- **The row** (`ApprovalStatusRow`, under the header, outside the collapsible
+  panel): a lock, "Waiting for your Face ID in HomeLabber", a live countdown to
+  `expiresAt` (one 1 s ticker per WAITING card, nothing else ticks), "Open
+  HomeLabber" → `homelabber://approve/<id>` (opens the app when Cody is open on
+  the phone; filled on touch devices, outlined elsewhere) and "Use backup code"
+  → `<base>/approvals/<id>` in a new tab. When `expiresAt` passes with no later
+  answer the card flips ONCE (a single timer) to a neutral "approval window has
+  closed": Cody cannot know whether he answered after the agent stopped
+  polling, so only HomeLabber's own `expired` ever says expired. With only the
+  prose clock (no epoch) the row shows "expires HH:MM" and cannot lapse.
+- **Hidden activity** keeps the gated call (its raw result is an error, which
+  that mode already shows) and hides quiet polls like any other call.
+- **A folded turn stays open while an answer is owed.** Once a turn ends, its
+  tool calls fold into the collapsed "Process details" group, which would bury
+  a request still waiting on his Face ID together with the link that answers
+  it (seen in the first browser pass: a settled chat showed the user message
+  and one closed group). `ProcessDetailsGroup` takes `waitingUntil`
+  (`latestWaitingDeadline`: the latest `expiresAt` among the group's requests
+  whose state is still `pending`, null when none or when no epoch is known)
+  and opens while that is in the future. It STAYS open when the window closes
+  or he answers — the card changing under a reader is the news, a group
+  vanishing is not — until he toggles it or the page reloads; a reload folds
+  it again, because a closed window holds nothing open. A manual toggle always
+  wins.
+- **Trap — "has the deadline passed" must not re-arm itself.**
+  `useDeadlinePassed` keeps the last time it looked in state and arms ONE
+  timer for the deadline (`deadlineCheckDelay`, null once the look is past the
+  deadline). The first version re-read the clock in an effect keyed on that
+  same state, so a card whose window had already closed set state on every
+  run and React threw "Maximum update depth exceeded" — no unit test and no
+  static render shows an effect loop; a real browser's console did.
+- **The base URL** is `GET /api/homelabber`: `CODY_HOMELABBER_URL`, else the
+  ORIGIN of the `homelabber` server in omp's user-level `mcp.json` (omp only;
+  never headers, path, query or userinfo — an MCP URL can itself be a
+  credential), else `https://homelabber.nateshome.net`. An IP address or
+  `localhost` is rejected (`homelabberBaseFromMcpUrl`): it is a
+  machine-to-machine address, not where his phone is signed in. **Trade-off:**
+  that default is the owner's own hostname, chosen by him, against "never ship
+  the owner's environment" above. It is only reached by a chat that already has
+  a `homelabber` MCP tool call, and `CODY_HOMELABBER_URL` (or a hostname-based
+  MCP URL) replaces it, but another install with a HomeLabber of its own MUST
+  set one of those or its backup-code link would point at the owner's server.
+- **Trap — MCP timeout.** omp gives every MCP `tools/call` a 30 s deadline
+  (`OMP_MCP_TIMEOUT_MS`, else the server's `timeout` in mcp.json, default
+  30 000 ms; `src/mcp/timeout.ts`, applied by `transports/http.ts` to the whole
+  POST), so a 45–50 s `approval_wait` dies with "Request timeout after
+  30000ms". HomeLabber's `approval_wait` therefore takes `waitSeconds` 0..28
+  (default 25). Cody does not touch MCP configuration.
+- Strings are `homelabberApproval.*` in all three locales. Tests:
+  `lib/homelabber-approval.test.mjs` (parser, index, links, base rules),
+  `components/HomelabberApproval.test.mjs` (the card),
+  `lib/homelabber-route.test.mjs` (the route).
 
 ### Long tool calls narrate themselves
 - `tool_execution_update` frames are handled, not dropped: the newest text

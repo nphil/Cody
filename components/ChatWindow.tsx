@@ -1,7 +1,7 @@
 "use client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { CompactionProgress } from "@/components/CompactionProgress";
-import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ChevronDown, ShieldAlert, TriangleAlert, X } from "lucide-react";
 import type { ActivityDisplayMode, AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, ImageContent, SessionInfo, SessionTreeNode, TextContent, ToolCallContent, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
@@ -34,6 +34,8 @@ import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
 import { getNextVisibleCount, VISIBLE_PAGE_SIZE } from "@/lib/chat-lazy-load";
 import { captureTranscriptAnchor } from "@/lib/transcript-anchor";
 import { TranscriptViewportContext, type TranscriptViewport } from "@/components/TranscriptViewportContext";
+import { ApprovalIndexContext, HomelabberApprovalProvider, useDeadlinePassed } from "./HomelabberApproval";
+import { latestWaitingDeadline } from "@/lib/homelabber-approval";
 import { formatModelDisplayName } from "@/lib/model-display";
 import { deriveSessionActiveModels } from "@/lib/session-active-models";
 import { useSessionPreset } from "@/hooks/useSessionPreset";
@@ -200,6 +202,23 @@ function countToolCalls(messages: AgentMessage[], indices: number[]): number {
   return count;
 }
 
+/** Every tool call of a folded turn: its process messages plus the blocks the
+ *  final reply carries ahead of its answer. */
+function processToolCalls(messages: AgentMessage[], indices: number[], extraBlocks: AssistantContentBlock[]): ToolCallContent[] {
+  const calls: ToolCallContent[] = [];
+  for (const idx of indices) {
+    const msg = messages[idx];
+    if (msg?.role !== "assistant") continue;
+    for (const block of getDisplayableAssistantBlocks(msg as AssistantMessage)) {
+      if (block.type === "toolCall") calls.push(block);
+    }
+  }
+  for (const block of extraBlocks) {
+    if (block.type === "toolCall") calls.push(block);
+  }
+  return calls;
+}
+
 function hasDisplayableProcessMessage(message: AgentMessage): boolean {
   if (message.role === "assistant") {
     return getDisplayableAssistantBlocks(message as AssistantMessage).length > 0;
@@ -335,14 +354,25 @@ function collectGroupResultImages(
   return images.slice(0, 6);
 }
 
-function ProcessDetailsGroup({ messageCount, toolCallCount, resultImages, defaultExpanded = false, children }: { messageCount: number; toolCallCount: number; resultImages?: ImageContent[]; defaultExpanded?: boolean; children: ReactNode }) {
+function ProcessDetailsGroup({ messageCount, toolCallCount, resultImages, defaultExpanded = false, waitingUntil = null, children }: { messageCount: number; toolCallCount: number; resultImages?: ImageContent[]; defaultExpanded?: boolean; waitingUntil?: number | null; children: ReactNode }) {
   const { t, tn } = useI18n();
   // Reasoning on a committed turn lives inside this group, and its children are
   // not even mounted while it is shut — so "Expand thinking blocks" has to open
   // the group or it would only ever apply to the streaming turn. A group the
   // user has toggled keeps their choice.
   const [userExpanded, setUserExpanded] = useState<boolean | null>(null);
-  const expanded = userExpanded ?? defaultExpanded;
+  // A HomeLabber request still waiting on his Face ID opens its turn: the card
+  // inside holds the link that answers it, and a folded turn would bury it. It
+  // stays open once the request's window closes (or he answers) — the card
+  // changing under a reader is the news, and the group vanishing is not — and
+  // a reload folds it again, because a closed window holds nothing open.
+  const windowClosed = useDeadlinePassed(waitingUntil);
+  const holdsWaitingApproval = waitingUntil !== null && !windowClosed;
+  const [heldOpen, setHeldOpen] = useState(false);
+  useEffect(() => {
+    if (holdsWaitingApproval) setHeldOpen(true);
+  }, [holdsWaitingApproval]);
+  const expanded = userExpanded ?? (defaultExpanded || holdsWaitingApproval || heldOpen);
   const parts = [t("chatWindow.processDetails"), tn("chatWindow.messageCount", messageCount)];
   if (toolCallCount > 0) parts.push(tn("chatWindow.toolCallCount", toolCallCount));
 
@@ -550,6 +580,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
 }: CommittedTranscriptProps) {
   const { t } = useI18n();
   const { toolResultsMap, lastAnchorIdx, visibleRefIndexByMessage } = conversationMeta;
+  const approvalIndex = useContext(ApprovalIndexContext);
 
   // One stable callback per ref slot: a fresh closure per render makes React
   // detach and re-attach every message ref on every render, which churns the
@@ -646,6 +677,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
             toolCallCount={countToolCalls(messages, unit.processIndices) + countToolCallBlocks(processBlocks)}
             resultImages={activityDisplayMode === "full" ? collectGroupResultImages(messages, unit.processIndices, toolResultsMap, processBlocks) : undefined}
             key={activityDisplayMode}
+            waitingUntil={latestWaitingDeadline(processToolCalls(messages, unit.processIndices, processBlocks), toolResultsMap, approvalIndex)}
             defaultExpanded={activityDisplayMode === "full" || (thinkingDefaultExpanded && groupHasThinking(messages, unit.processIndices, processBlocks))}
           >
             {/* Every row inside the group carries its own identity too, so a
@@ -1529,6 +1561,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
               <ExtensionWidgets widgets={aboveEditorWidgets} />
 
             <TranscriptViewportContext.Provider value={transcriptViewport}>
+            <HomelabberApprovalProvider messages={messages} toolResults={conversationMeta.toolResultsMap}>
             <CommittedTranscript
               messages={messages}
               entryIds={entryIds}
@@ -1564,6 +1597,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
                 <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} sessionId={session?.id ?? sessionIdRef.current ?? undefined} thinkingDefaultExpanded={thinkingDefaultExpanded} activityDisplayMode={activityDisplayMode} />
               </div>
             )}
+            </HomelabberApprovalProvider>
             </TranscriptViewportContext.Provider>
 
             {activityDisplayMode === "compact" && pendingToolHeaders.map((tool) => (

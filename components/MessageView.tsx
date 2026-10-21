@@ -18,6 +18,8 @@ import { StreamingMarkdown } from "./StreamingMarkdown";
 
 import { requestDistill, retryDistill, thinkingSummaryKeys, useDistillChatSettings, useDistillState, useOnScreen, type DistillRequest, type DistillState } from "@/hooks/useDistill";
 import { SubagentStatusIcon } from "./SubagentStatusIcon";
+import { ApprovalChip, ApprovalStatusRow, TONE_COLOR, TONE_FRAME, useApprovalCard } from "./HomelabberApproval";
+import { approvalTone } from "@/lib/homelabber-approval";
 import { formatCost, formatDuration, formatTokens, shortModel } from "@/lib/subagent-format";
 import { formatModelDisplayName } from "@/lib/model-display";
 import type {
@@ -1207,8 +1209,15 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
 
 const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isStreaming, isActiveStreamBlock, activityDisplayMode = "compact" }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number; isStreaming?: boolean; isActiveStreamBlock?: boolean; activityDisplayMode?: ActivityDisplayMode }) {
   const { t } = useI18n();
-  const isError = result?.isError ?? false;
-  const hidden = activityDisplayMode === "hidden" && !isError;
+  const rawError = result?.isError ?? false;
+  // HomeLabber answers a call that needs Nitin's Face ID with a request that is
+  // still waiting, which the MCP layer flags as an error. It is not one: an
+  // approval card draws its own state (waiting, approved, done, denied, …)
+  // instead of the red error look, and is never auto-expanded as a failure.
+  const approval = useApprovalCard(block, result);
+  const tone = approval ? approvalTone(approval.phase) : (rawError ? "error" : "success");
+  const isError = approval ? false : rawError;
+  const hidden = activityDisplayMode === "hidden" && !rawError;
   const [expanded, setExpanded] = useState(activityDisplayMode === "full" || isError);
   useEffect(() => {
     if (activityDisplayMode === "full" || isError) setExpanded(true);
@@ -1248,8 +1257,8 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
         borderRadius: 7,
         overflow: "hidden",
         fontSize: 12,
-        border: isError ? "1px solid color-mix(in srgb, var(--status-error) 45%, transparent)" : "1px solid color-mix(in srgb, var(--status-success) 25%, transparent)",
-        background: isError ? "color-mix(in srgb, var(--status-error) 5%, transparent)" : "color-mix(in srgb, var(--status-success) 4%, transparent)",
+        border: TONE_FRAME[tone].border,
+        background: TONE_FRAME[tone].background,
       }}
     >
       <Collapsible
@@ -1274,13 +1283,13 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
             minWidth: 0,
           }}
         >
-          <span style={{ color: isError ? "var(--status-error)" : "var(--status-success)", fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 11, flexShrink: 0 }}>
+          <span style={{ color: TONE_COLOR[tone], fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 11, flexShrink: 0 }}>
             {block.toolName}
           </span>
           <span style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0, maxWidth: "64ch", marginRight: "auto" }}>
             {displayedPreview}
           </span>
-          {activityStatus && <span style={{ color: activityStatus === "error" ? "var(--status-error)" : "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11, flexShrink: 0 }}>{activityStatus}</span>}
+          {approval ? <ApprovalChip phase={approval.phase} /> : activityStatus && <span style={{ color: activityStatus === "error" ? "var(--status-error)" : "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11, flexShrink: 0 }}>{activityStatus}</span>}
           {duration !== undefined && (
             <span style={{ fontSize: 11, color: "var(--text-dim)", flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{t("messageView.durationSeconds", { seconds: duration })}</span>
           )}
@@ -1294,6 +1303,7 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
             }}
           />
         </CollapsibleTrigger>
+        {approval?.role === "request" && <ApprovalStatusRow card={approval} />}
 
         {/* ── Expanded content (input args + paired result), mounted by the
             panel and width-pinned by .collapse-box-inner so the grow
@@ -1314,7 +1324,7 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
                   overflow: "auto",
                   overscrollBehavior: "contain",
                   backgroundColor: "var(--bg-subtle)",
-                  borderTop: isError ? "1px solid color-mix(in srgb, var(--status-error) 25%, transparent)" : "1px solid color-mix(in srgb, var(--status-success) 20%, transparent)",
+                  borderTop: TONE_FRAME[tone].rule,
                   whiteSpace: "pre-wrap",
                   wordBreak: "break-all",
                 }}
