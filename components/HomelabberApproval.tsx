@@ -276,7 +276,7 @@ function ApprovalItems({ items }: { items: readonly ApprovalItemOutcome[] }) {
 /** What a gated call is doing right now, under its header. While Nitin has not
  *  answered it is the only thing the card needs to say, plus the two ways to
  *  answer: the HomeLabber app (the link opens it when Cody is open on the
- *  phone) and the web page where a backup code approves it. */
+ *  phone) and the web page that shows it in full (approving happens on the phone). */
 export function ApprovalStatusRow({ card }: { card: ApprovalCard }) {
   const { t, tn } = useI18n();
   const coarse = useIsCoarsePointer();
@@ -345,10 +345,10 @@ export function ApprovalStatusRow({ card }: { card: ApprovalCard }) {
               target="_blank"
               rel="noopener noreferrer"
               className="ui-focus-ring"
-              title={t("homelabberApproval.backupCodeTitle")}
+              title={t("homelabberApproval.detailsTitle")}
               style={{ ...buttonBase, padding: "0 2px", fontWeight: 500, color: "var(--accent)", textDecoration: "underline", textUnderlineOffset: 2 }}
             >
-              {t("homelabberApproval.backupCode")}
+              {t("homelabberApproval.details")}
             </a>
           </div>
         )}

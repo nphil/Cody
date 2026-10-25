@@ -3607,7 +3607,7 @@ own last-line check says the agent asked something) by appending a
   panel): a lock, "Waiting for your Face ID in HomeLabber", a live countdown to
   `expiresAt` (one 1 s ticker per WAITING card, nothing else ticks), "Open
   HomeLabber" → `homelabber://approve/<id>` (opens the app when Cody is open on
-  the phone; filled on touch devices, outlined elsewhere) and "Use backup code"
+  the phone; filled on touch devices, outlined elsewhere) and "Details in HomeLabber"
   → `<base>/approvals/<id>` in a new tab. When `expiresAt` passes with no later
   answer the card flips ONCE (a single timer) to a neutral "approval window has
   closed": Cody cannot know whether he answered after the agent stopped

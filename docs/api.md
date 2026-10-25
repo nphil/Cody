@@ -334,7 +334,7 @@ old zone).
 Where HomeLabber's web UI lives, for the chat's approval card. HomeLabber (an
 MCP server named `homelabber`) can hold a tool call until its owner approves it
 with Face ID on his phone; the card under that call links to the HomeLabber
-app and to the web page where a backup code approves it, and this route says
+app and to the web page that shows the request in full, and this route says
 which origin that page is on. Any signed-in user (or an open instance).
 
 ```json

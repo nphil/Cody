@@ -69,7 +69,7 @@ test("a pending request shows the Face ID row, a live countdown and both ways to
   assert.match(html, /Waiting for your Face ID in HomeLabber/);
   assert.match(html, /role="timer"[^>]*>[34]:\d\d left</);
   assert.match(html, new RegExp(`href="homelabber://approve/${ID}"[^>]*>(?:<svg[^>]*>.*?</svg>)?Open HomeLabber`));
-  assert.match(html, new RegExp(`href="https://homelabber\\.nateshome\\.net/approvals/${ID}"[^>]*target="_blank"[^>]*rel="noopener noreferrer"[^>]*>Use backup code<`));
+  assert.match(html, new RegExp(`href="https://homelabber\\.nateshome\\.net/approvals/${ID}"[^>]*target="_blank"[^>]*rel="noopener noreferrer"[^>]*>Details in HomeLabber<`));
   assert.match(html, />waiting</, "the header carries the state word where an ordinary call says error");
   assert.doesNotMatch(html, />error</);
   assert.doesNotMatch(html, /var\(--status-error\)/, "a request that is waiting is not an error");

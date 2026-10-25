@@ -538,7 +538,7 @@ export function approvalDeepLink(id: string): string {
   return `homelabber://approve/${id}`;
 }
 
-/** HomeLabber's web page for one request: where the backup code approves it. */
+/** HomeLabber's web page for one request: which shows it in full (approving happens on the phone). */
 export function approvalWebUrl(base: string, id: string): string {
   return `${base.replace(/\/+$/, "")}/approvals/${id}`;
 }
