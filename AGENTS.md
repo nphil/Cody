@@ -3571,22 +3571,17 @@ own last-line check says the agent asked something) by appending a
   `xd://mcp__homelabber_<tool>` with the JSON arguments in `content` — omp
   mounts MCP tools as `xd://` devices, so that is the usual spelling in a
   Cody chat. Any HomeLabber tool can be gated, so the tool id is no allow-list.
-- **Reading the answer** (`parseHomelabberApproval`) works from the TEXT alone:
-  `session-reader.ts`'s `stripToolResultDetails` drops `details`, so
-  `structuredContent` never reaches a reloaded chat. omp joins HomeLabber's two
-  text blocks (the message, the JSON of `data`) with a blank line and appends
-  the whole `structuredContent` as a fenced json block; the parser takes every
-  top-level JSON object in the text, then `details.structuredContent` (also
-  under `details.xdev.inner` for a device call) when a live frame has it, then
-  the sentence `(request <id>, expires <HH:MM>)` as a last resort. Shapes:
+- **Reading the answer** (`parseHomelabberApproval`): live `structuredContent`
+  is authoritative, including nested device results. Reloaded transcripts retain
+  flattened data JSON; its outer object is parsed without treating command output
+  or prose as an approval. Untrusted fenced data must be one complete JSON object.
+  Diagnostic section output is never treated as an approval. Shapes:
   pending `data.approval = {id, status, expiresAt}`; `approval_wait`
   `data = {id, status, expiresAt?, items[{seq, tool, status, message,
   changeId}]}`. Any `waitSeconds` is fine — the answer's `status` decides,
   never the arguments. An id is `[A-Za-z0-9_-]{8,64}` because it goes into URLs.
-  A gated call can only come back `pending` (a retry returns the same
-  request; every later state arrives through `approval_wait`), so an
-  `approval` object in any other state on another tool's answer — a read tool
-  listing past requests — draws no card.
+  A replay of a gated call may carry a later durable state including `uncertain`;
+  list tools are not request cards. `uncertain` means inspect state, never repeat.
 - **`items[].data` is never read.** HomeLabber returns a tool's own result
   data once in that field (an issued SSH certificate, say). The parser does not
   copy it, so no card can print a secret; the expanded raw result shows what
@@ -3601,8 +3596,12 @@ own last-line check says the agent asked something) by appending a
   with what it saw, so five polls are not five cards. It is a context, not a
   prop, because `MessageView`'s memo re-renders a message only for ITS OWN tool
   results and the poll that says "done" lives in a later message. The subagent
-  dialog and the side bar have no provider: their cards render from their own
-  result and do not follow later polls.
+  transcript has its own provider, scoped to its own rows; the sidebar has none.
+- **Agent procedure:** `lib/omp/extensions/cody-homelabber-gate.ts` is loaded by
+  Cody on main omp launches and inherited by delegated omp sessions. Its
+  `before_agent_start` appends the same gate procedure to their runtime prompts.
+  Caller tokens may be shared; listing a grant is not proof of agent ownership.
+  Guidance grants no authority and does not override Principle 0.
 - **The row** (`ApprovalStatusRow`, under the header, outside the collapsible
   panel): a lock, "Waiting for your Face ID in HomeLabber", a live countdown to
   `expiresAt` (one 1 s ticker per WAITING card, nothing else ticks), "Open
@@ -3611,8 +3610,7 @@ own last-line check says the agent asked something) by appending a
   → `<base>/approvals/<id>` in a new tab. When `expiresAt` passes with no later
   answer the card flips ONCE (a single timer) to a neutral "approval window has
   closed": Cody cannot know whether he answered after the agent stopped
-  polling, so only HomeLabber's own `expired` ever says expired. With only the
-  prose clock (no epoch) the row shows "expires HH:MM" and cannot lapse.
+  polling, so only HomeLabber's own `expired` ever says expired.
 - **Hidden activity** keeps the gated call (its raw result is an error, which
   that mode already shows) and hides quiet polls like any other call.
 - **A folded turn stays open while an answer is owed.** Once a turn ends, its
@@ -5087,6 +5085,7 @@ removal silently breaks the credits.
 - **Fallback switches announce themselves**: OMP's `retry_fallback_applied` ({from, to, role}) and `retry_fallback_succeeded` ({model, role}) frames surface as toasts in `useAgentSession` (i18n `agentSession.fallback*`).
 - **Trap — `patchSettingsSection` in `hooks/useConfigWriter.ts`** (formerly SettingsConfig.tsx's `patchSection`) must spread the SECTION (`base?.[key]`), never the whole settings object; the whole-object spread filled config.yml sections with junk top-level keys after the first save. `patchSettingsTop` is the one deliberate exception — top-level keys and arrays like `enabledModels` genuinely need the whole object spread.
 - **OMP 17.4 compaction**: `compaction.strategy`/`remoteEnabled` no longer exist upstream — `compaction.methodOrder` (ordered preference list) replaced them. `settings-config.ts` reads legacy keys through OMP's own migration mapping and deletes them when writing `methodOrder`.
+- **Advisor launches.** OMP RPC defaults advisor off even when `advisor.enabled` is saved. `buildEngineRpcLaunch` reads that preference for each new, resumed, and relaunched main chat and passes `--advisor` when enabled; an explicit launch override wins. Sidebar chats and engines without advisor support never receive it. Saving the setting does not update an already-running child.
 - **`advisor.subagents` is Cody's logical key, not omp's.** omp has no such schema key; its settings loader migrates it to `task.agentAdvisor.task` (`"on"`/`"off"`/model pattern; an early build persisted booleans). `settings-config.ts` keeps the `advisor.subagents` boolean on the wire (card key, `NativeSettings`, the reset path) but reads/writes/resets `task.agentAdvisor.task`: a legacy un-migrated `advisor.subagents` is read as a fallback and removed on the next write, never written; turning review on keeps a model pattern the user chose; reset drops the real key and tidies empty `task`/`agentAdvisor` maps. `memory.backend` also accepts 18.4's `sharpshooter`.
 - Retry/fallback UI lives in `components/settings/RetryFallbackPanel.tsx` (see its module comment for the never-persist-an-empty-chain rule).
 

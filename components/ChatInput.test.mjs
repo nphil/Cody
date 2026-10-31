@@ -53,7 +53,7 @@ test("keeps the model selector visible when a model error leaves no options", ()
 });
 
 
-test("renders planning and advisor indicators at the composer", () => {
+test("renders planning indicator at the composer", () => {
   const html = renderToStaticMarkup(
     React.createElement(ChatInput, {
       onSend() {},
@@ -64,12 +64,10 @@ test("renders planning and advisor indicators at the composer", () => {
       modelList: [{ provider: "test", modelId: "model", id: "model", name: "Test model" }],
       modelNames: {},
       activePlan: { objective: "Plan the implementation" },
-      advisorEnabled: true,
     }),
   );
 
   assert.match(html, /(Planning in progress|chatInput\.planningInProgress)/);
-  assert.match(html, /(Advisor enabled|chatInput\.advisorEnabled)/);
 });
 
 const ompEngine = { id: "omp", displayName: "OMP", shortName: "omp", experimental: false };

@@ -32,8 +32,6 @@ export const STORAGE_KEYS = {
   submitDuringRun: "cody:submit-during-run",
   /** Selected tool preset (none / default / full). */
   toolPreset: "cody:tool-preset",
-  /** Whether the native OMP advisor is enabled. */
-  advisorEnabled: "cody:advisor-enabled",
   /** Models pinned into the composer's model picker. Retired allowlist: the
    * catalog migration reads it once and deletes it; nothing else may. */
   composerModels: "cody:composer-models",
@@ -150,7 +148,6 @@ export const LEGACY_STORAGE_KEYS: readonly (readonly [string, string])[] = [
   ["omp-web:last-open-by-project", STORAGE_KEYS.lastOpenByProject],
   ["omp-web:submit-during-run", STORAGE_KEYS.submitDuringRun],
   ["omp-web:tool-preset", STORAGE_KEYS.toolPreset],
-  ["omp-advisor-enabled", STORAGE_KEYS.advisorEnabled],
   ["omp-composer-models", STORAGE_KEYS.composerModels],
   ["omp-sound-enabled", STORAGE_KEYS.soundEnabled],
 ];

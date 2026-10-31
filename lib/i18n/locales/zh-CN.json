@@ -152,7 +152,6 @@
   "branchNavigator.noBranches": "此会话没有分支",
   "branchNavigator.roleAssistant": "A",
   "branchNavigator.roleUser": "U",
-  "chatInput.advisorEnabled": "顾问已启用",
   "chatInput.allowlistMigrated": "你的输入框模型列表已转为隐藏列表",
   "chatInput.allowlistMigratedDetail": "已为你隐藏 {count} 个模型。可在 设置 → 模型 中管理。",
   "chatInput.attachFile": "附加文件",
@@ -3044,7 +3043,6 @@
   "homelabberApproval.region": "HomeLabber 批准",
   "homelabberApproval.waiting": "正在等待你在 HomeLabber 中通过 Face ID 批准",
   "homelabberApproval.timeLeft": "剩余 {time}",
-  "homelabberApproval.expiresAt": "{time} 到期",
   "homelabberApproval.open": "打开 HomeLabber",
   "homelabberApproval.openTitle": "在此设备上打开 HomeLabber 应用，用 Face ID 批准",
   "homelabberApproval.details": "在 HomeLabber 中查看详情",
@@ -3056,6 +3054,7 @@
   "homelabberApproval.expired": "无人批准，已过期",
   "homelabberApproval.cancelled": "已在 HomeLabber 中取消",
   "homelabberApproval.lapsed": "批准时限已过，请到 HomeLabber 查看结果",
+  "homelabberApproval.uncertain": "结果未知。请先检查状态，不要重复执行操作",
   "homelabberApproval.steps.one": "1 个步骤",
   "homelabberApproval.steps.other": "{count} 个步骤",
   "homelabberApproval.chip.waiting": "待批准",
@@ -3066,8 +3065,11 @@
   "homelabberApproval.chip.expired": "已过期",
   "homelabberApproval.chip.cancelled": "已取消",
   "homelabberApproval.chip.lapsed": "已结束",
+  "homelabberApproval.chip.uncertain": "结果未知",
   "homelabberApproval.item.executed": "完成",
   "homelabberApproval.item.failed": "失败",
   "homelabberApproval.item.skipped": "已跳过",
-  "homelabberApproval.item.pending": "等待中"
+  "homelabberApproval.item.pending": "等待中",
+  "homelabberApproval.item.executing": "执行中",
+  "homelabberApproval.item.uncertain": "结果未知"
 }

@@ -44,7 +44,6 @@ import type { SmartDefault } from "@/lib/model-presets/types";
 interface Props {
   session: SessionInfo | null;
   newSessionCwd: string | null;
-  advisorEnabled?: boolean;
   /** Everything the ACTIVE engine can serve, straight from AppShell's one
    * `/api/info` read. The whole flag set travels together rather than as a
    * hand-picked subset: a control gated on the wrong neighbouring flag is
@@ -781,7 +780,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
     </>
   );
 });
-export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, advisorEnabled: advisorPreferred, capabilities = ALL_CAPABILITIES, engine = null, activityDisplayMode = "compact", thinkingDefaultExpanded = false, onAgentEnd, onSessionNamed, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onModelUsageChange, onOpenFile, onOpenPreview, onPreviewUrlsSeen, onSessionModelsChange, sideQuestionsBridge, onOpenSideQuestions }: Props) {
+export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, capabilities = ALL_CAPABILITIES, engine = null, activityDisplayMode = "compact", thinkingDefaultExpanded = false, onAgentEnd, onSessionNamed, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onModelUsageChange, onOpenFile, onOpenPreview, onPreviewUrlsSeen, onSessionModelsChange, sideQuestionsBridge, onOpenSideQuestions }: Props) {
 /** Memoized: AppShell holds ~60 state values (git badge polls, update checks,
  *  the context-usage tick ChatWindow itself pushes up), and each of those
  *  re-renders would otherwise rebuild this whole tree. */
@@ -796,7 +795,6 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
   // `/btw` side questions are omp's: no other engine has the commands, and an
   // engine with a `/btw` of its own (Claude Code) must receive it untouched.
   const sideQuestionsCapable = engine?.id === OMP_ENGINE_ID && chatExtras;
-  const advisorEnabled = capabilities.advisor && advisorPreferred;
   const canForkHere = useForkAvailable(engine?.id);
   const { playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -879,7 +877,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
     handleThinkingLevelChange, handleModeChange, handleFastModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, loadSlashCommands,
     retryLoadSession,
   } = useAgentSession({
-    session, newSessionCwd, advisorEnabled, subagentsCapable, engineName: engine?.shortName, thinkingDefaultExpanded, onAgentEnd: wrappedOnAgentEnd, onSessionNamed, onSessionCreated, onSessionForked,
+    session, newSessionCwd, subagentsCapable, engineName: engine?.shortName, thinkingDefaultExpanded, onAgentEnd: wrappedOnAgentEnd, onSessionNamed, onSessionCreated, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
     onOpenFile, onOpenPreview, onPreviewUrlsSeen,
     newSessionPresetId: presetState.newSessionPresetId,
@@ -1352,7 +1350,6 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, adv
       modelNameOverride={liveModelMeta?.name ?? null}
       retryInfo={retryInfo}
       activePlan={activePlan}
-      advisorEnabled={advisorEnabled}
       inputHistory={inputHistory}
       onRemoveQueuedMessage={removeQueuedMessage}
       onEditQueuedMessage={(id) => { void editQueuedMessage(id); }}

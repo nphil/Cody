@@ -152,7 +152,6 @@
   "branchNavigator.noBranches": "This session has no branches",
   "branchNavigator.roleAssistant": "A",
   "branchNavigator.roleUser": "U",
-  "chatInput.advisorEnabled": "Advisor enabled",
   "chatInput.allowlistMigrated": "Your composer list became a hidden list",
   "chatInput.allowlistMigratedDetail": "{count} models are now hidden for you. Manage them in Settings → Models.",
   "chatInput.attachFile": "Attach files",
@@ -3044,7 +3043,6 @@
   "homelabberApproval.region": "HomeLabber approval",
   "homelabberApproval.waiting": "Waiting for your Face ID in HomeLabber",
   "homelabberApproval.timeLeft": "{time} left",
-  "homelabberApproval.expiresAt": "expires {time}",
   "homelabberApproval.open": "Open HomeLabber",
   "homelabberApproval.openTitle": "Opens the HomeLabber app on this device so you can approve with Face ID",
   "homelabberApproval.details": "Details in HomeLabber",
@@ -3056,6 +3054,7 @@
   "homelabberApproval.expired": "Expired before anyone approved it",
   "homelabberApproval.cancelled": "Cancelled in HomeLabber",
   "homelabberApproval.lapsed": "The approval window has closed. Check HomeLabber for the result",
+  "homelabberApproval.uncertain": "Outcome unknown. Inspect the state before doing anything; do not repeat the action",
   "homelabberApproval.steps.one": "1 step",
   "homelabberApproval.steps.other": "{count} steps",
   "homelabberApproval.chip.waiting": "waiting",
@@ -3066,8 +3065,11 @@
   "homelabberApproval.chip.expired": "expired",
   "homelabberApproval.chip.cancelled": "cancelled",
   "homelabberApproval.chip.lapsed": "closed",
+  "homelabberApproval.chip.uncertain": "unknown",
   "homelabberApproval.item.executed": "done",
   "homelabberApproval.item.failed": "failed",
   "homelabberApproval.item.skipped": "skipped",
-  "homelabberApproval.item.pending": "waiting"
+  "homelabberApproval.item.pending": "waiting",
+  "homelabberApproval.item.executing": "running",
+  "homelabberApproval.item.uncertain": "outcome unknown"
 }

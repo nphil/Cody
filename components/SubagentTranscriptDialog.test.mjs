@@ -263,6 +263,18 @@ function renderTranscript(overrides = {}) {
 function count(html, pattern) {
   return (html.match(pattern) ?? []).length;
 }
+test("a child request follows its later unknown outcome", () => {
+  const id = "3b1f6c1e-8d2a-4c57-9a0e-5f2d7a41b9c3";
+  const rows = [
+    { key: "1", message: { role: "assistant", content: [{ type: "toolCall", toolCallId: "gate", toolName: "mcp__homelabber_run_command", input: {} }] } },
+    { key: "2", message: { role: "assistant", content: [{ type: "toolCall", toolCallId: "wait", toolName: "mcp__homelabber_approval_wait", input: { id } }] } },
+  ];
+  const result = (toolCallId, data) => ({ role: "toolResult", toolCallId, content: [{ type: "text", text: JSON.stringify({ ok: false, data }) }] });
+  const toolResults = new Map([["gate", result("gate", { approval: { id, status: "pending" } })], ["wait", result("wait", { id, status: "uncertain", retrySafe: false })]]);
+  const html = renderTranscript({ rows, toolResults });
+  assert.match(html, /Outcome unknown/);
+  assert.doesNotMatch(html, /Waiting for your Face ID/);
+});
 
 test("rows are drawn by the chat's own components: collapsed thinking, tool cards, user bubbles", () => {
   const html = renderTranscript();

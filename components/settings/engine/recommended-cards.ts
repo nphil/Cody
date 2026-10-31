@@ -54,7 +54,7 @@ export interface RecommendedCard {
 export const RECOMMENDED_GROUPS: readonly RecommendedGroup[] = [
   { id: "safety", label: "Safety & approvals", description: "When the engine asks before running a tool, and the overrides for terminal commands and extension requests." },
   { id: "thinking", label: "Thinking & style", description: "Default reasoning effort, response verbosity, personality and how thinking is shown." },
-  { id: "advisor", label: "Advisor", description: "A second model passively reviews each turn and leaves guidance notes." },
+  { id: "advisor", label: "Advisor", description: "A second model passively reviews each turn and leaves guidance notes. Changes apply the next time a chat launches; they do not update an active chat." },
   { id: "context", label: "Context", description: "How a long session is kept inside the model's context window." },
   { id: "memory", label: "Memory & learning", description: "Durable memory across sessions and automatic lesson capture." },
 ];
@@ -71,7 +71,7 @@ export const RECOMMENDED_CARDS: readonly RecommendedCard[] = [
   { key: "hideThinkingBlock", group: "thinking", control: "toggle", hint: "Cody draws its own thinking blocks; use Expand thinking blocks under Preferences for the browser." },
   { key: "externalThinking", group: "thinking", control: "toggle" },
   // Advisor (5)
-  { key: "advisor.enabled", group: "advisor", control: "toggle", hint: "Also sets the default for new sessions in this browser." },
+  { key: "advisor.enabled", group: "advisor", control: "toggle" },
   { key: "advisor.syncBacklog", group: "advisor", control: "select" },
   { key: "advisor.immuneTurns", group: "advisor", control: "select" },
   { key: "advisor.subagents", group: "advisor", control: "toggle" },

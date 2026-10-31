@@ -35,7 +35,7 @@ export async function POST(
       return NextResponse.json({ error: "Sidebar chats do not need model recovery", code: "unsupported" }, { status: 400 });
     }
     const cwd = resolveSpawnCwd(readSessionHeader(filePath)?.cwd);
-    await startRpcSession(id, filePath, cwd, undefined, false, undefined, undefined, undefined, undefined, { restoreModel: { provider, modelId } });
+    await startRpcSession(id, filePath, cwd, undefined, undefined, undefined, undefined, undefined, undefined, { restoreModel: { provider, modelId } });
     return NextResponse.json({ success: true, data: { provider, modelId } });
   } catch (error) {
     return agentCommandErrorResponse(error);

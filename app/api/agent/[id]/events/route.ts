@@ -157,8 +157,8 @@ export async function GET(
           try {
             const cwd = resolveSpawnCwd(engineMode ? engineCwd : readSessionHeader(filePath)?.cwd);
             ({ session } = engineMode
-              ? await startRpcSession(id, "", cwd, undefined, false, id)
-              : await startRpcSession(id, filePath, cwd, undefined, false, undefined, undefined, kind));
+              ? await startRpcSession(id, "", cwd, undefined, undefined, id)
+              : await startRpcSession(id, filePath, cwd, undefined, undefined, undefined, undefined, kind));
           } catch (error) {
             // A resumed chat whose saved model is gone: a structured event the
             // client turns into "pick another model", not a failure banner.

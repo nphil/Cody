@@ -62,9 +62,6 @@ export function createSettingsBusy(): SettingsBusyContext {
 }
 
 export interface SettingsShellCallbacks {
-  /** The Enable Advisor card writes omp's config AND the browser-side
-   * default ChatWindow reads (`cody:advisor-enabled`); AppShell owns that. */
-  onAdvisorChange: (enabled: boolean) => void;
   /** models.yml changed — the composer's catalog must be re-read. */
   onModelsSaved: () => void;
   /** A plugin reload restarted the session; the chat remounts. */
@@ -83,9 +80,6 @@ export interface SettingsShellPrefs {
   setActivityDisplayMode: (mode: ActivityDisplayMode) => void;
   thinkingDefaultExpanded: boolean;
   setThinkingDefaultExpanded: (expanded: boolean) => void;
-  /** The browser-side advisor default, the fallback the Enable Advisor card
-   * shows until omp's config has loaded. */
-  advisorEnabled: boolean;
 }
 
 export interface SettingsShellValue {

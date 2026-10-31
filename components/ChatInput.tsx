@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
-import { AlertTriangle, ChevronDown, Clock, Footprints, Gauge, ListChecks, Loader2, Paperclip, Pin, RefreshCw, ShieldCheck, SlidersHorizontal, Sparkles, Split, Target, TriangleAlert, Turtle, Zap, ZapOff } from "lucide-react";
+import { AlertTriangle, ChevronDown, Clock, Footprints, Gauge, ListChecks, Loader2, Paperclip, Pin, RefreshCw, SlidersHorizontal, Sparkles, Split, Target, TriangleAlert, Turtle, Zap, ZapOff } from "lucide-react";
 import type { SessionModeOption } from "@/hooks/useAgentSession";
 import type { OutboxEntry } from "@/lib/outbox";
 import type { PendingInput, PendingInputResponse, RewoundDraft } from "@/lib/pending-input";
@@ -258,7 +258,6 @@ interface Props {
   /** Session working directory — enables the @ file autocomplete menu */
   cwd?: string | null;
   activePlan?: ActivePlan | null;
-  advisorEnabled?: boolean;
 }
 
 export interface ChatInputHandle {
@@ -617,7 +616,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   draftKey,
   cwd,
   activePlan,
-  advisorEnabled,
 }: Props, ref) {
   const isMobile = useIsMobile();
   const { t, tn, locale } = useI18n();
@@ -3376,18 +3374,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                       <line x1="1" y1="9" x2="4" y2="9" /><line x1="1" y1="14" x2="4" y2="14" />
                     </svg>
                   )}
-                  {advisorEnabled && (
-                    // ShieldCheck, deliberately NOT Sparkles: Sparkles is the
-                    // Smart-model glyph in the dropdown one click away, and an
-                    // accent sparkle beside the model name read as "this model
-                    // was auto-picked" — a meaning it never had.
-                    <span title={t("chatInput.advisorEnabled")} aria-label={t("chatInput.advisorEnabled")} style={{ display: "flex", flexShrink: 0, color: "var(--accent)" }}>
-                      <ShieldCheck size={13} strokeWidth={2} aria-hidden="true" />
-                    </span>
-                  )}
                   {slowMode?.enabled && (
                     // The turtle is the same glyph as the dropdown's Slow row.
-                    // Inline like the Advisor and Smart marks, never a box of
+                    // Inline like the Smart mark, never a box of
                     // its own: it only takes 17px from the name (phoneBudget).
                     <span role="img" title={t("slowMode.on")} aria-label={t("slowMode.on")} style={{ display: "flex", flexShrink: 0, color: "var(--accent)" }}>
                       <Turtle size={12} strokeWidth={2} aria-hidden="true" />

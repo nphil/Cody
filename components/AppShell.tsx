@@ -240,7 +240,6 @@ export function AppShell() {
   // The open session's model catalog under a session-scoped (ACP) engine,
   // lifted out of ChatWindow so Settings › Models can list it.
   const [sessionModels, setSessionModels] = useState<{ provider: string; id: string; name: string }[] | null>(null);
-  const [advisorEnabled, setAdvisorEnabled] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [hasAwaitingInput, setHasAwaitingInput] = useState(false);
   const [mobileSidebarReady, setMobileSidebarReady] = useState(false);
@@ -367,13 +366,6 @@ export function AppShell() {
     setMobileSidebarReady(true);
   }, []);
   useEffect(() => {
-    setAdvisorEnabled(localStorage.getItem(STORAGE_KEYS.advisorEnabled) === "true");
-  }, []);
-  const handleAdvisorChange = useCallback((enabled: boolean) => {
-    setAdvisorEnabled(enabled);
-    localStorage.setItem(STORAGE_KEYS.advisorEnabled, String(enabled));
-  }, []);
-  useEffect(() => {
     // The runtime-update probe is omp's; wait until the engine is known so a
     // Claude/Codex instance never opens with an "OMP update available" toast.
     if (!capabilitiesLoaded || !capabilities.updates) return;
@@ -412,12 +404,11 @@ export function AppShell() {
     return () => controller.abort();
   }, [openSettings]);
   const settingsCallbacks = useMemo(() => ({
-    onAdvisorChange: handleAdvisorChange,
     onModelsSaved: () => setModelsRefreshKey((k) => k + 1),
     onPluginsReloaded: () => setSessionKey((k) => k + 1),
     onOmpUpdateAvailabilityChange: setOmpUpdateAvailable,
     onClose: closeSettings,
-  }), [handleAdvisorChange, closeSettings]);
+  }), [closeSettings]);
   const chatInputRef = useRef<ChatInputHandle | null>(null);
   const topBarRef = useRef<HTMLDivElement>(null);
 
@@ -1957,7 +1948,6 @@ export function AppShell() {
               onOpenFile={handleOpenLinkedFile}
               onOpenPreview={handleAgentOpenPreview}
               onPreviewUrlsSeen={handlePreviewUrlsSeen}
-              advisorEnabled={advisorEnabled}
               capabilities={capabilities}
               engine={activeEngine}
               activityDisplayMode={activityDisplayMode}
@@ -2334,7 +2324,7 @@ export function AppShell() {
         capabilities={capabilities}
         engine={activeEngine}
         sessionModels={sessionModels}
-        prefs={{ activityDisplayMode, setActivityDisplayMode: handleActivityDisplayModeChange, thinkingDefaultExpanded, setThinkingDefaultExpanded: handleThinkingDefaultExpandedChange, advisorEnabled }}
+        prefs={{ activityDisplayMode, setActivityDisplayMode: handleActivityDisplayModeChange, thinkingDefaultExpanded, setThinkingDefaultExpanded: handleThinkingDefaultExpandedChange }}
         callbacks={settingsCallbacks}
       />
     )}

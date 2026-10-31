@@ -14,12 +14,10 @@
  *     through the section-spread writer.
  *
  * Nothing here carries a label of its own beyond that table, so an upstream
- * rename shows up here the moment the engine ships it. The "Enable Advisor
- * for new sessions" default this browser keeps (`cody:advisor-enabled`)
- * follows the `advisor.enabled` card through the shell's callback.
+ * rename shows up here the moment the engine ships it.
  */
 import { AlertCircle, ArrowDown, ArrowUp, RotateCcw, Sparkles, X } from "lucide-react";
-import { useCallback, type CSSProperties, type ReactNode } from "react";
+import { type CSSProperties, type ReactNode } from "react";
 import { Select } from "@/components/ui/Select";
 import { useConfigWriter, useNativeSettings, type CompactionMethod, type NativeSettings, type NativeSettingsHandle } from "@/hooks/useConfigWriter";
 import { useSchemaIndex, type SchemaIndex, type SchemaRow, type SchemaValue } from "@/hooks/useSchemaIndex";
@@ -139,11 +137,10 @@ function CardFooter({ settingKey, modified, hint, onReset }: { settingKey: strin
 }
 
 /** A card whose key the engine's schema declares. */
-function SchemaCard({ card, row, index, onAfterChange }: { card: RecommendedCard; row: SchemaRow; index: SchemaIndex; onAfterChange?: (value: SchemaValue) => void }) {
+function SchemaCard({ card, row, index }: { card: RecommendedCard; row: SchemaRow; index: SchemaIndex }) {
   const { track } = useSaveStatus(ENGINE_PANEL_ID);
   const write = (value: SchemaValue | null) => { void track(() => index.setValue(row.key, value)); };
   const change = (value: SchemaValue) => {
-    onAfterChange?.(value);
     write(value);
   };
   const description = [row.description, index.describeCondition(row.condition)].filter(Boolean).join(" ");
@@ -208,17 +205,15 @@ async function resetCurated(key: string): Promise<void> {
 /** A card whose key the engine keeps config-file only: copy from the table,
  * value from /api/omp-settings, written through the section writer, reset
  * through the DELETE route's per-path form. */
-function CuratedCard({ card, meta, native, onAfterChange }: { card: RecommendedCard; meta: CuratedOnlySetting; native: NativeSettingsHandle; onAfterChange?: (value: boolean | number | string) => void }) {
+function CuratedCard({ card, meta, native }: { card: RecommendedCard; meta: CuratedOnlySetting; native: NativeSettingsHandle }) {
   const { track } = useSaveStatus(ENGINE_PANEL_ID);
   const { enqueue } = useConfigWriter();
   const stored = readCurated(native.settings, meta);
   const effective = stored ?? meta.default;
   const change = (value: boolean | number | string) => {
-    onAfterChange?.(value);
     void track(() => writeCurated(native, meta, value));
   };
   const reset = () => {
-    if (typeof meta.default === "boolean") onAfterChange?.(meta.default);
     void track(() => enqueue("delete", () => resetCurated(meta.key)));
   };
   let control: ReactNode;
@@ -250,15 +245,11 @@ function CuratedCard({ card, meta, native, onAfterChange }: { card: RecommendedC
 }
 
 function RecommendedCardView({ card, index, native }: { card: RecommendedCard; index: SchemaIndex; native: NativeSettingsHandle }) {
-  const { callbacks } = useSettingsShell();
-  // The browser-side default for new sessions follows the file's value.
-  const onAdvisor = useCallback((value: unknown) => { if (typeof value === "boolean") callbacks.onAdvisorChange(value); }, [callbacks]);
-  const afterChange = card.key === "advisor.enabled" ? onAdvisor : undefined;
 
   const row = index.byKey.get(card.key);
   if (row) {
     if (!row.visible) return null;
-    return <SchemaCard card={card} row={row} index={index} onAfterChange={afterChange} />;
+    return <SchemaCard card={card} row={row} index={index} />;
   }
   const meta = curatedOnly(card.key);
   if (!meta || !native.enabled) return null;
@@ -266,7 +257,7 @@ function RecommendedCardView({ card, index, native }: { card: RecommendedCard; i
   // unreadable there is nothing to evaluate it against, and an inert card
   // beats a silently missing one.
   if (index.status === "ready" && !index.conditionMet(meta.condition)) return null;
-  return <CuratedCard card={card} meta={meta} native={native} onAfterChange={afterChange} />;
+  return <CuratedCard card={card} meta={meta} native={native} />;
 }
 
 function GroupHeading({ group, first }: { group: RecommendedGroup; first: boolean }) {

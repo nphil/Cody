@@ -104,7 +104,6 @@ export function useApprovalCard(block: ToolCallContent, result: ToolResultMessag
     id: state.id,
     status: state.status,
     expiresAt: state.expiresAt,
-    expiresClock: state.expiresClock,
     items: state.items,
     message: state.message,
     role: observed.source,
@@ -163,6 +162,7 @@ const PHASE_KEYS: Record<ApprovalPhase, { label: string; chip: string }> = {
   expired: { label: "homelabberApproval.expired", chip: "homelabberApproval.chip.expired" },
   cancelled: { label: "homelabberApproval.cancelled", chip: "homelabberApproval.chip.cancelled" },
   lapsed: { label: "homelabberApproval.lapsed", chip: "homelabberApproval.chip.lapsed" },
+  uncertain: { label: "homelabberApproval.uncertain", chip: "homelabberApproval.chip.uncertain" },
 };
 
 const ITEM_KEYS: Record<ApprovalItemOutcome["status"], string> = {
@@ -170,6 +170,8 @@ const ITEM_KEYS: Record<ApprovalItemOutcome["status"], string> = {
   failed: "homelabberApproval.item.failed",
   skipped: "homelabberApproval.item.skipped",
   pending: "homelabberApproval.item.pending",
+  executing: "homelabberApproval.item.executing",
+  uncertain: "homelabberApproval.item.uncertain",
 };
 
 const PHASE_ICON: Record<ApprovalPhase, LucideIcon> = {
@@ -181,6 +183,7 @@ const PHASE_ICON: Record<ApprovalPhase, LucideIcon> = {
   expired: TimerOff,
   cancelled: Ban,
   lapsed: Clock,
+  uncertain: TriangleAlert,
 };
 
 const ITEM_ICON: Record<ApprovalItemOutcome["status"], { Icon: LucideIcon; color: string }> = {
@@ -188,6 +191,8 @@ const ITEM_ICON: Record<ApprovalItemOutcome["status"], { Icon: LucideIcon; color
   failed: { Icon: X, color: "var(--status-error)" },
   skipped: { Icon: Minus, color: "var(--text-dim)" },
   pending: { Icon: Clock, color: "var(--text-dim)" },
+  executing: { Icon: Loader2, color: "var(--accent)" },
+  uncertain: { Icon: TriangleAlert, color: "var(--status-warning)" },
 };
 
 /** The header's short state word, in the card's tone (the slot where an
@@ -285,8 +290,8 @@ export function ApprovalStatusRow({ card }: { card: ApprovalCard }) {
   const now = useNow(waiting && card.expiresAt !== null);
   const tone = approvalTone(card.phase);
   const color = TONE_COLOR[tone];
-  const showItems = card.items.length > 0 && (card.phase === "approved" || card.phase === "done" || card.phase === "failed");
-  const showMessage = card.message !== null && (card.phase === "failed" || card.phase === "cancelled");
+  const showItems = card.items.length > 0 && (card.phase === "approved" || card.phase === "done" || card.phase === "failed" || card.phase === "uncertain");
+  const showMessage = card.message !== null && (card.phase === "failed" || card.phase === "cancelled" || card.phase === "uncertain");
   const PhaseIcon = PHASE_ICON[card.phase];
 
   const buttonBase: CSSProperties = {
@@ -316,11 +321,6 @@ export function ApprovalStatusRow({ card }: { card: ApprovalCard }) {
           {waiting && card.expiresAt !== null && (
             <span role="timer" style={{ color: "var(--status-warning)", fontVariantNumeric: "tabular-nums", flexShrink: 0 }}>
               {t("homelabberApproval.timeLeft", { time: formatCountdown(card.expiresAt - now) })}
-            </span>
-          )}
-          {waiting && card.expiresAt === null && card.expiresClock !== null && (
-            <span style={{ color: "var(--text-dim)", fontVariantNumeric: "tabular-nums", flexShrink: 0 }}>
-              {t("homelabberApproval.expiresAt", { time: card.expiresClock })}
             </span>
           )}
         </div>

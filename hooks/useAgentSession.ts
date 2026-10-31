@@ -760,7 +760,6 @@ export type BuiltinSlashCommandResult =
 export interface UseAgentSessionOptions {
   session: SessionInfo | null;
   newSessionCwd: string | null;
-  advisorEnabled?: boolean;
   /** False when the active engine has no subagents: skip the roster call
    * entirely rather than provoking an "unsupported" rejection per send. */
   subagentsCapable?: boolean;
@@ -1129,7 +1128,7 @@ function toSlashCommandInfo(command: RpcAvailableSlashCommand): SlashCommandInfo
 
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
-    session, newSessionCwd, advisorEnabled, thinkingDefaultExpanded, onAgentEnd, onSessionNamed, onSessionCreated, onSessionForked, sessionKind, contextSessionId,
+    session, newSessionCwd, thinkingDefaultExpanded, onAgentEnd, onSessionNamed, onSessionCreated, onSessionForked, sessionKind, contextSessionId,
     modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
     onOpenFile, onOpenPreview, onPreviewUrlsSeen,
   } = opts;
@@ -2265,7 +2264,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             toolNames,
             ...(selectedModel && spawn.sendModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
             ...(thinkingLevel !== "auto" && spawn.sendThinkingLevel ? { thinkingLevel } : {}),
-            ...(advisorEnabled ? { advisor: true } : {}),
             ...(newSessionLocalOnlyRef.current ? { localOnly: true } : {}),
             ...(opts.newSessionPresetId !== undefined && spawn.sendPresetId ? { presetId: opts.newSessionPresetId } : {}),
             ...deviceTimeZoneField(),
@@ -2292,7 +2290,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       } finally {
         ensuringNewSessionRef.current = null;
       }
-    }, [advisorEnabled, contextSessionId, isNew, newSessionCwd, opts.newSessionPresetId, sessionKind, newSessionModel, newSessionDefaultModel, setSmartModelProvenance, thinkingLevel, toolPreset, updateSessionControlScope]);
+    }, [contextSessionId, isNew, newSessionCwd, opts.newSessionPresetId, sessionKind, newSessionModel, newSessionDefaultModel, setSmartModelProvenance, thinkingLevel, toolPreset, updateSessionControlScope]);
 
   const selectLocalOnly = useCallback(async (): Promise<boolean> => {
     if (localOnly.pending || !localOnly.supported) return false;

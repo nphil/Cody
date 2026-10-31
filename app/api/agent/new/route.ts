@@ -133,7 +133,7 @@ export async function POST(req: Request) {
         "",
         cwd,
         toolNames,
-        advisor === true,
+        typeof advisor === "boolean" ? advisor : undefined,
         engineMode ? "" : undefined,
         profileTarget,
         kind,

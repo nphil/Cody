@@ -8,6 +8,7 @@ import { useI18n } from "@/lib/i18n";
 import type { TranscriptRow } from "@/lib/subagent-transcript";
 import type { ToolResultMessage } from "@/lib/types";
 import { MessageView } from "./MessageView";
+import { HomelabberApprovalProvider } from "./HomelabberApproval";
 
 /** Section label shared by the dialog's Result / Task / Transcript blocks. */
 export const BLOCK_LABEL_STYLE: CSSProperties = {
@@ -61,7 +62,9 @@ const TranscriptRows = memo(function TranscriptRows({ rows, toolResults, contain
   containerRef: (node: HTMLDivElement | null) => void;
 }) {
   const stamped = useMemo(() => timestampKeysOf(rows), [rows]);
+  const messages = useMemo(() => rows.map((row) => row.message), [rows]);
   return (
+    <HomelabberApprovalProvider messages={messages} toolResults={toolResults}>
     <div ref={containerRef} data-testid="subagent-transcript-rows">
       {rows.map((row) => (
         // The wrapper is the row's identity for the scroll anchor and keeps the
@@ -78,6 +81,7 @@ const TranscriptRows = memo(function TranscriptRows({ rows, toolResults, contain
         </div>
       ))}
     </div>
+    </HomelabberApprovalProvider>
   );
 });
 

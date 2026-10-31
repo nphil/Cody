@@ -51,6 +51,12 @@ test("the five groups hold 28 cards, in the spec's sizes, with no duplicate keys
   }
 });
 
+test("advisor guidance distinguishes the next launch from the active chat", () => {
+  const advisor = RECOMMENDED_GROUPS.find((group) => group.id === "advisor");
+  assert.match(advisor.description, /next time a chat launches/);
+  assert.match(advisor.description, /do not update an active chat/);
+});
+
 test("retry keys are not Recommended, MCP keys are not rendered here, and both stay in the key space", () => {
   const recommended = new Set(RECOMMENDED_CARDS.map((card) => card.key));
   for (const key of ["retry.enabled", "retry.maxRetries", "retry.modelFallback"]) {

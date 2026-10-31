@@ -76,18 +76,10 @@ test("a pending request shows the Face ID row, a live countdown and both ways to
   assert.match(html, /aria-expanded="false"/, "and it is not auto-expanded as one");
 });
 
-test("a pending request that reached the transcript only as prose still gets the row", () => {
+test("prose alone cannot create an approval card", () => {
   const message = assistant(firewall);
-  const result = {
-    role: "toolResult",
-    toolCallId: "c1",
-    isError: true,
-    content: [{ type: "text", text: `Error: ${pending(0).message}` }],
-  };
-  const html = render([message], [result]);
-  assert.match(html, /Waiting for your Face ID in HomeLabber/);
-  assert.match(html, /expires 23:13/);
-  assert.doesNotMatch(html, /role="timer"/, "no epoch, no countdown");
+  const result = { role: "toolResult", toolCallId: "c1", isError: true, content: [{ type: "text", text: `Error: ${pending(0).message}` }] };
+  assert.doesNotMatch(render([message], [result]), /Waiting for your Face ID/);
 });
 
 test("the same request, once an approval_wait reports it, reads approved and done", () => {
@@ -106,6 +98,18 @@ test("the same request, once an approval_wait reports it, reads approved and don
   assert.doesNotMatch(html, /homelabber:\/\/approve/, "nothing left to approve");
   assert.doesNotMatch(html, /var\(--status-error\)/);
   assert.match(html, /var\(--status-success\)/);
+});
+test("an interrupted plan shows known, running and uncertain steps and the recovery message", () => {
+  const messages = [assistant(firewall), assistant(call("w1", "mcp__homelabber_approval_wait", { id: ID }))];
+  const items = [
+    { seq: 0, tool: "first", status: "executed", message: "First completed" },
+    { seq: 1, tool: "second", status: "uncertain", message: "Second outcome unknown" },
+    { seq: 2, tool: "third", status: "skipped" },
+    { seq: 3, tool: "fourth", status: "executing" },
+  ];
+  const outcome = { ok: false, message: "Inspect the affected service", data: { id: ID, status: "uncertain", items } };
+  const html = render(messages, [ompResult("c1", pending(Date.now() + 60000)), ompResult("w1", outcome)], { index: 0 });
+  for (const text of [/Inspect the affected service/, /First completed/, /Second outcome unknown/, /aria-label="done"/, /aria-label="outcome unknown"/, /aria-label="skipped"/, /aria-label="running"/]) assert.match(html, text);
 });
 
 test("approved but still running, then denied, expired and failed, each in its own words", () => {

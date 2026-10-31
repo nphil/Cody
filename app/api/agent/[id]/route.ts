@@ -135,7 +135,7 @@ export async function POST(
       const engine = resolveEngineSessionOr404(id, req);
       if ("response" in engine) return engine.response;
       const engineCwd = resolveSpawnCwd(engine.row.cwd);
-      const { session } = await startRpcSession(id, "", engineCwd, undefined, false, id, undefined, undefined, undefined, { timeZone });
+      const { session } = await startRpcSession(id, "", engineCwd, undefined, undefined, id, undefined, undefined, undefined, { timeZone });
       await checkpointBeforePrompt(engineCwd, body);
       return await sendWithAckBound(session, body);
     }
@@ -147,7 +147,7 @@ export async function POST(
 
     const cwd = resolveSpawnCwd(readSessionHeader(filePath)?.cwd);
 
-    const { session } = await startRpcSession(id, filePath, cwd, undefined, false, undefined, undefined, kind, undefined, { timeZone });
+    const { session } = await startRpcSession(id, filePath, cwd, undefined, undefined, undefined, undefined, kind, undefined, { timeZone });
     await checkpointBeforePrompt(cwd, body);
     return await sendWithAckBound(session, body);
   } catch (error) {

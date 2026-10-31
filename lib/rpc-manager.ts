@@ -666,7 +666,7 @@ export function buildSessionSpawnArgs(
       if (mapped.length > 0) args.push("--tools", mapped.join(","));
     }
   }
-  if (flags.supportsAdvisor && advisor && !sessionFile) args.push("--advisor");
+  if (flags.supportsAdvisor && advisor && kind !== "sidebar") args.push("--advisor");
   
   // Sidebar chat: a conversation, not an agent. No tools, skills, extensions,
   // rules or prewalk, a short fixed system prompt, and its own session dir
@@ -734,7 +734,11 @@ export function buildEngineRpcLaunch(
   // `--tools` alone is additive in OMP. The 8k profile must be a real
   // read+bash whitelist, while larger profiles retain OMP’s normal tool surface.
   if (opts.profile?.profileId === "minimal") args.push("--no-tools");
-  args.push(...buildSessionSpawnArgs(opts.sessionFile, newSessionTools, opts.advisor === true, opts.kind, sidebarSessionDir, spec));
+  // RPC defaults advisor off even when configured; resolve on every launch.
+  const advisor = spec.supportsAdvisor && opts.kind !== "sidebar"
+    ? opts.advisor ?? readNativeSettings().settings.advisor?.enabled ?? false
+    : false;
+  args.push(...buildSessionSpawnArgs(opts.sessionFile, newSessionTools, advisor, opts.kind, sidebarSessionDir, spec));
   // OMP accepts these flags with --resume. Existing session tool presets are
   // intentionally untouched unless a local profile explicitly replaces them.
   if (opts.sessionFile && opts.profile?.toolNames?.length) {
@@ -750,17 +754,15 @@ export function buildEngineRpcLaunch(
     args.push("--model", `${provider}/${modelId}`);
   }
   if (opts.profile?.systemPromptPath) args.push("--system-prompt", opts.profile.systemPromptPath);
-  // Main omp sessions carry Cody's two extensions (lib/omp/extensions): the
-  // refusal guard asks before a safety refusal falls back to another model and
-  // performs the in-place rewind, and the local-time extension gives the agent
-  // one hidden line with the user's local time before every prompt. Resolved
-  // from the package dir the server itself sets, never the process cwd, so any
-  // launch directory finds them.
+  // Main omp sessions load Cody's extensions: the refusal guard, local-time
+  // context, and the HomeLabber gate procedure (also inherited by subagents).
+  // Resolve them from the package directory, never the launch cwd.
   if (harness.id === "omp" && opts.kind !== "sidebar") {
     const packageRoot = process.env.CODY_PACKAGE_DIR || process.cwd();
     const extensions = path.join(packageRoot, "lib", "omp", "extensions");
     args.push("--extension", path.join(extensions, "cody-refusal-guard.ts"));
     args.push("--extension", path.join(extensions, "cody-local-time.ts"));
+    args.push("--extension", path.join(extensions, "cody-homelabber-gate.ts"));
   }
   // A sidebar child gets its own agent dir, whose `mcp.json` is empty, so the
   // user-scope MCP servers (111 tool schemas / 89,303 tokens on the owner's
@@ -4390,7 +4392,7 @@ export async function alignSessionTimeZone(session: EngineSession, zone: string)
   if (inflight) return inflight;
   const respawn = (async () => {
     await session.destroyAndWait();
-    const { session: replacement } = await startRpcSession(sessionId, "", session.cwd, undefined, false, sessionId, undefined, undefined, undefined, { timeZone: wanted });
+    const { session: replacement } = await startRpcSession(sessionId, "", session.cwd, undefined, undefined, sessionId, undefined, undefined, undefined, { timeZone: wanted });
     return replacement;
   })().finally(() => zoneRespawns.delete(sessionId));
   zoneRespawns.set(sessionId, respawn);
@@ -4582,7 +4584,7 @@ export async function startRpcSession(
   sessionFile: string,
   cwd: string,
   toolNames?: string[],
-  advisor = false,
+  advisor?: boolean,
   engineSessionId?: string,
   profileTarget?: ModelProfileTarget,
   kind?: "sidebar",

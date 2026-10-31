@@ -98,6 +98,26 @@ the draft. The original prompt owns terminal events. ACP steering does not imply
 `follow_up` or concurrent `prompt` support. Native rpc-dialect engines retain
 their existing `chatExtras` steering/follow-up path.
 
+### OMP Advisor preference and HomeLabber gate guidance
+
+The persisted Advisor preference is applied on every supported main-session launch,
+including resume and safe relaunch. An explicit launch override takes precedence;
+sidebar sessions and engines without Advisor support remain off. Changing Settings
+affects the next launch, not an already running process. Use `/advisor on` in the
+current OMP chat when immediate activation is wanted; Cody does not infer live
+Advisor state from a saved preference.
+
+The bundled `cody-homelabber-gate` extension adds the gate procedure to main OMP
+sessions and their real delegated sessions. Each agent discovers the available tools,
+checks requests and grants for its caller token when supported, verifies exact scope,
+and polls the original request ID after reconnect. If it cannot recover the ID, it
+stops rather than issuing a replacement. Shared credentials do not provide agent
+isolation. Pending or uncertain work must not be resubmitted, and no agent may
+bypass an available gate with SSH. This guidance grants no authority: HomeLabber
+enforces the human-approved scope. Signed releases still need explicit approval
+for each release. Root and delegated transcript cards distinguish waiting, running
+and outcome-unknown states, including individual plan steps.
+
 ### Pi rides the RPC pipeline, not the turn seam
 
 Pi is omp's ancestor: `pi --mode rpc` speaks the same NDJSON dialect

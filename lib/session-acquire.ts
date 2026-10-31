@@ -49,13 +49,13 @@ export async function acquireSession(sessionId: string, timeZone: string): Promi
   if (harness.createSession) {
     const row = getEngineSession(sessionId);
     if (!row || row.engine !== harness.id) throw new SessionUnavailableError("gone");
-    const { session } = await startRpcSession(sessionId, "", resolveSpawnCwd(row.cwd), undefined, false, sessionId, undefined, undefined, undefined, { timeZone });
+    const { session } = await startRpcSession(sessionId, "", resolveSpawnCwd(row.cwd), undefined, undefined, sessionId, undefined, undefined, undefined, { timeZone });
     return session;
   }
 
   const filePath = await resolveSessionPath(sessionId);
   if (!filePath) throw new SessionUnavailableError("gone");
   if (isSidebarSessionPath(filePath)) throw new SessionUnavailableError("sidebar");
-  const { session } = await startRpcSession(sessionId, filePath, resolveSpawnCwd(readSessionHeader(filePath)?.cwd), undefined, false, undefined, undefined, undefined, undefined, { timeZone });
+  const { session } = await startRpcSession(sessionId, filePath, resolveSpawnCwd(readSessionHeader(filePath)?.cwd), undefined, undefined, undefined, undefined, undefined, undefined, { timeZone });
   return session;
 }

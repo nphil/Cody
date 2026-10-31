@@ -424,7 +424,6 @@ function SidebarChatSession({ session, cwd, contextSessionId, onSessionCreated, 
     sessionKind: "sidebar",
     // What `read_session` defaults to: the main chat this panel is pointed at.
     contextSessionId,
-    advisorEnabled: false,
     thinkingDefaultExpanded: false,
     onAgentEnd: onTurnEnd,
     onSessionCreated: (created) => onSessionCreated(created.id),
