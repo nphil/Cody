@@ -5,11 +5,12 @@ import { Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, us
 import { ChevronDown, ShieldAlert, TriangleAlert, X } from "lucide-react";
 import type { ActivityDisplayMode, AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, ImageContent, SessionInfo, SessionTreeNode, TextContent, ToolCallContent, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
-import { countToolCallBlocks, getDisplayableAssistantBlocks, isHiddenFromTranscript, isVisibleTranscriptMessage, groupHasThinking, splitFinalAssistantBlocks } from "@/lib/message-display";
+import { backgroundActivityKind, backgroundActivityNeedsReview, backgroundMessageIdentity, countToolCallBlocks, getDisplayableAssistantBlocks, isActionableCustomDetails, isHiddenFromTranscript, isVisibleTranscriptMessage, groupHasThinking, splitFinalAssistantBlocks } from "@/lib/message-display";
 import { isReminderCustomType } from "@/lib/system-reminder";
 import { estimateTurnHeight, type TurnContentSignal } from "@/lib/turn-height-estimate";
 import { imageSource, MessageView } from "./MessageView";
 import { ClickableImage } from "./ImageLightbox";
+import { BackgroundActivity } from "./BackgroundActivity";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { SubagentTranscriptDialog } from "./SubagentTranscriptDialog";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
@@ -472,6 +473,7 @@ interface CommittedTranscriptProps {
 type TranscriptUnit =
   | { kind: "message"; idx: number; estimatedHeight: number }
   | { kind: "answer"; idx: number; message: AssistantMessage; estimatedHeight: number }
+  | { kind: "background"; indices: number[]; estimatedHeight: number }
   | {
       kind: "process";
       userIdx: number;
@@ -500,7 +502,7 @@ function buildTranscriptUnits(messages: AgentMessage[], lastAnchorIdx: number, t
   // A hidden engine message gets no unit at all: an empty turn wrapper would
   // still leave a gap between its neighbours.
   const pushMessageUnit = (idx: number) => {
-    if (!isHiddenFromTranscript(messages[idx])) units.push({ kind: "message", idx, estimatedHeight: heightForMessage(idx) });
+    if (!backgroundActivityKind(messages[idx]) && !isHiddenFromTranscript(messages[idx])) units.push({ kind: "message", idx, estimatedHeight: heightForMessage(idx) });
   };
   // Process groups render collapsed by default (ProcessDetailsGroup) — the
   // toggle button is the only thing that actually paints until expanded, so
@@ -513,20 +515,33 @@ function buildTranscriptUnits(messages: AgentMessage[], lastAnchorIdx: number, t
   for (let idx = 0; idx < messages.length;) {
     const msg = messages[idx];
     if (!isGroupAnchor(msg)) {
-      pushMessageUnit(idx);
-      idx += 1;
+      let endIdx = idx;
+      while (endIdx < messages.length && !isGroupAnchor(messages[endIdx])) endIdx++;
+      const indices: number[] = [];
+      for (let i = idx; i < endIdx; i++) if (backgroundActivityKind(messages[i])) indices.push(i);
+      for (let i = idx; i < endIdx; i++) {
+        if (i === indices[0]) units.push({ kind: "background", indices, estimatedHeight: collapsedProcessHeight });
+        pushMessageUnit(i);
+      }
+      idx = endIdx;
       continue;
     }
 
     const userIdx = idx;
     let endIdx = userIdx + 1;
     while (endIdx < messages.length && !isGroupAnchor(messages[endIdx])) endIdx += 1;
+    const backgroundIndices: number[] = [];
+    for (let i = userIdx + 1; i < endIdx; i++) if (backgroundActivityKind(messages[i])) backgroundIndices.push(i);
+    const pushBackground = () => {
+      if (backgroundIndices.length) units.push({ kind: "background", indices: backgroundIndices, estimatedHeight: collapsedProcessHeight });
+    };
 
     const finalAssistantIdx = findFinalAssistantIndex(messages, userIdx, endIdx);
     const isLiveTail = tailIsLive && endIdx === messages.length && userIdx === lastAnchorIdx;
 
     if (finalAssistantIdx === -1 || isLiveTail) {
       for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
+        if (renderIdx === backgroundIndices[0]) pushBackground();
         pushMessageUnit(renderIdx);
       }
       idx = endIdx;
@@ -537,7 +552,12 @@ function buildTranscriptUnits(messages: AgentMessage[], lastAnchorIdx: number, t
 
     const processIndices: number[] = [];
     for (let processIdx = userIdx + 1; processIdx < finalAssistantIdx; processIdx++) {
-      if (hasDisplayableProcessMessage(messages[processIdx])) processIndices.push(processIdx);
+      const processMessage = messages[processIdx];
+      if (processMessage.role === "custom" && (processMessage.attribution === "user" || isActionableCustomDetails(processMessage.details))) {
+        pushMessageUnit(processIdx);
+      } else if (!backgroundActivityKind(processMessage) && hasDisplayableProcessMessage(processMessage)) {
+        processIndices.push(processIdx);
+      }
     }
     const finalAssistant = messages[finalAssistantIdx] as AssistantMessage;
     const finalSplit = splitFinalAssistantBlocks(finalAssistant);
@@ -546,6 +566,7 @@ function buildTranscriptUnits(messages: AgentMessage[], lastAnchorIdx: number, t
       : null;
     const hasAnswer = finalSplit.answerBlocks.length > 0;
 
+    if (backgroundIndices.length && backgroundIndices[0] < finalAssistantIdx) pushBackground();
     if (processIndices.length + (finalProcessMessage ? 1 : 0) > 0) {
       units.push({ kind: "process", userIdx, finalAssistantIdx, processIndices, finalProcessMessage, hasAnswer, estimatedHeight: collapsedProcessHeight });
     }
@@ -554,6 +575,7 @@ function buildTranscriptUnits(messages: AgentMessage[], lastAnchorIdx: number, t
       units.push({ kind: "answer", idx: finalAssistantIdx, message: answerMessage, estimatedHeight: estimateTurnHeight(turnContentSignal(answerMessage)) });
     }
     for (let renderIdx = finalAssistantIdx + 1; renderIdx < endIdx; renderIdx++) {
+      if (renderIdx === backgroundIndices[0]) pushBackground();
       pushMessageUnit(renderIdx);
     }
     idx = endIdx;
@@ -655,6 +677,15 @@ const CommittedTranscript = memo(function CommittedTranscript({
     // CSS rule stays in place as the fallback for the instant before this
     // inline style attaches.
     const turnStyle: React.CSSProperties = { containIntrinsicSize: `auto ${unit.estimatedHeight}px` };
+    if (unit.kind === "background") {
+      const firstIdx = unit.indices[0];
+      return (
+        <div key={`background-${backgroundMessageIdentity(messages[firstIdx]) ?? `idx-${firstIdx}`}`} data-turn-key={turnKeyOf(firstIdx)} data-turn-index={firstIdx}
+          className={turnClassName(live, true)} style={turnStyle}>
+          <BackgroundActivity messages={messages} indices={unit.indices} needsReview={unit.indices.some((index) => backgroundActivityNeedsReview(messages[index]))} />
+        </div>
+      );
+    }
     if (unit.kind === "process") {
       const processBlocks = unit.finalProcessMessage?.content ?? [];
       const processRefIdx = unit.processIndices
@@ -723,6 +754,10 @@ const CommittedTranscript = memo(function CommittedTranscript({
       if (activityDisplayMode !== "hidden") return planned;
       const visible: TranscriptUnit[] = [];
       for (const unit of planned) {
+        if (unit.kind === "background") {
+          if (unit.indices.some((index) => backgroundActivityNeedsReview(messages[index]))) visible.push(unit);
+          continue;
+        }
         if (unit.kind === "process") {
           for (const idx of unit.processIndices) {
             if (isVisibleTranscriptMessage(messages[idx], activityDisplayMode, toolResultsMap)) {

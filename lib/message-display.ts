@@ -91,6 +91,99 @@ export function isHiddenFromTranscript(message: { role?: string; customType?: st
   return message.role === "custom" && message.customType !== undefined && Object.hasOwn(HIDDEN_CUSTOM_TYPES, message.customType);
 }
 
+export function isActionableCustomDetails(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const details = value as Record<string, unknown>;
+  const failed = (status: unknown) => status === "failed" || status === "error" || status === "cancelled";
+  const invalidSchema = (status: unknown) => status === "invalid" || status === "unavailable" || status === "error";
+  const schemaFailed = (schema: unknown) => !!schema && typeof schema === "object"
+    && invalidSchema((schema as Record<string, unknown>).status);
+  if (details.notifyType === "error" || details.notifyType === "warning"
+    || details.isError === true || details.requiresAction === true
+    || failed(details.status) || failed(details.jobStatus)
+    || invalidSchema(details.schemaStatus) || schemaFailed(details.schema)) return true;
+  return Array.isArray(details.jobs) && details.jobs.some((job: unknown) => {
+    if (!job || typeof job !== "object") return false;
+    const item = job as Record<string, unknown>;
+    return item.notifyType === "error" || item.notifyType === "warning"
+      || item.isError === true || item.requiresAction === true
+      || failed(item.status) || invalidSchema(item.schemaStatus) || schemaFailed(item.schema);
+  });
+}
+
+/** Exact engine types, including actionable deliveries that must not be folded away. */
+export function isInternalBackgroundMessage(message: AgentMessage): boolean {
+  if (message.role !== "custom") return false;
+  switch (message.customType) {
+    case "async-result":
+    case "async_result":
+    case "irc:incoming":
+    case "irc:autoreply":
+    case "irc:relay":
+    case "irc:workpool":
+      return true;
+    default:
+      return false;
+  }
+}
+
+/** Classify only engine-identified background messages, never their text. */
+export function backgroundActivityKind(message: AgentMessage): "completion" | "coordination" | null {
+  if (message.role !== "custom" || message.attribution === "user" || isActionableCustomDetails(message.details)) return null;
+  // Schema validity describes the output format, not whether the job succeeded.
+  // Missing status is common in older deliveries; keep them grouped and inspectable.
+  if (message.customType === "async-result" || message.customType === "async_result") return "completion";
+  switch (message.customType) {
+    case "irc:incoming":
+    case "irc:autoreply":
+    case "irc:relay":
+    case "irc:workpool":
+      return "coordination";
+    default:
+      return null;
+  }
+}
+
+/** A valid output schema does not prove a job succeeded; unknown outcomes need review. */
+export function backgroundActivityNeedsReview(message: AgentMessage): boolean {
+  if (backgroundActivityKind(message) !== "completion" || message.role !== "custom") return false;
+  const details = message.details;
+  if (!details || typeof details !== "object") return true;
+  const jobs = (details as Record<string, unknown>).jobs;
+  return !Array.isArray(jobs) || jobs.length === 0 || !jobs.every(job =>
+    job && typeof job === "object" && (job as Record<string, unknown>).status === "completed");
+}
+
+/** Stable identity only when the engine supplies enough metadata to distinguish deliveries. */
+export function backgroundMessageIdentity(message: AgentMessage): string | null {
+  if (message.role !== "custom" || !message.details || typeof message.details !== "object") return null;
+  const details = message.details as Record<string, unknown>;
+  if (message.customType === "irc:incoming") {
+    return typeof details.id === "string" && details.id !== "" ? JSON.stringify(["irc:incoming", details.id]) : null;
+  }
+  if ((message.customType !== "async-result" && message.customType !== "async_result")
+    || typeof message.timestamp !== "number" || !Number.isFinite(message.timestamp)
+    || !Array.isArray(details.jobs) || details.jobs.length === 0) return null;
+  const ids = details.jobs.map((job: unknown) => job && typeof job === "object" ? (job as Record<string, unknown>).jobId : undefined);
+  if (!ids.every((id: unknown) => typeof id === "string" && id !== "")) return null;
+  return JSON.stringify(["async-result", message.timestamp, ids]);
+}
+
+/** Replace a duplicate delivery in its existing position without changing the input. */
+export function appendBackgroundMessage(messages: AgentMessage[], message: AgentMessage): AgentMessage[] {
+  const id = backgroundMessageIdentity(message);
+  if (id !== null) {
+    for (let index = messages.length - 1; index >= 0; index--) {
+      if (backgroundMessageIdentity(messages[index]) === id) {
+        const updated = messages.slice();
+        updated[index] = message;
+        return updated;
+      }
+    }
+  }
+  return [...messages, message];
+}
+
 /** Shared visibility boundary so hidden activity leaves no transcript wrapper. */
 export function isVisibleTranscriptMessage(message: AgentMessage, mode: ActivityDisplayMode, results?: Map<string, ToolResultMessage>): boolean {
   if (message.role === "toolResult") return false;
@@ -102,7 +195,7 @@ export function isVisibleTranscriptMessage(message: AgentMessage, mode: Activity
       : !isEmptyThinkingBlock(block));
   }
   if (message.role === "custom") {
-    return message.customType === "compaction" || Boolean(message.details && typeof message.details === "object" && "notifyType" in message.details && message.details.notifyType === "error");
+    return message.customType === "compaction" || message.attribution === "user" || isActionableCustomDetails(message.details);
   }
   if (message.role === "bashExecution") return Boolean(message.cancelled || (message.exitCode !== undefined && message.exitCode !== 0));
   return false;

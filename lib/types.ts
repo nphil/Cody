@@ -126,6 +126,7 @@ export interface CustomMessage {
   content: string | (TextContent | ImageContent)[];
   display: boolean;
   details?: unknown;
+  attribution?: "agent" | "user";
   timestamp?: number;
 }
 
@@ -341,6 +342,7 @@ export interface CustomMessageEntry extends SessionEntryBase {
   content: string | (TextContent | ImageContent)[];
   details?: unknown;
   display: boolean;
+  attribution?: "agent" | "user";
 }
 
 export interface LabelEntry extends SessionEntryBase {

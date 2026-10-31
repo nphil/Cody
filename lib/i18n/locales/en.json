@@ -1,4 +1,11 @@
 {
+  "chatWindow.backgroundActivity": "Background activity",
+  "chatWindow.backgroundEventCount.one": "{count} event",
+  "chatWindow.backgroundEventCount.other": "{count} events",
+  "chatWindow.backgroundImage": "Background activity image",
+  "chatWindow.showRawImage": "Show raw image data",
+  "chatWindow.hideRawImage": "Hide raw image data",
+  "chatWindow.reviewBackgroundResults": "Review results",
   "devices.serialTerminal": "Serial terminal — {device}",
   "devices.terminalEnding": "Line ending",
   "devices.fastbootTerminal": "Fastboot command — {device}",

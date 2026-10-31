@@ -1,4 +1,11 @@
 {
+  "chatWindow.backgroundActivity": "后台活动",
+  "chatWindow.backgroundEventCount.one": "{count} 个事件",
+  "chatWindow.backgroundEventCount.other": "{count} 个事件",
+  "chatWindow.backgroundImage": "后台活动图片",
+  "chatWindow.showRawImage": "显示原始图片数据",
+  "chatWindow.hideRawImage": "隐藏原始图片数据",
+  "chatWindow.reviewBackgroundResults": "查看结果",
   "devices.serialTerminal": "串口终端 — {device}",
   "devices.terminalEnding": "行尾",
   "devices.fastbootTerminal": "Fastboot 命令 — {device}",

@@ -14,6 +14,7 @@ import type {
 } from "@/lib/types";
 import { normalizeToolCalls } from "@/lib/normalize";
 import { foldSystemReminder } from "@/lib/system-reminder";
+import { appendBackgroundMessage, isInternalBackgroundMessage } from "@/lib/message-display";
 import {
   readPermissionRequest,
   readPermissionRequests,
@@ -3956,6 +3957,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // reconcile) — they would resurrect a ghost streaming bubble.
         if (!agentRunningRef.current) break;
         const msg = event.message as Partial<AgentMessage> | undefined;
+        if (msg && isInternalBackgroundMessage(msg as AgentMessage)) break;
         if (msg?.role === "user") {
           break;
         }
@@ -3968,6 +3970,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       case "message_end": {
         const completed = event.message as AgentMessage | undefined;
+        if (completed && isInternalBackgroundMessage(completed)) {
+          setMessages((previous) => appendBackgroundMessage(previous, completed));
+          break;
+        }
         if (completed && completed.role === "user") {
           // Delivered user messages must render even when a late frame arrives
           // after the client has already marked the run idle.

@@ -8,7 +8,7 @@ import { TranscriptViewportContext } from "./TranscriptViewportContext";
 import { anchorIsInsideOpenBlock } from "@/lib/transcript-anchor";
 import { translate, useI18n, type Locale } from "@/lib/i18n";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
-import { isEmptyThinkingBlock, isVisibleTranscriptMessage } from "@/lib/message-display";
+import { isActionableCustomDetails, isEmptyThinkingBlock, isInternalBackgroundMessage, isVisibleTranscriptMessage } from "@/lib/message-display";
 import { ENGINE_NOTE_CUSTOM_TYPE, isTodoReminderDetails, TODO_REMINDER_CUSTOM_TYPE } from "@/lib/system-reminder";
 import { estimateTokensFromChars, estimateTokensPerSecond, messageTokenRate, tokenRateTier, MIN_RATE_OUTPUT_TOKENS } from "@/lib/message-rate";
 import { parseUnifiedPatch, type SplitDiffCell } from "@/lib/patch";
@@ -184,9 +184,9 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
   if (message.role === "custom") {
     // Hidden messages are filtered by isVisibleTranscriptMessage above.
     if ((message as CustomMessage).customType === "compaction") return <CompactionMessageView message={message as CustomMessage} />;
-    // Hidden (display:false) messages are the engine's instructions to the
-    // model, not something said to the user: same slim row as a reminder.
-    if ((message as CustomMessage).customType === TODO_REMINDER_CUSTOM_TYPE || (message as CustomMessage).customType === ENGINE_NOTE_CUSTOM_TYPE || (message as CustomMessage).display === false) {
+    // Hidden messages normally remain slim notes; actionable internal alerts
+    // are shown in full so the reader cannot miss a failure or required action.
+    if (message.customType === TODO_REMINDER_CUSTOM_TYPE || message.customType === ENGINE_NOTE_CUSTOM_TYPE || (message.display === false && message.attribution !== "user" && !(isInternalBackgroundMessage(message) && isActionableCustomDetails(message.details)))) {
       return <EngineReminderRow message={message as CustomMessage} />;
     }
     return <CustomMessageView message={message as CustomMessage} cwd={cwd} onOpenFile={onOpenFile} activityDisplayMode={activityDisplayMode} />;
@@ -1967,7 +1967,7 @@ function CompactionFileList({ title, files }: { title: string; files: string[] }
 
 function CustomMessageView({ message, cwd, onOpenFile, activityDisplayMode }: { message: CustomMessage; cwd?: string; onOpenFile?: (filePath: string) => void; activityDisplayMode: ActivityDisplayMode }) {
   const { t, locale } = useI18n();
-  const isHiddenDisplay = message.display === false;
+  const isHiddenDisplay = message.display === false && message.attribution !== "user" && !(isInternalBackgroundMessage(message) && isActionableCustomDetails(message.details));
   const [contentExpanded, setContentExpanded] = useState(!isHiddenDisplay);
   const [detailsExpanded, setDetailsExpanded] = useState(false);
   const { copied, copy: copyContent } = useCopyFeedback();
@@ -1976,8 +1976,8 @@ function CustomMessageView({ message, cwd, onOpenFile, activityDisplayMode }: { 
   const hasDetails = message.details !== undefined;
   const detailsText = hasDetails ? safeJson(message.details) : "";
   const isIrc = IRC_CUSTOM_TYPES.has(message.customType);
-  const actionableError = isRecord(message.details) && message.details.notifyType === "error";
-  if (activityDisplayMode === "hidden" && !actionableError) return null;
+  const actionableError = (isRecord(message.details) && message.details.notifyType === "error") || (isInternalBackgroundMessage(message) && isActionableCustomDetails(message.details));
+  if (activityDisplayMode === "hidden" && !actionableError && message.attribution !== "user") return null;
   const ircEnvelope = isIrc ? parseIrcEnvelope(text) : null;
   const displayText = ircEnvelope ? ircEnvelope.body : text;
   const title = isIrc

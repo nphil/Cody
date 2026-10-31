@@ -117,6 +117,31 @@ bypass an available gate with SSH. This guidance grants no authority: HomeLabber
 enforces the human-approved scope. Signed releases still need explicit approval
 for each release. Root and delegated transcript cards distinguish waiting, running
 and outcome-unknown states, including individual plan steps.
+### Background activity in the main transcript
+
+Engine-identified background completions (`async-result` / `async_result`) and
+inter-agent coordination (`irc:incoming`, `irc:autoreply`, `irc:relay`,
+`irc:workpool`) share one **Background activity** disclosure per conversation
+turn. It starts collapsed, does not open when events arrive, and mounts full
+payloads and origin metadata only when expanded. Hidden activity mode omits
+routine groups, but completions whose engine metadata omits the execution
+outcome retain a compact **Review results** indicator in every mode. Cody does
+not infer success from a valid output schema or the absence of an error flag.
+Ordinary replies, thinking and tool cards retain their existing view.
+
+This is a browser presentation rule, never an engine-delivery filter. Complete
+events still reach the main agent and the existing session history remains intact.
+Classification uses exact custom types and attribution, never message wording;
+user-attributed events and explicit warning, error or action-required metadata
+stay visible. Questions and approval requests retain their normal input surface.
+History replay preserves attribution. The transcript uses canonical
+`message_end` ordering, not live-only IRC relay observations. Duplicate late
+deliveries reconcile by the engine-provided IRC message ID, or by an async
+batch's job IDs and original timestamp, without resetting the assistant stream
+or phase. Disclosure keys use that same identity so a terminal history reload
+does not close a group the reader opened. Live-only relay/workpool observations
+remain outside transcript indices; Cody does not invent history records.
+
 
 ### Pi rides the RPC pipeline, not the turn seam
 

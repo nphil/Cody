@@ -962,6 +962,7 @@ export function entryToUiMessage(
         content: entry.content,
         display: entry.display,
         details: entry.details,
+        ...(entry.attribution !== undefined ? { attribution: entry.attribution } : {}),
         timestamp: parseEntryTimestamp(entry.timestamp),
       };
     default:

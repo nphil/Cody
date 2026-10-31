@@ -76,6 +76,28 @@ test("other hidden custom messages still render as the slim engine note", () => 
   assert.match(html, /hidden extension payload|Engine note/);
 });
 
+test("actionable hidden internal alerts show their content in every activity mode", () => {
+  for (const activityDisplayMode of ["full", "compact", "hidden"]) {
+    const html = renderToStaticMarkup(React.createElement(MessageView, {
+      activityDisplayMode,
+      message: { role: "custom", customType: "async-result", content: "Background job needs attention", display: false, details: { status: "failed" } },
+    }));
+    assert.match(html, /Background job needs attention/, activityDisplayMode);
+    assert.match(html, /markdown-custom-message/, activityDisplayMode);
+  }
+});
+
+test("user-attributed hidden custom questions stay visible in every activity mode", () => {
+  for (const activityDisplayMode of ["full", "compact", "hidden"]) {
+    const html = renderToStaticMarkup(React.createElement(MessageView, {
+      activityDisplayMode,
+      message: { role: "custom", customType: "irc:incoming", attribution: "user", content: "Can you review this?", display: false },
+    }));
+    assert.match(html, /Can you review this?/, activityDisplayMode);
+    assert.match(html, /markdown-custom-message/, activityDisplayMode);
+  }
+});
+
 test("streaming tool calls start collapsed when the interface preference is enabled", () => {
   const html = renderToStaticMarkup(React.createElement(MessageView, {
     isStreaming: true,

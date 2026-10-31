@@ -1,4 +1,11 @@
 {
+  "chatWindow.backgroundActivity": "バックグラウンドの活動",
+  "chatWindow.backgroundEventCount.one": "{count} 件のイベント",
+  "chatWindow.backgroundEventCount.other": "{count} 件のイベント",
+  "chatWindow.backgroundImage": "バックグラウンドの活動の画像",
+  "chatWindow.showRawImage": "画像の生データを表示",
+  "chatWindow.hideRawImage": "画像の生データを隠す",
+  "chatWindow.reviewBackgroundResults": "結果を確認",
   "devices.serialTerminal": "シリアルターミナル — {device}",
   "devices.terminalEnding": "改行コード",
   "devices.fastbootTerminal": "Fastboot コマンド — {device}",
