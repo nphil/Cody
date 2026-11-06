@@ -1,6 +1,8 @@
 import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { scratchEnv } from "../disk/scratch";
+import { diskAreaPaths } from "../disk/status";
 import { getAgentDir } from "../omp/paths";
 import { isRecord } from "../type-guards";
 import { normalizeTimeZone } from "../time-zone";
@@ -163,10 +165,23 @@ const CODY_ONLY_VARIABLES: Record<string, true> = { OPENROUTER_MANAGEMENT_KEY: t
  * win, and a value that is not a zone is ignored — the child then simply
  * inherits the server's. This is the ONE place a zone reaches an engine
  * process; callers pass the zone, they never assemble `TZ` themselves.
+ *
+ * `options.scratchDir` is the chat's own scratch dir (lib/disk/scratch.ts):
+ * `TMPDIR`, `TMP`, `TEMP` and `CODY_SCRATCH` all name it, so everything the
+ * agent and its tools throw away lands in a directory Cody owns, measures and
+ * deletes instead of the shared /tmp. Like the zone it is applied before
+ * `extra`. Terminals, one-shot helpers and logins pass none and keep the
+ * server's temp dir.
+ *
+ * `CODY_DISK_AREAS` is always set, whoever spawns: the filesystems the
+ * disk-budget extension (lib/omp/extensions/cody-disk-budget.ts) probes. It
+ * runs inside omp with no Cody imports, so Cody tells it where to look — as
+ * `[{id, path}]`, the shape of `diskAreaPaths()` — and a value inherited from
+ * a Cody that launched this one is replaced rather than trusted.
  */
 export function engineChildEnv(
   extra?: Record<string, string | undefined> | ReadonlyArray<{ name: string; value: string }>,
-  options?: { timeZone?: string | null },
+  options?: { timeZone?: string | null; scratchDir?: string | null },
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const [name, value] of Object.entries(readProviderKeys())) {
@@ -177,6 +192,8 @@ export function engineChildEnv(
   for (const name of Object.keys(CODY_ONLY_VARIABLES)) delete env[name];
   const timeZone = normalizeTimeZone(options?.timeZone);
   if (timeZone) env.TZ = timeZone;
+  if (options?.scratchDir) Object.assign(env, scratchEnv(options.scratchDir));
+  env.CODY_DISK_AREAS = JSON.stringify(diskAreaPaths());
   if (Array.isArray(extra)) {
     for (const { name, value } of extra as ReadonlyArray<{ name: string; value: string }>) env[name] = value;
   } else if (extra) {

@@ -9,6 +9,7 @@ import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-fo
 import { getRequestUser } from "@/lib/auth/guard";
 import { isMessageCommandType } from "@/lib/time-zone";
 import { zoneForMessage } from "@/lib/time-zone-prefs";
+import { checkDiskForNewTurn, commandStartsNewWork } from "@/lib/disk/gate";
 
 import { getHarness } from "@/lib/harness";
 
@@ -118,8 +119,21 @@ export async function POST(
       return NextResponse.json({ success: true, data: { cancelled: false } });
     }
 
-    // Fast path: already-running session
+    // The disk gate. When a disk is almost full a NEW turn is refused (507,
+    // `disk_full`) before anything is checkpointed, started or sent. Only a
+    // command that starts work is refused (`commandStartsNewWork`): a steer or
+    // an interrupt into a turn that is already running still goes through,
+    // because that is how a person tells a runaway agent to stop and clean up
+    // its scratch folder. Stop, shell commands and every other non-message
+    // command are never gated.
     const existing = getRpcSession(id);
+    const chatRunning = existing?.isAlive() === true && existing.isRunning();
+    if (commandStartsNewWork(body, chatRunning)) {
+      const refusal = checkDiskForNewTurn();
+      if (refusal) return NextResponse.json({ error: refusal.message, code: refusal.code }, { status: 507 });
+    }
+
+    // Fast path: already-running session
     if (existing?.isAlive()) {
       // A message from a new zone restarts an idle child first (never one that
       // is mid-turn), and only then is handed over — see alignSessionTimeZone.

@@ -143,7 +143,8 @@ export type DeliveryOutcome =
  * Classifies one raw HTTP outcome per the send contract (local://send-contract.md):
  * network error, 202 pending, 409 session_restarting, and 503 are retried
  * with the same clientMessageId; everything else (including an ACP engine's
- * definitive session_busy) is a failure the outbox does not retry on its own.
+ * definitive session_busy, and `disk_full`: the server refusing to start work
+ * while a disk is almost full) is a failure the outbox does not retry on its own.
  */
 export function classifyDeliveryOutcome(response: RawDeliveryResponse): DeliveryOutcome {
   if (response.status === null) return { kind: "retry", detail: response.error };
@@ -157,6 +158,13 @@ export function classifyDeliveryOutcome(response: RawDeliveryResponse): Delivery
   if (response.status === 202 && response.pending) return { kind: "pending" };
   if (response.status === 409 && response.code === "session_restarting") return { kind: "retry", detail: response.error };
   if (response.code === "model_unrestorable") return { kind: "blocked", detail: response.error };
+  // The server's disk is almost full (lib/disk/gate.ts answers 507). Final, in
+  // the server's own words: retrying would only knock on a disk nobody has
+  // cleaned yet, once a second for two minutes. It is a server failure, so a
+  // reload does not re-arm it either; Retry on the row is one press once
+  // someone has made room. Listed before the 503 rule so that no proxy status
+  // can turn it back into a retry.
+  if (response.code === "disk_full") return { kind: "failed", detail: response.error || response.code, origin: "server" };
   if (response.status === 503) return { kind: "retry", detail: response.error };
   return { kind: "failed", detail: response.error || response.code || `HTTP ${response.status}`, origin: "server" };
 }

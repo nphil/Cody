@@ -16,6 +16,7 @@ import { getHarness } from "@/lib/harness";
 import { engineSessionTitle, getEngineSession, upsertEngineSession } from "@/lib/harness/engine-sessions";
 import { EngineCommandError } from "@/lib/harness/errors";
 import { configuredLocalRoutingModels, renameSessionLocalRouting, setSessionLocalOnly } from "@/lib/local-model-routing";
+import { checkDiskForNewTurn } from "@/lib/disk/gate";
 import { forgetSessionPreset, setSessionPreset } from "@/lib/model-presets/overlay";
 import { getPreset, setLastUsedPreset } from "@/lib/model-presets/store";
 
@@ -46,6 +47,10 @@ function newSessionErrorResponse(error: unknown) {
 // Spawns a brand-new omp session. Most calls immediately send the first command;
 // type:"ensure_session" only creates the runtime so clients can query commands.
 // Returns { sessionId, data } where sessionId is omp's real session id.
+// Answers 507 { code: "disk_full" } before anything is created while a disk is
+// almost full (lib/disk/gate.ts): a new chat writes its engine's files and a
+// snapshot of the workspace, then starts a turn, and all of that would land on
+// the disk that is about to run out.
 // Model/thinking presets are applied post-ready via RPC set_model /
 // set_thinking_level (not CLI flags) so failures surface as command errors and
 // the live model catalog (incl. background discovery) is consulted.
@@ -75,6 +80,9 @@ export async function POST(req: Request) {
     if (presetId !== undefined && presetId !== null && typeof presetId !== "string") {
       return NextResponse.json({ error: "presetId must be a preset id or null", code: "invalid_preset" }, { status: 400 });
     }
+
+    const refusal = checkDiskForNewTurn();
+    if (refusal) return NextResponse.json({ error: refusal.message, code: refusal.code }, { status: 507 });
 
     // Must be unique per request: startRpcSession coalesces concurrent callers
     // that share a key onto one session. Date.now() (ms resolution) collides for

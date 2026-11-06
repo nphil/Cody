@@ -73,6 +73,7 @@ export function groupHasThinking(
 const HIDDEN_CUSTOM_TYPES: Record<string, true> = {
   "xdev-mount-notice": true,
   "cody-local-time": true,
+  "cody-disk-low": true,
   "goal-mode-context": true,
   "goal-continuation": true,
   "goal-budget-limit": true,
@@ -83,9 +84,11 @@ const HIDDEN_CUSTOM_TYPES: Record<string, true> = {
  * no spacing, not counted as a turn. The one predicate every reader
  * (session history, subagent pages, live frames, grouping) shares.
  *
- * "cody-local-time" is LOCAL_TIME_CUSTOM_TYPE (lib/time-zone.ts), repeated here
+ * "cody-local-time" is LOCAL_TIME_CUSTOM_TYPE (lib/time-zone.ts) and
+ * "cody-disk-low" is DISK_LOW_CUSTOM_TYPE (lib/disk/gate.ts), repeated here
  * because this module is also loaded without a bundler, where an extensionless
- * import does not resolve; lib/time-zone.test.mjs pins the two together.
+ * import does not resolve; lib/time-zone.test.mjs and
+ * lib/omp/cody-disk-budget.test.mjs pin the literals together.
  */
 export function isHiddenFromTranscript(message: { role?: string; customType?: string }): boolean {
   return message.role === "custom" && message.customType !== undefined && Object.hasOwn(HIDDEN_CUSTOM_TYPES, message.customType);

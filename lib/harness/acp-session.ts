@@ -522,6 +522,8 @@ export function emptyTurnMessage(engineName: string, stopReason: string, setupHi
 export class AcpEngineSession implements EngineSession {
   readonly cwd: string;
   readonly timeZone?: string;
+  /** The chat's scratch dir: the agent's `TMPDIR` (lib/disk/scratch.ts). */
+  readonly scratchDir: string | null;
   private spec: AcpEngineSpec;
   private _sessionId: string;
   /** The id the AGENT knows this session by (from session/new or session/load). */
@@ -575,6 +577,7 @@ export class AcpEngineSession implements EngineSession {
     this.cwd = options.cwd && existsSync(options.cwd) ? options.cwd : process.cwd();
     this._sessionId = options.sessionId || `${spec.id}-${randomUUID()}`;
     this.timeZone = normalizeTimeZone(options.timeZone) ?? undefined;
+    this.scratchDir = options.scratchDir ?? null;
     const known = options.sessionId ? getEngineSession(options.sessionId) : null;
     if (known?.engineSessionId) this.acpSessionId = known.engineSessionId;
   }
@@ -768,7 +771,7 @@ export class AcpEngineSession implements EngineSession {
       // Provider keys saved in Settings ride along with the spec's own
       // variables (lib/harness/provider-keys.ts): the one credential path all
       // five engines share is their environment.
-      env: engineChildEnv(this.spec.env, { timeZone: this.timeZone }),
+      env: engineChildEnv(this.spec.env, { timeZone: this.timeZone, scratchDir: this.scratchDir }),
       stdio: ["pipe", "pipe", "pipe"],
     });
     this.child = child;

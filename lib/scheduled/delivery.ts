@@ -1,4 +1,5 @@
 import { createCheckpoint } from "../checkpoints";
+import { checkDiskForNewTurn } from "../disk/gate";
 import { EngineCommandError } from "../harness/errors";
 import { getRpcSession, unrestorableModelOf, WebRpcError } from "../rpc-manager";
 import { acquireSession, isSessionUnavailableError } from "../session-acquire";
@@ -131,10 +132,20 @@ function handOverOf(session: object, clientMessageId: string, ack: unknown): Sch
  * Deliver one message. Resolves once the chat has taken it, saying whether it
  * started (or is in the conversation) or is only queued behind a running turn;
  * rejects with a `ScheduledDeliveryError` saying whether another try is worth it.
+ *
+ * While a disk is almost full nothing is handed over, and no engine is started
+ * for it (lib/disk/gate.ts): the send would begin a turn, held or not, into a
+ * disk that cannot hold what it writes. That is worth another try — the
+ * janitor runs every hour and a person may free room — so it is retryable, on
+ * the scheduler's own back-off, with the gate's plain words recorded on the
+ * message as the reason. A copy that already reached the chat is still found
+ * first: finding it writes nothing.
  */
 export async function deliverScheduledMessage(item: StoredItem): Promise<ScheduledHandOver> {
   try {
     if (item.attempts > 0 && await alreadyDelivered(item)) return "delivered";
+    const refusal = checkDiskForNewTurn();
+    if (refusal) throw new ScheduledDeliveryError(refusal.message, true);
     const timeZone = ownerTimeZone(item.sessionId);
     const session = await acquireSession(item.sessionId, timeZone);
     // The same safety net the composer's own prompt gets: a snapshot to restore to. Never allowed to hold the message back.

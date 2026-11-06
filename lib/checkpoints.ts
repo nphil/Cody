@@ -3,6 +3,7 @@ import { createHash } from "crypto";
 import fs from "fs";
 import { homedir } from "os";
 import path from "path";
+import { lowPriorityCommand, measureTree, removeTree } from "./disk/walk";
 import { getAgentDir } from "./omp/paths";
 
 function timeoutFromEnv(name: string, fallback: number): number {
@@ -33,6 +34,11 @@ export interface CheckpointInfo {
   ts: number;
 }
 
+/** Where every workspace's shadow repo lives, in the instance data dir. */
+export function checkpointStoreDir(): string {
+  return path.join(getAgentDir(), "cody-checkpoints");
+}
+
 /** Workspace checkpoints live in a shadow git repository OUTSIDE the workspace
  * (under the omp agent dir), pointed at the workspace via GIT_WORK_TREE. The
  * workspace's own .git is untouched: git always skips entries named .git, so
@@ -43,7 +49,7 @@ export function checkpointGitDir(cwd: string): string {
   const resolved = path.resolve(cwd);
   const digest = createHash("sha1").update(resolved).digest("hex").slice(0, 12);
   const name = path.basename(resolved).replace(/[^\w.-]+/gu, "-").slice(0, 40) || "workspace";
-  return path.join(getAgentDir(), "cody-checkpoints", name + "-" + digest);
+  return path.join(checkpointStoreDir(), name + "-" + digest);
 }
 
 interface ShadowGitOptions {
@@ -96,29 +102,6 @@ async function execFileAsync(
       }
     });
   });
-}
-
-function findExecutable(name: string): string | null {
-  for (const directory of (process.env.PATH ?? "").split(path.delimiter)) {
-    if (!directory) continue;
-    const candidate = path.join(directory, name);
-    try {
-      fs.accessSync(candidate, fs.constants.X_OK);
-      return candidate;
-    } catch {
-      // Try the next PATH entry.
-    }
-  }
-  return null;
-}
-
-function lowPriorityGitCommand(args: string[]): { command: string; args: string[] } {
-  const nice = findExecutable("nice");
-  const ionice = findExecutable("ionice");
-  if (nice && ionice) return { command: nice, args: ["-n", "19", ionice, "-c", "3", "git", ...args] };
-  if (nice) return { command: nice, args: ["-n", "19", "git", ...args] };
-  if (ionice) return { command: ionice, args: ["-c", "3", "git", ...args] };
-  return { command: "git", args };
 }
 
 const sweptShadowDirs = new Set<string>();
@@ -185,7 +168,7 @@ async function shadowGit(cwd: string, args: string[], options: ShadowGitOptions 
     ? CHECKPOINT_TIMEOUT_MS
     : options.deadline - Date.now();
   if (timeout <= 0) throw new CheckpointTimeoutError();
-  const command = options.lowPriority ? lowPriorityGitCommand(args) : { command: "git", args };
+  const command = options.lowPriority ? lowPriorityCommand("git", args) : { command: "git", args };
   const lockPath = path.join(gitDir, "index.lock");
   let lockExistedBefore = false;
   try {
@@ -333,7 +316,7 @@ function baseExcludeLines(cwd: string): string[] {
     "dist/",
     "coverage/",
   ];
-  const store = path.join(getAgentDir(), "cody-checkpoints");
+  const store = checkpointStoreDir();
   const relativeStore = path.relative(worktree, store);
   if (relativeStore && !relativeStore.startsWith("..") && !path.isAbsolute(relativeStore)) {
     excludeLines.push("/" + escapeGitIgnoreLiteral(relativeStore.split(path.sep).join("/")) + "/");
@@ -587,4 +570,123 @@ async function restoreCheckpointLocked(cwd: string, hash: string, safetyLabel: s
   } catch (error) {
     return { ok: false, safetyHash, error: error instanceof Error ? error.message : String(error) };
   }
+}
+
+/**
+ * Retention. Every workspace a chat ever opened gets a shadow repo that nothing
+ * else removed: 10 GB of them on the owner's instance, on top of the 21 GB of
+ * leaked packs. The janitor (lib/disk/janitor.ts) prunes the store repo by
+ * repo, never inside one: a repo goes wholesale or stays whole, because half
+ * of an undo history is worse than none.
+ */
+
+/** `checkpointGitDir`'s names: the workspace's folder name, a dash, 12 hex digits of the path hash. */
+const SHADOW_REPO_NAME = /^[\w.-]+-[0-9a-f]{12}$/;
+/** A repo touched this recently may have a snapshot in flight (a chat that just
+ *  ended): it is never removed, whatever the caps say. */
+const PRUNE_GRACE_MS = 10 * 60_000;
+
+export interface CheckpointPruneOptions {
+  /** The whole store may hold this many bytes … */
+  maxBytes: number;
+  /** … and a repo nobody used for this long is dropped. */
+  maxAgeMs: number;
+  now?: number;
+  /** The workspaces of live chats: their repos are never removed. */
+  liveCwds?: Iterable<string>;
+  /** Work out what would go and delete nothing. */
+  dryRun?: boolean;
+}
+
+export interface CheckpointPruneResult {
+  removed: Array<{ path: string; bytes: number }>;
+  /** What the store holds afterwards. */
+  totalBytes: number;
+  /** The device the store is on; null when there is no store yet. */
+  dev: number | null;
+  errors: string[];
+}
+
+/** When a shadow repo was last used: the newest of its own directory and the
+ *  files every snapshot rewrites (index, HEAD, reflog, branch tips). */
+async function repoLastUsedMs(gitDir: string): Promise<number> {
+  let newest = (await fs.promises.stat(gitDir)).mtimeMs;
+  const touched = ["HEAD", "index", path.join("logs", "HEAD")];
+  try {
+    for (const branch of await fs.promises.readdir(path.join(gitDir, "refs", "heads"))) {
+      touched.push(path.join("refs", "heads", branch));
+    }
+  } catch {
+    // No branch yet.
+  }
+  for (const name of touched) {
+    try {
+      newest = Math.max(newest, (await fs.promises.stat(path.join(gitDir, name))).mtimeMs);
+    } catch {
+      // Not there (yet).
+    }
+  }
+  return newest;
+}
+
+/**
+ * Drop whole shadow repos nobody has used for `maxAgeMs`, then, while the store
+ * still exceeds `maxBytes`, the least recently used ones. The repo of a
+ * workspace with a live chat is never removed (nor is one touched in the last
+ * few minutes). The repos that stay lose their half-written packs and objects,
+ * with the same `cleanupShadowGarbage` the first touch of a repo runs, but
+ * only when no one is writing to them. Never throws.
+ */
+export async function pruneCheckpointStore(options: CheckpointPruneOptions): Promise<CheckpointPruneResult> {
+  const now = options.now ?? Date.now();
+  const store = checkpointStoreDir();
+  const result: CheckpointPruneResult = { removed: [], totalBytes: 0, dev: null, errors: [] };
+  let children: fs.Dirent[];
+  try {
+    children = await fs.promises.readdir(store, { withFileTypes: true });
+    result.dev = (await fs.promises.stat(store)).dev;
+  } catch {
+    return result;
+  }
+  const live = new Set([...(options.liveCwds ?? [])].map((cwd) => checkpointGitDir(cwd)));
+  const repos: Array<{ dir: string; bytes: number; lastUsed: number; removable: boolean }> = [];
+  for (const child of children) {
+    if (!child.isDirectory() || !SHADOW_REPO_NAME.test(child.name)) continue;
+    const dir = path.join(store, child.name);
+    try {
+      const lastUsed = await repoLastUsedMs(dir);
+      const removable = !live.has(dir) && now - lastUsed >= PRUNE_GRACE_MS;
+      // What a killed snapshot left behind is garbage in any repo no one is writing right now.
+      if (removable && !options.dryRun) await cleanupShadowGarbage(dir);
+      repos.push({ dir, bytes: (await measureTree(dir)).bytes, lastUsed, removable });
+    } catch (error) {
+      result.errors.push(`Could not read the undo snapshots in ${child.name}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  let total = repos.reduce((sum, repo) => sum + repo.bytes, 0);
+  const dropped = new Set(repos.filter((repo) => repo.removable && now - repo.lastUsed >= options.maxAgeMs));
+  let kept = total;
+  for (const repo of dropped) kept -= repo.bytes;
+  const leastRecentlyUsed = repos.filter((repo) => repo.removable && !dropped.has(repo)).sort((a, b) => a.lastUsed - b.lastUsed);
+  for (const repo of leastRecentlyUsed) {
+    if (kept <= options.maxBytes) break;
+    dropped.add(repo);
+    kept -= repo.bytes;
+  }
+
+  for (const repo of dropped) {
+    try {
+      if (!options.dryRun) {
+        await removeTree(repo.dir);
+        sweptShadowDirs.delete(repo.dir);
+      }
+      result.removed.push({ path: repo.dir, bytes: repo.bytes });
+      total -= repo.bytes;
+    } catch (error) {
+      result.errors.push(`Could not remove the undo snapshots in ${path.basename(repo.dir)}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  result.totalBytes = total;
+  return result;
 }

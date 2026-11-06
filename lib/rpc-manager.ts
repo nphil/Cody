@@ -3,6 +3,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import path from "path";
 import { getSessionOwner, renameSessionOwner, setSessionOwner } from "./auth/session-owners";
+import { DISK_LOW_CUSTOM_TYPE } from "./disk/gate";
+import { ensureSessionScratch, listSessionScratch, noteScratchAlias, removeScratchDir, removeSessionScratch, touchSessionScratch } from "./disk/scratch";
 import { aliasDisplaySession, publishDisplayRequest } from "./display/bus";
 import { startSharedBrowser } from "./display/shared-browser";
 import { isLoopbackHost } from "./display/ladder";
@@ -466,6 +468,11 @@ const CLIENT_MESSAGE_ID_CAP = 500;
 const DELIVERY_LEDGER_TTL_MS = 60 * 60 * 1000;
 const DELIVERY_LEDGER_CAP = 500;
 
+/** How often a working chat re-stamps its scratch dir as in use. The janitor's
+ *  idle window is days, so once a minute is far finer than it needs, and it
+ *  keeps the index file from being rewritten at every turn boundary. */
+const SCRATCH_TOUCH_INTERVAL_MS = 60_000;
+
 const RESTARTING_MESSAGE = "This session is restarting. Retry in a moment.";
 
 /** Every rpc-dialect engine reaches the `!!` refusal, so the sentence names the
@@ -755,7 +762,8 @@ export function buildEngineRpcLaunch(
   }
   if (opts.profile?.systemPromptPath) args.push("--system-prompt", opts.profile.systemPromptPath);
   // Main omp sessions load Cody's extensions: the refusal guard, local-time
-  // context, and the HomeLabber gate procedure (also inherited by subagents).
+  // context, the HomeLabber gate procedure and the scratch/disk-budget rule
+  // (all also inherited by subagents).
   // Resolve them from the package directory, never the launch cwd.
   if (harness.id === "omp" && opts.kind !== "sidebar") {
     const packageRoot = process.env.CODY_PACKAGE_DIR || process.cwd();
@@ -763,6 +771,7 @@ export function buildEngineRpcLaunch(
     args.push("--extension", path.join(extensions, "cody-refusal-guard.ts"));
     args.push("--extension", path.join(extensions, "cody-local-time.ts"));
     args.push("--extension", path.join(extensions, "cody-homelabber-gate.ts"));
+    args.push("--extension", path.join(extensions, "cody-disk-budget.ts"));
   }
   // A sidebar child gets its own agent dir, whose `mcp.json` is empty, so the
   // user-scope MCP servers (111 tool schemas / 89,303 tokens on the owner's
@@ -987,6 +996,22 @@ function launchWithLocalRouting(profile: LocalModelProfileLaunch | undefined, se
   };
 }
 
+/**
+ * Stamps a chat's scratch dir as in use, at most once per
+ * SCRATCH_TOUCH_INTERVAL_MS: the janitor reads the stamp to tell a chat that
+ * went quiet from one that is working. `sessionKey` is any id the chat's dir
+ * is filed under.
+ */
+function scratchToucher(sessionKey: string): () => void {
+  let last = 0;
+  return () => {
+    const now = Date.now();
+    if (now - last < SCRATCH_TOUCH_INTERVAL_MS) return;
+    last = now;
+    touchSessionScratch(sessionKey);
+  };
+}
+
 // ============================================================================
 // AgentSessionWrapper
 // Wraps one spawned rpc-dialect engine process (`omp --mode rpc-ui`,
@@ -1017,6 +1042,15 @@ export interface WrapperEngineContext {
   user?: UserRecord | null;
   /** The zone the first child is started under (its `TZ`). Absent: the server's. */
   timeZone?: string;
+  /**
+   * The chat's scratch dir (lib/disk/scratch.ts), which the child runs with as
+   * its `TMPDIR`, and the id it was filed under. Both absent for a sidebar
+   * chat, which has no tools to leave files with; `scratchDir` is null when
+   * none could be made. A restart reuses the dir (made again if something
+   * removed it) instead of starting without one.
+   */
+  scratchKey?: string;
+  scratchDir?: string | null;
 }
 
 export class AgentSessionWrapper {
@@ -1189,6 +1223,10 @@ export class AgentSessionWrapper {
   readonly cwd: string;
 
   private readonly engine: WrapperEngineContext;
+  /** What the child's TMPDIR names; null when the chat has no scratch dir. */
+  private _scratchDir: string | null;
+  /** Stamps the scratch dir as in use at turn boundaries; null without one. */
+  private readonly scratchActivity: (() => void) | null;
 
   // Plain field assignments (not TS parameter properties) keep this module
   // runnable under Node's strip-only TypeScript mode for probes/tests.
@@ -1200,6 +1238,8 @@ export class AgentSessionWrapper {
     this.localProfileResolution = engine.initialResolution;
     this.childTimeZone = normalizeTimeZone(engine.timeZone) ?? serverTimeZone();
     this.messageTimeZone = this.childTimeZone;
+    this._scratchDir = engine.scratchDir ?? null;
+    this.scratchActivity = engine.scratchKey ? scratchToucher(engine.scratchKey) : null;
   }
 
   /** The smallest local profile is deliberately limited to its two OMP tools.
@@ -1375,6 +1415,11 @@ export class AgentSessionWrapper {
 
   get sessionId(): string {
     return this._sessionId;
+  }
+
+  /** The scratch dir this chat's child runs in (its TMPDIR), or null. */
+  get scratchDir(): string | null {
+    return this._scratchDir;
   }
 
   /** The session id is not known until applyIdentity/buildWebState runs, so
@@ -1821,11 +1866,13 @@ export class AgentSessionWrapper {
     } else if (event.type === "permission_resolved" && typeof event.requestId === "string") {
       this.pendingPermissionRequests.delete(event.requestId);
     }
-    // The hidden per-prompt line (lib/omp/extensions/cody-local-time.ts) is
-    // for the model only. Dropped here, before any listener or the sidebar sees
-    // it, so a live transcript never flashes a row the reloaded one lacks.
+    // The hidden per-prompt lines (the clock, lib/omp/extensions/cody-local-time.ts,
+    // and the low-disk notice, cody-disk-budget.ts) are for the model only.
+    // Dropped here, before any listener or the sidebar sees them, so a live
+    // transcript never flashes a row the reloaded one lacks.
     if ((event.type === "message_start" || event.type === "message_end") && isRecord(event.message)
-      && event.message.role === "custom" && event.message.customType === LOCAL_TIME_CUSTOM_TYPE) {
+      && event.message.role === "custom"
+      && (event.message.customType === LOCAL_TIME_CUSTOM_TYPE || event.message.customType === DISK_LOW_CUSTOM_TYPE)) {
       return;
     }
 
@@ -1844,6 +1891,7 @@ export class AgentSessionWrapper {
         break;
       }
       case "agent_start":
+        this.scratchActivity?.();
         this.streaming = true;
         this.lastReplyText = null;
         // The continuation a "Steer now" was waiting for has begun.
@@ -1864,6 +1912,7 @@ export class AgentSessionWrapper {
         }
         break;
       case "agent_end":
+        this.scratchActivity?.();
         if (event.isTerminal !== false && this.steerInterrupt && this.steerInterrupt.timer === null) {
           // "Steer now" aborted the model's reply: omp is about to continue
           // with the steer. Forward this end as a pause, keep the run state
@@ -3144,10 +3193,14 @@ export class AgentSessionWrapper {
       this.streaming = false;
       this.compacting = false;
 
+      // The same scratch dir as before (found by the id it was made under),
+      // made again if something removed it meanwhile.
+      if (this.engine.scratchKey) this._scratchDir = ensureSessionScratch(this.engine.scratchKey) ?? this._scratchDir;
       const proc = new RpcProcess({
         cwd: this.cwd,
         launch: this.engine.relaunch(resumable ? sessionFile : "", profile),
         timeZone,
+        scratchDir: this._scratchDir,
         onExit: ({ stderrTail }) => {
           if (this.proc === proc) this.handleProcessExit(stderrTail);
         },
@@ -4329,6 +4382,30 @@ export function getRpcSession(sessionId: string): EngineSession | undefined {
   return getRegistry().get(sessionId);
 }
 
+/** The scratch dirs live engines are running in. Neither the janitor nor a
+ *  chat delete may remove one: a duplicated chat continues in its parent's
+ *  engine, so the dir outlives the id it was made under. */
+export function getLiveScratchDirs(): Set<string> {
+  const dirs = new Set<string>();
+  for (const session of getRegistry().values()) {
+    if (session.scratchDir) dirs.add(session.scratchDir);
+  }
+  return dirs;
+}
+
+/**
+ * A chat was deleted and its own engine has stopped: remove its scratch dir.
+ * Kept when another chat's engine is still running in it (the copy a
+ * "Duplicate chat" made carries on in this chat's engine, and deleting the
+ * original must not pull the dir out from under it); the janitor takes it
+ * once that engine has been idle long enough. False when nothing was removed.
+ */
+export async function removeDeletedSessionScratch(sessionId: string): Promise<boolean> {
+  const entry = listSessionScratch().find((candidate) => candidate.sessionIds.includes(sessionId));
+  if (!entry || getLiveScratchDirs().has(entry.dir)) return false;
+  return removeScratchDir(entry.dir);
+}
+
 export function getLocalModelProfileApplication(sessionId: string): { provider: string; modelId: string; profileId: PromptProfileId } | undefined {
   const session = getRegistry().get(sessionId);
   return session instanceof AgentSessionWrapper ? session.localModelProfileApplication() : undefined;
@@ -4527,17 +4604,32 @@ export function notifyRunningChange({ refreshSessionList = false }: { refreshSes
  * Registration mirrors the omp path exactly — same registry keys, same
  * onDestroy/onIdentityChange bookkeeping — so every consumer of getRpcSession
  * behaves the same whichever engine is active.
+ *
+ * `scratchKey` is the id the chat's scratch dir is filed under: the id the page
+ * knows the chat by, which for a brand-new chat is a temporary key (the engine
+ * is then asked to mint its own, `sessionId === ""`).
  */
 async function startEngineSession(
   create: (options: EngineSessionOptions) => EngineSession,
   sessionId: string,
   cwd: string,
   timeZone: string,
+  scratchKey: string,
 ): Promise<{ session: EngineSession; realSessionId: string }> {
   const registry = getRegistry();
-  const created = create({ sessionId, cwd, timeZone });
-  created.start();
-  await created.waitUntilReady();
+  const scratchDir = ensureSessionScratch(scratchKey);
+  let created: EngineSession;
+  try {
+    created = create({ sessionId, cwd, timeZone, scratchDir });
+    // A new chat's real id is minted by the engine: both lead to one dir.
+    noteScratchAlias(scratchKey, created.sessionId);
+    created.start();
+    await created.waitUntilReady();
+  } catch (error) {
+    // A new chat that never started has nothing in its scratch worth keeping.
+    if (!sessionId) await removeSessionScratch(scratchKey);
+    throw error;
+  }
 
   const realSessionId = created.sessionId;
   created.onDestroy(() => {
@@ -4555,12 +4647,15 @@ async function startEngineSession(
     renameSessionOwner(oldId, newId);
     moveSessionItems(oldId, newId);
     aliasDisplaySession(oldId, newId);
+    noteScratchAlias(oldId, newId);
   });
+  const touchScratch = scratchToucher(scratchKey);
   // A turn-based engine has no frame pipeline calling notifyRunningChange the
   // way handleFrame does for omp, so drive the sidebar's running indicator (and
   // its session-list refresh) off the engine's own turn boundaries.
   created.onEvent((event) => {
     if (event.type === "agent_start" || event.type === "agent_end") {
+      touchScratch();
       notifyRunningChange({ refreshSessionList: true });
     } else if (event.type === "permission_request" || event.type === "permission_resolved") {
       notifyRunningChange();
@@ -4622,16 +4717,23 @@ export async function startRpcSession(
   const starting = (async () => {
     const timeZone = normalizeTimeZone(spawn?.timeZone) ?? ownerTimeZone(createEngineSession ? (engineSessionId || sessionId) : sessionId);
     if (createEngineSession) {
-      return startEngineSession(createEngineSession, engineSessionId ?? sessionId, cwd, timeZone);
+      return startEngineSession(createEngineSession, engineSessionId ?? sessionId, cwd, timeZone, sessionId);
     }
     const initialResolution = profileTarget ? resolveLocalModelPromptProfile(profileTarget) : undefined;
     const initialProfile = initialResolution ? materializeLocalModelProfile(initialResolution) : undefined;
     const launchProfile = launchWithSessionOverlays(initialProfile, sessionId);
     const holder: { wrapper?: AgentSessionWrapper; renamed: boolean } = { renamed: false };
+    const launch = buildEngineRpcLaunch(harness, { cwd, sessionFile, toolNames, advisor, profile: launchProfile, kind, restoreModel: spawn?.restoreModel });
+    // Main chats only: a sidebar chat has no tools to leave files with. Made
+    // once the launch is built, so an engine that is not installed leaves no
+    // stray dir behind.
+    const scratchKey = kind === "sidebar" ? undefined : sessionId;
+    const scratchDir = scratchKey ? ensureSessionScratch(scratchKey) : null;
     const proc = new RpcProcess({
       cwd,
-      launch: buildEngineRpcLaunch(harness, { cwd, sessionFile, toolNames, advisor, profile: launchProfile, kind, restoreModel: spawn?.restoreModel }),
+      launch,
       timeZone,
+      scratchDir,
       onExit: ({ stderrTail }) => holder.wrapper?.handleProcessExit(stderrTail),
     });
     const created = new AgentSessionWrapper(proc, cwd, {
@@ -4640,6 +4742,8 @@ export async function startRpcSession(
       initialProfile: launchProfile,
       initialResolution,
       timeZone,
+      scratchKey,
+      scratchDir,
       relaunch: (file, profile) => buildEngineRpcLaunch(harness, {
         cwd,
         sessionFile: file,
@@ -4677,6 +4781,9 @@ export async function startRpcSession(
       // OMP child while the failed one is still flushing/exiting, and
       // concurrent resume/delete/archive paths could race that old child.
       await created.destroyAndWait();
+      // A new chat that never started has nothing in its scratch worth
+      // keeping; a resumed one keeps everything it had.
+      if (!sessionFile) await removeSessionScratch(sessionId);
       if (error instanceof ModelUnrestorableError) {
         throw new WebRpcError(
           `This chat used ${error.provider}/${error.modelId}, which is no longer available.`,
@@ -4694,6 +4801,7 @@ export async function startRpcSession(
     // holds for a start which finishes after that teardown has run.
     if (getHarness().id !== launchedFor) {
       await created.destroyAndWait();
+      if (!sessionFile) await removeSessionScratch(sessionId);
       throw new WebRpcError(
         `The ${launchedFor} engine was switched away while this session was starting.`,
         "engine_changed",
@@ -4708,6 +4816,7 @@ export async function startRpcSession(
       renameSessionLocalRouting(sessionId, realSessionId);
       renameSessionPreset(sessionId, realSessionId);
       aliasDisplaySession(sessionId, realSessionId);
+      noteScratchAlias(sessionId, realSessionId);
     }
     holder.renamed = true;
     created.onDestroy(() => {
@@ -4718,6 +4827,7 @@ export async function startRpcSession(
     created.onIdentityChange((oldId, newId) => {
       if (registry.get(oldId) === created) registry.delete(oldId);
       registry.set(newId, created);
+      noteScratchAlias(oldId, newId);
     });
     registry.set(realSessionId, created);
     observeSessionForNotifications(created, { kind });

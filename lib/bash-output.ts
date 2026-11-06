@@ -4,23 +4,44 @@
  * `$TMPDIR/pi-bash-<id>.log` and records `fullOutputPath` on the
  * bashExecution entry; this module serves that file with the same
  * constraints as the upstream pi-web implementation:
- *   - the path must resolve directly inside the OS temp directory,
+ *   - the path must resolve directly inside the OS temp directory, or
+ *     directly inside ONE chat's scratch dir (omp's TMPDIR is that dir since
+ *     every chat got its own, lib/disk/scratch.ts) — never deeper, and never
+ *     through a link,
  *   - the basename must match the `pi-bash-*.log` pattern,
  *   - symlinks are rejected (O_NOFOLLOW, re-stat after open),
  *   - inline reads are capped; callers stream oversized files instead.
  */
 
-import { constants } from "node:fs";
+import { constants, lstatSync } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 
 export const MAX_INLINE_BASH_OUTPUT_BYTES = 5 * 1024 * 1024;
 
-export function resolveBashOutputPath(filePath: string, tempRoot: string): string | null {
+/** How lib/disk/scratch.ts names a chat's scratch dir: 12 lowercase hex
+ *  characters. Repeated here, not imported, so this module loads on its own;
+ *  lib/bash-output.test.mjs makes a real scratch dir and checks both agree. */
+const SCRATCH_DIR_NAME = /^[0-9a-f]{12}$/;
+
+function isRealDirectory(dir: string): boolean {
+  try {
+    return lstatSync(dir).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+export function resolveBashOutputPath(filePath: string, tempRoot: string, scratchRoot?: string): string | null {
   const resolvedPath = resolve(filePath);
-  if (dirname(resolvedPath) !== resolve(tempRoot)) return null;
   if (!/^pi-bash-[A-Za-z0-9_-]+\.log$/.test(basename(resolvedPath))) return null;
-  return resolvedPath;
+  const dir = dirname(resolvedPath);
+  if (dir === resolve(tempRoot)) return resolvedPath;
+  const inScratchDir = scratchRoot !== undefined
+    && dirname(dir) === resolve(scratchRoot)
+    && SCRATCH_DIR_NAME.test(basename(dir))
+    && isRealDirectory(dir);
+  return inScratchDir ? resolvedPath : null;
 }
 
 export async function openRegularFileNoFollow(filePath: string) {

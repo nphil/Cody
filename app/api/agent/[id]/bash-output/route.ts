@@ -7,6 +7,7 @@ import {
   readUtf8FileWithinLimit,
   resolveBashOutputPath,
 } from "@/lib/bash-output";
+import { scratchRoot } from "@/lib/disk/scratch";
 import { isBashOutputPathReferencedBySession } from "@/lib/session-file-references";
 
 // GET /api/agent/[id]/bash-output?path=<absPath>[&download=1]
@@ -34,7 +35,7 @@ export async function GET(
     return NextResponse.json({ error: "path required" }, { status: 400 });
   }
 
-  const resolved = resolveBashOutputPath(path, tmpdir());
+  const resolved = resolveBashOutputPath(path, tmpdir(), scratchRoot());
   if (!resolved) {
     return NextResponse.json({ error: "invalid path" }, { status: 400 });
   }

@@ -231,6 +231,9 @@ app/api/
                                    open IS what makes the server sample at all
   machines/test/route.ts          POST {destination} (admin) one real ssh sample;
                                    200 either way, `ok:false` carries a reason code
+  disk/route.ts                   GET disk meters, largest chat scratch folders, the
+                                   janitor's last run | POST {action:"clean"} (admin)
+                                   runs the janitor now | PUT (admin) its settings
   claude-credits/route.ts         GET (omp only) each Claude plan account and its backup
                                   API key, last four only | PUT {accountId, key} /
                                   DELETE {keyId} (admin): "Claude API credits as the
@@ -320,6 +323,12 @@ lib/
                        (bin/cody-display-mcp.js) is a separate process holding no
                        Cody state, and giving it the forge would mean a new
                        authenticated HTTP surface proxying arbitrary host calls
+  disk/                disk hygiene (see "Disk hygiene" below): `scratch.ts`
+                       (per-chat TMPDIR), `janitor.ts` + `sweep.ts` / `walk.ts` /
+                       `transcripts.ts` / `mentions.ts` (the hourly cleanup),
+                       `gate.ts` (refuse new work at < 5 % free), `status.ts`,
+                       `settings.ts` (`cody-disk.json`), `types.ts` (browser-safe
+                       shapes). Nothing here may use `@/` (loaded by the server)
   machines/            the machines the top bar shows CPU/memory meters for:
                        this server plus any ssh machine (see "Machine meters
                        in the top bar"). Browser-safe: `types.ts` (statuses,
@@ -357,14 +366,13 @@ lib/
                        runtime selection state, three transports (rpc-ui, ACP,
                        per-turn), session index, binary probe + on-demand install
                        (docs/harnesses.md)
-    housekeeping.ts    the server's own daily cleanup (first run 60 s after
-                       boot, timers unref'd): today omp's temp leftovers via
-                       lib/omp/temp-files.ts — browser screenshots
-                       (`omp-sshots-*`) and helper stderr dirs
-                       (`omp-worker-stderr-*`) older than 7 days, in the
-                       temp dir every engine child shares. Built into Cody on
-                       purpose: an install must never depend on a host cron
-                       or user script to stop an engine's files piling up
+    housekeeping.ts    the server's own cleanup (first pass 60 s after boot,
+                       then HOURLY, timers unref'd): the disk janitor
+                       (lib/disk/janitor.ts) and omp's temp leftovers via
+                       lib/omp/temp-files.ts (`omp-sshots-*`,
+                       `omp-worker-stderr-*` older than 7 days). Built into
+                       Cody on purpose: an install must never depend on a
+                       host cron or user script to stop files piling up
     pi-settings.ts     pi's settings, derived from the settings TABLES in the
                        installed pi package's own docs/settings.md (parsed at
                        runtime, failing soft) and written back to
@@ -718,6 +726,9 @@ components/
                         recommended-cards.ts (the curated-card table),
                         SchemaSettingsList (the engine's complete schema,
                         chip-grouped, secrets masked)
+    DiskSection.tsx     the System hub's "Disk space" card (`/api/disk`):
+                        meters, largest scratch folders, "Clean idle scratch
+                        now", idle-days setting. Highlight id `disk`
     MachinesSection.tsx the System hub's "Machines" card: rename this server,
                         add / edit / remove ssh machines (a removal answers with an
                         Undo toast that re-adds it), a Test button
@@ -3344,6 +3355,68 @@ vendor CLI parity, elevated capability, CMSIS-DAP, or generic UF2 flashing.
   because their overlay's memory switch was ignored. Those junk memories were
   also RECALLED into real chats. When adding anything that writes per event,
   add its pruning in the same change.
+
+### Disk hygiene: per-chat scratch, the janitor, the low-disk gate (`lib/disk/`)
+On 2026-11-04 the owner's server hung when its disk filled: Cody's /tmp held
+208 GB (50,193 top-level leftovers: test temp dirs, a cargo target dir per
+attempt, toolchains) and /data 162 GB. Every chat inherited the shared /tmp and
+nothing owned what it left. The host now only has native ZFS quotas (no cron,
+no script, by the owner's choice), so Cody's own janitor is the ONLY cleanup.
+- **Per-chat scratch** (`scratch.ts`). Every MAIN chat's engine (omp rpc and ACP;
+  never sidebar, one-shots, terminals or logins) runs with
+  `TMPDIR`/`TMP`/`TEMP`/`CODY_SCRATCH` = `<tmp>/cs/<12 hex>` (`CODY_SCRATCH_ROOT`
+  moves the root). Short on purpose: unix sockets under TMPDIR are capped at 108
+  bytes. The index `cody-scratch.json` (0600) maps a dir to every id the chat had
+  (temp id → real id, omp's move to a new id), so a restart, resume or reboot
+  reuses the same dir. Never removed on engine exit or idle dispose (a resumed
+  chat still needs its venv or build dir); removed on chat delete unless another
+  live engine runs in it, and by the janitor. `engineChildEnv(extra, { timeZone,
+  scratchDir })` applies it and always sets `CODY_DISK_AREAS` (what the extension
+  probes). Tests that start real sessions must point `CODY_SCRATCH_ROOT` inside
+  their private root. `lib/bash-output.ts` also accepts
+  `<scratchRoot>/<12 hex>/pi-bash-*.log`.
+- **The janitor** (`janitor.ts`, `sweep.ts`, `walk.ts`, `transcripts.ts`,
+  `mentions.ts`; settings in `cody-disk.json` via `settings.ts`; last report in
+  `cody-janitor-report.json`). Hourly, single-flight, never throws. Removes the
+  scratch of chats idle `scratchIdleDays` (default 3; a live chat's never),
+  orphan scratch dirs, top-level entries of the temp dir idle `tmpIdleHours` (24)
+  and top-level DIRECTORIES of `~/tmp` idle `homeTmpIdleHours` (72; files there
+  are helper scripts and tokens and are kept), and checkpoint shadow repos past
+  `checkpointMaxAgeDays`/`checkpointMaxGb` (never a live workspace's). A temp
+  entry goes only when ALL hold: nothing inside changed (mtime AND ctime) in the
+  window, no process references it (one /proc scan per run: cwd, exe, root, fds,
+  maps, cmdline, environ, bound unix sockets — environ matters because a venv's
+  python resolves to /usr/bin), no chat file changed in 72 h names it in its
+  recent tail (128 MiB per run), and it is not a dot-entry, special file, mount,
+  symlink, the scratch root, the agent/home dir, the server cwd or `<tmp>/jiti`
+  (the server's transpile cache: deleting it crashes the next import). Any doubt
+  (truncated walk, `find` error, unreadable /proc) keeps the entry, and a second
+  look runs just before the first removal. Above `budgetPercent` (70) used it also
+  removes scratch of non-live chats idle ≥ 6 h, oldest first. Deletion is a
+  separate niced `rm -rf`: Node's recursive rm floods the libuv pool every chat
+  shares (measured 2.4 s stalls). Live chats are read from
+  `globalThis.__ompSessions`; a registry that cannot be read keeps everything.
+- **The low-disk gate** (`gate.ts`, thresholds in `status.ts`: low < 15 % free,
+  critical < 5 %). At critical, `/api/agent/[id]` and `/api/agent/new` answer
+  507 `disk_full` with a plain sentence before anything starts; commands that
+  start NEW work are refused, while steer/abort into a running turn pass so a
+  person can tell an agent to clean up. The outbox treats it as a final failure
+  (Retry/Edit stay); scheduled sends and run recovery postpone and retry without
+  using up an attempt. `describeEngineError` names ENOSPC/EDQUOT in plain words.
+- **The agent rule** (`lib/omp/extensions/cody-disk-budget.ts`, a fourth
+  `--extension` for main omp chats, inherited by subagents): appends the
+  "Scratch and disk budget" rule to the system prompt (sizes read once per
+  process, so the prompt cache holds; it says those figures override any
+  remembered one), and below 15 % free adds a hidden `cody-disk-low` line per
+  prompt and an `additionalContext` note on tool results (throttled). Trap: in
+  omp ANY extension that registers `tool_call`/`tool_result` vetoes
+  `task.speculativeLaunch`, so the `tool_result` handler is registered lazily,
+  only once a disk has been seen low. Constants mirror `status.ts` (tested).
+- **Settings › System › Disk space** (`components/settings/DiskSection.tsx`,
+  `/api/disk`: GET for any signed-in user, POST `{action:"clean"}` and PUT
+  settings admin-only): meters against the quotas, the five largest scratch
+  folders by chat title, the undo-snapshot total, the last clean, "Clean idle
+  scratch now", and the idle-days setting (the rest under Advanced).
 
 ### Disk exhaustion is a first-class failure (`lib/disk-space.ts`)
 - The instance data dir is finite and often quota-capped (a ZFS dataset on

@@ -120,6 +120,10 @@ export interface RpcProcessOptions {
   env?: Record<string, string>;
   /** IANA zone the child runs under (its `TZ`); absent leaves the server's. */
   timeZone?: string;
+  /** The chat's scratch dir (lib/disk/scratch.ts): the child's `TMPDIR`, so
+   * what its tools throw away lands there. Absent for helpers that run in the
+   * server's own temp dir. */
+  scratchDir?: string | null;
   /** Called for every non-response frame (events, extension UI, subagent frames). */
   onFrame?: (frame: RpcFrame) => void;
   /** Called once when the child exits, after pending commands are rejected. */
@@ -176,7 +180,7 @@ export class RpcProcess {
       cwd: options.cwd,
       // Cody provider credentials, then launch-specific profile/routing data,
       // then an explicit process override supplied by the caller.
-      env: engineChildEnv({ ...(options.launch?.env ?? {}), ...(options.env ?? {}) }, { timeZone: options.timeZone }),
+      env: engineChildEnv({ ...(options.launch?.env ?? {}), ...(options.env ?? {}) }, { timeZone: options.timeZone, scratchDir: options.scratchDir }),
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       // On POSIX, omp launches grandchildren (LSP servers, extension subprocesses). Run the

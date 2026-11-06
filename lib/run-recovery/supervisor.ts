@@ -1,4 +1,5 @@
 import { readEnv } from "../env";
+import { checkDiskForNewTurn, type DiskGateRefusal } from "../disk/gate";
 import type { EngineEvent, EngineSession } from "../harness/types";
 import { sendNotification, type NotificationDraft } from "../notifications/dispatch";
 import { ownerTimeZone } from "../time-zone-prefs";
@@ -44,6 +45,12 @@ import { describeCause, recoveryPrompt, type RunCause } from "./text";
  * and, once, for every run the journal still holds when the server starts
  * (bin/cody-server.js).
  *
+ * While a disk is almost full a recovery waits (lib/disk/gate.ts): it would
+ * start an engine and a turn into the disk the run most likely died of, and
+ * fail the same way. Nothing is closed, started or counted as an attempt, the
+ * chat is looked at again on the next tick, and the log says so once per chat
+ * per wait.
+ *
  * `CODY_RUN_RECOVERY=0` turns the watchdog, crash recovery and boot resume off;
  * the journal is still written.
  *
@@ -75,6 +82,8 @@ export interface RunRecoveryDeps {
   /** Run `run` once after `delayMs` without keeping the process alive. Returns how to cancel it. */
   schedule: (run: () => void, delayMs: number) => () => void;
   sleep: (ms: number) => Promise<void>;
+  /** Why a new turn may not start right now (a disk is almost full), or null. */
+  diskRefusal: () => DiskGateRefusal | null;
   limits: RunRecoveryLimits;
 }
 
@@ -118,6 +127,8 @@ export interface RunRecoveryState {
   pending: Map<string, PendingRecovery>;
   /** Chats a recovery is under way for: one at a time each. */
   recovering: Set<string>;
+  /** Chats whose recovery is waiting for room on the disk: one log line each, when the wait begins. */
+  postponed: Set<string>;
   warnedAt: Map<string, number>;
 }
 
@@ -157,6 +168,7 @@ function liveDeps(): RunRecoveryDeps {
     isShuttingDown: isServerShuttingDown,
     enabled: () => readEnv("RUN_RECOVERY")?.trim() !== "0",
     schedule: liveSchedule,
+    diskRefusal: checkDiskForNewTurn,
     sleep: liveSleep,
     limits: { ...RUN_RECOVERY_LIMITS },
   };
@@ -178,6 +190,7 @@ function newState(deps: RunRecoveryDeps): RunRecoveryState {
     supervised: new WeakSet(),
     pending: new Map(),
     recovering: new Set(),
+    postponed: new Set(),
     warnedAt: new Map(),
   };
 }
@@ -476,7 +489,7 @@ class RunTracker {
     };
     return recoverRun(this.state, request).then(
       (result) => {
-        // Not acted on after all (the chat moved on, or another recovery had it): look again next time.
+        // Not acted on after all (the chat moved on, another recovery had it, or a disk is too full to start one): look again next time.
         if (result === "skipped") this.actedOn = false;
       },
       (error: unknown) => {
@@ -561,6 +574,24 @@ async function giveUp(state: RunRecoveryState, sessionId: string, count: number,
 }
 
 /**
+ * Put a recovery off until there is room. A stalled engine's tracker looks at
+ * the chat again on its own (`skipped` frees it for the next tick); a recovery
+ * with no tracker behind it (a crash, a boot resume, an earlier failed
+ * attempt) is queued for the next tick instead, because nothing else would
+ * bring it back. The log gets one line when a chat's wait begins, not one per
+ * look.
+ */
+function postponeForDisk(state: RunRecoveryState, request: RecoveryRequest, refusal: DiskGateRefusal): void {
+  const { deps } = state;
+  const { sessionId, cause, hint, recycle } = request;
+  if (!state.postponed.has(sessionId)) {
+    state.postponed.add(sessionId);
+    console.warn(`[run-recovery] postponing the restart of chat ${sessionId} until there is room on the disk: ${refusal.message}`);
+  }
+  if (!recycle) state.pending.set(sessionId, { sessionId, cause, hint, notBefore: deps.now() + deps.limits.tickMs });
+}
+
+/**
  * Carry a chat's run on: close the stalled engine (when there still is one),
  * start the chat again from its own session and send the agent one user turn
  * saying what happened. One recovery per chat at a time, and never more than
@@ -575,6 +606,17 @@ async function recoverRun(state: RunRecoveryState, request: RecoveryRequest): Pr
   if (deps.isShuttingDown()) return "skipped";
   // Still the session Cody was looking at, and still running: anything else means the chat moved on while this waited.
   if (recycle && (recycle.closed || !recycle.session.isAlive() || !recycle.session.isRunning())) return "skipped";
+  // A recovery starts an engine and a turn, and a disk that is almost full is
+  // what an unattended run is most likely to have died of: starting more work
+  // into it only fails the same way. Wait, without closing the stalled engine
+  // and without counting an attempt (the cap is for engines that fail, not for
+  // a full disk).
+  const refusal = deps.diskRefusal();
+  if (refusal) {
+    postponeForDisk(state, request, refusal);
+    return "skipped";
+  }
+  state.postponed.delete(sessionId);
   state.recovering.add(sessionId);
   try {
     const now = deps.now();
@@ -776,6 +818,7 @@ export function stopRunRecovery(): void {
   for (const cancel of state.cancels) cancel();
   state.cancels.clear();
   state.pending.clear();
+  state.postponed.clear();
 }
 
 /** A supervisor with its own private state and collaborators: what the tests drive. */

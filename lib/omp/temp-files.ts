@@ -18,6 +18,12 @@ import path from "path";
  * long finished with: a screenshot is used the moment it is taken, and a
  * helper process that is still alive keeps its open log even when the
  * directory entry goes away.
+ *
+ * The hourly disk janitor (lib/disk/janitor.ts) sweeps the whole temp dir by
+ * stricter rules (idle window, no process using it, no recent chat naming it),
+ * and these files are among what it removes. This narrower, age-only sweep
+ * stays beside it (lib/harness/housekeeping.ts runs both) for machines where
+ * the janitor cannot tell what is in use because there is no /proc to read.
  */
 const SWEEPABLE = /^(omp-sshots-[\w-]+\.(png|webp|jpe?g)|omp-worker-stderr-[\w-]+)$/;
 

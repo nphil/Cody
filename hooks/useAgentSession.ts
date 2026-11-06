@@ -2270,7 +2270,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             ...deviceTimeZoneField(),
           }),
         });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) {
+          // A refusal for a nearly full disk (lib/disk/gate.ts) says what is full and
+          // how to clean it, so it travels as it is; every other failure stays the
+          // bare status it always was.
+          const failure = await res.json().catch(() => null) as { error?: unknown; code?: unknown } | null;
+          throw new Error(failure?.code === "disk_full" && typeof failure.error === "string" ? failure.error : `HTTP ${res.status}`);
+        }
         const result = await res.json() as { sessionId: string };
         const realId = result.sessionId;
         sessionIdRef.current = realId;
@@ -4468,6 +4474,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // retry-exhaustion instead of an inline catch.
         const detail = describeEngineError(resolved.error ?? translate("agentSession.commandFailed")).detail;
         rollBackFailedSend(entry.text, detail);
+      } else if (response?.code === "disk_full" && sessionIdRef.current === sid) {
+        // The server will not start work while a disk is almost full. A message
+        // queued behind a running reply has no run to roll back, and its row shows
+        // the reason only on hover: say it once, in the server's own words
+        // (identical notices collapse into one).
+        const raw = resolved.error ?? "";
+        addNotice({
+          type: "error",
+          message: translate("agentSession.sendFailed", { detail: describeEngineError(raw).detail }),
+          dedupeKey: errorDedupeKey(raw),
+          errorKind: "disk",
+        });
       }
     };
 
@@ -4497,7 +4515,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       outboxInFlightRef.current.delete(entryId);
     }
-  }, [ensureEventsConnected, noteModelUnrestorable, rollBackFailedSend]);
+  }, [addNotice, ensureEventsConnected, noteModelUnrestorable, rollBackFailedSend]);
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[], behaviorOverride?: OutboxEntry["behavior"]): Promise<boolean> => {
     const trimmedMessage = message.trim();

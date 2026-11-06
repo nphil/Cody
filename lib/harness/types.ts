@@ -369,6 +369,10 @@ export interface EngineSessionOptions {
   sessionId: string;
   /** IANA zone the child process runs under (its `TZ`); absent leaves the server's. */
   timeZone?: string;
+  /** The chat's scratch dir (lib/disk/scratch.ts): the engine child's `TMPDIR`,
+   *  so what it and its tools throw away lands where Cody can measure and
+   *  delete it. Absent or null: the child keeps the server's temp dir. */
+  scratchDir?: string | null;
   /** Working directory the agent operates in. */
   cwd: string;
 }
@@ -387,6 +391,9 @@ export interface EngineSession {
   readonly cwd: string;
   /** The IANA zone this session's child process was started with; undefined when unknown. */
   readonly timeZone?: string;
+  /** The scratch dir the engine child was started with, if any. Read to tell
+   *  which dirs a running engine is using (a chat delete never removes one). */
+  readonly scratchDir?: string | null;
   isAlive(): boolean;
   isRunning(): boolean;
   /** True while this session has a user response outstanding. */

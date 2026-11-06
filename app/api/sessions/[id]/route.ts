@@ -23,7 +23,7 @@ import {
 } from "@/lib/session-reader";
 import { apiErrorResponse, resolveEngineSessionOr404, resolveSessionPathOr404 } from "@/lib/api-utils";
 import { sessionPathKey } from "@/lib/session-path";
-import { getRpcSession } from "@/lib/rpc-manager";
+import { getRpcSession, removeDeletedSessionScratch } from "@/lib/rpc-manager";
 import { forgetSession } from "@/lib/auth/session-owners";
 import { getHarness } from "@/lib/harness";
 import { removeEngineSession, upsertEngineSession, type EngineSessionRow } from "@/lib/harness/engine-sessions";
@@ -366,6 +366,7 @@ export async function DELETE(
       forgetSessionLocalRouting(id);
       forgetSessionPreset(id);
       removeSessionItems(id);
+      await removeDeletedSessionScratch(id);
       return NextResponse.json({ ok: true });
     }
 
@@ -492,6 +493,8 @@ export async function DELETE(
     forgetSessionLocalRouting(deletedSessionId);
     forgetSessionPreset(deletedSessionId);
     removeSessionItems(deletedSessionId);
+    // Last, once the engine that was writing there is gone.
+    for (const alias of new Set([id, deletedSessionId])) await removeDeletedSessionScratch(alias);
     return NextResponse.json({
       ok: true,
       ...(skippedChildren.length > 0 ? { skippedChildren } : {}),
