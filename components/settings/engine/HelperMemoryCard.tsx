@@ -26,7 +26,7 @@ const MODES: ReadonlyArray<{ id: HelperMode; label: string }> = [
   { id: "inherit", label: "Same as my chats" },
 ];
 
-const HINT = "A percentage follows each model's own window size. Small models need more: 20% of a 100k window leaves less room than every request's start-up text, so helpers on Haiku (scout, sonic, luna) are set higher under Advanced.";
+const HINT = "A percentage follows each model's own window size. On a small model (about 100k tokens or less) a low percentage leaves less room than the start-up text every request carries, so give helpers that run on one a higher value under Advanced.";
 
 function radioStyle(selected: boolean): CSSProperties {
   return {
