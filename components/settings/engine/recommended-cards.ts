@@ -22,6 +22,7 @@
  *     round-trip test covers every curated key.
  */
 import type { SearchEntry } from "../search-index";
+import { HELPER_MEMORY_DESCRIPTION, HELPER_MEMORY_LABEL, HELPER_MEMORY_SEARCH_ID } from "./helper-memory";
 
 export type RecommendedControl = "select" | "toggle" | "number" | "methodOrder";
 
@@ -311,7 +312,7 @@ export function groupLabelOf(id: CardGroupId): string {
  * `cardOwner(key)` tells the collector which of those to trail as
  * Recommended › group instead of tab › group.
  */
-export const SEARCH_ENTRIES: readonly SearchEntry[] = RECOMMENDED_CARDS
+const CURATED_SEARCH_ENTRIES: readonly SearchEntry[] = RECOMMENDED_CARDS
   .flatMap((card) => {
     const meta = curatedOnly(card.key);
     if (!meta) return [];
@@ -326,3 +327,18 @@ export const SEARCH_ENTRIES: readonly SearchEntry[] = RECOMMENDED_CARDS
       action: "jump" as const,
     }];
   });
+
+/** The curated-only cards, plus the one hand-built card (helper agents' memory limit, which is no single schema key). */
+export const SEARCH_ENTRIES: readonly SearchEntry[] = [
+  ...CURATED_SEARCH_ENTRIES,
+  {
+    id: HELPER_MEMORY_SEARCH_ID,
+    tab: "engine",
+    label: HELPER_MEMORY_LABEL,
+    description: HELPER_MEMORY_DESCRIPTION,
+    keywords: ["task.agentCompactionThresholdOverrides", "subagent", "helper", "compaction", "summarise", "notes", "context window"],
+    breadcrumb: ["{engine}", "Behavior", "Recommended", groupLabelOf("context")],
+    needsCapability: "configEditor",
+    action: "jump",
+  },
+];

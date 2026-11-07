@@ -33,7 +33,7 @@ export type NativeSettings = {
     fallbackRevertPolicy?: "cooldown-expiry" | "never";
     fallbackChains?: Record<string, string[]>;
   };
-  compaction?: { enabled?: boolean; midTurnEnabled?: boolean; methodOrder?: CompactionMethod[]; autoContinue?: boolean; keepRecentTokens?: number };
+  compaction?: { enabled?: boolean; experimentalContextManagement?: boolean; midTurnEnabled?: boolean; methodOrder?: CompactionMethod[]; autoContinue?: boolean; keepRecentTokens?: number };
   memory?: { backend?: "off" | "local" | "mnemopi" | "hindsight" | "sharpshooter" };
   autolearn?: { enabled?: boolean; autoContinue?: boolean; minToolCalls?: number };
   mnemopi?: { scoping?: "global" | "per-project" | "per-project-tagged"; autoRecall?: boolean; autoRetain?: boolean; noEmbeddings?: boolean };
@@ -41,6 +41,12 @@ export type NativeSettings = {
   /** Web-search provider priority (omp's providers.webSearchOrder): the
    * preferred provider first; empty array = automatic. */
   providers?: { webSearchOrder?: string[] };
+  /** `task.agentCompactionThresholdOverrides`: the size at which each helper
+   * agent's history is summarised, by agent name. A positive token count or a
+   * "N%" share of the model's window; null entries (which only clear a value
+   * inherited from another layer) pass through untouched. The map is read and
+   * written whole, so a client that spreads it keeps every other agent's entry. */
+  task?: { agentCompactionThresholdOverrides?: Record<string, number | string | null> };
 };
 
 const THINKING_LEVELS = new Set(["auto", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -114,6 +120,37 @@ function readCompactionMethodOrder(compaction: Record<string, unknown>): Compact
  * model pattern; early omp builds persisted booleans. */
 const ADVISOR_SUBAGENTS_PATH = ["task", "agentAdvisor", "task"] as const;
 
+/** The per-agent compaction threshold map (omp: task.agentCompactionThresholdOverrides). */
+const COMPACTION_OVERRIDES_PATH = ["task", "agentCompactionThresholdOverrides"] as const;
+
+/** omp's own rule for one entry: a positive integer token count, or "N%" with N in (0, 100]. */
+const PERCENT_OVERRIDE = /^(\d+(?:\.\d+)?)%$/;
+function validCompactionOverride(value: unknown): value is number | string {
+  if (typeof value === "number") return Number.isSafeInteger(value) && value > 0;
+  if (typeof value !== "string") return false;
+  const match = PERCENT_OVERRIDE.exec(value.trim());
+  return match !== null && Number(match[1]) > 0 && Number(match[1]) <= 100;
+}
+
+/** Replace the whole map, so removing an agent's entry is just leaving it out.
+ * An empty map drops the key (and `task` when that leaves it empty); an
+ * unchanged map is not rewritten, so the many writes that carry it along do
+ * not reformat the file. */
+function writeCompactionOverrides(doc: Document, overrides: Record<string, number | string | null>): void {
+  const data = doc.toJS();
+  const task = isRecord(data) && isRecord(data.task) ? data.task : {};
+  const existing = task.agentCompactionThresholdOverrides;
+  if (JSON.stringify(existing ?? {}) === JSON.stringify(overrides)) return;
+  if (Object.keys(overrides).length > 0) {
+    doc.setIn([...COMPACTION_OVERRIDES_PATH], overrides);
+    return;
+  }
+  if (existing === undefined) return;
+  doc.deleteIn([...COMPACTION_OVERRIDES_PATH]);
+  const node = doc.getIn(["task"]);
+  if (isMap(node) && node.items.length === 0) doc.deleteIn(["task"]);
+}
+
 /** Effective "review subagents" value: `task.agentAdvisor.task` wins; a legacy
  * `advisor.subagents` boolean (not yet migrated by omp) is read as a fallback
  * but never written. A model pattern means advisor review is on. */
@@ -163,6 +200,10 @@ export function readNativeSettings(): { path: string; settings: NativeSettings }
   const mnemopi = isRecord(data.mnemopi) ? data.mnemopi : {};
   const mcp = isRecord(data.mcp) ? data.mcp : {};
   const providers = isRecord(data.providers) ? data.providers : {};
+  const task = isRecord(data.task) ? data.task : {};
+  const compactionOverrides = isRecord(task.agentCompactionThresholdOverrides)
+    ? Object.fromEntries(Object.entries(task.agentCompactionThresholdOverrides).filter((entry): entry is [string, number | string | null] => entry[1] === null || validCompactionOverride(entry[1])))
+    : {};
   const registryHasScopedEntries = [data.enabledModels, data.disabledProviders, data.modelProviderOrder]
     .some((value) => Array.isArray(value) && !value.every((item) => typeof item === "string"));
   return {
@@ -207,6 +248,7 @@ export function readNativeSettings(): { path: string; settings: NativeSettings }
         ...(typeof compaction.midTurnEnabled === "boolean" ? { midTurnEnabled: compaction.midTurnEnabled } : {}),
         ...((() => { const methodOrder = readCompactionMethodOrder(compaction); return methodOrder !== undefined ? { methodOrder } : {}; })()),
         ...(typeof compaction.autoContinue === "boolean" ? { autoContinue: compaction.autoContinue } : {}),
+        ...(typeof compaction.experimentalContextManagement === "boolean" ? { experimentalContextManagement: compaction.experimentalContextManagement } : {}),
         ...(typeof compaction.keepRecentTokens === "number" && Number.isInteger(compaction.keepRecentTokens) ? { keepRecentTokens: compaction.keepRecentTokens } : {}),
       } } : {}),
       ...(Object.keys(memory).length ? { memory: { ...(MEMORY_BACKENDS.has(memory.backend as string) ? { backend: memory.backend as NonNullable<NativeSettings["memory"]>["backend"] } : {}) } } : {}),
@@ -228,6 +270,7 @@ export function readNativeSettings(): { path: string; settings: NativeSettings }
         ...(typeof mcp.notificationDebounceMs === "number" && Number.isInteger(mcp.notificationDebounceMs) ? { notificationDebounceMs: mcp.notificationDebounceMs } : {}),
       } } : {}),
       ...(stringArray(providers.webSearchOrder) ? { providers: { webSearchOrder: stringArray(providers.webSearchOrder) } } : {}),
+      ...(Object.keys(compactionOverrides).length ? { task: { agentCompactionThresholdOverrides: compactionOverrides } } : {}),
     },
   };
 }
@@ -245,6 +288,11 @@ export function writeNativeSettings(settings: NativeSettings): void {
   assertOptionalRecord(settings.mnemopi, "mnemopi");
   assertOptionalRecord(settings.mcp, "mcp");
   assertOptionalRecord(settings.providers, "providers");
+  assertOptionalRecord(settings.task, "task");
+  assertOptionalRecord(settings.task?.agentCompactionThresholdOverrides, "task.agentCompactionThresholdOverrides");
+  for (const [agent, value] of Object.entries(settings.task?.agentCompactionThresholdOverrides ?? {})) {
+    if (value !== null && !validCompactionOverride(value)) throw new Error(`task.agentCompactionThresholdOverrides.${agent} must be a positive token count or a percentage like "20%"`);
+  }
   if (settings.providers?.webSearchOrder !== undefined
     && (!Array.isArray(settings.providers.webSearchOrder)
       || settings.providers.webSearchOrder.some((value) => typeof value !== "string" || !value.trim()))) {
@@ -260,6 +308,7 @@ export function writeNativeSettings(settings: NativeSettings): void {
     "retry.usageAwareFallback": settings.retry?.usageAwareFallback,
     "compaction.enabled": settings.compaction?.enabled,
     "compaction.midTurnEnabled": settings.compaction?.midTurnEnabled,
+    "compaction.experimentalContextManagement": settings.compaction?.experimentalContextManagement,
     "compaction.autoContinue": settings.compaction?.autoContinue,
     "autolearn.enabled": settings.autolearn?.enabled,
     "autolearn.autoContinue": settings.autolearn?.autoContinue,
@@ -300,12 +349,16 @@ export function writeNativeSettings(settings: NativeSettings): void {
   const { path, doc } = readDocument();
   mkdirSync(dirname(path), { recursive: true });
   if (doc.contents === null) {
-    const { advisor, ...rest } = settings;
+    const { advisor, task, ...rest } = settings;
     const { subagents, ...advisorRest } = advisor ?? {};
+    const freshTask = {
+      ...(task?.agentCompactionThresholdOverrides && Object.keys(task.agentCompactionThresholdOverrides).length ? { agentCompactionThresholdOverrides: task.agentCompactionThresholdOverrides } : {}),
+      ...(subagents !== undefined ? { agentAdvisor: { task: subagents ? "on" : "off" } } : {}),
+    };
     const fresh = {
       ...rest,
       ...(Object.keys(advisorRest).length ? { advisor: advisorRest } : {}),
-      ...(subagents !== undefined ? { task: { agentAdvisor: { task: subagents ? "on" : "off" } } } : {}),
+      ...(Object.keys(freshTask).length ? { task: freshTask } : {}),
     };
     const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
     writeFileSync(temp, stringify(fresh), "utf8");
@@ -339,6 +392,7 @@ export function writeNativeSettings(settings: NativeSettings): void {
   for (const [key, value] of Object.entries(settings.mnemopi ?? {})) doc.setIn(["mnemopi", key], value);
   for (const [key, value] of Object.entries(settings.mcp ?? {})) doc.setIn(["mcp", key], value);
   if (settings.providers?.webSearchOrder !== undefined) doc.setIn(["providers", "webSearchOrder"], settings.providers.webSearchOrder);
+  if (settings.task?.agentCompactionThresholdOverrides !== undefined) writeCompactionOverrides(doc, settings.task.agentCompactionThresholdOverrides);
   const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
   writeFileSync(temp, doc.toString(), "utf8");
   renameSync(temp, path);

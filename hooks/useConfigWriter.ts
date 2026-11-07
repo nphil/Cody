@@ -56,12 +56,14 @@ export type NativeSettings = {
   personality?: "default" | "friendly" | "pragmatic" | "none";
   advisor?: { enabled?: boolean; subagents?: boolean; syncBacklog?: "off" | "1" | "3" | "5"; immuneTurns?: number };
   tools?: { approvalMode?: "always-ask" | "write" | "yolo"; approval?: { bash?: "allow" | "prompt" | "deny"; extension?: "allow" | "prompt" } };
-  compaction?: { enabled?: boolean; midTurnEnabled?: boolean; methodOrder?: CompactionMethod[]; autoContinue?: boolean; keepRecentTokens?: number };
+  compaction?: { enabled?: boolean; experimentalContextManagement?: boolean; midTurnEnabled?: boolean; methodOrder?: CompactionMethod[]; autoContinue?: boolean; keepRecentTokens?: number };
   memory?: { backend?: "off" | "local" | "mnemopi" | "hindsight" | "sharpshooter" };
   autolearn?: { enabled?: boolean; autoContinue?: boolean; minToolCalls?: number };
   mnemopi?: { scoping?: "global" | "per-project" | "per-project-tagged"; autoRecall?: boolean; autoRetain?: boolean; noEmbeddings?: boolean };
   mcp?: { enableProjectConfig?: boolean; renderMarkdownResults?: boolean; notifications?: boolean; notificationDebounceMs?: number };
   retry?: { enabled?: boolean; maxRetries?: number; modelFallback?: boolean };
+  /** Per-agent compaction size (lib/omp/settings-config NativeSettings.task); written whole. */
+  task?: { agentCompactionThresholdOverrides?: Record<string, number | string | null> };
   enabledModels?: string[];
   disabledProviders?: string[];
   modelProviderOrder?: string[];

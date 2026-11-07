@@ -25,6 +25,7 @@ import { NativeSetting, TERMINAL_ONLY_BADGE, ToggleSwitch, chipStyle } from "../
 import { useSaveStatus } from "../SaveStatus";
 import { useSettingsShell } from "../shell-context";
 import { ENGINE_PANEL_ID, RECOMMENDED_CARDS, RECOMMENDED_GROUPS, curatedOnly, searchIdForKey, type CuratedOnlySetting, type RecommendedCard, type RecommendedGroup } from "./recommended-cards";
+import { HelperMemoryCard } from "./HelperMemoryCard";
 import { NumberField, SchemaControl } from "./SchemaSettingsList";
 
 const COMPACTION_METHOD_LABELS: Record<CompactionMethod, string> = {
@@ -308,6 +309,7 @@ export function RecommendedSettings() {
             {RECOMMENDED_CARDS.filter((card) => card.group === group.id).map((card) => (
               <RecommendedCardView key={card.key} card={card} index={index} native={native} />
             ))}
+            {group.id === "context" && native.enabled && <HelperMemoryCard native={native} />}
           </div>
         </section>
       ))}

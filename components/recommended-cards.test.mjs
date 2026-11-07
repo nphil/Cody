@@ -145,11 +145,12 @@ test("cards match the installed OMP schema, with newer-version cards gated until
   }
 });
 
-test("static search entries cover exactly the curated-only cards rendered here, under the shared id scheme", () => {
+test("static search entries cover the curated-only cards rendered here, under the shared id scheme, plus the helper-memory card", () => {
   const ids = SEARCH_ENTRIES.map((entry) => entry.id);
   assert.equal(new Set(ids).size, ids.length, "no id collides");
+  assert.equal(ids.at(-1), "helper-agents-memory-limit", "the hand-built helper-memory card is searchable");
   const renderedCuratedOnly = RECOMMENDED_CARDS.filter((card) => CURATED_ONLY_KEYS.includes(card.key)).map((card) => card.key);
-  assert.deepEqual(ids, renderedCuratedOnly.map((key) => `schema-${key}`));
+  assert.deepEqual(ids.slice(0, -1), renderedCuratedOnly.map((key) => `schema-${key}`));
   for (const entry of SEARCH_ENTRIES) {
     assert.equal(entry.tab, "engine");
     assert.equal(entry.needsCapability, "configEditor");

@@ -762,8 +762,8 @@ export function buildEngineRpcLaunch(
   }
   if (opts.profile?.systemPromptPath) args.push("--system-prompt", opts.profile.systemPromptPath);
   // Main omp sessions load Cody's extensions: the refusal guard, local-time
-  // context, the HomeLabber gate procedure and the scratch/disk-budget rule
-  // (all also inherited by subagents).
+  // context, the HomeLabber gate procedure, the scratch/disk-budget rule and
+  // the helper-agent context budget line (all also inherited by subagents).
   // Resolve them from the package directory, never the launch cwd.
   if (harness.id === "omp" && opts.kind !== "sidebar") {
     const packageRoot = process.env.CODY_PACKAGE_DIR || process.cwd();
@@ -772,6 +772,7 @@ export function buildEngineRpcLaunch(
     args.push("--extension", path.join(extensions, "cody-local-time.ts"));
     args.push("--extension", path.join(extensions, "cody-homelabber-gate.ts"));
     args.push("--extension", path.join(extensions, "cody-disk-budget.ts"));
+    args.push("--extension", path.join(extensions, "cody-context-budget.ts"));
   }
   // A sidebar child gets its own agent dir, whose `mcp.json` is empty, so the
   // user-scope MCP servers (111 tool schemas / 89,303 tokens on the owner's

@@ -725,7 +725,8 @@ components/
     engine/             the Behavior hub: RecommendedSettings +
                         recommended-cards.ts (the curated-card table),
                         SchemaSettingsList (the engine's complete schema,
-                        chip-grouped, secrets masked)
+                        chip-grouped, secrets masked), HelperMemoryCard
+                        (helper agents' memory limit; logic in helper-memory.ts)
     DiskSection.tsx     the System hub's "Disk space" card (`/api/disk`):
                         meters, largest scratch folders, "Clean idle scratch
                         now", idle-days setting. Highlight id `disk`
@@ -3412,6 +3413,21 @@ no script, by the owner's choice), so Cody's own janitor is the ONLY cleanup.
   omp ANY extension that registers `tool_call`/`tool_result` vetoes
   `task.speculativeLaunch`, so the `tool_result` handler is registered lazily,
   only once a disk has been seen low. Constants mirror `status.ts` (tested).
+- **Helper-agent memory limit** (`lib/omp/extensions/cody-context-budget.ts`, a
+  fifth `--extension` for main omp chats): for SUBAGENTS only, appends one
+  system-prompt line saying at what size omp summarises their history and to
+  keep `context_notes` current. The size is what omp itself applies, read from
+  `<agent dir>/config.yml` (re-read when its mtime changes: one `statSync` per
+  helper start; `task.agentCompactionThresholdOverrides[<agent>]`,
+  else root `compaction.thresholdTokens`, else `thresholdPercent`; Bun-only,
+  no config → a generic line). The text is fixed per agent+model window+config (prompt
+  cache) and it registers no `tool_call`/`tool_result` handler (see the disk
+  note: that vetoes `task.speculativeLaunch`). The Behavior › Context card
+  "Helper agents' memory limit" (`components/settings/engine/HelperMemoryCard.tsx`,
+  logic in `helper-memory.ts`) edits that map through `/api/omp-settings`, which
+  reads and replaces the `task.agentCompactionThresholdOverrides` map WHOLE
+  (so the client spreads it and unknown agents survive), and toggles
+  `compaction.experimentalContextManagement` (all chats, not only helpers).
 - **Settings › System › Disk space** (`components/settings/DiskSection.tsx`,
   `/api/disk`: GET for any signed-in user, POST `{action:"clean"}` and PUT
   settings admin-only): meters against the quotas, the five largest scratch
