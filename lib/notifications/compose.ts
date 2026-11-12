@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import * as path from "path";
+import { isAskDoneRow, isAskOtherRow, isAskSelectedTitle, isToolApprovalTitle } from "../ask-walk";
 import { readPermissionOptions, describeToolCall } from "../permission-request";
 import { providerBrand } from "../provider-brand";
 import { replyAsksUser } from "../reply-question";
@@ -154,9 +155,71 @@ export interface AnswerOffer {
   choices: AnswerChoice[];
 }
 
-/** omp's tool approval: a confirm titled "Allow tool: <name>". */
-export function isToolApprovalTitle(title: unknown): title is string {
-  return typeof title === "string" && /^allow tool\s*:/i.test(title);
+/** A tool approval as omp asks it over RPC, reduced to what a notification may do with it. */
+export interface ToolApprovalSelect {
+  /** The tool's name, from the first line of the title. */
+  tool: string;
+  /** The rest of the title: where the tool came from, why, and what it will do. */
+  details: string;
+  /** The one option that approves exactly this call: "Approve", or "Approve Once" when omp also offers grants. */
+  once: string;
+  deny: string;
+  /** omp also offers a session-wide or remembered approval; those are only ever answered in the chat itself. */
+  broader: boolean;
+}
+
+/** The tool name (the first line after "Allow tool:") and the lines under it of an approval title. */
+function approvalTitleParts(title: string): { tool: string; details: string } {
+  const [first = "", ...rest] = title.split("\n");
+  return { tool: first.replace(/^allow tool\s*:\s*/i, "").trim(), details: rest.join("\n").trim() };
+}
+
+/**
+ * Reads omp's tool-approval `select` (title "Allow tool: <name>\n<details>").
+ * Its options are, in order: grants for this session, grants across sessions,
+ * "Approve" (named "Approve Once" as soon as any grant is offered), "Approve
+ * <subject> for this session", "Deny". Only the single-call approval and "Deny"
+ * are ever picked out; anything broader is left for the person in the chat.
+ *
+ * Null when the dialog is not recognisably that shape. A caller must then offer
+ * no buttons and accept no token answer: not knowing which option is the narrow
+ * one is never a reason to guess.
+ */
+export function toolApprovalSelect(event: Record<string, unknown>): ToolApprovalSelect | null {
+  if (event.method !== "select" || !isToolApprovalTitle(event.title)) return null;
+  if (!Array.isArray(event.options)) return null;
+  const options = strings(event.options);
+  if (options.length !== event.options.length) return null;
+  const once = options.includes("Approve Once") ? "Approve Once" : "Approve";
+  // A label that appears twice cannot say which of its rows a reply meant.
+  const only = (label: string) => options.filter((option) => option === label).length === 1;
+  if (!only(once) || !only("Deny")) return null;
+  // Without "Approve Once" omp offers no grant, so the only other row it may add is "Approve <subject> for this
+  // session". Any other row means this is not the list described above, and "Approve" may then be a grant.
+  if (once === "Approve" && options.some((option) => option !== "Approve" && option !== "Deny" && !/^approve .+ for this session$/i.test(option))) return null;
+  return {
+    ...approvalTitleParts(event.title),
+    once,
+    deny: "Deny",
+    broader: options.some((option) => option !== once && option !== "Deny"),
+  };
+}
+
+/**
+ * The reply Cody's "Extension Tool Requests: Auto approve" setting sends for a tool approval, or null when the
+ * request must stay with the person. It allows THIS call once and nothing broader: the `select` form (what omp
+ * 18.8.3 and 18.19.0 really send) answers the single-call option picked out by {@link toolApprovalSelect}, and a
+ * list that is not recognisably omp's answers nothing; the legacy `confirm` form answers `confirmed: true`.
+ *
+ * Two prompts are never auto-approved, whatever the setting: omp says "no setting or yolo mode may bypass" a
+ * provider safety check, and a restricted folder "asks in every approval mode". Both name themselves in the title.
+ */
+export function autoApprovalReply(event: Record<string, unknown>): { confirmed: true } | { value: string } | null {
+  if (!isToolApprovalTitle(event.title)) return null;
+  if (/^(Provider safety checks:|Reason: Restricted folder:)/m.test(event.title)) return null;
+  if (event.method === "confirm") return { confirmed: true };
+  const approval = toolApprovalSelect(event);
+  return approval ? { value: approval.once } : null;
 }
 
 /** The string entries of an array field; anything else reads as no options. */
@@ -220,7 +283,11 @@ function choicesFromLabels(labels: string[], answer: (label: string) => Record<s
 /**
  * The buttons an omp dialog can honestly be answered with:
  *  - confirm: two. "Allow"/"Deny" for a tool approval, otherwise "Yes"/"No".
- *  - select: one per option, when there are at most three.
+ *  - select: one per option, when there are at most three — except that a tool
+ *    approval gets exactly "Allow once" and "Deny" (never a session-wide or
+ *    remembered approval), and the "Other (type your own)" row of omp's
+ *    field-by-field `ask` is no button. A multi-choice field of that walk gets
+ *    none: a tap would tick the box, not answer.
  *  - ask: one per option, when it is a single question that takes one answer
  *    and has at most three options.
  * Anything else (typed input, an editor, a link, a form, a long list) needs the
@@ -241,7 +308,19 @@ export function answerOfferForUiRequest(event: Record<string, unknown>): AnswerO
     const options = strings(event.options);
     // A list with an entry that is not text is one this code does not understand: no buttons, not a subset.
     if (Array.isArray(event.options) && options.length === event.options.length) {
-      choices = choicesFromLabels(options, (value) => ({ value }));
+      if (isToolApprovalTitle(event.title)) {
+        // The list can carry "Approve <tool> for this session" and remembered grants. A button is one tap on a
+        // lock screen, so it only ever allows THIS call or denies it, whatever else the dialog offers.
+        const approval = toolApprovalSelect(event);
+        if (approval) {
+          choices = [
+            { label: "Allow once", answer: { value: approval.once } },
+            { label: "Deny", answer: { value: approval.deny } },
+          ];
+        }
+      } else if (!isAskSelectedTitle(event.title) && !options.some(isAskDoneRow)) {
+        choices = choicesFromLabels(options.filter((option) => !isAskOtherRow(option)), (value) => ({ value }));
+      }
     }
   } else if (event.method === "ask") {
     const questions = askQuestions(event);
@@ -301,6 +380,17 @@ export function summarizeUiRequest(event: Record<string, unknown>): UiRequestSum
     }
     case "select": {
       const options = strings(event.options);
+      if (isToolApprovalTitle(title)) {
+        // The options (grants, "for this session") are not listed: a notification can only allow once or deny, and the chat shows the rest.
+        const { tool, details } = approvalTitleParts(title);
+        const approval = toolApprovalSelect(event);
+        const more = !approval || approval.broader ? "Open the chat to choose how long to allow it." : "";
+        return { event: "approval", body: [tool ? `Tool: ${tool}` : "A tool wants to run.", details, more].filter(Boolean).join("\n") };
+      }
+      if (isAskSelectedTitle(title) || options.some(isAskDoneRow)) {
+        // A multi-choice field of omp's `ask`: ticking is a chat job, so say so rather than list its control rows.
+        return { event: "question", body: [title, optionList(options.filter((option) => !isAskDoneRow(option))), "Open the chat to continue."].filter(Boolean).join("\n") };
+      }
       return { event: "question", body: [title || "The agent asked you to choose.", optionList(options)].filter(Boolean).join("\n") };
     }
     case "input":

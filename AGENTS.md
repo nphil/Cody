@@ -165,6 +165,9 @@ app/api/
                                    it dispatches on HarnessAdapter.settings and
                                    refuses `unsupported` when an engine has none —
                                    never on an engine id
+  settings-seen/route.ts          GET/POST which engine settings are new for the caller (per
+                                   account, NOT admin-only); POST reports chips seen / keys
+                                   changed, once per Settings open
   mcp/route.ts                    GET/POST/PUT/DELETE MCP servers in either
                                    scope (`scope: "project"` default, `"user"`)
   homelabber/route.ts             GET {base, source}: the web origin of HomeLabber for the
@@ -455,6 +458,9 @@ lib/
   model-catalog-seen.ts the "seen" ledger (`cody-model-catalog-seen.json`) that
                        makes "new since you last looked" a fact, not a guess —
                        see the design-decision note under Settings shell
+  settings-new-keys.ts pure rules for the Settings "New" badge: diff, accumulate, fade
+  settings-seen.ts     the Settings "New" ledger (`cody-settings-seen.json`)
+  settings-new-reporter.ts browser-safe batching and the on-screen dwell for it
   model-visibility.ts  who hides/pins which models, instance-wide (admin) and
                        per user (`cody-model-visibility.json`); the HIDE set is
                        an inversion, not an allowlist, so a model neither list
@@ -644,6 +650,11 @@ components/
   MarkdownBody.tsx    markdown renderer
   InputDock.tsx       non-modal composer panel for extension, permission, and
                       refusal questions; keeps the transcript visible
+                      Also draws the model's `ask` walk (one card per field) and the
+                      one-line "a message withdraws this question" warning.
+  ExtensionDialog.tsx select / input / editor requests, including the checkbox view of
+                      an `ask` multi-choice step and masked (`secret`) inputs.
+                      `lib/ask-walk.ts` is the pure logic behind both (tested).
   PermissionRequestCard.tsx one approval an ACP engine is blocked on, shown
                       inside InputDock with the transcript still in view
   ProviderIcon.tsx    vendored brand marks (models.dev logo set + simple-icons for
@@ -696,6 +707,8 @@ components/
     SaveStatus.tsx      per-hub save/error corner indicator
     SegmentedControl.tsx the MCP/Skills/Plugins and Catalog/Assignments switch
     primitives.tsx      NativeSetting row, chip styles, SettingsHighlightContext
+    new-badges.ts       the "New" badge context, `isBadgedRow`, the hub/sub-view dot
+                        computation and the `N new` label
     EngineRoster.tsx    install/switch/update/reinstall/revert/uninstall for
                         every known engine; shared by Settings › System ›
                         Engines and the setup flow's engine step
@@ -769,6 +782,8 @@ hooks/
                            each row's effective value, `ui.condition` result and
                            changed-from-default flag; backs Behavior AND the
                            dialog-wide search
+  useSettingsNewKeys.ts    one answer per Settings open + the seen/changed reporters
+                           for the "New" badge
   useModelCatalog.ts       Settings › Models' one row shape across omp/pi/ACP
                            catalogs, with who hid/pinned what and what is new
   useLocalAiScan.ts        client for `/api/local-ai`, feeding Providers ›
@@ -917,8 +932,9 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   `getAgentDir()`): accounts, checkpoints, engine selection, session owners,
   the engine session index, the tools prefix, per-engine provider keys
   (`cody-provider-keys.json`), who hides/pins which models
-  (`cody-model-visibility.json`) and the model-catalog "seen" ledger
-  (`cody-model-catalog-seen.json`). Never route these through the
+  (`cody-model-visibility.json`), the model-catalog "seen" ledger
+  (`cody-model-catalog-seen.json`) and the Settings "New" ledger
+  (`cody-settings-seen.json`). Never route these through the
   active adapter's `getAgentDir()` — they must survive engine switches.
 - **Browser state that names an engine's things is scoped per engine.**
   `ENGINE_SCOPED_KEYS` / `engineScopedKey()` (lib/storage-keys.ts) address
@@ -1131,6 +1147,21 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   with `stopReason: "error"` used to append an EMPTY bubble; it is now an
   error notice in the provider's words, with a pointer at the keys panel when
   the text smells like a 401.
+- **Engine start-up failure detection.** `lib/omp/rpc-process.ts` recognises an engine that exits before answering by its stderr line. omp 18.19 prefixes it with `error:` and a typed name (`SessionModelRestoreError:`) where 18.8.3 printed the bare sentence; the regex accepts both, so a missing/unavailable model on `--resume` is reported the same on either engine.
+- **Engine install needs Bun.** `lib/harness/install.ts` checks the Bun version before installing omp 18.19+ (engine floor Bun 1.4.4) and refuses with a plain message; older omp keeps the old floor. `docker/Dockerfile` ships Bun 1.4.4. The `bin/cody-omp-*.mjs` helpers need Bun >= 1.4.4 as well (they open agent.db; 18.16+ installs an SQLite lock shim on Linux and logs "SQLite OFD lock shim unavailable" once on stderr if it cannot).
+- **Providers, sign-in roster and catalog.** The Providers list joins three sources: the engine's sign-in roster, Cody's curated catalog (`lib/harness/provider-catalog.ts`) and the model catalog. Row ids must be unique: a roster id that a catalog row does not list in `loginIds` still merges into the row whose `id` equals it (omp 18.16.0 added a `mistral` sign-in; the Mistral entry now lists `loginIds: ["mistral"]`). The eight API-key vendors omp added after 18.8.3 (`cloudflare-workers-ai`, `coralbricks`, `inception`, `liquid`, `modular`, `otari`, `sambanova`, `scaleway`) are catalog rows marked `needsRoster`: they are listed only when the engine's roster or model catalog names them, or a key for them is already saved, so 18.8.3 never shows a paste box its omp would ignore. One variable per field: the first name from omp's own rules (`CLOUDFLARE_API_TOKEN`, `CORAL_API_KEY`, `INCEPTION_API_KEY`, `LIQUID_API_KEY`, `MODULAR_API_KEY`, `OTARI_API_KEY`, `SAMBANOVA_API_KEY`, `SCW_SECRET_KEY`); the aliases (`CLOUDFLARE_AUTH_TOKEN`, `CORALBRICKS_API_KEY`, `SCW_API_KEY`) still work in the server's environment. Cloudflare Workers AI also needs `CLOUDFLARE_ACCOUNT_ID` (a non-secret field) when the token is a pasted key rather than a stored sign-in. Devin is one row with a key and three sign-ins (`devin`, `devin-cli`, `devin-windsurf`; all store as provider `devin`). Real-roster regression fixtures: `lib/harness/fixtures/omp-login-roster-18.8.3.json` (81 entries) and `-18.19.0.json` (92).
+  New curated vendors also need an entry in `components/settings/providers/provider-groups.ts` (`KEY_IDS`, or `GATEWAY_IDS` for a router like Otari).
+- **Sign-ins omp refuses over RPC.** omp's RPC mode cannot answer a prompt asked before any URL. From omp 18.18.7, Google Antigravity first makes the user type `yes` to a risk warning, so a Cody sign-in fails at once with "requires interactive prompts which are not supported in RPC mode". omp's roster carries no flag for this, so `lib/omp/provider-login.ts` keeps `TERMINAL_ONLY_SINCE` (provider id → first omp version that refuses it) and `list()` sets `terminalOnly: true` on those roster rows only when the installed omp is at least that version (`getOmpVersion`; an unreadable version flags nothing). The Providers detail then shows "Sign in from the omp terminal: type /login" instead of the Sign in button, and `ProviderLoginFlow` never auto-starts it. Any refusal that slips through (`requires interactive prompts` / `requires secret input`, `not supported in RPC mode`) is translated by `explainLoginError` into a `TerminalOnlyLoginError` with code `terminal_only`; the login route forwards the code in the SSE `error` frame and the panel shows its own translated words. When omp flags more providers this way, add them to `TERMINAL_ONLY_SINCE`.
+
+  A login can ask more than one `input` (Cloudflare Workers AI: API token, then account id). The login driver answers each request with whatever the user submits next; a stale prompt waiter used to swallow the second submission and is fixed (`deliver`).
+- **Refreshing models after sign-in or sign-out.** omp 18.18.2+ refreshes its scoped model list only inside the process that signed in or out. Every Cody sign-in success, sign-out and account removal therefore goes through `settleProviderChange` (`lib/provider-state.ts`): drop Cody's model cache and sign-in roster, restart idle chat engines, leave mid-reply ones alone. Do not call `invalidateModelsCache` directly from a new login/logout path.
+- **Moving sign-ins between machines (omp auth export / import).** Not offered in Cody: Cody deliberately never lets credential secrets into its own process, and an in-app export would. The terminal commands are `omp auth export` and `omp auth import` on the server's omp.
+- **Signed-out providers and saved-reset notices (omp 18.15+).** omp hops BEFORE the turn onto the first keyed `retry.fallbackChains` entry when a model's provider has no login, announcing it as `retry_fallback_applied` with `reason: "no credential for <provider>"` (src/session/turn-recovery.ts). With no keyed fallback it refuses the prompt with `No API key found for <provider>.` (18.19.0: typed PromptPreflightError; 18.8.3: plain Error; same text, so the result is a failed prompt response / `prompt_error` / `prompt_result` error on both). hooks/credential-notices.ts is the one pure module that reads those strings (`missingCredentialProvider`, `missingApiKeyProvider`) and maps the `claude-auto-reset` / `codex-auto-reset` notice sources (`savedResetEligibleProvider`). The hop is told as "You are signed out of X; using Y until you sign in" (hooks/useAgentSession.ts `announceFallbackApplied`, composer chip reason `signed_out`); the refusal goes through `engineErrorNotice` (and `rollBackFailedSend`) and reads "You are signed out of X, so your message was not sent". Both notices carry a button, found by the shelf from the notice `dedupeKey` (`signed-out:<provider>` / `saved-reset:<provider>`, see `noticeCtaForDedupeKey`): components/NoticeActions.tsx renders "Sign in to X" (Settings > Providers, `provider-<id>` highlight) or "Use reset" (confirm dialog, `useResetCredits().redeem` on the first redeemable credit of that provider; no button when none) plus a link to the auto-redeem setting (first of `claudeResets.autoRedeem5h|Weekly|autoRedeem` / `codexResets.*` the engine schema has). `creditsNoticeKind(from, to, reason)` returns null for a signed-out reason, so a hop off a signed-out Claude plan onto the credits is never worded "Claude plan limit reached". Notices with buttons stay 20 s (plain ones 5 s). Other `claude-auto-reset`/`codex-auto-reset` notices (redeemed, already redeemed, will retry) show omp's own words as plain info/warning, never through the engine-error describer (a 429 code would read as a usage error). The saved-reset EXPIRY warning (C5-20, omp 18.9+) is built only for omp's terminal status line (modes/status-line-host.ts) and is never a `notice` frame, so an RPC host cannot show it; Cody's own expiry badge covers it. Cody always spawns omp with a prompt UI, so the "no prompt UI" saved-reset notice itself is not reachable in Cody chats (the consent is an ordinary select dialog); the mapping is kept for headless/ACP engines.
+- **Signed-out notices keep Cody's "no credentials" banner and the chain rules.**
+  - `components/ChatInput.tsx` `modelErrorCode === "no_credentials"` banner: comes from `lib/models-cache.ts classifyModelError` on "No models available" from `get_available_models`, i.e. only when the whole model LIST is empty (nothing signed in). In that state every fallback chain entry is also unkeyed, so omp finds no hop candidate and refuses the prompt (AU-10 text) - the banner and the refusal agree. A single signed-out provider among others does NOT empty the list, so the banner never fires there; the hop notice is the right signal. Keep the banner.
+  - `lib/routing/chain-binding.ts` / `reconcile.ts` / `lib/claude-credits.ts` have no credential logic (an empty chain still means "no fallback"; omp's `#findKeyedRetryFallback` honours an empty chain and `retry.modelFallback` too, so an empty chain yields no hop, the refusal appears instead). Nothing can be bypassed that Cody relied on. Evidence: read from omp 18.19.0 source (turn-recovery.ts ~2094-2110, agent-session.ts ~9549), and CatchupAuthNotices-2's runs on both engines (keyed chain: hop frame then agent_start; no chain: late failed response + prompt_result error on both 18.8.3 and 18.19.0).
+  - 18.8.3 never sends the hop; the notice code is inert there and the refusal text is handled.
+- **Saved-reset consent dialog has a multi-line title.** omp's saved-reset consent is an extension `select` whose TITLE is "Spend a saved X rate-limit reset?\n<one line per account>". The InputDock header is a single ellipsized line, so the account lines were squashed/cut. Now: header shows the first line (`splitExtensionTitle().headline`), and ExtensionInputCard shows the remaining lines as a wrapped paragraph above the options. Option descriptions ("Redeem now and set <keys> to yes.") already render via `optionDetails` (verified in components/ExtensionDialog.tsx; text comes from the engine, so the new per-window keys appear automatically).
 - **Provider SIGN-IN is each engine's own, behind one seam**
   (`HarnessAdapter.providerLogins`: `ProviderLoginSurface` in
   `lib/harness/types.ts`, gated by `capabilities.providerLogin`). A
@@ -1403,7 +1434,7 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   every binary, because a cache HIT never expires and the companion CLI's bin
   name is not something the installer models.
 - **HarnessAdapter.verifiedVersion** is the exact engine version this Cody
-  build was last audited against — every adapter carries one (omp: 18.8.3,
+  build was last audited against — every adapter carries one (omp: 18.19.0,
   claude-agent-acp: 0.73.0, codex-acp: 1.8.0, pi: 0.73.1).
   It is shown verbatim on the System hub's engine roster card (Settings ›
   System › Engines) ("Built to vX.Y.Z", served through /api/engines), and
@@ -1430,6 +1461,12 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   submodules. New engine-neutral code must NOT import `lib/omp` directly;
   route it through the harness (capabilities, adapter methods, or the engine
   dispatch pattern in `app/api/sessions/route.ts`).
+
+**Notes for maintainers (omp 18.19 catch-up).**
+- `task.workerThreads: 0` is omp's escape hatch if worker threads misbehave in a container (no Cody setting).
+- Sidebar chats keep a bare cwd (`sidebarBareCwd`): `--no-context-files` does not exist on 18.8.3 and the sidebar has no tools/subagents.
+- `luna.md`/`agents/` live under `$PI_CODING_AGENT_DIR/agents` on omp 18.18.8+ (`~/.omp/agent/agents` before); `lib/routing/request.ts` reads both roots.
+- Checked and left alone: joined `--flag=value` forms (both engines accept the spaced form too, joined works everywhere); `omp-uploads-*` is swept by omp itself, `yt-*`/`omp-dump-anon-*` fall under the hourly disk janitor's temp sweep.
 
 ## Settings shell (`components/settings/`)
 
@@ -1503,6 +1540,51 @@ active engine, named by its short name); **System** (the server).
   "new" is a guess; without globs, curating a provider once freezes its
   roster forever; without the inversion, every model would need an explicit
   add.
+- **Design decision — a new engine setting is badged once, per person, and
+  fades with use.** An engine update adds settings and the Behavior hub
+  renders whatever schema the engine declares, so nothing said a setting was
+  new. `lib/settings-seen.ts` (`cody-settings-seen.json`, instance data dir,
+  0600, atomic temp+rename) keeps, per engine, the key set Cody saw the LAST
+  time it looked (the normalized schema, `harness.settings.readSchema()
+  .schema.settings[].key`, terminal-only rows included) plus the keys
+  introduced since, each with the engine version that brought it. A key in
+  the schema that the last snapshot lacked is new; the snapshot then moves to
+  the current set, new keys accumulate across upgrades while unfaded and drop
+  out when the engine stops declaring them. The FIRST look at an engine only
+  records its keys (a fresh install or a lost ledger never badges ~550
+  settings); a missing or corrupt file reads the same way. The rules are pure,
+  browser-safe functions in `lib/settings-new-keys.ts` (`FADE_AFTER_SEEN = 3`)
+  and are unit-tested without a browser. Fading is per person (`user.id`; one
+  fixed `__instance` key on an open instance): the chip fades after it was
+  seen in 3 separate Settings opens, or the first time the key is changed
+  through Settings, and one person's views never fade another's chip — so
+  `/api/settings-seen` is NOT admin-only. "Seen" means the "New" chip was at
+  least half on screen for ~600 ms in a visible page (`NewChip` →
+  `observeSeen` in `lib/settings-new-reporter.ts`); a hub kept mounted under
+  `display:none` never intersects. Counting is once per (person, key, OPEN):
+  the dialog sends one random `openId` per Settings open
+  (`hooks/useSettingsNewKeys.ts`) and the ledger stores the last counted
+  `openId` beside each counter, so a retried POST, or the same key shown in
+  two panels, cannot count twice. The answer is read once per open, so a chip
+  is never pulled from under the cursor because the count reached 3; it fades
+  at the next open. A CHANGE hides it at once: every settled write in
+  `hooks/useConfigWriter.ts` announces its keys through
+  `subscribeSettingsWritten`. Terminal-only rows never badge (the route
+  leaves them out of `newKeys`; `isBadgedRow` in
+  `components/settings/new-badges.ts` double-checks) though their keys are
+  still recorded. Surfaces: the chip in the label row of `NativeSetting`
+  (`newKey` prop) on the All-settings rows and on the curated, MCP and retry
+  cards; a dot on the hub rows of the rail and the phone root list and on the
+  Models › Assignments / Extensions sub-view tabs, where a key's home is
+  resolved by `settingHome()` in `search-index.ts` (it reuses `cardHome()`:
+  retry cards → Models › Assignments, MCP cards → Extensions › MCP, every
+  other key → Behavior); `N new` counts on the All-settings tab buttons, group
+  headers and phone contents; and a chip on dialog-wide search results
+  (`SearchEntry.isNew`). Settings copy is English-only, so no `lib/i18n`
+  entries.
+- **Safety & approvals cards (Settings > Behavior).** The Recommended "Safety & approvals" group has seven cards: `tools.approvalMode`, `tools.approval.bash`, `tools.approval.extension`, `tools.restrictedFolders`, `bash.gitGuard`, `session.warnCost`, `session.maxCost`. `tools.approvalMode` also takes `always-ask-cached` ("Ask and remember", omp 18.12.3+). Cody offers it only when the installed schema lists it, but the typed config read/write (`lib/omp/settings-config.ts`) always accepts it. The typed read keeps EVERY `tools.approval.<tool>` entry holding allow/prompt/deny (e.g. `computer.control`, omp 18.14+), so a save never drops one; the Settings UI has no editor for them. `tools.restrictedFolders` and `bash.gitGuard` are schema-declared (18.13.1 / 18.8.7) so their cards hide on older engines like the other versioned cards (`INTRODUCED_IN` in `components/recommended-cards.test.mjs`). `session.warnCost` / `session.maxCost` have no UI metadata in omp, so they are `CURATED_ONLY` number cards (section `session`, `unset: true`, `minVersion: "18.13.0"`, hidden below that version by `curatedSupported`). omp accepts only POSITIVE USD amounts for them (0 is rejected), so "off" means the key is absent: the card starts empty and Reset removes it. Cody has no /forget-approvals button; the card hint says to type the slash command in the composer. The `ask.timeout` note in `SETTING_NOTES` describes 18.19 behaviour (submit the form's current values) and says older engines pick the recommended answer; the cfg:// approval part is left out because only the terminal UI registers a host for it.
+
+  The `tools.approval.extension` card ("Extension Tool Requests") is Cody's own: omp reads no such key. Its one consumer is the auto-approve branch of `trackExtensionUiRequest` in `lib/rpc-manager.ts`, which, when the value is `allow`, answers a tool approval through `autoApprovalReply` (`lib/notifications/compose.ts`, built on the same `toolApprovalSelect` / `isToolApprovalTitle` the notification buttons use). omp 18.8.3 and 18.19.0 ask the approval as a `select` titled `Allow tool: <name>…`, so the reply is the option that allows THIS call once (`Approve`, or `Approve Once` beside grants), never a session-wide, remembered or `Deny` option; a list it cannot recognise is left for the person. The legacy `confirm` form still gets `confirmed: true`. Provider safety-check prompts (`Provider safety checks:` in the title) and restricted-folder prompts (`Reason: Restricted folder:`) are never auto-approved. Tests: `lib/rpc-manager.test.mjs` ("auto approve …").
 
 ## Settings: schema-driven, not hand-listed
 
@@ -1546,6 +1628,21 @@ setting added upstream appears without a Cody change.
   permissive Proxy stub and jiti transpiles what is left. The stub must return
   `undefined` for `then`, or the module becomes thenable and the load hangs
   forever on an unsettled top-level await.
+  Two loader rules for omp's newer source layout. (1) Import attributes: a
+  `import x from "./f.md" with { type: "text" };` line is now recognised by the
+  one `sourceImports` regexp (it used to be missed and could swallow the next
+  import), so a prompt-text import is aliased to the stub like any other.
+  (2) `SETTINGS_DATA_MODULES` (a `Record<string, true>`, today only
+  `magic-keywords.ts`): a settings domain file's relative import of one of
+  these in-package data tables is loaded for real (its own imports stubbed,
+  `depth` 1) and handed to the domain as an override, because rows derived
+  from the table at load time (`magicKeywords.<id>` per keyword, and the
+  master switch's "standalone ultrathink, chillax, … keywords" text) came back
+  empty under the stub. A table that fails to load falls back to the stub (no
+  per-keyword rows), never to an error. Covered by the "derives the
+  per-keyword magic switches" test in `lib/omp/settings-schema.test.mjs`; the
+  18.19.0 key snapshot `lib/harness/fixtures/omp-schema-keys.json` now lists the
+  five `magicKeywords.*` rows (440 keys).
 - **Upstream keeps moving modules into sibling packages, and the stub destroys
   data.** 18.2.5 moved the whole terminal UI into `@oh-my-pi/pi-tui`, leaving
   `export { MODEL_ROLE_IDS } from "@oh-my-pi/pi-tui/…"` behind and enum values
@@ -1606,6 +1703,46 @@ setting added upstream appears without a Cody change.
   installed engine does not declare is ambiguous (renamed away, or targeting a
   NEWER engine), so the unmatched-rule check only judges an engine at least as
   new as `HarnessAdapter.verifiedVersion`.
+  Terminal-only list, 18.8.6-18.19.0 additions (checked against the 18.19.0
+  source: none is read under `src/modes/rpc` or `src/modes/acp`):
+  `update.auto`, `session.worktreeScope`, `composer.predictions`,
+  `composer.predictionAlternatives`, `terminal.programStatus`,
+  `worktree.onStart`, `worktree.onExit`, `extensionHandlers.modeControl`,
+  `extensionRenderers.assistantText`, `extensionRenderers.transcriptPresenters`,
+  `btw.inject`, `async.printWake`, `title.refreshAfterPrompts`. `steeringMode`,
+  `followUpMode` and `interruptMode` are NOT terminal-only any more: the engine
+  core reads them for rpc-ui sessions too and Cody drives their live values
+  through `set_steering_mode` / `set_follow_up_mode` / `set_interrupt_mode`.
+  `SETTING_NOTES` gained Cody notes for `out.enabled`,
+  `providers.openaiLiveSteering` (18.14 default flipped to Off: a message sent
+  during a GPT reply waits for the next tool call), `task.autoParallel` (one
+  extra request to the `judge` role per new prompt), `task.perCallModel`,
+  `async.widgets` (background-job widgets cost extra small-model calls that
+  Cody never shows; the `widget` role resolves like `smol`), and a refreshed
+  memory-store note (omp 18.9 made the per-memory scoring much cheaper but it is
+  still per stored memory). `settings-surface.test.mjs` keeps every rule and note
+  matching the installed schema.
+
+  `lib/omp/settings-schema.ts` `CODY_DEFAULT_OVERRIDES` (`Record<string,
+  boolean | number | string>`): the value a Cody chat has while nothing
+  configures it, for settings whose engine default follows the host — `out.enabled`
+  (off under rpc-ui, on in the terminal) and `display.shellVisualization` (Cody
+  launches with it off, `lib/omp/cody-launch-defaults.yml`). The panel shows that
+  value instead of the declared default so a switch never reads On while the
+  engine keeps the feature off.
+
+  `lib/omp/settings-conditions.ts`: `composerPredictionsEnabled` (a
+  `SETTING_CONDITIONS` rule on `composer.predictions`) and
+  `GLOBAL_LAYER_CONDITIONS` (`Record<string, true>`: `contextFilesExtraNotProject`,
+  `restrictedFoldersNotProject`, `perCallModelAllowNotProject`). The engine hides
+  those three list editors while a project file supplied the list; Cody reads and
+  writes the global layer only, so they are always satisfied (no "only takes
+  effect when…" hint). `hooks/useSchemaIndex.ts` `describeCondition` knows the
+  set.
+  `task.autoParallel` (omp 18.19.0) and `task.perCallModel` (18.14.2) carry cost /
+  behaviour notes in `SETTING_NOTES`; the settings themselves, and `task.steps`,
+  `task.structured`, `task.agentSoftRequestBudget`, appear in the panel through the
+  engine's own schema with its own descriptions.
 - **This whole pipeline is tested against a REAL omp package, and for a long
   time it was not.** Six test files (`settings-schema`, `settings-values`,
   `settings-surface`, `model-roles`, `recommended-roundtrip`,
@@ -1656,6 +1793,28 @@ setting added upstream appears without a Cody change.
 - There is no "Native OMP" chip: it labelled the majority of rows and named a
   harness. Only the exceptions carry a chip — "Cody only" for browser-local
   preferences, "Workspace", and "Terminal only" above.
+
+- **Recommended cards for newer engine keys.** `defaultThinkingLevel` is now a
+  card (it left `CURATED_ONLY`); `textVerbosity` carries the "omp 18.17+ defaults
+  to Low" hint; `advisor.continueSeverity` (18.12.1) is an Advisor card; the
+  retry cards gained `retry.fallbackOn` (18.9) and `retry.rateLimitWalksChain`
+  (18.13.3), rendered by `RetrySchemaCard` in
+  `components/settings/RetryFallbackPanel.tsx` and shown only when the installed
+  schema declares the key, so 18.8.3 shows neither. `advisor.syncBacklog` also
+  accepts `strict` (`lib/omp/settings-config.ts`, `BACKLOGS`;
+  `hooks/useConfigWriter.ts`).
+- **List settings accept pasted lists.** `ArrayControl` in
+  `components/settings/engine/SchemaSettingsList.tsx` takes a pasted JSON array
+  (or newline text) through `components/settings/engine/list-draft.ts` (pure,
+  tested in `list-draft.test.mjs`) instead of making the user add each entry.
+  `lib/omp/settings-values.ts` validates `contextFiles.extra` as bare file names
+  (no path separators), which is what the engine accepts (18.14.2).
+- **Web-search order.** The setup wizard writes the full engine order
+  (`WEB_SEARCH_FULL_ORDER` in `components/setup-wizard-steps.tsx`, now also
+  `deepseek`, `keenable`, `sofya`). omp migrates `providers.webSearchOrder`
+  into its `web` model role and fallback chain on load (18.8.3 too; ids the
+  engine does not know are dropped), so one list serves both; `hackernews` is
+  left out on purpose (omp routes `site:news.ycombinator.com` there itself).
 
 ## Key Design Decisions & Traps
 
@@ -1765,8 +1924,8 @@ must name the panel that fixes it.
   what turned the price seed into a phantom "connected" row. Pinned by
   `lib/provider-directory.test.mjs`.
 - **Prices for models omp does not know yet** (`lib/model-price-fill.ts`).
-  omp prices every turn from its BUNDLED catalog (`@oh-my-pi/pi-catalog`
-  `models.json`, read for membership by `lib/omp/bundled-catalog.ts`), so a
+  omp prices every turn from its BUNDLED catalog (`@oh-my-pi/pi-catalog`, read for membership by `readBundledCatalog` in
+  `lib/omp/bundled-catalog.ts`; layouts below), so a
   model reached through runtime discovery before omp's next release (a new
   GPT on a ChatGPT subscription) reads as free. `/api/models` reconciles in
   the background at most every 30 min: an `unpriced` model omp's catalog does
@@ -1782,6 +1941,7 @@ must name the panel that fixes it.
   four flat rates exist in models.yml's override schema — a long-context
   tier is not carried. Verified on a live omp: the utility registry reports
   the written cost for a discovered `openai-codex` model.
+  **Bundled catalog layouts.** Two on-disk layouts exist and Cody reads whichever engine is installed: up to omp 18.13 `src/models.json` is plain `provider -> modelId -> model` (exported as `./models.json`); from 18.14 it is a compact encoded object and the package no longer exports it, so the package's own `src/model-catalog-format.ts` decoder is loaded (never hand-decoded in Cody, it would go stale with the next format change). A failed read is a typed `reason`, never an empty catalog: callers treat it as "cannot tell", not as "omp ships nothing" (price fill then does nothing rather than pricing against a wrong set). Pinned by `lib/omp/claude-credits.test.mjs` (both layouts via `fixtures/claude-credits/fake-omp-package.mjs`).
 - **An engine's own CLI advice is not Cody's advice.** `OMP_BIN_MISSING`
   (lib/omp/omp-cli.ts) is the one missing-binary string, and it names Settings
   › System › Engines — not "install oh-my-pi or set CODY_OMP_BIN", which is
@@ -1803,6 +1963,7 @@ must name the panel that fixes it.
 - Container SSH auto-launch is separately guarded in
   `docker/entrypoint.sh` by `SSH_CONNECTION`, a real TTY, and
   `CODY_NO_AUTO_ENGINE`; non-interactive SSH commands must bypass it.
+- **Terminal omp launches never self-update.** Terminal omp launches get an overlay layer pinning `update.auto: false` so omp can never self-update the engine under Cody's gated install (omp 18.17+ setting; harmless on older).
 
 ### RPC session lifecycle (`lib/rpc-manager.ts`)
 - One wrapper per session id, keyed in a `globalThis` registry.
@@ -1844,7 +2005,12 @@ must name the panel that fixes it.
   that build keeps its select/editor fallback. An engine with a restricted
   vocabulary (pi) is never asked: its id-less error could never settle the
   request. `ask` is a pending dialog like select/confirm/input/editor:
-  replayed to a reconnecting stream, dropped by omp's `cancel` frame.
+  replayed to a reconnecting stream, dropped by omp's `cancel` frame. From omp
+  18.18.3 the built-in `ask` tool no longer uses the structured `ask` request, so
+  `set_ask_dialog` changes nothing for the model's own questions; it still opts in
+  extensions' `ctx.ui.askDialog` calls (an extension-only path, so `AskDialogForm`
+  is now rare). The call stays harmless on every engine (an omp that predates it
+  answers `Unknown command`).
 - **A live session can MOVE to a new id** (omp 18.4.9). When another omp
   process owns the session file for writing, this one's next write moves the
   live session to a NEW sibling `.jsonl` under a NEW session id
@@ -1875,6 +2041,37 @@ must name the panel that fixes it.
   Those frames are forwarded but never reset the idle timer, flip the running
   state or signal the sidebar, so an unattended child still idles out after 10
   minutes (warming costs real provider calls until the child is gone).
+
+- **Engine RPC commands added by omp 18.13–18.19 (`lib/rpc-manager.ts`).** `PASSTHROUGH_COMMANDS` now also forwards `navigate_tree`, `abort_branch_summary`, `set_label` and `get_session_lease` verbatim (omp 18.13.2+/18.14.1+). omp 18.8.3 answers them with an ordinary `Unknown command: <type>` failed response, so every caller must treat that as "feature absent" and fall back; pi never sees them (they are not in its `rpcUi.commands`). `navigate_tree` was removed from `UNSUPPORTED_COMMANDS`. The UI does NOT call any of them yet: the transcript tree's "navigate" stays display-only (`handleNavigate` in `hooks/useAgentSession.ts`) because moving the real leaf would have to spawn an engine just to browse and would change what "Edit from here" means — a product decision, not a compatibility fix.
+- **Shell command "exclude from context" (`!!`) is capability-gated.** omp 18.16+ announces `supportsBashExcludeFromContext` in its `ready` frame; `AgentSessionWrapper` keeps it as `bashExcludeSupported` (reset on relaunch, re-read on the next `ready`). A `bash` command with `excludeFromContext: true` against an engine without it is refused with `WebRpcError` code `bash_exclude_unsupported` (plain message, i18n `agentSession.*`) instead of being silently treated as a normal command that the model would then see. Do not re-add a version-number check; the `ready` flag is the contract.
+- **Spend cap errors (`cost_cap`).** omp 18.13+ refuses the next model request once the chat passes `session.maxCost` (`--max-cost`) and says so in a `notice` frame with `source: "cost-gate"` (warning level at `session.warnCost`, error level at the cap). `lib/error-text.ts` classifies the cap's wording as kind `cost_cap` (plain sentence, no provider guess; `readCostGateAmounts` pulls the amounts out); `hooks/useAgentSession.ts` shows it as a warning-tone notice with its own i18n sentence (`agentSession.errorCostCap*`) instead of a raw "--max-cost" error; `lib/notifications/observer.ts` tracks `costCapRunId` so a run the cap ended before any model reply is reported as failed with the spend-limit sentence (and a prompt refused outright, which never starts a run, still sends one error notification). 18.8.3 has no cost gate, so none of this fires there.
+- **Launch defaults layer (`lib/omp/cody-launch-defaults.{yml,ts}`).** Cody-driven chats get `display.shellVisualization: false` via a `PI_CONFIG_FILES` layer (omp 18.17+ attaches a live copy of the shell screen to every bash progress frame and the saved entry: a 2 s bash call sent 65 frames of up to 112 KB). `buildEngineRpcLaunch` in `lib/rpc-manager.ts` merges the layer FIRST in the existing `PI_CONFIG_FILES` list (model preset / Claude credits / Local-only layers keep their order). The user's `config.yml` is never written; if the user explicitly set `display.shellVisualization: true` there, `codyLaunchDefaultsLayer()` returns null and the layer is dropped. The Settings panel shows the Cody default (`CODY_DEFAULT_OVERRIDES` / `SETTING_NOTES`). Older engines ignore the unknown key.
+  Cody's launch defaults are therefore one `PI_CONFIG_FILES` layer file per omp setting (`lib/omp/cody-launch-defaults.yml` for `display.shellVisualization`, `lib/omp/cody-launch-defaults-async-widgets.yml` for `async.widgets`, nested keys only); each layer is dropped when config.yml explicitly sets that key to true, and engines without the key ignore it.
+- **A start can open a different copy of the chat (omp 18.13.2+).** When omp
+  cannot keep writing a session file (another process holds it, or it changed
+  underneath) it carries the chat on in a NEW sibling file. That file holds the
+  whole transcript again and its header names the old session in
+  `continuationOf`; resuming the OLD id then opens the NEWEST copy. So an id
+  mismatch after a start is no longer only a new chat's temporary key.
+  `startRpcSession` tells them apart by `sessionFile`: with one it is a resume
+  that landed on another copy, so what the app files under the old id
+  (`carryConversation`: owner, preset, Local-only snapshot, crash notices,
+  scheduled messages, plan checklist, display/scratch aliases) is carried to the
+  new id, never renamed (the old id still names a real, frozen file that a
+  bookmark, a scheduled message or a tab may ask for again), and
+  `getAliases().set(oldId, child)` makes a LATER start for the old id find the
+  live child instead of opening a second one on the file the first holds.
+  Aliases are consulted by `startRpcSession` only, never by `getRpcSession`:
+  every read route keeps reading the old file by its own id. If the newest copy
+  already runs under its own id the freshly started child is destroyed and the
+  live one returned. A live move (`announceSessionMove`) sets the same alias,
+  but only when the new file's header says `continuationOf === previousId`; an
+  older omp writes no link, so its old file stays an ordinary chat. The events
+  route emits `cody_session_moved {sessionId, previousSessionId, sessionFile,
+  reason: "continued"}` when a stream asked for one id attaches to a chat that
+  runs as another; `hooks/useAgentSession.ts` adopts the id and shows a one-time
+  notice (`agentSession.sessionContinuedTitle/Body`). Tests:
+  `lib/rpc-manager.test.mjs`, `lib/session-continuation.test.mjs`.
 
 ### Push notifications (`lib/notifications/`)
 
@@ -1979,6 +2176,8 @@ edits them; `app/api/notifications/{route,test,presence,action}`.
   redirect is never followed (a redirected POST becomes a 200 page that looks
   like success); what a non-ntfy server answers is never echoed back. Tests that
   need an open instance must `delete process.env.CODY_REQUIRE_ACCOUNTS`.
+
+**A notification button can only grant ONCE.** omp asks a tool approval as a `select` titled "Allow tool: <name>" with rows such as "Allow once", "Allow for session", "Deny". `lib/notifications/compose.ts` (`toolApprovalSelect`) offers a lock-screen/notification button only for the once and deny rows; `lib/notifications/answer.ts` (`cleanUiAnswer`) re-checks the same rule server-side, so a forged or stale tap cannot send a broader grant (session-wide, "always", or an unknown row). Broader grants stay inside the chat dialog. The predicates (`isToolApprovalTitle`, `isAskOtherRow`, `isAskDoneRow`, `isAskSelectedTitle`) live in `lib/ask-walk.ts` and are imported by compose/answer so the dock and the notifications read omp's wording one way. For the model's own questions: a plain pick gets one button per real option (omp's "Other (type your own)" row is dropped, so no button only opens a typed follow-up); a multi-choice step (a "(N selected)" title or a Done row) gets no buttons and its notification says to open the chat.
 
 ### Time zones: the device that sent the message decides (`lib/time-zone.ts`, `lib/time-zone-prefs.ts`)
 
@@ -2350,9 +2549,11 @@ message, read when it was sent** — not the server's, not a saved setting.
   clobber exactly those headers, and per spec `frame-ancestors` is also what
   overrides the global `X-Frame-Options: DENY`.
   The session-export policy additionally allows `https://cdnjs.cloudflare.com`
-  in `script-src`: the exporter renders the transcript client-side with
+  in `script-src`: the exporter of omp 18.8.3 renders the transcript client-side with
   SRI-pinned `marked`/`highlight.js` from that CDN, and blocking it renders an
-  empty transcript.
+  empty transcript. omp 18.19's exported viewer loads its script from stencil.so
+  instead, so the policy also allows `stencil.so` and `build.stencil.so`; opening an
+  export now needs internet access.
 - The Docker image installs `chromium` and sets `CODY_CHROMIUM_BIN` so both
   `preview_screenshot` captures and the `stream` rung — the fallback that must
   never be missing — work out of the box.
@@ -2890,6 +3091,8 @@ is the part of Cody that notices both.
   container template now carries `--pids-limit 16384`; check
   `/sys/fs/cgroup/pids.events` (`max` counts refused forks) before blaming
   the engine.
+
+- **Run recovery: `tool_execution_update` for unknown tool ids.** `lib/run-recovery/supervisor.ts` `toolUpdated` now only refreshes a call that is already in flight. Since omp 18.10.2 the engine no longer drops a tool's late progress frames (a background job that keeps reporting after the call or the run ended); the old code created a tracker entry from such a frame, and since that call never gets an end the entry outlived the run as a ghost: `insideOwnDeadline` excused real silence from a `bash` call and `findOverdueTool` called a healthy run stalled. A call enters the table only through its `tool_execution_start`.
 
 ### Browser-hosted hardware (`lib/devices/`)
 
@@ -3712,11 +3915,11 @@ no script, by the owner's choice), so Cody's own janitor is the ONLY cleanup.
 - **Helper-agent memory limit** (`lib/omp/extensions/cody-context-budget.ts`, a
   fifth `--extension` for main omp chats): for SUBAGENTS only, appends one
   system-prompt line saying at what size omp summarises their history and to
-  keep `context_notes` current. The size is what omp itself applies, read from
+  keep `context_notes` current. The size is what omp itself applies to that helper's model, read from
   `<agent dir>/config.yml` (re-read when its mtime changes: one `statSync` per
-  helper start; `task.agentCompactionThresholdOverrides[<agent>]`,
-  else root `compaction.thresholdTokens`, else `thresholdPercent`; Bun-only,
-  no config → a generic line). The text is fixed per agent+model window+config (prompt
+  helper start) by `resolveHelperLimit` in `lib/helper-memory-limit.ts`; the
+  extension passes the live `ctx.model` (provider, id, contextWindow) so the
+  per-model thresholds apply (Bun-only, no config → a generic line). The text is fixed per agent+model window+config (prompt
   cache) and it registers no `tool_call`/`tool_result` handler (see the disk
   note: that vetoes `task.speculativeLaunch`). The Behavior › Context card
   "Helper agents' memory limit" (`components/settings/engine/HelperMemoryCard.tsx`,
@@ -3726,22 +3929,38 @@ no script, by the owner's choice), so Cody's own janitor is the ONLY cleanup.
   `compaction.experimentalContextManagement` (all chats, not only helpers).
 - **Helper memory limit: one implementation.** The helper memory limit has ONE
   implementation: `lib/helper-memory-limit.ts` (`resolveHelperLimit`,
-  `effectiveHelperLimit`, `limitTokens`, `parseOverride`; override for the
-  agent, else root `compaction.thresholdTokens`, else
-  `compaction.thresholdPercent`, applied to the model's context window). The
-  Settings card (`components/settings/engine/helper-memory.ts`), the helper's
-  own prompt line (`lib/omp/extensions/cody-context-budget.ts`, which imports it
-  by relative path — its only Cody import) and the subagent chips/transcript
-  header (`subagentContextGauge` in `lib/subagent-format.ts`, config from
-  `hooks/useHelperLimitConfig.ts` via the cached `/api/omp-settings` route) all
-  use it; never write a second copy. `readNativeSettings` now also returns
-  `compaction.thresholdTokens` / `thresholdPercent` (validated, round-tripped on
-  write).
+  `effectiveHelperLimit`, `limitTokens`, `clampPercent`, `parseOverride`). It
+  mirrors omp 18.9+ `resolveCompactionPoint`, in this order: the agent's
+  `task.agentCompactionThresholdOverrides[<agent>]` (a token count or "N%");
+  else the entry for the helper's model in `compaction.modelThresholds`
+  (`enabled` not false; exact `provider/id` key beats the longest prefix
+  pattern ending in `*`; the value is `"f<N>"` = N% of the window shown as a
+  fixed-size trigger, `"N%"`, or a plain number = a base token count with
+  optional `reserveTokens`); else root `compaction.thresholdTokens`; else root
+  `thresholdPercent`. `limitTokens` follows the engine's arithmetic: a token
+  limit at or above the model's window means "window minus the reserve"
+  (`max(15 %, reserveTokens ?? 16384)`; an impossible reserve falls back to
+  15 %), a share is clamped to 1-99 % and floored. The model is optional:
+  without it (the subagent chips and transcript header, whose progress events
+  carry no provider/id: `subagentContextGauge` in `lib/subagent-format.ts`,
+  config from `hooks/useHelperLimitConfig.ts`) only the override, root
+  keys and the new window-minus-reserve and clamp rules apply; the helper's own
+  prompt line (`lib/omp/extensions/cody-context-budget.ts`, which imports the
+  module by relative path — its only Cody import) knows the model and so also
+  honours `modelThresholds`. The Settings card
+  (`components/settings/engine/helper-memory.ts`) uses the same module; never
+  write a second copy. `compaction.modelThresholds` and
+  `compaction.reserveTokens` have no `ui` in omp (hidden), so they stay out of
+  the schema and the panel; a per-model editor belongs to the Models hub, not
+  Behavior. `readNativeSettings` returns `compaction.thresholdTokens` /
+  `thresholdPercent` (validated, round-tripped on write).
 - **Settings › System › Disk space** (`components/settings/DiskSection.tsx`,
   `/api/disk`: GET for any signed-in user, POST `{action:"clean"}` and PUT
   settings admin-only): meters against the quotas, the five largest scratch
   folders by chat title, the undo-snapshot total, the last clean, "Clean idle
   scratch now", and the idle-days setting (the rest, including `testLeftoverIdleHours`, under Advanced).
+- **Background services (Settings › System › Services).** `lib/omp/services.ts` wraps `omp ps --all --json` (works on 18.8.3 and 18.19): list + stop/kill of detached engine services. `app/api/services/route.ts` is admin-only and validates the pid/name against the live list before stopping anything.
+- **Replay data (Settings › System › Disk).** `lib/omp/gc-strip.ts` + `app/api/disk/replay-data/route.ts` drive `omp gc strip-replay-data` (18.19+; feature-detected, hidden on 18.8.3): GET previews bytes saved, POST applies. Admin only. `gc.autoCompress` is deliberately not exposed (APFS/NTFS only, no-op on Linux).
 
 ### Disk exhaustion is a first-class failure (`lib/disk-space.ts`)
 - The instance data dir is finite and often quota-capped (a ZFS dataset on
@@ -3848,7 +4067,7 @@ refresh) are forwarded without touching state; a `notice` may carry a
 a new file (see "RPC session lifecycle"), at `error` a persistence failure;
 `agent-end` a failed post-turn maintenance. `extension_ui_request`
 `method:"ask"` is a structured multi-question dialog (answered with `answers`,
-or `cancelled`), and `method:"cancel"` retires an expired dialog.
+or `cancelled`; from omp 18.18.3 only an extension's `ui.askDialog` sends it, the model's own `ask` walks `select`/`input`/`editor` requests), and `method:"cancel"` retires an expired dialog.
 **Mount notices are for the model, not the person.** omp announces `xd://`
 tool roster changes twice: a `notice` (`source: "xdev"`, text
 `xd://: mounted …; unmounted …`) and, persisted, an `xdev-mount-notice`
@@ -3859,6 +4078,15 @@ is written for that spawn-time roster too, before the first user message.
 Only an MCP server's tools (`mcp__*`) changing is news: `describeMcpMountChange`
 (lib/mount-notice.ts) words the toast from `details`, and the `notice` path
 drops every non-MCP line. Never toast the message `content`.
+
+- **Manual compaction frames.** omp 18.13.3+ emits `manual_compaction_start` / `manual_compaction_end` for every manual compaction (typed `/compact`, extension, another tab). `hooks/useAgentSession.ts` shows the "compacting" banner from `manual_compaction_start` and settles from `manual_compaction_end` ONLY when this page has no `compact` request in flight (`compactRpcInFlightRef`); the page's own request still settles from its command response. Older engines send neither frame, so the page's own button behaves exactly as before.
+- **Edit rejections (stale-tag edit failures).** omp 18.19 marks a rejected `edit` tool result with `details.errorKind` (e.g. `stale tag`). `lib/session-reader.ts` keeps `errorKind` on tool-result details; `MessageView.getEditRejectionReason()` shows it as an "error · stale tag" chip on the tool card; `countEditRejections()` in the hook totals them into `SessionStatsInfo.editRejections` (`lib/pi-types.ts`) which the Session stats list in `AppShell.tsx` renders as "Edit rejections". Absent on 18.8.3 → nothing shown.
+- **Shell output notes (`lib/bash-output-meta.ts`).** `bashOutputNotes(meta)` turns omp 18.17+ bash result metadata (`elidedLines/elidedBytes`, `columnTruncatedLines`/`columnLimit`, `minimized`) into a typed list of notes; `BashExecutionView` in `MessageView.tsx` renders them under the card (`messageView.bashNote*` i18n keys) so a trimmed command output says it was trimmed instead of looking complete. `BashExecutionMessage.meta` carries the metadata (`lib/types.ts`). Nothing renders when the engine sends no metadata (18.8.3).
+- **Narration blocks (assistant thinking with `narration: true`).** omp 18.12+ on Anthropic/Bedrock marks thinking blocks that are really prose to the user (`ThinkingContent.narration`, `lib/types.ts`). They are answer text, never thinking: `lib/message-display.ts` `isFinalAnswerBlock` counts them as answer and `groupHasThinking` does not count them as thinking; `MessageView.BlockView` renders them with `TextBlock` (never the collapsed thinking box) and `isLiveText` treats them as unboxed text; `lib/session-reader.ts` does not defer them when thinking is deferred; `ChatWindow.hasFinalAssistantAnswer` treats a non-empty narration as a final answer. Live frames carry whole message snapshots, so the flag arrives with the block. Engines without the field never set it, so behaviour there is unchanged.
+**Notes for maintainers (omp 18.19 catch-up).**
+- `agent_end` rewriting in `rpc-manager.handleFrame` only applies when `event.isTerminal !== false`: 18.19 sends `isTerminal:false` for an end followed by a continuation (steer, auto-retry), 18.8.3 always sends `true` (or omits it). Do not "simplify" it to always rewrite.
+- Engine builtin slash commands (`/unpin`, `/forget-approvals`, …) appear in the palette automatically (grouped as `engineBuiltin` in `ChatInput`); no per-command Cody code.
+- Checked and left alone: `queue_update.liveSteered` (Cody never reads `queue_update`; `withdrawQueued`/`steerNow` already settle by trying the command and reading its boolean), `resumedToolCallIds` on `ready` (ignored; run-recovery's text nudge works on both engines), `live_connect` / `dictation_*` frames (the server has no microphone or WebRTC peer; `handleEvent` has no `default:` so unknown frames fall through harmlessly).
 
 ### Todo reminder: quiet, and never over a question
 omp auto-continues an unfinished todo list after a terminal turn (unless its
@@ -3938,6 +4166,19 @@ over 60 characters) and `folds` (summary and task count, keyed by the fold's
 first task). The keeper fails soft: any failure applies nothing. Tests:
 `lib/plan-keeper.test.mjs`, `components/TodoList.test.mjs`.
 
+omp 18.19.0 removed the todo status `blocked` and the `blocker` text; it reads an
+old blocked task back as `pending`. Cody keeps accepting both (`TodoItem` in
+`lib/pi-types.ts`, `parseTodoPhases` in `lib/session-reader.ts`, the plan keeper
+and `TodoList`) because omp 18.8 still sends them and old chat files contain
+them; 18.19 simply never produces one. The keeper already treats `blocked` as an
+ordinary open task, so nothing in it relied on a "blocked is untouchable"
+guard. `lib/plan-keeper-engine.test.mjs` runs the keeper's `set_todos` check-off
+against a REAL engine (`CODY_OMP_BIN`, scripted local model server, throw-away
+agent dir) and covers both versions: an engine restart keeps the tick on 18.12.4+
+(the engine saves `set_todos` edits as a `user_todo_edit` entry) and loses it
+on older engines (the keeper puts it back), and a list holding a blocked task
+is accepted on both.
+
 ### Approval prompts: inline, and the agent owns the buttons
 - An ACP engine (`lib/harness/acp-session.ts`) can stop mid-turn and ask
   permission. The turn GENUINELY blocks on the answer, so the card is not a
@@ -3973,7 +4214,8 @@ first task). The keeper fails soft: any failure applies nothing. Tests:
   for a shell command than for a file edit, and `title`/`kind` are both
   optional, so every field is read defensively (`lib/permission-request.ts`)
   and an unrecognised kind renders verbatim rather than as a missing i18n key.
-- **omp's `ask` dialog (18.4+) is ONE form, not a series.** After the wrapper
+- **omp 18.4 - 18.18.2: the `ask` dialog is ONE form, not a series.** From 18.18.3
+  this `ask` request is sent only for an EXTENSION's `ui.askDialog`. After the wrapper
   sends `set_ask_dialog`, omp emits `extension_ui_request` `method:"ask"` with
   `questions[]` (`recommended` is an INDEX; omp never sends an "Other" option,
   so the form always adds a free-text field). `components/AskDialogForm.tsx`
@@ -3987,6 +4229,11 @@ first task). The keeper fails soft: any failure applies nothing. Tests:
   `{cancelled:true}`. Typing "Other" on a single-select clears the radio and
   picking a radio clears the text; multi-select keeps both. A reconnect replays
   the request with the same id, so the InputDock-keyed form keeps its draft.
+- **omp 18.18.3+: the model's `ask` is one HTML `<form>` that RPC walks field by field** with ordinary `select` / `input` / `editor` requests (the same frames in `docs`: `select` "Which color?" [..., "Other (type your own)"]; a multi-choice field is asked again after every tick as `select` "(N selected) <question>" with a "✔ Done selecting" row; notes are an `editor` titled "Notes", no timeout). omp sends no tick state, so Cody rebuilds it: `lib/ask-walk.ts` (`createAskWalkTracker`: `observe`, `reply`, `withdrawn`) recognises a step by its "(N selected)" title and its Done / Other rows, remembers the ticks the user made, and marks the `select` request with a `walk` view. `useAgentSession` feeds every dialog through the tracker; a tick keeps the dialog up in a "settling" state (`ASK_WALK_SETTLE_MS`, 5 s fallback) because omp asks again under a new request id. `InputDock` keys a walk card by the question (`walk:<question>`) so a whole checkbox field is one card that keeps its focus. `ExtensionDialog` shows checkboxes (`role="checkbox"`, `aria-checked`), a hint line, "Done" as the primary button (it answers with omp's exact Done row), and an "Other" row that shows the line typed behind it. Preselected boxes omp never reports show as plain rows plus the count. Every answer is the exact row string omp offered; the screen wording is localised, omp's text is not. A dialog counts as the model's own (`fromAsk`) when it arrives while the `ask` tool is running and is not a tool approval (`dialogBelongsToAsk`).
+- **A message sent while an ask is open withdraws it (omp 18.14.2+).** omp sends a `cancel` for the open dialog and the tool result is "Ask interrupted by message". The tracker drops the walk on that `cancel`; `InputDock` shows a warning (`inputDock.askWithdrawn`) on engines where `askWithdrawnByMessage(version)` is true (version via `hooks/useEngineVersion.ts`, unknown version = no warning). A half-typed answer is not kept.
+- **`secret: true` inputs (omp 18.13.2+).** An `input` request with `secret: true` renders as `type="password"` with `autoComplete="new-password"`, autocapitalize/autocorrect/spellcheck off and the `data-1p-ignore` / `data-lpignore` / `data-bwignore` hints. Only extensions issue it today (omp refuses secret provider logins over RPC). Types: `secret?: boolean` on the input request in `lib/types.ts` and `lib/pi-types.ts`.
+- Text fields (input / editor, masked or not) take the focus when the dock opens (`data-input-autofocus`).
+- **The `ask` transcript card.** An `ask` tool call renders its answers as question/answer rows (components/AskResultPanel.tsx, pure helpers in lib/ask-result.ts) instead of the raw args JSON. `askAnswersFromDetails` normalises both engines: omp 18.19 `details.answers/notes/timedOut` (one HTML form in `args.html`) and omp 18.8 `details.question|results` (`args.questions[]`). A `<input type="password" name=…>` field found in `args.html` has its answer shown as bullets (max 12), as omp's own TUI does; the result text (which carries the raw JSON) is hidden while the panel shows. History loads keep a BOUNDED whitelist of ask details (lib/session-reader.ts stripToolResultDetails → `keepAskToolResultDetails`: ≤50 rows, strings ≤4000 code points); extend that whitelist if the panel ever reads more. An errored or cancelled ask keeps the plain args + result text. Header preview: `askCallPreview` (first 18.8 question, else `i`, else the form's tag-stripped text).
 
 ### HomeLabber approvals in the chat (`lib/homelabber-approval.ts`, `components/HomelabberApproval.tsx`, `/api/homelabber`)
 - **What it is.** HomeLabber (the owner's homelab admin server, an MCP server
@@ -4153,6 +4400,13 @@ first task). The keeper fails soft: any failure applies nothing. Tests:
   stage line (`usageLimit` prop, one ellipsised line, warning/error colour,
   full sentence in its tooltip) and only while the account is past its limit.
   About 320 px tall collapsed.
+- **Quota popover: what omp 18.19.0 adds, and what 18.8.3 still gets.** The quota ring's popover (components/QuotaPopover.tsx) words only facts the engine actually sent, so the installed 18.8.3 renders exactly as before and 18.19.0 adds lines. `buildQuotaView` is a thin wrapper over `buildQuotaViewCore`: it adds per-read facts (`refreshFailed`, `unreported`) to whichever view came out, and the per-account facts (`policy` + `showPriority`, `fiveHourIdle`, `windowsStaleSince`; helper `accountFacts`) sit on the hero view or on each `QuotaAccountRowView`. Every field exists only when it has something to say; nothing is invented for an engine that does not report it. All wording lives in lib/usage/quota-copy.ts (pure, takes `t`): `describeAccountPolicy` (the default policy says nothing; the priority is named only when another login of the same provider has a non-default one, `providerUsesPriority`), `isFiveHourIdle` (omp's `inactiveGates` contains `5h` AND no 5-hour window is reported), `describeWindowAmount` (`UsageWindow.amount`: "$5 of $20", "40 of 100 credits"; a window with no length, `windowMs` null, renders normally), `creditExpiryState` / `formatCreditDate` (a saved reset is "soon" within `EXPIRES_SOON_MS` = 48 h; the date is a clock time today, a weekday within six days, a plain "Dec 30" beyond), `describeCreditClears` (from the credit's `clears` ids such as `anthropic:7d:fable`; ids Cody cannot name are dropped, nothing nameable means no line). Footer: a failed refresh with an older good reading shows "Numbers from <read time> · refresh failed at <time>" (the reason, when omp wrote a readable one, is the tooltip), never "Updated just now"; an account carried over from an earlier read says "Quota as of <time>"; logins omp could not read are one muted line ("omp could not read the quota of N signed-in accounts"), counted by provider only, never by identity or email. A limited login's row has a tooltip that explains the fallback model; with no reset time it reads "Limited" (`usage.accountLimitedNoTime`), never a leaked "{time}".
+
+  Logins that cannot serve: `resolveModelAvailability` can answer `unavailable` (every login signed out or turned off). A login that ended gets the existing sign-in view (`signedOut` set, so the ring wears its dot and the popover its "Sign in again" button). A login omp turned off for any other reason gets `QUOTA_DISABLED`: warning colour and the words "Login turned off", but NO `signedOut`, so no dot and no sign-in button (the owner may have turned it off on purpose, and a sign-in is not the fix). The same holds with no model selected. `modelLimitReached` (the picker's "Limit reached" mark) stays exhausted-only: `unavailable` never marks or blocks a model in the picker.
+
+  Saved resets inside the popover: each credit line shows its end date, an "Expires soon" tag when it is within 48 h (the Saved resets header carries the same tag so it is seen without opening anything), a "Clears: …" line from `credit.clears`, and "Expired <time>" for one already past; when `snapshot.failedProviders` is set, a note names the provider(s) whose list could not be read, so a short list is not read as "none". Automatic spending (components/QuotaAutoSpend.tsx): `AutoSpendSection` is bound to the running engine's own settings schema (`useSchemaIndex`); `buildAutoRedeemGroups` (hooks/auto-redeem-controls.ts) offers exactly the keys that engine has: 18.19.0 gets one Ask / Spend / Never switch per limit (`<group>Resets.autoRedeem5h`, `autoRedeemWeekly`, and Claude's separate `claudeResets.autoRedeemFable` with a note that weekly consent does not cover it), 18.8.3 gets the single legacy `<group>Resets.autoRedeem`, an engine with none gets no switches, and nothing renders before the schema has loaded. "Ask" is written as `unset`, never by clearing the key (clearing would let an old single key flow back in). Writes use the same `setValue` the Settings panel uses, so the two can never disagree.
+
+  Tests (engine-independent, real `omp usage --json` fixtures of both engines in lib/usage/fixtures/): components/QuotaPopover.auth.test.mjs, lib/usage/quota-copy.test.mjs, hooks/auto-redeem-controls.test.mjs. Time assertions are timezone-agnostic on purpose (`\d{1,2}:\d{2}`, dates built from local-time parts).
 - **The ring says whose quota it is, and how old the reading is.** With more
   than one account on a provider, every window label carries the account's
   POSITION (`brandedAccountLabel` → "Claude · Primary · 5-hour window"), and
@@ -4172,6 +4426,10 @@ first task). The keeper fails soft: any failure applies nothing. Tests:
   (`cody-reset-credits.json`, 0600) marked stale rather than erasing it.
   Rows are named like the account list ("Claude · Primary"), never by the
   org/email string omp reports.
+- **Saved-reset redemption (Claude and Codex).** Cody spends a saved reset through omp's own locked command when the installed engine has it, and through the old Bun helper otherwise. `redeemResetCredit` (lib/harness/reset-credits.ts) probes the engine once per binary and package version (`probeUsageResetSupport`: reads `omp usage --help` and checks the ACTION list for `reset`, no version-number compare; a failed probe is not cached and counts as unsupported). When supported, it hands the helper (bin/cody-omp-reset-credits.mjs) the omp binary; the helper first re-lists the account and refuses with `offer_changed` unless the grant the user chose is still the one omp will spend (`credits[0]`; omp's command spends the account's next credit and takes no credit id), then runs `omp usage reset <provider>/<credentialId>` (bin/cody-omp-reset-cli.mjs: fixed argv, no shell, `NO_COLOR=1`, 90 s timeout, `PI_CODING_AGENT_DIR` set). That command holds omp's cross-process lock (`<agent.db>.reset-<hash>`), so a Cody click cannot double-spend with a running omp. The command prints text, not JSON (`--json` only affects listing), so `parseUsageResetResult` maps exit code plus sentence to Cody's unchanged outcomes: `Reset applied for` with exit 0 -> `reset`; lock contention / lock timeout / "another omp process started spending" -> `reset_in_progress`; "another omp process spent" -> `already_redeemed`; nothing to reset, no credit, ineligible, offer changed, unconfirmed, cooldown, account unavailable, credit list failed -> their existing codes. Anything unrecognised, an exit 0 without the spend sentence, or a timeout is `inconclusive` (never reported as spent). If the binary cannot launch, the helper falls back to the direct storage call. Listing always stays on the Bun helper (works on every engine). The listing also carries each credit's `clears` (limits it refreshes, e.g. `anthropic:7d:fable` for the Fable launch reset) and `failedProviders` (a provider that did not answer; the other provider's accounts still show).
+
+  Fable (omp 18.19.0): a Claude launch reset that also clears the Fable weekly cap is an ordinary Claude credit whose `clears` includes `anthropic:7d:fable`; it appears in the normal saved-reset list. Whether it is spent automatically is the engine-side setting `claudeResets.autoRedeemFable` alone; nothing in the helper acts on it.
+- **Saved-reset auto-redeem settings (omp 18.18.7+).** omp 18.18.7 replaced `codexResets.autoRedeem` / `claudeResets.autoRedeem` with per-window `autoRedeem5h` / `autoRedeemWeekly` (Claude also `autoRedeemFable`). The engine copies a legacy value into 5h and weekly IN MEMORY only and leaves config.yml untouched, so the file alone reads "unset" while omp is already spending saved resets. `migrateLegacyAutoRedeem(data, schemaKeys)` in `lib/omp/settings-values.ts` mirrors that rule (nested `group.autoRedeem` wins over the quoted dotted key; boolean true/false becomes yes/no, strings carry over; a window key that is already set, nested or flat, is never overwritten; Fable is never filled). `readSchemaSettings` applies it, so the Settings panel, the quota popover and `/api/omp-settings/schema` all show what the engine acts on. It is gated on the engine's schema declaring BOTH window keys of a group, so 18.8.x values pass through untouched. One engine quirk is mirrored on purpose: when the legacy key is a quoted dotted key with no nested group beside it, omp fills a dotted key it never reads (checked on 18.19.0 with `omp config get`: "unset"), so Cody fills nothing there either; showing or writing "yes" would grant a new spending consent. `writeSchemaSettings` extends the one existing write: when the patch touches any `group.autoRedeem*` key and the legacy key is still in the file, it writes BOTH 5h and weekly with their migrated values, applies the patch, and removes the legacy key, all in the same atomic write; other keys are never touched. The Claude 5h / weekly / Fable rows carry the note "Fable is a separate consent: it is not copied from the old switch." (`SETTING_NOTES` in `lib/omp/settings-surface.ts`, listed in the test's `NOTE_SINCE` as 18.18.7). A legacy value that is not unset/yes/no is written as "unset". Tests: `lib/omp/settings-values.test.mjs` compares the migration with `omp config get` on the installed engine (run it with CODY_OMP_BIN against 18.8.3 and 18.19.0).
 - **Freshness is refreshed where it changes, and stated where it is read.** A
   usage read happens on mount, on a session switch, when the popover OPENS,
   on an explicit Refresh in the popover footer, and — the one that matters —
@@ -4369,6 +4627,14 @@ fails when the bridge's copy of the tool definition drifts from
 (resolution + level validation), `lib/model-switch/switch.test.mjs` (timing,
 order, refusals, `everywhere` writes only `modelRoles.default` and returns the
 previous value, tool texts), `hooks/agent-model-switch.test.mjs`.
+
+- **Composer thinking levels.** The composer's level list is `auto` + `thinkingLevelsFor(model)` (`off` + the model's own
+  `thinking.efforts` when `reasoning` is true, else only `off`). It passes omp's per-model list through,
+  so a live-discovered model shows the real ladder only when omp itself built it as reasoning: omp 18.8.3
+  does that for an unlisted Fable build only while models.dev/online discovery knows it (offline it
+  arrives as non-reasoning, which Cody cannot repair), omp 18.19.0 lists Fable 5.2 in its bundled
+  catalog and shows `low..max` even offline. Credits twins mirror the catalog (see above).
+- **Unverified thinking ladders.** omp 18.10.3+ may send `thinking.unverified: true` (with `reasoning: false`) for a model it has no capability data for. `hasUnverifiedLadder` (lib/thinking-levels.ts) is the one test for it; such a model still offers its ladder, the composer's reasoning menu shows a note, and `/api/models` entries carry `thinkingUnverified`. An engine that never sends the marker behaves exactly as before.
 
 ### Running state SSE + reconciliation
 - The sidebar listens to `/api/agent/running/events`, backed by `subscribeRunningSessions()` in `lib/rpc-manager.ts`, so running badges update without polling.
@@ -5134,6 +5400,17 @@ device on the account. Nothing it does ever blocks a send or stops a run.
   `⤴` async marker (live `detached` flag or history `details.async`
   presence). Shared formatters live in `lib/subagent-format.ts`.
 
+A `task` call is summarised on its card by `lib/task-call-preview.ts` (batch:
+"N subagents: names", omp 18.19 `task.steps`: first step plus "(N steps)").
+Since omp 18.18 a parent agent's message to a running subagent is a `user`
+message carrying `parentIrc {from, body}` beside the model-facing `<irc …>`
+wrapper; `lib/irc-display.ts` turns it into the same incoming-IRC card peers
+use, so a subagent transcript shows the plain text and the sender. omp 18.17+
+puts `progress`, `broadcast`, `replyTo` in the IRC message details; the card
+shows them as small tags. `AgentProgress.stage`/`watch` (omp 18.19) come only
+from the completion probe, which omp never runs under RPC, so Cody does not
+read them.
+
 ### Worktrees and project grouping
 - `lib/worktree.ts` resolves linked worktree top-levels back to the main repo `projectRoot`; `listAllSessions()` attaches that to each `SessionInfo` so all worktrees for one repo are grouped together in the sidebar.
 - Worktree operations are served by `/api/worktrees` and guarded by the same allowed-root rules as `/api/files`.
@@ -5215,6 +5492,26 @@ device on the account. Nothing it does ever blocks a send or stops a run.
   The sort is a memo over the session list, so it re-sorts when the list
   refreshes and never on running/unread/clock ticks. Per-project trees also sort
   by `lastActiveAt`; the project order itself is unchanged.
+
+**One row per chat, even after a move.** `SessionInfo.continuationOf` (read from
+the header by `scanSessionInfo`) lets `collapseContinuedSessions`
+(`lib/session-reader.ts`) drop the earlier copy once a listed row continues it
+and nothing was said in it after the new file began; a copy that was written
+afterwards holds turns the other lacks, so both stay (that is also when omp's own
+resume leaves the older copy alone). omp decides this by whether the older copy's
+newest entry id is held by the newer file; Cody does not read whole files for the
+list, so it uses `earlier.lastActiveAt <= copy.created` instead. A chat that moved
+several times is one row, forks of an earlier copy hang from the row shown, and
+`/api/sessions/<id>` still reads every copy by its own id. Delete and Archive of
+the row take the earlier copies along (`listSupersededCopies`) so none returns as
+a chat. `lib/session-tools.ts` (cross-session awareness) collapses the same way.
+The list's first-prompt scan (`scanSessionInfo`) is a head window plus a tail
+window; when a chat's first prompt sits behind a large leading entry (for
+example a `memory_recall` custom entry written before the first turn) the head
+window holds no user message, so the scan walks the gap line by line
+(`forEachFileLineSync` stops when the callback returns true) instead of
+reporting an empty chat. Tests: `lib/session-collapse.test.mjs`,
+`lib/omp/session-list-window.test.mjs`.
 
 ### Session switching: paint from cache, never wait on the engine
 
@@ -5351,6 +5648,7 @@ session:
 - `/api/plugins` shells out to the user's `omp plugin` CLI (`list/install/uninstall/enable/disable/upgrade`, `--json` where available) — never the Bun-only SDK. `lib/omp/plugin-cli.ts` holds the shared `execFile`/loose-JSON-parse helpers (`runOmpCli`, `parseJsonLoose`), used by both `/api/plugins` and `/api/plugins/marketplace`.
 - **`plugin upgrade` targets.** omp 18.4.5+ accepts a bare marketplace plugin name and npm/git-installed plugins; 18.3.x accepts only `name@marketplace` (anything else exits with "Invalid plugin ID"). `/api/plugins` `update` already forwards the source verbatim (works on both, 18.3.x just refuses npm plugins), and the marketplace route's `parsePluginId` check is an input guard, not a workaround, and stays so a bare name never reaches an 18.3.x engine.
 - **Plugin marketplace** (`/api/plugins/marketplace`, `lib/omp/marketplace.ts`, `components/PluginMarketplace.tsx`): browse data is a pure-Node read of `marketplaces.json` (the registry of `omp plugin marketplace add`ed catalogs, at `getMarketplacesRegistryPath()`) plus each marketplace's cached `marketplace.json` catalog (`getPluginsDir()`'s cache dir, `~` expanded) — no child process. `lib/omp/paths.ts`'s `getOmpDataRoot()` is the shared root for both (`~/.omp`, or its XDG equivalent): omp's own `DirResolver` gates XDG activation on the SAME `PI_CODING_AGENT_DIR`-override check for config-root-scoped paths (plugins, marketplaces) as for agent-scoped ones, so `getOmpDataRoot()` reuses the existing `xdgDataAgentRoot()` value rather than re-deriving a separate check — the override disables XDG resolution instance-wide, not per-category. Installed-state (which catalog plugins are already installed, at what version/scope) comes from `omp plugin list --json`, same as `/api/plugins`. Every mutation (add/remove/update marketplace, install/uninstall/upgrade a plugin) shells out to the CLI; name/id segments are validated against omp's own `^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$` rule before reaching argv.
+- **Bundled plugin versions.** `readMarketplaceCatalog` now shows a bundled (`source: "./…"`) plugin's own `.claude-plugin/plugin.json` / `plugin.json` version before the catalog entry's, matching what `omp plugin upgrade` installs (18.11+).
 - `/api/skills` uses `lib/skills-service.ts`, a pure-Node scanner mirroring the ACTIVE engine's discovery. omp: project `.omp/skills` (walk-up), `~/.omp/agent/skills`, then the `.claude` / `.agent(s)` / `.codex` / `.github` compat dirs and managed skills. pi: a narrower set (`buildPiScanRoots`).
 - **The scan is one level deep.** Every root sits inside a repo or a user config dir, so a recursive walk would list every vendored, checked-out or archived `SKILL.md` as a loaded skill.
 - Skill toggling edits only the `disable-model-invocation` frontmatter key on the target `SKILL.md`; keep that surgical so user formatting survives.
@@ -5414,6 +5712,16 @@ config").
   sessions, because a running omp keeps its own in-memory copy of the block
   (`#credentialBackoff`) until it restarts. Safe: a provider still limiting
   re-writes the block on the next request.
+- **Usage reading (`lib/usage`): a failed or partial read never erases a good one.** `omp usage --json` is a photograph, and the camera sometimes fails (timeout, a provider endpoint rate-limiting one login, an engine restart). The rules, all in pure modules so the cache, the browser hook and the tests share them:
+  - **`lib/usage/last-good.ts`.** A FAILED read (timeout, crash, no usable JSON) keeps serving the last good reading for up to 6 hours (`LAST_GOOD_MAX_AGE_MS`), flagged `stale: true` with `refreshFailed {at, reason}`; older than that the plain failure shows ("unavailable"). A SUCCESSFUL read that does not mention an account the previous good one had carries that account forward for up to 30 minutes (`CARRY_FORWARD_MAX_AGE_MS`), its windows labelled by `UsageAccount.windowsStaleSince` (the time of the reading they come from, never refreshed by later reads, so the account ages out). Carried windows whose reset time has passed are dropped, and an account the newest read does name (measured, signed out or disabled) is always the newest word.
+  - **`lib/usage/cache.ts`** owns `lastGood`; it is dropped with the cache (engine switch, login, logout, tests), and a read that was in flight when the cache was reset cannot become the new world's last good (generation guard). A re-served last-good reading backs off like a failure (`USAGE_FAILURE_BACKOFF_MS`), so no caller can turn a failing probe into a spawn loop. Credential blocks come from `listOmpCredentialsKeepingLast` (the last good store read, 15 minutes at most) so a block that vanished for one read cannot flip a refused account back to usable.
+  - **`lib/usage/client-merge.ts` (`mergeUsageRead`, used by `hooks/useUsage.ts`).** The browser keeps a good reading on screen when a poll answers `available: false` (a restarting server, a first read that failed) and marks it stale instead; a newer good reading always replaces it, and a reading older than six hours is not kept.
+  - **Parser tolerance (`lib/usage/omp-usage.ts`).** A notice printed before or after the JSON (an update line, a deprecation) no longer makes the output "malformed" (falls back to the `{`...`}` span); a non-zero exit that still printed a readable payload (some builds exit 1 when one provider's fetch failed) is a reading, not a failure. `accountsWithoutUsage` (both 18.8.3 and 18.19.0 print the key; 18.19.0 also lists capless LiteLLM keys and a per-entry `policy`) is kept as `UsageSnapshot.unreportedAccounts`, never as account rows (nothing was measured). When NOTHING is measurable but omp listed signed-in logins it could not read, the read is unavailable with "omp could not read the quota of N signed-in accounts" rather than "no quota windows". A saved reset that is spent (`remainingCount` 0 or status `redeemed`) no longer pulls the "expires soon" date earlier.
+  - **New 18.19 fields, all optional (18.8.3 prints none of them):** `reports[].policy` becomes `UsageAccount.policy` (priority, reservePct, reserveSource, reclaimAbovePct, state, remainingPct); `metadata.inactiveSharedGates` becomes `UsageAccount.inactiveGates` (`["5h"]`: no 5-hour session is open, so the window is absent, not dropped); `limits[].amount` of a money meter (usd, credits) becomes `UsageWindow.amount {unit, used, limit}`; a LiteLLM budget is labelled "key budget" / "user budget"; a Codex `credits` tier is a billing meter, labelled "credit spend cap".
+- **`lib/usage/quota-tiers.ts` is the one place that says which windows constrain which model** (header comment is the rule list): Claude tiered windows (Fable, Mythos) bind only that family; a Codex Spark model spends only the Spark meter and every other model only the 5-hour and weekly plan windows; a credit-billed Codex seat has no plan windows, so `openai-codex:spend-cap` stands in for them (beside plan windows the cap only bounds credit overage and gates nothing); Cursor's weekly pool binds only Cursor's own models (Auto, Composer, Grok) and the prepaid pool only every other model (a plan reporting one combined window binds all); Factory Droid's extra-balance meter is a top-up, not a gate; plan-label tiers (Copilot `individual`, Devin) name no model and constrain none. `select.ts` and `availability.ts` call it; do not re-implement the rules elsewhere.
+- **`AvailabilityState` has a fifth value, `unavailable`.** When every account a provider has is signed out or disabled, nothing can serve the model: `unavailable` with `unusable: "signed_out" | "disabled"`, never `unknown` (which every caller reads as "usable") and never `exhausted` (which means "wait for the reset"). `cannotServe()` is what a caller that asks "may I send here?" reads; `pickAvailableRoute` skips an unavailable candidate like a spent one and reports `chosenState: "unavailable"` only when every skip was a login problem. Routing consumers outside `lib/usage` (blackouts, chain binding, credits cover) intentionally still act only on `exhausted`: a signed-out provider is not a blackout that ends at a reset, omp walks the chain itself (see "Signed-out providers"), and the UI says "sign in".
+- **Credential blocks are scoped (omp 18.19).** omp stores each rate-limit block with a `blockScope` (Claude `''`/`tier:fable`/`tier:mythos`; Codex `chat`/`spark`/`shared`; Cursor `pool:auto`/`pool:api`; others account-wide). `bin/cody-omp-credentials.mjs` returns every credential row with `blocks: [{scope, until(epoch ms)}]` (unexpired only, one per scope, scope `''` when the engine has none) beside the merged `blockedUntil`; `OmpCredentialRow.blocks` is optional, and a row without it reads as one `''` block. `applyCredentialBlocks` (lib/usage/credential-order.ts) makes ONE window per (credential, scope): id `<provider>:blocked:<credentialId>` for `''` (unchanged, so remembered blackouts match) and `<provider>:blocked:<credentialId>:<scope>` otherwise, with `source: "block"`, `blockScope`, and `tier` from `tierOfBlockScope`. Never test "account-wide" with `!window.tier`; call `isAccountWideWindow` (lib/usage/quota-tiers.ts) — blackouts, credits-cover and chain-binding do. `listOmpCredentialsKeepingLast` (lib/harness/omp-credentials.ts) returns the last successful list (marked `stale`, up to 15 minutes) when a later helper call fails, so a block already seen is not lost to a transient failure. Real-engine test: `lib/harness/omp-credentials-blocks.test.mjs` (run with `CODY_OMP_BIN` for each engine).
+
 - **Usage is about accounts, not the active engine.** `/api/usage` answers
   whenever the omp binary is installed, whichever engine is active, and the
   composer ring and picker badges ("Limit reached · resets …") render for
@@ -5484,6 +5792,9 @@ config").
   out). A working concrete pin, an alias the user wrote, and an `on`/`off`
   value are left untouched; with no cached catalog no pin is ever judged
   unresolvable.
+  `seance` (omp's bundled read-only "consult a saved chat" agent, 18.12+) is in
+  `BUNDLED_AGENTS` and maps to `@smol` in `DEFAULT_AGENT_ROLES` because it has no
+  `model:` of its own.
 - **`retry.usageAwareFallback` is the same-provider-first switch.** With it
   on, omp checks usage health before each request (auth-storage
   `getModelUsageHealth`): the provider is healthy while ANY account is, and
@@ -5567,14 +5878,17 @@ removal silently breaks the credits.
      starting omp); a replaced key stays in its provider, a new one takes the first
      free provider;
   2. one Cody block per key's provider in models.yml (`syncClaudeCreditsProviders`):
-     model IDs only (omp fills the rest from its bundled catalog — measured
-     identical), names suffixed " (API credits)" / " (API credits 2)", `auth: none`.
+     model IDs, plus `reasoning` and `thinking` copied from the bundled catalog row when the engine needs them (an unlisted-but-discovered model such as `claude-fable-5-2` on omp 18.8.3 builds as non-reasoning on its own, so the twin mirrors the catalog's thinking ladder; on omp 18.19 the catalog lists it and omp fills the rest itself), names suffixed " (API credits)" / " (API credits 2)", `auth: none`.
      Never omit `auth`: omp then forces OAuth-style request shaping; with `none` an
      `sk-ant-api…` key goes as `X-Api-Key` with no `Authorization` header. A
      hand-written provider of one of those names is never touched, a block keeps its
      `baseUrl` (a new one inherits the first's), the Providers directory hides them,
      and every chat launch levels them with omp's catalog (a new Claude model gets
-     its twins at once, not when someone opens Settings);
+     its twins at once, not when someone opens Settings). The Claude model list comes
+     from `readClaudePlanModels` through the shared catalog reader (see "Prices for models
+     omp does not know yet"), so saving a key works on both layouts. omp 18.19.0 holds a
+     plan for 60 s when a refusal repeats with stale usage: a fake usage server in tests
+     must report a reset of now + `retry-after`;
   3. a per-chat config overlay (`cody-claude-credits/<digest>.yml`) appended to
      `PI_CONFIG_FILES` by `withClaudeCreditsOverlay` (profile → preset → credits →
      Local-only, which replaces the launch so a Local-only chat never reaches a
@@ -5620,10 +5934,12 @@ removal silently breaks the credits.
   generic `ANTHROPIC_API_KEY` box is unused by omp while a plan is signed in.
 
 ### Model orchestration: roles, plans, chains, resets
-- **OMP defaults and role scope.** With no `modelRoles` in config.yml, OMP owns role resolution. Its fifteen built-in roles (omp 18.4.9; read from the engine, `FALLBACK_MODEL_ROLE_IDS` mirrors them) are `default`, `smol`, `slow`, `vision`, `plan`, `commit`, `tiny`, `memory`, `task`, `advisor`, `image`, `web`, `speech`, `dictation`, and `judge`; no removed or custom role is implicit. Preserve saved custom-role mappings. “Reset to OMP defaults” deletes only Cody's overrides: `DELETE /api/model-roles` drops `modelRoles`, `DELETE /api/omp-settings` `{sections:["retry"]}` removes the retry section, and `DELETE /api/model-plan` removes the plan's roles, fallback chains, and usage-aware flag while preserving unrelated retry tuning. Deletion allow-lists live in `lib/omp/settings-config.ts` (`RESETTABLE_SECTIONS`/`RESETTABLE_PATHS`).
+- **OMP defaults and role scope.** With no `modelRoles` in config.yml, OMP owns role resolution. Its sixteen built-in roles (omp 18.12.3+; fifteen on older engines such as 18.8.3; read from the engine, `FALLBACK_MODEL_ROLE_IDS` mirrors the newest set) are `default`, `smol`, `slow`, `vision`, `plan`, `commit`, `tiny`, `memory`, `task`, `advisor`, `widget` (job-widget captions; resolves like `smol` until assigned), `image`, `web`, `speech`, `dictation`, and `judge`; no removed or custom role is implicit. Preserve saved custom-role mappings. “Reset to OMP defaults” deletes only Cody's overrides: `DELETE /api/model-roles` drops `modelRoles`, `DELETE /api/omp-settings` `{sections:["retry"]}` removes the retry section, and `DELETE /api/model-plan` removes the plan's roles, fallback chains, and usage-aware flag while preserving unrelated retry tuning. Deletion allow-lists live in `lib/omp/settings-config.ts` (`RESETTABLE_SECTIONS`/`RESETTABLE_PATHS`).
+- **Roles come from the engine, never a frozen list.** omp's role vocabulary changes between releases (16 roles from omp 18.12.3: `widget`, which writes job widgets and captions and resolves like `smol` until assigned). Anything that lists roles to the user, proposes them or writes them to `modelRoles` must read the engine's live list (`getOmpModelRoleIds()` in lib/omp/model-roles.ts) and filter Cody's own vocabulary through `planRoleNames()` in lib/model-plan/derive.ts, so `widget` is never offered or written on an engine that lacks it. Label-only maps (`modelPlan.role.*`, `agentSession.job.*`, `ROLE_LABEL_KEYS`, `DESCRIBED_ROLES`) may always know every role. The derive functions (`heuristicPlan`, `constrainPlanDraft`, `deriveChains`, `validatePlan`) and `planWithModel` take an optional `roleNames` list; the default is every role Cody knows, so production callers (app/api/model-plan/route.ts) must pass the engine-filtered list.
+- **Non-chat models in the Settings role picker.** `get_available_models` returns chat models only. LM Studio decision models (omp's `judge` role, provider id `lm-studio`) come from Cody's own local scan: `lib/local-ai.ts` reads LM Studio's native `/api/v1/models` and returns them as `decisionModels`, kept out of `models`. Only the `judge` row of Settings > Models > Assignments offers them.
 - **Live config takes a restart.** An OMP child reads config.yml at spawn (only subagent preflight reloads it), so plan apply and every reset call `restartIdleRpcSessions()` (rpc-manager): idle children reconnect on demand with the new config; running turns complete on their old config. Responses carry `{restarted, active}` for the UI to announce the result.
 - **One effective roster.** `lib/model-plan/roster.ts` builds the planner allow-list directly from OMP's effective `get_available_models` response. That response already applies `enabledModels`; never add a second Cody filter. The planner's `bestAvailableModel` uses the same provider tiering and lets the provider assigned to `default` lead its tier.
-- **Native hints are optional.** The planner may read installed `src/priority.json` through the shared `getOmpPackageRoot()` resolver for native smol/slow suitability ranks. A missing, malformed, or unavailable asset must leave planning functional. Keep task balanced; native-smol suitability remains a valid light-workload signal.
+- **Native hints are optional.** The planner reads omp's native smol/slow/image/web/speech/dictation/judge suitability ranks through `readNativeRolePriorities(packageRoot)` (`lib/model-plan/roster.ts`): first the catalog rules file `src/compat/rules.json` -> `behavior.roleDefaults` (omp 18.8.4+/18.14, read as JSON, not through Bun), then the legacy `<root>/src/priority.json` (older engines). A missing, malformed or unavailable source leaves planning functional (no ranks). Pinned by `lib/model-plan/roster.test.mjs`. Keep task balanced; native-smol suitability remains a valid light-workload signal.
 - **Provider tiering is semantic.** Rank direct Claude/Codex providers first, then other direct APIs, then gateways (including OpenRouter), then genuinely local endpoints. A zero price is common for remote subscriptions or gateways and is never locality evidence; only the endpoint address can establish localness.
 - **Fallback chains keep source intent.** For every role assignment that resolves to the same source, derive one invariant source tier: native suitability, then meaningful provider price, then role-only intent when price is unknown. Same-provider suitable siblings remain eligible so distinct quota buckets can absorb a fallback. Emit selectors in OMP precedence order: exact model first, provider wildcard second, role last.
 - **Fallback switches announce themselves**: OMP's `retry_fallback_applied` ({from, to, role}) and `retry_fallback_succeeded` ({model, role}) frames surface as toasts in `useAgentSession` (i18n `agentSession.fallback*`).
@@ -5680,10 +5996,12 @@ instance data dir (`cody-model-presets.json`), never in `config.yml`.
   `lib/server-import-graph.test.mjs` walks that graph from the server's own
   entry list.
 
+- **Preset selectors must be exact on omp 18.14+.** A preset's role and chain entries are `provider/id[:level]` selectors that omp resolves itself. From omp 18.14.0 a provider-qualified selector must name an exact model id; omp no longer picks a close sibling. `PUT /api/model-presets/[id]` therefore checks every role value and chain entry against the live roster (`lib/model-presets/roster-check.ts`, pure rules in `lib/model-presets/selector.ts`: `selectorProblem`) and refuses an unresolvable one with a `unknown_model` 400 that names the closest ids. The check only runs on engines at or above `EXACT_SELECTOR_SINCE` (18.14.0), skips role refs (`@smol`), wildcards (`openai/*`), providers the roster does not list, and a roster that cannot be read. Chain keys are never checked.
+
 ### Auth and model config
 - Auth flows go through RPC commands (`get_login_providers`, `login`) against the omp child process; credentials live in omp's `agent.db` (SQLite). Cody reads and removes them only through the Bun helper over omp's own AuthStorage (`bin/cody-omp-credentials.mjs`) — plus one read-only SELECT of ACTIVE `openrouter` api keys in `lib/openrouter/key.ts` and the helper's guarded tombstone purge (see "Several accounts can serve one provider").
 - `models.yml` in the omp agent directory (`~/.omp/agent/models.yml`, `.yaml` fallback) is read and written from the Providers hub's detail drawer, in a custom endpoint's "Advanced" form (`components/ModelsConfig.tsx`'s editors, rendered by `settings/providers/ProviderDetail.tsx`) — not the Models hub, which only reads the resulting catalog.
-  - Model `kind` (chat/tiny/image/tts/stt/judge/embedding/rerank/video, never `search`), runner `api`s and `compat.statefulResponses` (Responses-family apis only) follow omp 18.7. The kind↔api rule and omp's exact message live in `lib/model-kinds.ts`, shared by the editor (inline error, Save disabled) and `validateModelsConfig`. Unset kind / default statefulResponses persist as the key ABSENT (`withCompatFlag` drops an emptied `compat`). There is no `modelOverrides` editor UI; overrides are only validated and preserved.
+  - Model `kind` (chat/tiny/image/tts/stt/judge/embedding/rerank/video, never `search`), runner `api`s and the `compat` switches follow omp 18.19 as seen by the INSTALLED engine: `lib/model-kinds.ts` carries the release that first knew each newer key (`RUNNER_API_SINCE`, `MODELS_YML_SINCE`, `MODEL_TOKENIZERS`), and the editor (`components/ModelsConfig.tsx`, via `hooks/useEngineVersion`) offers a value only from that release on, plus whenever the file already carries it (so it can be seen and removed). Old engines ignore an unknown KEY but the api list and `tokenizer` are closed enums where one future value makes omp drop the WHOLE file, which is why those are gated. Gated fields: judge runner apis `openai-decisions`/`workers-ai-systemone` (18.9.2) and `liquid-systemone` (18.19.0); per-model `imageCountBudget` (18.11.3, positive integer, also validated on `modelOverrides`); `tokenizer` `o200k` (18.10.3) / `cl100k` (18.16.0); `compat.requiresThinkingPresence` (anthropic-messages, 18.13.0); `compat.supportsThinkingBindingControls` (bedrock-converse-stream, 18.9.1); `compat.statefulResponses` on anthropic-messages = message threads (18.17.0); provider `discovery.advertisedReasoning` (18.13.2, only on `openai-models-list`/`lm-studio`/`proxy` discovery; any other type is refused at save because omp 18.13.2+ drops the file). `lib/model-kinds.test.mjs` asks the installed engine's own models.yml schema (`lib/omp/fixtures/models-yml-schema-probe.mjs`) which apis/tokenizers it accepts, so a drifting table turns red on whichever engine runs the test. The kind↔api rule and omp's exact message live in `lib/model-kinds.ts`, shared by the editor (inline error, Save disabled) and `validateModelsConfig`. Unset kind / default statefulResponses persist as the key ABSENT (`withCompatFlag` drops an emptied `compat`). There is no `modelOverrides` editor UI; overrides are only validated and preserved.
 - API-key status endpoints must never return the raw key.
 
 ### RPC transport limit — the utility process MUST negotiate v2
@@ -5780,6 +6098,40 @@ Location: `~/.omp/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`
   be tolerated by readers.
 - Large payloads (images) are externalized to the content-addressed blob store
   at `~/.omp/agent/blobs` and referenced from entries.
+- Header may carry `continuationOf` (omp 18.13.2+): the id of the session this
+  file carries on from. See "RPC session lifecycle" and the list collapse above.
+- `model_usage` entries record a billed call that is not a transcript message
+  (late response, discarded turn with `purpose: "discarded-turn"`, cache refresh,
+  helper call). From omp 18.12.4 an entry written off the active branch names
+  the branch it interrupted in `activeLeafId` (`null` = a cleared session). The
+  head is NOT blindly the last entry: use `resolveSessionLeafId(entries)`
+  (`lib/omp/session-files.ts`); `buildSessionTree` leaves such dead-end entries
+  out. From omp 18.17.0 they count in omp's own totals, the cost cap and
+  `omp stats`, so Cody sums them too: `aggregateModelUsage(entries)`
+  (`lib/session-usage.ts`), `GET /api/sessions/<id>` returns it as `modelUsage`
+  (omitted when zero), the page adds it to the totals it sums from messages, and
+  the subagent usage scan (`lib/subagent-history.ts`) includes it.
+- Every entry may carry `runtime: {version, commit, branch, label}` (omp 18.11+,
+  the build that wrote it). Readers ignore unknown keys; Cody shows nothing from
+  it.
+- Fork and `/tan` pair a call the parent left unresolved with a `toolResult` that
+  has `isError: true` and the text "...its outcome is unknown." It renders as an
+  ordinary failed tool result; it is never shown as a success.
+- A compaction entry's `preserveData.snapcompact` can hold up to 12 MB (24 MB
+  with the reasoning-free copy) of base64 PNG frames on ONE line. Never render
+  `preserveData` (`compactionUiMessage` uses `summary` only). Readers that touch
+  raw lines must tolerate lines of tens of MB: `MAX_SESSION_LOAD_BYTES` is 1 GiB,
+  the statistics indexer steps over lines above 64 MiB, and the disk janitor's
+  transcript tail (`readTranscriptMentions`, 2 MiB) is raw text cut mid-line and
+  scanned by needle, so a huge last line costs one tail read and no allocation
+  per line (test: `lib/disk/transcripts.test.mjs`).
+- Silent custom entries (`date-cwd-reminder`, `memory_recall`,
+  `source_session_init`, `system-prompt-digest`) have `type: "custom"`, which the
+  reader never turns into a row. Custom MESSAGE types that are bookkeeping are
+  listed in `HIDDEN_CUSTOM_TYPES` (`lib/message-display.ts`): now also
+  `auto-parallel-plan`, `skill-notice`, `memory-recall-changes`,
+  `streaming-edit-recovery`. `session-transfer` (omp 18.10 `session pack/unpack`)
+  stays visible, titled by `messageView.sessionTransferLabel`.
 
 `entryIds[]` in `SessionContext` is a parallel array to `messages[]` — maps each displayed message back to its `.jsonl` entry id, used for fork and navigate_tree calls.
 

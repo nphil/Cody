@@ -1,10 +1,11 @@
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { getHarness } from "../harness";
+import { readCatalogRoleDefaults } from "../omp/bundled-catalog";
 import { getOmpPackageRoot } from "../omp/settings-schema";
 import { type OmpLoginProvider, type OmpModel, runUtilityCommand } from "../omp/rpc-utility";
 
-/** Native OMP role-priority lists copied from its optional priority.json asset. */
+/** Native OMP role-priority lists: the `smol` and `slow` chains omp ranks its own models by. */
 export interface NativeRolePriorityLists {
   smol?: readonly string[];
   slow?: readonly string[];
@@ -25,7 +26,7 @@ export interface RosterModel {
   local: boolean;
   /** Published per-token cost: tier evidence only, never subscription quota. */
   relativeCost: number | null;
-  /** Zero-based native OMP suitability ranks, when priority.json recognizes it. */
+  /** Zero-based native OMP suitability ranks, when omp's own smol/slow chains recognise it. */
   rolePriority?: {
     smol?: number;
     slow?: number;
@@ -76,19 +77,39 @@ function normalizeNativeRolePriorities(value: unknown): NativeRolePriorityLists 
   };
 }
 
-/** Read OMP's shipped priority hints without coupling plan generation to a version. */
-function readNativeRolePriorities(): NativeRolePriorityLists | undefined {
-  try {
-    const packageRoot = getOmpPackageRoot();
-    if (!packageRoot) return undefined;
+let warnedNativeRoleHints = false;
 
-    const assetPath = join(packageRoot, "src", "priority.json");
-    if (!existsSync(assetPath)) return undefined;
+/**
+ * Read OMP's shipped role hints without coupling plan generation to a version.
+ * Newer omp keeps them in its catalog package's compiled rules
+ * (`behavior.roleDefaults`); older omp shipped `smol` and `slow` as
+ * `<root>/src/priority.json`. Either is optional: with neither, planning goes
+ * on without native ranks.
+ */
+export function readNativeRolePriorities(packageRoot: string | null = getOmpPackageRoot()): NativeRolePriorityLists | undefined {
+  if (!packageRoot) return undefined;
 
-    return normalizeNativeRolePriorities(JSON.parse(readFileSync(assetPath, "utf8")) as unknown);
-  } catch {
-    return undefined;
+  const catalog = readCatalogRoleDefaults(packageRoot);
+  if (catalog.ok) {
+    const lists = normalizeNativeRolePriorities(catalog.defaults);
+    if (lists) return lists;
   }
+
+  try {
+    const assetPath = join(packageRoot, "src", "priority.json");
+    if (existsSync(assetPath)) {
+      const lists = normalizeNativeRolePriorities(JSON.parse(readFileSync(assetPath, "utf8")) as unknown);
+      if (lists) return lists;
+    }
+  } catch {
+    // An unreadable asset is the same as an absent one.
+  }
+
+  if (!warnedNativeRoleHints) {
+    warnedNativeRoleHints = true;
+    console.warn(`[cody] model plan: omp's own smol/slow ranking could not be read, so plans go by price alone (${catalog.ok ? "its role defaults hold no smol or slow list" : catalog.reason})`);
+  }
+  return undefined;
 }
 
 function isPrivateIpv4(hostname: string): boolean {

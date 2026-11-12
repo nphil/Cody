@@ -25,12 +25,72 @@ import { isSignedOutCause } from "../usage/credential-health";
 import { rankProviderAccounts } from "../usage/select";
 import type { UsageAccount, UsageAccountService } from "../usage/types";
 import { enableProvider } from "./model-roles";
+import { getOmpVersion } from "./omp-cli";
 import { RpcProcess, type RpcFrame } from "./rpc-process";
 import { disposeUtilityRpc, type OmpLoginProvider, runUtilityCommand } from "./rpc-utility";
 
 const LOGIN_EXTRA_ARGS = ["--no-session", "--no-extensions", "--no-skills", "--no-lsp"];
 const READY_TIMEOUT_MS = 60_000;
 const LOGIN_TIMEOUT_MS = 15 * 60_000;
+
+/**
+ * Sign-ins omp's RPC mode cannot complete, keyed by the FIRST omp release that
+ * refuses them. omp's roster does not flag these (it lists id, name, available
+ * and authenticated only), and the refusal is a failed `login` command, so
+ * the version is what lets the Providers list say so BEFORE a click.
+ *
+ * google-antigravity: from 18.18.7 omp makes the user type "yes" to a risk
+ * warning first; that is a prompt asked before any URL, which RPC mode
+ * rejects at once. 18.8.3 opened the browser, so older engines are untouched.
+ */
+export const TERMINAL_ONLY_SINCE: Readonly<Record<string, readonly [number, number, number]>> = {
+  "google-antigravity": [18, 18, 7],
+};
+
+/**
+ * Whether `version` (bare semver, or null when unreadable) is at least `min`.
+ * An unreadable version is NOT at least anything: the sign-in stays offered and
+ * the engine's own refusal (see `explainLoginError`) decides.
+ */
+export function versionAtLeast(version: string | null | undefined, min: readonly [number, number, number]): boolean {
+  const match = /(\d+)\.(\d+)\.(\d+)/.exec(version ?? "");
+  if (!match) return false;
+  for (let index = 0; index < 3; index += 1) {
+    const part = Number(match[index + 1]);
+    if (part !== min[index]) return part > min[index];
+  }
+  return true;
+}
+
+/** Whether this omp refuses to sign `providerId` in over RPC. */
+export function isTerminalOnlyLogin(providerId: string, version: string | null | undefined): boolean {
+  const since = TERMINAL_ONLY_SINCE[providerId];
+  return since !== undefined && versionAtLeast(version, since);
+}
+
+/** The sign-in error code the route forwards so the panel can show its own words. */
+export const TERMINAL_ONLY_CODE = "terminal_only";
+
+/** omp's words when a sign-in needs a typed answer or a secret before any URL:
+ * "Provider 'x' requires interactive prompts which are not supported in RPC mode.
+ * Use the terminal UI to log in." (and "...requires secret input, which is not
+ * supported in RPC mode..."). */
+const RPC_REFUSAL = /requires (?:interactive prompts|secret input)[^]*?not supported in RPC mode/i;
+
+/** A refused sign-in, in words a person can act on. `code` is `terminal_only`. */
+export class TerminalOnlyLoginError extends Error {
+  readonly code = TERMINAL_ONLY_CODE;
+  constructor(providerId: string) {
+    super(`Cody cannot sign you in to "${providerId}": omp asks a question here that Cody cannot pass on. Open a terminal on the server, run omp, type /login and choose this provider.`);
+    this.name = "TerminalOnlyLoginError";
+  }
+}
+
+/** `error` as a TerminalOnlyLoginError when omp refused the login over RPC, else unchanged. */
+export function explainLoginError(providerId: string, error: unknown): unknown {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  return RPC_REFUSAL.test(message) ? new TerminalOnlyLoginError(providerId) : error;
+}
 
 /** The slice of RpcProcess the login flow drives; a test hands in a fake. */
 export interface LoginRpcChild {
@@ -55,6 +115,8 @@ export interface OmpProviderLoginDeps {
   removeCredential?: (provider: string, credentialId: number) => Promise<OmpCredentialRemoval>;
   /** Remove every credential stored for a provider. */
   removeProvider?: (provider: string) => Promise<OmpCredentialRemoval>;
+  /** The installed omp's bare version; decides which sign-ins are terminal-only. */
+  engineVersion?: () => Promise<string | null>;
 }
 
 const defaultDeps: Required<OmpProviderLoginDeps> = {
@@ -72,6 +134,7 @@ const defaultDeps: Required<OmpProviderLoginDeps> = {
   listUsage: () => getUsageSnapshot(),
   removeCredential: (provider, credentialId) => removeOmpCredential(provider, credentialId),
   removeProvider: (provider) => removeOmpProvider(provider),
+  engineVersion: () => getOmpVersion(),
 };
 
 /** Every credential stored for one provider, with the state omp reports for
@@ -138,6 +201,8 @@ export function createOmpProviderLogins(overrides: OmpProviderLoginDeps = {}): P
           // as "standby" instead of naming which one is actually serving.
         }
       }
+      // An unreadable version flags nothing: the engine's own refusal (explainLoginError) still decides.
+      const version = await deps.engineVersion().catch(() => null);
       return {
         providers: providers
           .filter((provider) => provider.available !== false)
@@ -152,6 +217,9 @@ export function createOmpProviderLogins(overrides: OmpProviderLoginDeps = {}): P
               // logout only offers itself when there is a stored credential to remove.
               canLogout: accounts !== undefined && accounts.length > 0,
               ...(accounts ? { accounts, multiAccount: accounts.length > 1 } : {}),
+              // The sign-in needs a typed answer omp cannot take over RPC: the panel
+              // points at the omp terminal instead of offering a button that fails.
+              ...(isTerminalOnlyLogin(provider.id, version) ? { terminalOnly: true } : {}),
             };
           }),
       };
@@ -205,9 +273,12 @@ export function createOmpProviderLogins(overrides: OmpProviderLoginDeps = {}): P
           typeof frame.title === "string" ? frame.title : "Enter the authorization code",
           typeof frame.placeholder === "string" ? frame.placeholder : null,
         ).then((value) => {
-          // The prompt's own answer, unless the paste watch already answered.
-          if (pendingInputId === id) { pendingInputId = null; answer(id, value); }
-          else bufferedValue = value;
+          // The prompt's own answer, unless the paste watch already answered
+          // it. A prompt answered that way is left waiting on the channel and
+          // would take the NEXT submission: that value belongs to whichever
+          // request is outstanding now (a second `input` in the same login,
+          // like Cloudflare's account id), or is held for the next one.
+          deliver(value);
         }).catch(() => {});
       } else if (method === "notify") {
         if (typeof frame.message === "string") ui.onProgress(frame.message);
@@ -224,7 +295,11 @@ export function createOmpProviderLogins(overrides: OmpProviderLoginDeps = {}): P
     ui.signal.addEventListener("abort", onAbort);
     try {
       await running.waitReady(READY_TIMEOUT_MS);
-      await running.sendCommand({ type: "login", providerId }, LOGIN_TIMEOUT_MS);
+      try {
+        await running.sendCommand({ type: "login", providerId }, LOGIN_TIMEOUT_MS);
+      } catch (error) {
+        throw explainLoginError(providerId, error);
+      }
       deps.afterLogin(providerId);
     } finally {
       ui.signal.removeEventListener("abort", onAbort);

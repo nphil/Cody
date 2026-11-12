@@ -1,4 +1,5 @@
 import type { OmpCredentialRow } from "../harness/omp-credentials";
+import { tierOfBlockScope } from "./quota-tiers";
 import type { UsageAccount, UsageSnapshot } from "./types";
 
 /**
@@ -113,11 +114,17 @@ export function applyCredentialOrder(
  * headroom while every turn fell back to another provider. Same for the
  * Token Plan key, blocked for six days while its plan reported fine.
  *
- * A block is therefore folded in as an exhausted, untiered window on the
- * account: the ring shows it, `resolveModelAvailability` reports the model
- * exhausted, the blackout registry remembers it until `blockedUntil`, and
- * the role binder routes around it. One source of truth means the blocks
- * have to be IN it.
+ * A block is therefore folded in as an exhausted window on the account: the
+ * ring shows it, `resolveModelAvailability` reports the model exhausted, the
+ * blackout registry remembers it until `blockedUntil`, and the role binder
+ * routes around it. One source of truth means the blocks have to be IN it.
+ *
+ * omp 18.19 scopes a block (`blockScope`: a Claude tier, a Codex chat/spark
+ * lane, a Cursor pool, …), so a credential gets ONE window per scope, and a
+ * scoped window names only what it refuses: a Fable-tier block must not read as
+ * the whole Claude account being out. The unscoped ('') window keeps its
+ * original id so remembered blackouts still match; a scoped one appends the
+ * scope. A row with no `blocks` list (older source) reads as one '' block.
  */
 export function applyCredentialBlocks(
   snapshot: UsageSnapshot,
@@ -125,30 +132,36 @@ export function applyCredentialBlocks(
   now = Date.now(),
 ): UsageSnapshot {
   if (!snapshot.available || credentials.length === 0) return snapshot;
-  const blocked = new Map<number, string>();
+  const blocked = new Map<number, { scope: string; until: string }[]>();
   for (const row of credentials) {
     // A disabled row (removed, or disabled by omp) can no longer serve, so a
     // block still recorded against it is not a fact about routing. Surfacing
     // it fabricated a blocked account for a credential the user had removed.
-    if (!row.blockedUntil || row.disabledCause) continue;
-    const until = Date.parse(row.blockedUntil);
+    if (row.disabledCause) continue;
+    const candidates = row.blocks?.length
+      ? row.blocks.flatMap((block) => (block.until !== null && Number.isFinite(new Date(block.until).getTime()) ? [{ scope: block.scope, until: new Date(block.until).toISOString() }] : []))
+      : row.blockedUntil ? [{ scope: "", until: row.blockedUntil }] : [];
     // An expired block is not a block; the helper already filters, but the
     // snapshot may be served from cache across the expiry.
-    if (Number.isFinite(until) && until > now) blocked.set(row.id, row.blockedUntil);
+    const live = candidates.filter((block) => Date.parse(block.until) > now);
+    if (live.length > 0) blocked.set(row.id, live);
   }
   if (blocked.size === 0) return snapshot;
 
-  const blockWindow = (provider: string, credentialId: number | null, until: string) => ({
-    id: `${provider}:blocked:${credentialId ?? "credential"}`,
+  const blockWindows = (provider: string, credentialId: number | null, blocks: { scope: string; until: string }[]) => blocks.map(({ scope, until }) => ({
+    id: scope ? `${provider}:blocked:${credentialId ?? "credential"}:${scope}` : `${provider}:blocked:${credentialId ?? "credential"}`,
     label: "rate-limit block",
     utilization: 100,
     resetsAt: until,
     state: "exhausted" as const,
     windowMs: null,
-    tier: null,
+    // A scope that names a model family (tier:fable, spark) carries that tier,
+    // like a measured window for it, so it never counts as account-wide.
+    tier: tierOfBlockScope(scope),
     shared: true,
     source: "block" as const,
-  });
+    blockScope: scope,
+  }));
 
   const claimed = new Set<number>();
   // Which providers the snapshot itself reports accounts for, decided BEFORE any
@@ -158,10 +171,10 @@ export function applyCredentialBlocks(
   // invisible (two saved keys, both refused, read as one spent and one usable).
   const reporting = new Set(snapshot.accounts.map((account) => account.provider));
   const accounts = snapshot.accounts.map((account) => {
-    const until = account.credentialId === null ? undefined : blocked.get(account.credentialId);
-    if (!until || account.credentialId === null) return account;
+    const blocks = account.credentialId === null ? undefined : blocked.get(account.credentialId);
+    if (!blocks || account.credentialId === null) return account;
     claimed.add(account.credentialId);
-    return { ...account, windows: [...(account.windows ?? []), blockWindow(account.provider, account.credentialId, until)] };
+    return { ...account, windows: [...(account.windows ?? []), ...blockWindows(account.provider, account.credentialId, blocks)] };
   });
 
   // A blocked credential whose provider reports no usage at all — an API key
@@ -170,8 +183,8 @@ export function applyCredentialBlocks(
   // refuses to send on it. Measured: the Token Plan key blocked for six days
   // still read as "unknown", i.e. usable.
   for (const row of credentials) {
-    const until = blocked.get(row.id);
-    if (!until || claimed.has(row.id)) continue;
+    const blocks = blocked.get(row.id);
+    if (!blocks || claimed.has(row.id)) continue;
     if (accounts.some((account) => account.provider === row.provider && account.credentialId === row.id)) continue;
     // Only synthesize when the provider reports NO account of its own: an unmatched
     // credential beside a reporting sibling is an identity join Cody could
@@ -185,7 +198,7 @@ export function applyCredentialBlocks(
       label: row.provider,
       planType: null,
       unlimited: false,
-      windows: [blockWindow(row.provider, row.id, until)],
+      windows: blockWindows(row.provider, row.id, blocks),
     });
   }
   return { ...snapshot, accounts };

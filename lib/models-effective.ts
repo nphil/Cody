@@ -16,6 +16,7 @@ import { loadModelsWithCache, peekCatalogCache, withModelRuntimeError, type Mode
 import { readDisabledProviders } from "./omp/model-roles";
 import { type OmpModel, runUtilityCommand } from "./omp/rpc-utility";
 import { utilityRpcLaunchFor } from "./rpc-manager";
+import { hasUnverifiedLadder } from "./thinking-levels";
 
 // "off" is always a valid selector; the concrete efforts come from the model's
 // baked thinking metadata (omp: getSupportedEfforts = reasoning ? efforts : []).
@@ -24,7 +25,7 @@ import { utilityRpcLaunchFor } from "./rpc-manager";
 // reasoning model, so those are the honest options to offer.
 const RPC_DIALECT_EFFORTS = ["minimal", "low", "medium", "high", "xhigh"];
 function thinkingLevelsFor(model: OmpModel, fallbackEfforts: boolean): string[] {
-  if (!model.reasoning) return ["off"];
+  if (!model.reasoning && !hasUnverifiedLadder(model)) return ["off"];
   const efforts = model.thinking?.efforts ?? (fallbackEfforts ? RPC_DIALECT_EFFORTS : []);
   return ["off", ...efforts];
 }
@@ -103,6 +104,7 @@ export async function loadEffectiveModels(harness: HarnessAdapter): Promise<Mode
       name: model.name || model.id,
       provider: model.provider,
       thinkingLevels: thinkingLevelsFor(model, fallbackEfforts),
+      ...(hasUnverifiedLadder(model) ? { thinkingUnverified: true as const } : {}),
       supportsFastMode: supportsPriorityFastMode(model),
       ...(typeof model.contextWindow === "number"
         && Number.isFinite(model.contextWindow)

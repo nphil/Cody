@@ -125,7 +125,11 @@ export function SignInStep({ engine }: { engine: EngineSummary | null }) {
 /** omp's web/search/types.ts SEARCH_PROVIDER_OPTIONS, curated to the entries
  * a first run realistically picks; the rest stay reachable in engine
  * settings. Order arrays are written the way omp's own wizard writes them:
- * the choice first, then the remaining priority order. */
+ * the choice first, then the remaining priority order. omp turns the order
+ * into its `web` model role and fallback chain the next time it loads the
+ * config (omp 18.8.3 and later alike) and drops engines it does not know, so
+ * one list serves both. `hackernews` is left out on purpose: omp routes
+ * `site:news.ycombinator.com` queries to it by itself, and it answers nothing else. */
 const WEB_SEARCH_CHOICES = [
   { value: "auto", label: "Auto" },
   { value: "perplexity", label: "Perplexity" },
@@ -138,8 +142,8 @@ const WEB_SEARCH_CHOICES = [
 
 const WEB_SEARCH_FULL_ORDER = [
   "perplexity", "gemini", "anthropic", "codex", "xai", "zai", "exa", "tinyfish", "jina", "kagi",
-  "tavily", "firecrawl", "brave", "kimi", "parallel", "synthetic", "searxng", "startpage",
-  "duckduckgo", "ecosia", "google", "mojeek", "public",
+  "tavily", "firecrawl", "brave", "kimi", "parallel", "synthetic", "deepseek", "keenable", "sofya",
+  "searxng", "startpage", "duckduckgo", "ecosia", "google", "mojeek", "public",
 ];
 
 export function WebSearchStep() {

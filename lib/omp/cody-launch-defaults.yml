@@ -1,0 +1,13 @@
+# Cody's launch defaults for a chat's omp engine.
+#
+# Loaded as a PI_CONFIG_FILES layer (lib/omp/cody-launch-defaults.ts) — never merged
+# into the user's config.yml. Only settings whose omp default suits the terminal
+# UI but not a process Cody drives over a pipe belong here, each with the reason.
+
+display:
+  # omp 18.17+ attaches an execution trace (a copy of the shell's screen, refreshed
+  # about every 80 ms) to every bash progress update and to the saved session. Cody
+  # draws none of it, so it is pure cost: one 2-second bash call sent 65 update
+  # frames of up to 112 KB (2.49 MB) and saved a 112 KB session entry, against
+  # 62 KB and 23 KB with this off. Older engines have no such setting and ignore it.
+  shellVisualization: false

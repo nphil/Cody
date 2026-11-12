@@ -1,6 +1,8 @@
 "use client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { CompactionProgress } from "@/components/CompactionProgress";
+import { NoticeActions } from "@/components/NoticeActions";
+import { noticeCtaForDedupeKey } from "@/hooks/credential-notices";
 import { Fragment, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ChevronDown, ShieldAlert, TriangleAlert, X } from "lucide-react";
 import type { ActivityDisplayMode, AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, ImageContent, SessionInfo, SessionTreeNode, TextContent, ToolCallContent, ToolResultMessage } from "@/lib/types";
@@ -30,7 +32,7 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import { useForkAvailable } from "@/hooks/useForkChat";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
-import { resolveAvailableThinkingLevels } from "@/lib/thinking-levels";
+import { hasUnverifiedLadder, resolveAvailableThinkingLevels } from "@/lib/thinking-levels";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
 import { getNextVisibleCount, VISIBLE_PAGE_SIZE } from "@/lib/chat-lazy-load";
 import { captureTranscriptAnchor } from "@/lib/transcript-anchor";
@@ -164,7 +166,9 @@ const LOAD_MORE_ROOT_MARGIN = "400px 0px 0px 0px";
 function hasFinalAssistantAnswer(message: AgentMessage): boolean {
   if (message.role !== "assistant") return false;
   return splitFinalAssistantBlocks(message as AssistantMessage).answerBlocks.some((block) => (
-    block.type === "image" || (block.type === "text" && block.text.trim().length > 0)
+    block.type === "image"
+    || (block.type === "text" && block.text.trim().length > 0)
+    || (block.type === "thinking" && block.narration === true && block.thinking.trim().length > 0)
   ));
 }
 
@@ -1115,6 +1119,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, cap
       sessionStats.tokens.cacheWrite,
       sessionStats.tokens.total,
       sessionStats.cost ?? 0,
+      sessionStats.editRejections ? JSON.stringify(sessionStats.editRejections) : "",
     ].join("|")
     : null;
   const sessionStatsRef = useRef(sessionStats);
@@ -1226,6 +1231,16 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, cap
         )
       : null
   ), [displayModelValue, modelThinkingLevels, liveModelMeta]);
+
+  // omp has no capability data for this model (18.10.3+): its ladder is an
+  // opt-in guess, and thinking stays off until a level is picked.
+  const thinkingUnverified = useMemo(() => {
+    if (!displayModelValue) return false;
+    if (liveModelMeta && liveModelMeta.provider === displayModelValue.provider && liveModelMeta.modelId === displayModelValue.modelId) {
+      return hasUnverifiedLadder(liveModelMeta);
+    }
+    return modelList.some((entry) => entry.provider === displayModelValue.provider && entry.id === displayModelValue.modelId && entry.thinkingUnverified === true);
+  }, [displayModelValue, liveModelMeta, modelList]);
 
   // Session usage is wider than the selected model: live routing, child work,
   // fallbacks, and committed turns can all consume a provider in parallel.
@@ -1382,6 +1397,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, cap
       onSlowModeChange={fastModeCapable && session ? handleSlowModeChange : undefined}
       onAbortRetry={session ? handleAbortRetry : undefined}
       availableThinkingLevels={availableThinkingLevels}
+      thinkingUnverified={thinkingUnverified}
       modelThinkingLevels={modelThinkingLevels}
       modelNameOverride={liveModelMeta?.name ?? null}
       retryInfo={retryInfo}
@@ -1977,6 +1993,7 @@ function NoticeShelf({ notices, floating = false, align = "left" }: { notices: N
         // gets its own icon on top of the shared warning (amber) tone —
         // easier to tell apart from an auth/transport failure at a glance.
         const isRefusal = notice.errorKind === "refusal";
+        const cta = noticeCtaForDedupeKey(notice.dedupeKey);
         return (
           <div
             key={notice.id}
@@ -2019,6 +2036,7 @@ function NoticeShelf({ notices, floating = false, align = "left" }: { notices: N
                 }}
               />
             )}
+            <div style={{ minWidth: 0, display: "flex", flexDirection: "column" }}>
             <span
               style={{
                 minWidth: 0,
@@ -2035,6 +2053,8 @@ function NoticeShelf({ notices, floating = false, align = "left" }: { notices: N
                 <span style={{ opacity: 0.6, marginLeft: 6, fontVariantNumeric: "tabular-nums" }}>×{notice.count}</span>
               ) : null}
             </span>
+            {cta ? <NoticeActions action={cta} /> : null}
+            </div>
           </div>
         );
       })}

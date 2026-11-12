@@ -5,9 +5,9 @@ import { dirname, join } from "path";
 import {
   buildSessionTree,
   deleteSessionFileWithArtifacts,
-  getLeafEntryId,
   MAX_SESSION_LOAD_BYTES,
   parseTitleSlotLine,
+  resolveSessionLeafId,
   setSessionTitle,
   writeSessionFileAtomicSync,
 } from "@/lib/omp/session-files";
@@ -18,6 +18,7 @@ import {
   invalidateSessionPathCache,
   invalidateSessionListCache,
   buildSessionContext,
+  listSupersededCopies,
   loadSessionFileCached,
   readSessionHeader,
 } from "@/lib/session-reader";
@@ -34,6 +35,7 @@ import { engineCrashRow, withEngineCrashRows } from "@/lib/engine-crash";
 import { readEngineCrashes } from "@/lib/engine-crash-log";
 import { applyPlanOverlay } from "@/lib/plan-keeper/fold";
 import { readPlanOverlay } from "@/lib/plan-keeper/overlay";
+import { aggregateModelUsage, usageTokenTotal } from "@/lib/session-usage";
 import type { AgentMessage } from "@/lib/types";
 
 // BranchNavigator still traverses recursively, so keep the response tree shallow.
@@ -70,11 +72,23 @@ function projectTreeForResponse<T extends { entry: { id: string }; children: T[]
     }
   }
 
-  const cloneNode = (node: T, compressedEntryIds?: string[]): T => ({
-    ...node,
-    children: [],
-    ...(compressedEntryIds?.length ? { compressedEntryIds } : {}),
-  });
+  const cloneNode = (node: T, compressedEntryIds?: string[]): T => {
+    // A compaction entry's `preserveData` is engine-only state: omp 18.10+ keeps
+    // its snapcompact archive there (base64 PNG frames, up to 12 MB a copy). The
+    // page never reads it, and a compaction entry that ends or forks the chat
+    // would ship it again on every reload.
+    let entry = node.entry;
+    if ("preserveData" in entry) {
+      entry = { ...entry };
+      delete (entry as { preserveData?: unknown }).preserveData;
+    }
+    return {
+      ...node,
+      entry,
+      children: [],
+      ...(compressedEntryIds?.length ? { compressedEntryIds } : {}),
+    };
+  };
   const projectedRoots = nodes.map((node) => cloneNode(node));
   const tasks = nodes.map((source, index) => ({
     source,
@@ -246,7 +260,7 @@ export async function GET(
     if (!header) {
       return NextResponse.json({ error: "Session file is missing or malformed", code: "session_file_malformed" }, { status: 404 });
     }
-    const leafId = getLeafEntryId(entries);
+    const leafId = resolveSessionLeafId(entries);
     const tree = projectTreeForResponse(buildSessionTree(entries));
     const context = buildSessionContext(entries, leafId, {
       deferThinking,
@@ -300,6 +314,11 @@ export async function GET(
     // engine keeps that in memory), so the keeper's own record supplies it —
     // otherwise every reload would show those tasks unfinished again.
     const planOverlay = readPlanOverlay(header.id);
+    // omp's billed calls that are not transcript messages (late responses,
+    // discarded turns, cache refreshes, helper calls) sit on no branch of the
+    // chat, so the client cannot sum them from `context.messages`. Left out
+    // when there are none, so an ordinary chat's payload does not change.
+    const modelUsage = aggregateModelUsage(entries);
     return NextResponse.json({
       sessionId: id,
       filePath,
@@ -308,6 +327,7 @@ export async function GET(
       tree,
       context: withCrashRows(id, { ...context, todoPhases: applyPlanOverlay(context.todoPhases, planOverlay) }),
       ...(planOverlay ? { planOverlay } : {}),
+      ...(usageTokenTotal(modelUsage) > 0 || modelUsage.cost > 0 ? { modelUsage } : {}),
       ...(agent ? { agent } : {}),
     });
   } catch (error) {
@@ -387,129 +407,14 @@ export async function DELETE(
 
     const resolved = await resolveSessionPathOr404(id, req);
     if ("response" in resolved) return resolved.response;
-    const filePath = resolved.filePath;
 
-    // Read only the bounded header before deleting.
-    const deletedHeader = readSessionHeader(filePath);
-    const deletedSessionId = deletedHeader?.id ?? id;
-    const parentSession = deletedHeader?.parentSession;
-
-    // Children reference their parent either by file path or by bare session id
-    // (see resolveParentSessionId), so the grandparent has to be written back in
-    // whichever form each child used. Resolve both forms up front.
-    let grandparentPath: string | undefined;
-    let grandparentId: string | undefined;
-    if (parentSession) {
-      const idForPath = await resolveSessionIdByPath(parentSession);
-      if (idForPath) {
-        grandparentPath = parentSession;
-        grandparentId = idForPath;
-      } else {
-        const pathForId = await resolveSessionPath(parentSession);
-        if (pathForId) {
-          grandparentPath = pathForId;
-          grandparentId = parentSession;
-        }
-      }
-    }
-
-    // Re-attach all direct children to this session's parent (cascade re-parent)
-    // Scan sibling files in the same directory
-    const targetPathKey = sessionPathKey(filePath);
-    const dir = dirname(filePath);
-    const skippedChildren: Array<{ id: string; reason: string }> = [];
-    try {
-      const readDirectorySync = Reflect.get(fsRuntime, "readdirSync") as typeof readdirSync;
-      const files = readDirectorySync(dir).filter(
-        (file) => file.endsWith(".jsonl") && sessionPathKey(join(dir, file)) !== targetPathKey,
-      );
-      for (const file of files) {
-        const childPath = join(dir, file);
-
-        // Re-parenting rewrites the whole child file; a child at/above the
-        // load ceiling would cause a huge allocation (RangeError) during the
-        // read and a full-file rewrite. Skip it like a live session.
-        try {
-          if (statSync(childPath).size > MAX_SESSION_LOAD_BYTES) {
-            // Report the real session id when the header is readable without
-            // loading the whole file (bounded 64KB prefix read).
-            let oversizedId = file;
-            try {
-              const fd = openSync(childPath, "r");
-              try {
-                const head = Buffer.alloc(64 * 1024);
-                const bytes = readSync(fd, head, 0, head.length, 0);
-                const lines = head.toString("utf8", 0, bytes).split("\n");
-                const headerIndex = parseTitleSlotLine(lines[0] ?? "") ? 1 : 0;
-                const parsed = JSON.parse(lines[headerIndex] ?? "{}") as { id?: unknown };
-                if (typeof parsed.id === "string") oversizedId = parsed.id;
-              } finally {
-                closeSync(fd);
-              }
-            } catch {
-              // Header unreadable — fall back to the basename.
-            }
-            skippedChildren.push({ id: oversizedId, reason: "session_child_too_large" });
-            continue;
-          }
-        } catch {
-          continue; // vanished between readdir and stat — not a child we can fix
-        }
-        // Parse phase: an unreadable or non-matching sibling is simply not a
-        // child of the deleted session, so it must not be reported as skipped.
-        let lines: string[];
-        let headerIndex: number;
-        let header: { type?: string; id?: string; parentSession?: string };
-        let linkedByPath: boolean;
-        try {
-          lines = readFileSync(childPath, "utf8").split("\n");
-          // v3 files carry a fixed-width title slot on line 1; the session
-          // header is then line 2. The slot line is left byte-identical.
-          headerIndex = parseTitleSlotLine(lines[0] ?? "") ? 1 : 0;
-          header = JSON.parse(lines[headerIndex]) as typeof header;
-          if (header.type !== "session" || !header.parentSession) continue;
-          linkedByPath = sessionPathKey(header.parentSession) === targetPathKey;
-          if (!linkedByPath && header.parentSession !== deletedSessionId) continue;
-        } catch {
-          continue;
-        }
-
-        // A live omp process owns its session file and flushes its whole
-        // in-memory state on write — our rewrite would be clobbered by (or
-        // interleaved with) its next flush.
-        const childId = typeof header.id === "string" ? header.id : undefined;
-        if (childId && getRpcSession(childId)?.isAlive?.()) {
-          skippedChildren.push({ id: childId, reason: "session_child_live" });
-          continue;
-        }
-
-        // Write the replacement in the same form the child used.
-        header.parentSession = linkedByPath
-          ? (grandparentPath ?? parentSession)
-          : (grandparentId ?? parentSession);
-        lines[headerIndex] = JSON.stringify(header);
-        try {
-          // Atomic: writeFileSync truncates first, so a crash or ENOSPC here
-          // would permanently truncate a session the user did NOT delete.
-          writeSessionFileAtomicSync(childPath, lines.join("\n"), "reparent");
-        } catch {
-          skippedChildren.push({ id: childId ?? file, reason: "session_child_rewrite_failed" });
-        }
-      }
-    } catch { /* skip if dir unreadable */ }
-
-    // Await the child's exit before unlinking: omp flushes session state on
-    // shutdown and would recreate the file if it were still running.
-    await getRpcSession(id)?.destroyAndWait?.("the chat was deleted");
-    deleteSessionFileWithArtifacts(filePath);
-    invalidateSessionPathCache(id);
-    invalidateSessionListCache();
-    forgetSession(deletedSessionId);
-    forgetSessionLocalRouting(deletedSessionId);
-    forgetSessionPreset(deletedSessionId);
-    removeSessionItems(deletedSessionId);
-    // Last, once the engine that was writing there is gone.
-    for (const alias of new Set([id, deletedSessionId])) await removeDeletedSessionScratch(alias);
+    // A chat omp moved to a new file (18.13.2+) is one row that stands in for
+    // every earlier copy still on disk. They go with it, or the list would show
+    // the chat again the moment the newer copy is gone. Newest first, so each
+    // delete hands the forks it inherited one step further up the chain.
+    const earlierCopies = await listSupersededCopies(id);
+    const skippedChildren = await deleteSessionAndRelink(id, resolved.filePath);
+    for (const copy of earlierCopies) skippedChildren.push(...(await deleteSessionAndRelink(copy.id, copy.path)));
     return NextResponse.json({
       ok: true,
       ...(skippedChildren.length > 0 ? { skippedChildren } : {}),
@@ -517,4 +422,134 @@ export async function DELETE(
   } catch (error) {
     return apiErrorResponse(error);
   }
+}
+
+/**
+ * Delete one session file with its artifacts and everything Cody filed under
+ * its id, after re-attaching its direct children to its own parent (cascade
+ * re-parent). Returns the children that could not be re-attached.
+ */
+async function deleteSessionAndRelink(id: string, filePath: string): Promise<Array<{ id: string; reason: string }>> {
+  // Read only the bounded header before deleting.
+  const deletedHeader = readSessionHeader(filePath);
+  const deletedSessionId = deletedHeader?.id ?? id;
+  const parentSession = deletedHeader?.parentSession;
+
+  // Children reference their parent either by file path or by bare session id
+  // (see resolveParentSessionId), so the grandparent has to be written back in
+  // whichever form each child used. Resolve both forms up front.
+  let grandparentPath: string | undefined;
+  let grandparentId: string | undefined;
+  if (parentSession) {
+    const idForPath = await resolveSessionIdByPath(parentSession);
+    if (idForPath) {
+      grandparentPath = parentSession;
+      grandparentId = idForPath;
+    } else {
+      const pathForId = await resolveSessionPath(parentSession);
+      if (pathForId) {
+        grandparentPath = pathForId;
+        grandparentId = parentSession;
+      }
+    }
+  }
+
+  // Re-attach all direct children to this session's parent (cascade re-parent)
+  // Scan sibling files in the same directory
+  const targetPathKey = sessionPathKey(filePath);
+  const dir = dirname(filePath);
+  const skippedChildren: Array<{ id: string; reason: string }> = [];
+  try {
+    const readDirectorySync = Reflect.get(fsRuntime, "readdirSync") as typeof readdirSync;
+    const files = readDirectorySync(dir).filter(
+      (file) => file.endsWith(".jsonl") && sessionPathKey(join(dir, file)) !== targetPathKey,
+    );
+    for (const file of files) {
+      const childPath = join(dir, file);
+
+      // Re-parenting rewrites the whole child file; a child at/above the
+      // load ceiling would cause a huge allocation (RangeError) during the
+      // read and a full-file rewrite. Skip it like a live session.
+      try {
+        if (statSync(childPath).size > MAX_SESSION_LOAD_BYTES) {
+          // Report the real session id when the header is readable without
+          // loading the whole file (bounded 64KB prefix read).
+          let oversizedId = file;
+          try {
+            const fd = openSync(childPath, "r");
+            try {
+              const head = Buffer.alloc(64 * 1024);
+              const bytes = readSync(fd, head, 0, head.length, 0);
+              const lines = head.toString("utf8", 0, bytes).split("\n");
+              const headerIndex = parseTitleSlotLine(lines[0] ?? "") ? 1 : 0;
+              const parsed = JSON.parse(lines[headerIndex] ?? "{}") as { id?: unknown };
+              if (typeof parsed.id === "string") oversizedId = parsed.id;
+            } finally {
+              closeSync(fd);
+            }
+          } catch {
+            // Header unreadable — fall back to the basename.
+          }
+          skippedChildren.push({ id: oversizedId, reason: "session_child_too_large" });
+          continue;
+        }
+      } catch {
+        continue; // vanished between readdir and stat — not a child we can fix
+      }
+      // Parse phase: an unreadable or non-matching sibling is simply not a
+      // child of the deleted session, so it must not be reported as skipped.
+      let lines: string[];
+      let headerIndex: number;
+      let header: { type?: string; id?: string; parentSession?: string };
+      let linkedByPath: boolean;
+      try {
+        lines = readFileSync(childPath, "utf8").split("\n");
+        // v3 files carry a fixed-width title slot on line 1; the session
+        // header is then line 2. The slot line is left byte-identical.
+        headerIndex = parseTitleSlotLine(lines[0] ?? "") ? 1 : 0;
+        header = JSON.parse(lines[headerIndex]) as typeof header;
+        if (header.type !== "session" || !header.parentSession) continue;
+        linkedByPath = sessionPathKey(header.parentSession) === targetPathKey;
+        if (!linkedByPath && header.parentSession !== deletedSessionId) continue;
+      } catch {
+        continue;
+      }
+
+      // A live omp process owns its session file and flushes its whole
+      // in-memory state on write — our rewrite would be clobbered by (or
+      // interleaved with) its next flush.
+      const childId = typeof header.id === "string" ? header.id : undefined;
+      if (childId && getRpcSession(childId)?.isAlive?.()) {
+        skippedChildren.push({ id: childId, reason: "session_child_live" });
+        continue;
+      }
+
+      // Write the replacement in the same form the child used.
+      header.parentSession = linkedByPath
+        ? (grandparentPath ?? parentSession)
+        : (grandparentId ?? parentSession);
+      lines[headerIndex] = JSON.stringify(header);
+      try {
+        // Atomic: writeFileSync truncates first, so a crash or ENOSPC here
+        // would permanently truncate a session the user did NOT delete.
+        writeSessionFileAtomicSync(childPath, lines.join("\n"), "reparent");
+      } catch {
+        skippedChildren.push({ id: childId ?? file, reason: "session_child_rewrite_failed" });
+      }
+    }
+  } catch { /* skip if dir unreadable */ }
+
+  // Await the child's exit before unlinking: omp flushes session state on
+  // shutdown and would recreate the file if it were still running.
+  await getRpcSession(id)?.destroyAndWait?.("the chat was deleted");
+  deleteSessionFileWithArtifacts(filePath);
+  invalidateSessionPathCache(id);
+  invalidateSessionListCache();
+  forgetSession(deletedSessionId);
+  forgetSessionLocalRouting(deletedSessionId);
+  forgetSessionPreset(deletedSessionId);
+  removeSessionItems(deletedSessionId);
+  // Last, once the engine that was writing there is gone.
+  for (const alias of new Set([id, deletedSessionId])) await removeDeletedSessionScratch(alias);
+  return skippedChildren;
 }

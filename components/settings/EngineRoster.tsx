@@ -197,9 +197,15 @@ interface ChangelogState {
    * that just discovered an update (or an out-of-band engine update) can
    * never leave cached entries wearing yesterday's "New" marks. */
   forVersions: { installed: string | null; latest: string | null } | null;
+  /** Newer releases the server's size limits cut from `entries`. */
+  omittedNew: number;
+  /** The package no longer carries notes older than its oldest entry. */
+  olderMissing: boolean;
+  /** The package's own link to its archived older notes. */
+  archiveUrl: string | null;
 }
 
-const CLOSED_CHANGELOG: ChangelogState = { open: false, loading: false, entries: null, reason: null, source: null, updatePending: false, forVersions: null };
+const CLOSED_CHANGELOG: ChangelogState = { open: false, loading: false, entries: null, reason: null, source: null, updatePending: false, forVersions: null, omittedNew: 0, olderMissing: false, archiveUrl: null };
 
 export const cardStyle: CSSProperties = {
   display: "flex",
@@ -665,6 +671,9 @@ export function EngineRoster({ mode, capabilities: capabilitiesProp, checkSeq = 
             updatePending?: boolean;
             installedVersion?: string | null;
             latestVersion?: string | null;
+            omittedNew?: number;
+            olderMissing?: boolean;
+            archiveUrl?: string | null;
           }
         | null;
       if (!mountedRef.current) return;
@@ -679,6 +688,9 @@ export function EngineRoster({ mode, capabilities: capabilitiesProp, checkSeq = 
           installed: typeof data?.installedVersion === "string" ? data.installedVersion : null,
           latest: typeof data?.latestVersion === "string" ? data.latestVersion : null,
         },
+        omittedNew: typeof data?.omittedNew === "number" ? data.omittedNew : 0,
+        olderMissing: data?.olderMissing === true,
+        archiveUrl: typeof data?.archiveUrl === "string" && data.archiveUrl.startsWith("https://") ? data.archiveUrl : null,
       });
     } catch (error) {
       if (mountedRef.current) setChangelog({ ...CLOSED_CHANGELOG, open: true, reason: String(error) });
@@ -1036,6 +1048,20 @@ export function EngineRoster({ mode, capabilities: capabilitiesProp, checkSeq = 
             <pre style={{ margin: "6px 0 0", whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontSize: 11, lineHeight: 1.55, color: "var(--text-muted)", fontFamily: "inherit" }}>{entry.body}</pre>
           </div>
         ))}
+        {!changelog.loading && changelog.entries && changelog.omittedNew > 0 && (
+          <div style={dimLineStyle}>{t("updates.omp.changelogOmitted", { count: changelog.omittedNew })}</div>
+        )}
+        {!changelog.loading && changelog.entries && changelog.olderMissing && (
+          <div style={dimLineStyle}>
+            {t("updates.omp.changelogOlderMissing")}
+            {changelog.archiveUrl && (
+              <>
+                {" "}
+                <a href={changelog.archiveUrl} target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>{t("updates.omp.changelogArchive")}</a>
+              </>
+            )}
+          </div>
+        )}
         {!changelog.loading && !changelog.entries && (
           <div style={dimLineStyle}>{changelog.reason ?? t("updates.omp.changelogUnavailable")}</div>
         )}

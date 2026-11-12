@@ -148,7 +148,7 @@ in the system browser.
 
 Detection is **server-side** (benefits the container deployment too): a scan
 service probes well-known local endpoints (Ollama `:11434`, LM Studio
-`:1234`, llama.cpp/llama-swap `:8080`/`:9292`) on the server's localhost
+`:1234`, llama.cpp/llama-swap `:8080`/`:9292`, llama-server default `:9931`) on the server's localhost
 **and** — when `CODY_HOST_GATEWAY=<ip>` is set — the same ports on the
 Windows host across the WSL NAT boundary. The shell computes and passes
 `CODY_HOST_GATEWAY`. [VERIFY gateway discovery method.] Found endpoints are

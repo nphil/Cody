@@ -1,0 +1,158 @@
+{
+ "generatedAt": 1794474784148,
+ "reports": [
+  {
+   "provider": "anthropic",
+   "fetchedAt": 1794474784133,
+   "limits": [
+    {
+     "id": "anthropic:7d",
+     "label": "Claude 7 Day",
+     "scope": {
+      "provider": "anthropic",
+      "windowId": "7d",
+      "shared": true
+     },
+     "window": {
+      "id": "7d",
+      "label": "7 Day",
+      "durationMs": 604800000,
+      "resetsAt": 1794774780928
+     },
+     "amount": {
+      "used": 30,
+      "limit": 100,
+      "remaining": 70,
+      "usedFraction": 0.3,
+      "remainingFraction": 0.7,
+      "unit": "percent"
+     },
+     "status": "ok"
+    }
+   ],
+   "metadata": {
+    "endpoint": "https://api.anthropic.com/api/oauth/usage",
+    "accountId": "acct-a@example.invalid",
+    "email": "a@example.invalid",
+    "inactiveSharedGates": [
+     "5h"
+    ]
+   },
+   "resetCredits": {
+    "availableCount": 0,
+    "redeemableCount": 0,
+    "eligible": false,
+    "credits": []
+   },
+   "policy": {
+    "priority": 2,
+    "reservePct": 15,
+    "reserveSource": "override",
+    "reclaimAbovePct": 80,
+    "state": "eligible",
+    "remainingPct": 70
+   }
+  },
+  {
+   "provider": "openai-codex",
+   "fetchedAt": 1794474784127,
+   "limits": [
+    {
+     "id": "openai-codex:primary",
+     "label": "5 hours",
+     "scope": {
+      "provider": "openai-codex",
+      "windowId": "5h",
+      "shared": true
+     },
+     "window": {
+      "id": "5h",
+      "label": "5 hours",
+      "durationMs": 18000000,
+      "resetsAt": 1794477780000
+     },
+     "amount": {
+      "used": 21,
+      "limit": 100,
+      "remaining": 79,
+      "usedFraction": 0.21,
+      "remainingFraction": 0.79,
+      "unit": "percent"
+     },
+     "status": "ok"
+    },
+    {
+     "id": "openai-codex:secondary",
+     "label": "7 days",
+     "scope": {
+      "provider": "openai-codex",
+      "windowId": "7d",
+      "shared": true
+     },
+     "window": {
+      "id": "7d",
+      "label": "7 days",
+      "durationMs": 604800000,
+      "resetsAt": 1794774780000
+     },
+     "amount": {
+      "used": 40,
+      "limit": 100,
+      "remaining": 60,
+      "usedFraction": 0.4,
+      "remainingFraction": 0.6,
+      "unit": "percent"
+     },
+     "status": "ok"
+    }
+   ],
+   "resetCredits": {
+    "availableCount": 0
+   },
+   "metadata": {
+    "planType": "plus",
+    "allowed": true,
+    "limitReached": false,
+    "email": "c@example.invalid",
+    "accountId": "acct-c@example.invalid",
+    "meterStates": {
+     "chat": {
+      "allowed": true,
+      "limitReached": false
+     }
+    }
+   }
+  }
+ ],
+ "accountsWithoutUsage": [],
+ "disabledCredentials": [],
+ "capacity": {
+  "anthropic": [
+   {
+    "window": "7d",
+    "durationMs": 604800000,
+    "accounts": 1,
+    "usedAccounts": 0.3,
+    "remainingAccounts": 0.7
+   }
+  ],
+  "openai-codex": [
+   {
+    "window": "5h",
+    "durationMs": 18000000,
+    "meter": "chat",
+    "accounts": 1,
+    "usedAccounts": 0.21,
+    "remainingAccounts": 0.79
+   },
+   {
+    "window": "7d",
+    "durationMs": 604800000,
+    "meter": "chat",
+    "accounts": 1,
+    "usedAccounts": 0.4,
+    "remainingAccounts": 0.6
+   }
+  ]
+ }
+}

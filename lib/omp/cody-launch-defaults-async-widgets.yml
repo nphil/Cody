@@ -1,0 +1,8 @@
+# Cody launch default (see cody-launch-defaults.ts): one layer per setting.
+
+async:
+  # omp 18.12.3+ runs two extra small-model calls (a widget author and a caption)
+  # for every background job that runs 15 s+ with 3+ lines of output. The widgets
+  # are terminal-UI only and nothing reaches Cody over rpc-ui, so in a Cody chat
+  # these calls only cost money. Older engines have no such key and ignore it.
+  widgets: false

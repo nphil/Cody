@@ -8,7 +8,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { MessageView, SafeMarkdownBody, TaskResultPanel, getStructuredActivityStatus } = await jiti.import("./MessageView.tsx");
+const { MessageView, SafeMarkdownBody, TaskResultPanel, getEditRejectionReason, getStructuredActivityStatus } = await jiti.import("./MessageView.tsx");
 const { CodeBlock } = await jiti.import("./MermaidBlock.tsx");
 
 test("large message content avoids the markdown pipeline until requested", () => {
@@ -224,6 +224,15 @@ test("advisor custom messages use the localized advisor label", () => {
   assert.doesNotMatch(html, /customType/);
 });
 
+test("a session-transfer marker shows a readable title, not its raw type", () => {
+  const html = renderToStaticMarkup(React.createElement(MessageView, {
+    message: { role: "custom", customType: "session-transfer", content: "This session arrived from /a and now lives in /b.", display: true, details: { kind: "arrived", fromCwd: "/a", cwd: "/b" } },
+  }));
+  assert.match(html, /Session moved/);
+  assert.match(html, /now lives in/);
+  assert.doesNotMatch(html, /session-transfer/);
+});
+
 
 test("activity modes leave user prose and assistant thinking/text untouched", () => {
   const user = renderToStaticMarkup(React.createElement(MessageView, { activityDisplayMode: "hidden", message: { role: "user", content: "ordinary user prose" } }));
@@ -248,4 +257,23 @@ test("structured async task status is compact, expandable in full, and hidden wi
   const error = { ...result, isError: true, content: [{ type: "text", text: "actionable tool failure" }] };
   const visibleError = renderToStaticMarkup(React.createElement(MessageView, { activityDisplayMode: "hidden", message, toolResults: new Map([["task-1", error]]) }));
   assert.match(visibleError, /actionable tool failure/);
+});
+
+test("a failed edit names why it was refused next to the error chip", () => {
+  const failed = (details) => ({ role: "toolResult", toolCallId: "edit-1", toolName: "edit", isError: true, content: [{ type: "text", text: "tag is stale" }], ...(details ? { details } : {}) });
+  assert.equal(getEditRejectionReason(failed({ errorKind: "stale_tag" })), "stale tag");
+  assert.equal(getEditRejectionReason(failed({ errorKind: "no_match" })), "no match");
+  // An older engine records no reason: the chip stays a bare "error".
+  assert.equal(getEditRejectionReason(failed()), null);
+  assert.equal(getEditRejectionReason(failed({ errorKind: "" })), null);
+  assert.equal(getEditRejectionReason({ ...failed({ errorKind: "stale_tag" }), isError: false }), null);
+  assert.equal(getEditRejectionReason({ ...failed({ errorKind: "stale_tag" }), toolName: "bash" }), null);
+  assert.equal(getEditRejectionReason(undefined), null);
+  // The status itself is unchanged by the reason.
+  assert.equal(getStructuredActivityStatus(failed({ errorKind: "stale_tag" })), "error");
+  const message = { role: "assistant", content: [{ type: "toolCall", toolCallId: "edit-1", toolName: "edit", input: { path: "a.txt" } }] };
+  const html = renderToStaticMarkup(React.createElement(MessageView, { activityDisplayMode: "compact", message, toolResults: new Map([["edit-1", failed({ errorKind: "stale_tag" })]]) }));
+  assert.match(html, /error · stale tag/);
+  const plain = renderToStaticMarkup(React.createElement(MessageView, { activityDisplayMode: "compact", message, toolResults: new Map([["edit-1", failed()]]) }));
+  assert.doesNotMatch(plain, /error · /);
 });

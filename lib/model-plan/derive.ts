@@ -1,6 +1,12 @@
 import type { RosterModel } from "./roster";
 
-/** OMP 18.1 no longer has a designer role. */
+/**
+ * Every role Cody can ever assign. `widget` is new in omp 18.12.3: an engine
+ * without it never consults `modelRoles.widget`, so anything that PROPOSES or
+ * WRITES a role map must go through planRoleNames() with the engine's live role
+ * list rather than use this vocabulary directly (it is also the display set).
+ * OMP 18.1 no longer has a designer role.
+ */
 export const ROLE_NAMES: readonly string[] = [
   "default",
   "smol",
@@ -11,7 +17,16 @@ export const ROLE_NAMES: readonly string[] = [
   "tiny",
   "task",
   "advisor",
+  "widget",
 ];
+
+/** The roles Cody may assign on an engine whose live role list is
+ *  `engineRoleIds` (omp's MODEL_ROLE_IDS): ROLE_NAMES minus anything that
+ *  engine does not have. Omit the argument only where no engine is involved. */
+export function planRoleNames(engineRoleIds?: readonly string[]): readonly string[] {
+  if (!engineRoleIds) return ROLE_NAMES;
+  return ROLE_NAMES.filter((role) => engineRoleIds.includes(role));
+}
 
 export interface PlanRationale {
   subject: string;
@@ -43,7 +58,7 @@ interface RoleWorkload {
 }
 
 const SUBSCRIPTION_PROVIDERS = new Set(["openai-codex", "anthropic"]);
-const LIGHTWEIGHT_ROLES = new Set(["smol", "tiny", "commit"]);
+const LIGHTWEIGHT_ROLES = new Set(["smol", "tiny", "commit", "widget"]);
 const SLOW_ROLES = new Set(["slow", "plan", "advisor"]);
 const THINKING_LEVELS = ["inherit", "off", "minimal", "low", "medium", "high", "xhigh", "max"];
 const ANTHROPIC_FAMILY_RANK: Record<string, number> = {
@@ -448,6 +463,7 @@ const SOURCE_ROLE_PRECEDENCE = [
   "smol",
   "tiny",
   "commit",
+  "widget",
 ];
 
 /**
@@ -557,8 +573,10 @@ export function deriveChains(args: {
   roles: Record<string, string>;
   ladder: string[];
   roster: RosterModel[];
+  /** Roles to derive a chain for; defaults to every role Cody knows. */
+  roleNames?: readonly string[];
 }): Record<string, string[]> {
-  const { roles, ladder, roster } = args;
+  const { roles, ladder, roster, roleNames = ROLE_NAMES } = args;
   const chains: Record<string, string[]> = {};
   const enabled = new Set(roster.map((model) => model.selector));
 
@@ -582,7 +600,7 @@ export function deriveChains(args: {
     if (chain.length > 0) chains[`${provider}/*`] = chain;
   }
 
-  for (const role of ROLE_NAMES) {
+  for (const role of roleNames) {
     const selected = roles[role] ? resolveRosterModel(roles[role], roster) : null;
     if (selected && chains[selected.selector]) {
       // This mirrors the exact winner when models are shared across roles.
@@ -612,13 +630,14 @@ export function validatePlan(
     rationale?: PlanRationale[];
   },
   roster: RosterModel[],
+  roleNames: readonly string[] = ROLE_NAMES,
 ): { plan: ModelPlan; warnings: string[] } {
   const warnings: string[] = [];
   const repair = bestAvailableModel(roster);
   const roles: Record<string, string> = {};
 
   for (const [role, rawSelector] of Object.entries(plan.roles ?? {})) {
-    if (!ROLE_NAMES.includes(role)) {
+    if (!roleNames.includes(role)) {
       warnings.push(`Ignored "${role}": not a role Cody assigns.`);
       continue;
     }
@@ -739,13 +758,14 @@ function hasLightweightAlternative(
 export function constrainPlanDraft(
   draft: PlanDraft,
   roster: RosterModel[],
+  roleNames: readonly string[] = ROLE_NAMES,
 ): { draft: PlanDraft; warnings: string[] } {
   const roles: Record<string, string> = {};
   const warnings: string[] = [];
   const gateways = gatewayProviders(roster);
   const locals = localProviders(roster);
 
-  for (const role of ROLE_NAMES) {
+  for (const role of roleNames) {
     const requested = draft.roles[role];
     const model = requested ? resolveRosterModel(requested, roster) : null;
     const replacement = bestFor(role, roster);
@@ -831,12 +851,12 @@ function rationaleFor(role: string, model: RosterModel): string {
 /** Deterministic proposal when the optional planner model is unavailable. */
 export function heuristicPlan(
   roster: RosterModel[],
-  options: { preferredProvider?: string } = {},
+  options: { preferredProvider?: string; roleNames?: readonly string[] } = {},
 ): PlanDraft {
   const roles: Record<string, string> = {};
   const rationale: PlanRationale[] = [];
 
-  for (const role of ROLE_NAMES) {
+  for (const role of options.roleNames ?? ROLE_NAMES) {
     const model = bestFor(role, roster, options.preferredProvider);
     if (!model) continue;
 

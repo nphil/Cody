@@ -90,9 +90,15 @@ export const ompHarness: HarnessAdapter = {
   // (bin/cody-omp-reset-credits.mjs) sends both spellings so older engines
   // still redeem. Its `claudeResets.*` settings reach the panel through the
   // schema like any other, and the auto-redeem consent prompt arrives as an
-  // ordinary rpc-ui select. It also needs Bun >= 1.3.14, which the image's
-  // `oven/bun:1` satisfies.
-  verifiedVersion: "18.8.3",
+  // ordinary rpc-ui select. It also needs Bun, which the image's `oven/bun:1`
+  // satisfies: >= 1.3.14 for omp 18.8.x, >= 1.4.4 from 18.13.3 (an older Bun
+  // makes omp exit 1 with "Bun runtime must be >= 1.4.4"; Cody's installer
+  // checks the package's `engines.bun` before replacing a working engine).
+  //
+  // Audited against 18.19.0 (RPC, settings schema, catalog, auth helpers and
+  // the launch flags were run against both 18.8.3 and 18.19.0). 18.8.3 still
+  // works: every 18.9+ feature Cody uses is feature-detected, never assumed.
+  verifiedVersion: "18.19.0",
   capabilities: {
     liveSessions: true,
     models: true,

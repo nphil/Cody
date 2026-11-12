@@ -145,6 +145,7 @@ export function createSessionObserver(session: ObservedSession, overrides: Parti
   let stoppedByUser = false;
   let waitingRunId = -1;
   let errorRunId = -1;
+  let costCapRunId = -1;
   let refusalRunId = -1;
   let refusalKey: string | null = null;
   let lastFallbackAt: number | null = null;
@@ -291,7 +292,9 @@ export function createSessionObserver(session: ObservedSession, overrides: Parti
     if (waitingRunId === runId || errorRunId === runId) return;
 
     let failure: string | null = null;
-    if (lastStopReason === "error") failure = lastErrorMessage ?? "The model returned an error.";
+    // The spend limit ended this run before a model reply could say why: the cost-gate notice is the whole story.
+    if (costCapRunId === runId) failure = lastErrorMessage ?? "This chat reached its spend limit.";
+    else if (lastStopReason === "error") failure = lastErrorMessage ?? "The model returned an error.";
     else if (acpStop === "error") failure = lastErrorMessage ?? "The agent stopped with an error.";
     else if (acpStop === "refusal") failure = "The agent declined to answer this prompt.";
     if (failure !== null) {
@@ -317,6 +320,13 @@ export function createSessionObserver(session: ObservedSession, overrides: Parti
       // The wrapper says why (out of memory, disk full, ...) and what happens next; an exit with no such payload keeps the plain line.
       const crash = readEngineCrashNotice(event.crash);
       sendError(crash ? engineCrashSentence(crash) : "The engine for this chat stopped unexpectedly.");
+    } else if (event.source === "cost-gate") {
+      // omp 18.13+: past `session.maxCost` the engine refuses the next model request. A prompt refused at once never starts a run, so no agent_end would speak for it; one refused mid-run ends without a reply to carry the reason. The warning level is only a heads-up, kept on the chat page.
+      const message = asString(event.message);
+      if (event.level !== "error" || !message) return;
+      lastErrorMessage = singleLine(message);
+      if (runActive) costCapRunId = runId;
+      else sendError(describeError(message).text);
     } else if (event.level === "error") {
       // An ACP turn that fails says so in a notice, then ends with stopReason
       // "error" and no text of its own.

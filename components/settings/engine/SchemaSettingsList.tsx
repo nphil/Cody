@@ -18,6 +18,10 @@
  * key-prefix heading. On a phone the contents are a Directory and each
  * tab (or group) is a pushed level. Secret leaves render write-only:
  * "Set" / "Not set" plus a masked input, never the value.
+ *
+ * A setting the engine added in its last update wears a "New" chip (the
+ * state is components/settings/new-badges.ts); the tab buttons, the group
+ * headers and the phone contents add an `N new` count.
  */
 import { AlertCircle, Check, ChevronDown, ChevronRight, Copy, RotateCcw } from "lucide-react";
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
@@ -25,9 +29,11 @@ import { SecretInput } from "@/components/ui/field";
 import { Select } from "@/components/ui/Select";
 import { useSchemaIndex, type SchemaGroup, type SchemaIndex, type SchemaRow, type SchemaSetting, type SchemaTab, type SchemaValue } from "@/hooks/useSchemaIndex";
 import { Directory } from "../Directory";
+import { countBadged, isBadgedRow, newCountLabel, useSettingsNewBadges } from "../new-badges";
 import { NativeSetting, READ_ONLY_BADGE, SettingsHighlightContext, TERMINAL_ONLY_BADGE, ToggleSwitch, chipStyle, nativeInputStyle } from "../primitives";
 import { useSaveStatus } from "../SaveStatus";
 import { useSettingsShell } from "../shell-context";
+import { LIST_DRAFT_HINT, formatListDraft, parseListDraft } from "./list-draft";
 import { ALSO_UNDER, ENGINE_PANEL_ID, cardOwner, cardSurfaceAvailable, rowSearchIdBesideCard, searchIdForKey, type CardSurface } from "./recommended-cards";
 
 /** Beyond this many rows a tab's groups start collapsed on desktop too: a
@@ -129,7 +135,7 @@ export function NumberField({ label, value, onCommit, min, max, step, width = 11
   return (
     <input
       type="number"
-      inputMode="numeric"
+      inputMode={step !== undefined && !Number.isInteger(step) ? "decimal" : "numeric"}
       aria-label={label}
       value={draft}
       min={min}
@@ -226,40 +232,57 @@ function ReadOnlyValue({ setting, value }: { setting: SchemaSetting; value: Sche
 }
 
 /** Arrays are free-form string lists upstream (no membership choices), so they
- * edit as one entry per line and commit on blur rather than per keystroke. */
+ * edit as one entry per line and commit on blur rather than per keystroke. A
+ * pasted JSON list is read as that list: several engine lists describe
+ * themselves as "a JSON list" and typing one used to save it as a single
+ * entry (see ./list-draft). */
 function ArrayControl({ setting, value, onChange }: {
   setting: SchemaSetting;
   value: string[];
   onChange: (value: string[]) => void;
 }) {
-  const [draft, setDraft] = useState(value.join("\n"));
-  const committed = useRef(value.join("\n"));
+  const [draft, setDraft] = useState(formatListDraft(value));
+  const [problem, setProblem] = useState<string | null>(null);
+  const committed = useRef(formatListDraft(value));
 
   useEffect(() => {
-    const joined = value.join("\n");
+    const joined = formatListDraft(value);
     if (joined !== committed.current) {
       committed.current = joined;
       setDraft(joined);
+      setProblem(null);
     }
   }, [value]);
 
   const commit = () => {
-    const entries = draft.split("\n").map((entry) => entry.trim()).filter(Boolean);
-    if (entries.join("\n") === committed.current) return;
-    committed.current = entries.join("\n");
-    onChange(entries);
+    const parsed = parseListDraft(draft);
+    if (!parsed.ok) {
+      setProblem(parsed.reason);
+      return;
+    }
+    setProblem(null);
+    const joined = formatListDraft(parsed.entries);
+    // A pasted JSON list shows back as the one-per-line list it saved as.
+    if (joined !== draft) setDraft(joined);
+    if (joined === committed.current) return;
+    committed.current = joined;
+    onChange(parsed.entries);
   };
 
   return (
-    <textarea
-      aria-label={`${setting.label} (one per line)`}
-      value={draft}
-      rows={Math.min(6, Math.max(2, draft.split("\n").length))}
-      placeholder="One entry per line"
-      onChange={(event) => setDraft(event.target.value)}
-      onBlur={commit}
-      style={{ ...nativeInputStyle, width: "100%", fontFamily: "var(--font-mono, monospace)", resize: "vertical" }}
-    />
+    <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0, width: "100%" }}>
+      <textarea
+        aria-label={`${setting.label} (one per line)`}
+        aria-invalid={problem !== null}
+        value={draft}
+        rows={Math.min(6, Math.max(2, draft.split("\n").length))}
+        placeholder={LIST_DRAFT_HINT}
+        onChange={(event) => { setDraft(event.target.value); setProblem(null); }}
+        onBlur={commit}
+        style={{ ...nativeInputStyle, width: "100%", fontFamily: "var(--font-mono, monospace)", resize: "vertical" }}
+      />
+      {problem && <span role="alert" style={{ fontSize: 10.5, color: "var(--status-error)", lineHeight: 1.4 }}>{problem}</span>}
+    </div>
   );
 }
 
@@ -310,6 +333,7 @@ function SecretControl({ row, onSave, onClear }: { row: SchemaRow; onSave: (valu
  * each rebuild the whole tab index on every cache change. */
 export function SchemaSettingRow({ row, index }: { row: SchemaRow; index: SchemaIndex }) {
   const { capabilities, callbacks } = useSettingsShell();
+  const { isNew } = useSettingsNewBadges();
   const { track } = useSaveStatus(ENGINE_PANEL_ID);
   const owner = cardOwner(row.key);
   const cardRendered = owner !== null && cardSurfaceAvailable(owner.surface, capabilities);
@@ -354,6 +378,7 @@ export function SchemaSettingRow({ row, index }: { row: SchemaRow; index: Schema
       description={description || undefined}
       badge={row.readOnly ? READ_ONLY_BADGE : (row.terminalOnly ? TERMINAL_ONLY_BADGE : undefined)}
       searchId={cardRendered ? rowSearchIdBesideCard(row.key) : searchIdForKey(row.key)}
+      newKey={isBadgedRow(row, isNew) ? row.key : undefined}
       switchControl={isToggle}
       control={(
         <>
@@ -388,15 +413,23 @@ export function SchemaSettingRow({ row, index }: { row: SchemaRow; index: Schema
   );
 }
 
+/** ` · K new` for a tab or section with K badged settings, else nothing. */
+function newCountSuffix(rows: readonly SchemaRow[], isNew: (key: string) => boolean): string {
+  const count = countBadged(rows, isNew);
+  return count > 0 ? ` · ${newCountLabel(count)}` : "";
+}
+
 function groupKey(tabId: string, groupId: string): string {
   return `${tabId} ${groupId}`;
 }
 
 /** A collapsible section: `Group · N settings · M changed`. */
 function GroupSection({ tabId, group, open, onToggle, columns, index }: { tabId: string; group: SchemaGroup; open: boolean; onToggle: () => void; columns: number; index: SchemaIndex }) {
+  const { isNew } = useSettingsNewBadges();
   const visible = group.rows.filter((row) => row.visible);
   if (visible.length === 0) return null;
   const changed = visible.filter((row) => row.modified).length;
+  const fresh = countBadged(visible, isNew);
   const id = `schema-group-${tabId}-${group.id}`.replace(/[^a-z0-9-]+/gi, "-");
   return (
     <section id={id} aria-labelledby={`${id}-heading`} style={{ display: "flex", flexDirection: "column", gap: 10, scrollMarginTop: 56 }}>
@@ -412,6 +445,7 @@ function GroupSection({ tabId, group, open, onToggle, columns, index }: { tabId:
         <span style={{ fontSize: 12, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--text-muted)" }}>{group.label}</span>
         <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
           · {visible.length} setting{visible.length === 1 ? "" : "s"}{changed > 0 ? ` · ${changed} changed` : ""}
+          {fresh > 0 && <span style={{ color: "var(--accent)", fontWeight: 600 }}>{` · ${newCountLabel(fresh)}`}</span>}
         </span>
       </button>
       {open && (
@@ -496,6 +530,7 @@ function rowMatches(row: SchemaRow, query: string): boolean {
 
 export function SchemaSettingsList() {
   const { capabilities, isMobile, harnessLabel, openSub } = useSettingsShell();
+  const { isNew } = useSettingsNewBadges();
   const index = useSchemaIndex({ enabled: capabilities.nativeSettings });
   const shortName = index.shortName ?? harnessLabel;
   const [activeTab, setActiveTab] = useState<string | null>(null);
@@ -567,12 +602,13 @@ export function SchemaSettingsList() {
 
   if (index.status === "disabled" || index.status === "unsupported") return null;
 
+  const newTotal = countBadged(index.rows, isNew);
   const heading = (
     <div>
       <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>All {shortName} settings</h3>
       <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--text-muted)" }}>
         {index.status === "ready"
-          ? <>{[index.version, `${index.modifiedCount} changed`, `${index.settingsCount} settings`].filter(Boolean).join(" · ")} — every setting {shortName} declares, in its own tabs and sections{index.path ? <>, saved to <code style={{ fontSize: 11 }}>{index.path}</code></> : null}.</>
+          ? <>{[index.version, `${index.modifiedCount} changed`, `${index.settingsCount} settings`, newTotal > 0 ? newCountLabel(newTotal) : null].filter(Boolean).join(" · ")} — every setting {shortName} declares, in its own tabs and sections{index.path ? <>, saved to <code style={{ fontSize: 11 }}>{index.path}</code></> : null}.</>
           : <>This list mirrors {shortName}&apos;s own settings schema, so it shows every setting the installed {shortName} declares.</>}
       </p>
     </div>
@@ -637,7 +673,7 @@ export function SchemaSettingsList() {
     return {
       id: entry.id,
       title: entry.label,
-      subtitle: `${visible} setting${visible === 1 ? "" : "s"}${entry.changed > 0 ? ` · ${entry.changed} changed` : ""}`,
+      subtitle: `${visible} setting${visible === 1 ? "" : "s"}${entry.changed > 0 ? ` · ${entry.changed} changed` : ""}${newCountSuffix(entry.rows, isNew)}`,
       onOpen: () => open(entry.id),
     };
   });
@@ -670,7 +706,7 @@ export function SchemaSettingsList() {
             onChange={jumpToGroup}
             options={[...tab.groups, ...tab.ungrouped].map((group) => ({
               value: group.id,
-              label: `${group.label}${group.changed > 0 ? ` · ${group.changed} changed` : ""}`,
+              label: `${group.label}${group.changed > 0 ? ` · ${group.changed} changed` : ""}${newCountSuffix(group.rows, isNew)}`,
             }))}
             placeholder={`Jump to section… (${tab.groups.length + tab.ungrouped.length})`}
             width="min(320px, 100%)"
@@ -679,6 +715,7 @@ export function SchemaSettingsList() {
           <nav aria-label={`${shortName} settings tabs`} role="tablist" style={{ display: "flex", gap: 3, flexWrap: "wrap" }}>
             {tabs.map((entry) => {
               const selected = entry.id === currentTab;
+              const fresh = countBadged(entry.rows, isNew);
               return (
                 <button
                   key={entry.id}
@@ -689,7 +726,7 @@ export function SchemaSettingsList() {
                   className="ui-focus-ring"
                   style={{ padding: "5px 10px", border: "1px solid " + (selected ? "var(--accent)" : "var(--border)"), borderRadius: "var(--radius-control)", background: selected ? "var(--bg-selected)" : "transparent", color: selected ? "var(--text)" : "var(--text-muted)", cursor: "pointer", fontSize: 12, whiteSpace: "nowrap", minHeight: 28 }}
                 >
-                  {entry.label}{entry.changed > 0 ? <span style={{ marginLeft: 5, color: "var(--accent)", fontSize: 10.5 }}>{entry.changed}</span> : null}
+                  {entry.label}{entry.changed > 0 ? <span style={{ marginLeft: 5, color: "var(--accent)", fontSize: 10.5 }}>{entry.changed}</span> : null}{fresh > 0 ? <span style={{ marginLeft: 5, color: "var(--accent)", fontSize: 10.5, fontWeight: 600 }}>{newCountLabel(fresh)}</span> : null}
                 </button>
               );
             })}

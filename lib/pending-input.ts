@@ -1,4 +1,5 @@
 import type { AskAnswer } from "@/lib/ask-dialog";
+import type { AskWalkView } from "@/lib/ask-walk";
 import type { DeviceTrustRequest } from "@/lib/devices/trust";
 import type { AgentPermissionRequest } from "@/lib/permission-request";
 import type { OutboxImage } from "@/lib/outbox";
@@ -9,9 +10,20 @@ export type { RefusalDecision } from "@/lib/pi-types";
 /** omp >= 18.4's multi-question `ask` dialog (after `set_ask_dialog`). */
 export type ExtensionAskRequest = Extract<OmpExtensionUiRequest, { method: "ask" }>;
 
+/**
+ * A `select`, as omp sent it plus two fields only the browser adds while omp's
+ * `ask` tool walks a form one field at a time (see lib/ask-walk.ts).
+ */
+export type ExtensionSelectRequest = Extract<OmpExtensionUiRequest, { method: "select" }> & {
+  /** This select is one step of that walk; the rows know what is ticked. */
+  walk?: AskWalkView;
+  /** The pick was sent and omp has not asked its next question yet: the tick shows, the rows wait. */
+  settling?: boolean;
+};
+
 export type ExtensionDialogRequest =
   | Extract<ExtensionUiRequest, { method: "confirm" | "input" | "editor" }>
-  | Extract<OmpExtensionUiRequest, { method: "select" }>
+  | ExtensionSelectRequest
   | ExtensionAskRequest;
 
 export type ExtensionDialogResponse =
@@ -22,7 +34,7 @@ export type ExtensionDialogResponse =
 
 
 export type PendingInput =
-  | { kind: "extension"; request: ExtensionDialogRequest }
+  | { kind: "extension"; request: ExtensionDialogRequest; fromAsk?: boolean }
   | { kind: "permission"; request: AgentPermissionRequest }
   | { kind: "refusal"; decision: RefusalDecision }
   | { kind: "device-trust"; request: DeviceTrustRequest };

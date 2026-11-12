@@ -554,7 +554,7 @@ notes are missing, and is what clients should key any "stale" caveat off.
 | `/api/sessions` | GET | list; ownership-filtered; `ETag` + `304` |
 | `/api/sessions/<id>` | GET | transcript, tree and context |
 | `/api/sessions/<id>` | PATCH | `{name}` — rename |
-| `/api/sessions/<id>` | DELETE | delete session and artifacts |
+| `/api/sessions/<id>` | DELETE | delete session and artifacts, and the earlier copies its row stands in for (see `continuationOf`) |
 | `/api/sessions/<id>/state` | GET | `{running}` (+ `state` when live) |
 | `/api/sessions/<id>/context` | GET | context window accounting |
 | `/api/sessions/<id>/export` | GET | transcript export |
@@ -564,7 +564,7 @@ notes are missing, and is what clients should key any "stale" caveat off.
 | `/api/sessions/<id>/btw` | GET | side-question (`/btw`) topics, newest first; never starts an engine (omp only) |
 | `/api/sessions/<id>/media` | GET | attachments referenced by the transcript |
 | `/api/sessions/<id>/entries/<entryId>/thinking` | GET | expanded reasoning for one entry |
-| `/api/sessions/<id>/archive` | POST | archive the session and its artifacts |
+| `/api/sessions/<id>/archive` | POST | archive the session and its artifacts, and the earlier copies its row stands in for |
 | `/api/sessions/import` | POST | `{fileName, content}` (≤10 MB); the imported session becomes yours |
 
 ### `GET /api/sessions` — Stable envelope
@@ -586,9 +586,21 @@ Engines that keep their transcripts privately cannot supply `messageCount` or
 `firstMessage`; those degrade to `0` and the title rather than being guessed.
 Do not compute anything load-bearing from them.
 
+`continuationOf` (optional, omp 18.13.2+) is the id of the chat a row carries on
+from in a new file: omp moves a chat to a sibling file when it cannot keep writing
+the first, and the new file holds the whole transcript again. The list shows that
+as **one row**: the earlier copy is left out once a listed row continues it and
+nothing was said in it after the new file began (a copy that went on afterwards
+holds turns the other lacks, so both stay). A chat that moved more than once is
+one row too. Forks of an earlier copy have the row shown as their
+`parentSessionId`, and the row takes the earlier copy's place in the tree. The
+earlier copies stay readable by their own id (`GET /api/sessions/<id>`), and
+Delete and Archive of the row take them along, so none comes back as a chat.
+
 ### `GET /api/sessions/<id>` — Stable envelope, Incidental contents
 
-Top-level keys: `sessionId`, `filePath`, `info`, `leafId`, `tree`, `context`.
+Top-level keys: `sessionId`, `filePath`, `info`, `leafId`, `tree`, `context`, and
+(optional) `modelUsage`.
 
 - `info` is the same row shape as a `sessions` list entry.
 - `tree` is the branch-navigation tree: nodes of `{entry, children}` where
@@ -596,7 +608,18 @@ Top-level keys: `sessionId`, `filePath`, `info`, `leafId`, `tree`, `context`.
   entry types are the engine's transcript vocabulary.
 - `context` is `{messages, entryIds, thinkingLevel, model, todoPhases}`;
   `messages` is the rendered transcript. **Incidental.**
-- `leafId` is the current head entry, which is what a client resumes from.
+- `leafId` is the head entry omp resumes at, which is what a client resumes
+  from. It is the last entry, except that a `model_usage` bookkeeping entry
+  (omp 18.12.4+) written for a turn that was discarded sits on no branch and
+  names the branch it interrupted in `activeLeafId`: the head is that branch's
+  tip, not the bookkeeping entry. `tree` leaves such an entry out too. A session
+  with nothing in it has `leafId: null`.
+- `modelUsage` (optional) is the spend omp billed that is not a transcript
+  message, summed over the file's `model_usage` entries (late responses,
+  discarded turns, cache refreshes, helper calls): `{input, output, cacheRead,
+  cacheWrite, cost, unpricedModels}`, the same shape the statistics rollups use.
+  Absent when there is none, so an ordinary chat's payload is unchanged. A
+  client adds it to what it sums from `context.messages`.
 
 `404` when the session does not exist *or* is owned by another account.
 
@@ -951,6 +974,16 @@ frozen file. It is sent once to every attached stream, after the new file
 exists, and follows omp's own `notice` (`source:"session-persistence"`). A
 fork's new id is not announced this way: the `fork` command's answer carries
 `newSessionId`.
+
+The same frame, with **`"reason":"continued"`**, answers a stream opened on an
+**older id** whose conversation omp (18.13.2+) has since carried on in a newer
+file: the server opened (or found already running) that newer copy, so the
+stream is attached to `sessionId`, not to the id in its URL. It is sent once,
+first thing after the stream attaches. Switch to `sessionId` exactly as above.
+The server filed the old id's owner, preset, Local-only snapshot, plan
+checklist, scheduled messages and crash notices under the new id (the old
+file stays as it was), and a later start or command for the old id reaches the
+same running chat instead of opening a second one.
 
 ```json
 {"type":"cody_queue_returned","messages":[{"clientMessageId":"c1","text":"  fix the typo  ","images":[]}],
@@ -1550,6 +1583,54 @@ secretsSet, error?}`. `null` resets a key to the engine's default (and prunes
 the parent it empties). A key the engine refuses is named in `rejected` with
 its reason and `success` is false; nothing is reported saved that was not.
 The echoed `values` are redacted exactly as `GET`'s.
+
+## `GET|POST /api/settings-seen` — Incidental
+
+Which of the active engine's settings are **new since its last update**, for
+the calling person: the "New" chip Settings draws on a setting an engine
+update brought. Gated on a signed-in user, or an open instance (no accounts;
+the one fixed instance record is used then). **Not admin-only**: the counters
+are per account, so one person's views never fade another's chip.
+
+The keys are the engine's own settings schema, the one
+`/api/omp-settings/schema` serves. Cody keeps, per engine, the key set it saw
+the last time it looked (`cody-settings-seen.json` in the instance data dir)
+and diffs the current keys against it. The **first** look at an engine only
+records its keys: nothing is new retroactively. A later engine version (or key
+set) badges exactly the keys that were not there before; keys accumulate
+across upgrades while unfaded and drop out when the engine stops declaring
+them.
+
+```json
+{"engine":{"id":"omp","version":"18.19.0"},
+ "previousVersion":"18.8.3","firstRun":false,
+ "newKeys":["<setting.key>","…"],
+ "since":{"<setting.key>":"18.19.0"},
+ "fadeAfter":3}
+```
+
+- `newKeys` is sorted and holds only what is still badged for THIS caller.
+  Terminal-only settings (they do nothing in a browser) are never in it, though
+  their keys are recorded. `since` names the engine version that brought each
+  one; `version`, `previousVersion` and `since` values are `null` when the
+  engine's version cannot be read. `firstRun: true` means this request was the
+  first look at the engine.
+- A badge fades for a person after they have **seen** it in `fadeAfter` (3)
+  separate Settings opens, or **changed** the setting once.
+- An engine with no settings schema (or an empty one) answers `newKeys: []`,
+  `firstRun: false` and writes nothing.
+
+`POST {"openId": "<random id>", "seen"?: ["<key>", …], "changed"?: ["<key>", …]}`
+reports a display or a change and answers the same shape. `openId` is one
+random id per Settings open (at most 128 characters); the server keeps the
+last open that counted beside each counter, so a retried or duplicated POST,
+or the same chip shown in several panels, counts **once per open**. `seen` /
+`changed` are arrays of at most 1000 setting keys of at most 200 characters
+each; a key that is not a currently badged setting of the engine is ignored,
+never an error (the client may race an update). A body that is not JSON, or
+is over 256 KiB, is `400 invalid_body`; a body without a usable `openId`, or
+with a malformed list, is `400 invalid_report`. Every answer carries
+`Cache-Control: no-store`.
 
 ## Not covered here
 

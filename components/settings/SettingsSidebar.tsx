@@ -13,6 +13,8 @@ import { STORAGE_EVENTS, STORAGE_KEYS } from "@/lib/storage-keys";
 import { useTheme } from "@/hooks/useTheme";
 import { SHARED_ROUTE_TTL_MS, useSettingsRoutes } from "@/hooks/useSettingsData";
 import type { ActiveEngineInfo, EngineCapabilities } from "../SettingsTabs";
+import { useSettingsNewBadges } from "./new-badges";
+import { NewDot } from "./primitives";
 import { groupLabel, groupSections, type SettingsSection, type SettingsSectionId, type ShellData, type StatusLine } from "./registry";
 
 function readSoundEnabled(): boolean {
@@ -80,6 +82,7 @@ export function SettingsSidebar({ sections, active, onSelect, capabilities, engi
   harnessLabel: string;
 }) {
   const statuses = useSectionStatuses(sections, capabilities, engine, harnessLabel);
+  const { hubsWithNew } = useSettingsNewBadges();
   const groups = groupSections(sections, "desktop");
   const flat = groups.flatMap((group) => group.sections);
 
@@ -147,7 +150,10 @@ export function SettingsSidebar({ sections, active, onSelect, capabilities, engi
               >
                 <Icon size={16} aria-hidden="true" style={{ marginTop: 2, flexShrink: 0, color: selected ? "var(--accent)" : "currentColor" }} />
                 <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
-                  <div style={{ fontSize: 12.5, fontWeight: selected ? 600 : 500, lineHeight: 1.3, color: selected ? "var(--text)" : "inherit" }}>{label}</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, fontWeight: selected ? 600 : 500, lineHeight: 1.3, color: selected ? "var(--text)" : "inherit" }}>
+                    {label}
+                    {hubsWithNew.has(id) && <NewDot />}
+                  </div>
                   {status && (
                     <div style={{ fontSize: 10.5, color: TONE_COLOR[status.tone ?? "muted"], lineHeight: 1.3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={status.text}>
                       {status.text}

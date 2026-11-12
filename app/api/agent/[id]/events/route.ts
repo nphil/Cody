@@ -172,6 +172,14 @@ export async function GET(
         }
         if (closed) return;
         unsubscribe = session.onEvent((event) => encode(event));
+        // A resume of an older copy opened the newer one (omp 18.13.2+ follows
+        // the old file's `continuationOf` link), so this stream, asked for `id`,
+        // is attached to a chat that runs as another id. Say so the way a live
+        // move does: the page adopts it, and its next send, its transcript and
+        // its stream follow the copy that is being written, not the frozen one.
+        if (!engineMode && session.sessionId && session.sessionId !== id) {
+          encode({ type: "cody_session_moved", sessionId: session.sessionId, previousSessionId: id, sessionFile: session.sessionFile, reason: "continued" });
+        }
         // The session can close under an open stream: idle, a settings
         // restart, a crash. Staying subscribed to it would hear nothing from
         // the replacement the next command spawns, so end the stream instead;

@@ -86,6 +86,14 @@ export function ompPackageVersion(packageRoot: string): string | null {
 export function loadOmpPackageSource(packageRoot: string, ...segments: string[]): Record<string, unknown> | null {
   return loadOmpSourceFile(path.join(packageRoot, ...segments));
 }
+
+/** In-package data tables a settings domain derives its rows from at load time.
+ * A relative import is normally stubbed, which would leave those rows empty —
+ * `modes/magic-keywords.ts` is what `magicKeywords.<id>` is generated from, and
+ * under the stub the panel lost every keyword switch. These load for real, with
+ * their own imports stubbed. */
+const SETTINGS_DATA_MODULES: Record<string, true> = { "magic-keywords.ts": true };
+
 export interface OmpRegistrySettingsResult {
   definitions: Record<string, unknown>[] | null;
   ui: Record<string, unknown> | null;
@@ -135,7 +143,14 @@ export function loadOmpRegistrySettings(packageRoot: string): OmpRegistrySetting
     if (!registrySpecifier) {
       return { definitions: null, ui: null, error: "OMP settings domain " + modulePath + " does not import the shared registry" };
     }
-    const loaded = loadOmpSourceFile(modulePath, 0, { [registrySpecifier]: registry }, errors);
+    const overrides: Record<string, Record<string, unknown>> = { [registrySpecifier]: registry };
+    for (const specifier of sourceImports(source)) {
+      const dataPath = specifier.startsWith(".") ? resolveSourceSpecifier(modulePath, specifier) : null;
+      if (!dataPath || !SETTINGS_DATA_MODULES[path.basename(dataPath)]) continue;
+      const data = loadOmpSourceFile(dataPath, 1, undefined, errors);
+      if (data) overrides[specifier] = data;
+    }
+    const loaded = loadOmpSourceFile(modulePath, 0, overrides, errors);
     if (!loaded) {
       return { definitions: null, ui: null, error: errors.at(-1) ?? "Could not evaluate OMP settings domain " + modulePath };
     }
@@ -201,7 +216,8 @@ function loadOmpSettingsUiMetadata(packageRoot: string, errors: string[]): Recor
 }
 
 function sourceImports(source: string): string[] {
-  return [...source.matchAll(/^import\s+[\s\S]*?from\s+"([^"]+)";/gm)].map((match) => match[1]);
+  // `with { type: "text" }` import attributes sit between the specifier and the `;`.
+  return [...source.matchAll(/^import\s+[\s\S]*?from\s+"([^"]+)"(?:\s+with\s+\{[^}]*\})?;/gm)].map((match) => match[1]);
 }
 
 /** The same evaluation, addressed by absolute path — the form the re-export
@@ -222,7 +238,7 @@ function loadOmpSourceFile(
       return null;
     }
     const source = fs.readFileSync(file, "utf8");
-    const imports = [...source.matchAll(/^import\s+[\s\S]*?from\s+"([^"]+)";/gm)].map((match) => match[1]);
+    const imports = sourceImports(source);
     stubDir = fs.mkdtempSync(path.join(os.tmpdir(), "cody-omp-source-"));
     const stubPath = path.join(stubDir, STUB_FILENAME);
     fs.writeFileSync(stubPath, STUB_SOURCE, "utf8");

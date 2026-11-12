@@ -2,9 +2,11 @@ import { NextResponse } from "next/server";
 import { requireEngine } from "@/lib/engine-guard";
 import { archiveSessionFileWithArtifacts } from "@/lib/omp/session-files";
 import {
+  collapseContinuedSessions,
   invalidateSessionListCache,
   invalidateSessionPathCache,
   listAllSessions,
+  listSupersededCopies,
 } from "@/lib/session-reader";
 import { resolveSessionPathOr404 } from "@/lib/api-utils";
 import { getRpcSession } from "@/lib/rpc-manager";
@@ -29,7 +31,9 @@ export async function POST(
     // Parent-session paths are native branch metadata. Moving only a parent
     // would leave active children pointing at a path that no longer exists,
     // flattening their tree in the sidebar. Archive leaves first instead.
-    const hasChildren = (await listAllSessions()).some((session) => session.parentSessionId === id);
+    // The list is the sidebar's: forks of an earlier copy of this chat hang
+    // from it, and the earlier copies themselves are not children.
+    const hasChildren = collapseContinuedSessions(await listAllSessions()).some((session) => session.parentSessionId === id);
     if (hasChildren) {
       return NextResponse.json(
         { error: "Archive child sessions before archiving this session", code: "session_has_children" },
@@ -40,6 +44,13 @@ export async function POST(
     // OMP owns writes while a child is live; wait for its final flush before
     // moving the file so the archive contains the complete native transcript.
     await getRpcSession(id)?.destroyAndWait?.("the chat was archived");
+    // A chat omp moved to a new file (18.13.2+) is one row standing in for its
+    // earlier copies; they go with it, or the list would show the chat again.
+    // They first, so a failure leaves the row in place to try again.
+    for (const copy of await listSupersededCopies(id)) {
+      archiveSessionFileWithArtifacts(copy.path);
+      invalidateSessionPathCache(copy.id);
+    }
     const archivedPath = archiveSessionFileWithArtifacts(filePath);
     invalidateSessionPathCache(id);
     invalidateSessionListCache();

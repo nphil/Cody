@@ -15,7 +15,7 @@
  * union; with an empty query a chip lists everything it matches.
  */
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { chipStyle } from "./primitives";
+import { chipStyle, NewChipLabel } from "./primitives";
 import { SEARCH_FILTERS, matchesSearchFilter, type SearchEntry, type SearchFilter, type SearchResult } from "./search-index";
 
 export const SEARCH_RESULTS_ID = "settings-search-results";
@@ -179,6 +179,7 @@ export function SearchResultsList({ results, query, filter, onFilterChange, entr
             >
               <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                 <span style={{ fontSize: 12.5, fontWeight: 600 }}>{result.label}</span>
+                {result.isNew && <NewChipLabel />}
                 {result.id.startsWith("tab-") && <span style={chipStyle}>Section</span>}
                 {result.scope && <span style={chipStyle}>{result.scope}</span>}
                 {result.badge && <span style={chipStyle}>{result.badge}</span>}

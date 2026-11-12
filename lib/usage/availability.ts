@@ -9,20 +9,24 @@
  * second matching dialect: account ranking, tier scoping and window binding
  * already live there.
  *
- * Two rules are load-bearing:
+ * Three rules are load-bearing:
  *
  * 1. **Unknown is usable.** A provider that reports no quota at all (an
  *    ordinary API key, a local endpoint) must never be routed around. Only
- *    positive evidence of exhaustion blocks a model.
+ *    positive evidence that a model cannot serve blocks it.
  * 2. **Exhaustion is per serving account.** A provider with two accounts is
  *    exhausted only when the account that would actually serve the request
  *    is; an idle spent sibling says nothing.
+ * 3. **A login that ended is evidence, not silence.** When every account a
+ *    provider has is signed out or disabled, nothing can serve the model: the
+ *    verdict is `unavailable`, never `unknown` (which every caller reads as
+ *    "usable") and never `exhausted` (which says "wait for a reset").
  */
 
-import { rankProviderAccounts, selectWindowsForModel } from "./select";
+import { rankProviderAccounts } from "./select";
 import type { UsageSnapshot, UsageWindow } from "./types";
 
-export type AvailabilityState = "ok" | "warning" | "exhausted" | "unknown";
+export type AvailabilityState = "ok" | "warning" | "exhausted" | "unavailable" | "unknown";
 
 export interface ModelAvailability {
 	provider: string;
@@ -37,6 +41,17 @@ export interface ModelAvailability {
 	/** Set when every account for the provider is exhausted, not just the
 	 * serving one — the case a router must treat as "come back later". */
 	allAccountsExhausted?: boolean;
+	/** With state "unavailable": why no account can serve — the login ended
+	 * ("signed_out", only signing in again fixes it) or omp disabled the
+	 * credential ("disabled"). */
+	unusable?: "signed_out" | "disabled";
+}
+
+/** Whether a verdict means the model cannot take a request right now: out of
+ * quota, or no usable login at all. Callers that ask "may I send here?" read
+ * this rather than comparing against `exhausted` alone. */
+export function cannotServe(availability: Pick<ModelAvailability, "state"> | null | undefined): boolean {
+	return availability?.state === "exhausted" || availability?.state === "unavailable";
 }
 
 export interface RouteCandidate {
@@ -79,8 +94,6 @@ function soonestReset(windows: UsageWindow[]): string | undefined {
 	return iso;
 }
 
-
-
 /** The verdict for one model, from the snapshot alone. */
 export function resolveModelAvailability(
 	snapshot: UsageSnapshot | null | undefined,
@@ -88,13 +101,22 @@ export function resolveModelAvailability(
 	modelId: string,
 ): ModelAvailability {
 	const accounts = snapshot?.available ? (snapshot.accounts ?? []) : [];
-	const match = selectWindowsForModel(accounts, { provider, modelId });
-	if (!match) return { provider, modelId, state: "unknown" };
+	const ranked = rankProviderAccounts(accounts, provider, modelId);
+	const top = ranked[0];
+	if (!top) return { provider, modelId, state: "unknown" };
 
-	const binding = match.windows ?? [];
+	// `rankProviderAccounts` puts every unusable account last, so an unusable
+	// FIRST rank means the provider has no account that can serve at all.
+	// That is positive evidence about the login, so it is named, not shrugged
+	// off as "unknown".
+	if (top.state === "signed_out" || top.state === "disabled") {
+		return { provider, modelId, state: "unavailable", accountId: top.account.id, unusable: top.state };
+	}
+
+	const binding = top.windows ?? [];
 	if (binding.length === 0) {
 		// The provider reports quota, but none of it constrains this model.
-		return { provider, modelId, state: "unknown", accountId: match.account.id };
+		return { provider, modelId, state: "unknown", accountId: top.account.id };
 	}
 
 	const exhausted = binding.filter((window) => window.state === "exhausted");
@@ -109,29 +131,28 @@ export function resolveModelAvailability(
 		provider,
 		modelId,
 		state,
-		accountId: match.account.id,
+		accountId: top.account.id,
 		utilization: worst ? toUtilization(worst.utilization) : undefined,
 	};
 	const resetsAt = soonestReset(exhausted.length > 0 ? exhausted : binding);
 	if (resetsAt) availability.resetsAt = resetsAt;
 	if (state === "exhausted") {
-		// `selectWindowsForModel` already reports the SERVING account, so an
+		// `rankProviderAccounts` already puts the SERVING account first, so an
 		// exhausted answer means the best account is spent. Say explicitly
 		// whether a sibling could still take it, because that is the
 		// difference between "rotate" and "this provider is gone until reset".
-		const ranked = rankProviderAccounts(accounts, provider, modelId);
-		availability.allAccountsExhausted = ranked.length > 0
-			&& ranked.every((rank) => rank.state === "limited" || rank.state === "signed_out" || rank.state === "disabled");
+		availability.allAccountsExhausted = ranked.every((rank) => rank.state === "limited" || rank.state === "signed_out" || rank.state === "disabled");
 	}
 	return availability;
 }
 
 /**
- * The first candidate that is not exhausted, in the caller's own order.
+ * The first candidate that can serve, in the caller's own order.
  *
  * The order is the USER's (their `retry.fallbackChains` entry), never
  * re-sorted by utilization: a fallback chain is a preference, and quietly
- * reordering it would route work somewhere they did not choose.
+ * reordering it would route work somewhere they did not choose. A candidate
+ * whose provider has no usable login at all is passed over like a spent one.
  */
 export function pickAvailableRoute(
 	snapshot: UsageSnapshot | null | undefined,
@@ -141,10 +162,11 @@ export function pickAvailableRoute(
 	for (const candidate of candidates) {
 		if (!candidate?.provider || !candidate?.modelId) continue;
 		const availability = resolveModelAvailability(snapshot, candidate.provider, candidate.modelId);
-		if (availability.state !== "exhausted") {
+		if (!cannotServe(availability)) {
 			return { chosen: { provider: candidate.provider, modelId: candidate.modelId }, chosenState: availability.state, skipped };
 		}
 		skipped.push(availability);
 	}
-	return { chosen: null, chosenState: "exhausted", skipped };
+	const onlyLogins = skipped.length > 0 && skipped.every((availability) => availability.state === "unavailable");
+	return { chosen: null, chosenState: onlyLogins ? "unavailable" : "exhausted", skipped };
 }

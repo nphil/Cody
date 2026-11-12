@@ -28,12 +28,18 @@ import {
 } from "@/components/ui/field";
 import { Select, type SelectOption } from "@/components/ui/Select";
 import { Trash2, RefreshCw, AlertCircle, Cpu, Settings, Sparkles, Check as CheckIcon } from "lucide-react";
+import { useEngineVersion } from "@/hooks/useEngineVersion";
 import {
-  isResponsesFamilyApi,
+  type CompatSwitchKey,
+  discoveryAcceptsAdvertisedReasoning,
   kindApiMismatch,
   MODEL_KIND_OPTIONS,
+  MODELS_YML_SINCE,
+  modelsYmlOffers,
+  offeredCompatSwitches,
+  offeredRunnerApis,
+  offeredTokenizers,
   RUNNER_API_KINDS,
-  RUNNER_API_OPTIONS,
   withCompatFlag,
 } from "@/lib/model-kinds";
 import { toast } from "@/components/ui/toast";
@@ -147,6 +153,10 @@ export interface ModelEntry {
   input?: string[];
   contextWindow?: number;
   maxTokens?: number;
+  /** Images one request may carry before omp drops the oldest (omp 18.11.3+). */
+  imageCountBudget?: number;
+  /** Token-counting family (see MODEL_TOKENIZERS in lib/model-kinds.ts). */
+  tokenizer?: string;
   cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
   compat?: Record<string, unknown>;
 }
@@ -158,6 +168,8 @@ export interface ProviderEntry {
   auth?: "apiKey" | "none" | "oauth";
   headers?: Record<string, string>;
   compat?: Record<string, unknown>;
+  /** Live model discovery. `advertisedReasoning: false` (omp 18.13.2+) ignores the thinking levels the endpoint advertises. */
+  discovery?: { type?: string; advertisedReasoning?: boolean; [key: string]: unknown };
   models?: ModelEntry[];
   modelOverrides?: Record<string, unknown>;
 }
@@ -185,35 +197,110 @@ const API_OPTIONS: SelectOption[] = [
   "google-vertex",
 ].map((value) => ({ value, label: value }));
 
-const RUNNER_API_SELECT_OPTIONS: SelectOption[] = RUNNER_API_OPTIONS.map((value) => ({
-  value,
-  label: `${value} (${RUNNER_API_KINDS[value]})`,
-}));
+/** The runner apis an engine of `version` accepts (the three judge apis arrived in
+ * omp 18.9.2 / 18.19.0), plus the one the entry already names. */
+function runnerApiSelectOptions(version: string | null, current: string | undefined): SelectOption[] {
+  return offeredRunnerApis(version, current).map((value) => ({ value, label: `${value} (${RUNNER_API_KINDS[value]})` }));
+}
 
 const KIND_SELECT_OPTIONS: SelectOption[] = [
   { value: "", label: "chat / default" },
   ...MODEL_KIND_OPTIONS.filter((kind) => kind !== "chat").map((value) => ({ value, label: value })),
 ];
 
-/** compat.statefulResponses as default / on / off. Default means the key is
+/** Label and explanation of each `compat` switch. One key can mean different
+ * things per api: `statefulResponses` is Responses chaining on OpenAI and message
+ * threads on Anthropic (omp 18.17+). */
+function compatSwitchCopy(key: CompatSwitchKey, api: string | undefined): { label: string; hint: string } {
+  switch (key) {
+    case "statefulResponses":
+      return api === "anthropic-messages"
+        ? {
+            label: "Message threads",
+            hint: "Anthropic message threads (compat.statefulResponses): later turns continue a conversation the server holds. Default uses them only on Anthropic's own API; On opts a gateway in, Off turns them off for a proxy that misbehaves.",
+          }
+        : {
+            label: "Stateful responses",
+            hint: "OpenAI Responses chaining (compat.statefulResponses). Default leaves it to omp.",
+          };
+    case "requiresThinkingPresence":
+      return {
+        label: "Requires a thinking block",
+        hint: "Send a thinking block on every assistant turn (compat.requiresThinkingPresence), for a gateway group whose strict member rejects a turn without one. Default leaves it off.",
+      };
+    case "supportsThinkingBindingControls":
+      return {
+        label: "Thinking binding controls",
+        hint: "Claude thinking-binding controls on Bedrock (compat.supportsThinkingBindingControls). Default leaves them on; Off for a gateway or region that rejects them.",
+      };
+  }
+}
+
+/** One boolean `compat` switch as default / on / off. Default means the key is
  * ABSENT from the file, never a sentinel; on/off write true/false. */
-function StatefulResponsesField({ compat, onChange }: {
+function CompatSwitchField({ flag, api, compat, onChange }: {
+  flag: CompatSwitchKey;
+  api: string | undefined;
   compat: Record<string, unknown> | undefined;
   onChange: (compat: Record<string, unknown> | undefined) => void;
 }) {
-  const current = compat?.statefulResponses;
+  const current = compat?.[flag];
+  const { label, hint } = compatSwitchCopy(flag, api);
   return (
-    <FormField
-      label="Stateful responses"
-      hint="OpenAI Responses chaining (compat.statefulResponses). Default leaves it to omp."
-    >
+    <FormField label={label} hint={hint}>
       <Select
         value={current === true ? "on" : current === false ? "off" : ""}
-        onChange={(v) => onChange(withCompatFlag(compat, "statefulResponses", v === "on" ? true : v === "off" ? false : undefined))}
+        onChange={(v) => onChange(withCompatFlag(compat, flag, v === "on" ? true : v === "off" ? false : undefined))}
         options={[
           { value: "", label: "Default" },
           { value: "on", label: "On" },
           { value: "off", label: "Off" },
+        ]}
+        size="md"
+      />
+    </FormField>
+  );
+}
+
+/** The `compat` switches omp reads for `api` — those this engine's version knows,
+ * plus any the file already sets (so it can be seen and removed). */
+function CompatSwitchFields({ api, compat, version, onChange }: {
+  api: string | undefined;
+  compat: Record<string, unknown> | undefined;
+  version: string | null;
+  onChange: (compat: Record<string, unknown> | undefined) => void;
+}) {
+  return (
+    <>
+      {offeredCompatSwitches(api, compat, version).map((flag) => (
+        <CompatSwitchField key={flag} flag={flag} api={api} compat={compat} onChange={onChange} />
+      ))}
+    </>
+  );
+}
+
+/** `discovery.advertisedReasoning` (omp 18.13.2+): trust the thinking levels the
+ * endpoint's /v1/models rows advertise (the default) or ignore them. Trust drops
+ * the key from the file. */
+function AdvertisedReasoningField({ discovery, onChange }: {
+  discovery: NonNullable<ProviderEntry["discovery"]>;
+  onChange: (discovery: ProviderEntry["discovery"]) => void;
+}) {
+  return (
+    <FormField
+      label="Advertised thinking levels"
+      hint="Whether omp trusts the thinking levels this endpoint's /v1/models list advertises (discovery.advertisedReasoning). Ignore them when the advertised levels don't match what the route accepts; omp then uses its bundled catalog for the model."
+    >
+      <Select
+        value={discovery.advertisedReasoning === false ? "ignore" : "trust"}
+        onChange={(v) => {
+          const next = { ...discovery };
+          delete next.advertisedReasoning;
+          onChange(v === "ignore" ? { ...next, advertisedReasoning: false } : next);
+        }}
+        options={[
+          { value: "trust", label: "Trust (default)" },
+          { value: "ignore", label: "Ignore, use the catalog's" },
         ]}
         size="md"
       />
@@ -269,6 +356,7 @@ export function ProviderEntryEditor({ name, provider, onChange, onRename }: {
   onChange: (p: ProviderEntry) => void; onRename: (n: string) => void;
 }) {
   const { t } = useI18n();
+  const engineVersion = useEngineVersion();
   const [editingName, setEditingName] = useState(name);
   useEffect(() => setEditingName(name), [name]);
   const set = <K extends keyof ProviderEntry>(k: K, v: ProviderEntry[K]) => onChange({ ...provider, [k]: v });
@@ -457,8 +545,17 @@ export function ProviderEntryEditor({ name, provider, onChange, onRename }: {
           />
         </FormField>
 
-        {isResponsesFamilyApi(provider.api ?? "openai-completions") && (
-          <StatefulResponsesField compat={provider.compat} onChange={(compat) => set("compat", compat)} />
+        <CompatSwitchFields
+          api={provider.api ?? "openai-completions"}
+          compat={provider.compat}
+          version={engineVersion}
+          onChange={(compat) => set("compat", compat)}
+        />
+
+        {provider.discovery
+          && discoveryAcceptsAdvertisedReasoning(provider.discovery.type)
+          && modelsYmlOffers(engineVersion, MODELS_YML_SINCE.advertisedReasoning, provider.discovery.advertisedReasoning !== undefined) && (
+          <AdvertisedReasoningField discovery={provider.discovery} onChange={(discovery) => set("discovery", discovery)} />
         )}
       </FieldGroup>
 
@@ -652,6 +749,7 @@ export function ModelEntryEditor({
   onDelete: () => void;
 }) {
   const { t } = useI18n();
+  const engineVersion = useEngineVersion();
   const [testState, setTestState] = useState<ModelTestState>({ phase: "idle" });
   const [removeOpen, setRemoveOpen] = useState(false);
   const set = <K extends keyof ModelEntry>(k: K, v: ModelEntry[K]) => onChange({ ...model, [k]: v });
@@ -752,7 +850,7 @@ export function ModelEntryEditor({
           <Select
             value={model.api ?? ""}
             onChange={(v) => set("api", v || undefined)}
-            options={[{ value: "", label: t("modelsConfig.inheritNone") }, ...API_OPTIONS, ...RUNNER_API_SELECT_OPTIONS]}
+            options={[{ value: "", label: t("modelsConfig.inheritNone") }, ...API_OPTIONS, ...runnerApiSelectOptions(engineVersion, model.api)]}
             size="md"
           />
         </FormField>
@@ -770,12 +868,12 @@ export function ModelEntryEditor({
           />
         </FormField>
 
-        {isResponsesFamilyApi(effectiveApi) && (
-          <StatefulResponsesField
-            compat={model.compat}
-            onChange={(compat) => set("compat", compat)}
-          />
-        )}
+        <CompatSwitchFields
+          api={effectiveApi}
+          compat={model.compat}
+          version={engineVersion}
+          onChange={(compat) => set("compat", compat)}
+        />
 
         <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
           <FormCheck
@@ -842,6 +940,35 @@ export function ModelEntryEditor({
               value={model.maxTokens !== undefined ? String(model.maxTokens) : ""}
               onChange={(v) => set("maxTokens", v ? parseInt(v) : undefined)}
               placeholder="16384"
+            />
+          </FormField>
+        </div>
+      </FieldGroup>
+
+      <FieldGroup label="Images and token counting">
+        <div className="model-detail-grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          {modelsYmlOffers(engineVersion, MODELS_YML_SINCE.imageCountBudget, model.imageCountBudget !== undefined) && (
+            <FormField
+              label="Max images per request"
+              hint="The image limit of this gateway's host (imageCountBudget). Past it omp drops the oldest images, which rewrites the prompt cache. Leave empty for omp's default of 5."
+              error={model.imageCountBudget !== undefined && !(Number.isSafeInteger(model.imageCountBudget) && model.imageCountBudget > 0) ? "Must be a whole number above 0." : undefined}
+            >
+              <NumInput
+                value={model.imageCountBudget !== undefined ? String(model.imageCountBudget) : ""}
+                onChange={(v) => set("imageCountBudget", v ? parseInt(v) : undefined)}
+                placeholder="5"
+              />
+            </FormField>
+          )}
+          <FormField
+            label="Tokenizer"
+            hint="Which tokenizer omp uses to count this model's tokens. Default lets omp choose from the model id."
+          >
+            <Select
+              value={model.tokenizer ?? ""}
+              onChange={(v) => set("tokenizer", v || undefined)}
+              options={[{ value: "", label: "Default" }, ...offeredTokenizers(engineVersion, model.tokenizer).map((value) => ({ value, label: value }))]}
+              size="md"
             />
           </FormField>
         </div>

@@ -394,9 +394,10 @@ export const MAX_SESSION_LOAD_BYTES = 1024 * 1024 * 1024;
  * Read a file line by line over a byte buffer. Unlike readFileSync(path,"utf8")
  * this never materializes the whole file as a single JS string, so sessions
  * past Node's ~512 MiB string cap still open. Lines exclude the newline; the
- * decoder carries multi-byte characters across chunk boundaries.
+ * decoder carries multi-byte characters across chunk boundaries. A callback
+ * that returns `true` stops the read early.
  */
-function forEachFileLineSync(filePath: string, onLine: (line: string) => void): void {
+function forEachFileLineSync(filePath: string, onLine: (line: string) => void | boolean): void {
   const fd = openSync(filePath, "r");
   try {
     const buffer = Buffer.allocUnsafe(SESSION_READ_CHUNK_BYTES);
@@ -425,7 +426,7 @@ function forEachFileLineSync(filePath: string, onLine: (line: string) => void): 
       let start = 0;
       let newlineIndex = joined.indexOf("\n", start);
       while (newlineIndex !== -1) {
-        onLine(joined.slice(start, newlineIndex));
+        if (onLine(joined.slice(start, newlineIndex)) === true) return;
         start = newlineIndex + 1;
         newlineIndex = joined.indexOf("\n", start);
       }
@@ -575,22 +576,33 @@ export function readSessionHeaderSync(filePath: string): SessionHeader | null {
 /**
  * Build the session tree: one root for a well-formed session, orphaned entries
  * (broken parent chain) become extra roots. Labels come from label entries in
- * append order (a later label overrides; an empty label clears).
+ * append order (a later label overrides; an empty label clears). A late
+ * `model_usage` (omp 18.12.4+ names the leaf it interrupted in `activeLeafId`)
+ * is billing, not a place in the chat; drawn as a child of the older entry it
+ * answered for it would show as a dead-end branch, so it is left out.
  */
 export function buildSessionTree(entries: SessionEntry[]): SessionTreeNode[] {
   const labels = new Map<string, string>();
+  const hasChildren = new Set<string>();
   for (const entry of entries) {
+    if (entry.parentId) hasChildren.add(entry.parentId);
     if (entry.type !== "label") continue;
     if (entry.label) labels.set(entry.targetId, entry.label);
     else labels.delete(entry.targetId);
   }
+  const drawn = entries.filter((entry) => !(
+    entry.type === "model_usage"
+    && entry.activeLeafId !== undefined
+    && entry.activeLeafId !== entry.id
+    && !hasChildren.has(entry.id)
+  ));
 
   const nodes = new Map<string, SessionTreeNode>();
   const roots: SessionTreeNode[] = [];
-  for (const entry of entries) {
+  for (const entry of drawn) {
     nodes.set(entry.id, { entry, children: [], label: labels.get(entry.id) });
   }
-  for (const entry of entries) {
+  for (const entry of drawn) {
     const node = nodes.get(entry.id)!;
     if (entry.parentId === null || entry.parentId === entry.id) {
       roots.push(node);
@@ -612,9 +624,27 @@ export function buildSessionTree(entries: SessionEntry[]): SessionTreeNode[] {
   return roots;
 }
 
-/** The persisted leaf: the last appended entry (matches omp's loaded-session leaf). */
-export function getLeafEntryId(entries: SessionEntry[]): string | null {
-  return entries.length > 0 ? entries[entries.length - 1].id : null;
+/**
+ * The persisted leaf: what omp itself resumes at (port of its
+ * `resolveSessionLeafId`). The last entry, unless that entry was written off
+ * the active branch (a late `model_usage`, a background bash result,
+ * discarded-turn usage) and names the leaf it interrupted in `activeLeafId`.
+ * An empty or cleared (`activeLeafId: null`) session has no leaf (null). A
+ * named leaf that no longer exists falls back to the newest entry that
+ * selects itself. A file from an engine before 18.12.4 carries no
+ * `activeLeafId`, so this stays "the last entry" there.
+ */
+export function resolveSessionLeafId(entries: readonly SessionEntry[]): string | null {
+  const last = entries.at(-1);
+  if (!last) return null;
+  const leafId = last.activeLeafId !== undefined ? last.activeLeafId : last.id;
+  if (leafId === null || leafId === last.id || entries.some((entry) => entry.id === leafId)) return leafId;
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index];
+    // An entry selects itself unless it names a different leaf.
+    if (entry.activeLeafId === undefined || entry.activeLeafId === entry.id) return entry.id;
+  }
+  return null;
 }
 
 // ============================================================================
@@ -629,6 +659,8 @@ export interface OmpSessionInfo {
   cwd: string;
   title?: string;
   parentSessionPath?: string;
+  /** Id of the session this file continues in a new file (header `continuationOf`). */
+  continuationOf?: string;
   created: Date;
   modified: Date;
   /** Time of the newest user message or assistant reply, read from the tail
@@ -840,6 +872,7 @@ interface SessionListHeader {
   cwd?: string;
   title?: string;
   parentSession?: string;
+  continuationOf?: string;
   timestamp?: string;
 }
 
@@ -861,6 +894,7 @@ function sessionListHeaderFromRecord(
         ? undefined
         : (titleOverride ?? (typeof record.title === "string" ? record.title : undefined)),
     parentSession: typeof record.parentSession === "string" ? record.parentSession : undefined,
+    continuationOf: typeof record.continuationOf === "string" ? record.continuationOf : undefined,
     timestamp: typeof record.timestamp === "string" ? record.timestamp : undefined,
   };
 }
@@ -874,6 +908,7 @@ function parseSessionListHeaderLine(line: string, titleOverride?: string | null)
     cwd: extractStringProperty(line, "cwd"),
     title: titleOverride === null ? undefined : (titleOverride ?? extractStringProperty(line, "title")),
     parentSession: extractStringProperty(line, "parentSession"),
+    continuationOf: extractStringProperty(line, "continuationOf"),
     timestamp: extractStringProperty(line, "timestamp"),
   };
 }
@@ -975,6 +1010,32 @@ export function scanSessionInfo(filePath: string, withStatus = true): OmpSession
       entries = parseJsonlLenient<Record<string, unknown>>(content);
       scanEntries();
     }
+    // omp 18.19 recovers a first prompt that sits behind a leading record
+    // bigger than even the wide window (a memory-recall block, an attachment):
+    // one line-boundary pass over the rest of the file instead of trusting the
+    // gap. Without it such a chat reads "(no messages)" in the sidebar and the
+    // session namer never names it.
+    if (!firstMessage && size > SESSION_LIST_WIDE_PREFIX_BYTES) {
+      try {
+        forEachFileLineSync(filePath, (line) => {
+          if (!line.includes('"user"')) return;
+          let record: { type?: unknown; message?: { role?: unknown; content?: unknown } };
+          try {
+            record = JSON.parse(line);
+          } catch {
+            return;
+          }
+          if (record.type !== "message" || record.message?.role !== "user") return;
+          const text = extractTextFromContent(record.message.content).slice(0, SESSION_LIST_PREFIX_BYTES);
+          if (!text) return;
+          firstMessage = text;
+          parsedMessageCount ||= 1;
+          return true;
+        });
+      } catch {
+        // Unreadable past the window: keep the bounded-window evidence.
+      }
+    }
 
     firstMessage ||= extractFirstDisplayMessageFromPrefix(content) ?? "";
     const messageCount = Math.max(parsedMessageCount, countMessageMarkers(content));
@@ -984,6 +1045,7 @@ export function scanSessionInfo(filePath: string, withStatus = true): OmpSession
       cwd: header.cwd ?? "",
       title: header.title ?? shortSummary,
       parentSessionPath: header.parentSession,
+      continuationOf: header.continuationOf,
       created: new Date(header.timestamp ?? ""),
       modified: mtime,
       lastActiveAt,

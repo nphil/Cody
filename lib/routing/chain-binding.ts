@@ -33,6 +33,7 @@ import { dirname } from "path";
 import { isMap, parseDocument } from "yaml";
 import { getSettingsPath } from "../omp/paths";
 import { resolveModelAvailability } from "../usage/availability";
+import { isAccountWideWindow } from "../usage/quota-tiers";
 import type { UsageSnapshot } from "../usage/types";
 import { coveredByClaudeCredits, type ClaudeCreditsCover } from "./credits-cover";
 import { parseRoleSelector } from "./role-binding";
@@ -95,7 +96,7 @@ function droppedEntry(input: ChainBindingInput, entry: string): DroppedChainEntr
 	const until = availability.resetsAt ?? null;
 	const exhausted = (input.snapshot?.accounts ?? [])
 		.filter((account) => account?.provider === provider)
-		.flatMap((account) => (account.windows ?? []).filter((window) => window?.state === "exhausted" && !window.tier));
+		.flatMap((account) => (account.windows ?? []).filter((window) => window?.state === "exhausted" && isAccountWideWindow(window)));
 	const blocked = exhausted.length > 0 && exhausted.every((window) => window.source === "block");
 	const reason = blocked ? "blocked after a rejected request" : "all accounts exhausted";
 	return { entry, provider, reason: until ? `${reason} until ${until}` : reason, until, source: blocked ? "block" : "quota" };

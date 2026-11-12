@@ -42,6 +42,7 @@ import { MachineMeters } from "./machines/MachineMeters";
 import { MachinesPanel } from "./machines/MachinesPanel";
 import { providerBrand } from "@/lib/provider-brand";
 import type { SessionStatsInfo } from "@/lib/pi-types";
+import { formatEditRejections } from "@/lib/session-usage";
 import { ALL_CAPABILITIES, normalizeCapabilities, type ActiveEngineInfo, type EngineCapabilities, type SettingsTab } from "./SettingsTabs";
 import type { SettingsRequest } from "./SettingsConfig";
 import { SettingsOpenerContext, type SettingsOpenOptions } from "./settings/shell-context";
@@ -1677,11 +1678,14 @@ export function AppShell() {
                       { label: t("appShell.statFile"), value: sessionStats.sessionFile ?? t("appShell.inMemory"), copyField: "file" as const },
                       { label: t("appShell.statId"), value: sessionStats.sessionId, copyField: "id" as const },
                     ];
+                    const editRejectionsLine = formatEditRejections(sessionStats.editRejections);
                     const messageRows = [
                       [t("appShell.statUser"), sessionStats.userMessages.toLocaleString(locale)],
                       [t("appShell.statAssistant"), sessionStats.assistantMessages.toLocaleString(locale)],
                       [t("appShell.statToolCalls"), sessionStats.toolCalls.toLocaleString(locale)],
                       [t("appShell.statToolResults"), sessionStats.toolResults.toLocaleString(locale)],
+                      // omp >= 18.13 only; an older transcript has no reason on its failed edits.
+                      ...(editRejectionsLine ? [[t("appShell.statEditRejections"), editRejectionsLine]] : []),
                       [t("appShell.statTotal"), sessionStats.totalMessages.toLocaleString(locale)],
                     ];
                     const tokenRows = [

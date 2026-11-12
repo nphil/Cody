@@ -29,8 +29,9 @@ const SYSTEM_PROMPT = [
 // What each role actually drives. Without this, names such as smol and slow
 // invite guesses that conflict with OMP's real role behavior. Exported so the
 // researched-preset planner (lib/model-presets/research.ts) can reuse the same
-// wording instead of re-describing OMP's roles from scratch, extending it with
-// roles this planner does not assign (e.g. memory).
+// wording instead of re-describing OMP's roles from scratch. It also briefs
+// roles this planner does not assign (memory); the planner's own prompt lists
+// only the roles passed in (ROLE_NAMES filtered to the installed engine).
 export const ROLE_BRIEF_LINES: Record<string, string> = {
   default: "default - the main session: every ordinary user-driven turn.",
   task: "task - general-purpose subagents doing balanced, multi-step delegated work; do not spend the frontier model by default.",
@@ -41,10 +42,11 @@ export const ROLE_BRIEF_LINES: Record<string, string> = {
   vision: "vision - anything with images attached; the model must accept image input.",
   commit: "commit - short, formulaic commit messages at high volume.",
   advisor: "advisor - OMP's rigorous second-opinion reviewer, not a cheapest background classifier.",
+  widget: "widget - tiny background calls that design the live widgets and one-line captions shown for background jobs; like smol and tiny, use a small, fast, cheap model, never a flagship one, even for the strongest tier.",
+  memory: "memory - background calls the memory backend itself makes (Mnemopi/Hindsight extraction, consolidation, and recall synthesis); never a user-facing chat turn, and only relevant when memory is not off.",
 };
-const ROLE_BRIEF = Object.values(ROLE_BRIEF_LINES).join("\n");
 
-function buildUserPrompt(roster: Roster): string {
+function buildUserPrompt(roster: Roster, roleNames: readonly string[]): string {
   return [
     "Assign models to roles for this installation.",
     "",
@@ -58,14 +60,14 @@ function buildUserPrompt(roster: Roster): string {
     ].join(" "),
     "",
     "The roles:",
-    ROLE_BRIEF,
+    roleNames.flatMap((role) => ROLE_BRIEF_LINES[role] ?? []).join("\n"),
     "",
     "Answer with exactly this JSON shape:",
     '{"roles":{"<role>":"<selector>"},"ladder":["<provider id>"],"rationale":[{"subject":"<role or topic>","text":"<one short sentence>"}]}',
     "",
-    `Rules. Role names must come from this list: ${ROLE_NAMES.join(", ")}. Omit a role only when no available model can satisfy its required image input.`,
+    `Rules. Role names must come from this list: ${roleNames.join(", ")}. Omit a role only when no available model can satisfy its required image input.`,
     [
-      "Use a native-smol or otherwise lightweight model for smol, tiny, and commit whenever one is available.",
+      "Use a native-smol or otherwise lightweight model for smol, tiny, commit, and widget (when listed) whenever one is available.",
       "Use a native-slow model for slow, plan, and advisor whenever one is available.",
       "Reasoning is a preference, not a reason to leave a chat-only roster unusable.",
     ].join(" "),
@@ -143,7 +145,11 @@ function readDraft(raw: unknown): PlanDraft | null {
 }
 
 /** Plan with a model. `model` is a roster selector; the caller picks it. */
-export async function planWithModel(model: string, roster: Roster): Promise<PlannerOutcome> {
+export async function planWithModel(
+  model: string,
+  roster: Roster,
+  roleNames: readonly string[] = ROLE_NAMES,
+): Promise<PlannerOutcome> {
   const bin = resolveOmpBin();
   if (!bin) return { ok: false, reason: OMP_BIN_MISSING };
 
@@ -151,7 +157,7 @@ export async function planWithModel(model: string, roster: Roster): Promise<Plan
     bin,
     model,
     systemPrompt: SYSTEM_PROMPT,
-    prompt: buildUserPrompt(roster),
+    prompt: buildUserPrompt(roster, roleNames),
     timeoutMs: PLANNER_TIMEOUT_MS,
     timeZone: effectiveTimeZone(null).zone,
     usage: { purpose: "planner" },

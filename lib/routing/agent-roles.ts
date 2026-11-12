@@ -7,7 +7,7 @@
  * `task/structured-subagent.ts`):
  *
  * - An agent definition may pin a concrete model
- *   (`~/.omp/agent/agents/luna.md` → `model: openai-codex/gpt-5.6-luna`).
+ *   (`$PI_CODING_AGENT_DIR/agents/luna.md` on omp 18.18.8+, `~/.omp/agent/agents/luna.md` before → `model: openai-codex/gpt-5.6-luna`).
  * - `resolveAgentModelSelection` returns `role: undefined` for any source
  *   that is not a role alias. The role is what keys the child's inherited
  *   retry-fallback chain — so a concrete pin means the subagent gets **no
@@ -48,6 +48,8 @@ export const DEFAULT_AGENT_ROLES: Record<string, string> = {
 	scout: "@smol",
 	reviewer: "@slow",
 	"security-reviewer": "@slow",
+	// Reads one saved chat and answers a question: a light, read-only job like scout.
+	seance: "@smol",
 };
 
 export interface AgentRoleChange {

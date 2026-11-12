@@ -22,6 +22,7 @@ import {
 } from "@/lib/permission-request";
 import type { RefusalDecision } from "@/lib/pending-input";
 import type { ExtensionDialogRequest, ExtensionDialogResponse, PendingInput, PendingInputResponse, RewoundDraft } from "@/lib/pending-input";
+import { createAskWalkTracker, dialogBelongsToAsk } from "@/lib/ask-walk";
 import { extractLoopbackUrls, normalizePreviewUrl } from "@/lib/preview-url";
 import { derivePersistedContextUsage, type ContextUsageValue } from "@/lib/context-usage";
 import type { ThinkingModelMeta } from "@/lib/thinking-levels";
@@ -55,7 +56,7 @@ import { engineSupports } from "@/lib/engine-capabilities";
 import { currentLocale, translate } from "@/lib/i18n";
 import { formatResetTime } from "@/lib/format";
 import { deriveSlowModeState, describeUsageLimit, readUsageLimit, sameUsageLimit, usageLimitStageToAnnounce, type SlowModeState } from "@/lib/slow-mode-state";
-import { describeEngineError, errorDedupeKey, type ErrorKind } from "@/lib/error-text";
+import { describeEngineError, errorDedupeKey, readCostGateAmounts, type ErrorKind } from "@/lib/error-text";
 import { shelfItemFor } from "@/lib/devices/operation-notices";
 import { engineCrashRow, readEngineCrashNotice } from "@/lib/engine-crash";
 import { useDeviceTrustRequests } from "@/hooks/useDeviceTrustRequests";
@@ -108,6 +109,16 @@ import {
 } from "@/hooks/session-control-scope";
 import { SESSION_PROMPT_IMAGE, SESSION_PROMPT_STEERING, sessionPromptCapabilityBits } from "@/hooks/session-prompt-capabilities";
 import { PLAN_LIMIT_NOTICE_HOLD_MS, PLAN_LIMIT_RETRY_BANNER_HOLD_MS, creditsNoticeKind, modelSelector, shouldHoldPlanLimitNotice, shouldHoldRetryBanner } from "@/hooks/claude-credits-notices";
+import {
+  ACTIONABLE_NOTICE_VISIBLE_MS,
+  credentialProviderName,
+  missingApiKeyProvider,
+  missingCredentialProvider,
+  noticeCtaForDedupeKey,
+  savedResetDedupeKey,
+  savedResetEligibleProvider,
+  signedOutDedupeKey,
+} from "@/hooks/credential-notices";
 import { isClaudeCreditsSelector } from "@/lib/claude-credits";
 import { toast } from "@/components/ui/toast";
 import { forkChatWithFeedback } from "@/hooks/useForkChat";
@@ -117,7 +128,7 @@ import { createActiveGoal, parseActiveGoal, type ActiveGoal, type ActivePlan } f
 import { adoptGoal, goalErrorKey, parseGoalCommand, parseGoalModeState, readGoalUpdate, type GoalModeState, type GoalView } from "@/lib/goal-state";
 import type { HostToolDefinition, HostUriSchemeDefinition, PlanOverlay, RpcAvailableSlashCommand, SessionStatsInfo, TodoPhase, UsageLimitState } from "@/lib/pi-types";
 import { asCount, asNumber, asString, isRecord } from "@/lib/type-guards";
-import { addUsageTotals, aggregateMessageUsage, emptyUsageTotals, usageTokenTotal, type UsageTotals } from "@/lib/session-usage";
+import { addUsageTotals, aggregateMessageUsage, countEditRejections, emptyUsageTotals, usageTokenTotal, type UsageTotals } from "@/lib/session-usage";
 import { SESSION_STORAGE_PREFIXES } from "@/lib/storage-keys";
 import { getCachedSessionData, setCachedSessionData } from "@/lib/session-transcript-cache";
 import { captureTranscriptAnchor, restoreTranscriptAnchor, type TranscriptAnchor } from "@/lib/transcript-anchor";
@@ -155,6 +166,10 @@ export interface SessionData {
    * chat with no engine running still shows its labels and summaries. Absent
    * when the keeper never touched it. */
   planOverlay?: unknown;
+  /** Spend omp recorded as `model_usage` entries (a late response, a discarded
+   * turn, a cache refresh, a helper call): billed, but in no message. Summed
+   * by the server (lib/session-usage.ts); absent when there is none. */
+  modelUsage?: UsageTotals;
 }
 
 interface StreamingState {
@@ -243,7 +258,7 @@ interface LastAssistantTextResponse {
 // Shape of lib/rpc-manager's WebSessionState as seen over HTTP.
 type AgentStateResponse = {
   // Raw get_state passthrough: the resolved model omp is actually running.
-  model?: { provider: string; id: string; name?: string; reasoning?: boolean; thinking?: { efforts?: string[] } };
+  model?: { provider: string; id: string; name?: string; reasoning?: boolean; thinking?: { efforts?: string[]; unverified?: boolean } };
   contextUsage?: ContextUsageValue | null;
   systemPrompt?: string;
   thinkingLevel?: string;
@@ -505,7 +520,7 @@ function carrySessionClientState(fromId: string, toId: string): void {
 }
 
 /** Narrow the live state's model (OmpModel: id-based) to the composer's shape. */
-function toThinkingModelMeta(model: { provider?: string; id?: string; name?: string; reasoning?: boolean; thinking?: { efforts?: string[] } } | null | undefined): ThinkingModelMeta | null {
+function toThinkingModelMeta(model: { provider?: string; id?: string; name?: string; reasoning?: boolean; thinking?: { efforts?: string[]; unverified?: boolean } } | null | undefined): ThinkingModelMeta | null {
   if (!model?.provider || !model.id) return null;
   return { provider: model.provider, modelId: model.id, name: model.name, reasoning: model.reasoning, thinking: model.thinking };
 }
@@ -519,6 +534,8 @@ type IncomingExtensionUiRequest =
   | Extract<ExtensionDialogRequest, { method: "ask" }>
   | { type: "extension_ui_request"; id: string; method: "open_url"; url: string; launchUrl?: string; instructions?: string }
   | { type: "extension_ui_request"; id: string; method: "cancel"; targetId: string };
+/** How long a ticked `ask` step waits for omp's next question before the dialog is dropped as finished. */
+const ASK_WALK_SETTLE_MS = 5000;
 export type NoticeType = "info" | "success" | "warning" | "error";
 
 export type NoticeItem = {
@@ -574,8 +591,10 @@ export interface AutoModelSwitchInfo {
   /** Classified `reason`: a refusal needs a manual re-pick, a usage limit
    * resolves itself at the reset. Null when the text is unrecognized.
    * "credits": the Claude plan hit its limit and the Claude API credits
-   * took over — omp returns to the plan by itself. */
-  reasonKind?: FallbackReasonKind | "credits" | null;
+   * took over — omp returns to the plan by itself. "signed_out": the model's
+   * provider has no login, so omp hopped to a keyed fallback before the turn
+   * and returns once the login is back. */
+  reasonKind?: FallbackReasonKind | "credits" | "signed_out" | null;
   job: AutoModelSwitchJob;
 }
 
@@ -640,6 +659,7 @@ function noticeToneForErrorKind(kind: ErrorKind): NoticeType {
     case "refusal":
     case "usage":
     case "credits":
+    case "cost_cap":
     case "overloaded":
       return "warning";
     default:
@@ -659,6 +679,18 @@ function engineErrorNotice(
   rawMessage: string,
   fallbackProvider?: string,
 ): { type: NoticeType; message: string; dedupeKey: string; kind: ErrorKind } | null {
+  // omp refuses a prompt for a provider with no login, and no keyed fallback
+  // to hop to, with "No API key found for <provider>…": say it as a sign-out
+  // and let the shelf offer the sign-in button (keyed by provider).
+  const signedOutProvider = missingApiKeyProvider(rawMessage);
+  if (signedOutProvider) {
+    return {
+      type: "warning",
+      message: translate("agentSession.signedOutPrompt", { provider: credentialProviderName(signedOutProvider) }),
+      dedupeKey: signedOutDedupeKey(signedOutProvider),
+      kind: "auth",
+    };
+  }
   const described = describeEngineError(rawMessage);
   if (described.kind === "aborted") return null;
   const provider = described.provider ?? fallbackProvider ?? translate("agentSession.genericProvider");
@@ -673,6 +705,13 @@ function engineErrorNotice(
     case "credits":
       message = translate("agentSession.errorCredits", { provider, detail: described.detail });
       break;
+    case "cost_cap": {
+      // omp's own sentence names `--max-cost` and `session.maxCost`; say what
+      // happened and where the limit is changed instead.
+      const amounts = readCostGateAmounts(rawMessage);
+      message = amounts ? translate("agentSession.errorCostCap", amounts) : translate("agentSession.errorCostCapUnknown");
+      break;
+    }
     case "auth":
       // Same hint the credentials branch below used to give inline: point at
       // the one panel that actually fixes it.
@@ -701,6 +740,19 @@ function noticeFromCaughtError(
 ): { type: NoticeType; message: string; dedupeKey: string; kind: ErrorKind } | null {
   const raw = error instanceof Error ? error.message : String(error);
   return engineErrorNotice(raw, fallbackProvider);
+}
+
+/** The one-time heads-up omp 18.13+ sends when a chat first passes its
+ * `session.warnCost` (a `notice` with `source: "cost-gate"` at warning level).
+ * Its own sentence names `--warn-cost` and `session.warnCost`; this says the
+ * same in plain words. Keyed by chat, so another chat's warning still shows. */
+function costWarningNotice(rawMessage: string, sessionId: string | null): { type: NoticeType; message: string; dedupeKey: string } {
+  const amounts = readCostGateAmounts(rawMessage);
+  return {
+    type: "warning",
+    message: amounts ? translate("agentSession.costWarning", amounts) : translate("agentSession.costWarningUnknown"),
+    dedupeKey: `cost-warning:${sessionId ?? ""}`,
+  };
 }
 
 export type AgentPhase =
@@ -1081,8 +1133,9 @@ function compactionErrorOutcome(error: unknown): "failed" | "cancelled" | "unsup
     if (error.code === "cancelled") return "cancelled";
     if (error.code === "nothing_to_compact") return "noop";
   }
-  // OMP 0.18.1 reports its documented no-op only as this RpcCommandError text.
-  if (error instanceof Error && /^nothing\s+to\s+compact\b/i.test(error.message)) return "noop";
+  // OMP 0.18.1 reports its documented no-op only as this RpcCommandError text;
+  // a session whose newest entry is already a compaction says "Already compacted".
+  if (error instanceof Error && /^(nothing\s+to\s+compact|already\s+compacted)\b/i.test(error.message)) return "noop";
   return "failed";
 }
 
@@ -1120,7 +1173,7 @@ export interface AttachedImage {
 }
 
 type SelectedModel = { provider: string; modelId: string };
-type ModelEntry = { id: string; name: string; provider: string; supportsFastMode?: boolean; contextWindow?: number };
+type ModelEntry = { id: string; name: string; provider: string; supportsFastMode?: boolean; contextWindow?: number; thinkingUnverified?: true };
 type ModelsResponse = {
   models: Record<string, string>;
   modelList?: ModelEntry[];
@@ -1330,6 +1383,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [noticeState, dispatchNotice] = useReducer(noticeReducer, { visible: [], pending: [] });
   const [sessionStatsOverride, setSessionStatsOverride] = useState<SessionStatsInfo | null>(null);
   const [extensionDialog, setExtensionDialog] = useState<ExtensionUiDialogRequest | null>(null);
+  // The model's `ask` tool reaches us as a walk of plain dialogs (omp 18.18.3+). The tracker recognises
+  // a checkbox step and remembers its ticks, so the dialog can show them (lib/ask-walk.ts).
+  const [askWalk] = useState(createAskWalkTracker);
   const [extensionCustomUi, setExtensionCustomUi] = useState<ExtensionUiCustomRequest | null>(null);
   const [todoPhases, setTodoPhases] = useState<TodoPhase[]>(initialCachedData?.context.todoPhases ?? []);
   // Approvals the agent is blocked on. Plural and ordered: the protocol allows
@@ -1461,6 +1517,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // Monotonic fence for reconnect snapshots: a GET started before a newer
   // compaction request must not overwrite the newer request when it resolves.
   const compactionGenerationRef = useRef(0);
+  // Counts this page's own `compact` commands awaiting their response. The
+  // response settles that request, so a manual_compaction_end frame must not.
+  const compactRpcInFlightRef = useRef(0);
   // Set while an interrupt-and-reply (abort_and_prompt) is in flight: the
   // aborted turn's terminal agent_end must not tear down the new run that is
   // starting. Cleared on the new run's agent_start (or the intercept itself).
@@ -1634,7 +1693,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       assistantMessages += 1;
       toolCalls += msg.content.filter((c) => c.type === "toolCall").length;
     }
-    const usage = addUsageTotals(aggregateMessageUsage(messages), external);
+    const usage = addUsageTotals(aggregateMessageUsage(messages), external, data?.modelUsage ?? emptyUsageTotals());
     const tokens = {
       input: usage.input,
       output: usage.output,
@@ -1643,6 +1702,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       total: usageTokenTotal(usage),
     };
     if (tokens.total === 0 && messages.length === 0) return null;
+    const editRejections = countEditRejections(messages);
     return {
       sessionFile: data?.filePath || undefined,
       sessionId: sessionIdRef.current ?? session?.id ?? "",
@@ -1654,12 +1714,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       totalMessages: messages.length,
       tokens,
       cost: usage.cost,
+      // Absent rather than empty when nothing failed (or the engine predates
+      // the reason): the panel then shows no row at all.
+      ...(Object.keys(editRejections).length > 0 ? { editRejections } : {}),
       // Absent rather than empty when nothing was flagged: the UI reads absence
       // as "no per-model signal", never as "everything was priced".
       ...(usage.unpricedModels.length > 0 ? { unpricedModels: usage.unpricedModels } : {}),
       ...(contextUsage ? { contextUsage } : {}),
     } satisfies SessionStatsInfo;
-  }, [messages, sessionStatsOverride, subagentUsage, engineUsage, contextUsage, data?.filePath, session?.id, session?.name]);
+  }, [messages, sessionStatsOverride, subagentUsage, engineUsage, contextUsage, data?.filePath, data?.modelUsage, session?.id, session?.name]);
 
   // The web-hosted goal below is the FALLBACK for an engine with no native goal
   // mode (older omp, pi, ACP). Keep it scoped to its session so switching
@@ -2552,7 +2615,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     response: ExtensionDialogResponse,
   ) => {
     const sid = sessionIdRef.current;
-    setExtensionDialog((current) => current?.id === request.id ? null : current);
+    // A tick on one of the `ask` walk's checkbox steps: omp asks the same question again a moment
+    // later, so the dialog stays up with the tick showing instead of vanishing and coming back.
+    const staying = askWalk.reply(request, response);
+    if (staying !== null && request.method === "select") {
+      setExtensionDialog((current) => current?.id === request.id ? { ...request, walk: staying, settling: true } : current);
+      // omp's next question replaces this dialog. If it never comes (the ask ended another way), do not leave a dead one.
+      window.setTimeout(() => {
+        setExtensionDialog((current) => current?.id === request.id ? null : current);
+      }, ASK_WALK_SETTLE_MS);
+    } else {
+      setExtensionDialog((current) => current?.id === request.id ? null : current);
+    }
     if (!sid) return;
     try {
       await sendAgentCommand(sid, {
@@ -2563,7 +2637,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       console.error("Failed to send extension UI response:", e);
     }
-  }, []);
+  }, [askWalk]);
 
   /**
    * Answer one approval the agent is blocked on. Optimistic like the
@@ -2627,15 +2701,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // hub, keyed by the same session id the Devices panel opens its bridge with (AppShell's selectedSession).
   const { requests: deviceTrustRequests, respond: respondToDeviceTrust } = useDeviceTrustRequests(session?.id ?? null);
 
+  // The model's own `ask` tool is what is waiting when it runs: its plain dialogs look like any extension's.
+  const askToolRunning = agentPhase?.kind === "running_tools" && agentPhase.tools.some((tool) => tool.name === "ask");
+
   // Collect user-response prompts for the shared, non-modal composer panel.
   const pendingInputs = useMemo<PendingInput[]>(() => {
     const inputs: PendingInput[] = [];
-    if (extensionDialog) inputs.push({ kind: "extension", request: extensionDialog });
+    if (extensionDialog) {
+      const walkStep = extensionDialog.method === "select" && extensionDialog.walk !== undefined;
+      inputs.push({ kind: "extension", request: extensionDialog, fromAsk: walkStep || dialogBelongsToAsk(extensionDialog, askToolRunning) });
+    }
     for (const request of permissionRequests) inputs.push({ kind: "permission", request });
     if (pendingRefusalDecision) inputs.push({ kind: "refusal", decision: pendingRefusalDecision });
     for (const request of deviceTrustRequests) inputs.push({ kind: "device-trust", request });
     return inputs;
-  }, [extensionDialog, permissionRequests, pendingRefusalDecision, deviceTrustRequests]);
+  }, [extensionDialog, askToolRunning, permissionRequests, pendingRefusalDecision, deviceTrustRequests]);
 
   const respondToInput = useCallback(async (item: PendingInput, response: PendingInputResponse) => {
     switch (item.kind) {
@@ -3005,7 +3085,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     burst.timer = setTimeout(() => flushRoutingBurst(), ROUTING_BURST_MS);
   }, [flushRoutingBurst]);
 
-  const announceFallbackApplied = useCallback((attribution: ModelFallbackAttribution, from: string, to: string) => {
+  const announceFallbackApplied = useCallback((attribution: ModelFallbackAttribution, from: string, to: string, signedOutProvider?: string | null) => {
+    if (signedOutProvider) {
+      // omp 18.15+ hopped before the turn because this provider has no login.
+      // Not a limit and not the credits overlay: say it is a sign-out, offer
+      // the sign-in button, and let the composer chip explain the same.
+      if (attribution.job.kind === "main" && sessionIdRef.current) {
+        setAutoModelSwitch({ from, to, role: attribution.role, reason: `no credential for ${signedOutProvider}`, reasonKind: "signed_out", job: attribution.job, forSession: sessionIdRef.current });
+        setSmartPinnedModel(null);
+      }
+      addNotice({
+        type: "warning",
+        message: translate("agentSession.signedOutFallback", { provider: credentialProviderName(signedOutProvider), to }),
+        dedupeKey: signedOutDedupeKey(signedOutProvider),
+      });
+      return;
+    }
     const reason = retryErrorByJobRef.current.get(fallbackJobKey(attribution.job));
     // Plan -> API credits is the one hand-off with its own plain sentence:
     // the provider's limit text would only repeat what the sentence says.
@@ -3018,7 +3113,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // A subagent's switch already has a home in the subagent panel; it is
     // recorded in the transcript but never interrupts.
     queueRoutingNotice(message, "info", attribution.job.kind !== "main");
-  }, [queueRoutingNotice]);
+  }, [addNotice, queueRoutingNotice]);
 
   const announceFallbackSucceeded = useCallback((attribution: ModelFallbackAttribution, model: string) => {
     retryErrorByJobRef.current.delete(fallbackJobKey(attribution.job));
@@ -3125,14 +3220,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const handleExtensionUiRequest = useCallback((request: IncomingExtensionUiRequest) => {
     switch (request.method) {
-      case "select":
+      case "select": {
+        // omp's `ask` tool walks its form with plain selects (lib/ask-walk.ts): mark the ones that are a step of it.
+        const walk = askWalk.observe(request);
+        setExtensionDialog(walk ? { ...request, walk } : request);
+        break;
+      }
       case "confirm":
       case "input":
       case "editor":
       case "ask":
+        askWalk.observe(request);
         setExtensionDialog(request);
         break;
       case "cancel":
+        // A withdrawn step (a message sent while a question is open, a Stop, a timeout) ends the whole ask.
+        askWalk.withdrawn(request.targetId);
         setExtensionDialog((current) => current?.id === request.targetId ? null : current);
         break;
       case "open_url": {
@@ -3196,7 +3299,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
         break;
     }
-  }, [addNotice, opts.chatInputRef]);
+  }, [addNotice, opts.chatInputRef, askWalk]);
 
   const finishPromptWithoutStream = useCallback(async (sid: string | null = sessionIdRef.current, runId?: number) => {
     // Bail out before loadSession too: a stale finish for a previous run
@@ -3742,11 +3845,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         // the next send, the transcript and the stream must use the file
         // being written, not the frozen original. The adoption remounts this
         // page's chat, so the explanation is a global toast, which outlives it.
+        // `reason: "continued"` is the other way in: this page asked for an
+        // older copy and the server opened the newer one omp had carried the
+        // chat on to (the same adoption, a different explanation).
         const movedTo = typeof event.sessionId === "string" ? event.sessionId : "";
         const movedFrom = sessionIdRef.current;
         if (movedTo && movedFrom && movedTo !== movedFrom && onSessionForked) {
           carrySessionClientState(movedFrom, movedTo);
-          toast.info(translate("agentSession.sessionMovedTitle"), translate("agentSession.sessionMovedBody"), { clamp: true });
+          const continued = event.reason === "continued";
+          toast.info(
+            translate(continued ? "agentSession.sessionContinuedTitle" : "agentSession.sessionMovedTitle"),
+            translate(continued ? "agentSession.sessionContinuedBody" : "agentSession.sessionMovedBody"),
+            { clamp: true },
+          );
           onSessionForked(movedTo);
         }
         break;
@@ -3857,9 +3968,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             }
           }
         }
-        // A prompt handled entirely by a builtin/extension slash command:
-        // no agent_start/agent_end pair will follow.
-        if (event.agentInvoked !== false) break;
+        // A prompt handled entirely by a builtin/extension slash command, or
+        // refused by omp's spend limit (18.13+, `error.code: "cost_cap"`)
+        // before any model request: no agent_start/agent_end pair will follow.
+        if (event.agentInvoked !== false && !(isRecord(promptResult.error) && promptResult.error.code === "cost_cap")) break;
         if (!agentRunningRef.current) break;
         // Fence with the current run id like agent_end does: the reload below
         // is async, and a prompt that starts while it is in flight must not be
@@ -3892,10 +4004,31 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // omp could not save a side-question topic. It belongs to the panel
           // that shows those topics, not to the chat's engine-error shelf.
           sideQuestionsRef.current?.noteHistoryNotice(message);
+        } else if (event.source === "cost-gate") {
+          // omp 18.13+ spend limits. The error is the refusal the prompt's own
+          // result carries too (both land on one notice: same key); the warning
+          // is a one-time heads-up that the chat passed its warning level.
+          if (level === "error") addEngineErrorNotice(message, engineNameRef.current);
+          else addNotice(costWarningNotice(message, sessionIdRef.current));
         } else if (event.source === "session-persistence" && level === "warning") {
           // omp moved this live session to a new file (cody_session_moved
           // adopts the new id): worth saying, but not an engine failure.
           addNotice({ type: "info", message });
+        } else if (event.source === "claude-auto-reset" || event.source === "codex-auto-reset") {
+          // omp spends (or offers to spend) saved rate-limit resets itself.
+          // "Eligible but auto-redeem is unset" gets the buttons; its other
+          // lines (redeemed, already redeemed elsewhere, will retry) are plain
+          // status in omp's own words, not engine failures to describe.
+          const resetProvider = savedResetEligibleProvider(event.source, message);
+          if (resetProvider) {
+            addNotice({
+              type: "info",
+              message: translate("agentSession.savedResetsEligible", { provider: credentialProviderName(resetProvider) }),
+              dedupeKey: savedResetDedupeKey(resetProvider),
+            });
+          } else {
+            addNotice({ type: level === "warning" || level === "error" ? "warning" : "info", message });
+          }
         } else if (event.reason === "engine_exit" && readEngineCrashNotice(event.crash)) {
           // The engine stopped on its own. The words (why, and what happens next) are a line that stays in the chat, like the one a reload brings back, not a notice on the shelf that goes away.
           const crash = readEngineCrashNotice(event.crash);
@@ -4029,7 +4162,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "config_update": {
         // Payload event: model + thinkingLevel snapshot after a
         // config-affecting slash command (e.g. /model).
-        const model = event.model as { provider?: string; id?: string; name?: string; reasoning?: boolean; thinking?: { efforts?: string[] } } | undefined;
+        const model = event.model as { provider?: string; id?: string; name?: string; reasoning?: boolean; thinking?: { efforts?: string[]; unverified?: boolean } } | undefined;
         if (model) applyAuthoritativeModel(toThinkingModelMeta(model));
         if (event.thinkingLevel !== undefined) adoptThinkingLevel(event.thinkingLevel as string | undefined);
         break;
@@ -4240,9 +4373,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const attribution = fallbackAttributionForRole(event.role, subagentsRef.current);
         const from = typeof event.from === "string" ? event.from : "?";
         const to = typeof event.to === "string" ? event.to : "?";
-        announceFallbackApplied(attribution, from, to);
+        const signedOutProvider = missingCredentialProvider(event.reason);
+        announceFallbackApplied(attribution, from, to, signedOutProvider);
         // The credits took over: the held retry banner is never shown.
-        if (attribution.job.kind === "main" && creditsNoticeKind(from, to) === "switch") dropRetryBanner(sessionIdRef.current);
+        if (attribution.job.kind === "main" && creditsNoticeKind(from, to, event.reason) === "switch") dropRetryBanner(sessionIdRef.current);
         break;
       }
       case "retry_fallback_succeeded": {
@@ -4309,6 +4443,47 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         } else {
           setCompactResult(readCompactResult(event.result, "auto"));
           dispatchCompactionStatus({ type: "settle", sessionId: sid, outcome: "completed", source: "automatic", now: Date.now() });
+          void loadSession(sid);
+        }
+        break;
+      }
+      case "manual_compaction_start": {
+        // omp 18.13.3+ announces every manual compaction: this page's own button
+        // (already showing its banner), but also a typed command, an extension
+        // or another tab, which would otherwise be invisible until it ended.
+        const sid = sessionIdRef.current;
+        if (!sid) break;
+        isCompactingRef.current = true;
+        setIsCompacting(true);
+        const own = compactRpcInFlightRef.current > 0;
+        if (!own) {
+          setCompactError(null);
+          setCompactResult(null);
+        }
+        const compactionGeneration = own ? compactionGenerationRef.current : ++compactionGenerationRef.current;
+        dispatchCompactionStatus({ type: "running", sessionId: sid, source: "manual", now: Date.now(), generation: compactionGeneration, phase: typeof event.mode === "string" && event.mode ? event.mode : undefined });
+        break;
+      }
+      case "manual_compaction_end": {
+        const sid = sessionIdRef.current;
+        if (!sid) break;
+        // This page's own request settles from the response to its `compact`
+        // command, which carries the same outcome. Only a compaction nobody
+        // here asked for is settled from the frame.
+        if (compactRpcInFlightRef.current > 0) break;
+        isCompactingRef.current = false;
+        setIsCompacting(false);
+        if (event.skipped === true) {
+          dispatchCompactionStatus({ type: "settle", sessionId: sid, outcome: "noop", source: "manual", now: Date.now() });
+        } else if (event.aborted === true) {
+          dispatchCompactionStatus({ type: "settle", sessionId: sid, outcome: "cancelled", source: "manual", now: Date.now() });
+        } else if (typeof event.errorMessage === "string" && event.errorMessage.length > 0) {
+          setCompactError(event.errorMessage);
+          setCompactResult(null);
+          dispatchCompactionStatus({ type: "settle", sessionId: sid, outcome: "failed", source: "manual", now: Date.now(), message: event.errorMessage });
+        } else {
+          setCompactResult(readCompactResult(event.result, "manual"));
+          dispatchCompactionStatus({ type: "settle", sessionId: sid, outcome: "completed", source: "manual", now: Date.now() });
           void loadSession(sid);
         }
         break;
@@ -4478,10 +4653,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    *  instruction the user cannot see". */
   const rollBackFailedSend = useCallback((typedMessage: string, detail: string, streamErrorMessage?: string, restoreText = true) => {
     undoOptimisticRun();
-    addNotice({
-      type: "error",
-      message: streamErrorMessage ?? translate("agentSession.sendFailed", { detail }),
-    });
+    // omp refused the prompt because the provider has no login: say so and
+    // offer the sign-in button instead of the raw "No API key found" text.
+    const signedOutProvider = streamErrorMessage ? null : missingApiKeyProvider(detail);
+    if (signedOutProvider) {
+      detail = translate("agentSession.signedOutPrompt", { provider: credentialProviderName(signedOutProvider) });
+      addNotice({ type: "warning", message: detail, dedupeKey: signedOutDedupeKey(signedOutProvider) });
+    } else {
+      addNotice({
+        type: "error",
+        message: streamErrorMessage ?? translate("agentSession.sendFailed", { detail }),
+      });
+    }
     // A toast fades; the wedge this replaces did not. The banner stays until
     // dismissed so a prompt that never started can never read as one still
     // running — whatever the failure was (refused frame, timeout, network).
@@ -5281,6 +5464,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setCompactResult(null);
     const compactionGeneration = ++compactionGenerationRef.current;
     dispatchCompactionStatus({ type: "request", sessionId: sid, source: "manual", now: Date.now(), generation: compactionGeneration });
+    compactRpcInFlightRef.current += 1;
     try {
       const result = await sendAgentCommand<CompactCommandResult>(sid, { type: "compact" });
       if (sessionIdRef.current !== sid) return;
@@ -5296,6 +5480,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setCompactResult(null);
       dispatchCompactionStatus({ type: "settle", sessionId: sid, outcome, now: Date.now(), message: outcome === "failed" ? (error instanceof Error ? error.message : String(error)) : undefined });
     } finally {
+      compactRpcInFlightRef.current -= 1;
       if (sessionIdRef.current === sid) {
         isCompactingRef.current = false;
         setIsCompacting(false);
@@ -5367,6 +5552,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           setCompactResult(null);
           const compactionGeneration = ++compactionGenerationRef.current;
           dispatchCompactionStatus({ type: "request", sessionId: sid, source: "manual", now: Date.now(), generation: compactionGeneration });
+          compactRpcInFlightRef.current += 1;
           try {
             const result = await sendAgentCommand<CompactCommandResult>(sid, {
               type: "compact",
@@ -5387,6 +5573,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             setCompactResult(null);
             dispatchCompactionStatus({ type: "settle", sessionId: sid, outcome, now: Date.now(), message: outcome === "failed" ? message : undefined });
             return outcome === "failed" ? complete({ handled: true, error: message }) : complete({ handled: true, message: outcome === "noop" ? translate("compaction.nothingToCompact") : undefined });
+          } finally {
+            compactRpcInFlightRef.current -= 1;
           }
         }
 
@@ -5431,7 +5619,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
         default: {
           // Web-native prompt commands (/goal, /plan, ...). omp's same-named
-          // builtins are TUI-only and never execute over RPC, so the palette
+          // builtins are TUI-only and never execute over RPC (its OTHER
+          // builtins do: /session, /unpin and /forget-approvals run and answer
+          // with a command_output frame, shown as an info notice), so the palette
           // shows these instead (CLIENT_BUILTIN_COMMAND_NAMES drops omp's
           // copies). handleSend runs the full prompt pipeline — optimistic
           // bubble, running state, settlement — with the expanded text.
@@ -6258,7 +6448,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!oldest) return;
     const t = setTimeout(() => {
       dispatchNotice({ type: "mark_oldest_exiting" });
-    }, NOTICE_VISIBLE_MS);
+    }, noticeCtaForDedupeKey(oldest.dedupeKey) ? ACTIONABLE_NOTICE_VISIBLE_MS : NOTICE_VISIBLE_MS);
     return () => clearTimeout(t);
   }, [noticeState.visible]);
 

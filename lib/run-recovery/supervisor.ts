@@ -408,11 +408,20 @@ class RunTracker {
     this.tools.set(id, { id, name, args: event.args, startedAt: now, clockStart: now, lastUpdateAt: now });
   }
 
+  /**
+   * A progress frame refreshes a call that is in flight and does nothing else.
+   * Since omp 18.10.2 the engine no longer drops a tool's progress frames that
+   * arrive after its run ended (a background job that keeps reporting): they
+   * come as `tool_execution_update` after `agent_end`, or after the call's own
+   * `tool_execution_end`. Such a frame names a call nobody is waiting on, and
+   * if it started an entry here that entry would never get an end — it would
+   * outlive the run as a ghost, let `insideOwnDeadline` excuse real silence
+   * from a `bash` call, and make `findOverdueTool` call a healthy run stalled.
+   * A call enters the table only through its `tool_execution_start`.
+   */
   private toolUpdated(event: EngineEvent, now: number): void {
-    const id = asString(event.toolCallId) ?? "";
-    const flight = this.tools.get(id);
+    const flight = this.tools.get(asString(event.toolCallId) ?? "");
     if (flight) flight.lastUpdateAt = now;
-    else if (id) this.tools.set(id, { id, name: asString(event.toolName) ?? "", args: event.args, startedAt: now, clockStart: now, lastUpdateAt: now });
   }
 
   /** Any frame that is the run going somewhere: the clocks restart, the question to the engine is withdrawn, the journal's "last activity" moves. */

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { jsonError, requireAdminOrOpenInstance } from "@/lib/auth/http";
 import { requireEngine } from "@/lib/engine-guard";
 import { presetOverlayEquals, sessionsOnPreset, unbindPreset } from "@/lib/model-presets/overlay";
+import { presetRosterProblem } from "@/lib/model-presets/roster-check";
 import { deletePreset, getPreset, PresetValidationError, updatePreset } from "@/lib/model-presets/store";
 import type { ModelPresetUpdate } from "@/lib/model-presets/types";
 import { restartSessionForRoutingWhenIdle } from "@/lib/rpc-manager";
@@ -48,6 +49,10 @@ export async function PUT(request: Request, { params }: { params: Promise<{ id: 
   }
   if (!isRecord(body)) return jsonError("Body must be an object", 400, "invalid_preset");
   const before = getPreset(id);
+  // A selector omp cannot resolve is refused here, with its own suggestion,
+  // rather than saved and then failing every chat on this preset.
+  const unresolved = await presetRosterProblem(body);
+  if (unresolved) return jsonError(unresolved, 400, "unknown_model");
   let preset;
   try {
     preset = updatePreset(id, body as ModelPresetUpdate);

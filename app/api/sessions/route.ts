@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createHash } from "crypto";
-import { listAllSessions } from "@/lib/session-reader";
+import { collapseContinuedSessions, listAllSessions } from "@/lib/session-reader";
 import { getRunningRpcSessionIds } from "@/lib/rpc-manager";
 import { getRequestUser } from "@/lib/auth/guard";
 import { filterSessionsForUser } from "@/lib/auth/session-owners";
@@ -48,7 +48,7 @@ export async function GET(req: Request) {
     // (pre-account history and terminal-created sessions stay visible to all).
     const harness = getHarness();
     const sessions = filterSessionsForUser(
-      harness.createSession ? listActiveEngineSessions(harness.id) : await listAllSessions(),
+      harness.createSession ? listActiveEngineSessions(harness.id) : collapseContinuedSessions(await listAllSessions()),
       getRequestUser(req),
     );
     const visible = new Set(sessions.map((session) => session.id));

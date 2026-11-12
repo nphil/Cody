@@ -167,13 +167,18 @@ RUN apt-get update \
   && mkdir -p /run/sshd
 
 # No engine is baked in — but omp is a Bun program (`#!/usr/bin/env bun`,
-# `engines: { bun: ">=1.3.14" }`), so the runtime that a picker-installed omp
+# `engines: { bun: ">=1.4.4" }` since omp 18.13.3; 18.8.x needed 1.3.14), so
+# the runtime that a picker-installed omp
 # needs must already be here: npm installs it happily and then every
 # invocation dies with "env: 'bun': No such file or directory" without Bun on
 # PATH. Bun ships as a single static executable, so copying it out of the
 # official image is enough — no second package manager, no install script.
+# `oven/bun:1` floats, but a cached layer could still hold an older 1.x: the
+# build fails here rather than ship an image whose omp refuses to start.
 COPY --from=oven/bun:1 /usr/local/bin/bun /usr/local/bin/bun
-RUN bun --version
+RUN bun --version \
+  && [ "$(printf '1.4.4\n%s\n' "$(bun --version)" | sort -V | head -n1)" = "1.4.4" ] \
+  || { echo "Bun >= 1.4.4 is required by omp 18.13.3+" >&2; exit 1; }
 
 ENV NODE_ENV=production \
   HOME=/data/home \

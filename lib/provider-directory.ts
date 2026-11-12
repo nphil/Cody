@@ -63,6 +63,8 @@ export interface ProviderMethod {
   accounts?: ProviderLoginAccount[];
   /** True when `accounts` has more than one entry. */
   multiAccount?: boolean;
+  /** The engine refuses this sign-in over Cody's connection; it has to be done in the engine's own terminal. */
+  terminalOnly?: boolean;
   /** The one method the row's status line describes: the highest-precedence
    * connected method (signed in › key saved in Cody › key from the
    * container › custom endpoint), or the first method when none is. */
@@ -191,6 +193,7 @@ function loginMethod(login: ProviderLoginOption): ProviderMethod {
     ...(login.hint ? { hint: login.hint } : {}),
     ...(login.accounts ? { accounts: login.accounts } : {}),
     ...(login.multiAccount !== undefined ? { multiAccount: login.multiAccount } : {}),
+    ...(login.terminalOnly ? { terminalOnly: true } : {}),
     winning: false,
   };
 }
@@ -285,6 +288,9 @@ export function buildProviderDirectory(input: BuildProviderDirectoryInput): Prov
     for (const login of matched) consumedLogins.add(login.id);
     const methods: ProviderMethod[] = matched.map(loginMethod);
     const stored = keyById.get(definition.id);
+    // A provider only newer engines have is listed once this engine proves it
+    // has it (roster entry or models served), or the owner already set a key.
+    if (definition.needsRoster && matched.length === 0 && !(sumCounts(input.counts, [definition.id, ...(definition.catalogIds ?? [])]) ?? 0) && !stored?.variables.some((variable) => variable.stored || variable.fromEnvironment)) continue;
     if (stored) methods.push(keyMethod(definition, stored));
     const catalogIds = unique([definition.id, ...(definition.catalogIds ?? []), ...loginIds]);
     const orderIds = unique([definition.id, ...(definition.catalogIds ?? [])]);
@@ -305,6 +311,16 @@ export function buildProviderDirectory(input: BuildProviderDirectoryInput): Prov
   // 2. Every roster entry the catalogue did not claim: the engine's own row.
   for (const login of logins) {
     if (consumedLogins.has(login.id)) continue;
+    // A roster id that equals a catalogue row's id without being one of its
+    // `loginIds` (omp added a `mistral` sign-in before Cody's row listed it) is
+    // that row's sign-in, never a second row with the same id.
+    const sameId = rowById.get(login.id);
+    if (sameId) {
+      sameId.methods.unshift(loginMethod(login));
+      sameId.catalogIds = unique([...sameId.catalogIds, login.id]);
+      sameId.group = groupForRow({ id: sameId.id, loginIds: sameId.methods.flatMap((method) => (method.loginId ? [method.loginId] : [])) });
+      continue;
+    }
     push({
       id: login.id,
       name: login.name,

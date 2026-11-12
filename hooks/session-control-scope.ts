@@ -121,6 +121,7 @@ const ROLE_LABEL_KEYS: Record<string, string> = {
   commit: "agentSession.job.commit",
   advisor: "agentSession.job.advisor",
   vision: "agentSession.job.vision",
+  widget: "agentSession.job.widget",
 };
 
 function normalizedRole(role: unknown): string {
@@ -169,8 +170,11 @@ export function fallbackAttributionForSubagent(
  * Why the engine switched models, derived from the provider error the retry
  * saga remembered (`auto_retry_start.errorMessage`).
  *
- * `retry_fallback_applied` carries only `{from, to, role}`, so every switch
- * used to read as the same generic "hit a usage limit or error" — which
+ * `retry_fallback_applied` carries `{from, to, role}` plus an optional engine
+ * `reason` ("Request failed: <provider error>", a usage-reserve note, and from
+ * omp 18.15 "no credential for <provider>", which hooks/credential-notices.ts
+ * reads), but Cody classifies the cause from the provider error, so every
+ * switch used to read as the same generic "hit a usage limit or error" — which
  * conflates two situations a user acts on differently:
  *
  * - `refusal`: the model itself declined on content-policy grounds. Nothing is

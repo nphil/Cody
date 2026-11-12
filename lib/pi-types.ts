@@ -35,6 +35,8 @@ export interface OmpModel {
     efforts?: string[];
     requiresEffort?: boolean;
     defaultLevel?: string;
+    /** omp 18.15+: the levels were guessed, not confirmed by the provider. */
+    unverified?: boolean;
   };
   [key: string]: unknown;
 }
@@ -42,6 +44,11 @@ export interface OmpModel {
 export interface TodoItem {
   id?: string;
   content: string;
+  // `blocked` and `blocker` exist only on omp before 18.19.0 (and in chat files
+  // those engines saved). 18.19.0 removed both from its list and reads an old
+  // blocked task back as `pending`. Cody still reads and shows them so a chat
+  // on an older engine, or an old chat file read without an engine, stays
+  // truthful; an engine that never sends them simply never produces one.
   status: "pending" | "in_progress" | "completed" | "blocked" | "abandoned";
   blocker?: string;
 }
@@ -177,7 +184,7 @@ export interface WebSessionState {
   interruptMode: "immediate" | "wait";
   steeringMode: "all" | "one-at-a-time";
   followUpMode: "all" | "one-at-a-time";
-  model?: ModelLike & { name?: string; reasoning?: boolean; thinking?: { efforts?: string[] } };
+  model?: ModelLike & { name?: string; reasoning?: boolean; thinking?: { efforts?: string[]; unverified?: boolean } };
   messageCount: number;
   queuedMessageCount: number;
   contextUsage: ContextUsage | null;
@@ -224,7 +231,9 @@ export interface RpcAvailableSlashCommand {
   source: AvailableSlashCommandSource;
 }
 
-/** Mirror of omp's BashResult (`bash` command response). */
+/** Mirror of omp's BashResult (`bash` command response). The `elided*`,
+ *  `column*` and `minimized` fields arrive with omp 18.16-18.17 and are absent
+ *  from older engines. */
 export interface BashResultInfo {
   output: string;
   exitCode: number | undefined;
@@ -236,6 +245,16 @@ export interface BashResultInfo {
   outputLines?: number;
   outputBytes?: number;
   artifactId?: string;
+  /** Bytes / lines dropped from the MIDDLE of `output` (head and tail kept). */
+  elidedBytes?: number;
+  elidedLines?: number;
+  /** What the per-line column cap cut: bytes, lines, the first/last cut line, and the cap in bytes. */
+  columnDroppedBytes?: number;
+  columnTruncatedLines?: number;
+  columnTruncatedRange?: { first: number; last: number };
+  columnMax?: number;
+  /** The output minimizer rewrote the output: filter label plus raw and kept byte counts. */
+  minimized?: { filter?: string; inputBytes?: number; outputBytes?: number; artifactId?: string };
   workingDir?: string;
 }
 
@@ -257,6 +276,11 @@ export interface SessionStatsInfo {
     total: number;
   };
   premiumRequests?: number;
+  /**
+   * Failed edits by the engine's reason (`stale_tag`, `unseen_lines`, ...),
+   * omp >= 18.13. Absent when nothing failed or the engine predates the field.
+   */
+  editRejections?: Record<string, number>;
   /**
    * API-equivalent spend: what the session would have cost on pay-as-you-go
    * pricing, never money actually charged on a subscription plan.
@@ -314,7 +338,7 @@ export interface OmpSelectOptionDetail {
 export type OmpExtensionUiRequest =
   | { type: "extension_ui_request"; id: string; method: "select"; title: string; options: string[]; optionDetails?: OmpSelectOptionDetail[]; timeout?: number; expiresAt?: number }
   | { type: "extension_ui_request"; id: string; method: "confirm"; title: string; message: string; timeout?: number; expiresAt?: number }
-  | { type: "extension_ui_request"; id: string; method: "input"; title: string; placeholder?: string; timeout?: number; expiresAt?: number }
+  | { type: "extension_ui_request"; id: string; method: "input"; title: string; placeholder?: string; secret?: boolean; timeout?: number; expiresAt?: number }
   | { type: "extension_ui_request"; id: string; method: "editor"; title: string; prefill?: string; promptStyle?: boolean; timeout?: number; expiresAt?: number }
   | { type: "extension_ui_request"; id: string; method: "ask"; questions: OmpAskQuestion[]; timeout?: number; expiresAt?: number }
   | { type: "extension_ui_request"; id: string; method: "cancel"; targetId: string }

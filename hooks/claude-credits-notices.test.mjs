@@ -55,6 +55,14 @@ test("every other model change is neither", () => {
   assert.equal(creditsNoticeKind(undefined, null), null);
 });
 
+test("a hop off a signed-out Claude plan onto the credits is a sign-out, not a plan limit", () => {
+  // omp 18.15+ `retry_fallback_applied.reason` for a provider with no login.
+  assert.equal(creditsNoticeKind("anthropic/claude-opus-5-5", "anthropic-api/claude-opus-5-5", "no credential for anthropic"), null);
+  // The same hop with a limit reason (or none) is still the credits switch.
+  assert.equal(creditsNoticeKind("anthropic/claude-opus-5-5", "anthropic-api/claude-opus-5-5", "429 rate limit"), "switch");
+  assert.equal(creditsNoticeKind("anthropic/claude-opus-5-5", "anthropic-api/claude-opus-5-5", undefined), "switch");
+});
+
 test("an authoritative model becomes a provider/model selector", () => {
   const selector = modelSelector({ provider: "anthropic-api", modelId: "claude-opus-5-5" });
   assert.equal(selector, "anthropic-api/claude-opus-5-5");

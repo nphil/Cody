@@ -23,10 +23,11 @@ import { readNativeSettings } from "./omp/settings-config";
 import { getSidebarChatsDir, getSessionDirNameForCwd } from "./omp/paths";
 import { linkIsolatedAgentDir } from "./omp/isolated-agent-dir";
 import { captureLoopbackScreenshot, ScreenshotError } from "./preview-screenshot";
-import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
+import { cacheSessionPath, invalidateSessionListCache, readSessionHeader } from "./session-reader";
 import { assistantReplyText, replyAsksUser } from "./reply-question";
 import { readRefusalPolicyConfig, writeRefusalPolicyConfig } from "./refusal/config";
 import { PlanKeeper } from "./plan-keeper/keeper";
+import { autoApprovalReply } from "./notifications/compose";
 import { observeSessionForNotifications } from "./notifications/observer";
 import { markServerShuttingDown } from "./run-recovery/shutdown";
 import { crashRecoveryOutlook, superviseRun } from "./run-recovery/supervisor";
@@ -40,6 +41,7 @@ import { materializeLocalModelProfile, resolveLocalModelPromptProfile, type Loca
 import { copySessionLocalRouting, materializeLocalRoutingOverlay, readLocalRoutingIntent, renameSessionLocalRouting, validateLocalRoutingModelSelection } from "./local-model-routing";
 import { copySessionPreset, renameSessionPreset, sessionPresetOverlay } from "./model-presets/overlay";
 import { materializeClaudeCreditsOverlay } from "./omp/claude-credits-overlay";
+import { codyLaunchDefaultsEnv } from "./omp/cody-launch-defaults";
 import { selectPromptProfileId, type PromptProfileId } from "./local-model-profile";
 import { PRESET_FULL } from "./tool-presets";
 import { isRecord } from "./type-guards";
@@ -323,8 +325,10 @@ function sidebarOverlayPath(): string {
 
 /** The empty directory every sidebar child runs from, so omp's context-file
  * discovery finds nothing to inject. `--no-rules` does NOT cover
- * `AGENTS.md`/`CLAUDE.md`, and omp has no flag that does; starting somewhere
- * with none is the lever that works. Kept inside the sidebar-chats dir so it
+ * `AGENTS.md`/`CLAUDE.md`. omp 18.13+ has `--no-context-files`, but 18.8.3
+ * has no such flag, so starting somewhere with none is the lever that works
+ * on every engine version (the sidebar has no tools or subagents that would
+ * need the flag's other effects). Kept inside the sidebar-chats dir so it
  * is obviously Cody-owned state and never a user workspace. */
 export function sidebarBareCwd(): string {
   const dir = path.join(getSidebarChatsDir(), "cwd");
@@ -491,11 +495,12 @@ const SCRATCH_TOUCH_INTERVAL_MS = 60_000;
 
 const RESTARTING_MESSAGE = "This session is restarting. Retry in a moment.";
 
-/** Every rpc-dialect engine reaches the `!!` refusal, so the sentence names the
+/** Every rpc-dialect engine can reach the `!!` refusal, so the sentence names the
  * one that actually raised it — a pi user told "omp cannot…" would go looking
- * for a setting in an engine they are not running. */
+ * for a setting in an engine they are not running. omp added the option in
+ * 18.18.1 and its ready frame says so; only a child that does not is refused. */
 const bashExcludeMessage = (engine: string) =>
-  `${engine} cannot run a shell command with its output excluded from the model context (\`!!\`): the RPC bash command has no exclusion option, so the output would silently enter the context anyway. Run it with a single \`!\` to share the output with the model, or use a terminal outside Cody.`;
+  `${engine} cannot run a shell command with its output excluded from the model context (\`!!\`): this engine's RPC bash command has no exclusion option (omp has it from 18.18.1), so the output would silently enter the context anyway. Run it with a single \`!\` to share the output with the model, or use a terminal outside Cody.`;
 
 /**
  * Failure raised by Cody itself (not by omp) carrying a stable snake_case
@@ -569,6 +574,14 @@ const PASSTHROUGH_COMMANDS = new Set([
   // omp 18.7: side questions (/btw). `btw` itself has a dedicated case in send().
   "get_btw_history",
   "btw_cancel",
+  // omp 18.13.2+ / 18.14.1+: move the session leaf inside the same file
+  // (optionally summarising the branch left), stop that summary, label an
+  // entry, and ask which sessions another omp process holds. Older engines
+  // answer `Unknown command`; pi never sees them (engine vocabulary gate).
+  "navigate_tree",
+  "abort_branch_summary",
+  "set_label",
+  "get_session_lease",
 ]);
 
 /** Read-only, argument-free snapshots. omp answers commands one at a time,
@@ -594,7 +607,6 @@ const LOCAL_WRAPPER_COMMANDS = new Set([
 
 // pi-web commands with no omp RPC equivalent. The UI tolerates these failing.
 const UNSUPPORTED_COMMANDS: Record<string, string> = {
-  navigate_tree: "Branch navigation is not supported over the omp RPC protocol",
   clear_queue: "Clearing the whole queue at once is not supported over the omp RPC protocol; withdraw_queued takes back one message by id",
   get_tools: "Per-session tool listing is not supported over the omp RPC protocol",
   set_tools: "Changing tools on a running session is not supported over the omp RPC protocol; tool presets apply to new sessions",
@@ -780,7 +792,10 @@ export function buildEngineRpcLaunch(
   // Main omp sessions load Cody's extensions: the refusal guard, local-time
   // context, the HomeLabber gate procedure, the scratch/disk-budget rule and
   // the helper-agent context budget line (all also inherited by subagents).
-  // Resolve them from the package directory, never the launch cwd.
+  // Resolve them from the package directory, never the launch cwd. The same
+  // sessions get Cody's launch defaults (lib/omp/cody-launch-defaults.yml) as
+  // the FIRST config layer, so every overlay keeps its place after it.
+  let defaultsEnv: { PI_CONFIG_FILES: string } | undefined;
   if (harness.id === "omp" && opts.kind !== "sidebar") {
     const packageRoot = process.env.CODY_PACKAGE_DIR || process.cwd();
     const extensions = path.join(packageRoot, "lib", "omp", "extensions");
@@ -789,6 +804,7 @@ export function buildEngineRpcLaunch(
     args.push("--extension", path.join(extensions, "cody-homelabber-gate.ts"));
     args.push("--extension", path.join(extensions, "cody-disk-budget.ts"));
     args.push("--extension", path.join(extensions, "cody-context-budget.ts"));
+    defaultsEnv = codyLaunchDefaultsEnv(opts.profile?.env?.PI_CONFIG_FILES ?? process.env.PI_CONFIG_FILES, packageRoot);
   }
   // A sidebar child gets its own agent dir, whose `mcp.json` is empty, so the
   // user-scope MCP servers (111 tool schemas / 89,303 tokens on the owner's
@@ -799,7 +815,7 @@ export function buildEngineRpcLaunch(
     bin,
     label: harness.binaryName,
     args,
-    ...(opts.profile?.env || sidebarEnv ? { env: { ...opts.profile?.env, ...sidebarEnv } } : {}),
+    ...(opts.profile?.env || sidebarEnv || defaultsEnv ? { env: { ...opts.profile?.env, ...sidebarEnv, ...defaultsEnv } } : {}),
     readiness: spec.readiness,
   };
 }
@@ -1070,6 +1086,40 @@ export interface WrapperEngineContext {
   scratchDir?: string | null;
 }
 
+/**
+ * What the app files under a chat's id, carried to the id the same chat now
+ * answers to: its owner (a session with no owner is visible to every account,
+ * and so is its usage in Statistics), its pinned preset, its frozen Local-only
+ * snapshot and the crash notices filed in it. `fromId` stays valid — a fork's
+ * parent, or the untouched file a session move leaves behind — so these are
+ * copied, never moved.
+ */
+function carrySessionState(fromId: string, toId: string): void {
+  copySessionLocalRouting(fromId, toId);
+  copySessionPreset(fromId, toId);
+  const owner = getSessionOwner(fromId);
+  if (owner) setSessionOwner(toId, owner);
+  copyEngineCrashes(fromId, toId);
+}
+
+/**
+ * ONE conversation that carries on in a new file under a new id: omp moved a
+ * live session off a file another process held, or a resume of an older copy
+ * opened the newer one (a fork is a different conversation and takes only
+ * `carrySessionState`). What is scheduled for it goes with it — moved, never
+ * copied, both ids would send it — the plan keeper's checklist belongs to the
+ * conversation rather than its file, and the preview stream and the scratch
+ * dir (one engine, one TMPDIR) answer to both ids.
+ */
+function carryConversation(fromId: string, toId: string): void {
+  carrySessionState(fromId, toId);
+  moveSessionItems(fromId, toId);
+  const planOverlay = readPlanOverlay(fromId);
+  if (planOverlay) writePlanOverlay(toId, planOverlay);
+  aliasDisplaySession(fromId, toId);
+  noteScratchAlias(fromId, toId);
+}
+
 export class AgentSessionWrapper {
   private listeners: EventListener[] = [];
   /**
@@ -1176,6 +1226,10 @@ export class AgentSessionWrapper {
   private unsubscribeFrames: (() => void) | null = null;
   private initPromise: Promise<void> | null = null;
   private restarting = false;
+  /** The current child's ready frame said its `bash` takes `excludeFromContext`
+   *  (omp 18.18.1+). Read per child: a restart asks the new one, and a child
+   *  that never says so keeps the `!!` refusal. */
+  private bashExcludeSupported = false;
   /** The container's cgroup counters when the current child started, so its exit can be read against them (lib/engine-crash.ts). */
   private cgroupAtSpawn: CgroupCounters = readCgroupCounters();
   private _alive = true;
@@ -1693,6 +1747,7 @@ export class AgentSessionWrapper {
 
   private async initialize(): Promise<void> {
     const ready = await this.proc.waitReady(READY_TIMEOUT_MS);
+    this.bashExcludeSupported = ready.supportsBashExcludeFromContext === true;
     await this.proc.negotiateProtocol(ready);
     // Subscribe to subagent lifecycle/progress frames so the UI can show a
     // live subagent roster. Older omp builds may not know the command —
@@ -1795,30 +1850,10 @@ export class AgentSessionWrapper {
     this.onIdentityChangeCallback?.(previousId, sessionId);
     invalidateSessionListCache();
     if (this.requestedIdentityChanges === 0) {
-      this.carrySessionState(previousId, sessionId);
-      // What is scheduled for the conversation goes with it, never copied: both ids would send it.
-      moveSessionItems(previousId, sessionId);
-      // The checklist belongs to the conversation, which carries on in the new
-      // file with its todo list intact (a fork is a different conversation).
-      const planOverlay = readPlanOverlay(previousId);
-      if (planOverlay) writePlanOverlay(sessionId, planOverlay);
-      aliasDisplaySession(previousId, sessionId);
+      carryConversation(previousId, sessionId);
       void this.announceSessionMove(previousId, sessionId, this._sessionFile);
     }
     notifyRunningChange({ refreshSessionList: true });
-  }
-
-  /** What was filed under `fromId` follows a session that continues as
-   *  `toId`: its owner (a session with no owner is visible to every account),
-   *  its pinned preset and its frozen Local-only snapshot. `fromId` stays
-   *  valid — a fork's parent, or the untouched file a session move leaves
-   *  behind — so these are copied, never moved. */
-  private carrySessionState(fromId: string, toId: string): void {
-    copySessionLocalRouting(fromId, toId);
-    copySessionPreset(fromId, toId);
-    const owner = getSessionOwner(fromId);
-    if (owner) setSessionOwner(toId, owner);
-    copyEngineCrashes(fromId, toId);
   }
 
   /**
@@ -1836,6 +1871,12 @@ export class AgentSessionWrapper {
       if (!this._alive || this._sessionId !== sessionId) return;
     }
     if (!this._alive || this._sessionId !== sessionId) return;
+    // omp 18.13.2+ links the new file to the old one (header `continuationOf`)
+    // and opens the NEWEST copy for every later resume of the old id, which
+    // would put a second child on the file this one holds: a start for the old
+    // id must find this child instead (getAliases). An older omp writes no
+    // link, so its old file stays an ordinary chat of its own.
+    if (sessionFile && readSessionHeader(sessionFile)?.continuationOf === previousId) getAliases().set(previousId, this);
     invalidateSessionListCache();
     this.emit({ type: "cody_session_moved", sessionId, previousSessionId: previousId, sessionFile });
     notifyRunningChange({ refreshSessionList: true });
@@ -2114,6 +2155,18 @@ export class AgentSessionWrapper {
         this.compacting = false;
         // Same patch the manual `compact` path applies — the client reads
         // event.result.estimatedTokensAfter for the banner.
+        patchEstimatedTokensAfter(event.result);
+        invalidateSessionListCache();
+        this.getPlanKeeper()?.notifyListRebuilt();
+        break;
+      case "manual_compaction_start":
+        // omp 18.13.3+ announces every manual compaction, also one nobody here
+        // asked for (a typed command, an extension's ctx.compact()). It holds
+        // the session busy like the `compact` command below does.
+        this.compacting = true;
+        break;
+      case "manual_compaction_end":
+        this.compacting = false;
         patchEstimatedTokensAfter(event.result);
         invalidateSessionListCache();
         this.getPlanKeeper()?.notifyListRebuilt();
@@ -2557,18 +2610,23 @@ export class AgentSessionWrapper {
       this.forgetPendingUiRequest(targetId);
       return false;
     }
-    // Only the “Allow tool: <name>” confirmation is covered. Other extension
-    // prompts, including login/editor confirmations, remain interactive.
-    let autoApproveExtension = false;
-    try {
-      autoApproveExtension = readNativeSettings().settings.tools?.approval?.extension === "allow";
-    } catch {
-      // A malformed config must not prevent normal interactive approval.
-    }
-    if (method === "confirm" && typeof event.title === "string" && /^allow tool\s*:/i.test(event.title) && autoApproveExtension) {
-      this.forgetPendingUiRequest(id);
-      this.proc.sendFrame({ type: "extension_ui_response", id, confirmed: true });
-      return true;
+    // Auto approve (`tools.approval.extension: allow`) answers a tool approval that allows THIS call once: omp
+    // (18.8.3 and 18.19.0 alike) asks it as a `select`, older Cody builds and fixtures as a `confirm`. A list that
+    // is not recognisably omp's, a provider safety check and a restricted folder all stay for the person.
+    // Other extension prompts, including login/editor confirmations, remain interactive too.
+    if (method === "select" || method === "confirm") {
+      let autoApproveExtension = false;
+      try {
+        autoApproveExtension = readNativeSettings().settings.tools?.approval?.extension === "allow";
+      } catch {
+        // A malformed config must not prevent normal interactive approval.
+      }
+      const reply = autoApproveExtension ? autoApprovalReply(event) : null;
+      if (reply) {
+        this.forgetPendingUiRequest(id);
+        this.proc.sendFrame({ type: "extension_ui_response", id, ...reply });
+        return true;
+      }
     }
     if (PENDING_UI_METHODS.has(method)) {
       this.forgetPendingUiRequest(id);
@@ -3157,7 +3215,9 @@ export class AgentSessionWrapper {
             provider: state.model.provider,
             name: state.model.name,
             reasoning: state.model.reasoning,
-            thinking: state.model.thinking ? { efforts: state.model.thinking.efforts } : undefined,
+            thinking: state.model.thinking
+              ? { efforts: state.model.thinking.efforts, ...(state.model.thinking.unverified === true ? { unverified: true } : {}) }
+              : undefined,
           }
         : undefined,
       messageCount: state.messageCount,
@@ -3262,10 +3322,12 @@ export class AgentSessionWrapper {
         },
       });
       this.proc = proc;
+      this.bashExcludeSupported = false;
       this.childTimeZone = timeZone;
       this.unsubscribeFrames = proc.onFrame((frame) => this.handleFrame(frame));
       try {
         const ready = await proc.waitReady(READY_TIMEOUT_MS);
+        this.bashExcludeSupported = ready.supportsBashExcludeFromContext === true;
         await proc.negotiateProtocol(ready);
         if (this.engine.rpcUi.subagentEvents) {
           await proc.sendCommand({ type: "set_subagent_subscription", level: SUBAGENT_SUBSCRIPTION_LEVEL }).catch(() => {});
@@ -4076,7 +4138,7 @@ export class AgentSessionWrapper {
           const newSessionId = await this.refreshIdentityAfterSessionChange();
           // A branch keeps its parent resumable, so clone rather than move the
           // frozen Local-only snapshot and account ownership sidecars.
-          this.carrySessionState(parentSessionId, newSessionId);
+          carrySessionState(parentSessionId, newSessionId);
           return { cancelled: false, newSessionId };
         } finally {
           this.requestedIdentityChanges -= 1;
@@ -4105,7 +4167,7 @@ export class AgentSessionWrapper {
           }
           if (result.cancelled) return { cancelled: true };
           const newSessionId = await this.refreshIdentityAfterSessionChange();
-          this.carrySessionState(parentSessionId, newSessionId);
+          carrySessionState(parentSessionId, newSessionId);
           return { cancelled: false, newSessionId };
         } finally {
           this.requestedIdentityChanges -= 1;
@@ -4208,12 +4270,13 @@ export class AgentSessionWrapper {
       }
 
       case "bash": {
-        // The rpc dialect's bash command is `{type:"bash", command}` only
-        // (rpc-types.ts) — there is no excludeFromContext option anywhere in
-        // modes/rpc. Running a `!!` command anyway would put output the user
-        // meant to keep private into the model context, so refuse instead of
-        // silently ignoring it.
-        if (command.excludeFromContext === true) {
+        // `!!` runs the command with its output kept out of the model context.
+        // omp 18.18.1+ takes `excludeFromContext` on the bash command and says
+        // so in its ready frame. Any other child (older omp, pi) would run the
+        // command and put output the user meant to keep private into the model
+        // context, so it is refused instead of silently ignored.
+        const excluded = command.excludeFromContext === true;
+        if (excluded && !this.bashExcludeSupported) {
           throw new WebRpcError(bashExcludeMessage(this.engine.label), "bash_exclude_unsupported");
         }
         if (this.isRunning()) {
@@ -4222,7 +4285,11 @@ export class AgentSessionWrapper {
         this.bashRunning = true;
         notifyRunningChange();
         try {
-          return await this.proc.sendCommand<BashResultInfo>({ type: "bash", command: command.command as string });
+          return await this.proc.sendCommand<BashResultInfo>({
+            type: "bash",
+            command: command.command as string,
+            ...(excluded ? { excludeFromContext: true } : {}),
+          });
         } finally {
           this.bashRunning = false;
           invalidateSessionListCache();
@@ -4360,6 +4427,7 @@ declare global {
   var __ompSessions: Map<string, EngineSession> | undefined;
   var __ompStartLocks: Map<string, Promise<{ session: EngineSession; realSessionId: string }>> | undefined;
   var __ompRetiring: Map<string, Promise<void>> | undefined;
+  var __ompSessionAliases: Map<string, EngineSession> | undefined;
   var __ompRunningListeners: Set<(update: RunningSessionUpdate) => void> | undefined;
 }
 
@@ -4383,6 +4451,21 @@ function getRegistry(): Map<string, EngineSession> {
 function getLocks(): Map<string, Promise<{ session: EngineSession; realSessionId: string }>> {
   if (!globalThis.__ompStartLocks) globalThis.__ompStartLocks = new Map();
   return globalThis.__ompStartLocks;
+}
+
+/**
+ * Other ids a LIVE conversation is still asked for under: a resume of file A
+ * that opened the newer copy B (omp 18.13.2+ follows the header's
+ * `continuationOf` link) leaves every stale reference to A — a bookmark, a
+ * scheduled message, a chat message addressed to it — asking for a chat that
+ * is already running as B. Consulted by `startRpcSession` only, never by
+ * `getRpcSession`: to every route that reads a file the old id still names
+ * the frozen original, and only a START must not put a second child on the
+ * copy the live one holds.
+ */
+function getAliases(): Map<string, EngineSession> {
+  if (!globalThis.__ompSessionAliases) globalThis.__ompSessionAliases = new Map();
+  return globalThis.__ompSessionAliases;
 }
 
 /**
@@ -4756,6 +4839,11 @@ export async function startRpcSession(
 
   const existing = registry.get(sessionId);
   if (existing?.isAlive()) return { session: existing, realSessionId: sessionId };
+  // This id used to name a conversation that now runs under a newer copy's id
+  // (see getAliases): a start must hand out that child, never open a second
+  // one on the copy it already holds.
+  const continued = sessionFile ? getAliases().get(sessionId) : undefined;
+  if (continued?.isAlive()) return { session: continued, realSessionId: continued.sessionId };
   if (existing?.destroyPromise) await existing.destroyPromise;
   // A child destroyed a moment ago is no longer in the registry but may still
   // hold the session file: wait for it to exit before starting another.
@@ -4866,19 +4954,43 @@ export async function startRpcSession(
 
     const realSessionId = created.sessionId;
     if (sessionId !== realSessionId) {
-      // New OMP sessions receive their durable id only after launch. This is a
-      // rename, unlike a fork: the temporary id has no resumable parent.
-      renameSessionOwner(sessionId, realSessionId);
-      renameSessionLocalRouting(sessionId, realSessionId);
-      renameSessionPreset(sessionId, realSessionId);
-      aliasDisplaySession(sessionId, realSessionId);
-      noteScratchAlias(sessionId, realSessionId);
+      if (sessionFile) {
+        // A RESUME that opened another file: omp 18.13.2+ follows a file's
+        // `continuationOf` link to the newest copy of its conversation, and
+        // that copy has an id of its own. Unlike a new chat's temporary key the
+        // id asked for names a real file that stays (a bookmark, a scheduled
+        // message or an open tab may ask for it again), so what is filed under
+        // it is carried across, never renamed, and `getAliases` makes a later
+        // start for it find this child instead of opening a second one.
+        const live = registry.get(realSessionId);
+        if (live?.isAlive() && live !== created) {
+          // The newest copy already runs under its own id and this was a stale
+          // reference to it: that child IS the conversation. The one just
+          // started would only fight it for the file, so it goes.
+          await created.destroyAndWait();
+          carryConversation(sessionId, realSessionId);
+          getAliases().set(sessionId, live);
+          return { session: live, realSessionId };
+        }
+        carryConversation(sessionId, realSessionId);
+        getAliases().set(sessionId, created);
+      } else {
+        // New OMP sessions receive their durable id only after launch. This is a
+        // rename, unlike a fork: the temporary id has no resumable parent.
+        renameSessionOwner(sessionId, realSessionId);
+        renameSessionLocalRouting(sessionId, realSessionId);
+        renameSessionPreset(sessionId, realSessionId);
+        aliasDisplaySession(sessionId, realSessionId);
+        noteScratchAlias(sessionId, realSessionId);
+      }
     }
     holder.renamed = true;
     created.onDestroy(() => {
-      if (registry.get(created.sessionId) === created) registry.delete(created.sessionId);
-      if (registry.get(realSessionId) === created) registry.delete(realSessionId);
-      noteRetiring([created.sessionId, realSessionId], created.destroyPromise);
+      // Every key this child was filed under, whatever the id moved through.
+      for (const [key, session] of registry) if (session === created) registry.delete(key);
+      const aliases = getAliases();
+      for (const [key, session] of aliases) if (session === created) aliases.delete(key);
+      noteRetiring([created.sessionId, realSessionId, sessionId], created.destroyPromise);
     });
     created.onIdentityChange((oldId, newId) => {
       if (registry.get(oldId) === created) registry.delete(oldId);

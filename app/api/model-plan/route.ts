@@ -5,13 +5,13 @@ import {
   constrainPlanDraft,
   deriveChains,
   heuristicPlan,
-  ROLE_NAMES,
+  planRoleNames,
   validatePlan,
 } from "@/lib/model-plan/derive";
 import { plannerCandidates, savedDefaultProvider, suggestedPlanner } from "@/lib/model-plan/planner-candidates";
 import { planWithModel } from "@/lib/model-plan/planner";
 import { loadRoster } from "@/lib/model-plan/roster";
-import { clearModelRoles, readModelRoles, writeModelRoles } from "@/lib/omp/model-roles";
+import { clearModelRoles, getOmpModelRoleIds, readModelRoles, writeModelRoles } from "@/lib/omp/model-roles";
 import {
   deleteNativeSettingsPaths,
   readNativeSettings,
@@ -29,8 +29,15 @@ export const dynamic = "force-dynamic";
  */
 const SURFACE = "The OMP model-roles planner";
 
-function savedCustomRoles(roles: Record<string, string>): Record<string, string> {
-  return Object.fromEntries(Object.entries(roles).filter(([role]) => !ROLE_NAMES.includes(role)));
+/** The roles this engine has and Cody assigns. `widget` exists only from omp
+ * 18.12.3, so on an older engine it is neither offered, proposed nor written
+ * (an unknown key is inert there, but would show a role nothing consults). */
+function assignableRoles(): readonly string[] {
+  return planRoleNames(getOmpModelRoleIds());
+}
+
+function savedCustomRoles(roles: Record<string, string>, assignable: readonly string[]): Record<string, string> {
+  return Object.fromEntries(Object.entries(roles).filter(([role]) => !assignable.includes(role)));
 }
 
 export async function GET() {
@@ -55,7 +62,7 @@ export async function GET() {
       roles,
       chains: settings.retry?.fallbackChains ?? {},
       usageAwareFallback: settings.retry?.usageAwareFallback ?? false,
-      roleNames: [...ROLE_NAMES],
+      roleNames: [...assignableRoles()],
     });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
@@ -82,7 +89,8 @@ export async function POST(request: Request) {
     const warnings: string[] = [];
     const currentDefault = readModelRoles().roles.default;
     const preferredProvider = savedDefaultProvider(currentDefault, roster.models);
-    const heuristic = heuristicPlan(roster.models, { preferredProvider });
+    const roleNames = assignableRoles();
+    const heuristic = heuristicPlan(roster.models, { preferredProvider, roleNames });
     let draft = heuristic;
     let source: "llm" | "heuristic" = "heuristic";
 
@@ -96,7 +104,7 @@ export async function POST(request: Request) {
       if (!planner) {
         warnings.push("No model here can run the planner, so this is Cody's own suggestion.");
       } else {
-        const outcome = await planWithModel(planner, roster);
+        const outcome = await planWithModel(planner, roster, roleNames);
         if (outcome.ok) {
           draft = outcome.draft;
           source = "llm";
@@ -108,7 +116,7 @@ export async function POST(request: Request) {
       }
     }
 
-    const constrained = constrainPlanDraft(draft, roster.models);
+    const constrained = constrainPlanDraft(draft, roster.models, roleNames);
     draft = constrained.draft;
     warnings.push(...constrained.warnings);
 
@@ -119,10 +127,12 @@ export async function POST(request: Request) {
       roles: draft.roles,
       ladder: draft.ladder,
       roster: roster.models,
+      roleNames,
     });
     const validated = validatePlan(
       { roles: draft.roles, chains, rationale: draft.rationale },
       roster.models,
+      roleNames,
     );
     const { settings } = readNativeSettings();
     if (validated.plan.usageAwareFallback && settings.retry?.modelFallback === false) {
@@ -161,9 +171,10 @@ export async function PUT(request: Request) {
       return NextResponse.json({ error: "usageAwareFallback must be a boolean" }, { status: 400 });
     }
 
+    const assignable = assignableRoles();
     const roles: Record<string, string> = {};
     for (const [role, selector] of Object.entries(body.roles)) {
-      if (!ROLE_NAMES.includes(role)) {
+      if (!assignable.includes(role)) {
         return NextResponse.json({ error: `Unknown role "${role}"` }, { status: 400 });
       }
       if (typeof selector !== "string" || !selector.trim()) {
@@ -206,7 +217,7 @@ export async function PUT(request: Request) {
       if (selectors.length > 0) chains[key.trim()] = selectors;
     }
 
-    writeModelRoles({ ...savedCustomRoles(readModelRoles().roles), ...roles });
+    writeModelRoles({ ...savedCustomRoles(readModelRoles().roles, assignable), ...roles });
     // Read-then-merge: this endpoint owns fallback chains and the usage-aware
     // switch, never retry.modelFallback, retry count, or revert policy.
     const { settings } = readNativeSettings();
@@ -236,9 +247,10 @@ export async function DELETE() {
     const gate = requireEngine("omp", SURFACE);
     if ("response" in gate) return gate.response;
 
+    const assignable = assignableRoles();
     const persistedRoles = readModelRoles().roles;
-    const customRoles = savedCustomRoles(persistedRoles);
-    const clearedRoles = Object.keys(persistedRoles).some((role) => ROLE_NAMES.includes(role))
+    const customRoles = savedCustomRoles(persistedRoles, assignable);
+    const clearedRoles = Object.keys(persistedRoles).some((role) => assignable.includes(role))
       ? (Object.keys(customRoles).length > 0 ? (writeModelRoles(customRoles), true) : clearModelRoles())
       : false;
     const clearedPaths = deleteNativeSettingsPaths([

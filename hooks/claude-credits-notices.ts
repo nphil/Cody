@@ -12,6 +12,7 @@
  */
 import { CLAUDE_PLAN_PROVIDER, isClaudeCreditsReturn, isClaudeCreditsSwitch } from "@/lib/claude-credits";
 import { describeEngineError } from "@/lib/error-text";
+import { missingCredentialProvider } from "@/hooks/credential-notices";
 
 /** How long a plan-limit warning waits for `auto_retry_start` to cancel it.
  * The retry frame follows the failed message within milliseconds; a second
@@ -49,7 +50,14 @@ export function shouldHoldRetryBanner(retry: { job: "main" | "subagent"; provide
 /** "switch": plan -> credits. "return": credits -> plan. Null: neither. */
 export type CreditsNoticeKind = "switch" | "return";
 
-export function creditsNoticeKind(from: unknown, to: unknown): CreditsNoticeKind | null {
+/**
+ * `reason` is `retry_fallback_applied.reason` when the hop came from that
+ * event. A hop off a signed-out Claude plan onto the credits (omp 18.15.0+,
+ * reason "no credential for anthropic") is a sign-out, not a plan limit, so it
+ * is no "switch" and must not read "Claude plan limit reached".
+ */
+export function creditsNoticeKind(from: unknown, to: unknown, reason?: unknown): CreditsNoticeKind | null {
+  if (missingCredentialProvider(reason) !== null) return null;
   if (isClaudeCreditsSwitch(from, to)) return "switch";
   if (isClaudeCreditsReturn(from, to)) return "return";
   return null;

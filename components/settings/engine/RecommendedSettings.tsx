@@ -21,10 +21,11 @@ import { type CSSProperties, type ReactNode } from "react";
 import { Select } from "@/components/ui/Select";
 import { useConfigWriter, useNativeSettings, type CompactionMethod, type NativeSettings, type NativeSettingsHandle } from "@/hooks/useConfigWriter";
 import { useSchemaIndex, type SchemaIndex, type SchemaRow, type SchemaValue } from "@/hooks/useSchemaIndex";
+import { isBadgedRow, useSettingsNewBadges } from "../new-badges";
 import { NativeSetting, TERMINAL_ONLY_BADGE, ToggleSwitch, chipStyle } from "../primitives";
 import { useSaveStatus } from "../SaveStatus";
 import { useSettingsShell } from "../shell-context";
-import { ENGINE_PANEL_ID, RECOMMENDED_CARDS, RECOMMENDED_GROUPS, curatedOnly, searchIdForKey, type CuratedOnlySetting, type RecommendedCard, type RecommendedGroup } from "./recommended-cards";
+import { ENGINE_PANEL_ID, RECOMMENDED_CARDS, RECOMMENDED_GROUPS, curatedOnly, curatedSupported, searchIdForKey, type CuratedOnlySetting, type RecommendedCard, type RecommendedGroup } from "./recommended-cards";
 import { HelperMemoryCard } from "./HelperMemoryCard";
 import { NumberField, SchemaControl } from "./SchemaSettingsList";
 
@@ -139,6 +140,7 @@ function CardFooter({ settingKey, modified, hint, onReset }: { settingKey: strin
 
 /** A card whose key the engine's schema declares. */
 function SchemaCard({ card, row, index }: { card: RecommendedCard; row: SchemaRow; index: SchemaIndex }) {
+  const { isNew } = useSettingsNewBadges();
   const { track } = useSaveStatus(ENGINE_PANEL_ID);
   const write = (value: SchemaValue | null) => { void track(() => index.setValue(row.key, value)); };
   const change = (value: SchemaValue) => {
@@ -160,6 +162,7 @@ function SchemaCard({ card, row, index }: { card: RecommendedCard; row: SchemaRo
       description={description || undefined}
       badge={row.terminalOnly ? TERMINAL_ONLY_BADGE : undefined}
       searchId={searchIdForKey(row.key)}
+      newKey={isBadgedRow(row, isNew) ? row.key : undefined}
       switchControl={inline && row.type === "boolean"}
       control={(
         <>
@@ -184,7 +187,8 @@ function readCurated(settings: NativeSettings | null, meta: CuratedOnlySetting):
 }
 
 function writeCurated(native: NativeSettingsHandle, meta: CuratedOnlySetting, value: boolean | number | string): Promise<void> {
-  if (meta.section === "tools.approval") return native.patchApproval({ [meta.field]: value });
+  // A curated approval card only offers the values omp accepts for that tool.
+  if (meta.section === "tools.approval") return native.patchApproval({ [meta.field]: value } as Parameters<NativeSettingsHandle["patchApproval"]>[0]);
   if (meta.section === null) return native.patchTop({ [meta.field]: value });
   return native.patchSection(meta.section, { [meta.field]: value });
 }
@@ -210,7 +214,7 @@ function CuratedCard({ card, meta, native }: { card: RecommendedCard; meta: Cura
   const { track } = useSaveStatus(ENGINE_PANEL_ID);
   const { enqueue } = useConfigWriter();
   const stored = readCurated(native.settings, meta);
-  const effective = stored ?? meta.default;
+  const effective = stored ?? (meta.unset ? undefined : meta.default);
   const change = (value: boolean | number | string) => {
     void track(() => writeCurated(native, meta, value));
   };
@@ -258,6 +262,7 @@ function RecommendedCardView({ card, index, native }: { card: RecommendedCard; i
   // unreadable there is nothing to evaluate it against, and an inert card
   // beats a silently missing one.
   if (index.status === "ready" && !index.conditionMet(meta.condition)) return null;
+  if (!curatedSupported(meta, index.version)) return null;
   return <CuratedCard card={card} meta={meta} native={native} />;
 }
 

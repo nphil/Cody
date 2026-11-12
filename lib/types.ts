@@ -19,6 +19,12 @@ export interface SessionHeader {
   /** Extra workspace roots beyond cwd (multi-root workspace). */
   additionalDirectories?: string[];
   parentSession?: string;
+  /** Id of the session this file CONTINUES (omp 18.13.2+): when omp cannot
+   *  keep writing a file (another live process holds it, or it changed under
+   *  it) the chat goes on in a sibling file with a new id (omp also puts the
+   *  old id in `parentSession`), and a resume of the old id opens the newest
+   *  copy. A deliberate fork never sets it. */
+  continuationOf?: string;
   providerPromptCacheKey?: string;
 }
 
@@ -26,6 +32,15 @@ export interface SessionEntryBase {
   type: string;
   id: string;
   parentId: string | null;
+  /**
+   * omp 18.12.4+: for an entry written OFF the active branch (a late
+   * `model_usage`, a background bash result, discarded-turn usage) the leaf
+   * the session was on when it was appended. A reload replays that leaf
+   * instead of treating this entry as the end of the chat. Absent means
+   * the entry selects itself; `null` records a cleared leaf. Read it only
+   * through `resolveSessionLeafId` (lib/omp/session-files.ts).
+   */
+  activeLeafId?: string | null;
   timestamp: string;
 }
 
@@ -56,6 +71,12 @@ export interface ThinkingContent {
   thinking: string;
   /** Historical content omitted from the initial response and loaded on demand. */
   deferred?: boolean;
+  /**
+   * omp 18.12+ (Anthropic/Bedrock): the model's prose to the user between tool
+   * calls, which the provider returned as thinking. It is answer text: shown
+   * as such, never inside the collapsed thinking box.
+   */
+  narration?: boolean;
 }
 
 export interface ToolCallContent {
@@ -71,6 +92,9 @@ export interface UserMessage {
   role: "user";
   content: string | (TextContent | ImageContent)[];
   timestamp?: number;
+  /** omp 18.18+: set when a parent agent steered this message into a subagent.
+   * `content` then holds the model-facing `<irc …>` wrapper; show `body`. */
+  parentIrc?: { from: string; body: string };
 }
 
 export interface AssistantMessage {
@@ -139,6 +163,8 @@ export interface BashExecutionMessage {
   truncated?: boolean;
   fullOutputPath?: string;
   excludeFromContext?: boolean;
+  /** omp's size report for this output: truncation, column cuts, minimizer (lib/bash-output-meta.ts). */
+  meta?: Record<string, unknown>;
   timestamp?: number;
 }
 
@@ -210,6 +236,8 @@ export type ExtensionUiRequest =
       method: "input";
       title: string;
       placeholder?: string;
+      /** omp 18.13.2+: an extension asked for a secret (a token, a password); the box masks what is typed. */
+      secret?: boolean;
       timeout?: number;
       expiresAt?: number;
     }
@@ -393,6 +421,27 @@ export interface ModeChangeEntry extends SessionEntryBase {
   data?: Record<string, unknown>;
 }
 
+/**
+ * Billed usage of a model call that is not a transcript message (omp): the
+ * helper calls (`auto-thinking`, titles, recaps), a late response, a
+ * discarded empty or length-stopped turn (`purpose: "discarded-turn"`), a
+ * cache-warm refresh. It carries no chat rendering but it IS spend: omp
+ * counts it in the session total, the cost cap and `omp stats`.
+ */
+export interface ModelUsageEntry extends SessionEntryBase {
+  type: "model_usage";
+  purpose?: string;
+  role?: string;
+  api?: string;
+  provider?: string;
+  model?: string;
+  usage?: AssistantMessage["usage"];
+  stopReason?: string;
+  errorMessage?: string;
+  /** A cache-warm refresh: when it was sent and whether it read the cache. */
+  cacheRefresh?: { sentAt: number; hit: boolean };
+}
+
 export type SessionEntry =
   | SessionMessageEntry
   | ThinkingLevelChangeEntry
@@ -407,7 +456,8 @@ export type SessionEntry =
   | TitleChangeEntry
   | TtsrInjectionEntry
   | SessionInitEntry
-  | ModeChangeEntry;
+  | ModeChangeEntry
+  | ModelUsageEntry;
 
 export type FileEntry = SessionHeader | SessionEntry;
 
@@ -431,6 +481,11 @@ export interface SessionInfo {
   messageCount: number;
   firstMessage: string;
   parentSessionId?: string; // set if this session was forked from another
+  /** Id of the session this one carries on from in a new file (header `continuationOf`:
+   *  omp 18.13.2+ moves a chat to a sibling file when it cannot keep writing the first).
+   *  The sidebar list hides the earlier copy once this one has taken over; see
+   *  collapseContinuedSessions. */
+  continuationOf?: string;
   /** Main repo root shared by all worktrees of this cwd (cwd itself for non-git dirs).
    *  Always set by the server; optional because the client builds transient
    *  SessionInfo objects before the first refresh. Fall back to cwd. */

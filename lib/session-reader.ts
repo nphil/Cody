@@ -7,6 +7,7 @@ import {
   listAllSessionInfos,
   loadSessionFile,
   readSessionHeaderSync,
+  resolveSessionLeafId,
   type LoadedSession,
   type LoadSessionOptions,
   type OmpSessionInfo,
@@ -24,12 +25,14 @@ import { normalizeToolCalls } from "./normalize";
 import { isRecord } from "./type-guards";
 import { goalFromPersistedMode } from "./goal-state";
 import { taskResultRetryFailure, taskResultStructuredOutput, taskResultUsageCost } from "./task-result-details";
+import { keepAskToolResultDetails } from "./ask-result";
 import type { TodoPhase } from "./pi-types";
 import { sessionPathKey } from "./session-path";
 import { foldSystemReminder } from "./system-reminder";
 import { isHiddenFromTranscript } from "./message-display";
 import { resolveProject, type ProjectInfo } from "./worktree";
 import { displaySessionTitle } from "./session-title";
+import { lastActiveMs } from "./project-ordering";
 
 export { getAgentDir };
 
@@ -93,6 +96,7 @@ async function loadAllSessions(): Promise<SessionInfo[]> {
       parentSessionId: s.parentSessionPath
         ? matchParentSessionId(s.parentSessionPath, pathToId, knownIds)
         : undefined,
+      ...(s.continuationOf ? { continuationOf: s.continuationOf } : {}),
       projectRoot: project?.projectRoot ?? s.cwd,
       ...(project?.isWorktree && project.branch ? { worktreeBranch: project.branch } : {}),
     };
@@ -149,6 +153,81 @@ export async function listAllSessions(): Promise<SessionInfo[]> {
   globalThis.__piSessionListPromiseGeneration = generation;
   globalThis.__piSessionListPromiseRoot = root;
   return trackedPromise;
+}
+
+/**
+ * The chats whose row another copy has taken over. omp 18.13.2+ moves a chat to
+ * a sibling file when it cannot keep writing the first (another process holds
+ * it, or the file changed underneath): the new file holds the whole transcript
+ * again and names the old session in its header (`continuationOf`), so a list
+ * that shows both shows one chat twice, the older row frozen at the move.
+ *
+ * A copy is superseded when a listed session continues it and nothing was said
+ * in it after that session began. One that went on afterwards holds turns the
+ * other lacks (two processes kept writing), so both stay chats of their own.
+ * That is also when omp's own resume leaves the older copy alone.
+ *
+ * Maps each superseded id to the id of the copy shown in its place: the last
+ * copy of a chain that moved more than once, and, when several copies took
+ * over from one, the one with the newest turn.
+ */
+function findSupersededSessions(sessions: readonly SessionInfo[]): Map<string, string> {
+  const byId = new Map<string, SessionInfo>();
+  for (const session of sessions) byId.set(session.id, session);
+  const successor = new Map<string, SessionInfo>();
+  for (const copy of sessions) {
+    const earlier = copy.continuationOf ? byId.get(copy.continuationOf) : undefined;
+    if (!earlier || earlier === copy) continue;
+    if (earlier.lastActiveAt && Date.parse(earlier.lastActiveAt) > Date.parse(copy.created)) continue;
+    const rival = successor.get(earlier.id);
+    if (!rival || lastActiveMs(copy) > lastActiveMs(rival)) successor.set(earlier.id, copy);
+  }
+  const standsIn = new Map<string, string>();
+  for (const [id, copy] of successor) {
+    let shown = copy;
+    for (let hops = 0; hops < successor.size; hops++) {
+      const next = successor.get(shown.id);
+      if (!next) break;
+      shown = next;
+    }
+    // A chain that closes on itself (never written by omp) leaves its rows alone.
+    if (!successor.has(shown.id)) standsIn.set(id, shown.id);
+  }
+  return standsIn;
+}
+
+/**
+ * The list as the sidebar shows it: one row per chat. Rows another copy has
+ * taken over from are dropped (see findSupersededSessions) and the tree hangs
+ * from the copy shown instead: it takes the place of the chat it continues,
+ * and forks of a dropped copy hang from it.
+ */
+export function collapseContinuedSessions(sessions: SessionInfo[]): SessionInfo[] {
+  const superseded = findSupersededSessions(sessions);
+  if (superseded.size === 0) return sessions;
+  const byId = new Map(sessions.map((session) => [session.id, session]));
+  return sessions
+    .filter((session) => !superseded.has(session.id))
+    .map((session) => {
+      let parent = session.parentSessionId;
+      for (let hops = 0; parent && superseded.has(parent) && hops <= superseded.size; hops++) {
+        parent = superseded.get(parent) === session.id ? byId.get(parent)?.parentSessionId : superseded.get(parent);
+      }
+      return parent === session.parentSessionId ? session : { ...session, parentSessionId: parent };
+    });
+}
+
+/**
+ * The earlier copies a chat's row stands in for, newest first: what Delete and
+ * Archive of that row take along, so none of them reappears in the list once
+ * the row is gone.
+ */
+export async function listSupersededCopies(sessionId: string): Promise<SessionInfo[]> {
+  const sessions = await listAllSessions();
+  const standsIn = findSupersededSessions(sessions);
+  return sessions
+    .filter((session) => standsIn.get(session.id) === sessionId)
+    .sort((a, b) => Date.parse(b.created) - Date.parse(a.created));
 }
 
 // ============================================================================
@@ -500,11 +579,13 @@ function parseTodoPhases(value: unknown): TodoPhase[] | null {
   return phases;
 }
 
-/** Latest valid todo snapshot on the selected branch, without exposing tool metadata to the client. */
+/** Latest valid todo snapshot on the selected branch, without exposing tool metadata to the client.
+ *  No leaf means the one omp resumes at (see `resolveSessionLeafId`), not blindly the last entry. */
 export function getTodoPhasesFromEntries(entries: SessionEntry[], leafId?: string | null): TodoPhase[] {
   if (leafId === null || entries.length === 0) return [];
   const byId = new Map(entries.map((entry) => [entry.id, entry]));
-  let entry = leafId ? byId.get(leafId) : entries[entries.length - 1];
+  const startId = leafId || resolveSessionLeafId(entries);
+  let entry = startId ? byId.get(startId) : undefined;
   const path: SessionEntry[] = [];
   const seen = new Set<string>();
   while (entry && !seen.has(entry.id)) {
@@ -560,9 +641,14 @@ export function buildSessionContext(
   // Explicitly null — navigated to before the first entry.
   if (leafId === null) return emptyContext;
 
-  let leaf: SessionEntry | undefined;
-  if (leafId) leaf = byId.get(leafId);
-  if (!leaf) leaf = entries[entries.length - 1];
+  // No leaf (or an unknown one) means the leaf omp itself resumes at, not
+  // blindly the last entry: a late `model_usage` or background result at the
+  // tail names the leaf it interrupted. A cleared leaf selects no branch.
+  let leaf = leafId ? byId.get(leafId) : undefined;
+  if (!leaf) {
+    const replayedLeafId = resolveSessionLeafId(entries);
+    leaf = replayedLeafId === null ? undefined : byId.get(replayedLeafId);
+  }
   if (!leaf) return emptyContext;
 
   // Walk leaf → root. Corrupt files can contain parent cycles; stop at the
@@ -655,7 +741,7 @@ export function buildSessionContext(
       : { provider: "", modelId: defaultModel };
   }
 
-  return { messages, entryIds, thinkingLevel, model, todoPhases: getTodoPhasesFromEntries(entries, leafId), goal: goalFromPersistedMode(mode, modeData) };
+  return { messages, entryIds, thinkingLevel, model, todoPhases: getTodoPhasesFromEntries(entries, leaf.id), goal: goalFromPersistedMode(mode, modeData) };
 }
 
 function parseEntryTimestamp(timestamp: string): number | undefined {
@@ -684,9 +770,15 @@ function base64ImageInfo(block: unknown): { bytes: number; mime?: string } | nul
 /**
  * toolResult `details` is provider/tool-internal metadata that dominates real
  * history payloads (measured 643KB of a 1.34MB context on a 533-entry session),
- * and the history UI reads exactly two keys from it: details.patch and
- * details.diff (components/MessageView.tsx getResultDiff). Serialization
- * allowlists those keys — extend the allowlist if MessageView ever reads more.
+ * and the history UI reads a handful of keys from it: details.patch and
+ * details.diff (components/MessageView.tsx getResultDiff), plus the failed-edit
+ * reason details.errorKind (omp >= 18.13: the session stats panel counts them
+ * and the edit card names the reason). Serialization allowlists those keys —
+ * extend the allowlist if MessageView ever reads more.
+ * Ask toolResults keep a BOUNDED projection (lib/ask-result.ts
+ * keepAskToolResultDetails: answers/notes/timedOut, plus the omp 18.8
+ * question/selectedOptions/customInput/note/results) that AskResultPanel
+ * renders.
  * Task toolResults additionally keep a SIZE-BOUNDED subset of their
  * results/progress (telemetry, no full output) so the message flow can render
  * a per-subagent summary. On-disk parsing (loadSessionFile/getSessionEntries)
@@ -788,9 +880,18 @@ function stripToolResultDetails(message: AgentMessage): AgentMessage {
     const kept: Record<string, unknown> = {};
     if (typeof details.patch === "string") kept.patch = details.patch;
     if (typeof details.diff === "string") kept.diff = details.diff;
+    // A failed edit's machine-readable reason (a short snake_case word such as
+    // stale_tag). Bounded so a hostile or future payload cannot ride along.
+    if (message.toolName === "edit" && message.isError && typeof details.errorKind === "string" && details.errorKind.length <= 64) {
+      kept.errorKind = details.errorKind;
+    }
     if (message.toolName === "task") {
       const taskDetails = keepTaskToolResultDetails(details);
       if (taskDetails) Object.assign(kept, taskDetails);
+    }
+    if (message.toolName === "ask") {
+      const askDetails = keepAskToolResultDetails(details);
+      if (askDetails) Object.assign(kept, askDetails);
     }
     if (Object.keys(kept).length > 0) return { ...rest, details: kept };
   }
@@ -942,7 +1043,7 @@ export function entryToUiMessage(
       return {
         ...message,
         content: message.content.map((block) => (
-          block.type === "thinking" && typeof block.thinking === "string" && block.thinking.trim() !== ""
+          block.type === "thinking" && !block.narration && typeof block.thinking === "string" && block.thinking.trim() !== ""
             ? { ...block, thinking: "", deferred: true }
             : block
         )),
@@ -969,7 +1070,8 @@ export function entryToUiMessage(
     default:
       // model_change, thinking_level_change, service_tier_change, label,
       // title_change, session_init, ttsr_injection, mode_change, custom,
-      // session_info: metadata entries with no chat rendering.
+      // session_info, model_usage: metadata entries with no chat rendering
+      // (a model_usage is spend, counted by lib/session-usage.ts).
       return null;
   }
 }

@@ -206,13 +206,54 @@ test("engine/provider errors are cleaned and classified through lib/error-text b
   // for omp's own events AND every ACP engine's raw notice text
   // (lib/harness/acp-session.ts's "{name}: {error}" strings), not one path
   // per event type.
-  assert.match(hook, /import \{ describeEngineError, errorDedupeKey, type ErrorKind \} from "@\/lib\/error-text";/);
+  assert.match(hook, /import \{ describeEngineError, errorDedupeKey, readCostGateAmounts, type ErrorKind \} from "@\/lib\/error-text";/);
   assert.match(hook, /addEngineErrorNotice\(raw, engineNameRef\.current\);/, "prompt_error");
   assert.match(hook, /addEngineErrorNotice\(message, engineNameRef\.current\);/, "the notice case");
   assert.match(hook, /addEngineErrorNotice\(detail, engineNameRef\.current\);/, "message_end's stopReason \"error\" branch");
   // engineErrorNotice returns null (no notice at all) for an "aborted" kind,
   // i.e. "Interrupted by user" / "Request was aborted" stay quiet.
   assert.match(hook, /if \(described\.kind === "aborted"\) return null;/);
+});
+
+test("omp's spend limit (18.13+) reads as plain sentences, and a refused prompt that never starts a run still settles", () => {
+  // The refusal reaches the page twice (a `cost-gate` notice, then the prompt's
+  // result with error.code "cost_cap"); both land on one notice because the
+  // describer keys them alike. The warning is its own one-time heads-up.
+  assert.match(hook, /case "cost_cap": \{[\s\S]*?translate\("agentSession\.errorCostCap", amounts\) : translate\("agentSession\.errorCostCapUnknown"\)/);
+  assert.match(hook, /event\.source === "cost-gate"[\s\S]*?if \(level === "error"\) addEngineErrorNotice\(message, engineNameRef\.current\);[\s\S]*?else addNotice\(costWarningNotice\(message, sessionIdRef\.current\)\);/);
+  assert.match(hook, /if \(event\.agentInvoked !== false && !\(isRecord\(promptResult\.error\) && promptResult\.error\.code === "cost_cap"\)\) break;/, "no agent_start/agent_end follows a refusal, so the optimistic run must be ended here");
+  const tone = hook.slice(hook.indexOf("function noticeToneForErrorKind"), hook.indexOf("function engineErrorNotice"));
+  assert.match(tone, /case "cost_cap":/, "a limit the owner set is a warning, not a failure");
+  for (const key of ["agentSession.errorCostCap", "agentSession.errorCostCapUnknown", "agentSession.costWarning", "agentSession.costWarningUnknown"]) {
+    for (const [name, dictionary] of Object.entries(locales)) {
+      assert.equal(typeof dictionary[key], "string", `${name} is missing ${key}`);
+      if (name !== "en") assert.notEqual(dictionary[key], locales.en[key], `${name}:${key} was not translated`);
+    }
+  }
+  for (const key of ["agentSession.errorCostCap", "agentSession.costWarning"]) {
+    for (const [name, dictionary] of Object.entries(locales)) {
+      assert.match(dictionary[key], /\{spent\}/, `${name}:${key} keeps the spent figure`);
+      assert.match(dictionary[key], /\{limit\}/, `${name}:${key} keeps the limit figure`);
+    }
+  }
+});
+
+test("a compaction nobody on this page asked for (omp 18.13.3+) shows its progress; this page's own settles from the command's answer", () => {
+  assert.match(hook, /const compactRpcInFlightRef = useRef\(0\);/);
+  const cases = hook.slice(hook.indexOf('case "manual_compaction_start":'), hook.indexOf('case "subagent_lifecycle":'));
+  assert.ok(cases.length > 0, "both frames are handled");
+  // The banner opens with the `/compact <mode>` name as its phase.
+  assert.match(cases, /dispatchCompactionStatus\(\{ type: "running", sessionId: sid, source: "manual"[^\n]*phase: typeof event\.mode === "string"/);
+  // This page's own request already answers through the command's response; the frame must not settle it a second time.
+  assert.match(cases, /if \(compactRpcInFlightRef\.current > 0\) break;/);
+  for (const outcome of ["noop", "cancelled", "failed", "completed"]) {
+    assert.match(cases, new RegExp(`outcome: "${outcome}"`), `${outcome} is settled from the frame`);
+  }
+  // Both of this page's own compact paths (the button and the typed /compact) hold the counter for as long as their command is outstanding.
+  assert.equal((hook.match(/compactRpcInFlightRef\.current \+= 1;/g) ?? []).length, 2);
+  assert.equal((hook.match(/compactRpcInFlightRef\.current -= 1;/g) ?? []).length, 2);
+  // omp answers a second compaction of an already-compacted chat with "Already compacted": nothing happened, which is not a failure.
+  assert.match(hook, /already\\s\+compacted/);
 });
 
 test("the notice reducer deduplicates repeats and caps visible errors at two", () => {

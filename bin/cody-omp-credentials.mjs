@@ -130,15 +130,28 @@ function identityOfDisabledSummary(row) {
   return safeString(row.email) ?? safeString(row.orgName) ?? safeString(row.accountId) ?? null;
 }
 
-/** Latest UNEXPIRED block across every scope for one credential id, or null. */
-function blockedUntilFor(credentialId, blocks) {
+/** Every UNEXPIRED block for one credential id, one entry per scope (the latest
+ * deadline wins when two provider keys share a scope), as epoch-ms. omp 18.19
+ * scopes a block (`blockScope`: a Claude tier, a Codex chat/spark/shared lane, a
+ * Cursor pool, …); 18.8.3 has no such column, so its blocks read as scope '' —
+ * account-wide, which is exactly what they are there. */
+function blocksFor(credentialId, blocks) {
   const now = Date.now();
-  let latest = null;
+  const byScope = new Map();
   for (const block of blocks) {
     if (block.credentialId !== credentialId) continue;
-    if (typeof block.blockedUntilMs !== "number" || block.blockedUntilMs <= now) continue;
-    if (latest === null || block.blockedUntilMs > latest) latest = block.blockedUntilMs;
+    if (typeof block.blockedUntilMs !== "number" || !Number.isFinite(block.blockedUntilMs) || block.blockedUntilMs <= now) continue;
+    const scope = typeof block.blockScope === "string" ? block.blockScope : "";
+    const known = byScope.get(scope);
+    if (known === undefined || block.blockedUntilMs > known) byScope.set(scope, block.blockedUntilMs);
   }
+  return [...byScope].map(([scope, until]) => ({ scope, until }));
+}
+
+/** Latest UNEXPIRED block across every scope, or null (the merged, scope-blind view older callers read). */
+function blockedUntilOf(scoped) {
+  let latest = null;
+  for (const block of scoped) if (latest === null || block.until > latest) latest = block.until;
   return isoFromEpochMs(latest);
 }
 
@@ -161,28 +174,36 @@ async function listCredentials(api, hasher, dbPath) {
     try { await purgeTombstones(api, dbPath, deletedByUser.map((row) => ({ provider: row.provider, id: row.id }))); } catch { /* the next read retries */ }
   }
   const blocks = api.listBlocks([...active.map((row) => row.id), ...disabled.map((row) => row.id)]);
-  const activeRows = active.map((row) => ({
-    id: row.id,
-    provider: row.provider,
-    type: row.credential.type,
-    identity: identityOfCredential(row.credential),
-    // AuthStorage's OAuth/api_key credential never carries a plan tier; the
-    // caller (lib/omp/provider-login.ts) fills this from the usage snapshot.
-    planType: null,
-    disabledCause: null,
-    blockedUntil: blockedUntilFor(row.id, blocks),
-    pinHash: pinHashOf(hasher, row.provider, row.credential),
-  }));
-  const disabledRows = disabled.map((row) => ({
-    id: row.id,
-    provider: row.provider,
-    type: row.type,
-    identity: identityOfDisabledSummary(row),
-    planType: null,
-    disabledCause: causeOf(row),
-    blockedUntil: blockedUntilFor(row.id, blocks),
-    pinHash: null,
-  }));
+  const activeRows = active.map((row) => {
+    const scoped = blocksFor(row.id, blocks);
+    return {
+      id: row.id,
+      provider: row.provider,
+      type: row.credential.type,
+      identity: identityOfCredential(row.credential),
+      // AuthStorage's OAuth/api_key credential never carries a plan tier; the
+      // caller (lib/omp/provider-login.ts) fills this from the usage snapshot.
+      planType: null,
+      disabledCause: null,
+      blockedUntil: blockedUntilOf(scoped),
+      blocks: scoped,
+      pinHash: pinHashOf(hasher, row.provider, row.credential),
+    };
+  });
+  const disabledRows = disabled.map((row) => {
+    const scoped = blocksFor(row.id, blocks);
+    return {
+      id: row.id,
+      provider: row.provider,
+      type: row.type,
+      identity: identityOfDisabledSummary(row),
+      planType: null,
+      disabledCause: causeOf(row),
+      blockedUntil: blockedUntilOf(scoped),
+      blocks: scoped,
+      pinHash: null,
+    };
+  });
   return [...activeRows, ...disabledRows].sort((a, b) => a.id - b.id);
 }
 

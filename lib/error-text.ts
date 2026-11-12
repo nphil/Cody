@@ -28,6 +28,7 @@ export type ErrorKind =
   | "disk"
   | "usage"
   | "credits"
+  | "cost_cap"
   | "auth"
   | "overloaded"
   | "transport"
@@ -117,6 +118,23 @@ const CREDITS_PATTERNS = [
   /add more credits to/i,
 ];
 
+// omp 18.13+: once a chat has spent its `session.maxCost` the engine refuses
+// to send the next model request. The sentence names command-line flags
+// ("--max-cost") nobody here typed, so the words shown are rebuilt from its two
+// dollar figures (see describeCostCap). A refusal that mentions the setting
+// by name is also this, whatever wording a later omp gives it.
+const COST_CAP_PATTERNS = [
+  /\bcost cap reached\b/i,
+  /\bsession\.maxCost\b/i,
+];
+
+/** The two dollar figures in omp's spend-limit sentences, in the order both of them say them: what the chat has spent, then the limit it is held to ("this session spent $1.50 of its $0.50 cap", "has spent $1.23, past its $1.00 warning threshold"). Null when they are not both there. */
+export function readCostGateAmounts(raw: string): { spent: string; limit: string } | null {
+  const amounts = typeof raw === "string" ? raw.match(/\$\d[\d,]*(?:\.\d+)?/g) : null;
+  if (!amounts || amounts.length < 2) return null;
+  return { spent: amounts[0], limit: amounts[1] };
+}
+
 const AUTH_PATTERNS = [
   /\b401\b/,
   /\b403\b/,
@@ -170,6 +188,7 @@ function matchesAny(patterns: RegExp[], text: string): boolean {
  * though `cleanDetail` strips all of it from what gets shown. */
 function classify(raw: string): ErrorKind {
   if (matchesAny(ABORTED_PATTERNS, raw)) return "aborted";
+  if (matchesAny(COST_CAP_PATTERNS, raw)) return "cost_cap";
   if (matchesAny(REFUSAL_PATTERNS, raw)) return "refusal";
   if (matchesAny(DISK_PATTERNS, raw)) return "disk";
   if (matchesAny(OUTDATED_PATTERNS, raw)) return "outdated";
@@ -284,6 +303,7 @@ const GENERIC_FALLBACKS: Record<ErrorKind, string> = {
   usage: "A usage limit was reached.",
   disk: "The server's disk is full.",
   credits: "The account ran out of credits.",
+  cost_cap: "This chat reached its spend limit, so nothing was sent to the model.",
   auth: "The request was not authenticated.",
   overloaded: "The provider is overloaded right now.",
   transport: "The connection to the provider failed.",
@@ -331,6 +351,14 @@ function describeDisk(raw: string): string {
   return matchesAny(DISK_QUOTA_PATTERNS, raw) ? DISK_DETAILS.quota : DISK_DETAILS.full;
 }
 
+/** What a person reads when the chat hit its spend limit: the engine's sentence minus the command-line flags, with its two figures kept. */
+function describeCostCap(raw: string): string {
+  const amounts = readCostGateAmounts(raw);
+  return amounts
+    ? `This chat reached its spend limit (${amounts.spent} spent of ${amounts.limit}), so nothing was sent to the model.`
+    : GENERIC_FALLBACKS.cost_cap;
+}
+
 /** Describe a raw engine/provider error string: what kind of failure it is,
  * which provider said so (when the text names one), and a short, clean
  * sentence fit to show a person. Never throws, never returns an empty
@@ -338,9 +366,10 @@ function describeDisk(raw: string): string {
 export function describeEngineError(raw: string): DescribedError {
   const text = typeof raw === "string" ? raw : String(raw ?? "");
   const kind = classify(text);
-  // A full disk is nobody's provider, whatever a file path in the text happens to be called.
-  const provider = kind === "disk" ? undefined : inferProvider(text);
-  return { kind, provider, detail: kind === "disk" ? describeDisk(text) : cleanDetail(text, kind) };
+  // A full disk is nobody's provider, whatever a file path in the text happens to be called; neither is a spend limit.
+  const provider = kind === "disk" || kind === "cost_cap" ? undefined : inferProvider(text);
+  const detail = kind === "disk" ? describeDisk(text) : kind === "cost_cap" ? describeCostCap(text) : cleanDetail(text, kind);
+  return { kind, provider, detail };
 }
 
 /** A stable key for deduplicating notices: same kind, same cleaned detail

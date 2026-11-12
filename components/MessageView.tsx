@@ -7,7 +7,10 @@ import { MarkdownBody } from "./MarkdownBody";
 import { ClickableImage } from "./ImageLightbox";
 import { TranscriptViewportContext } from "./TranscriptViewportContext";
 import { anchorIsInsideOpenBlock } from "@/lib/transcript-anchor";
-import { translate, useI18n, type Locale } from "@/lib/i18n";
+import { translate, translatePlural, useI18n, type Locale } from "@/lib/i18n";
+import { taskCallPreview } from "@/lib/task-call-preview";
+import { askAnswersFromDetails, askCallPreview } from "@/lib/ask-result";
+import { ircSender, ircTags, parentIrcAsCustomMessage } from "@/lib/irc-display";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { isActionableCustomDetails, isEmptyThinkingBlock, isInternalBackgroundMessage, isVisibleTranscriptMessage } from "@/lib/message-display";
 import { ENGINE_NOTE_CUSTOM_TYPE, isTodoReminderDetails, TODO_REMINDER_CUSTOM_TYPE } from "@/lib/system-reminder";
@@ -19,9 +22,12 @@ import { StreamingMarkdown } from "./StreamingMarkdown";
 
 import { requestDistill, retryDistill, thinkingSummaryKeys, useDistillChatSettings, useDistillState, useOnScreen, type DistillRequest, type DistillState } from "@/hooks/useDistill";
 import { SubagentStatusIcon } from "./SubagentStatusIcon";
+import { AskResultPanel } from "./AskResultPanel";
 import { ApprovalChip, ApprovalStatusRow, TONE_COLOR, TONE_FRAME, useApprovalCard } from "./HomelabberApproval";
 import { approvalTone } from "@/lib/homelabber-approval";
 import { formatCost, formatDuration, formatTokens, shortModel } from "@/lib/subagent-format";
+import { bashOutputNotes, type BashOutputNote } from "@/lib/bash-output-meta";
+import { formatBytes } from "@/lib/format-bytes";
 import { formatModelDisplayName } from "@/lib/model-display";
 import type {
   AgentMessage,
@@ -173,6 +179,8 @@ function haveSameRelevantToolResults(
 export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, onFork, onForkHere, forking, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp, sessionId, thinkingDefaultExpanded = false, activityDisplayMode = "compact", allowDistill = true }: Props) {
   if (!isVisibleTranscriptMessage(message, activityDisplayMode, toolResults)) return null;
   if (message.role === "user") {
+    const parentIrcCard = parentIrcAsCustomMessage(message as UserMessage);
+    if (parentIrcCard) return <CustomMessageView message={parentIrcCard} cwd={cwd} onOpenFile={onOpenFile} activityDisplayMode={activityDisplayMode} />;
     return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} onNavigate={onNavigate} prevAssistantEntryId={prevAssistantEntryId} onEditContent={onEditContent} />;
   }
   if (message.role === "assistant") {
@@ -626,7 +634,7 @@ function AssistantMessageView({
   // The --live bar is an unboxed-text affordance: boxed blocks (tool calls,
   // thinking) carry their own borders, and the full-height accent bar would
   // paint over their left edge while a tool is running.
-  const isLiveText = isStreaming && !blocks.some((b) => b.type === "toolCall" || b.type === "thinking");
+  const isLiveText = isStreaming && !blocks.some((b) => b.type === "toolCall" || (b.type === "thinking" && !b.narration));
 
   // Where the distilled body renders: in place of the FIRST text block, so
   // it keeps the reply's position among the thinking and tool blocks.
@@ -814,9 +822,20 @@ function AssistantMessageView({
   );
 }
 
+// Narration (omp 18.12+): prose the model wrote to the user between tool calls
+// that the provider returned as thinking. It reads as the answer it is. The text
+// block is rebuilt only when the text changes, so TextBlock's memo still holds.
+const NarrationBlock = memo(function NarrationBlock({ block, isStreaming, isActiveStreamBlock, cwd, onOpenFile }: { block: ThinkingContent; isStreaming?: boolean; isActiveStreamBlock?: boolean; cwd?: string; onOpenFile?: (filePath: string) => void }) {
+  const text = useMemo<TextContent>(() => ({ type: "text", text: block.thinking }), [block.thinking]);
+  return <TextBlock block={text} isStreaming={isStreaming} isActiveStreamBlock={isActiveStreamBlock} cwd={cwd} onOpenFile={onOpenFile} />;
+});
+
 function BlockView({ block, toolResults, isStreaming, isActiveStreamBlock, streamingDuration, toolCallDurations, cwd, onOpenFile, sessionId, entryId, blockIndex, thinkingDefaultExpanded, activityDisplayMode, distillThinking, distillPlainLanguage }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; isStreaming?: boolean; isActiveStreamBlock?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; sessionId?: string; entryId?: string; blockIndex: number; thinkingDefaultExpanded: boolean; activityDisplayMode: ActivityDisplayMode; distillThinking: boolean; distillPlainLanguage: boolean }) {
   if (block.type === "text") {
     return <TextBlock block={block as TextContent} isStreaming={isStreaming} isActiveStreamBlock={isActiveStreamBlock} cwd={cwd} onOpenFile={onOpenFile} />;
+  }
+  if (block.type === "thinking" && block.narration === true && !block.deferred) {
+    return <NarrationBlock block={block} isStreaming={isStreaming} isActiveStreamBlock={isActiveStreamBlock} cwd={cwd} onOpenFile={onOpenFile} />;
   }
   if (block.type === "thinking") {
     return <ThinkingBlock block={block as ThinkingContent} duration={streamingDuration} sessionId={sessionId} entryId={entryId} blockIndex={blockIndex} defaultExpanded={thinkingDefaultExpanded} isStreaming={isStreaming} isActiveStreamBlock={isActiveStreamBlock} distillThinking={distillThinking} distillPlainLanguage={distillPlainLanguage} />;
@@ -1231,7 +1250,13 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
   const displayedPreview = getToolPreview(block);
   const isEditTool = isEditToolName(block.toolName);
   const resultDiff = result && !result.isError ? getResultDiff(result) : null;
+  // A settled `ask` shows its answers as rows instead of the raw HTML form /
+  // question JSON plus omp's JSON-ish result text; an error or cancelled ask
+  // keeps the plain args + result text.
+  const askAnswered = block.toolName === "ask" && !!result && !result.isError
+    && askAnswersFromDetails(result.details).rows.length > 0;
   const activityStatus = getStructuredActivityStatus(result);
+  const editRejection = activityStatus === "error" ? getEditRejectionReason(result) : null;
 
   // Result display
   const resultText = result
@@ -1291,7 +1316,7 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
           <span style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0, maxWidth: "64ch", marginRight: "auto" }}>
             {displayedPreview}
           </span>
-          {approval ? <ApprovalChip phase={approval.phase} /> : activityStatus && <span style={{ color: activityStatus === "error" ? "var(--status-error)" : "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11, flexShrink: 0 }}>{activityStatus}</span>}
+          {approval ? <ApprovalChip phase={approval.phase} /> : activityStatus && <span style={{ color: activityStatus === "error" ? "var(--status-error)" : "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11, flexShrink: 0 }}>{editRejection ? `${activityStatus} · ${editRejection}` : activityStatus}</span>}
           {duration !== undefined && (
             <span style={{ fontSize: 11, color: "var(--text-dim)", flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{t("messageView.durationSeconds", { seconds: duration })}</span>
           )}
@@ -1315,7 +1340,7 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
           onTransitionEnd={onPanelTransitionEnd}
         >
           <div className="collapse-box-inner">
-            {!isEditTool && (
+            {!isEditTool && !askAnswered && (
               <pre
                 style={{
                   margin: 0,
@@ -1341,12 +1366,18 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
                 />
               ) : (
                 <>
-                  <TaskResultPanel details={result.details} />
-                  <PairedResult
-                    text={resultText ?? ""}
-                    isEmpty={resultIsEmpty}
-                    isError={isError}
-                  />
+                  {askAnswered ? (
+                    <AskResultPanel details={result.details} input={block.input} />
+                  ) : (
+                    <>
+                      <TaskResultPanel details={result.details} />
+                      <PairedResult
+                        text={resultText ?? ""}
+                        isEmpty={resultIsEmpty}
+                        isError={isError}
+                      />
+                    </>
+                  )}
                 </>
               )
             )}
@@ -1744,6 +1775,18 @@ export function getStructuredActivityStatus(result?: ToolResultMessage): string 
   return null;
 }
 
+/**
+ * Why a failed `edit` was refused, as plain words (`stale tag`). omp >= 18.13
+ * records the engine's reason on the failed result as `details.errorKind`
+ * (session-reader keeps just that string of an edit error's details); an older
+ * engine records none, so the chip stays a bare "error".
+ */
+export function getEditRejectionReason(result?: ToolResultMessage): string | null {
+  if (!result?.isError || result.toolName !== "edit" || !isRecord(result.details)) return null;
+  const kind = result.details.errorKind;
+  return typeof kind === "string" && kind.length > 0 ? kind.replaceAll("_", " ") : null;
+}
+
 function PairedResult({ text, isEmpty, isError }: {
   text: string;
   isEmpty: boolean;
@@ -2014,13 +2057,15 @@ function CustomMessageView({ message, cwd, onOpenFile, activityDisplayMode }: { 
   const isIrc = IRC_CUSTOM_TYPES.has(message.customType);
   const actionableError = (isRecord(message.details) && message.details.notifyType === "error") || (isInternalBackgroundMessage(message) && isActionableCustomDetails(message.details));
   if (activityDisplayMode === "hidden" && !actionableError && message.attribution !== "user") return null;
-  const ircEnvelope = isIrc ? parseIrcEnvelope(text) : null;
+  const ircEnvelope = isIrc && !(isRecord(message.details) && message.details.plainBody === true) ? parseIrcEnvelope(text) : null;
   const displayText = ircEnvelope ? ircEnvelope.body : text;
   const title = isIrc
-    ? (ircEnvelope?.sender ?? formatCustomType(message.customType))
+    ? (ircSender(message.details) ?? ircEnvelope?.sender ?? formatCustomType(message.customType))
     : message.customType === "advisor"
       ? t("messageView.advisorLabel")
-      : formatCustomType(message.customType);
+      : message.customType === "session-transfer"
+        ? t("messageView.sessionTransferLabel")
+        : formatCustomType(message.customType);
   const time = formatTime(message.timestamp, locale);
 
 
@@ -2053,6 +2098,11 @@ function CustomMessageView({ message, cwd, onOpenFile, activityDisplayMode }: { 
             {isIrc && message.customType === "irc:incoming" ? `← ${title}` : title}
           </span>
           {isHiddenDisplay && <span style={{ color: "var(--text-dim)", fontSize: 11 }}>{t("messageView.hiddenExtensionMessage")}</span>}
+          {isIrc && ircTags(message.details).map((tag) => (
+            <span key={tag} style={{ color: "var(--text-dim)", fontSize: 10, border: "1px solid var(--border)", borderRadius: 4, padding: "0 5px" }}>
+              {t(`messageView.ircTag.${tag}`)}
+            </span>
+          ))}
           {time && <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10 }}>{time}</span>}
         </div>
 
@@ -2239,6 +2289,21 @@ function getToolPreview(block: ToolCallContent): string {
   const keys = Object.keys(input);
   if (keys.length === 0) return "";
 
+  if (block.toolName === "task") {
+    const preview = taskCallPreview(input, {
+      subagents: (count) => translatePlural("chatWindow.subagentCount", count),
+      steps: (count) => translatePlural("messageView.taskSteps", count),
+    });
+    if (preview) return preview;
+  }
+
+  if (block.toolName === "ask") {
+    const preview = askCallPreview(input, {
+      more: (count) => translatePlural("askResult.moreQuestions", count),
+    });
+    if (preview) return preview;
+  }
+
   // Common tool input patterns
   if ("command" in input) return String(input.command).slice(0, 120);
   if ("path" in input) return String(input.path).slice(0, 120);
@@ -2291,8 +2356,31 @@ function formatRateDetail(
   return parts.join(" · ");
 }
 
+/** One plain sentence for what omp cut from a shell command's output (lib/bash-output-meta.ts). */
+function describeBashOutputNote(
+  note: BashOutputNote,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+  tn: (key: string, count: number, vars?: Record<string, string | number>) => string,
+): string {
+  switch (note.kind) {
+    case "middle":
+      if (note.lines !== null && note.bytes !== null) return tn("messageView.bashNoteMiddleLines", note.lines, { size: formatBytes(note.bytes) });
+      if (note.lines !== null) return tn("messageView.bashNoteMiddleLinesOnly", note.lines);
+      return t("messageView.bashNoteMiddleBytes", { size: formatBytes(note.bytes ?? 0) });
+    case "shown":
+      return t("messageView.bashNoteShown", { shown: note.shown, total: note.total });
+    case "columns":
+      return t(note.unit === "chars" ? "messageView.bashNoteColumnsChars" : "messageView.bashNoteColumnsBytes", { max: note.max });
+    case "minimized":
+      return note.filter !== null && note.inputBytes !== null && note.outputBytes !== null
+        ? t("messageView.bashNoteMinimized", { filter: note.filter, from: formatBytes(note.inputBytes), to: formatBytes(note.outputBytes) })
+        : t("messageView.bashNoteMinimizedPlain");
+  }
+}
+
 function BashExecutionView({ message, sessionId, activityDisplayMode = "compact" }: { message: BashExecutionMessage; sessionId?: string; activityDisplayMode?: ActivityDisplayMode }) {
-  const { t } = useI18n();
+  const { t, tn } = useI18n();
+  const notes = useMemo(() => bashOutputNotes(message.meta), [message.meta]);
   const [fullOutput, setFullOutput] = useState<{ phase: "loading" } | { phase: "error"; message: string } | { phase: "ready"; output: string } | null>(null);
   // Bumped on every message change; an in-flight fetch from the previous
   // message must not write into the reused component instance.
@@ -2355,6 +2443,11 @@ function BashExecutionView({ message, sessionId, activityDisplayMode = "compact"
   return (
     <div className="chat-message collapse-scope" style={{ margin: "6px 0" }}>
       <ToolCallBlock block={block} result={result} activityDisplayMode={activityDisplayMode} />
+      {notes.length > 0 && (
+        <div style={{ marginTop: 4, display: "grid", gap: 2, fontSize: 11, color: "var(--text-dim)" }}>
+          {notes.map((note, index) => <div key={index}>{describeBashOutputNote(note, t, tn)}</div>)}
+        </div>
+      )}
       {downloadUrl && (
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 6 }}>
           {fullOutput?.phase !== "ready" && (

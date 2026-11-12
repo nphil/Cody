@@ -54,8 +54,9 @@ export type NativeSettings = {
   externalThinking?: boolean;
   textVerbosity?: "low" | "medium" | "high";
   personality?: "default" | "friendly" | "pragmatic" | "none";
-  advisor?: { enabled?: boolean; subagents?: boolean; syncBacklog?: "off" | "1" | "3" | "5"; immuneTurns?: number };
-  tools?: { approvalMode?: "always-ask" | "write" | "yolo"; approval?: { bash?: "allow" | "prompt" | "deny"; extension?: "allow" | "prompt" } };
+  advisor?: { enabled?: boolean; subagents?: boolean; syncBacklog?: "off" | "1" | "3" | "5" | "strict"; immuneTurns?: number };
+  tools?: { approvalMode?: "always-ask" | "always-ask-cached" | "write" | "yolo"; approval?: { bash?: "allow" | "prompt" | "deny"; extension?: "allow" | "prompt"; [tool: string]: "allow" | "prompt" | "deny" | undefined } };
+  session?: { warnCost?: number; maxCost?: number };
   compaction?: { enabled?: boolean; experimentalContextManagement?: boolean; midTurnEnabled?: boolean; methodOrder?: CompactionMethod[]; autoContinue?: boolean; keepRecentTokens?: number; thresholdTokens?: number; thresholdPercent?: number };
   memory?: { backend?: "off" | "local" | "mnemopi" | "hindsight" | "sharpshooter" };
   autolearn?: { enabled?: boolean; autoContinue?: boolean; minToolCalls?: number };
@@ -136,6 +137,43 @@ function settled(): void {
   seqListeners.forEach((listener) => listener());
 }
 
+const writtenListeners = new Set<(keys: readonly string[]) => void>();
+
+/** Hears the setting keys of every write that settled successfully. The "New"
+ * badge on engine settings uses it to learn that a key was changed through
+ * Settings (components/settings/engine, hooks/useSettingsNewKeys.ts). */
+export function subscribeSettingsWritten(listener: (keys: readonly string[]) => void): () => void {
+  writtenListeners.add(listener);
+  return () => { writtenListeners.delete(listener); };
+}
+
+function announceWritten(keys: readonly string[]): void {
+  if (keys.length === 0) return;
+  for (const listener of [...writtenListeners]) {
+    try {
+      listener(keys);
+    } catch {
+      // A listener's failure is not the write's: the file is already saved.
+    }
+  }
+}
+
+/** `promise`'s outcome, plus an announcement of `keys` once it resolves. */
+function writtenAfter(promise: Promise<void>, keys: readonly string[]): Promise<void> {
+  return promise.then(() => announceWritten(keys));
+}
+
+/** The dotted paths of the leaves of `partial` under `prefix`: what a section or top-level merge writes. */
+function leafKeys(prefix: string, partial: object): string[] {
+  const keys: string[] = [];
+  for (const [field, value] of Object.entries(partial)) {
+    const key = prefix ? `${prefix}.${field}` : field;
+    if (typeof value === "object" && value !== null && !Array.isArray(value)) keys.push(...leafKeys(key, value));
+    else keys.push(key);
+  }
+  return keys;
+}
+
 /** A promise that resolves once every family has drained. Tests. */
 export function configWriterIdle(): Promise<void> {
   return Promise.all(Object.values(tails)).then(() => undefined);
@@ -151,6 +189,7 @@ export function resetConfigWriter(): void {
   if (schemaTimer) clearTimeout(schemaTimer);
   schemaTimer = null;
   schemaWaiters = [];
+  writtenListeners.clear();
 }
 
 /**
@@ -280,16 +319,16 @@ function patchWith(next: (base: NativeSettings) => NativeSettings): Promise<void
 /** Merge `partial` into the object-valued SECTION under `section`. The
  * section is spread, never the whole settings object (see the module note). */
 export function patchSettingsSection<K extends keyof NativeSettings & string>(section: K, partial: Partial<NonNullable<NativeSettings[K]>> & object): Promise<void> {
-  return patchWith((base) => {
+  return writtenAfter(patchWith((base) => {
     const current = (base[section] ?? {}) as object;
     return { ...base, [section]: { ...current, ...partial } };
-  });
+  }), leafKeys(section, partial));
 }
 
 /** Merge top-level keys, arrays included, into the settings object. This is
  * the ONE place the whole object is spread, and only ever at the top. */
 export function patchSettingsTop(partial: Partial<NativeSettings>): Promise<void> {
-  return patchWith((base) => ({ ...base, ...partial }));
+  return writtenAfter(patchWith((base) => ({ ...base, ...partial })), leafKeys("", partial));
 }
 
 let pendingSchemaPatch: Record<string, unknown> = {};
@@ -317,6 +356,7 @@ async function flushSchemaPatch(): Promise<void> {
       const body = (await response.json().catch(() => ({}))) as { error?: string; rejected?: string[] };
       if (!response.ok || body.error) throw new Error(body.error || `HTTP ${response.status}`);
     });
+    announceWritten(Object.keys(patch));
     waiters.forEach((waiter) => waiter.resolve());
   } catch (error) {
     waiters.forEach((waiter) => waiter.reject(error));
@@ -397,10 +437,10 @@ const NOOP_PATCH = () => Promise.resolve();
  */
 export function useNativeSettings(enabled: boolean): NativeSettingsHandle {
   const route = useSettingsRoute<SettingsBody>(SETTINGS_ROUTE, { enabled });
-  const patchApproval = useCallback<NativeSettingsHandle["patchApproval"]>((patch) => patchWith((base) => {
+  const patchApproval = useCallback<NativeSettingsHandle["patchApproval"]>((patch) => writtenAfter(patchWith((base) => {
     const tools = base.tools ?? {};
     return { ...base, tools: { ...tools, approval: { ...(tools.approval ?? {}), ...patch } } };
-  }), []);
+  }), leafKeys("tools.approval", patch)), []);
   return useMemo(() => ({
     settings: enabled ? route.data?.settings ?? null : null,
     error: route.error,

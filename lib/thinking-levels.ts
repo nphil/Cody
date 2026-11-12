@@ -16,7 +16,7 @@ export interface ThinkingModelMeta {
   modelId: string;
   name?: string;
   reasoning?: boolean;
-  thinking?: { efforts?: string[] };
+  thinking?: { efforts?: string[]; unverified?: boolean };
 }
 
 const DEFAULT_THINKING_LEVELS = ["auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -32,8 +32,16 @@ export function selectableThinkingLevels(available: readonly string[] | null | u
 
 /** "off" is always a valid selector; concrete efforts come from the model. */
 export function thinkingLevelsForMeta(meta: ThinkingModelMeta): string[] {
-  if (!meta.reasoning) return ["off"];
+  // An unverified ladder is the opt-in ladder of a model omp has no capability
+  // data for: `reasoning` is false there, yet the user may still pick a level.
+  if (!meta.reasoning && !hasUnverifiedLadder(meta)) return ["off"];
   return ["off", ...(meta.thinking?.efforts ?? [])];
+}
+
+/** omp 18.10.3+ `thinking.unverified` with a ladder to offer: the efforts are a
+ *  guess the user opts into, not something omp has confirmed the model does. */
+export function hasUnverifiedLadder(meta: Pick<ThinkingModelMeta, "thinking">): boolean {
+  return meta.thinking?.unverified === true && (meta.thinking.efforts?.length ?? 0) > 0;
 }
 
 /**

@@ -106,3 +106,16 @@ test("a child's fallback is attributed to that subagent, not the main conversati
     },
   });
 });
+
+test("widget fallbacks read as job widgets, not a custom role, in every locale", async () => {
+  const { fallbackAttributionForRole } = await jiti.import("./session-control-scope.ts");
+  const { readFileSync } = await import("node:fs");
+  const attribution = fallbackAttributionForRole("widget", []);
+  assert.equal(attribution.job.roleLabelKey, "agentSession.job.widget");
+  for (const locale of ["en", "ja", "zh-CN"]) {
+    const messages = JSON.parse(readFileSync(new URL(`../lib/i18n/locales/${locale}.json`, import.meta.url), "utf8"));
+    assert.equal(typeof messages["agentSession.job.widget"], "string", `${locale} agentSession.job.widget`);
+    assert.equal(typeof messages["modelPlan.role.widget"], "string", `${locale} modelPlan.role.widget`);
+    assert.notEqual(messages["agentSession.job.widget"], "", locale);
+  }
+});

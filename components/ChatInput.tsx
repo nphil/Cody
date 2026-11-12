@@ -180,8 +180,9 @@ interface Props {
     role?: string;
     reason?: string;
     /** Classified reason; decides which sentence the detail toast uses.
-     * "credits": the Claude plan hit its limit and the API credits took over. */
-    reasonKind?: "refusal" | "usage" | "credits" | null;
+     * "credits": the Claude plan hit its limit and the API credits took over.
+     * "signed_out": the provider has no login and a keyed fallback took over. */
+    reasonKind?: "refusal" | "usage" | "credits" | "signed_out" | null;
     job?: { kind: "main" | "subagent"; subagentId?: string; agent?: string; roleLabelKey: string };
   } | null;
   /** RPC-dialect engines can queue a safe model switch while a turn is running. */
@@ -220,6 +221,8 @@ interface Props {
   currentModeId?: string | null;
   onModeChange?: (modeId: string) => void;
   availableThinkingLevels?: string[] | null;
+  /** omp has no capability data for the current model: its levels are an opt-in guess (omp 18.10.3+). */
+  thinkingUnverified?: boolean;
   /** Every model's own reasoning ladder, keyed `provider:modelId` (the models route's `["off", ...efforts]`): what the Send menu's reasoning selector offers for a model chosen for a scheduled message. */
   modelThinkingLevels?: Record<string, string[]>;
   /** Display name for the current model when the catalog does not know it. */
@@ -604,7 +607,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   onSend, onAbort, isStreaming, canSendWhileStreaming = false, canAttachWhileStreaming = false, canAttachImagesWhileStreaming = false, capabilities = ALL_CAPABILITIES, engine = null, model, sessionId, activeModels = NO_ACTIVE_MODELS, isAutoModelSelection, modelNames, modelList, modelError, modelErrorCode, modelsLoading, modelsRefreshKey, onModelChange, onSelectSmartModel, localOnly, onSelectLocalOnly, presets = NO_PRESETS, baseDefaultModel = null, activePresetId, pendingPresetPick = null, onPresetChange, autoModelSwitch, modelSwitchPending, modelChangeWhileStreaming = false, fastModeEnabled, fastModeActive, fastModeCapable, fastModeSupported, fastModePending, fastModeUnavailable, onFastModeChange,
   slowMode, slowModePending, usageLimit, onSlowModeChange,
   onAbortCompaction, isCompacting, compactResult,
-  thinkingLevel, onThinkingLevelChange, thinkingLevelPending, thinkingLevelTarget, availableModes = NO_MODES, currentModeId = null, onModeChange, availableThinkingLevels, modelThinkingLevels, modelNameOverride,
+  thinkingLevel, onThinkingLevelChange, thinkingLevelPending, thinkingLevelTarget, availableModes = NO_MODES, currentModeId = null, onModeChange, availableThinkingLevels, thinkingUnverified, modelThinkingLevels, modelNameOverride,
   retryInfo, inputHistory = [], onAbortRetry,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
@@ -2282,8 +2285,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   // re-pick the model by hand instead of pointing at a healthy quota.
   const autoSwitchDetail = autoModelSwitch == null
     ? null
-    : autoModelSwitch.reasonKind === "credits"
-      ? t("chatInput.autoSwitchDetailCredits")
+    : autoModelSwitch.reasonKind === "signed_out"
+      ? t("chatInput.autoSwitchDetailSignedOut", { from: autoModelSwitch.from, to: autoModelSwitch.to })
+      : autoModelSwitch.reasonKind === "credits"
+        ? t("chatInput.autoSwitchDetailCredits")
       : autoModelSwitch.reasonKind === "refusal"
         ? t("chatInput.autoSwitchDetailRefusal", { job: autoSwitchJob, from: autoModelSwitch.from, to: autoModelSwitch.to })
         : autoModelSwitch.reasonKind === "usage"
@@ -3604,7 +3609,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                           // id conservatively, and `resolveModelAvailability` is
                           // account-aware — a model with a healthy sibling account
                           // never marks. Still selectable when it does: the owner
-                          // may want to queue it anyway.
+                          // may want to queue it anyway. A provider whose every
+                          // login is signed out or turned off ("unavailable") never
+                          // marks either: that is a login to fix, not a spent limit,
+                          // and the ring and popover spell it out for the selected
+                          // model instead.
                           const limitReached = modelLimitReached(usageSnapshot, engineId, opt.provider, opt.modelId);
                           const resetLabel = limitReached?.resetsAt ? formatResetTime(limitReached.resetsAt, locale, Date.now()) : null;
                           const limitText = resetLabel
@@ -3765,6 +3774,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     position: "absolute", bottom: "calc(100% + 6px)", left: 0,
                     zIndex: 100, minWidth: 250, maxWidth: "calc(100vw - 32px)",
                   }}>
+                    {thinkingUnverified && (
+                      <div data-testid="thinking-unverified-note" style={{ padding: "7px 12px", fontSize: 11, color: "var(--text-dim)", whiteSpace: "normal", borderBottom: "1px solid var(--border)" }}>
+                        {t("chatInput.reasoningUnverified")}
+                      </div>
+                    )}
                     {thinkingLevelOptions.map((lvl) => {
                       const isActive = (thinkingLevel ?? "auto") === lvl;
                       const descKey = THINKING_LEVEL_DESC_KEYS[lvl];

@@ -101,6 +101,13 @@ export const KEY_IDS: ReadonlySet<string> = new Set([
   "minimax",
   "kimi",
   "bedrock",
+  "cloudflare-workers-ai",
+  "coralbricks",
+  "inception",
+  "liquid",
+  "modular",
+  "sambanova",
+  "scaleway",
 ]);
 
 /** One key, many vendors: a router in front of other people's models. */
@@ -115,6 +122,7 @@ export const GATEWAY_IDS: ReadonlySet<string> = new Set([
   "opencode-go",
   "yolo-auto",
   "nanogpt",
+  "otari",
 ]);
 
 /** Runs on the user's own machine or LAN; no account behind it. */

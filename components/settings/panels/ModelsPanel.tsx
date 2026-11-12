@@ -22,6 +22,8 @@ import { useModelCatalog } from "@/hooks/useModelCatalog";
 import { useDistillConfig } from "../models/DistillAssignment";
 import { ModelAssignments } from "../models/ModelAssignments";
 import { ModelCatalog } from "../models/ModelCatalog";
+import { subViewKey, useSettingsNewBadges } from "../new-badges";
+import { NewDot } from "../primitives";
 import { SaveStatusCorner } from "../SaveStatus";
 import { SegmentedControl } from "../SegmentedControl";
 import type { SearchEntry } from "../search-index";
@@ -60,6 +62,7 @@ export function useModelsSearchEntries(): SearchEntry[] {
 
 export function ModelsPanel() {
   const { capabilities, harnessLabel, sub, sessionModels, callbacks } = useSettingsShell();
+  const { subsWithNew } = useSettingsNewBadges();
   const catalog = useModelCatalog();
   const distill = useDistillConfig();
   // The engine's own assignments need `models`; Distill only needs its own
@@ -96,7 +99,7 @@ export function ModelsPanel() {
           <SegmentedControl
             label="Models sections"
             value={segment}
-            options={[{ id: "catalog", label: "Catalog" }, { id: "assignments", label: "Assignments" }]}
+            options={[{ id: "catalog", label: "Catalog" }, { id: "assignments", label: "Assignments", badge: subsWithNew.has(subViewKey("models", "assignments")) ? <NewDot /> : undefined }]}
             onChange={(id) => callbacks.selectSection("models", id)}
           />
         )}

@@ -1,7 +1,8 @@
+import { isAskDoneRow, isAskOtherRow, isToolApprovalTitle } from "../ask-walk";
 import type { EngineEvent, EngineSession } from "../harness/types";
 import { readPermissionOptions } from "../permission-request";
 import { isRecord } from "../type-guards";
-import { askQuestions, permissionDigest, strings, uiRequestDigest } from "./compose";
+import { askQuestions, permissionDigest, strings, toolApprovalSelect, uiRequestDigest } from "./compose";
 import { recipientForSession } from "./recipients";
 import { isConfigured } from "./store";
 import { claimAnswerToken, releaseAnswerToken, verifyAnswerToken, type AnswerTokenPayload } from "./tokens";
@@ -55,8 +56,18 @@ function cleanUiAnswer(pending: EngineEvent, answer: Record<string, unknown>): R
   switch (pending.method) {
     case "confirm":
       return typeof answer.confirmed === "boolean" ? { confirmed: answer.confirmed } : null;
-    case "select":
-      return typeof answer.value === "string" && strings(pending.options).includes(answer.value) ? { value: answer.value } : null;
+    case "select": {
+      if (typeof answer.value !== "string") return null;
+      if (isToolApprovalTitle(pending.title)) {
+        // A tap approves THIS call or denies it. omp's list also holds "for this session" and remembered grants; a
+        // token never answers one, and a dialog whose narrow option cannot be told apart answers nothing.
+        const approval = toolApprovalSelect(pending);
+        return approval && (answer.value === approval.once || answer.value === approval.deny) ? { value: answer.value } : null;
+      }
+      // The rows `ask` adds around a field's options start a typed answer or end a tick list; they are not choices.
+      if (isAskOtherRow(answer.value) || isAskDoneRow(answer.value)) return null;
+      return strings(pending.options).includes(answer.value) ? { value: answer.value } : null;
+    }
     case "ask": {
       const given = answer.answers;
       if (!Array.isArray(given) || given.length !== 1 || !Array.isArray(pending.questions) || pending.questions.length !== 1) return null;

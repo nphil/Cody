@@ -29,8 +29,8 @@
  * The same distinction bites the rpc dialect harder. Measured in a clean
  * container: **omp refuses to start `--mode rpc-ui` at all** with no model
  * configured — it prints "No models available. Use /login or set an API key
- * environment variable." and exits 1 before answering anything. pi starts
- * regardless. So an engine that came up far enough to TELL us it needs an
+ * environment variable." (omp 18.19: "No default model selected…") and exits 1
+ * before answering anything. pi starts regardless. So an engine that came up far enough to TELL us it needs an
  * account is reported as `needs setup`, not as a failure: it is a healthy
  * binary asking for configuration, which is exactly the state a fresh image
  * is in, and failing on it would mean the gate could never pass without
@@ -79,7 +79,7 @@ const BRINGUP_TIMEOUT_MS = 60_000;
  * change shows up as a FAILURE with the new text in the log — visible, and
  * one line to fix — instead of quietly passing.
  */
-const NEEDS_SETUP_RE = /no models available|set an api key|authentication required|not (?:logged in|authenticated)|no credentials/i;
+const NEEDS_SETUP_RE = /no models available|no default model selected|set an api key|authentication required|not (?:logged in|authenticated)|no credentials/i;
 
 const args = process.argv.slice(2);
 const requireIndex = args.indexOf("--require");

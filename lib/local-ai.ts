@@ -28,7 +28,13 @@ export interface LocalAiScanResult {
   runtime: LocalAiRuntime;
   origin: LocalAiOrigin;
   baseUrl: string;
+  /** Chat models. LM Studio's decision models are listed in `decisionModels`
+   * instead: they answer typed questions, not chat. */
   models: string[];
+  /** LM Studio only: models that answer omp's `judge` role over `/v1/decisions`
+   * and reject chat. Absent when there are none or the native listing is
+   * unavailable (an older LM Studio). */
+  decisionModels?: string[];
   /** Set only when something answered but couldn't be read as a model list
    * (bad JSON, unexpected shape). A probe that simply found nothing there —
    * connection refused, timed out, non-2xx — is not an error: it's the
@@ -107,6 +113,32 @@ function parseOllamaModels(data: unknown): string[] | null {
   return names;
 }
 
+/** LM Studio's native `GET /api/v1/models`: `{ models: [{ key, type }] }`. The
+ * `/v1/models` listing mixes decision models in with chat ones and does not say
+ * which is which; this one does (`type: "decision"`). */
+function parseLmStudioDecisionModels(data: unknown): string[] {
+  const entries = data && typeof data === "object" ? (data as { models?: unknown }).models : undefined;
+  if (!Array.isArray(entries)) return [];
+  const keys: string[] = [];
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object") continue;
+    const { key, type } = entry as { key?: unknown; type?: unknown };
+    if (typeof key === "string" && key.length > 0 && typeof type === "string" && type.toLowerCase() === "decision") keys.push(key);
+  }
+  return keys;
+}
+
+/** The decision models LM Studio at `baseUrl` serves; empty when its native
+ * listing is absent or unreadable, so an older LM Studio is simply unchanged. */
+async function probeLmStudioDecisionModels(baseUrl: string, fetcher: Fetcher, timeoutMs: number): Promise<string[]> {
+  try {
+    const response = await fetcher(`${baseUrl}/api/v1/models`, { cache: "no-store", signal: AbortSignal.timeout(timeoutMs) });
+    return response.ok ? parseLmStudioDecisionModels(await response.json()) : [];
+  } catch {
+    return [];
+  }
+}
+
 /** The OpenAI-compatible `/v1/models` shape LM Studio, llama.cpp, and
  * llama-swap all answer with: `{ data: [{ id }] }`. */
 function parseOpenAiModels(data: unknown): string[] | null {
@@ -122,12 +154,14 @@ function parseOpenAiModels(data: unknown): string[] | null {
 // Well-known local endpoints, per docs/windows.md. llama.cpp's own server and
 // llama-swap (a proxy in front of it) default to different ports but speak
 // the same OpenAI-compatible /v1/models, so both are probed under the same
-// "llamacpp" runtime id, distinguished by baseUrl.
+// "llamacpp" runtime id, distinguished by baseUrl. 9931 is the llama-server
+// default omp's own llama.cpp discovery tries when nothing answers on 8080.
 const RUNTIME_ENDPOINTS: readonly EndpointSpec[] = [
   { runtime: "ollama", port: 11434, path: "/api/tags", parseModels: parseOllamaModels },
   { runtime: "lmstudio", port: 1234, path: "/v1/models", parseModels: parseOpenAiModels },
   { runtime: "llamacpp", port: 8080, path: "/v1/models", parseModels: parseOpenAiModels },
   { runtime: "llamacpp", port: 9292, path: "/v1/models", parseModels: parseOpenAiModels },
+  { runtime: "llamacpp", port: 9931, path: "/v1/models", parseModels: parseOpenAiModels },
 ];
 
 async function probeEndpoint(
@@ -158,6 +192,13 @@ async function probeEndpoint(
   const models = spec.parseModels(parsed);
   if (models === null) {
     return { runtime: spec.runtime, origin, baseUrl, models: [], error: "Unexpected response shape" };
+  }
+  if (spec.runtime === "lmstudio") {
+    const decisionModels = await probeLmStudioDecisionModels(baseUrl, fetcher, timeoutMs);
+    if (decisionModels.length > 0) {
+      const decision = new Set(decisionModels);
+      return { runtime: spec.runtime, origin, baseUrl, models: models.filter((id) => !decision.has(id)), decisionModels };
+    }
   }
   return { runtime: spec.runtime, origin, baseUrl, models };
 }

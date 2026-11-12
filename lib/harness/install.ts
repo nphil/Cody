@@ -1,8 +1,9 @@
-import { spawn } from "child_process";
+import { execFile, spawn } from "child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { execPath } from "process";
 import { describeDiskError, formatBytes, getDiskSpace, getNpmCacheDir } from "../disk-space";
+import { isNewerVersion } from "../npm-update";
 import { stripVersionPrefix } from "../omp/omp-cli";
 import { getToolsDir, invalidateEngineBinCache, probeEngineVersion, resolveEngineBin } from "./engine-bin";
 
@@ -427,6 +428,55 @@ export function installSteps(request: EngineInstallRequest): InstallStep[] {
   return [primary, ...(request.installAlso ?? []).map((spec) => ({ spec }))];
 }
 
+/** What an engine package asks of the Bun on this machine (`engines.bun`),
+ * as the minimum version. Only the plain `>=X.Y.Z` shape npm packages use is
+ * understood; anything else reads as "no usable requirement". */
+export function parseBunRequirement(range: string): string | null {
+  const match = /^\s*>=\s*v?(\d+(?:\.\d+){0,2})\s*$/.exec(range);
+  return match ? match[1] : null;
+}
+
+/**
+ * omp 18.13.3+ refuses to run on an older Bun: `error: Bun runtime must be >=
+ * 1.4.4 (found v1.3.14). Please upgrade: bun upgrade`, exit 1. The text of a
+ * failed health probe, as the version numbers it names, or null for any other
+ * failure. */
+export function parseBunTooOld(text: string): { required: string; found: string } | null {
+  const match = /Bun runtime must be >= v?(\d+(?:\.\d+){0,2}) \(found v?(\d+(?:\.\d+){0,2})\)/i.exec(text);
+  return match ? { required: match[1], found: match[2] } : null;
+}
+
+/** The sentence an admin needs when the engine installed but Bun is too old:
+ * the fix is Bun, not a reinstall. */
+function bunTooOldMessage(spec: string, required: string, found: string, installed: boolean): string {
+  return installed
+    ? `${spec} installed, but it needs Bun ${required} or newer and this server has Bun ${found}. Update Bun (\`bun upgrade\`, or use a newer Cody image), then reinstall it; until then revert to the previous version.`
+    : `${spec} needs Bun ${required} or newer and this server has Bun ${found}, so it was not installed and your current version is untouched. Update Bun (\`bun upgrade\`, or use a newer Cody image), then try again.`;
+}
+
+function execText(command: string, args: string[], env: NodeJS.ProcessEnv): Promise<string | null> {
+  const { promise, resolve } = Promise.withResolvers<string | null>();
+  execFile(command, args, { env, timeout: 20_000 }, (error, stdout) => resolve(error ? null : String(stdout).trim()));
+  return promise;
+}
+
+/**
+ * Refuse an install that would replace a working engine with one this
+ * machine's Bun cannot run. Reads `engines.bun` of the spec from the registry
+ * and `bun --version` of the Bun on PATH (the one omp's launcher runs); any
+ * failure to learn either — offline registry, no Bun, an unusual range — lets
+ * the install proceed, because the health probe after it still catches a real
+ * problem. Null means "go ahead".
+ */
+async function bunRequirementProblem(spec: string, npm: { command: string; prefixArgs: string[] }, env: NodeJS.ProcessEnv): Promise<string | null> {
+  const range = await execText(npm.command, [...npm.prefixArgs, "view", spec, "engines.bun"], env);
+  const required = range ? parseBunRequirement(range) : null;
+  if (!required) return null;
+  const found = (await execText("bun", ["--version"], env))?.replace(/^v/, "") ?? null;
+  if (!found || !/^\d+(\.\d+)*/.test(found)) return null;
+  return isNewerVersion(required, found) ? bunTooOldMessage(spec, required, found, false) : null;
+}
+
 function runInstall(request: EngineInstallRequest): Promise<EngineInstallResult> {
   const prefix = getToolsDir();
   const cacheDir = getNpmCacheDir();
@@ -528,9 +578,12 @@ function runInstall(request: EngineInstallRequest): Promise<EngineInstallResult>
       }
       const probeArgs = request.healthArgs ?? request.versionArgs ?? ["--version"];
       void probeEngineVersion(binary, probeArgs, request.engineEnv?.()).then((probe) => {
+        const bunTooOld = probe.error ? parseBunTooOld(probe.error) : null;
         if (probe.error) {
           finish(new EngineInstallError(
-            `${request.installSpec} installed but ${request.binaryName} does not run — the install is damaged. Reinstall it, or revert to the previous version.`,
+            bunTooOld
+              ? bunTooOldMessage(request.installSpec, bunTooOld.required, bunTooOld.found, true)
+              : `${request.installSpec} installed but ${request.binaryName} does not run — the install is damaged. Reinstall it, or revert to the previous version.`,
             probe.error,
           ));
           return;
@@ -622,7 +675,14 @@ function runInstall(request: EngineInstallRequest): Promise<EngineInstallResult>
       });
     };
 
-    runStep(0);
+    void bunRequirementProblem(steps[0].spec, { command, prefixArgs: npmCli ? [npmCli] : [] }, env).then((problem) => {
+      if (problem) {
+        appendJobLog(job, `${problem}\n`);
+        finish(new EngineInstallError(problem));
+        return;
+      }
+      runStep(0);
+    });
   });
 }
 

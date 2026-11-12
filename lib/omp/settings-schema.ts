@@ -101,6 +101,23 @@ const CODY_UI_OVERRIDES: Record<string, Record<string, unknown>> = {
   },
 };
 
+/** What a setting reads as in a Cody-driven chat while NOTHING configures it,
+ * for the few settings whose engine default depends on the host instead of on
+ * the declared `default`. The panel shows this in place of the declared
+ * default, so a switch never reads On while the engine keeps the feature off.
+ *
+ *  - `out.enabled` (omp 18.14): internal-urls/out-protocol.ts
+ *    `outRepliesActive` lets a configured value win and otherwise follows the
+ *    host — on in the interactive terminal, off under rpc-ui — so the declared
+ *    `true` is never applied to a Cody chat.
+ *  - `display.shellVisualization` (omp 18.17): Cody launches every chat with
+ *    it off (lib/omp/cody-launch-defaults.yml), unless config.yml explicitly
+ *    turns it on, so the declared `true` is not what a Cody chat runs. */
+const CODY_DEFAULT_OVERRIDES: Record<string, boolean | number | string> = {
+  "out.enabled": false,
+  "display.shellVisualization": false,
+};
+
 /** Options survive only when they are real literals; anything derived from a
  * stubbed import is dropped rather than rendered as garbage. A NUMBER setting
  * may offer a word choice meaning "use the built-in default" (omp 18.3's
@@ -183,7 +200,9 @@ function normalize(schemaModule: Record<string, unknown>, source: OmpSettingsSch
       ...(description !== undefined ? { description } : {}),
       ...(values ? { values } : {}),
       ...(options ? { options } : {}),
-      ...(isSettingDefault(definition.default) ? { default: definition.default } : {}),
+      ...(CODY_DEFAULT_OVERRIDES[key] !== undefined
+        ? { default: CODY_DEFAULT_OVERRIDES[key] }
+        : isSettingDefault(definition.default) ? { default: definition.default } : {}),
       ...(uiMeta.options === "runtime" ? { runtimeOptions: true } : {}),
       ...(uiMeta.ordered === true ? { ordered: true } : {}),
       ...(typeof uiMeta.condition === "string" ? { condition: uiMeta.condition } : {}),

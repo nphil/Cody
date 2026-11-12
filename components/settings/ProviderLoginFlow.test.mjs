@@ -71,3 +71,16 @@ test("the mid-reply sentence appears only when some chat is mid-reply", () => {
   assert.equal(activeChatNote(0, t), undefined);
   assert.equal(activeChatNote(1, t), t("providerRemoval.activeChat"));
 });
+
+test("a terminal-only sign-in renders the note and no Sign in button, even when asked to start itself", async () => {
+  const React = (await import("react")).default;
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const { ProviderLoginFlow } = await jiti.import("./ProviderLoginFlow.tsx");
+  const base = { id: "google-antigravity", name: "Antigravity", authenticated: false, kind: "oauth", canLogout: false };
+  const refused = renderToStaticMarkup(React.createElement(ProviderLoginFlow, { provider: { ...base, terminalOnly: true }, onChanged: () => {}, autoStart: true }));
+  assert.match(refused, /type \/login and choose Antigravity/);
+  assert.doesNotMatch(refused, /<button/);
+  const open = renderToStaticMarkup(React.createElement(ProviderLoginFlow, { provider: base, onChanged: () => {} }));
+  assert.match(open, /<button/);
+  assert.doesNotMatch(open, /\/login/);
+});

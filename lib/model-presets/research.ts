@@ -118,13 +118,9 @@ export interface PresetBrief {
 /** Roles the research planner may assign: `store.ts`'s own live chat-role
  * list (omp's role vocabulary minus NON_CHAT_ROLES) — the same set a preset
  * can actually store, so a role such as `memory` (absent from
- * lib/model-plan/derive.ts's fixed ROLE_NAMES) is still offered. */
-
-const MEMORY_ROLE_BRIEF =
-  "memory - background calls the memory backend itself makes (Mnemopi/Hindsight extraction, consolidation, and recall synthesis); never a user-facing chat turn, and only relevant when memory is not off.";
-
+ * lib/model-plan/derive.ts's ROLE_NAMES) is still offered. Wording comes from
+ * ROLE_BRIEF_LINES (widget and memory included). */
 function roleBriefFor(role: string): string {
-  if (role === "memory") return MEMORY_ROLE_BRIEF;
   return ROLE_BRIEF_LINES[role] ?? `${role} - an omp role not documented here; use the same judgement as the closest similar role.`;
 }
 

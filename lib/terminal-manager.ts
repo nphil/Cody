@@ -1,4 +1,4 @@
-import { realpathSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -12,6 +12,7 @@ import type { IPty } from "node-pty";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "./file-access";
 import { getHarness } from "./harness";
 import { engineChildEnv } from "./harness/provider-keys";
+import { getAgentDir } from "./omp/paths";
 
 export type TerminalInfo = {
   id: string;
@@ -80,6 +81,29 @@ function terminalEnvironment(timeZone?: string): Record<string, string> {
   return env;
 }
 
+/** omp 18.17+ can update itself in the background when a TUI starts
+ * (`update.auto`, off unless the user turned it on). In a Cody terminal that
+ * would replace the engine under Cody's tools folder without its Bun check and
+ * verified-version gate, so the terminal launch pins it off. An engine that
+ * predates the setting ignores the unknown key. NESTED keys only (see
+ * lib/model-plan/one-shot.ts). */
+const TERMINAL_OVERLAY_YAML = "update:\n  auto: false\n";
+
+/** `PI_CONFIG_FILES` for an omp terminal: the layers the server already has,
+ * then the pin. Written under omp's agent dir and only rewritten when its
+ * content changes. */
+export function ompTerminalConfigFiles(inherited: string | undefined = process.env.PI_CONFIG_FILES): string {
+  const dir = getAgentDir();
+  const file = path.join(dir, "cody-terminal-overlay.yml");
+  let current: string | null = null;
+  try { current = readFileSync(file, "utf8"); } catch { /* absent */ }
+  if (current !== TERMINAL_OVERLAY_YAML) {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(file, TERMINAL_OVERLAY_YAML, { mode: 0o600 });
+  }
+  return [inherited, file].filter((layer): layer is string => typeof layer === "string" && layer.length > 0).join(path.delimiter);
+}
+
 type SpawnCommand = {
   command: string;
   args: string[];
@@ -139,7 +163,9 @@ function terminalCommand(mode: SpawnMode): SpawnCommand {
     // live session and the post-install probe get. Without it, an engine Cody
     // points at a CLI it manages separately would fail in a terminal only —
     // the one place the user goes to sign in.
-    env: harness.engineEnv?.(),
+    env: harness.id === "omp"
+      ? { ...harness.engineEnv?.(), PI_CONFIG_FILES: ompTerminalConfigFiles() }
+      : harness.engineEnv?.(),
   };
 }
 

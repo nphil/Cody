@@ -31,8 +31,9 @@ import { useSettingsRoute } from "@/hooks/useSettingsData";
 import { mcpInventoryOf, mcpRoute, type McpRouteBody } from "../../McpConfig";
 import { MCP_CARDS, cardSurfaceAvailable, searchIdForKey, type RecommendedCard } from "../engine/recommended-cards";
 import { SchemaControl } from "../engine/SchemaSettingsList";
+import { isBadgedRow, subViewKey, useSettingsNewBadges } from "../new-badges";
 import { getSection, getVisibleSubViews } from "../registry";
-import { NativeSetting, TERMINAL_ONLY_BADGE, chipStyle } from "../primitives";
+import { NativeSetting, NewDot, TERMINAL_ONLY_BADGE, chipStyle } from "../primitives";
 import { SaveStatusCorner, useSaveStatus } from "../SaveStatus";
 import type { SearchEntry } from "../search-index";
 import { SegmentedControl } from "../SegmentedControl";
@@ -80,6 +81,7 @@ export function useExtensionsSearchEntries(cwd: string | null, enabled = true): 
  * `ui.condition` hides it. */
 function McpCard({ card, index }: { card: RecommendedCard; index: SchemaIndex }) {
   const { track } = useSaveStatus(EXTENSIONS_PANEL_ID);
+  const { isNew } = useSettingsNewBadges();
   const row = index.byKey.get(card.key);
   if (!row || !row.visible) return null;
   const write = (value: SchemaValue | null) => { void track(() => index.setValue(row.key, value)); };
@@ -106,6 +108,7 @@ function McpCard({ card, index }: { card: RecommendedCard; index: SchemaIndex })
       description={description || undefined}
       badge={row.terminalOnly ? TERMINAL_ONLY_BADGE : undefined}
       searchId={searchIdForKey(row.key)}
+      newKey={isBadgedRow(row, isNew) ? row.key : undefined}
       switchControl={isToggle}
       control={(
         <>
@@ -125,6 +128,7 @@ function WorkspaceNote({ what }: { what: string }) {
 
 export function ExtensionsPanel() {
   const { capabilities, cwd, sessionId, sub, callbacks, isMobile } = useSettingsShell();
+  const { subsWithNew } = useSettingsNewBadges();
   const views = getVisibleSubViews(getSection("extensions"), capabilities);
   const active = views.some((view) => view.id === sub) ? sub! : views[0]?.id ?? null;
   const [visited, setVisited] = useState<Set<string>>(() => new Set(active ? [active] : []));
@@ -162,7 +166,7 @@ export function ExtensionsPanel() {
           <SegmentedControl
             label="Extension kinds"
             value={active}
-            options={views.map((view) => ({ id: view.id, label: view.label }))}
+            options={views.map((view) => ({ id: view.id, label: view.label, badge: subsWithNew.has(subViewKey("extensions", view.id)) ? <NewDot /> : undefined }))}
             onChange={(id) => callbacks.selectSection("extensions", id)}
           />
         )}

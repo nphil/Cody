@@ -53,6 +53,15 @@ export interface ProviderDefinition {
    * row sum over `id`, these, and `loginIds`.
    */
   catalogIds?: readonly string[];
+  /**
+   * The provider only exists on newer omp releases (an older engine does not
+   * read its variables at all). The Providers hub lists the row only when the
+   * engine's own roster or model catalog names it, or a key for it is already
+   * saved or set: a paste box for a provider the installed omp ignores would
+   * be a dead control. Every id here is in `loginIds`, so the roster is the
+   * proof.
+   */
+  needsRoster?: boolean;
 }
 
 const ALL = ["omp", "pi"] as const;
@@ -84,13 +93,42 @@ export const PROVIDER_CATALOG: readonly ProviderDefinition[] = [
   { id: "xai", name: "xAI", engines: ALL, variables: [{ name: "XAI_API_KEY", label: "API key", secret: true }], loginIds: ["xai", "xai-oauth"] },
   { id: "deepseek", name: "DeepSeek", engines: ALL, variables: [{ name: "DEEPSEEK_API_KEY", label: "API key", secret: true }], loginIds: ["deepseek"] },
   { id: "groq", name: "Groq", engines: ["omp", "pi"], variables: [{ name: "GROQ_API_KEY", label: "API key", secret: true }] },
-  { id: "mistral", name: "Mistral", engines: ["omp", "pi"], variables: [{ name: "MISTRAL_API_KEY", label: "API key", secret: true }] },
+  { id: "mistral", name: "Mistral", engines: ["omp", "pi"], variables: [{ name: "MISTRAL_API_KEY", label: "API key", secret: true }], loginIds: ["mistral"] },
   { id: "huggingface", name: "Hugging Face", engines: ["omp", "pi"], variables: [{ name: "HF_TOKEN", label: "Access token", secret: true }], loginIds: ["huggingface"] },
   { id: "cerebras", name: "Cerebras", engines: ["omp", "pi"], variables: [{ name: "CEREBRAS_API_KEY", label: "API key", secret: true }], loginIds: ["cerebras"] },
   { id: "fireworks", name: "Fireworks", engines: ["omp", "pi"], variables: [{ name: "FIREWORKS_API_KEY", label: "API key", secret: true }], loginIds: ["fireworks"] },
   { id: "minimax", name: "MiniMax", engines: ["omp", "pi"], variables: [{ name: "MINIMAX_API_KEY", label: "API key", secret: true }], loginIds: ["minimax-code", "minimax-code-cn", "minimax-oauth"], catalogIds: ["minimax-cn"] },
   { id: "kimi", name: "Kimi (Moonshot)", engines: ["omp", "pi"], variables: [{ name: "KIMI_API_KEY", label: "API key", secret: true }], loginIds: ["kimi-code", "moonshot"], catalogIds: ["kimi-coding", "moonshotai"] },
   { id: "zai", name: "Z.AI", engines: ["omp", "pi"], variables: [{ name: "ZAI_API_KEY", label: "API key", secret: true }], loginIds: ["zai", "zai-coding-plan"], catalogIds: ["zai-coding-cn"] },
+  // Devin keeps its key and its three sign-ins in one row: `devin` (browser),
+  // `devin-cli` (adopts ~/.local/share/devin/credentials.toml) and
+  // `devin-windsurf` (Windsurf Enterprise) all store as provider `devin`. The two
+  // newer ids are inert on an omp whose roster lacks them.
+  { id: "devin", name: "Devin", engines: ["omp"], variables: [{ name: "DEVIN_API_KEY", label: "API key", secret: true }], loginIds: ["devin", "devin-cli", "devin-windsurf"] },
+  // Providers newer omp releases added (the id is the row's one loginId, so
+  // the roster itself says whether the installed omp has it). The env names
+  // are the first one each provider's rules list; the aliases (CLOUDFLARE_AUTH_TOKEN,
+  // CORALBRICKS_API_KEY, SCW_API_KEY) work in the server's environment too.
+  {
+    id: "cloudflare-workers-ai",
+    name: "Cloudflare Workers AI",
+    engines: ["omp"],
+    variables: [
+      { name: "CLOUDFLARE_API_TOKEN", label: "API token", secret: true, hint: "Workers AI Read and Edit token from dash.cloudflare.com/profile/api-tokens" },
+      // A token taken from the environment gets its account from here; a stored
+      // sign-in carries the account itself.
+      { name: "CLOUDFLARE_ACCOUNT_ID", label: "Account ID", secret: false, hint: "32-character Cloudflare account ID" },
+    ],
+    loginIds: ["cloudflare-workers-ai"],
+    needsRoster: true,
+  },
+  { id: "coralbricks", name: "CoralBricks", engines: ["omp"], variables: [{ name: "CORAL_API_KEY", label: "API key", secret: true, hint: "Create one at coralbricks.ai/api-keys" }], loginIds: ["coralbricks"], needsRoster: true },
+  { id: "inception", name: "Inception", engines: ["omp"], variables: [{ name: "INCEPTION_API_KEY", label: "API key", secret: true, hint: "Create one at platform.inceptionlabs.ai/dashboard/api-keys" }], loginIds: ["inception"], needsRoster: true },
+  { id: "liquid", name: "Liquid AI", engines: ["omp"], variables: [{ name: "LIQUID_API_KEY", label: "API key", secret: true, hint: "Create one at console.liquid.ai" }], loginIds: ["liquid"], needsRoster: true },
+  { id: "modular", name: "Modular", engines: ["omp"], variables: [{ name: "MODULAR_API_KEY", label: "API key", secret: true, hint: "Create one at console.modular.com/api_keys" }], loginIds: ["modular"], needsRoster: true },
+  { id: "otari", name: "Otari", engines: ["omp"], variables: [{ name: "OTARI_API_KEY", label: "Workspace API key", secret: true, hint: "Create one at app.otari.ai/settings/api-keys" }], loginIds: ["otari"], needsRoster: true },
+  { id: "sambanova", name: "SambaNova", engines: ["omp"], variables: [{ name: "SAMBANOVA_API_KEY", label: "API key", secret: true, hint: "Create one at cloud.sambanova.ai/apis" }], loginIds: ["sambanova"], needsRoster: true },
+  { id: "scaleway", name: "Scaleway", engines: ["omp"], variables: [{ name: "SCW_SECRET_KEY", label: "Secret key", secret: true, hint: "Create one at console.scaleway.com/iam/api-keys" }], loginIds: ["scaleway"], needsRoster: true },
   {
     id: "bedrock",
     name: "Amazon Bedrock",

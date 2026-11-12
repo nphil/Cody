@@ -22,6 +22,7 @@ import type { DiskArea, DiskPayload, DiskSettings } from "@/lib/disk/types";
 import { ApiError, ErrorNote, primaryButtonStyle, requestJson, smallButtonStyle } from "./account-controls";
 import { cardStyle, cardTitleStyle, dimLineStyle, LoadingLine, mutedLineStyle } from "./EngineRoster";
 import { nativeInputStyle, SettingsHighlightContext } from "./primitives";
+import { ReplayDataRow } from "./ReplayDataRow";
 
 export const DISK_ROUTE = "/api/disk";
 
@@ -289,6 +290,8 @@ export function DiskSection({ initial }: { initial?: DiskPayload } = {}) {
             <span style={{ fontWeight: 600 }}>Undo snapshots</span>
             <span style={{ color: "var(--text-muted)" }}>{formatBytes(payload.checkpointBytes)}</span>
           </div>
+
+          {canEdit && <ReplayDataRow />}
 
           <div style={{ display: "flex", flexDirection: "column", gap: 6, paddingTop: 8, borderTop: "1px solid var(--border)" }}>
             <div style={mutedLineStyle} role="status">

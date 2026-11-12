@@ -68,8 +68,11 @@ const STDERR_KEEP = 2_000;
 // `memory.backend: off` line is a key literally named "memory.backend" and is
 // ignored (verified with `PI_CONFIG_FILES=<overlay> omp config get
 // memory.backend` on omp 18.3.4). Written flat, none of this applied, and every
-// Distill/session-name run booted the memory system: an ~800 MB embedding
-// worker per run, recall into the prompt, and its own transcript retained.
+// Distill/session-name run booted the memory system: recall into the prompt,
+// its own transcript retained, and (before omp 18.10, which shares one local
+// embedding server across sessions and stops it after 15 idle minutes) an
+// ~800 MB embedding worker per run. The overlay stays: recall and retention
+// are wrong for a one-shot helper on every engine version.
 const OVERLAY_YAML = [
   "memory:",
   "  backend: off",

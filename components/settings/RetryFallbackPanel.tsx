@@ -1,14 +1,17 @@
 "use client";
 
 import { useContext, useEffect, useState, type CSSProperties } from "react";
-import { AlertCircle, Plus, Sparkles, Trash2 } from "lucide-react";
+import { AlertCircle, Plus, RotateCcw, Sparkles, Trash2 } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/field";
 import { Select } from "@/components/ui/Select";
 import { toast } from "@/components/ui/toast";
 import { useConfigWriter, useNativeSettings, type NativeSettings } from "@/hooks/useConfigWriter";
 import { invalidateSettingsRoutes, useSettingsRoute } from "@/hooks/useSettingsData";
+import { useSchemaIndex, type SchemaIndex, type SchemaValue } from "@/hooks/useSchemaIndex";
 import { DEFAULT_HARNESS_LABEL } from "../SettingsTabs";
-import { NativeSetting, ToggleSwitch } from "./primitives";
+import { NativeSetting, NewChip, ToggleSwitch, chipStyle } from "./primitives";
+import { RETRY_CARDS, cardSurfaceAvailable, searchIdForKey, type RecommendedCard } from "./engine/recommended-cards";
+import { SchemaControl } from "./engine/SchemaSettingsList";
 import { useSaveStatus } from "./SaveStatus";
 import { ShellContext } from "./shell-context";
 import { SettingsSection } from "./SettingsSection";
@@ -101,6 +104,53 @@ function reservePolicies(engineName: string): { value: UsageReservePolicy; label
     { value: "auto", label: "Auto-fallback", description: `${engineName} switches providers on its own as soon as the reserve margin is reached.` },
     { value: "fail-closed", label: "Fail closed", description: `${engineName} stops the turn instead of switching providers once the reserve margin is reached.` },
   ];
+}
+
+/** The two retry keys the panel binds to the engine's schema rows instead of
+ * the native section writer: omp 18.9 added `retry.fallbackOn` and 18.13.3
+ * `retry.rateLimitWalksChain`, so an older engine has no row and no card. */
+const SCHEMA_RETRY_CARDS = RETRY_CARDS.filter((card) => card.key === "retry.fallbackOn" || card.key === "retry.rateLimitWalksChain");
+
+/** One schema-bound retry card: the row's label, description and control,
+ * written through the schema index so the Behavior hub's row and this card
+ * never disagree. Absent while the schema has not loaded, on an engine that
+ * does not declare the key, and while the row's own condition hides it. */
+function RetrySchemaCard({ card, index, panelId }: { card: RecommendedCard; index: SchemaIndex; panelId: string }) {
+  const { track } = useSaveStatus(panelId);
+  const row = index.byKey.get(card.key);
+  if (!row || !row.visible) return null;
+  const write = (value: SchemaValue | null) => { void track(() => index.setValue(row.key, value)); };
+  const description = [row.description, index.describeCondition(row.condition)].filter(Boolean).join(" ");
+  const isToggle = row.type === "boolean";
+  const control = <SchemaControl setting={row} value={row.value} onChange={write} />;
+  return (
+    <NativeSetting
+      label={row.label}
+      description={description || undefined}
+      searchId={searchIdForKey(row.key)}
+      newKey={row.terminalOnly ? undefined : row.key}
+      switchControl={isToggle}
+      control={(
+        <>
+          {!isToggle && control}
+          {card.hint && <span style={{ fontSize: 10.5, color: "var(--text-dim)", lineHeight: 1.4 }}>{card.hint}</span>}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 6, minWidth: 0, flexWrap: "wrap" }}>
+              <code style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono, monospace)", overflowWrap: "anywhere" }}>{row.key}</code>
+              {row.modified && <span style={{ ...chipStyle, color: "var(--accent)" }}>Changed</span>}
+            </span>
+            {row.modified && (
+              <button type="button" className="ui-focus-ring" onClick={() => write(null)} title="Reset to the engine's default" style={{ display: "inline-flex", alignItems: "center", gap: 4, background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 10.5, padding: "2px 4px", borderRadius: "var(--radius-control)", flexShrink: 0 }}>
+                <RotateCcw size={11} aria-hidden="true" /> Reset
+              </button>
+            )}
+          </div>
+        </>
+      )}
+    >
+      {isToggle ? control : undefined}
+    </NativeSetting>
+  );
 }
 
 type ChainKind = "Role" | "Provider" | "Model";
@@ -219,6 +269,8 @@ export function RetryFallbackPanel({ models, onOpenPresets, panelId = "models" }
   const writer = useConfigWriter();
   const native = useNativeSettings(true);
   const { track } = useSaveStatus(panelId);
+  // Bound to schema rows, so they exist only where the engine declares them.
+  const schemaIndex = useSchemaIndex({ enabled: shell !== null && cardSurfaceAvailable("retry", shell.capabilities) });
   const rolesRoute = useSettingsRoute<{ roleNames?: string[] }>("/api/model-roles");
   const refusalPolicyRoute = useSettingsRoute<RefusalPolicyResponse>("/api/refusal/config");
   const [refusalPolicySaving, setRefusalPolicySaving] = useState(false);
@@ -358,12 +410,13 @@ export function RetryFallbackPanel({ models, onOpenPresets, panelId = "models" }
         label="Retry transient errors"
         description={`Retry a failed model call before ${engineName} gives up on the turn. Off means a single attempt.`}
         searchId="retry-transient-errors"
+        newKey="retry.enabled"
       >
         <ToggleSwitch checked={retry.enabled ?? true} onChange={(enabled) => setRetry({ enabled })} />
       </NativeSetting>
 
       <SettingsSection
-        title="Retry attempts"
+        title={<span style={{ display: "inline-flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>Retry attempts<NewChip settingKey="retry.maxRetries" /></span>}
         variant="plain"
         searchId="schema-retry.maxRetries"
       >
@@ -389,9 +442,12 @@ export function RetryFallbackPanel({ models, onOpenPresets, panelId = "models" }
       <NativeSetting
         label="Allow model fallback"
         searchId="schema-retry.modelFallback"
+        newKey="retry.modelFallback"
       >
         <ToggleSwitch checked={retry.modelFallback ?? true} onChange={(checked) => setRetry({ modelFallback: checked })} />
       </NativeSetting>
+
+      {SCHEMA_RETRY_CARDS.map((card) => <RetrySchemaCard key={card.key} card={card} index={schemaIndex} panelId={panelId} />)}
 
       <NativeSetting
         label="Usage-aware fallback"

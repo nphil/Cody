@@ -1,6 +1,8 @@
 "use client";
 
 import { createContext, isValidElement, useContext, useEffect, useRef, type ReactNode } from "react";
+import { observeSeen } from "@/lib/settings-new-reporter";
+import { NEW_SETTINGS_LABEL, useSettingsNewBadges } from "./new-badges";
 
 /**
  * Shared building blocks for the settings dialog. Cody's curated panels and the
@@ -74,6 +76,45 @@ export function slugify(value: string): string {
 /** The search result the dialog wants scrolled to and outlined, or null. */
 export const SettingsHighlightContext = createContext<string | null>(null);
 
+/** The text of the chip that marks a setting the engine added in its last update. */
+export const NEW_CHIP_LABEL = "New";
+
+const newChipStyle = { ...chipStyle, background: "var(--accent)", color: "var(--on-accent)", fontWeight: 600 } as const;
+
+function newChipTitle(since: string | null): string {
+  return since ? `New in engine version ${since}` : "New since the last engine update";
+}
+
+/** The "New" chip without the seen-tracking: what a search result shows. */
+export function NewChipLabel({ title }: { title?: string }) {
+  return <span style={newChipStyle} title={title ?? newChipTitle(null)}>{NEW_CHIP_LABEL}</span>;
+}
+
+/**
+ * The "New" chip of one setting's row or card. It renders nothing unless the
+ * key is new for this person. Once at least half of it has been on screen for
+ * a moment in a visible page it reports a view, which the server counts once
+ * per Settings open however many panels show the key. A hub kept mounted
+ * under display:none never intersects, so it never counts.
+ */
+export function NewChip({ settingKey }: { settingKey: string }) {
+  const { isNew, introducedIn, reportSeen } = useSettingsNewBadges();
+  const ref = useRef<HTMLSpanElement | null>(null);
+  const show = isNew(settingKey);
+  useEffect(() => {
+    const element = ref.current;
+    if (!show || !element) return undefined;
+    return observeSeen(element, () => reportSeen(settingKey));
+  }, [show, settingKey, reportSeen]);
+  if (!show) return null;
+  return <span ref={ref} style={newChipStyle} title={newChipTitle(introducedIn(settingKey))}>{NEW_CHIP_LABEL}</span>;
+}
+
+/** The small dot on a hub or sub-view that owns a new setting. */
+export function NewDot({ label = NEW_SETTINGS_LABEL }: { label?: string }) {
+  return <span role="img" aria-label={label} title={label} style={{ display: "inline-block", width: 7, height: 7, borderRadius: "50%", background: "var(--accent)", flexShrink: 0 }} />;
+}
+
 /** `label` names the switch for a screen reader where no wrapping <label> does (a card whose other controls forbid wrapping it). */
 export function ToggleSwitch({ checked, onChange, disabled, label }: { checked: boolean; onChange: (checked: boolean) => void; disabled?: boolean; label?: string }) {
   return (
@@ -114,7 +155,7 @@ export function ToggleSwitch({ checked, onChange, disabled, label }: { checked: 
   );
 }
 
-export function NativeSetting({ label, description, scope, badge, unavailable, searchId, control, switchControl, children }: {
+export function NativeSetting({ label, description, scope, badge, unavailable, searchId, newKey, control, switchControl, children }: {
   label: string;
   description?: string;
   /** Where the value lives when it is not the harness's own config file. The
@@ -129,6 +170,10 @@ export function NativeSetting({ label, description, scope, badge, unavailable, s
   /** Overrides the label-derived search id, so two panels can carry the same
    * label without the search highlight landing on both. */
   searchId?: string;
+  /** The schema key of this setting, for a row or card that may wear the "New"
+   * chip. Leave it off for terminal-only settings and for anything that is not
+   * an engine schema setting. The chip shows only while the key is new. */
+  newKey?: string;
   /** Renders below the label instead of beside it — for wide inputs. */
   control?: ReactNode;
   /** States explicitly that `children` renders a boolean toggle, for callers
@@ -188,6 +233,7 @@ export function NativeSetting({ label, description, scope, badge, unavailable, s
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <span style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)" }}>{label}</span>
+          {newKey && <NewChip settingKey={newKey} />}
           {scope && <span style={chipStyle}>{scope}</span>}
           {badge && <span style={chipStyle}>{badge}</span>}
           {unavailable && <span style={{ ...chipStyle, color: "var(--status-warning)" }} title={unavailable}>{UNAVAILABLE_BADGE}</span>}

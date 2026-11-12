@@ -1,5 +1,11 @@
 import { isSignedOutCause } from "./credential-health";
+import { constrainingWindows, modelMatchesTier } from "./quota-tiers";
 import type { UsageAccount, UsageAccountService, UsageInUseBasis, UsageSessionAccount, UsageWindow } from "./types";
+
+// The tier matcher lives with the other scoping rules (quota-tiers.ts); it is
+// re-exported here because callers and tests have always imported it from the
+// selection module.
+export { modelMatchesTier };
 
 /**
  * Picking the binding constraint.
@@ -107,9 +113,7 @@ export function rankProviderAccounts(
       (account): account is UsageAccount => Boolean(account) && normalize(account.provider) === normalizedProvider,
     )
     .map((account, index) => {
-      const windows = (account.windows ?? [])
-        .filter((window): window is UsageWindow => Boolean(window) && windowConstrainsModel(window, scopeModelId))
-        .sort(compareBinding);
+      const windows = constrainingWindows(account.windows, account.provider, scopeModelId).sort(compareBinding);
       return { account, windows, binding: windows[0] ?? null, index };
     });
 
@@ -211,38 +215,6 @@ export function selectBindingWindowForModel(
   return match && window ? { account: match.account, window } : null;
 }
 
-/**
- * Whether a tier-scoped window covers a given model.
- *
- * The tier has to appear in the model id as a whole token — delimited by
- * non-alphanumerics or the ends of the string — so "opus" matches
- * "claude-opus-4-5" but not "claude-opusx". Substring matching would quietly
- * charge one model's quota against an unrelated model whose name happens to
- * contain the tier.
- */
-export function modelMatchesTier(modelId: string, tier: string): boolean {
-  const haystack = normalize(modelId);
-  const needle = normalize(tier);
-  if (!haystack || !needle) return false;
-
-  for (let from = 0; ; from = from + 1) {
-    const at = haystack.indexOf(needle, from);
-    if (at < 0) return false;
-    if (!isAlphanumericAt(haystack, at - 1) && !isAlphanumericAt(haystack, at + needle.length)) return true;
-    from = at;
-  }
-}
-
-/**
- * A reported tier always scopes a window to its own models. OMP can mark a
- * tiered bucket shared too, so that flag must not erase the explicit scope and
- * charge it to another model. Untiered windows bind the whole account.
- */
-function windowConstrainsModel(window: UsageWindow, modelId: string): boolean {
-  const tier = typeof window.tier === "string" ? window.tier.trim() : "";
-  return !tier || modelMatchesTier(modelId, tier);
-}
-
 function isMoreBinding(candidate: UsageWindow, incumbent: UsageWindow): boolean {
   return compareBinding(candidate, incumbent) < 0;
 }
@@ -296,8 +268,3 @@ function normalize(value: string | null | undefined): string {
   return typeof value === "string" ? value.trim().toLowerCase() : "";
 }
 
-function isAlphanumericAt(value: string, index: number): boolean {
-  if (index < 0 || index >= value.length) return false;
-  const code = value.charCodeAt(index);
-  return (code >= 48 && code <= 57) || (code >= 97 && code <= 122);
-}

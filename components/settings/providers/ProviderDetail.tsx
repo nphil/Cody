@@ -83,6 +83,7 @@ export function loginRowOf(row: ProviderRow, method: ProviderMethod): ProviderLo
     kind: method.kind === "device" ? "device" : "oauth",
     canLogout: method.canLogout === true,
     ...(method.hint ? { hint: method.hint } : {}),
+    ...(method.terminalOnly ? { terminalOnly: true } : {}),
   };
 }
 
@@ -260,10 +261,14 @@ export function LoginMethodCard({ row, method, canEdit, shortName, autoStart, on
       </div>
       {canEdit && (
         <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-          <button type="button" className="ui-focus-ring" onClick={startSignIn} aria-expanded={expanded} style={connected ? buttonStyle : primaryButtonStyle}>
-            {showAddAccount ? <UserPlus size={12} aria-hidden="true" /> : connected ? <RefreshCw size={12} aria-hidden="true" /> : <LogIn size={12} aria-hidden="true" />}
-            {showAddAccount ? (accounts?.length === 1 ? "Add secondary account" : "Add account") : connected ? "Re-login" : "Sign in"}
-          </button>
+          {method.terminalOnly ? (
+            <span style={{ flex: "1 1 160px", fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.45 }}>{t("providerLogin.terminalOnlyShort")}</span>
+          ) : (
+            <button type="button" className="ui-focus-ring" onClick={startSignIn} aria-expanded={expanded} style={connected ? buttonStyle : primaryButtonStyle}>
+              {showAddAccount ? <UserPlus size={12} aria-hidden="true" /> : connected ? <RefreshCw size={12} aria-hidden="true" /> : <LogIn size={12} aria-hidden="true" />}
+              {showAddAccount ? (accounts?.length === 1 ? "Add secondary account" : "Add account") : connected ? "Re-login" : "Sign in"}
+            </button>
+          )}
           {connected && method.canLogout && !hasAccounts && (
             <button type="button" className="ui-focus-ring" onClick={() => { void logout(); }} disabled={loggingOut} style={dangerButtonStyle}>
               {loggingOut ? <Loader2 size={12} aria-hidden="true" className="icon-spin" /> : <LogOut size={12} aria-hidden="true" />}

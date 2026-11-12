@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { authApi } from "./cody-omp-auth-api.mjs";
+import { OUTCOME_MESSAGES, runUsageReset } from "./cody-omp-reset-cli.mjs";
 console.log = (...args) => console.error(...args);
 console.info = console.log;
 console.debug = console.log;
@@ -40,7 +41,10 @@ function creditFor(provider, value) {
   // ("available", "unavailable", "cooldown"…) and only spent or lapsed grants go.
   if (provider.id === "openai-codex" ? status && status !== "available" : status === "redeemed" || status === "expired") return null;
   const title = typeof credit.title === "string" && credit.title.trim() ? credit.title.trim() : null;
-  return { id: credit.id, expiresAt: date(credit.expiresAt ?? credit.expires_at ?? credit.expiry), ...(title ? { title } : {}), ...(typeof credit.usable === "boolean" ? { usable: credit.usable } : {}) };
+  // `clears` names the limit windows this reset heals (`anthropic:5h`, `anthropic:7d`, and since
+  // 18.19.0 `anthropic:7d:fable` for a Fable launch reset), so the UI can say what it covers.
+  const clears = Array.isArray(credit.clears) ? credit.clears.filter((limit) => typeof limit === "string" && limit) : [];
+  return { id: credit.id, expiresAt: date(credit.expiresAt ?? credit.expires_at ?? credit.expiry), ...(title ? { title } : {}), ...(typeof credit.usable === "boolean" ? { usable: credit.usable } : {}), ...(clears.length > 0 ? { clears } : {}) };
 }
 function normalizeAccounts(provider, raw) {
   if (!Array.isArray(raw)) return [];
@@ -86,21 +90,14 @@ async function list(storage) {
     catch (error) { return { failed: error instanceof Error ? error.message : String(error), provider }; }
   }));
   // One provider failing must not hide the other's balance; only a total
-  // failure is a failed listing.
+  // failure is a failed listing. The failed ids ride along so a cache can tell
+  // "this provider has no resets" from "this provider did not answer".
   const failures = lists.filter((entry) => !Array.isArray(entry));
   if (failures.length === lists.length) throw new Error(failures[0].failed);
-  return lists.filter(Array.isArray).flat();
+  return { accounts: lists.filter(Array.isArray).flat(), failedProviders: failures.map((entry) => entry.provider.id) };
 }
 // The provider target never leaves the helper; accounts are named by opaque id.
 function publicAccount(account) { const copy = { ...account }; delete copy._target; return copy; }
-const OUTCOME_MESSAGES = {
-  ineligible: "This account cannot spend a saved reset right now.",
-  offer_changed: "The saved reset on offer changed. Refresh and confirm again.",
-  reset_in_progress: "Another reset for this account is still being applied.",
-  reset_unconfirmed: "The last reset for this account is still unconfirmed. Refresh before trying again.",
-  cooldown: "Saved resets for this account are cooling down.",
-  unsupported_provider: "This OMP build cannot redeem resets for that provider.",
-};
 function outcomeFor(code, ok) {
   if (code === "already_redeemed") return "already_redeemed";
   if (code === "no_credit" || code === "ineligible") return "no_credit";
@@ -113,14 +110,28 @@ async function main() {
   let storage;
   try { storage = await loadStorage(request.packageRoot, request.agentDir); } catch (error) { return fail(request.operation, "unsupported", error instanceof Error ? error.message : String(error)); }
   try {
-    let accounts; try { accounts = await list(storage); } catch (error) { return fail(request.operation, "credit_list_failed", error instanceof Error ? error.message : String(error)); }
-    if (request.operation === "list") return emit({ type: "list", ok: true, accounts: accounts.map(publicAccount) });
+    let listed; try { listed = await list(storage); } catch (error) { return fail(request.operation, "credit_list_failed", error instanceof Error ? error.message : String(error)); }
+    const accounts = listed.accounts;
+    if (request.operation === "list") return emit({ type: "list", ok: true, accounts: accounts.map(publicAccount), ...(listed.failedProviders.length > 0 ? { failedProviders: listed.failedProviders } : {}) });
     if (typeof request.accountId !== "string" || typeof request.creditId !== "string" || typeof request.idempotencyKey !== "string") return fail("redeem", "invalid_request", "Malformed redemption request.");
     const chosen = accounts.find((account) => account.id === request.accountId);
     if (!chosen) return emit({ type: "redeem", outcome: "error", code: "no_account", message: "The selected reset-credit account no longer exists." });
     if (chosen.error || !chosen._target) return emit({ type: "redeem", outcome: "error", code: "account_unavailable", message: chosen.error ?? "The selected account cannot redeem reset credits." });
     if (!chosen.credits.some((credit) => credit.id === request.creditId)) return emit({ type: "redeem", outcome: "no_credit", code: "no_credit" });
     if (!chosen.canRedeem) return emit({ type: "redeem", outcome: "no_credit", code: "ineligible", message: chosen.reason ?? OUTCOME_MESSAGES.ineligible });
+    // An engine with `omp usage reset` (the request carries its binary) spends
+    // through it: the command takes omp's cross-process reset lock, which
+    // AuthStorage's own redeem does not, so a click here cannot double-spend
+    // with a running omp session. The command spends the one grant the listing
+    // pins (Claude's `nextCreditId`, Codex's soonest-expiring), which is the
+    // grant listed first, so any other grant is a changed offer. No usable
+    // credential id, or a binary that cannot launch, keeps the direct call.
+    const credentialId = chosen._target.credentialId;
+    if (typeof request.ompBin === "string" && request.ompBin && typeof credentialId === "number") {
+      if (chosen.credits[0]?.id !== request.creditId) return emit({ type: "redeem", outcome: "error", code: "offer_changed", message: OUTCOME_MESSAGES.offer_changed });
+      const run = await runUsageReset({ ompBin: request.ompBin, provider: chosen.provider, credentialId, agentDir: request.agentDir });
+      if (run.started) return emit(run.frame);
+    }
     try {
       // AuthStorage owns native request UUID generation and all provider cache/block cleanup.
       // 18.2.9 reads provider and grant from `target`; older builds read them

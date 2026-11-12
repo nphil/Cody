@@ -32,7 +32,7 @@
 import { canAccessSession, filterSessionsForUser, getSessionOwner } from "./auth/session-owners";
 import type { UserRecord } from "./auth/users";
 import type { HostToolDefinition } from "./pi-types";
-import { buildSessionContext, getSessionEntries, listAllSessions, resolveSessionPath } from "./session-reader";
+import { buildSessionContext, collapseContinuedSessions, getSessionEntries, listAllSessions, resolveSessionPath } from "./session-reader";
 import { clampForSidebar, resultCharBudget, type ClampedResult } from "./sidebar-context-budget";
 import { formatToolTime } from "./tool-time";
 import type { AgentMessage, SessionInfo } from "./types";
@@ -149,7 +149,7 @@ function resolveTarget(query: string | undefined, sessions: SessionInfo[], ctx: 
   if (!query) return ctx.defaultSessionId ? { id: ctx.defaultSessionId } : null;
   if (sessions.some((session) => session.id === query)) return { id: query };
   const needle = query.trim().toLowerCase();
-  const matches = sessions.filter((session) => (session.name ?? "").toLowerCase().includes(needle));
+  const matches = collapseContinuedSessions(sessions).filter((session) => (session.name ?? "").toLowerCase().includes(needle));
   if (matches.length > 1) return { candidates: formatCandidates(query, matches) };
   return matches.length === 1 ? { id: matches[0].id } : null;
 }
@@ -183,7 +183,7 @@ function formatPhase(id: string, ctx: SessionToolContext): string {
 }
 
 async function listSessions(args: SessionToolArgs, ctx: SessionToolContext): Promise<string> {
-  const sessions = await visibleSessions(ctx);
+  const sessions = collapseContinuedSessions(await visibleSessions(ctx));
   const workspace = stringArg(args, "workspace");
   const filtered = workspace
     ? sessions.filter((session) => session.cwd === workspace || session.projectRoot === workspace)

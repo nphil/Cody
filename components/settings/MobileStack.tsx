@@ -19,7 +19,8 @@ import { ArrowLeft, ChevronRight, Search, X } from "lucide-react";
 import { useContext, useId, useRef, type KeyboardEvent, type ReactNode } from "react";
 import type { ActiveEngineInfo, EngineCapabilities } from "../SettingsTabs";
 import { useFocusTrap } from "./Drawer";
-import { SettingsHighlightContext } from "./primitives";
+import { useSettingsNewBadges } from "./new-badges";
+import { NewDot, SettingsHighlightContext } from "./primitives";
 import { groupLabel, groupSections, type SettingsSection, type SettingsSectionId, type StatusLine } from "./registry";
 import type { SearchEntry, SearchFilter, SearchResult } from "./search-index";
 import { focusSearchResults, SearchResultsList } from "./SettingsSearch";
@@ -147,6 +148,7 @@ export function MobileStack({ sections, active, view, onSelect, onBack, onClose,
   children: ReactNode;
 }) {
   const statuses = useSectionStatuses(sections, capabilities, engine, harnessLabel);
+  const { hubsWithNew } = useSettingsNewBadges();
   const groups = groupSections(sections, "phone");
   const activeSection = sections.find((section) => section.id === active) ?? null;
   const searching = searchQuery.trim().length > 0 || searchFilter !== null;
@@ -235,7 +237,10 @@ export function MobileStack({ sections, active, view, onSelect, onBack, onClose,
                       >
                         <Icon size={18} aria-hidden="true" style={{ flexShrink: 0, color: "var(--accent)" }} />
                         <span style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
-                          <span style={{ fontSize: 14, fontWeight: 500 }}>{section.label}</span>
+                          <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 14, fontWeight: 500 }}>
+                            {section.label}
+                            {hubsWithNew.has(section.id) && <NewDot />}
+                          </span>
                           {status && <span style={{ fontSize: 11.5, color: TONE_COLOR[status.tone ?? "muted"], overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{status.text}</span>}
                         </span>
                         <ChevronRight size={16} aria-hidden="true" style={{ flexShrink: 0, color: "var(--text-dim)" }} />

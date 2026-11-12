@@ -15,6 +15,7 @@
  */
 
 import type { OpenRouterAccountSnapshot } from "../openrouter/account";
+import { isAccountWideWindow } from "../usage/quota-tiers";
 import type { UsageAccount, UsageSnapshot, UsageWindow } from "../usage/types";
 import { blackoutActive, type ProviderBlackout, type RouteMemory } from "./route-memory";
 
@@ -30,7 +31,7 @@ const OPENROUTER_PROVIDER = "openrouter";
 export const OPENROUTER_CREDITS_FLOOR_USD = 1;
 
 function untieredExhausted(account: UsageAccount): UsageWindow[] {
-	return (account.windows ?? []).filter((window) => Boolean(window) && !window.tier && window.state === "exhausted");
+	return (account.windows ?? []).filter((window) => Boolean(window) && isAccountWideWindow(window) && window.state === "exhausted");
 }
 
 function soonestReset(windows: readonly UsageWindow[]): string | null {

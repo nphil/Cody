@@ -46,7 +46,31 @@ export interface UsageWindow {
    * measured at all (a provider with no usage reading). Absent = measured.
    */
   source?: "block";
+  /**
+   * Which requests a `source: "block"` window refuses, in omp's own scope
+   * vocabulary (`auth_credential_blocks.blockScope`): `""` or absent = every
+   * request on the account; `tier:fable` / `tier:mythos` (Claude), `spark` /
+   * `chat` / `shared` (Codex), `pool:auto` / `pool:api` (Cursor). A scoped
+   * block must not read as the whole account being out of quota.
+   */
+  blockScope?: string;
+  /**
+   * What the engine measured, when the meter counts money or credits rather
+   * than a share of a plan (a LiteLLM key budget in `usd`, a Codex spend cap
+   * in `credits`). Lets the UI say "$12.40 of $50" next to the percentage.
+   * Absent for plain percentage windows.
+   */
+  amount?: UsageWindowAmount;
 }
+
+/** A money or credit meter's own numbers, in the engine's unit. */
+export interface UsageWindowAmount {
+  /** The engine's unit, lowercased ("usd", "credits"). */
+  unit: string;
+  used: number | null;
+  limit: number | null;
+}
+
 /** A banked rate-limit reset balance actually reported by the engine. This is
  * separate from subscription quota and from any pay-as-you-go credit balance. */
 export interface UsageResetCredits {
@@ -126,6 +150,51 @@ export interface UsageAccount {
    *  `headersUpdatedAt`) — i.e. when it last actually served a request, from
    *  any conversation. Null when omp has only polled it. */
   lastServedAt?: string | null;
+  /**
+   * omp's account-routing policy for this login (`auth.accountPolicies`):
+   * which login it uses first and how much quota it keeps back. Present only
+   * when a policy applies to the account; reading it explains why omp holds
+   * or skips an account.
+   */
+  policy?: UsageAccountPolicy;
+  /**
+   * Shared gates that have not started counting (`"5h"`: a Claude account
+   * with no session open reports no 5-hour window at all). The window is
+   * absent because nothing is metering yet, not because it was dropped.
+   */
+  inactiveGates?: string[];
+  /**
+   * ISO time of the reading these windows come from, set ONLY when they are
+   * carried over from an earlier read because the newest one did not report
+   * this account. Absent on a window set the newest read measured.
+   */
+  windowsStaleSince?: string;
+}
+
+/** `omp usage --json`'s per-account `policy` object, with every field optional
+ * because the shape grew across releases. */
+export interface UsageAccountPolicy {
+  priority: number | null;
+  reservePct: number | null;
+  /** Whether the reserve is omp's global default or this account's own. */
+  reserveSource: "global" | "override" | null;
+  reclaimAbovePct: number | null;
+  /** Where omp's routing puts the account right now. */
+  state: "eligible" | "inside-reserve" | "exhausted" | "unknown";
+  remainingPct: number | null;
+}
+
+/** A stored login omp knows has a usage reader but could not produce a reading
+ * for in the newest read (`accountsWithoutUsage`). It is NOT an account row:
+ * nothing was measured, so it carries no windows and routes as "unknown". */
+export interface UsageUnreportedAccount {
+  provider: string;
+  type: "oauth" | "api_key";
+  /** email, else org name, else account id — the same identity a reading would carry. */
+  identity: string | null;
+  /** The engine account id when it gave one; joins to `UsageAccount.id`. */
+  accountId: string | null;
+  policy?: UsageAccountPolicy;
 }
 
 /** Per-window quota capacity for one provider, aggregated across every
@@ -166,4 +235,15 @@ export interface UsageSnapshot {
    *  resolved from omp's own `credential_pin` entries. A provider absent here
    *  has not been used by that conversation yet. */
   sessionAccounts?: Record<string, UsageSessionAccount>;
+  /**
+   * Set when the newest attempt to read usage FAILED (the command timed out,
+   * crashed, printed nothing usable) and `accounts` are the last good reading,
+   * kept instead of being replaced by "no data". `at` is when the failed
+   * attempt happened; `fetchedAt` is when these numbers were read. A snapshot
+   * carrying this is always `stale`.
+   */
+  refreshFailed?: { at: string; reason: string };
+  /** Stored logins with a usage reader that the newest read had no reading
+   * for. Absent on an engine that does not list them. */
+  unreportedAccounts?: UsageUnreportedAccount[];
 }

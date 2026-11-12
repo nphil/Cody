@@ -74,6 +74,85 @@ export interface OmpSettingsSnapshot {
   values: Record<string, OmpSettingValue>;
 }
 
+/** The saved-reset groups whose single `autoRedeem` consent omp 18.18.7 split
+ * into one key per window. */
+const AUTO_REDEEM_GROUPS = ["codexResets", "claudeResets"] as const;
+const AUTO_REDEEM_WINDOW_KEYS = ["autoRedeem5h", "autoRedeemWeekly"] as const;
+const AUTO_REDEEM_MODES: ReadonlySet<string> = new Set(["unset", "yes", "no"]);
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+interface LegacyAutoRedeemPlan {
+  group: (typeof AUTO_REDEEM_GROUPS)[number];
+  /** What the engine copies into every window key that is not set yet:
+   * `true`/`false` become "yes"/"no"; a string is carried over as it is. */
+  mode: unknown;
+  /** The window keys (`autoRedeem5h`, ...) the engine would fill from the legacy value. */
+  fill: string[];
+}
+
+/** Which groups still carry the legacy `autoRedeem` (nested, or as the quoted
+ * dotted key) and which window keys omp would fill from it. Only for a group
+ * whose per-window keys the running engine's schema declares: an engine
+ * without them (18.8.x) still reads the single key itself. Mirrors omp's
+ * src/config/settings.ts migration (18.18.7+): the nested value wins over the
+ * flat one, a window key counts as set when it holds anything but undefined (a
+ * YAML null included), and the Fable window is never filled. omp writes the
+ * fill into the nested group when there is one; with no nested group it writes
+ * a quoted dotted key that its settings reader never picks up (checked on
+ * 18.19.0: `omp config get` says "unset"), so that case fills nothing here
+ * either: showing or materializing a consent the engine does not act on would
+ * grant new spending permission. */
+function planLegacyAutoRedeem(data: Record<string, unknown>, schemaKeys: ReadonlySet<string>): LegacyAutoRedeemPlan[] {
+  const plans: LegacyAutoRedeemPlan[] = [];
+  for (const group of AUTO_REDEEM_GROUPS) {
+    if (!AUTO_REDEEM_WINDOW_KEYS.every((key) => schemaKeys.has(`${group}.${key}`))) continue;
+    const nested = isPlainRecord(data[group]) ? data[group] : undefined;
+    const dotted = `${group}.autoRedeem`;
+    // The key being present at all (even as null) is dropped by the engine.
+    const present = (nested !== undefined && "autoRedeem" in nested) || dotted in data;
+    if (!present) continue;
+    const legacy = nested?.autoRedeem ?? data[dotted];
+    const mode = typeof legacy === "boolean" ? (legacy ? "yes" : "no") : legacy;
+    const fill =
+      nested === undefined || legacy === undefined || legacy === null
+        ? []
+        : AUTO_REDEEM_WINDOW_KEYS.filter((key) => nested[key] === undefined && data[`${group}.${key}`] === undefined);
+    plans.push({ group, mode, fill });
+  }
+  return plans;
+}
+
+/**
+ * The settings file as the engine sees it after its in-memory migration of the
+ * old single saved-reset switch (`codexResets.autoRedeem`, `claudeResets.autoRedeem`)
+ * into `autoRedeem5h` / `autoRedeemWeekly`. omp 18.18.7+ does this on load and
+ * leaves config.yml untouched, so the file alone shows those switches unset
+ * while the engine is already spending saved resets on the old consent.
+ *
+ * Pure: returns `data` itself when there is nothing to migrate, otherwise a
+ * copy with only the affected groups changed. `schemaKeys` is the running
+ * engine's declared key set; a group is left alone unless it declares both
+ * window keys, so an 18.8.x engine's values stay exactly as they are.
+ */
+export function migrateLegacyAutoRedeem(data: Record<string, unknown>, schemaKeys: ReadonlySet<string>): Record<string, unknown> {
+  const plans = planLegacyAutoRedeem(data, schemaKeys);
+  if (plans.length === 0) return data;
+  const migrated: Record<string, unknown> = { ...data };
+  for (const { group, mode, fill } of plans) {
+    const nested = isPlainRecord(data[group]) ? { ...data[group] } : undefined;
+    if (nested) {
+      delete nested.autoRedeem;
+      migrated[group] = nested;
+      for (const key of fill) nested[key] = mode;
+    }
+    delete migrated[`${group}.autoRedeem`];
+  }
+  return migrated;
+}
+
 /** Every schema-declared setting currently persisted in OMP's settings file. */
 export function readSchemaSettings(): OmpSettingsSnapshot {
   const schema = getOmpSettingsSchema();
@@ -82,8 +161,9 @@ export function readSchemaSettings(): OmpSettingsSnapshot {
   if (!schema) return { path, schema, values };
   const data = doc.toJS() as unknown;
   if (typeof data !== "object" || data === null || Array.isArray(data)) return { path, schema, values };
+  const source = migrateLegacyAutoRedeem(data as Record<string, unknown>, new Set(schema.settings.map((setting) => setting.key)));
   for (const setting of schema.settings) {
-    const raw = resolvePath(data as Record<string, unknown>, setting.key);
+    const raw = resolvePath(source, setting.key);
     if (raw === undefined || raw === null) continue;
     const value = coerce(setting, raw);
     if (value !== undefined) values[setting.key] = value;
@@ -126,6 +206,30 @@ export function readPersistedStringList(key: string): string[] | undefined {
   return raw.filter((entry): entry is string => typeof entry === "string");
 }
 
+/** Built-in context file names, lower-cased. Listing one in `contextFiles.extra`
+ * would load a second copy or bypass one-per-depth shadowing. Mirrors omp's
+ * session/context-settings.ts (18.17+). */
+const BUILTIN_CONTEXT_FILE_NAMES: Record<string, true> = {
+  "agents.md": true,
+  "claude.md": true,
+  "gemini.md": true,
+  "copilot-instructions.md": true,
+};
+
+/** Why `entry` is not a valid `contextFiles.extra` name, in omp's own words;
+ * undefined for a plain, non-built-in file name. The engine rejects a bad entry
+ * when the session starts, so catching it here keeps a broken list out of
+ * config.yml instead of failing every chat that follows. */
+function contextFileNameError(entry: string): string | undefined {
+  const name = entry.trim();
+  if (name === "") return "contextFiles.extra entries must not be empty";
+  if (BUILTIN_CONTEXT_FILE_NAMES[name.toLowerCase()] === true) return `contextFiles.extra cannot list a built-in context file (${name})`;
+  if (name === "." || name === ".." || name.includes("/") || name.includes("\\") || name.includes("\0")) {
+    return `contextFiles.extra entries must be file names, not paths (${name})`;
+  }
+  return undefined;
+}
+
 /** Validate one patch entry against its schema definition. `null` resets the
  * setting to OMP's default by removing the key. */
 function validate(setting: OmpSetting, value: unknown): OmpSettingValue | null {
@@ -148,6 +252,13 @@ function validate(setting: OmpSetting, value: unknown): OmpSettingValue | null {
       return value;
     case "array":
       if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) throw new Error(`${setting.key} must be a list of strings`);
+      if (setting.key === "contextFiles.extra") {
+        for (const entry of value as string[]) {
+          const problem = contextFileNameError(entry);
+          if (problem) throw new Error(problem);
+        }
+        return (value as string[]).map((entry) => entry.trim());
+      }
       return value as string[];
   }
 }
@@ -191,6 +302,26 @@ export function writeSchemaSettings(patch: Record<string, unknown>): string[] {
   // An empty settings file parses to null contents, which setIn fills in for
   // us; anything else that is not a mapping is not OMP's settings file.
   if (doc.contents !== null && !isMap(doc.contents)) throw new Error(`${path} must contain a YAML mapping`);
+  // Saving a per-window auto-redeem key while the legacy single key is still in
+  // the file: write BOTH windows out with what the engine already treats as
+  // their value, and drop the legacy key, in this same write. Left alone the
+  // untouched window would silently fall back to "unset" the moment omp
+  // rewrites the file itself.
+  const legacyGroups: string[] = [];
+  if (doc.contents !== null) {
+    const schemaKeys = new Set(byKey.keys());
+    const current = doc.toJS() as unknown;
+    for (const plan of planLegacyAutoRedeem(isPlainRecord(current) ? current : {}, schemaKeys)) {
+      const touched = Object.keys(patch).some((key) => key.startsWith(`${plan.group}.autoRedeem`) && key !== `${plan.group}.autoRedeem`);
+      if (!touched) continue;
+      legacyGroups.push(plan.group);
+      const mode = typeof plan.mode === "string" && AUTO_REDEEM_MODES.has(plan.mode) ? plan.mode : "unset";
+      for (const key of plan.fill) {
+        doc.deleteIn([`${plan.group}.${key}`]);
+        doc.setIn([plan.group, key], mode);
+      }
+    }
+  }
   for (const [key, value] of resolved) {
     if (value === null) deleteIn(doc, key);
     else {
@@ -199,6 +330,7 @@ export function writeSchemaSettings(patch: Record<string, unknown>): string[] {
       doc.setIn(key.split("."), value);
     }
   }
+  for (const group of legacyGroups) deleteIn(doc, `${group}.autoRedeem`);
 
   mkdirSync(dirname(path), { recursive: true });
   const temp = `${path}.tmp-${process.pid}-${Date.now()}`;

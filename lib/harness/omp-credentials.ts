@@ -7,6 +7,11 @@ import { getAgentDir } from "../omp/paths";
 import { findOmpPackageRoot } from "../omp/package-source";
 import { resolveOmpBin } from "../omp/omp-cli";
 
+/** One unexpired rate-limit block on a credential. `scope` is omp's
+ *  `blockScope` ('' = the whole account; omp 18.19+ also scopes a block to a
+ *  Claude tier, a Codex lane, a Cursor pool, …; an OMP without the concept
+ *  always reports ''). `until` is epoch milliseconds. */
+export interface OmpCredentialBlock { scope: string; until: number | null }
 /** One stored OMP credential row, active or disabled — never the credential
  * object itself, so a token/refresh/api key can never reach this process. */
 export interface OmpCredentialRow {
@@ -18,12 +23,16 @@ export interface OmpCredentialRow {
   disabledCause: string | null;
   /** ISO timestamp of the latest UNEXPIRED rate-limit block, or null. */
   blockedUntil: string | null;
+  /** Every unexpired block, one per scope. Absent on a row from a source that
+   *  predates scopes: read it as one '' block ending at `blockedUntil`. */
+  blocks?: OmpCredentialBlock[];
   /** omp's `credential_pin` digest for this OAuth account (sha256 hex), the
    *  value a session file records for the account that served it; null for
    *  API keys, disabled rows, or an OMP build that cannot compute it. */
   pinHash: string | null;
 }
-export interface OmpCredentialsSnapshot { available: boolean; credentials: OmpCredentialRow[]; reason?: string; }
+/** `stale`: the rows are the last successful read, returned because the latest one failed (`reason` says why). */
+export interface OmpCredentialsSnapshot { available: boolean; credentials: OmpCredentialRow[]; reason?: string; stale?: boolean; }
 /** `count` (provider-wide removal only): how many stored accounts that signed out. */
 export interface OmpCredentialRemoval { removed: boolean; providerRemoved: boolean; count?: number; code?: string; message?: string; }
 
@@ -82,6 +91,25 @@ function invoke(request: HelperRequest, deps: OmpCredentialBridgeDeps = {}): Pro
   return promise;
 }
 function safeString(value: unknown): string | null { return typeof value === "string" && value.trim() ? value.trim() : null; }
+/** The helper's `blocks` array, kept to well-formed `{scope, until}` entries. A
+ *  row without the array (a helper that predates scopes) falls back to one
+ *  account-wide '' block ending at `blockedUntil`, so every row carries them. */
+function safeBlocks(raw: Record<string, unknown>, blockedUntil: string | null): OmpCredentialBlock[] {
+  if (!Array.isArray(raw.blocks)) {
+    const ms = blockedUntil ? Date.parse(blockedUntil) : Number.NaN;
+    return Number.isFinite(ms) ? [{ scope: "", until: ms }] : [];
+  }
+  const byScope = new Map<string, number | null>();
+  for (const entry of raw.blocks) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const block = entry as Record<string, unknown>;
+    const scope = typeof block.scope === "string" ? block.scope : "";
+    const until = typeof block.until === "number" && Number.isFinite(block.until) ? block.until : null;
+    const known = byScope.get(scope);
+    if (known === undefined || (until ?? 0) > (known ?? 0)) byScope.set(scope, until);
+  }
+  return [...byScope].map(([scope, until]) => ({ scope, until }));
+}
 function safeCredentialRow(value: unknown): OmpCredentialRow | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const raw = value as Record<string, unknown>;
@@ -89,6 +117,7 @@ function safeCredentialRow(value: unknown): OmpCredentialRow | null {
   const provider = safeString(raw.provider);
   const type = raw.type === "oauth" || raw.type === "api_key" ? raw.type : null;
   if (id === null || !provider || !type) return null;
+  const blockedUntil = safeString(raw.blockedUntil);
   return {
     id,
     provider,
@@ -96,7 +125,8 @@ function safeCredentialRow(value: unknown): OmpCredentialRow | null {
     identity: safeString(raw.identity),
     planType: safeString(raw.planType),
     disabledCause: safeString(raw.disabledCause),
-    blockedUntil: safeString(raw.blockedUntil),
+    blockedUntil,
+    blocks: safeBlocks(raw, blockedUntil),
     pinHash: typeof raw.pinHash === "string" && /^[0-9a-f]{64}$/.test(raw.pinHash) ? raw.pinHash : null,
   };
 }
@@ -122,6 +152,32 @@ export async function listOmpCredentials(deps: OmpCredentialBridgeDeps = {}): Pr
   const agentDir = deps.agentDir?.() ?? getAgentDir();
   const frame = await invoke({ operation: "list", packageRoot, agentDir }, deps);
   return normalizeList(frame);
+}
+
+/** A transient helper failure must not drop block information for long: past
+ *  this age a remembered list is no longer the best available fact. */
+const KEPT_CREDENTIALS_MAX_AGE_MS = 15 * 60_000;
+declare global {
+  var __codyLastCredentialRows: { at: number; credentials: OmpCredentialRow[] } | undefined;
+}
+
+/**
+ * `listOmpCredentials`, remembering the last SUCCESSFUL list. When a later call
+ * fails (the helper timed out, the store was locked for a moment) the remembered
+ * rows come back marked `stale`, so a rate-limit block already seen keeps
+ * routing around its account instead of vanishing for one read. A failure with
+ * nothing remembered, or older than 15 minutes, is reported as it is. Blocks
+ * carry their own deadline, so a remembered one still expires on time.
+ */
+export async function listOmpCredentialsKeepingLast(deps: OmpCredentialBridgeDeps = {}): Promise<OmpCredentialsSnapshot> {
+  const fresh = await listOmpCredentials(deps);
+  if (fresh.available) {
+    globalThis.__codyLastCredentialRows = { at: Date.now(), credentials: fresh.credentials };
+    return fresh;
+  }
+  const last = globalThis.__codyLastCredentialRows;
+  if (!last || Date.now() - last.at > KEPT_CREDENTIALS_MAX_AGE_MS) return fresh;
+  return { available: true, credentials: last.credentials, stale: true, reason: fresh.reason };
 }
 export async function removeOmpCredential(provider: string, credentialId: number, deps: OmpCredentialBridgeDeps = {}): Promise<OmpCredentialRemoval> {
   const unavailable = deps.packageRoot ? null : bridgeUnavailable();

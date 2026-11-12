@@ -3,7 +3,7 @@ import { join } from "path";
 import type { ModelCatalogEntry } from "./model-catalog";
 import { invalidateModelsCache } from "./models-cache";
 import { loadModelsDevCatalog } from "./models-dev";
-import { bundledModelKey, readBundledModelKeys } from "./omp/bundled-catalog";
+import { bundledModelKey, readBundledCatalog } from "./omp/bundled-catalog";
 import { readModelsConfigFile, writeModelsConfig, type ModelsFileConfig } from "./omp/models-config";
 import { getAgentDir } from "./omp/paths";
 import { disposeUtilityRpc } from "./omp/rpc-utility";
@@ -283,9 +283,11 @@ export interface PriceFillResult {
 export async function fillMissingModelPrices(catalog: readonly CatalogModel[]): Promise<PriceFillResult> {
   const empty: PriceFillResult = { filled: [], updated: [], handedBack: [] };
   // Without omp's own list Cody cannot tell a deliberate zero from a missing
-  // price, so it does nothing rather than guess.
-  const bundled = readBundledModelKeys();
-  if (!bundled) return { ...empty, reason: "omp's bundled catalog could not be read" };
+  // price, so it does nothing rather than guess (and says why: a catalog Cody
+  // cannot read means an omp release changed its layout, which wants a fix).
+  const read = readBundledCatalog();
+  if (!read.ok) return { ...empty, reason: `omp's bundled catalog could not be read: ${read.reason}` };
+  const bundled = read.catalog.keys;
   const file = readModelsConfigFile();
   if (file.parseError) return { ...empty, reason: file.parseError };
   const entries = await loadModelsDevCatalog();
@@ -323,7 +325,7 @@ export async function fillMissingModelPrices(catalog: readonly CatalogModel[]): 
 const FILL_INTERVAL_MS = 30 * 60_000;
 
 declare global {
-  var __codyPriceFillState: { lastRunAt: number; inFlight: Promise<PriceFillResult> | null } | undefined;
+  var __codyPriceFillState: { lastRunAt: number; inFlight: Promise<PriceFillResult> | null; lastReason?: string } | undefined;
 }
 
 /**
@@ -343,6 +345,9 @@ export function fillMissingModelPricesInBackground(
   state.lastRunAt = Date.now();
   state.inFlight = fillMissingModelPrices(catalog)
     .then(async (result) => {
+      // A reason that does not change is said once, not every half hour.
+      if (result.reason && result.reason !== state.lastReason) console.warn(`[cody] model price fill skipped: ${result.reason}`);
+      state.lastReason = result.reason;
       if (result.filled.length || result.updated.length || result.handedBack.length) await onChanged?.(result);
       return result;
     })

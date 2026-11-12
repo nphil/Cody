@@ -4,9 +4,9 @@ import type { RunRecoveryLimits } from "./limits";
 /**
  * Which tool calls in flight have outlived what they can honestly take.
  *
- * Pure: the supervisor hands it the main agent's tool calls (from
- * `tool_execution_start` / `_update` / `_end`) and the clock. Only omp's tools
- * are judged here, because only omp's deadlines are known; an engine that
+ * Pure: the supervisor hands it the main agent's tool calls (entered by
+ * `tool_execution_start`, refreshed by `_update`, removed by `_end`) and the clock.
+ * Only omp's tools are judged here, because only omp's deadlines are known; an engine that
  * names a tool `bash` too (pi's has no timeout at all) must not be held to
  * omp's, and the supervisor says so by not asking.
  */

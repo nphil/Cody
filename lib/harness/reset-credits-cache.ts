@@ -41,6 +41,8 @@ export interface ConfirmedResetAccount { account: ResetCreditAccount; checkedAt:
  * - An account whose check failed keeps its confirmed answer, marked `stale`
  *   (the count is the last one confirmed); with none, it is marked `retrying`.
  * - A listing that failed outright serves every confirmed answer as stale.
+ * - A provider the listing could not read at all (`failedProviders`) keeps its
+ *   confirmed accounts as stale, even though the listing named none of them.
  * - Accounts no longer listed (logged out) are dropped.
  */
 export function mergeResetCredits(
@@ -74,7 +76,18 @@ export function mergeResetCredits(
     next.set(account.id, { account: fresh, checkedAt });
     return fresh;
   });
-  return { snapshot: { ...live, accounts, fetchedAt: checkedAt }, confirmed: next, failed };
+  // A provider that threw returns no rows, which is not the same as "logged
+  // out": its confirmed accounts stay, marked as carried over.
+  const unread = new Set(live.failedProviders ?? []);
+  const listed = new Set(live.accounts.map((account) => account.id));
+  for (const [id, previous] of confirmed) {
+    if (listed.has(id) || !previous.account.provider || !unread.has(previous.account.provider)) continue;
+    failed = true;
+    next.set(id, previous);
+    accounts.push({ ...previous.account, checkedAt: previous.checkedAt, stale: true });
+  }
+  const { failedProviders: _failedProviders, ...rest } = live;
+  return { snapshot: { ...rest, accounts, fetchedAt: checkedAt }, confirmed: next, failed };
 }
 
 interface ResetCreditsCacheState {
@@ -168,6 +181,10 @@ export function getResetCredits(options: GetResetCreditsOptions = {}): Promise<R
     return merged.snapshot;
   })().catch((error: unknown) => {
     // listResetCredits fails soft; this only guards the merge/store plumbing.
+    // The last good reading stays served, and the retry backs off like any failed check.
+    cache.failures += 1;
+    cache.liveAt = now;
+    cache.nextLiveAt = now + Math.min(RESET_CREDITS_RETRY_MAX_MS, RESET_CREDITS_RETRY_BASE_MS * 2 ** (cache.failures - 1));
     return cache.snapshot ?? { available: false, accounts: [], fetchedAt: new Date(now).toISOString(), reason: error instanceof Error ? error.message : String(error) };
   }).finally(() => {
     cache.inFlight = null;

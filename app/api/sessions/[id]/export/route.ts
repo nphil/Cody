@@ -128,11 +128,15 @@ export async function GET(
           // policy, plus frame-ancestors 'self' so the top-bar history panel
           // can frame it (per spec this also supersedes X-Frame-Options).
           // Mirrors the docx preview in /api/files.
-          // cdnjs is allowed in script-src because the exporter renders the
-          // transcript client-side with SRI-pinned marked and highlight.js from
-          // that CDN; blocking it silently yields an empty transcript. This
-          // makes the rendered transcript depend on outbound access to cdnjs.
-          "Content-Security-Policy": "default-src 'none'; img-src 'self' data: blob: https:; style-src 'unsafe-inline'; script-src 'unsafe-inline' 'unsafe-eval' https://cdnjs.cloudflare.com; font-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
+          // The exporter renders the transcript client-side with SRI-pinned
+          // scripts, so script-src names their hosts; blocking them silently
+          // yields an empty transcript ("Loading session viewer…" forever).
+          // omp 18.8.x pulled marked and highlight.js from cdnjs; omp 18.14+
+          // writes a 6 KB page that loads marked, highlight.js and its viewer
+          // bundle from stencil.so and build.stencil.so. Both are allowed so
+          // either engine version works. The rendered transcript therefore
+          // depends on the viewer's browser reaching those hosts.
+          "Content-Security-Policy": "default-src 'none'; img-src 'self' data: blob: https:; style-src 'unsafe-inline'; script-src 'unsafe-inline' 'unsafe-eval' https://cdnjs.cloudflare.com https://stencil.so https://build.stencil.so; font-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
           "Referrer-Policy": "no-referrer",
           "X-Content-Type-Options": "nosniff",
         },

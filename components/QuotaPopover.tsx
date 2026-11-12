@@ -23,12 +23,12 @@ import { toast } from "@/components/ui/toast";
 import { formatRelativeTime, formatResetTime, usageToneColor } from "@/lib/format";
 import { QuotaBar, clampQuotaPercent } from "@/components/QuotaBar";
 import { OpenRouterCredits } from "./OpenRouterCredits";
-import type { UseResetCreditsResult, ResetCreditAccount } from "@/hooks/useUsage";
+import type { UseResetCreditsResult, ResetCredit, ResetCreditAccount } from "@/hooks/useUsage";
 import type { UseOpenRouterAccountResult } from "@/hooks/useOpenRouterAccount";
 import { evidenceFromSessionAccount, rankProviderAccounts, selectBindingWindow, selectWindowsForModel, type AccountEvidence, type ModelRef } from "@/lib/usage/select";
 import { resolveModelAvailability } from "@/lib/usage/availability";
 import { usageProviderFor } from "@/lib/usage/provider-map";
-import type { UsageAccount, UsageAccountService, UsageInUseBasis, UsageSnapshot, UsageWindow, UsageWindowState } from "@/lib/usage/types";
+import type { UsageAccount, UsageAccountPolicy, UsageAccountService, UsageInUseBasis, UsageSnapshot, UsageWindow, UsageWindowAmount, UsageWindowState } from "@/lib/usage/types";
 import { brandAccountLabel } from "@/lib/provider-brand";
 import { ProviderIcon } from "./ProviderIcon";
 import { translate, useI18n } from "@/lib/i18n";
@@ -38,6 +38,10 @@ import { ConfirmDialog } from "./ui/field";
 import { useSettingsOpener } from "./settings/shell-context";
 import type { UsageLimitState } from "@/lib/pi-types";
 import { describeUsageLimit } from "@/lib/slow-mode-state";
+import { credentialProviderName } from "@/hooks/credential-notices";
+import { isSignedOutCause } from "@/lib/usage/credential-health";
+import { creditExpiryState, describeAccountPolicy, describeCreditClears, describeWindowAmount, formatCreditDate, isFiveHourIdle, providerUsesPriority, type CopyTranslate } from "@/lib/usage/quota-copy";
+import { AutoSpendSection } from "./QuotaAutoSpend";
 
 /** Stable empty list keeps quota derivation memo-friendly when no session is live. */
 const NO_ACTIVE_MODELS: readonly SessionActiveModel[] = [];
@@ -54,6 +58,8 @@ export interface QuotaWindowView {
    *  rather than a read utilization. Surfaced as short honesty text, never
    *  silently painted like a normal reading. */
   blocked: boolean;
+  /** What a money or credit meter measured ("$3.20 of $10"); absent for a plain percentage window. */
+  amount?: UsageWindowAmount;
 }
 
 /** A non-selected window that constrains work still active in this session. */
@@ -78,6 +84,36 @@ export interface QuotaOtherWindowView {
   exhausted: boolean;
   resetsAt: string | null;
   blocked: boolean;
+  amount?: UsageWindowAmount;
+}
+
+/** What the popover can say about one account beyond its quota numbers. Every
+ *  field is present only when it has something to say, so an account with
+ *  nothing special keeps the plain shape it always had. Raw facts, not words:
+ *  the popover words them (lib/usage/quota-copy) in the reader's language. */
+export interface QuotaAccountFacts {
+  /** omp's routing policy for this login: which one it uses first, how much
+   *  quota it keeps back, and where this one stands right now. */
+  policy?: UsageAccountPolicy;
+  /** Another login of this provider has a non-default priority, so this
+   *  one's policy line names its priority too. */
+  showPriority?: boolean;
+  /** No 5-hour window is reported yet: it starts counting with the next message. */
+  fiveHourIdle?: boolean;
+  /** ISO time of the earlier read these numbers are carried over from; set
+   *  only when the newest read left this account out. */
+  windowsStaleSince?: string;
+}
+
+/** Facts about the whole read, present on every view so the footer never has
+ *  to guess whether the numbers on screen are current. */
+export interface QuotaReadFacts {
+  /** The newest read failed and the numbers shown are the last good ones:
+   *  `readAt` is when they were read, `at` when the refresh failed. */
+  refreshFailed?: { at: string; reason: string; readAt: string };
+  /** Signed-in logins omp could not read a quota for, and which providers
+   *  they belong to. Never who they are: identities can be email addresses. */
+  unreported?: { count: number; providers: string[] };
 }
 
 /** One account among several serving the same provider as the selected
@@ -87,7 +123,7 @@ export interface QuotaOtherWindowView {
  *  provider never grows this list. `label` is a position ("Primary",
  *  "Secondary", …), never the account's raw identity, which can be an email
  *  address or an org name. */
-export interface QuotaAccountRowView {
+export interface QuotaAccountRowView extends QuotaAccountFacts {
   key: string;
   label: string;
   state: UsageAccountService;
@@ -101,7 +137,7 @@ export interface QuotaAccountRowView {
   blocked: boolean;
 }
 
-export interface QuotaKnownView {
+export interface QuotaKnownView extends QuotaAccountFacts, QuotaReadFacts {
   known: true;
   /** Engine provider id of the binding account, for the header's brand mark. */
   provider: string;
@@ -111,6 +147,7 @@ export interface QuotaKnownView {
   label: string;
   resetsAt: string | null;
   blocked: boolean;
+  amount?: UsageWindowAmount;
   windows: QuotaWindowView[];
   /** Non-selected models with work in this session, always expanded. */
   inUse: QuotaInUseWindowView[];
@@ -129,7 +166,7 @@ export interface QuotaKnownView {
   resetCredits: UsageAccount["resetCredits"];
 }
 
-export interface QuotaAbsentView {
+export interface QuotaAbsentView extends QuotaReadFacts {
   known: false;
   color: string;
   /** i18n key standing in for the headline percentage's meaning. */
@@ -143,9 +180,10 @@ export interface QuotaAbsentView {
   others: QuotaOtherWindowView[];
   inUse: QuotaInUseWindowView[];
   /** Set when every account that could serve the selected model's provider
-   *  was signed out: its login expired and omp disabled it, so the only fix
-   *  is signing in again. The ring wears the warning dot and the popover
-   *  links to Settings › Providers on `provider` (a usage-provider id). */
+   *  is unusable: its login expired and omp disabled it, or omp turned it
+   *  off for another reason. Either way the only fix is signing in again.
+   *  The ring wears the warning dot and the popover links to Settings ›
+   *  Providers on `provider` (a usage-provider id). */
   signedOut?: { provider: string };
 }
 
@@ -211,6 +249,23 @@ const QUOTA_SIGNED_OUT: QuotaAbsentView = {
   others: [],
 };
 
+/** Like QUOTA_SIGNED_OUT, but omp itself turned every login off for a reason
+ *  that is not an ended sign-in (removed, replaced, switched off by an
+ *  operator). Nothing can be read or spent, so it must not look like silence
+ *  about limits, but it is not offered a sign-in either: there is no
+ *  `signedOut` on it, so the ring wears no sign-in dot and the popover no
+ *  button. The warning colour and the words are the whole message. */
+const QUOTA_DISABLED: QuotaAbsentView = {
+  known: false,
+  color: "var(--status-warning)",
+  titleKey: "usage.disabledTitle",
+  noteKey: "usage.disabledNote",
+  scopeKey: "usage.disabledScope",
+  reason: null,
+  inUse: [],
+  others: [],
+};
+
 /** Providers that bill a prepaid balance instead of a refilling plan window,
  *  and therefore have a credit balance worth reading. Exported so the composer
  *  gates its OpenRouter poll on the SAME predicate the quota view branches on:
@@ -229,6 +284,10 @@ export function isPrepaidProvider(provider: string | null | undefined): boolean 
  * translation on top, and only marks on a positive "exhausted" verdict:
  * "unknown" (no mapping, or the snapshot has nothing to say) and "warning"
  * both render nothing extra, same as a model with quota on another account.
+ * So does "unavailable" (every login of the provider is signed out or turned
+ * off): that is a login problem the ring and popover already spell out for
+ * the SELECTED model, not a spent limit, so the picker never grays out or
+ * blocks a model whose login the owner may fix a moment later.
  */
 export function modelLimitReached(
   snapshot: UsageSnapshot | null | undefined,
@@ -362,6 +421,45 @@ function mergeModelUses(target: SessionActiveModel["uses"], incoming: SessionAct
   }
 }
 
+/** `{ amount }` only when the window measured one, so a plain percentage
+ *  window keeps exactly the shape it always had. */
+function amountOf(window: Pick<UsageWindow, "amount">): { amount?: UsageWindowAmount } {
+  return window.amount ? { amount: window.amount } : {};
+}
+
+/** The routing and freshness facts worth a line under one account. Only the
+ *  ones that have something to say are set, so a login on omp's default
+ *  policy with a live 5-hour window keeps its plain shape. */
+function accountFacts(accounts: readonly UsageAccount[], account: UsageAccount): QuotaAccountFacts {
+  const facts: QuotaAccountFacts = {};
+  const showPriority = providerUsesPriority(accounts, account.provider);
+  // Asking for the words (with the keys standing in as the translation) is
+  // how this knows what is worth saying: the default policy says nothing.
+  if (account.policy && describeAccountPolicy(account.policy, (key) => key, { showPriority })) {
+    facts.policy = account.policy;
+    if (showPriority) facts.showPriority = true;
+  }
+  if (isFiveHourIdle(account)) facts.fiveHourIdle = true;
+  if (typeof account.windowsStaleSince === "string") facts.windowsStaleSince = account.windowsStaleSince;
+  return facts;
+}
+
+/** What the whole read says about itself, added to whichever view came out:
+ *  a refresh that failed (the numbers are the last good ones) and stored
+ *  logins omp could not read. Providers only — never who the logins are. */
+function withReadFacts(view: QuotaView, snapshot: UsageSnapshot): QuotaView {
+  const facts: QuotaReadFacts = {};
+  const failure = snapshot.refreshFailed;
+  if (failure && typeof failure.at === "string") {
+    facts.refreshFailed = { at: failure.at, reason: failure.reason, readAt: snapshot.fetchedAt };
+  }
+  const unreported = snapshot.unreportedAccounts ?? [];
+  if (unreported.length > 0) {
+    facts.unreported = { count: unreported.length, providers: [...new Set(unreported.map((account) => account.provider))] };
+  }
+  return facts.refreshFailed || facts.unreported ? { ...view, ...facts } : view;
+}
+
 /**
  * Windows for concrete non-selected models with attributable session work.
  * A shared provider window is rendered once with every reason it is active;
@@ -411,6 +509,7 @@ function buildInUseWindows(
         exhausted: quotaWindow.state === "exhausted",
         resetsAt: quotaWindow.resetsAt,
         blocked: quotaWindow.source === "block",
+        ...amountOf(quotaWindow),
         uses: active.uses.map((use) => ({ kind: use.kind, label: use.label })),
       });
     }
@@ -461,6 +560,7 @@ function buildOtherWindows(
       exhausted: binding.window.state === "exhausted",
       resetsAt: binding.window.resetsAt,
       blocked: binding.window.source === "block",
+      ...amountOf(binding.window),
     });
   });
   return rows.sort((a, b) => (
@@ -483,6 +583,18 @@ function buildOtherWindows(
  *  no limits, and this model's provider reporting limits none of which apply to
  *  it. Only an actual answer is entitled to say anything about the engine. */
 export function buildQuotaView(
+  snapshot: UsageSnapshot | null,
+  loading: boolean,
+  failed = false,
+  model?: ModelRef | null,
+  activeModels: readonly SessionActiveModel[] = NO_ACTIVE_MODELS,
+): QuotaView {
+  const view = buildQuotaViewCore(snapshot, loading, failed, model, activeModels);
+  return snapshot ? withReadFacts(view, snapshot) : view;
+}
+
+/** The view for one snapshot, before the facts about the read itself are added. */
+function buildQuotaViewCore(
   snapshot: UsageSnapshot | null,
   loading: boolean,
   failed = false,
@@ -549,6 +661,7 @@ export function buildQuotaView(
           planType: rank.account.planType,
           position: providerAccounts.indexOf(rank.account),
           blocked: rank.binding?.source === "block",
+          ...accountFacts(accounts, rank.account),
         }))
       : [];
     const accountsBasis = accountRows.length > 0 ? (ranks.find((rank) => rank.state === "in_use")?.basis ?? null) : null;
@@ -573,6 +686,11 @@ export function buildQuotaView(
       if (lead?.state === "signed_out") {
         return { ...QUOTA_SIGNED_OUT, signedOut: { provider: lead.account.provider }, inUse, others };
       }
+      // Another cause: omp itself turned every login off. Said plainly, never
+      // as "unmetered", and never with a sign-in the owner may not want.
+      if (lead?.state === "disabled") {
+        return { ...QUOTA_DISABLED, inUse, others };
+      }
       // Three different silences, and the copy has to tell them apart: no
       // account serves this provider / the account is unmetered / the account
       // reports quota that all belongs to other models.
@@ -595,6 +713,8 @@ export function buildQuotaView(
       label: nameWindow(match.account, modelBinding.label),
       resetsAt: modelBinding.resetsAt,
       blocked: modelBinding.source === "block",
+      ...amountOf(modelBinding),
+      ...accountFacts(accounts, match.account),
       // Already most-binding-first from the selector, and left in that order:
       // the row a user reads first is the one that stops them first.
       windows: match.windows.map((quotaWindow) => {
@@ -608,6 +728,7 @@ export function buildQuotaView(
           exhausted: quotaWindow.state === "exhausted",
           resetsAt: quotaWindow.resetsAt,
           blocked: quotaWindow.source === "block",
+          ...amountOf(quotaWindow),
         };
       }),
       others,
@@ -622,7 +743,16 @@ export function buildQuotaView(
   }
 
   const binding = selectBindingWindow(accounts);
-  if (!binding) return { ...QUOTA_UNREPORTED, reason: readableReason(snapshot.reason) };
+  if (!binding) {
+    // Nothing to gauge because no login can be used is not the engine having
+    // reported no limits: say what is wrong, and where it is fixed.
+    const unusable = accounts.filter((account) => account.disabled);
+    if (unusable.length > 0 && unusable.length === accounts.length) {
+      const endedLogin = unusable.find((account) => isSignedOutCause(account.disabled?.cause));
+      return endedLogin ? { ...QUOTA_SIGNED_OUT, signedOut: { provider: endedLogin.provider } } : QUOTA_DISABLED;
+    }
+    return { ...QUOTA_UNREPORTED, reason: readableReason(snapshot.reason) };
+  }
 
   const windows: QuotaWindowView[] = accounts
     // Window ids are unique only WITHIN an account, so two subscriptions on
@@ -640,6 +770,7 @@ export function buildQuotaView(
         exhausted: quotaWindow.state === "exhausted",
         resetsAt: quotaWindow.resetsAt,
         blocked: quotaWindow.source === "block",
+        ...amountOf(quotaWindow),
       };
     }))
     .sort((a, b) => b.percent - a.percent);
@@ -654,6 +785,8 @@ export function buildQuotaView(
     label: nameWindow(binding.account, binding.window.label),
     resetsAt: binding.window.resetsAt,
     blocked: binding.window.source === "block",
+    ...amountOf(binding.window),
+    ...accountFacts(accounts, binding.account),
     windows,
     // The account-wide list above already shows every window there is.
     inUse: [],
@@ -672,6 +805,28 @@ export function buildQuotaView(
  * window segment without changing the reported value itself. */
 function formatQuotaLabel(label: string, locale: string): string {
   return label.replace(/(^|·\s*)(\p{Ll})/gu, (_match, prefix: string, letter: string) => prefix + letter.toLocaleUpperCase(locale));
+}
+
+/** The small print after a window's percentage: what a money or credit meter
+ *  measured ("$3.20 of $10"), the honesty tag for a window omp only knows from
+ *  one rejected request, and when it resets. */
+function windowMeta(
+  entry: { blocked: boolean; resetsAt: string | null; amount?: UsageWindowAmount },
+  locale: string,
+  now: number,
+  t: CopyTranslate,
+): string | null {
+  const resetTime = formatResetTime(entry.resetsAt, locale, now);
+  return [
+    describeWindowAmount(entry.amount, locale, t),
+    entry.blocked ? t("usage.blockedTag") : null,
+    resetTime ? t("usage.resetsAt", { time: resetTime }) : null,
+  ].filter(Boolean).join(" · ") || null;
+}
+
+/** "Claude and Codex": provider ids as the owner knows them. */
+function listProviderNames(providers: readonly string[], locale: string): string {
+  return new Intl.ListFormat(locale, { style: "long", type: "conjunction" }).format(providers.map(credentialProviderName));
 }
 
 /* ────────────────────────── Presentational rows ────────────────────────── */
@@ -710,7 +865,7 @@ function WindowLine({
           {`${Math.round(percent)}%`}
         </span>
         {metaText && (
-          <span style={{ flex: 1, minWidth: 0, fontSize: 11, color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          <span title={metaText} style={{ flex: 1, minWidth: 0, fontSize: 11, color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {`· ${metaText}`}
           </span>
         )}
@@ -721,6 +876,53 @@ function WindowLine({
         </div>
       )}
       <QuotaBar percent={percent} color={color} height={meterHeight} dimmed={muted} />
+    </div>
+  );
+}
+
+/** A small warning tag: "Expires soon". */
+function ExpiresSoonPill({ label, testId }: { label: string; testId: string }) {
+  return (
+    <span
+      data-testid={testId}
+      style={{ flexShrink: 0, padding: "0 6px", border: "1px solid var(--status-warning)", borderRadius: 999, color: "var(--status-warning)", fontSize: 10, fontWeight: 700, lineHeight: "15px", whiteSpace: "nowrap" }}
+    >
+      {label}
+    </span>
+  );
+}
+
+/** The quiet lines under an account: how omp routes to it, that its 5-hour
+ *  window has not started yet, and that its numbers are carried over from an
+ *  earlier read. Each shows only when it has something to say. */
+function AccountFactLines({
+  facts,
+  locale,
+  now,
+  t,
+  inset = 0,
+  marginTop = 0,
+}: {
+  facts: QuotaAccountFacts;
+  locale: string;
+  now: number;
+  t: CopyTranslate;
+  /** Left padding in px, so the lines under an Accounts row line up with its label. */
+  inset?: number;
+  /** Space above the block, for when it follows other hero lines. */
+  marginTop?: number;
+}) {
+  const policy = describeAccountPolicy(facts.policy, t, { showPriority: facts.showPriority });
+  const asOf = facts.windowsStaleSince ? formatResetTime(facts.windowsStaleSince, locale, now) : null;
+  if (!policy && !facts.fiveHourIdle && !asOf) return null;
+  const line: React.CSSProperties = { fontSize: 11, lineHeight: 1.35, color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 1, paddingLeft: inset, marginTop, minWidth: 0 }}>
+      {policy && <div data-testid="quota-account-policy" title={policy.detail} style={line}>{policy.line}</div>}
+      {facts.fiveHourIdle && (
+        <div data-testid="quota-five-hour-idle" title={t("usage.fiveHourIdleDetail")} style={line}>{t("usage.fiveHourIdle")}</div>
+      )}
+      {asOf && <div data-testid="quota-windows-as-of" title={t("usage.windowsAsOfDetail")} style={line}>{t("usage.windowsAsOf", { time: asOf })}</div>}
     </div>
   );
 }
@@ -752,56 +954,63 @@ function AccountRow({
   const tone = ACCOUNT_STATE_COLOR[account.state];
   const resetTime = account.state === "limited" ? formatResetTime(account.resetsAt, locale, now) : null;
   const rightText = account.state === "limited"
-    ? (resetTime ? t("usage.accountLimited", { time: resetTime }) : t(ACCOUNT_STATE_LABEL_KEYS.limited))
+    ? (resetTime ? t("usage.accountLimited", { time: resetTime }) : t("usage.accountLimitedNoTime"))
     : account.state === "disabled"
       ? t(ACCOUNT_STATE_LABEL_KEYS.disabled)
       : null;
+  // The limited state's own text has a "{time}" slot to fill, so a hover title
+  // says what the state MEANS instead: omp stays on a fallback until the reset.
+  const stateTitle = account.state === "limited" ? t("usage.accountLimitedTooltip") : t(ACCOUNT_STATE_LABEL_KEYS[account.state]);
   const canUseReset = account.state === "limited" && reset !== null;
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-      <span
-        aria-hidden="true"
-        title={t(ACCOUNT_STATE_LABEL_KEYS[account.state])}
-        style={{ flexShrink: 0, width: 7, height: 7, borderRadius: "50%", background: tone }}
-      />
-      <span style={{ flex: 1, minWidth: 0, fontSize: 12, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-        {account.label}
-        {/* Which account is serving has to read at a glance, not from a dot's
-            hover title; limited/disabled already say so on the right. */}
-        {(account.state === "in_use" || account.state === "standby") && (
-          <span data-testid="quota-account-state" style={{ marginLeft: 6, fontSize: 11, color: account.state === "in_use" ? tone : "var(--text-dim)" }}>
-            {t(ACCOUNT_STATE_LABEL_KEYS[account.state])}
+    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+        <span
+          aria-hidden="true"
+          title={stateTitle}
+          style={{ flexShrink: 0, width: 7, height: 7, borderRadius: "50%", background: tone }}
+        />
+        <span style={{ flex: 1, minWidth: 0, fontSize: 12, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {account.label}
+          {/* Which account is serving has to read at a glance, not from a dot's
+              hover title; limited/disabled already say so on the right. */}
+          {(account.state === "in_use" || account.state === "standby") && (
+            <span data-testid="quota-account-state" style={{ marginLeft: 6, fontSize: 11, color: account.state === "in_use" ? tone : "var(--text-dim)" }}>
+              {t(ACCOUNT_STATE_LABEL_KEYS[account.state])}
+            </span>
+          )}
+        </span>
+        {canUseReset && (
+          <button
+            type="button"
+            onClick={() => onUseReset(reset, account.label)}
+            style={{ flexShrink: 0, padding: "1px 6px", border: "1px solid var(--border)", borderRadius: 5, background: "transparent", color: "var(--text-muted)", cursor: "pointer", fontSize: 11 }}
+          >
+            {t("usage.useReset")}
+          </button>
+        )}
+        {account.state === "signed_out" ? (
+          <button
+            type="button"
+            data-testid="quota-account-sign-in"
+            title={t("usage.accountSignedOutTooltip")}
+            onClick={onSignIn}
+            className="ui-focus-ring"
+            style={{ flexShrink: 0, padding: "1px 6px", border: `1px solid ${tone}`, borderRadius: 5, background: "transparent", color: tone, cursor: "pointer", fontSize: 11, fontWeight: 700 }}
+          >
+            {t(ACCOUNT_STATE_LABEL_KEYS.signed_out)}
+          </button>
+        ) : (
+          <span
+            title={account.blocked ? t("usage.blockedTag") : account.state === "limited" ? stateTitle : undefined}
+            style={{ flexShrink: 0, fontSize: 11, fontWeight: 700, color: tone, fontVariantNumeric: "tabular-nums" }}
+          >
+            {rightText ?? `${Math.round(account.percent)}%`}
           </span>
         )}
-      </span>
-      {canUseReset && (
-        <button
-          type="button"
-          onClick={() => onUseReset(reset, account.label)}
-          style={{ flexShrink: 0, padding: "1px 6px", border: "1px solid var(--border)", borderRadius: 5, background: "transparent", color: "var(--text-muted)", cursor: "pointer", fontSize: 11 }}
-        >
-          {t("usage.useReset")}
-        </button>
-      )}
-      {account.state === "signed_out" ? (
-        <button
-          type="button"
-          data-testid="quota-account-sign-in"
-          title={t("usage.accountSignedOutTooltip")}
-          onClick={onSignIn}
-          className="ui-focus-ring"
-          style={{ flexShrink: 0, padding: "1px 6px", border: `1px solid ${tone}`, borderRadius: 5, background: "transparent", color: tone, cursor: "pointer", fontSize: 11, fontWeight: 700 }}
-        >
-          {t(ACCOUNT_STATE_LABEL_KEYS.signed_out)}
-        </button>
-      ) : (
-        <span
-          title={account.blocked ? t("usage.blockedTag") : undefined}
-          style={{ flexShrink: 0, fontSize: 11, fontWeight: 700, color: tone, fontVariantNumeric: "tabular-nums" }}
-        >
-          {rightText ?? `${Math.round(account.percent)}%`}
-        </span>
-      )}
+      </div>
+      {/* Indented by the dot and its gap, so the lines align with the label. */}
+      <AccountFactLines facts={account} locale={locale} now={now} t={t} inset={14} />
     </div>
   );
 }
@@ -810,7 +1019,7 @@ function AccountRow({
  *  panel that stays mounted (hidden, not unmounted) while closed so its
  *  content is still present for anyone who searches the page — and so a
  *  test can assert what lives inside it without simulating a click. */
-function DisclosureSection({ title, children }: { title: string; children: React.ReactNode }) {
+function DisclosureSection({ title, badge, children }: { title: string; badge?: React.ReactNode; children: React.ReactNode }) {
   const [open, setOpen] = useState(false);
   return (
     <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
@@ -829,6 +1038,7 @@ function DisclosureSection({ title, children }: { title: string; children: React
             style={{ flexShrink: 0, transform: open ? "rotate(90deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }}
           />
           <span>{title}</span>
+          {badge}
         </CollapsibleTrigger>
         <CollapsiblePanel keepMounted style={{ marginTop: 8 }}>
           {children}
@@ -838,11 +1048,41 @@ function DisclosureSection({ title, children }: { title: string; children: React
   );
 }
 
-/** One saved-reset account, collapsed to a single line: brand, count,
- *  expiry, and a contextual Use action. Everything that used to be its own
- *  paragraph (the per-credit description, a stale-check caveat, why it
- *  cannot be redeemed) moves into the row's own `title` tooltip instead of
- *  taking a line of its own. */
+/** One saved credit on its own quiet line: when it ends (flagged when that is
+ *  soon, or already past) and which limits it clears, when omp says. */
+function SavedCreditLine({
+  credit,
+  now,
+  locale,
+  t,
+}: {
+  credit: ResetCredit;
+  now: number;
+  locale: string;
+  t: CopyTranslate;
+}) {
+  const state = creditExpiryState(credit.expiresAt, now);
+  const date = formatCreditDate(credit.expiresAt, locale, now);
+  const clears = describeCreditClears(credit.clears, locale, t);
+  if (!date && !clears) return null;
+  return (
+    <div data-testid="saved-reset-credit" style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "1px 8px", minWidth: 0, fontSize: 11, color: "var(--text-dim)" }}>
+      {date && (
+        <span style={{ flexShrink: 0, color: state === "past" ? "var(--status-error)" : "var(--text-dim)" }}>
+          {state === "past" ? t("usage.creditExpired", { time: date }) : t("usage.expiresAt", { time: date })}
+        </span>
+      )}
+      {state === "soon" && <ExpiresSoonPill label={t("usage.expiresSoon")} testId="saved-reset-expires-soon" />}
+      {clears && <span data-testid="saved-reset-clears">{clears}</span>}
+    </div>
+  );
+}
+
+/** One saved-reset account: brand, count and a contextual Use action on the
+ *  first line, then one quiet line per credit (expiry, what it clears).
+ *  Everything that used to be its own paragraph (the engine's description, a
+ *  stale-check caveat, why it cannot be redeemed) lives in the first line's
+ *  own `title` tooltip instead of taking a line of its own. */
 function SavedResetRow({
   account,
   label,
@@ -855,11 +1095,10 @@ function SavedResetRow({
   label: string;
   now: number;
   locale: string;
-  t: (key: string, vars?: Record<string, string | number>) => string;
+  t: CopyTranslate;
   onUse: () => void;
 }) {
   const credit = account.credits[0];
-  const expiry = credit ? formatResetTime(credit.expiresAt, locale, now) : null;
   const checked = account.stale && account.checkedAt ? formatRelativeTime(account.checkedAt, locale, now) : null;
   const canUse = Boolean(credit) && account.canRedeem && !account.retrying;
   const statusText = account.retrying
@@ -873,20 +1112,24 @@ function SavedResetRow({
     !account.error && !account.canRedeem && account.reason ? account.reason : null,
   ].filter(Boolean).join(" ") || undefined;
   return (
-    <div title={tooltip} style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-      <span style={{ flex: 1, minWidth: 0, fontSize: 11, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-        {`${label} · ${statusText}`}
-        {expiry ? ` · ${t("usage.expiresAt", { time: expiry })}` : ""}
-      </span>
-      {canUse && (
-        <button
-          type="button"
-          onClick={onUse}
-          style={{ flexShrink: 0, padding: "1px 6px", border: "1px solid var(--border)", borderRadius: 5, background: "transparent", color: "var(--text-muted)", cursor: "pointer", fontSize: 11 }}
-        >
-          {t("usage.useReset")}
-        </button>
-      )}
+    <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+      <div title={tooltip} style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+        <span style={{ flex: 1, minWidth: 0, fontSize: 11, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {`${label} · ${statusText}`}
+        </span>
+        {canUse && (
+          <button
+            type="button"
+            onClick={onUse}
+            style={{ flexShrink: 0, padding: "1px 6px", border: "1px solid var(--border)", borderRadius: 5, background: "transparent", color: "var(--text-muted)", cursor: "pointer", fontSize: 11 }}
+          >
+            {t("usage.useReset")}
+          </button>
+        )}
+      </div>
+      {account.credits.map((entry) => (
+        <SavedCreditLine key={entry.id} credit={entry} now={now} locale={locale} t={t} />
+      ))}
     </div>
   );
 }
@@ -942,7 +1185,7 @@ export function QuotaPopover({
   /** The account's usage-limit stage (omp 18.6.3+), shown as one line under the hero. */
   usageLimit?: UsageLimitState | null;
 }) {
-  const { t, locale } = useI18n();
+  const { t, tn, locale } = useI18n();
   const openSettings = useSettingsOpener();
   // A login that ended is fixed in Settings › Providers: open the provider's
   // own drawer there (ProviderDirectory answers to this `provider-<id>` id,
@@ -1028,6 +1271,19 @@ export function QuotaPopover({
     )) ?? null
   );
 
+  // A saved reset close to ending earns a tag on the disclosure's own line, so
+  // it is seen without opening anything. omp raises no notice for this over its
+  // remote protocol, so the credit's own end date is the only signal there is.
+  const anyCreditExpiresSoon = resetAccounts.some((account) => (
+    account.credits.some((credit) => creditExpiryState(credit.expiresAt, now) === "soon")
+  ));
+  // The providers whose saved resets are in play: the auto-spend switches are
+  // offered for exactly those, and the engine's own settings say which exist.
+  const autoSpendProviders = [...new Set(resetAccounts.flatMap((account) => (account.provider ? [account.provider] : [])))];
+  // Providers whose list could not be read while another's was: the rows above
+  // may be missing some, which is not the same as having none.
+  const failedResetProviders = resetCredits?.snapshot?.failedProviders ?? [];
+
   const percentText = quota.known ? t("usage.percentUsed", { percent: Math.round(quota.percent) }) : null;
   const headlineReset = quota.known ? formatResetTime(quota.resetsAt, locale, now) : null;
   const age = quota.known && quota.fetchedAt ? formatRelativeTime(quota.fetchedAt, locale, now) : null;
@@ -1035,14 +1291,25 @@ export function QuotaPopover({
   // that just landed, a snapshot the server itself flagged as possibly out of
   // date, and a read that FAILED — where the numbers on screen are the last
   // good ones and their age is the age of that read, not of an answer.
+  // The snapshot itself can say its newest read failed while a good earlier
+  // reading is still on screen (omp's quota read timed out, say): name the time
+  // the numbers are from and when the refresh failed, never "updated just now".
+  const readFailure = !refreshing && !failed && quota.refreshFailed ? quota.refreshFailed : null;
+  const readFailureReadAt = readFailure ? formatResetTime(readFailure.readAt, locale, now) : null;
+  const readFailureAt = readFailure ? formatResetTime(readFailure.at, locale, now) : null;
+  const failedFreshness = age ? t("usage.refreshFailedAge", { ago: age }) : t("usage.refreshFailed");
   const freshness = refreshing
     ? t("usage.refreshing")
     : failed
-      ? (age ? t("usage.refreshFailedAge", { ago: age }) : t("usage.refreshFailed"))
-      : age
-        ? [t("usage.updatedAgo", { ago: age }), quota.known && quota.stale ? t("usage.stale") : null]
-          .filter(Boolean).join(" · ")
-        : null;
+      ? failedFreshness
+      : readFailure
+        ? (readFailureReadAt && readFailureAt ? t("usage.refreshFailedShowing", { read: readFailureReadAt, failed: readFailureAt }) : failedFreshness)
+        : age
+          ? [t("usage.updatedAgo", { ago: age }), quota.known && quota.stale ? t("usage.stale") : null]
+            .filter(Boolean).join(" · ")
+          : null;
+  // Only a sentence the engine wrote for a human may explain the failure.
+  const readFailureReason = readFailure ? readableReason(readFailure.reason) : null;
   // The scope line used to be always-visible footer prose; it still carries
   // real meaning (which window this percentage is scoped to, or why there is
   // no percentage at all) but now lives on the hero's own tooltip.
@@ -1052,6 +1319,7 @@ export function QuotaPopover({
   const heroMetaLine = quota.known
     ? [
         formatQuotaLabel(quota.label, locale),
+        describeWindowAmount(quota.amount, locale, t),
         quota.blocked ? t("usage.blockedTag") : null,
         headlineReset ? t("usage.resetsAt", { time: headlineReset }) : null,
       ].filter(Boolean).join(" · ")
@@ -1126,7 +1394,7 @@ export function QuotaPopover({
 
         {quota.known ? (
           <>
-            <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            <div title={heroMetaLine} style={{ marginTop: 4, fontSize: 11, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {heroMetaLine}
             </div>
             <div style={{ marginTop: 6 }}>
@@ -1134,20 +1402,15 @@ export function QuotaPopover({
             </div>
             {secondaryWindows.length > 0 && (
               <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
-                {secondaryWindows.map((entry) => {
-                  const resetTime = formatResetTime(entry.resetsAt, locale, now);
-                  const metaText = [entry.blocked ? t("usage.blockedTag") : null, resetTime ? t("usage.resetsAt", { time: resetTime }) : null]
-                    .filter(Boolean).join(" · ") || null;
-                  return (
-                    <WindowLine
-                      key={entry.key}
-                      label={formatQuotaLabel(entry.label, locale)}
-                      percent={entry.percent}
-                      color={entry.color}
-                      metaText={metaText}
-                    />
-                  );
-                })}
+                {secondaryWindows.map((entry) => (
+                  <WindowLine
+                    key={entry.key}
+                    label={formatQuotaLabel(entry.label, locale)}
+                    percent={entry.percent}
+                    color={entry.color}
+                    metaText={windowMeta(entry, locale, now, t)}
+                  />
+                ))}
               </div>
             )}
             {quota.planType && (
@@ -1155,6 +1418,9 @@ export function QuotaPopover({
                 {t("usage.reportedPlan", { plan: quota.planType })}
               </div>
             )}
+            {/* With several accounts the Accounts list below carries each one's
+                own lines; a single account has no list, so they go here. */}
+            {quota.accounts.length === 0 && <AccountFactLines facts={quota} locale={locale} now={now} t={t} marginTop={6} />}
           </>
         ) : openRouterIsHero && openRouter ? (
           <OpenRouterCredits account={openRouter} />
@@ -1232,22 +1498,17 @@ export function QuotaPopover({
               {t("usage.alsoInUseSummary", { count: alsoInUseCount })}
             </div>
             <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 10 }}>
-              {quota.inUse.map((entry) => {
-                const resetTime = formatResetTime(entry.resetsAt, locale, now);
-                const metaText = [entry.blocked ? t("usage.blockedTag") : null, resetTime ? t("usage.resetsAt", { time: resetTime }) : null]
-                  .filter(Boolean).join(" · ") || null;
-                return (
-                  <WindowLine
-                    key={entry.key}
-                    icon={<ProviderIcon provider={entry.provider} size={11} style={{ flexShrink: 0, color: "var(--text-dim)" }} />}
-                    label={formatQuotaLabel(entry.label, locale)}
-                    percent={entry.percent}
-                    color={entry.color}
-                    metaText={metaText}
-                    subText={entry.uses.map(formatUse).join(", ")}
-                  />
-                );
-              })}
+              {quota.inUse.map((entry) => (
+                <WindowLine
+                  key={entry.key}
+                  icon={<ProviderIcon provider={entry.provider} size={11} style={{ flexShrink: 0, color: "var(--text-dim)" }} />}
+                  label={formatQuotaLabel(entry.label, locale)}
+                  percent={entry.percent}
+                  color={entry.color}
+                  metaText={windowMeta(entry, locale, now, t)}
+                  subText={entry.uses.map(formatUse).join(", ")}
+                />
+              ))}
               {openRouterVisible && (
                 <OpenRouterCredits account={openRouter!} usageLabel={openRouterSessionLabel ?? undefined} />
               )}
@@ -1259,7 +1520,10 @@ export function QuotaPopover({
             (including ones unrelated to the selected model), and every limit
             that cannot affect this model. */}
         {resetCredits && (
-          <DisclosureSection title={t("usage.savedResets", { count: availableResetCount })}>
+          <DisclosureSection
+            title={t("usage.savedResets", { count: availableResetCount })}
+            badge={anyCreditExpiresSoon ? <ExpiresSoonPill label={t("usage.expiresSoon")} testId="saved-resets-expires-soon" /> : null}
+          >
             <div style={{ fontSize: 11, lineHeight: 1.4, color: "var(--text-dim)", marginBottom: visibleResetAccounts.length > 0 ? 6 : 0 }}>
               {t(availableResetCount === 0 ? "usage.savedResetsEmpty" : "usage.savedResetsNote")}
             </div>
@@ -1288,6 +1552,12 @@ export function QuotaPopover({
             {resetCredits.snapshot && !resetCredits.snapshot.available && (
               <div style={{ marginTop: 6, fontSize: 11, color: "var(--text-muted)" }}>{resetCredits.snapshot.reason ?? t("usage.resetCreditUnavailable")}</div>
             )}
+            {failedResetProviders.length > 0 && (
+              <div data-testid="saved-reset-partial" style={{ marginTop: 6, fontSize: 11, lineHeight: 1.4, color: "var(--status-warning)" }}>
+                {t("usage.resetsPartial", { providers: listProviderNames(failedResetProviders, locale) })}
+              </div>
+            )}
+            {autoSpendProviders.length > 0 && <AutoSpendSection providers={autoSpendProviders} t={t} />}
           </DisclosureSection>
         )}
 
@@ -1297,29 +1567,36 @@ export function QuotaPopover({
               {t("usage.notForThisModelNote")}
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {quota.others.map((entry) => {
-                const resetTime = formatResetTime(entry.resetsAt, locale, now);
-                const metaText = [entry.blocked ? t("usage.blockedTag") : null, resetTime ? t("usage.resetsAt", { time: resetTime }) : null]
-                  .filter(Boolean).join(" · ") || null;
-                return (
-                  <WindowLine
-                    key={entry.key}
-                    icon={<ProviderIcon provider={entry.provider} size={11} style={{ flexShrink: 0, color: "var(--text-dim)" }} />}
-                    label={t("usage.notForThisModelRow", { account: entry.account, window: formatQuotaLabel(entry.label, locale) })}
-                    percent={entry.percent}
-                    color={entry.exhausted ? "var(--status-error)" : "var(--text-dim)"}
-                    metaText={metaText}
-                    muted
-                  />
-                );
-              })}
+              {quota.others.map((entry) => (
+                <WindowLine
+                  key={entry.key}
+                  icon={<ProviderIcon provider={entry.provider} size={11} style={{ flexShrink: 0, color: "var(--text-dim)" }} />}
+                  label={t("usage.notForThisModelRow", { account: entry.account, window: formatQuotaLabel(entry.label, locale) })}
+                  percent={entry.percent}
+                  color={entry.exhausted ? "var(--status-error)" : "var(--text-dim)"}
+                  metaText={windowMeta(entry, locale, now, t)}
+                  muted
+                />
+              ))}
             </div>
           </DisclosureSection>
         )}
 
+        {/* Stored logins omp had no quota for: the numbers above do not include
+            them, which is worth one quiet line. Providers only, never who. */}
+        {quota.unreported && (
+          <div
+            data-testid="quota-unreported"
+            title={t("usage.unreportedAccountsDetail", { providers: listProviderNames(quota.unreported.providers, locale) })}
+            style={{ marginTop: 10, fontSize: 11, lineHeight: 1.4, color: "var(--text-muted)" }}
+          >
+            {tn("usage.unreportedAccounts", quota.unreported.count)}
+          </div>
+        )}
+
         {/* FOOTER — just the reading's age, plus a way to take a new one. */}
         <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-          <span style={{ minWidth: 0, fontSize: 11, color: failed ? "var(--status-warning)" : "var(--text-dim)", fontVariantNumeric: "tabular-nums", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          <span title={readFailureReason ?? undefined} style={{ minWidth: 0, fontSize: 11, color: failed || readFailure ? "var(--status-warning)" : "var(--text-dim)", fontVariantNumeric: "tabular-nums", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {freshness ?? ""}
           </span>
           {onRefresh && (

@@ -14,8 +14,11 @@ export type NativeSettings = {
    * key (it migrates a legacy one into `task.agentAdvisor.task` while loading),
    * so this is read from and written to that real key; see
    * `readAdvisorSubagents` / `writeAdvisorSubagents`. */
-  advisor?: { enabled?: boolean; subagents?: boolean; syncBacklog?: "off" | "1" | "3" | "5"; immuneTurns?: number };
-  tools?: { approvalMode?: "always-ask" | "write" | "yolo"; approval?: { bash?: "allow" | "prompt" | "deny"; extension?: "allow" | "prompt" } };
+  advisor?: { enabled?: boolean; subagents?: boolean; syncBacklog?: "off" | "1" | "3" | "5" | "strict"; immuneTurns?: number };
+  /** `approvalMode` also takes `always-ask-cached` (omp 18.12.3). `approval` keeps every per-tool policy the file holds (`bash`, `extension`, and any other key such as omp 18.14's `computer.control`). */
+  tools?: { approvalMode?: "always-ask" | "always-ask-cached" | "write" | "yolo"; approval?: { bash?: "allow" | "prompt" | "deny"; extension?: "allow" | "prompt"; [tool: string]: "allow" | "prompt" | "deny" | undefined } };
+  /** omp 18.13.0 spend caps in USD for a whole session tree (subagents included); both are positive numbers, unset = no cap. omp declares no UI metadata for them. */
+  session?: { warnCost?: number; maxCost?: number };
   enabledModels?: string[];
   disabledProviders?: string[];
   modelProviderOrder?: string[];
@@ -54,8 +57,8 @@ export type NativeSettings = {
 const THINKING_LEVELS = new Set(["auto", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const TEXT_VERBOSITIES = new Set(["low", "medium", "high"]);
 const PERSONALITIES = new Set(["default", "friendly", "pragmatic", "none"]);
-const BACKLOGS = new Set(["off", "1", "3", "5"]);
-const APPROVAL_MODES = new Set(["always-ask", "write", "yolo"]);
+const BACKLOGS = new Set(["off", "1", "3", "5", "strict"]);
+const APPROVAL_MODES = new Set(["always-ask", "always-ask-cached", "write", "yolo"]);
 const APPROVAL_POLICIES = new Set(["allow", "prompt", "deny"]);
 const FALLBACK_REVERT_POLICIES = new Set(["cooldown-expiry", "never"]);
 const USAGE_RESERVE_POLICIES = new Set(["confirm", "auto", "fail-closed"]);
@@ -78,6 +81,28 @@ function configPath(): string {
 
 function stringArray(value: unknown): string[] | undefined {
   return Array.isArray(value) && value.every((item) => typeof item === "string") ? value : undefined;
+}
+
+/** Every per-tool approval policy the file holds. `bash` and `extension` keep their historical value sets; any other key (omp 18.14's `computer.control`, a future tool) keeps whichever of allow/prompt/deny it holds, so a save never drops it. */
+function readApprovalPolicies(approval: Record<string, unknown>): NonNullable<NonNullable<NativeSettings["tools"]>["approval"]> | undefined {
+  const kept: Record<string, "allow" | "prompt" | "deny"> = {};
+  for (const [tool, policy] of Object.entries(approval)) {
+    if (!APPROVAL_POLICIES.has(policy as string)) continue;
+    if (tool === "extension" && policy === "deny") continue;
+    kept[tool] = policy as "allow" | "prompt" | "deny";
+  }
+  return Object.keys(kept).length ? kept : undefined;
+}
+
+/** omp's `session.warnCost` / `session.maxCost`: positive USD amounts, anything else is not a cap. */
+function readSessionCosts(session: unknown): NativeSettings["session"] | undefined {
+  if (!isRecord(session)) return undefined;
+  const positive = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value > 0;
+  const kept = {
+    ...(positive(session.warnCost) ? { warnCost: session.warnCost } : {}),
+    ...(positive(session.maxCost) ? { maxCost: session.maxCost } : {}),
+  };
+  return Object.keys(kept).length ? kept : undefined;
 }
 
 function assertOptionalRecord(value: unknown, name: string): asserts value is Record<string, unknown> | undefined {
@@ -220,17 +245,15 @@ export function readNativeSettings(): { path: string; settings: NativeSettings }
         advisor: {
           ...(typeof advisor.enabled === "boolean" ? { enabled: advisor.enabled } : {}),
           ...(readAdvisorSubagents(data, advisor) !== undefined ? { subagents: readAdvisorSubagents(data, advisor) } : {}),
-          ...(BACKLOGS.has(advisor.syncBacklog as string) ? { syncBacklog: advisor.syncBacklog as "off" | "1" | "3" | "5" } : {}),
+          ...(BACKLOGS.has(advisor.syncBacklog as string) ? { syncBacklog: advisor.syncBacklog as "off" | "1" | "3" | "5" | "strict" } : {}),
           ...(typeof advisor.immuneTurns === "number" && Number.isInteger(advisor.immuneTurns) ? { immuneTurns: advisor.immuneTurns } : {}),
         },
       } : {}),
       ...(Object.keys(tools).length ? { tools: {
-        ...(APPROVAL_MODES.has(tools.approvalMode as string) ? { approvalMode: tools.approvalMode as "always-ask" | "write" | "yolo" } : {}),
-        ...(APPROVAL_POLICIES.has(approval.bash as string) || approval.extension === "allow" || approval.extension === "prompt" ? { approval: {
-          ...(APPROVAL_POLICIES.has(approval.bash as string) ? { bash: approval.bash as "allow" | "prompt" | "deny" } : {}),
-          ...(approval.extension === "allow" || approval.extension === "prompt" ? { extension: approval.extension } : {}),
-        } } : {}),
+        ...(APPROVAL_MODES.has(tools.approvalMode as string) ? { approvalMode: tools.approvalMode as NonNullable<NonNullable<NativeSettings["tools"]>["approvalMode"]> } : {}),
+        ...(readApprovalPolicies(approval) ? { approval: readApprovalPolicies(approval) } : {}),
       } } : {}),
+      ...(readSessionCosts(data.session) ? { session: readSessionCosts(data.session) } : {}),
       ...(stringArray(data.enabledModels) ? { enabledModels: stringArray(data.enabledModels) } : {}),
       ...(stringArray(data.disabledProviders) ? { disabledProviders: stringArray(data.disabledProviders) } : {}),
       ...(stringArray(data.modelProviderOrder) ? { modelProviderOrder: stringArray(data.modelProviderOrder) } : {}),
@@ -331,6 +354,13 @@ export function writeNativeSettings(settings: NativeSettings): void {
   if (settings.tools?.approvalMode !== undefined && !APPROVAL_MODES.has(settings.tools.approvalMode)) throw new Error("Invalid approval mode");
   if (settings.tools?.approval?.bash !== undefined && !APPROVAL_POLICIES.has(settings.tools.approval.bash)) throw new Error("Invalid Bash approval policy");
   if (settings.tools?.approval?.extension !== undefined && settings.tools.approval.extension !== "allow" && settings.tools.approval.extension !== "prompt") throw new Error("Invalid extension tool approval policy");
+  for (const [tool, policy] of Object.entries(settings.tools?.approval ?? {})) {
+    if (tool !== "bash" && tool !== "extension" && policy !== undefined && !APPROVAL_POLICIES.has(policy)) throw new Error(`Invalid approval policy for ${tool}`);
+  }
+  assertOptionalRecord(settings.session, "session");
+  for (const [name, value] of Object.entries({ "session.warnCost": settings.session?.warnCost, "session.maxCost": settings.session?.maxCost })) {
+    if (value !== undefined && !(typeof value === "number" && Number.isFinite(value) && value > 0)) throw new Error(`${name} must be a positive USD amount`);
+  }
   if (settings.retry?.maxRetries !== undefined && (!Number.isInteger(settings.retry.maxRetries) || settings.retry.maxRetries < 0 || settings.retry.maxRetries > 20)) throw new Error("Retry attempts must be an integer between 0 and 20");
   if (settings.retry?.usageReservePct !== undefined && (!Number.isInteger(settings.retry.usageReservePct) || settings.retry.usageReservePct < 0 || settings.retry.usageReservePct > 100)) throw new Error("Reserve margin must be an integer between 0 and 100");
   if (settings.retry?.usageReservePolicy !== undefined && !USAGE_RESERVE_POLICIES.has(settings.retry.usageReservePolicy)) throw new Error("Invalid usage reserve policy");
@@ -380,8 +410,8 @@ export function writeNativeSettings(settings: NativeSettings): void {
   for (const [key, value] of Object.entries(settings.advisor ?? {})) if (key !== "subagents") doc.setIn(["advisor", key], value);
   if (settings.advisor?.subagents !== undefined) writeAdvisorSubagents(doc, settings.advisor.subagents);
   if (settings.tools?.approvalMode !== undefined) doc.setIn(["tools", "approvalMode"], settings.tools.approvalMode);
-  if (settings.tools?.approval?.bash !== undefined) doc.setIn(["tools", "approval", "bash"], settings.tools.approval.bash);
-  if (settings.tools?.approval?.extension !== undefined) doc.setIn(["tools", "approval", "extension"], settings.tools.approval.extension);
+  for (const [tool, policy] of Object.entries(settings.tools?.approval ?? {})) if (policy !== undefined) doc.setIn(["tools", "approval", tool], policy);
+  for (const key of ["warnCost", "maxCost"] as const) if (settings.session?.[key] !== undefined) doc.setIn(["session", key], settings.session[key]);
   if (settings.enabledModels !== undefined) doc.set("enabledModels", settings.enabledModels);
   if (settings.disabledProviders !== undefined) doc.set("disabledProviders", settings.disabledProviders);
   if (settings.modelProviderOrder !== undefined) doc.set("modelProviderOrder", settings.modelProviderOrder);
@@ -430,6 +460,8 @@ export const CURATED_RESETTABLE_PATHS: readonly string[] = [
   "compaction.keepRecentTokens",
   "autolearn.minToolCalls",
   "retry.enabled",
+  "session.warnCost",
+  "session.maxCost",
 ];
 
 /** Dotted config.yml paths Cody may reset individually — the keys the model

@@ -7,13 +7,14 @@
  * so a value can never live in two places. A card carries NO label or
  * description of its own — those come from the engine's schema at render
  * time — only a key, a group, an optional control hint and an optional
- * Cody-side hint sentence. The eight keys omp declares without `ui`
+ * Cody-side hint sentence. The few keys omp declares without `ui`
  * metadata (config-file only upstream) get their copy from
  * `CURATED_ONLY` instead, which is the one hand-written table in this hub.
  *
  * Membership is pinned by components/recommended-cards.test.mjs against the
- * installed OMP schema AND the checked-in key snapshot: 28 schema-declared,
- * 8 curated-only, 36 total across the three card lists.
+ * installed OMP schema AND the checked-in key snapshot: every card key is
+ * schema-declared except the keys `CURATED_ONLY` lists, and nothing in that
+ * table is a key the engine declares.
  *
  *   - RECOMMENDED_CARDS render here, in five groups.
  *   - MCP_CARDS are the same bound cards rendered by Extensions › MCP.
@@ -53,30 +54,35 @@ export interface RecommendedCard {
 }
 
 export const RECOMMENDED_GROUPS: readonly RecommendedGroup[] = [
-  { id: "safety", label: "Safety & approvals", description: "When the engine asks before running a tool, and the overrides for terminal commands and extension requests." },
+  { id: "safety", label: "Safety & approvals", description: "When the engine asks before running a tool, the overrides for terminal commands and extension requests, folders that always ask, and spend limits." },
   { id: "thinking", label: "Thinking & style", description: "Default reasoning effort, response verbosity, personality and how thinking is shown." },
-  { id: "advisor", label: "Advisor", description: "A second model passively reviews each turn and leaves guidance notes. Changes apply the next time a chat launches; they do not update an active chat." },
+  { id: "advisor", label: "Advisor", description: "A second model reviews each turn and leaves guidance notes; a serious enough note can also wake the assistant for another turn. Changes apply the next time a chat launches; they do not update an active chat." },
   { id: "context", label: "Context", description: "How a long session is kept inside the model's context window." },
   { id: "memory", label: "Memory & learning", description: "Durable memory across sessions and automatic lesson capture." },
 ];
 
 export const RECOMMENDED_CARDS: readonly RecommendedCard[] = [
-  // Safety & approvals (3)
-  { key: "tools.approvalMode", group: "safety", control: "select" },
+  // Safety & approvals (7)
+  { key: "tools.approvalMode", group: "safety", control: "select", hint: "Ask and remember (omp 18.12.3 and later) keeps approvals you grant for a session or longer in approval-cache.db in the agent folder. Cody has no Forget approvals button: type /forget-approvals in the message box to clear them." },
   { key: "tools.approval.bash", group: "safety", control: "select" },
   { key: "tools.approval.extension", group: "safety", control: "select" },
+  { key: "tools.restrictedFolders", group: "safety", hint: "Needs omp 18.13.1 or later. The question arrives in the chat as the ordinary approve or deny box, even in Yolo mode." },
+  { key: "bash.gitGuard", group: "safety", control: "toggle", hint: "Needs omp 18.8.7 or later. Useful because Cody often runs several agents in one checkout: one agent's stash or hard reset would wipe another's unsaved work." },
+  { key: "session.warnCost", group: "safety", control: "number" },
+  { key: "session.maxCost", group: "safety", control: "number" },
   // Thinking & style (5)
   { key: "defaultThinkingLevel", group: "thinking", control: "select" },
-  { key: "textVerbosity", group: "thinking", control: "select" },
+  { key: "textVerbosity", group: "thinking", control: "select", hint: "omp 18.17 and later default to Low, for Codex models too; choose Medium for the longer answers earlier versions gave." },
   { key: "personality", group: "thinking", control: "select" },
   { key: "hideThinkingBlock", group: "thinking", control: "toggle", hint: "Cody draws its own thinking blocks; use Expand thinking blocks under Preferences for the browser." },
   { key: "externalThinking", group: "thinking", control: "toggle" },
-  // Advisor (5)
+  // Advisor (6)
   { key: "advisor.enabled", group: "advisor", control: "toggle" },
   { key: "advisor.syncBacklog", group: "advisor", control: "select" },
   { key: "advisor.immuneTurns", group: "advisor", control: "select" },
   { key: "advisor.subagents", group: "advisor", control: "toggle" },
   { key: "advisor.evictStaleResults", group: "advisor", control: "toggle" },
+  { key: "advisor.continueSeverity", group: "advisor", control: "select", hint: "A note at or above this level can start another assistant turn on its own after the final answer, which spends more; Blocker keeps that to the serious cases." },
   // Context (7)
   { key: "compaction.enabled", group: "context", control: "toggle" },
   { key: "compaction.midTurnEnabled", group: "context", control: "toggle" },
@@ -106,11 +112,15 @@ export const MCP_CARDS: readonly RecommendedCard[] = [
   { key: "mcp.startupTimeoutMs", group: "mcp", control: "number" },
 ];
 
-/** Retry lives under Models › Assignments (the retry panel), never here. */
+/** Retry lives under Models › Assignments (the retry panel), never here.
+ * `retry.fallbackOn` (omp 18.9) and `retry.rateLimitWalksChain` (18.13.3)
+ * have no schema row on older engines, where the panel hides them. */
 export const RETRY_CARDS: readonly RecommendedCard[] = [
   { key: "retry.enabled", group: "retry", control: "toggle" },
   { key: "retry.maxRetries", group: "retry", control: "select" },
   { key: "retry.modelFallback", group: "retry", control: "toggle" },
+  { key: "retry.fallbackOn", group: "retry", control: "select", hint: "Cody's own routing already moves roles off a spent provider before a request is made, so this only governs failures that still happen." },
+  { key: "retry.rateLimitWalksChain", group: "retry", control: "toggle", hint: "Matters for Claude models that saved their thinking earlier in the turn: with this on, a rate limit moves to your fallback chain at once instead of retrying the same model until Retry attempts is spent." },
 ];
 
 /** Every bound card across the three surfaces — the whole curated key space. */
@@ -133,12 +143,16 @@ export interface CuratedOnlySetting {
   key: string;
   label: string;
   description: string;
-  section: "tools.approval" | "advisor" | "compaction" | "autolearn" | "retry" | null;
+  section: "tools.approval" | "advisor" | "compaction" | "autolearn" | "retry" | "session" | null;
   field: string;
   type: "boolean" | "enum" | "number";
   options?: readonly CuratedOption[];
   default: boolean | number | string;
   condition?: string;
+  /** A number card with no engine default: unset means "off", so the field starts empty and Reset removes the key. `default` then only seeds tests. */
+  unset?: boolean;
+  /** First omp version that reads the key; the card hides on an older engine whose version is known. */
+  minVersion?: string;
   min?: number;
   max?: number;
   step?: number;
@@ -164,16 +178,6 @@ export const CURATED_ONLY: readonly CuratedOnlySetting[] = [
     type: "enum",
     options: [{ value: "prompt", label: "Ask every time" }, { value: "allow", label: "Auto approve" }],
     default: "prompt",
-  },
-  {
-    key: "defaultThinkingLevel",
-    label: "Reasoning",
-    description: "Default effort level for thinking-capable models.",
-    section: null,
-    field: "defaultThinkingLevel",
-    type: "enum",
-    options: ["auto", "minimal", "low", "medium", "high", "xhigh", "max"].map((level) => ({ value: level, label: level })),
-    default: "high",
   },
   {
     key: "advisor.subagents",
@@ -228,12 +232,50 @@ export const CURATED_ONLY: readonly CuratedOnlySetting[] = [
     type: "boolean",
     default: true,
   },
+  {
+    key: "session.warnCost",
+    label: "Spend warning ($)",
+    description: "Warn once when a chat's total spend, subagents included, first reaches this many US dollars. Leave it empty for no warning; Reset clears it.",
+    section: "session",
+    field: "warnCost",
+    type: "number",
+    default: 0,
+    unset: true,
+    minVersion: "18.13.0",
+    min: 0.01,
+    step: 0.5,
+  },
+  {
+    key: "session.maxCost",
+    label: "Spend limit ($)",
+    description: "Stop sending model requests once a chat's total spend reaches this many US dollars. The limit covers subagents too, and the turn that hits it ends with a \"spend limit reached\" message. Leave it empty for no limit; Reset clears it.",
+    section: "session",
+    field: "maxCost",
+    type: "number",
+    default: 0,
+    unset: true,
+    minVersion: "18.13.0",
+    min: 0.01,
+    step: 0.5,
+  },
 ];
 
 const CURATED_ONLY_BY_KEY: ReadonlyMap<string, CuratedOnlySetting> = new Map(CURATED_ONLY.map((entry) => [entry.key, entry]));
 
 export function curatedOnly(key: string): CuratedOnlySetting | undefined {
   return CURATED_ONLY_BY_KEY.get(key);
+}
+
+/** Whether an engine at `version` reads a curated-only key introduced in `minVersion`. An unknown engine version shows the card (the schema was readable, the key just has no row). */
+export function curatedSupported(meta: CuratedOnlySetting, version: string | null | undefined): boolean {
+  const have = /(\d+)\.(\d+)\.(\d+)/.exec(version ?? "");
+  const want = /(\d+)\.(\d+)\.(\d+)/.exec(meta.minVersion ?? "");
+  if (!have || !want) return true;
+  for (let part = 1; part <= 3; part += 1) {
+    const delta = Number(have[part]) - Number(want[part]);
+    if (delta !== 0) return delta > 0;
+  }
+  return true;
 }
 
 export const CURATED_ONLY_KEYS: readonly string[] = CURATED_ONLY.map((entry) => entry.key);

@@ -21,6 +21,7 @@ export const FALLBACK_MODEL_ROLE_IDS: readonly string[] = [
   "memory",
   "task",
   "advisor",
+  "widget",
   "image",
   "web",
   "speech",

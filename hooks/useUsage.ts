@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { mergeUsageRead } from "@/lib/usage/client-merge";
 import type { UsageSnapshot } from "@/lib/usage/types";
 import type { ResetCreditOutcome, ResetCreditsSnapshot } from "@/lib/harness/reset-credits";
 import { STORAGE_KEYS } from "@/lib/storage-keys";
@@ -115,7 +116,10 @@ export function useUsage(enabled = true, sessionId: string | null = null): UseUs
         // must not turn a transport failure into a claim about the engine.
         if (response.ok && body) {
           // A read that raced a conversation switch describes the old one.
-          setSnapshot(session === sessionRef.current ? body : { ...body, sessionAccounts: undefined });
+          // And a poll that comes back "no data" never erases a good reading
+          // already on screen: it marks that one stale (mergeUsageRead).
+          const next = session === sessionRef.current ? body : { ...body, sessionAccounts: undefined };
+          setSnapshot((current) => mergeUsageRead(current, next));
           setFailed(false);
         } else {
           setFailed(true);

@@ -8,6 +8,9 @@ import { STORAGE_KEYS } from "../storage-keys";
 
 export type Locale = "en" | "zh-CN" | "ja";
 
+/** The translator `useI18n()` hands out: a key and optional `{placeholder}` values in, the string out. */
+export type Translate = (key: string, vars?: Record<string, string | number>) => string;
+
 export const LOCALES: Array<{ value: Locale; label: string }> = [
   { value: "en", label: "EN" },
   { value: "zh-CN", label: "中文" },

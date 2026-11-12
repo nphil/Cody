@@ -137,7 +137,8 @@ behind an authenticating reverse proxy.
   sign-in state lives under `/data/home` — run `claude` or `codex login`
   once in a Cody terminal, or pass `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`
   as extra container variables. See `docs/harnesses.md`.
-- omp is a **Bun** program (`engines: bun >= 1.3.14`), so the image carries the
+- omp is a **Bun** program (`engines: bun >= 1.4.4` since omp 18.13.3; older
+  omp releases accepted 1.3.14), so the image carries the
   Bun binary alongside Node. Installing omp with npm onto a Node-only image
   looks like it works and then fails at every invocation with
   `env: 'bun': No such file or directory`.

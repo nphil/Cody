@@ -1,5 +1,4 @@
-import { readFileSync, statSync } from "fs";
-import { join } from "path";
+import { readBundledCatalog } from "./bundled-catalog";
 import {
   CLAUDE_CREDITS_PROVIDER,
   CLAUDE_CREDITS_PROVIDERS,
@@ -12,8 +11,8 @@ import { addClaudeApiKey, listClaudeApiKeys, type ClaudeCreditsBridgeDeps } from
 import { listOmpCredentials, removeOmpCredential, type OmpCredentialBridgeDeps, type OmpCredentialRow } from "../harness/omp-credentials";
 import { isRecord } from "../type-guards";
 import { readClaudeCreditsStore, writeClaudeCreditsStore } from "./claude-credits-store";
-import { readModelsConfigFile, validateModelsConfig, writeModelsConfig, type ModelsFileConfig, type ProviderConfig } from "./models-config";
-import { findOmpPackageRoot, resolveSourceSpecifier } from "./package-source";
+import { readModelsConfigFile, validateModelsConfig, writeModelsConfig, type ModelsFileConfig, type ModelThinkingConfig, type ProviderConfig } from "./models-config";
+import { findOmpPackageRoot } from "./package-source";
 import { readNativeSettings } from "./settings-config";
 
 /**
@@ -31,8 +30,9 @@ import { readNativeSettings } from "./settings-config";
  *  1. the keys, stored through omp's AuthStorage (bin/cody-omp-claude-credits.mjs),
  *     paired with a plan account in Cody's own record (claude-credits-store.ts);
  *  2. one block per key's provider in models.yml — one entry per Claude model
- *     omp knows, ids only (omp fills limits, thinking and prices from its own
- *     catalog), which exists exactly while its key does;
+ *     omp knows (its id and name, plus the reasoning ladder omp's own catalog
+ *     gives it; omp still fills limits and prices from its catalog by id),
+ *     which exists exactly while its key does;
  *  3. the per-chat config overlay that puts the credits first in the fallback
  *     chains (claude-credits-overlay.ts).
  */
@@ -57,35 +57,50 @@ export class ClaudeCreditsError extends Error {
 export interface ClaudePlanModel {
   id: string;
   name: string;
+  /** The catalog's own flag, kept only when true: a twin must reason like the plan model it mirrors. */
+  reasoning?: boolean;
+  /** The catalog's reasoning ladder, restricted to what models.yml accepts (see PLAN_THINKING_KEYS). */
+  thinking?: ModelThinkingConfig;
 }
 
-let cachedPlanModels: { path: string; mtimeMs: number; models: ClaudePlanModel[] } | null = null;
+/** The Claude models omp's catalog lists, or why they cannot be read. */
+export type ClaudePlanModelsRead = { models: ClaudePlanModel[] } | { reason: string };
+
+/** The `thinking` keys a models.yml model accepts in every omp Cody supports
+ *  (its schema is a strict subset of the catalog's `ThinkingConfig`: the rest, such
+ *  as `prefixBinding`, omp derives from the model id itself). */
+const PLAN_THINKING_KEYS = ["mode", "efforts", "defaultLevel", "supportsDisplay", "requiresEffort"] as const;
+
+function planThinking(value: unknown): ModelThinkingConfig | undefined {
+  if (!isRecord(value)) return undefined;
+  const thinking: Record<string, unknown> = {};
+  for (const key of PLAN_THINKING_KEYS) if (value[key] !== undefined) thinking[key] = value[key];
+  return typeof thinking.mode === "string" && Array.isArray(thinking.efforts) ? (thinking as ModelThinkingConfig) : undefined;
+}
 
 /**
  * Every Claude model omp's bundled catalog lists under `anthropic`, which is
- * the set the credits must be able to answer for. Read from the installed
- * package (omp's `models.json`, the same file lib/omp/bundled-catalog.ts reads
- * for membership), cached by mtime. Null when the catalog cannot be read.
+ * the set the credits must be able to answer for, with the reasoning ladder
+ * each one has (lib/omp/bundled-catalog.ts reads the installed package in
+ * either of its layouts and caches by mtime).
  */
-export function readClaudePlanModels(packageRoot: string | null = findOmpPackageRoot()): ClaudePlanModel[] | null {
-  if (!packageRoot) return null;
-  const file = resolveSourceSpecifier(join(packageRoot, "package.json"), "@oh-my-pi/pi-catalog/models.json");
-  if (!file) return null;
-  try {
-    const { mtimeMs } = statSync(file);
-    if (cachedPlanModels && cachedPlanModels.path === file && cachedPlanModels.mtimeMs === mtimeMs) return cachedPlanModels.models;
-    const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
-    const plan = isRecord(parsed) ? parsed[CLAUDE_PLAN_PROVIDER] : null;
-    if (!isRecord(plan)) return null;
-    const models = Object.entries(plan)
-      .map(([id, entry]): ClaudePlanModel => ({ id, name: isRecord(entry) && typeof entry.name === "string" && entry.name.trim() ? entry.name.trim() : id }))
-      .sort((a, b) => a.id.localeCompare(b.id));
-    if (models.length === 0) return null;
-    cachedPlanModels = { path: file, mtimeMs, models };
-    return models;
-  } catch {
-    return null;
-  }
+export function readClaudePlanModels(packageRoot: string | null = findOmpPackageRoot()): ClaudePlanModelsRead {
+  const read = readBundledCatalog(packageRoot, [CLAUDE_PLAN_PROVIDER]);
+  if (!read.ok) return { reason: read.reason };
+  const plan = read.catalog.rows.get(CLAUDE_PLAN_PROVIDER);
+  if (!plan || Object.keys(plan).length === 0) return { reason: `omp's catalog lists no ${CLAUDE_PLAN_PROVIDER} models` };
+  const models = Object.entries(plan)
+    .map(([id, row]): ClaudePlanModel => {
+      const thinking = row.reasoning === true ? planThinking(row.thinking) : undefined;
+      return {
+        id,
+        name: typeof row.name === "string" && row.name.trim() ? row.name.trim() : id,
+        ...(row.reasoning === true ? { reasoning: true } : {}),
+        ...(thinking ? { thinking } : {}),
+      };
+    })
+    .sort((a, b) => a.id.localeCompare(b.id));
+  return { models };
 }
 
 // ── The models.yml block ─────────────────────────────────────────────────────
@@ -99,7 +114,15 @@ function desiredBlock(models: readonly ClaudePlanModel[], baseUrl: string, provi
     baseUrl,
     api: "anthropic-messages",
     auth: "none",
-    models: models.map((model) => ({ id: model.id, name: `${model.name}${suffix}` })),
+    // The plan's models with their reasoning ladder: an id alone makes omp guess one (a generic
+    // minimal..xhigh for a Claude it has no row for, "no reasoning" for a model it does not know
+    // at all), so the twin would offer levels its plan model does not.
+    models: models.map((model) => ({
+      id: model.id,
+      name: `${model.name}${suffix}`,
+      ...(model.reasoning ? { reasoning: true } : {}),
+      ...(model.thinking ? { thinking: model.thinking } : {}),
+    })),
   };
 }
 
@@ -162,7 +185,7 @@ export function syncClaudeCreditsProviders(wanted: readonly string[], options: S
     const block = providers[name];
     return isClaudeCreditsBlock(block) && block.baseUrl ? [block.baseUrl] : [];
   })[0] ?? CLAUDE_CREDITS_BASE_URL;
-  let models: readonly ClaudePlanModel[] | null | undefined;
+  let models: readonly ClaudePlanModel[] | undefined = options.models;
   let changed = false;
   for (const name of CLAUDE_CREDITS_PROVIDERS) {
     const existing = providers[name];
@@ -172,8 +195,11 @@ export function syncClaudeCreditsProviders(wanted: readonly string[], options: S
     }
     let next: ProviderConfig | undefined;
     if (wantedNames.has(name)) {
-      models ??= options.models ?? readClaudePlanModels();
-      if (!models) throw new ClaudeCreditsError("claude_credits_unavailable", "Cody could not read omp's list of Claude models.", 503);
+      if (!models) {
+        const read = readClaudePlanModels();
+        if ("reason" in read) throw new ClaudeCreditsError("claude_credits_unavailable", `Cody could not read omp's list of Claude models: ${read.reason}.`, 503);
+        models = read.models;
+      }
       next = desiredBlock(models, options.baseUrl ?? (isClaudeCreditsBlock(existing) && existing.baseUrl ? existing.baseUrl : inheritedBaseUrl), name);
     }
     if (JSON.stringify(existing) === JSON.stringify(next)) continue;

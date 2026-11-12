@@ -12,6 +12,7 @@ const {
   patchSettingsSection,
   patchSettingsTop,
   resetConfigWriter,
+  subscribeSettingsWritten,
 } = await jiti.import("./useConfigWriter.ts");
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -249,4 +250,44 @@ test("every settled write invalidates the cached reads a config change can move"
   for (const route of ["/api/models", "/api/model-roles", "/api/models/new"]) {
     assert.equal(readSettingsRouteEntry(route).stale, true, `${route} is stale after a write`);
   }
+});
+
+test("a settled write announces the setting keys it wrote; a failed one announces nothing", async () => {
+  const server = stubServer({ advisor: { enabled: false } });
+  setSettingsRouteData("/api/omp-settings", { settings: server.settings });
+  const heard = [];
+  const stop = subscribeSettingsWritten((keys) => heard.push([...keys]));
+  await patchSettingsSection("advisor", { enabled: true });
+  await patchSettingsTop({ enabledModels: ["anthropic/**"], tools: { approvalMode: "write" } });
+  await patchSettingsSchema({ "ui.theme": "dark", "tools.approvalMode": null });
+  assert.deepEqual(heard, [
+    ["advisor.enabled"],
+    ["enabledModels", "tools.approvalMode"],
+    ["ui.theme", "tools.approvalMode"],
+  ], "section and top-level writes announce their dotted leaf keys; a schema patch announces its keys, resets (null) included");
+  await assert.rejects(patchSettingsTop({ __fail: true }), /disk full/);
+  assert.equal(heard.length, 3, "a write that failed changed nothing, so it announces nothing");
+  stop();
+  await patchSettingsSection("advisor", { enabled: false });
+  assert.equal(heard.length, 3, "an unsubscribed listener hears nothing more");
+  await configWriterIdle();
+});
+
+test("coalesced schema patches announce once, with every key that travelled together", async () => {
+  stubServer({});
+  const heard = [];
+  subscribeSettingsWritten((keys) => heard.push([...keys]));
+  await Promise.all([patchSettingsSchema({ "ui.theme": "dark" }), patchSettingsSchema({ "tools.approvalMode": "write", "ui.theme": "light" })]);
+  assert.deepEqual(heard, [["ui.theme", "tools.approvalMode"]]);
+});
+
+test("a listener that throws does not fail the write or silence the other listeners", async () => {
+  const server = stubServer({ advisor: { enabled: false } });
+  setSettingsRouteData("/api/omp-settings", { settings: server.settings });
+  const heard = [];
+  subscribeSettingsWritten(() => { throw new Error("listener bug"); });
+  subscribeSettingsWritten((keys) => heard.push([...keys]));
+  await patchSettingsSection("advisor", { enabled: true });
+  assert.deepEqual(heard, [["advisor.enabled"]]);
+  assert.equal(server.settings.advisor.enabled, true);
 });

@@ -18,7 +18,7 @@ import type { SubagentHistoryEntry, SubagentHistoryResult, SubagentAgentSource, 
 import type { AgentMessage, SessionEntry } from "./types";
 import { asNumber, asString, isRecord } from "./type-guards";
 import { taskResultStructuredOutput, taskResultUsageCost } from "./task-result-details";
-import { addUsageTotals, aggregateMessageUsage, emptyUsageTotals, type UsageTotals } from "./session-usage";
+import { addUsageTotals, aggregateMessageUsage, aggregateModelUsage, emptyUsageTotals, type UsageTotals } from "./session-usage";
 
 /** Sibling artifacts directory for a parent session file. */
 export function siblingDirForSession(sessionFilePath: string): string {
@@ -732,7 +732,7 @@ function scanTranscriptRange(
       const messages = entries
         .map((entry) => entryToUiMessage(entry, {}))
         .filter((message): message is AgentMessage => message !== null);
-      totals = addUsageTotals(totals, aggregateMessageUsage(messages));
+      totals = addUsageTotals(totals, aggregateMessageUsage(messages), aggregateModelUsage(entries));
       consumed += lastNewline + 1;
     }
   } finally {

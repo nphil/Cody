@@ -5,7 +5,9 @@
  * chip, the highlight, the visited set (a hub stays mounted once opened so a
  * login SSE in Providers survives a look at System), the phone stack's
  * levels, the busy register and the phone history, and provides all of it
- * through `ShellContext`.
+ * through `ShellContext`. It also asks once per open which engine settings
+ * are "New" for this person and provides that through
+ * `SettingsNewBadgesContext` (row chips, hub dots, counts, search chips).
  *
  * Desktop: header (title, search, close) over a 230px rail and a pane; a
  * query replaces the rail with the results, which stay until cleared.
@@ -24,15 +26,17 @@ import { Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useSchemaIndex } from "@/hooks/useSchemaIndex";
+import { useSettingsNewKeys } from "@/hooks/useSettingsNewKeys";
 import { useSettingsHistory } from "@/hooks/useSettingsHistory";
 import { ConfirmDialog } from "@/components/ui/field";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/primitives";
 import { STORAGE_KEYS } from "@/lib/storage-keys";
 import { ALL_CAPABILITIES, DEFAULT_HARNESS_LABEL, type ActiveEngineInfo, type EngineCapabilities, type PlatformInfo, type SettingsTab } from "../SettingsTabs";
 import { MobileStack, type MobileSubLevel } from "./MobileStack";
+import { computeNewHomes, SettingsNewBadgesContext, type SettingsNewBadges } from "./new-badges";
 import { SettingsHighlightContext } from "./primitives";
 import { getVisibleSections, getVisibleSubViews, isSectionId, resolveSection, type SettingsSection, type SettingsSectionId } from "./registry";
-import { collectSearchEntries, currentStaticSearchIndex, loadStaticSearchEntries, resultHighlight, resultTarget, searchSettings, type SchemaSearchRow, type SearchEntry, type SearchFilter, type SearchResult, type StaticSearchIndex } from "./search-index";
+import { collectSearchEntries, currentStaticSearchIndex, loadStaticSearchEntries, resultHighlight, resultTarget, searchSettings, settingHome, type SchemaSearchRow, type SearchEntry, type SearchFilter, type SearchResult, type StaticSearchIndex } from "./search-index";
 import { focusSearchResults, SearchResultsList } from "./SettingsSearch";
 import { SettingsSidebar } from "./SettingsSidebar";
 import { createSettingsBusy, ShellContext, type SessionModel, type SettingsShellCallbacks, type SettingsShellPrefs, type SettingsShellValue } from "./shell-context";
@@ -103,6 +107,15 @@ function PanelHost({ section, active, children }: { section: SettingsSection; ac
   );
 }
 
+/** The two contexts the dialog provides: the shell's own state and the "New" badges. */
+function ShellProviders({ shell, badges, children }: { shell: SettingsShellValue; badges: SettingsNewBadges; children: ReactNode }) {
+  return (
+    <ShellContext.Provider value={shell}>
+      <SettingsNewBadgesContext.Provider value={badges}>{children}</SettingsNewBadgesContext.Provider>
+    </ShellContext.Provider>
+  );
+}
+
 // The hubs' dynamic search hooks live in the hub modules; loading them
 // lazily keeps those modules out of this chunk until the dialog is open.
 const SearchSources = dynamic(() => import("./SearchSources"), { ssr: false });
@@ -139,6 +152,9 @@ export function SettingsShell({ request, cwd, sessionId, capabilities = ALL_CAPA
   // row the hub hides.
   const schemaIndex = useSchemaIndex({ enabled: capabilities.nativeSettings });
   const harnessLabel = schemaIndex.shortName ?? engine?.shortName ?? DEFAULT_HARNESS_LABEL;
+  // Which engine settings are new for this person: one answer per Settings
+  // open, read by the rail, the hubs and the search through one context.
+  const newKeys = useSettingsNewKeys({ enabled: capabilities.nativeSettings, engineId: engine?.id ?? null });
   const schemaRows = useMemo<SchemaSearchRow[]>(() => {
     const tabLabels = new Map((schemaIndex.schema?.tabs ?? []).map((tab) => [tab.id, tab.label]));
     return schemaIndex.rows.map((row) => ({
@@ -151,8 +167,14 @@ export function SettingsShell({ request, cwd, sessionId, capabilities = ALL_CAPA
       terminalOnly: row.terminalOnly,
       visible: row.visible,
       modified: row.modified,
+      isNew: newKeys.isNew(row.key),
     }));
-  }, [schemaIndex.rows, schemaIndex.schema]);
+  }, [schemaIndex.rows, schemaIndex.schema, newKeys]);
+  // The hubs and sub-views a badged key's row or card lives in get a dot.
+  const newBadges = useMemo<SettingsNewBadges>(() => {
+    const homes = computeNewHomes(schemaIndex.rows, newKeys.newKeys, (key) => settingHome(key, capabilities));
+    return { ...newKeys, hubsWithNew: homes.hubs, subsWithNew: homes.subs };
+  }, [schemaIndex.rows, newKeys, capabilities]);
 
   const applyTarget = useCallback((target: { id: SettingsSectionId; sub?: string }, opts?: { highlight?: string | null; toPanel?: boolean }) => {
     const id = visibleIds.has(target.id) ? target.id : "general";
@@ -370,7 +392,7 @@ export function SettingsShell({ request, cwd, sessionId, capabilities = ALL_CAPA
           className="settings-mobile-sheet"
           style={{ top: 0, left: 0, transform: "none", width: "100vw", maxWidth: "100vw", height: "100dvh", maxHeight: "100dvh", borderRadius: 0, border: "none", padding: 0, display: "flex", flexDirection: "column", overflow: "hidden", animation: "settings-sheet-in var(--dur-med) var(--ease-out-warm) both" }}
         >
-          <ShellContext.Provider value={shellValue}>
+          <ShellProviders shell={shellValue} badges={newBadges}>
             <div ref={(element) => { shellRoot.current = element; setPortalTarget(element); }} className="settings-shell settings-shell-mobile" style={{ position: "relative", flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
               <DialogTitle style={{ position: "absolute", width: 1, height: 1, overflow: "hidden", clip: "rect(0 0 0 0)", margin: 0 }}>Settings</DialogTitle>
               <MobileStack
@@ -397,7 +419,7 @@ export function SettingsShell({ request, cwd, sessionId, capabilities = ALL_CAPA
                 {panels}
               </MobileStack>
             </div>
-          </ShellContext.Provider>
+          </ShellProviders>
           {busyGuard}
         </DialogContent>
       </Dialog>
@@ -407,7 +429,7 @@ export function SettingsShell({ request, cwd, sessionId, capabilities = ALL_CAPA
   return (
     <Dialog open onOpenChange={(open) => { if (!open) requestClose(); }}>
       <DialogContent ariaLabel="Settings" style={{ width: 940, maxWidth: "calc(100vw - 16px)", height: "82vh", maxHeight: "calc(100dvh - 16px)", padding: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-        <ShellContext.Provider value={shellValue}>
+        <ShellProviders shell={shellValue} badges={newBadges}>
           <div ref={setPortalTarget} className="settings-shell" style={{ position: "relative", flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
             <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 14, padding: "12px 18px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)", flexShrink: 0 }}>
               <DialogTitle style={{ fontSize: 16, margin: 0, fontWeight: 600 }}>Settings</DialogTitle>
@@ -448,7 +470,7 @@ export function SettingsShell({ request, cwd, sessionId, capabilities = ALL_CAPA
               </div>
             </div>
           </div>
-        </ShellContext.Provider>
+        </ShellProviders>
         {busyGuard}
       </DialogContent>
     </Dialog>

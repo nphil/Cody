@@ -36,6 +36,16 @@ export interface ChangelogPayload {
   updatePending: boolean;
   installedVersion: string | null;
   latestVersion: string | null;
+  /** Release sections newer than the installed engine that the size limits
+   * cut from `entries` — so the panel can say "N more" instead of looking
+   * complete. */
+  omittedNew: number;
+  /** The package's file stops at a release newer than the installed one
+   * (omp 18.19.0 ships only its last 22 releases), so the notes between the
+   * installed version and the oldest one shown are not in the package. */
+  olderMissing: boolean;
+  /** Where the package says its older notes live, when it says so. */
+  archiveUrl: string | null;
 }
 
 /** Older sections shown even when nothing is pending — recent context. */
@@ -81,6 +91,30 @@ export function parseChangelogEntries(text: string, installedVersion: string | n
     total += heading.length + clipped.length;
   }
   return entries;
+}
+
+/** What the parsed `entries` leave out of `text`: pending sections cut by the
+ * limits, sections the package no longer carries, and the archive link the
+ * package points to for them. */
+export function describeChangelogGaps(
+  text: string,
+  installedVersion: string | null,
+  shownCount: number,
+): Pick<ChangelogPayload, "omittedNew" | "olderMissing" | "archiveUrl"> {
+  const versions = text
+    .split(/^## (?=\[?\d)/m)
+    .slice(1)
+    .map((section) => section.match(/^\[?(\d+(?:\.\d+){2}[^\]\s]*)/)?.[1] ?? null);
+  const newCount = installedVersion
+    ? versions.filter((version) => version !== null && isNewerVersion(version, installedVersion)).length
+    : 0;
+  const oldest = versions[versions.length - 1] ?? null;
+  const archive = text.match(/archived in \[[^\]]*\]\((https:\/\/[^)\s]+)\)/i)?.[1] ?? null;
+  return {
+    omittedNew: Math.max(0, Math.min(newCount, versions.length) - shownCount),
+    olderMissing: Boolean(installedVersion && oldest && isNewerVersion(oldest, installedVersion)),
+    archiveUrl: archive,
+  };
 }
 
 /** One file's text out of an uncompressed tar stream. Handles plain ustar
@@ -211,6 +245,9 @@ export async function buildChangelogPayload(options: {
   // worse to render: an empty array reads as a blank panel, not an answer.
   const entries = text === null ? null : parseChangelogEntries(text, installedVersion);
   const usable = entries !== null && entries.length > 0;
+  const gaps = text !== null && usable
+    ? describeChangelogGaps(text, installedVersion, entries.filter((entry) => entry.isNew).length)
+    : { omittedNew: 0, olderMissing: false, archiveUrl: null };
   return {
     entries: usable ? entries : null,
     reason: usable
@@ -222,5 +259,6 @@ export async function buildChangelogPayload(options: {
     updatePending,
     installedVersion,
     latestVersion,
+    ...gaps,
   };
 }

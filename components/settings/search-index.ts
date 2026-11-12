@@ -43,6 +43,9 @@ export interface SearchEntry {
    * not, and search must never offer a jump to a control that is not there. */
   needsCapability?: CapabilityGate;
   modified?: boolean;
+  /** The engine added this setting in its last update and the person has not
+   * yet seen its chip enough times or changed it: the result wears "New". */
+  isNew?: boolean;
   /** `jump` scrolls to the card; `filter` pre-fills a hub's own search box. */
   action: "jump" | "filter";
 }
@@ -188,6 +191,8 @@ export interface SchemaSearchRow {
   terminalOnly?: boolean;
   visible: boolean;
   modified: boolean;
+  /** The setting is new since the engine's last update, for this person. */
+  isNew?: boolean;
 }
 
 /** Rows from a raw schema body, every one visible: what search had before
@@ -222,6 +227,14 @@ function cardHome(key: string, capabilities: EngineCapabilities | undefined): { 
   return { tab: "engine", trail: [HUB_LABELS.engine, "Recommended", ...(owner.group ? [owner.group.label] : [])] };
 }
 
+/** The hub (and sub-view) a schema key's row or card is found in: the curated
+ * surface that owns it when one does, else Behavior. The "New" dots on the
+ * rail and the sub-view tabs follow the same mapping search jumps by. */
+export function settingHome(key: string, capabilities: EngineCapabilities | undefined): { tab: SettingsSectionId; sub?: string } {
+  const home = cardHome(key, capabilities);
+  return home ? { tab: home.tab, ...(home.sub ? { sub: home.sub } : {}) } : { tab: "engine" };
+}
+
 /** Dynamic entries for the engine's own schema: one per VISIBLE setting
  * (a row whose `ui.condition` does not hold has no control to jump to),
  * findable by label, description AND key, with the schema tab › group as
@@ -247,6 +260,7 @@ export function buildSchemaSearchEntries(rows: readonly SchemaSearchRow[] | null
         : [shortName, HUB_LABELS.engine, row.tabLabel ?? row.tab, ...(row.group ? [row.group] : [])],
       ...(row.terminalOnly ? { scope: TERMINAL_ONLY_BADGE as SearchEntry["scope"] } : {}),
       modified: row.modified,
+      ...(row.isNew && !row.terminalOnly ? { isNew: true } : {}),
       action: "jump",
     });
   }

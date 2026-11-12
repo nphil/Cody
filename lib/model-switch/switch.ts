@@ -158,7 +158,9 @@ function toCatalogModel(raw: unknown, fallbackEfforts?: readonly string[]): Cata
     id,
     ...(name ? { name } : {}),
     ...(typeof raw.reasoning === "boolean" ? { reasoning: raw.reasoning } : {}),
-    ...(efforts || defaultLevel ? { thinking: { ...(efforts ? { efforts } : {}), ...(defaultLevel ? { defaultLevel } : {}) } } : {}),
+    ...(efforts || defaultLevel
+      ? { thinking: { ...(efforts ? { efforts } : {}), ...(defaultLevel ? { defaultLevel } : {}), ...(thinking.unverified === true ? { unverified: true } : {}) } }
+      : {}),
   };
 }
 

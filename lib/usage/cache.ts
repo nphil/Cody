@@ -1,7 +1,8 @@
-import { listOmpCredentials, type OmpCredentialRow } from "../harness/omp-credentials";
+import { listOmpCredentialsKeepingLast, type OmpCredentialRow } from "../harness/omp-credentials";
 import { applyCredentialBlocks, applyCredentialOrder } from "./credential-order";
 import { fetchOmpUsageSnapshot, unavailableUsageSnapshot } from "./omp-usage";
 import { ALIBABA_TOKEN_PLAN_PROVIDER, fetchAlibabaTokenPlanUsage, type AlibabaUsageResult } from "./alibaba-usage";
+import { carryForwardMissingAccounts, reserveLastGood, type GoodReading } from "./last-good";
 import type { UsageSnapshot } from "./types";
 
 /**
@@ -9,7 +10,10 @@ import type { UsageSnapshot } from "./types";
  * over them (see credential-order.ts — it is what keeps the composer and
  * Settings naming the same account "Primary"). The store read is best-effort
  * and adds one helper spawn per cache refresh, not per request; a failure
- * leaves the engine's own ordering exactly as it was.
+ * leaves the engine's own ordering exactly as it was — except the credential
+ * BLOCKS: those come from the last successful store read (a few minutes at
+ * most, see `listOmpCredentialsKeepingLast`), because a block that vanished
+ * for one read would flip a refused account back to "usable" on screen.
  *
  * Providers the ENGINE cannot report are merged in here, so every consumer
  * — ring, popup, availability, routing — keeps reading exactly one snapshot.
@@ -26,7 +30,7 @@ async function loadUsageSnapshot(): Promise<UsageSnapshot> {
   let snapshot = engine;
   if (snapshot.available) {
     try {
-      const stored = await listOmpCredentials();
+      const stored = await listOmpCredentialsKeepingLast();
       if (stored.available) {
         // Order first (it assigns credentialId), then blocks, which are
         // keyed by that id.
@@ -100,6 +104,12 @@ interface UsageCacheState {
   entry: UsageCacheEntry | null;
   inFlight: Promise<UsageSnapshot> | null;
   generation: number;
+  /**
+   * The newest read that actually succeeded, kept when a failed read replaces
+   * `entry` — so a read that fails or times out never turns a good reading
+   * into "no data". Optional so state seeded without it keeps working.
+   */
+  lastGood?: GoodReading | null;
 }
 
 declare global {
@@ -155,12 +165,14 @@ export function peekUsageSnapshot(): UsageSnapshot | null {
   return getUsageCacheState().entry?.snapshot ?? null;
 }
 
-/** Drop everything, including any in-flight read (engine switch, logout, tests). */
+/** Drop everything, including any in-flight read and the last good reading
+ * (engine switch, login, logout, tests). */
 export function resetUsageCache(): void {
   const state = getUsageCacheState();
   state.generation += 1;
   state.entry = null;
   state.inFlight = null;
+  state.lastGood = null;
 }
 
 export function getUsageSnapshot(options: GetUsageSnapshotOptions = {}): Promise<UsageSnapshot> {
@@ -194,10 +206,21 @@ export function getUsageSnapshot(options: GetUsageSnapshotOptions = {}): Promise
 function isFresh(entry: UsageCacheEntry, maxAgeMs: number | undefined): boolean {
   const now = Date.now();
   if (entry.expiresAt <= now) return false;
-  // An unavailable entry is held for the whole backoff regardless of maxAgeMs:
-  // callers must not be able to turn a failing probe into a spawn loop.
-  if (!entry.snapshot.available) return true;
+  // An unavailable entry — and a last good reading re-served because the
+  // newest read failed — is held for the whole backoff regardless of
+  // maxAgeMs: callers must not be able to turn a failing probe into a spawn loop.
+  if (!entry.snapshot.available || entry.snapshot.refreshFailed) return true;
   return maxAgeMs === undefined || now - entry.storedAt <= maxAgeMs;
+}
+
+/** The newest reading the cache can fall back on: the one it remembered, else
+ * the entry itself when that is a real, un-failed reading (a state the
+ * module's own tests, or a hot reload, may have seeded without `lastGood`). */
+function previousGood(state: UsageCacheState): GoodReading | null {
+  if (state.lastGood) return state.lastGood;
+  const entry = state.entry;
+  if (entry?.snapshot.available && !entry.snapshot.refreshFailed) return { snapshot: entry.snapshot, readAt: entry.storedAt };
+  return null;
 }
 
 function startUsageLoad(state: UsageCacheState, load: UsageLoader): Promise<UsageSnapshot> {
@@ -206,15 +229,26 @@ function startUsageLoad(state: UsageCacheState, load: UsageLoader): Promise<Usag
     .then(load)
     .catch((error: unknown) => unavailableUsageSnapshot(`usage read failed: ${String(error)}`))
     .then((snapshot) => {
-      if (state.generation === generation && state.inFlight === loadPromise) {
-        const storedAt = Date.now();
-        state.entry = {
-          snapshot,
-          storedAt,
-          expiresAt: storedAt + (snapshot.available ? USAGE_CACHE_TTL_MS : USAGE_FAILURE_BACKOFF_MS),
-        };
-      }
-      return snapshot;
+      // A reset (engine switch, login, logout) or a newer read has taken over:
+      // this answer describes a world that no longer exists, so it may not
+      // touch what the cache remembers.
+      if (state.generation !== generation || state.inFlight !== loadPromise) return snapshot;
+      const now = Date.now();
+      const previous = previousGood(state);
+      // A read that FAILED must not erase a good one: the failure is served as
+      // the last good reading, flagged stale, and backs off like any failure.
+      // A read that succeeded but skipped an account the last one had keeps
+      // that account (briefly, and labelled) rather than letting it blink out.
+      const effective = snapshot.available
+        ? carryForwardMissingAccounts(previous, snapshot, now)
+        : reserveLastGood(previous, snapshot, now);
+      if (snapshot.available) state.lastGood = { snapshot: effective, readAt: now };
+      state.entry = {
+        snapshot: effective,
+        storedAt: now,
+        expiresAt: now + (effective.available && !effective.refreshFailed ? USAGE_CACHE_TTL_MS : USAGE_FAILURE_BACKOFF_MS),
+      };
+      return effective;
     })
     .finally(() => {
       if (state.inFlight === loadPromise) state.inFlight = null;

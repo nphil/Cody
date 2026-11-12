@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { basename, dirname, join } from "path";
 import { isMap, isScalar, isSeq, parseDocument, stringify, type Document } from "yaml";
 import { getModelsConfigPath } from "./paths";
-import { kindApiMismatch } from "../model-kinds";
+import { discoveryAcceptsAdvertisedReasoning, kindApiMismatch } from "../model-kinds";
 import { isRecord } from "../type-guards";
 
 /**
@@ -44,6 +44,10 @@ export interface ModelDefinition {
   input?: string[];
   contextWindow?: number;
   maxTokens?: number;
+  /** Images one request may carry before omp drops the oldest (positive integer; omp 18.11.3+, ignored by older engines). */
+  imageCountBudget?: number;
+  /** Token-counting family; the allowed values are MODEL_TOKENIZERS in lib/model-kinds.ts. */
+  tokenizer?: string;
   headers?: Record<string, string>;
   cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
   compat?: Record<string, unknown>;
@@ -59,6 +63,8 @@ export interface ProviderConfig {
   compat?: Record<string, unknown>;
   models?: ModelDefinition[];
   modelOverrides?: Record<string, unknown>;
+  /** How omp lists this provider's models live. `advertisedReasoning: false` (omp 18.13.2+) makes it ignore the thinking levels the endpoint's /v1/models rows advertise. */
+  discovery?: { type?: string; advertisedReasoning?: boolean; [key: string]: unknown };
   [key: string]: unknown;
 }
 
@@ -76,6 +82,11 @@ export function validateModelsConfig(config: ModelsFileConfig): void {
   for (const [providerName, provider] of Object.entries(providers)) {
     if (!isRecord(provider)) throw new Error(`Provider ${providerName}: must be an object`);
     const models = Array.isArray(provider.models) ? provider.models : [];
+    // omp 18.13.2+ drops the whole file when advertisedReasoning sits on discovery
+    // that does not read /v1/models rows (litellm, ollama, ...); older engines ignore it.
+    if (isRecord(provider.discovery) && provider.discovery.advertisedReasoning !== undefined && !discoveryAcceptsAdvertisedReasoning(provider.discovery.type)) {
+      throw new Error(`Provider ${providerName}: discovery.advertisedReasoning only applies to openai-models-list, lm-studio, or proxy discovery.`);
+    }
     if (models.length > 0) {
       if (!provider.baseUrl) {
         throw new Error(`Provider ${providerName}: "baseUrl" is required when defining custom models.`);
@@ -100,6 +111,11 @@ export function validateModelsConfig(config: ModelsFileConfig): void {
       if (typeof model.maxTokens === "number" && model.maxTokens <= 0) {
         throw new Error(`Provider ${providerName}, model ${model.id}: invalid maxTokens`);
       }
+      // omp's schema (validateImageCountBudget) refuses anything but a positive
+      // integer here and drops the whole file; engines older than 18.11.3 ignore the key.
+      if (model.imageCountBudget !== undefined && !(Number.isSafeInteger(model.imageCountBudget) && (model.imageCountBudget as number) > 0)) {
+        throw new Error(`Provider ${providerName}, model ${model.id}: imageCountBudget must be a positive integer`);
+      }
       // omp's schema requires all four cost fields whenever cost is present
       // (partial costs make omp reject the whole file), so refuse to write one.
       if (isRecord(model.cost)) {
@@ -113,6 +129,9 @@ export function validateModelsConfig(config: ModelsFileConfig): void {
     }
     if (isRecord(provider.modelOverrides)) {
       for (const [modelId, override] of Object.entries(provider.modelOverrides)) {
+        if (isRecord(override) && override.imageCountBudget !== undefined && !(Number.isSafeInteger(override.imageCountBudget) && (override.imageCountBudget as number) > 0)) {
+          throw new Error(`Provider ${providerName}, modelOverrides.${modelId}: imageCountBudget must be a positive integer`);
+        }
         if (!isRecord(override) || typeof override.kind !== "string") continue;
         const declared = models.find((m) => isRecord(m) && m.id === modelId);
         const api = (override.api ?? (declared ? (declared.api ?? provider.api) : undefined)) as string | undefined;

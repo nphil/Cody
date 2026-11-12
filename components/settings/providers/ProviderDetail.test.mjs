@@ -9,7 +9,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { LoginMethodCard, KeyMethodCard, planRemoval, describeRemoval, isEnvironmentOnly, runRemoval, reportRemoval } = await jiti.import("./ProviderDetail.tsx");
+const { LoginMethodCard, KeyMethodCard, loginRowOf, planRemoval, describeRemoval, isEnvironmentOnly, runRemoval, reportRemoval } = await jiti.import("./ProviderDetail.tsx");
 // Off the browser `translate` answers in English straight from en.json, so the
 // helpers are fed the real English copy instead of a second hard-coded copy.
 const { translate: t, translatePlural: tn } = await jiti.import("../../../lib/i18n/index.tsx");
@@ -83,6 +83,17 @@ test("no accounts and signed out renders Sign in with no accounts list", () => {
   assert.doesNotMatch(html, /Add account/);
   assert.doesNotMatch(html, /Add secondary account/);
   assert.doesNotMatch(html, /In use|Standby|Limited|Disabled/);
+});
+
+test("a terminal-only sign-in swaps the Sign in button for a note pointing at the omp terminal", () => {
+  const html = renderCard({ method: { state: "available", loginId: "google-antigravity", name: "Antigravity", accounts: undefined, terminalOnly: true } });
+  assert.match(html, /Sign in from the omp terminal: type \/login/);
+  assert.doesNotMatch(html, /Sign in<\/button>|>Sign in</);
+  // The flow below it carries the flag too, so no stray button or auto-start can reach the engine.
+  assert.equal(loginRowOf(row(), method({ terminalOnly: true })).terminalOnly, true);
+  assert.equal(loginRowOf(row(), method()).terminalOnly, undefined);
+  // An engine that still opens the browser keeps its button.
+  assert.match(renderCard({ method: { state: "available", accounts: undefined } }), /Sign in/);
 });
 
 test("accounts undefined and signed in without canLogout shows the TUI logout note, not the rotation note", () => {

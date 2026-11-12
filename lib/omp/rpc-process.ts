@@ -58,8 +58,10 @@ export class RpcCommandTimeoutError extends Error {
 
 /**
  * omp 18.6.3+ refuses to start (`--resume <file>`, exit 1, before `ready`)
- * when the session's saved model no longer exists or has no credentials:
- * `error: Could not restore model <provider>/<id>`. 18.4 silently fell back
+ * when the session's saved model no longer exists or has no credentials.
+ * The stderr line is `error: Could not restore model <provider>/<id>` up to
+ * omp 18.12 and `SessionModelRestoreError: Could not restore model <provider>/<id>`
+ * from 18.13.2 (a named error class); both are matched. 18.4 silently fell back
  * to another model, so this is the one engine start failure a person can fix
  * from the chat (pick another model), and it must not read as "omp crashed".
  */
@@ -80,7 +82,7 @@ export class ModelUnrestorableError extends Error {
  * The id may itself contain slashes (`openrouter/vendor/model`): only the first
  * one separates the provider. */
 export function parseModelUnrestorable(stderr: string): { provider: string; modelId: string } | null {
-  const match = /error: Could not restore model (\S+)/.exec(stderr);
+  const match = /(?:error|SessionModelRestoreError): Could not restore model (\S+)/.exec(stderr);
   if (!match) return null;
   const slash = match[1].indexOf("/");
   if (slash <= 0 || slash === match[1].length - 1) return null;

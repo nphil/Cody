@@ -21,7 +21,7 @@
  */
 import { useCallback, useMemo } from "react";
 import type { EngineSetting, EngineSettingValue, EngineSettingsSchema } from "@/lib/harness/types";
-import { HOST_CONDITIONS, SETTING_CONDITIONS, isConditionSatisfied, type HostFacts } from "@/lib/omp/settings-conditions";
+import { GLOBAL_LAYER_CONDITIONS, HOST_CONDITIONS, SETTING_CONDITIONS, isConditionSatisfied, type HostFacts } from "@/lib/omp/settings-conditions";
 import { SCHEMA_ROUTE, patchSettingsSchema } from "./useConfigWriter";
 import { readSettingsRoute, setSettingsRouteData, SHARED_ROUTE_TTL_MS, useSettingsRoute } from "./useSettingsData";
 
@@ -202,7 +202,7 @@ export function useSchemaIndex(opts?: { enabled?: boolean }): SchemaIndex {
   const conditionMet = useCallback((condition: string | undefined) => isConditionSatisfied(condition, resolver, host), [resolver, host]);
 
   const describeCondition = useCallback((condition: string | undefined): string | null => {
-    if (!condition || SETTING_CONDITIONS[condition] || HOST_CONDITIONS[condition]) return null;
+    if (!condition || SETTING_CONDITIONS[condition] || HOST_CONDITIONS[condition] || GLOBAL_LAYER_CONDITIONS[condition]) return null;
     return describeUnknownCondition(condition, shortName ?? "the engine");
   }, [shortName]);
 

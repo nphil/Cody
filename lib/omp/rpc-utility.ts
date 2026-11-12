@@ -38,6 +38,10 @@ export interface OmpModel {
     efforts?: string[];
     defaultLevel?: string;
     effortMap?: Record<string, string>;
+    /** omp 18.10.3+: no evidence this model reasons (a live-discovered model on
+     * a host without capability data). `reasoning` is false and the ladder is an
+     * opt-in: the session leaves thinking unset until a level is picked. */
+    unverified?: boolean;
   };
   input?: string[];
   contextWindow?: number | null;

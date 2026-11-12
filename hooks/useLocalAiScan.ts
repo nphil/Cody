@@ -23,6 +23,8 @@ export interface LocalAiScanResult {
   origin: LocalAiOrigin;
   baseUrl: string;
   models: string[];
+  /** LM Studio decision models (omp's `judge` role); not in `models`. */
+  decisionModels?: string[];
   /** Something answered but could not be read as a model list. */
   error?: string;
 }

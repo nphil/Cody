@@ -45,6 +45,9 @@ export interface ProviderLoginRow {
   canLogout: boolean;
   /** One line of context for the row ("Claude Pro/Max subscription"). */
   hint?: string;
+  /** The engine refuses this sign-in over Cody's connection (it asks a typed
+   * question first): no Sign in button, a note pointing at the omp terminal. */
+  terminalOnly?: boolean;
 }
 
 type LoginFlowState =
@@ -160,7 +163,7 @@ export function ProviderLoginFlow({ provider, onChanged, autoStart = false, comp
     es.onmessage = (e) => {
       let data: {
         type: string; url?: string; instructions?: string | null;
-        token?: string; message?: string; placeholder?: string | null;
+        token?: string; message?: string; placeholder?: string | null; code?: string;
         userCode?: string; verificationUri?: string; intervalSeconds?: number | null; expiresInSeconds?: number | null;
         options?: { id: string; label: string }[];
       };
@@ -194,7 +197,8 @@ export function ProviderLoginFlow({ provider, onChanged, autoStart = false, comp
         onChanged();
       } else if (data.type === "error") {
         es.close();
-        setLoginState({ phase: "error", message: data.message! });
+        // omp refused the sign-in over Cody's connection: say what to do, in the user's language.
+        setLoginState({ phase: "error", message: data.code === "terminal_only" ? t("providerLogin.terminalOnly", { name: provider.name }) : data.message! });
       } else if (data.type === "cancelled") {
         es.close();
         setLoginState({ phase: "idle" });
@@ -278,11 +282,11 @@ export function ProviderLoginFlow({ provider, onChanged, autoStart = false, comp
   handleLoginRef.current = handleLogin;
   const startedRef = useRef(false);
   useEffect(() => {
-    if (!autoStart || startedRef.current) return;
+    if (!autoStart || provider.terminalOnly || startedRef.current) return;
     startedRef.current = true;
     handleLoginRef.current();
     return () => { startedRef.current = false; };
-  }, [autoStart]);
+  }, [autoStart, provider.terminalOnly]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: compact ? 10 : 16 }}>
@@ -302,7 +306,9 @@ export function ProviderLoginFlow({ provider, onChanged, autoStart = false, comp
       <div style={{ minHeight: 48 }}>
         {loginState.phase === "idle" && (
           <p style={{ margin: 0, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
-            {provider.authenticated ? t("modelsConfig.alreadyConnected") : t("modelsConfig.connectAccount", { name: provider.name })}
+            {provider.terminalOnly
+              ? t("providerLogin.terminalOnly", { name: provider.name })
+              : provider.authenticated ? t("modelsConfig.alreadyConnected") : t("modelsConfig.connectAccount", { name: provider.name })}
           </p>
         )}
         {loginState.phase === "connecting" && (
@@ -400,12 +406,14 @@ export function ProviderLoginFlow({ provider, onChanged, autoStart = false, comp
           </button>
         ) : (
           <>
-            <button
-              onClick={handleLogin}
-              style={{ padding: "5px 14px", background: "var(--accent)", border: "none", borderRadius: 5, color: "var(--on-accent)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}
-            >
-              {provider.authenticated ? t("modelsConfig.relogin") : t("modelsConfig.login")}
-            </button>
+            {provider.terminalOnly ? null : (
+              <button
+                onClick={handleLogin}
+                style={{ padding: "5px 14px", background: "var(--accent)", border: "none", borderRadius: 5, color: "var(--on-accent)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}
+              >
+                {provider.authenticated ? t("modelsConfig.relogin") : t("modelsConfig.login")}
+              </button>
+            )}
             {provider.authenticated && provider.canLogout && (
               <button
                 onClick={handleLogout}

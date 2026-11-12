@@ -19,14 +19,14 @@
  * One hit in a tier is the answer; several is ambiguity.
  */
 
-import { selectableThinkingLevels, thinkingLevelsForMeta } from "../thinking-levels";
+import { hasUnverifiedLadder, selectableThinkingLevels, thinkingLevelsForMeta } from "../thinking-levels";
 
 export interface CatalogModel {
   provider: string;
   id: string;
   name?: string;
   reasoning?: boolean;
-  thinking?: { efforts?: string[]; defaultLevel?: string };
+  thinking?: { efforts?: string[]; defaultLevel?: string; unverified?: boolean };
 }
 
 export type ModelResolution =
@@ -151,10 +151,11 @@ export function resolveModel(query: string, catalog: readonly CatalogModel[]): M
  * The levels one model offers, in the order the composer lists them. A model
  * without reasoning has exactly "off"; any other model has "auto" (the engine
  * decides), "off" and its own efforts — the same ladder the composer's
- * reasoning menu shows (lib/thinking-levels.ts), never a generic one.
+ * reasoning menu shows (lib/thinking-levels.ts), never a generic one. An
+ * unverified ladder (omp has no capability data for the model) is offered too.
  */
 export function modelThinkingLevels(model: CatalogModel): string[] {
-  if (!model.reasoning) return ["off"];
+  if (!model.reasoning && !hasUnverifiedLadder(model)) return ["off"];
   return selectableThinkingLevels(thinkingLevelsForMeta({
     provider: model.provider,
     modelId: model.id,

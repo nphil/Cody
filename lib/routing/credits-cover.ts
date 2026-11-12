@@ -14,6 +14,7 @@
  */
 
 import { CLAUDE_PLAN_PROVIDER, claudeCreditsSlot } from "../claude-credits";
+import { isAccountWideWindow } from "../usage/quota-tiers";
 import type { UsageSnapshot } from "../usage/types";
 
 /** The saved credits, as far as routing needs them. */
@@ -28,7 +29,7 @@ export interface ClaudeCreditsCover {
 /** Saved keys omp has blocked, as the usage snapshot reports them. */
 function spentKeys(snapshot: UsageSnapshot | null): number {
   return (snapshot?.accounts ?? []).filter((account) => claudeCreditsSlot(account?.provider) !== null
-    && (account.windows ?? []).some((window) => window?.state === "exhausted" && !window.tier)).length;
+    && (account.windows ?? []).some((window) => window?.state === "exhausted" && isAccountWideWindow(window))).length;
 }
 
 export function coveredByClaudeCredits(

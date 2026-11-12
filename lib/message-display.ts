@@ -16,7 +16,7 @@ export function getDisplayableAssistantBlocks(
 }
 
 function isFinalAnswerBlock(block: AssistantContentBlock): boolean {
-  return block.type === "text" || block.type === "image";
+  return block.type === "text" || block.type === "image" || (block.type === "thinking" && block.narration === true);
 }
 
 export function splitFinalAssistantBlocks(
@@ -53,23 +53,27 @@ export function groupHasThinking(
   indices: number[],
   extraBlocks: AssistantContentBlock[],
 ): boolean {
-  if (extraBlocks.some((block) => block.type === "thinking")) return true;
+  if (extraBlocks.some((block) => block.type === "thinking" && !block.narration)) return true;
   for (const idx of indices) {
     const message = messages[idx];
     if (message?.role !== "assistant") continue;
-    if (getDisplayableAssistantBlocks(message as AssistantMessage).some((block) => block.type === "thinking")) return true;
+    if (getDisplayableAssistantBlocks(message as AssistantMessage).some((block) => block.type === "thinking" && !block.narration)) return true;
   }
   return false;
 }
 
-/** Custom messages the transcript never shows. The last three are how omp's
+/** Custom messages the transcript never shows. The goal-* types are how omp's
  * goal mode talks to the model: `goal-mode-context` is re-sent before EVERY
  * turn while a goal is active (token budget and all), `goal-continuation` is
  * the hidden "carry on" steer an auto-continuing goal sends between turns, and
  * `goal-budget-limit` tells the model to wrap up. They arrive as `display:false`
  * custom messages, which would otherwise each draw an "Engine note" row — two
  * of them per turn of a goal that runs by itself. The Goal panel above the
- * composer is where a goal is read. */
+ * composer is where a goal is read. The last four are omp 18.19's hidden
+ * model-only notes: the auto-parallel delegation hint, the skill list
+ * announce/withdraw notice, the recalled-memory delta and the streaming-edit
+ * recovery nudge. A person never needs to read them, and each would otherwise
+ * add an "Engine note" row to the chat. */
 const HIDDEN_CUSTOM_TYPES: Record<string, true> = {
   "xdev-mount-notice": true,
   "cody-local-time": true,
@@ -77,6 +81,10 @@ const HIDDEN_CUSTOM_TYPES: Record<string, true> = {
   "goal-mode-context": true,
   "goal-continuation": true,
   "goal-budget-limit": true,
+  "auto-parallel-plan": true,
+  "skill-notice": true,
+  "memory-recall-changes": true,
+  "streaming-edit-recovery": true,
 };
 
 /**

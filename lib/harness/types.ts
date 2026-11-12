@@ -271,6 +271,12 @@ export interface ProviderLoginOption {
   /** True when `accounts` has more than one entry — the row should offer
    * "add another account" alongside each account's own remove control. */
   multiAccount?: boolean;
+  /**
+   * True when this engine refuses to run the sign-in from Cody (it needs a
+   * typed answer the wire cannot carry), so the panel points at the engine's
+   * own terminal instead of a button that fails. Absent means "Cody can run it".
+   */
+  terminalOnly?: boolean;
 }
 
 /** One stored credential for a provider, enough for Settings to show its

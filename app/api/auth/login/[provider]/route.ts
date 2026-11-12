@@ -2,10 +2,9 @@ import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth/http";
 import { requireCapability } from "@/lib/engine-guard";
-import { invalidateModelsCache } from "@/lib/models-cache";
+import { settleProviderChange } from "@/lib/provider-state";
 import { getHarness } from "@/lib/harness";
 import { createLoginValueChannel } from "@/lib/harness/login-channel";
-import { invalidateProviderLoginsCache } from "@/lib/provider-directory-server";
 import type { ProviderLoginUi } from "@/lib/harness/types";
 
 export const dynamic = "force-dynamic";
@@ -167,17 +166,20 @@ export async function GET(
 
       try {
         await surface.login(provider, ui);
-        // A new credential changes which models resolve, whatever the engine.
-        invalidateModelsCache();
-        // ...and the rail's cached `?cached=1` roster, or it keeps answering
-        // the pre-sign-in status until the 15s peek window lapses.
-        invalidateProviderLoginsCache(engine.id);
+        // A new credential changes which models resolve, whatever the engine:
+        // drop Cody's model list and the rail's cached sign-in roster, and
+        // restart idle chat engines. Chats that were already running read their
+        // model list at start, and only the process that did the sign-in
+        // refreshes its own, so without the restart they would keep the old one.
+        await settleProviderChange({ engineId: engine.id });
         send({ type: "success" });
       } catch (error) {
         if (req.signal.aborted) {
           send({ type: "cancelled" });
         } else {
-          send({ type: "error", message: error instanceof Error ? error.message : String(error) });
+          // A driver's typed error (`code`) lets the panel show its own words for it.
+          const code = error instanceof Error && "code" in error && typeof error.code === "string" ? error.code : undefined;
+          send({ type: "error", message: error instanceof Error ? error.message : String(error), ...(code ? { code } : {}) });
         }
       } finally {
         cleanup();

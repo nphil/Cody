@@ -145,6 +145,30 @@ function readStringArray(value: unknown): string[] | undefined {
   return strings.length > 0 ? strings : undefined;
 }
 
+/** The version a relative-source plugin declares in its own manifest, or
+ * undefined (remote sources, a missing or unreadable manifest, a path that
+ * escapes the marketplace folder). */
+function bundledPluginVersion(root: string, source: unknown): string | undefined {
+  if (typeof source !== "string" || !source.startsWith("./")) return undefined;
+  const dir = path.resolve(root, source);
+  const inside = path.relative(root, dir);
+  if (inside === ".." || inside.startsWith(`..${path.sep}`) || path.isAbsolute(inside)) return undefined;
+  for (const file of [path.join(".claude-plugin", "plugin.json"), "plugin.json"]) {
+    const manifest = path.join(dir, file);
+    if (!existsSync(manifest)) continue;
+    try {
+      const data = readJsonFile(manifest);
+      if (isRecord(data)) {
+        const version = asString(data.version);
+        if (version) return version;
+      }
+    } catch {
+      // Unreadable manifest: fall through to the next candidate / catalog version.
+    }
+  }
+  return undefined;
+}
+
 /**
  * Read one marketplace's catalog (marketplace.json at its catalogPath, `~`
  * expanded) and return its plugin entries, each tagged with the owning
@@ -157,13 +181,19 @@ function readStringArray(value: unknown): string[] | undefined {
  * catalog (wrong top-level shape) still throws; individual malformed plugin
  * entries are skipped.
  */
-export function readMarketplaceCatalog(entry: Pick<MarketplaceInfo, "name" | "catalogPath">): CatalogPlugin[] | null {
+export function readMarketplaceCatalog(entry: Pick<MarketplaceInfo, "name" | "catalogPath"> & Partial<Pick<MarketplaceInfo, "sourceType" | "sourceUri">>): CatalogPlugin[] | null {
   const catalogPath = expandHome(entry.catalogPath);
   if (!existsSync(catalogPath)) return null;
   const data = readJsonFile(catalogPath);
   if (!isRecord(data) || !Array.isArray(data.plugins)) {
     throw new Error(`Marketplace catalog at ${catalogPath} has an unexpected shape (expected { plugins: [...] }).`);
   }
+  // A plugin that ships inside the marketplace folder (`source: "./…"`) is
+  // versioned by its own `.claude-plugin/plugin.json` (then `plugin.json`) first,
+  // the catalog entry second — omp 18.11+ upgrades to that version, so show it.
+  // omp resolves the folder from the registered path for a local marketplace and
+  // from the catalog's directory for a cloned one.
+  const root = entry.sourceType === "local" && entry.sourceUri ? path.resolve(expandHome(entry.sourceUri)) : path.dirname(path.resolve(catalogPath));
   const plugins: CatalogPlugin[] = [];
   for (const raw of data.plugins) {
     if (!isRecord(raw)) continue;
@@ -173,7 +203,7 @@ export function readMarketplaceCatalog(entry: Pick<MarketplaceInfo, "name" | "ca
       name,
       marketplace: entry.name,
       description: asString(raw.description),
-      version: asString(raw.version),
+      version: bundledPluginVersion(root, raw.source) ?? asString(raw.version),
       author: readAuthor(raw.author),
       homepage: asString(raw.homepage),
       repository: asString(raw.repository),

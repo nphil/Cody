@@ -24,6 +24,7 @@ const {
   buildSchemaSearchEntries,
   buildStaticSearchIndex,
   schemaRowsFromBody,
+  settingHome,
   collectSearchEntries,
   matchesSearchFilter,
   readSearchEntriesExport,
@@ -233,6 +234,36 @@ test("a schema row a curated card owns trails the card's home, and the schema li
   assert.deepEqual(schemaOnly[0].breadcrumb, ["Codex", "Behavior", "Tools", "Approvals"], "no card on this engine: the row is the key's only home");
   assert.equal(schemaOnly[1].tab, "engine");
   assert.deepEqual(buildSchemaSearchEntries(schemaRowsFromBody(body), "OMP")[0].breadcrumb, ["OMP", "Behavior", "Tools", "Approvals"], "without capabilities nothing is assumed");
+});
+
+test("a schema row that is new wears the chip in search; a terminal-only or hidden row never does", () => {
+  const entries = buildSchemaSearchEntries([
+    { key: "a.fresh", label: "Fresh", tab: "t", visible: true, modified: false, isNew: true },
+    { key: "a.old", label: "Old", tab: "t", visible: true, modified: false },
+    { key: "a.seen", label: "Seen", tab: "t", visible: true, modified: false, isNew: false },
+    { key: "ui.fresh", label: "Terminal", tab: "t", visible: true, modified: false, isNew: true, terminalOnly: true },
+    { key: "a.hidden", label: "Hidden", tab: "t", visible: false, modified: false, isNew: true },
+  ], "OMP", ALL_CAPABILITIES);
+  assert.deepEqual(entries.map((entry) => [entry.id, entry.isNew]), [
+    ["schema-a.fresh", true],
+    ["schema-a.old", undefined],
+    ["schema-a.seen", undefined],
+    ["schema-ui.fresh", undefined],
+  ]);
+  assert.equal(entries[3].scope, TERMINAL_ONLY_BADGE, "the terminal-only row is still found, just never badged");
+  const union = collectSearchEntries({ capabilities: ALL_CAPABILITIES, shortName: "OMP", dynamic: { schemaRows: [{ key: "a.fresh", label: "Fresh", tab: "t", visible: true, modified: false, isNew: true }] }, statics: { entries: [], coveredTabs: new Set() } });
+  assert.equal(searchSettings("fresh", union).find((result) => result.id === "schema-a.fresh")?.isNew, true, "the flag survives the union and the ranking");
+});
+
+test("settingHome follows the card surface that owns a key, else Behavior", () => {
+  assert.deepEqual(settingHome("tools.approvalMode", ALL_CAPABILITIES), { tab: "engine" }, "a Recommended card lives in Behavior");
+  assert.deepEqual(settingHome("retry.enabled", ALL_CAPABILITIES), { tab: "models", sub: "assignments" }, "retry cards live under Models › Assignments");
+  assert.deepEqual(settingHome("mcp.enableProjectConfig", ALL_CAPABILITIES), { tab: "extensions", sub: "mcp" }, "MCP cards live under Extensions › MCP");
+  assert.deepEqual(settingHome("some.uncurated.key", ALL_CAPABILITIES), { tab: "engine" }, "a key no card owns is its schema row's");
+  assert.deepEqual(settingHome("retry.enabled", { ...ALL_CAPABILITIES, models: false }), { tab: "engine" }, "no retry panel on this engine: the schema row is the home");
+  assert.deepEqual(settingHome("mcp.enableProjectConfig", { ...ALL_CAPABILITIES, mcp: false }), { tab: "engine" });
+  assert.deepEqual(settingHome("retry.enabled", { ...ALL_CAPABILITIES, configEditor: false }), { tab: "engine" }, "no config editor, no cards at all");
+  assert.deepEqual(settingHome("retry.enabled", undefined), { tab: "engine" }, "without capabilities nothing is assumed");
 });
 
 test("ranking: label prefix, then label contains, then keyword or key, then description, then trail", () => {

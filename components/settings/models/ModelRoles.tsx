@@ -24,6 +24,7 @@ import { ConfirmDialog } from "@/components/ui/field";
 import { Select, type SelectOption } from "@/components/ui/Select";
 import { toast } from "@/components/ui/toast";
 import { useConfigWriter } from "@/hooks/useConfigWriter";
+import { useLocalAiScan } from "@/hooks/useLocalAiScan";
 import { invalidateSettingsRoutes, useSettingsRoute } from "@/hooks/useSettingsData";
 import { formatModelDisplayName } from "@/lib/model-display";
 import { isRecognizedThinkingSuffix } from "@/lib/model-plan/derive";
@@ -49,6 +50,10 @@ interface ModelRolesBody {
 }
 
 const ROLES_ROUTE = "/api/model-roles";
+/** omp's provider id for LM Studio. */
+const LM_STUDIO_PROVIDER = "lm-studio";
+/** The one role omp serves non-chat (decision) models for. */
+const JUDGE_ROLE = "judge";
 /** Split `provider/id[:effort]` into its model and its reasoning level. A
  * selector that IS a known model (a bare id containing a colon) keeps its
  * colon; Distill's chain editor splits the same dialect. */
@@ -71,8 +76,18 @@ export function ModelRoles({ models, panelId }: { models: RoleModelOption[]; pan
   const [saving, setSaving] = useState(false);
   const [resetOpen, setResetOpen] = useState(false);
   const [resetting, setResetting] = useState(false);
-  const modelSelectors = useMemo(() => new Set(models.map((model) => model.provider + "/" + model.id)), [models]);
   const roleNames = route.data?.roleNames ?? [];
+  // LM Studio decision models can serve the `judge` role (omp 18.13.2+) but are
+  // not chat models, so omp's model list never carries them: the scan does.
+  const scan = useLocalAiScan(roleNames.includes("judge"));
+  const decisionSelectors = useMemo(
+    () => [...new Set(scan.results.filter((result) => result.runtime === "lmstudio").flatMap((result) => result.decisionModels ?? []))].map((id) => LM_STUDIO_PROVIDER + "/" + id),
+    [scan.results],
+  );
+  const modelSelectors = useMemo(
+    () => new Set([...models.map((model) => model.provider + "/" + model.id), ...decisionSelectors]),
+    [models, decisionSelectors],
+  );
 
   // The server's copy wins until the user edits; a save that lands re-reads
   // the route, which is the confirmation that the edit persisted.
@@ -142,7 +157,8 @@ export function ModelRoles({ models, panelId }: { models: RoleModelOption[]; pan
             const { model: selectedModel, effort: selectedThinking } = splitSelector(roles[role] ?? "", modelSelectors);
             const assigned = models.find((item) => item.provider + "/" + item.id === selectedModel);
             const assignedHidden = Boolean(assigned?.hidden);
-            const modelKnown = !selectedModel || Boolean(assigned);
+            const decisionAssigned = role === JUDGE_ROLE && decisionSelectors.includes(selectedModel);
+            const modelKnown = !selectedModel || Boolean(assigned) || decisionAssigned;
             const unavailable = assignedHidden
               ? "hidden — still used until changed"
               : !modelKnown
@@ -160,6 +176,9 @@ export function ModelRoles({ models, panelId }: { models: RoleModelOption[]; pan
                 value: item.provider + "/" + item.id,
                 label: `${formatModelDisplayName(item.id, item.name)} (${item.provider}/${item.id})`,
               })),
+              ...(role === JUDGE_ROLE
+                ? decisionSelectors.map((selector) => ({ value: selector, label: `${selector.slice(LM_STUDIO_PROVIDER.length + 1)} (${selector}, LM Studio decision model)` }))
+                : []),
             ];
             const thinkingOptions: SelectOption<string>[] = [
               { value: "", label: "Model default" },

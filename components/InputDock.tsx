@@ -2,12 +2,15 @@
 
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type RefObject } from "react";
 import { ChevronDown, ChevronLeft, ChevronRight, CircleHelp } from "lucide-react";
-import { useI18n } from "@/lib/i18n";
+import { useI18n, type Translate } from "@/lib/i18n";
+import { useEngineVersion } from "@/hooks/useEngineVersion";
 import { PermissionRequestCard } from "./PermissionRequestCard";
 import { DeviceTrustCard } from "./DeviceTrustCard";
 import { ExtensionInputCard } from "./ExtensionDialog";
 import { AskDialogForm } from "./AskDialogForm";
-import type { PendingInput, PendingInputResponse, RefusalDecision } from "@/lib/pending-input";
+import type { ExtensionDialogRequest, PendingInput, PendingInputResponse, RefusalDecision } from "@/lib/pending-input";
+import { askWithdrawnByMessage } from "@/lib/ask-walk";
+import { splitExtensionTitle } from "@/lib/extension-title";
 
 export interface InputDockProps {
   pendingInputs: PendingInput[];
@@ -15,20 +18,30 @@ export interface InputDockProps {
   composerRef: RefObject<HTMLTextAreaElement | null>;
 }
 
+/**
+ * What one extension dialog is known by. omp's `ask` tool asks a checkbox field again after every tick, each time as
+ * a new request; the field stays one card (it keeps its focus and its place), so a step of that walk is known by its
+ * question instead of its request id.
+ */
+function extensionKey(request: ExtensionDialogRequest): string {
+  return request.method === "select" && request.walk ? `walk:${request.walk.question}` : request.id;
+}
+
 function inputKey(item: PendingInput): string {
   switch (item.kind) {
-    case "extension": return "extension:" + item.request.id;
+    case "extension": return "extension:" + extensionKey(item.request);
     case "permission": return "permission:" + item.request.requestId;
     case "refusal": return "refusal:" + item.decision.id;
     case "device-trust": return "device-trust:" + item.request.id;
   }
 }
 
-function requestTitle(item: PendingInput, t: ReturnType<typeof useI18n>["t"]): string {
+function requestTitle(item: PendingInput, t: Translate): string {
   switch (item.kind) {
     case "extension": {
       const request = item.request;
-      if (request.method !== "ask") return request.title;
+      if (request.method === "select" && request.walk) return splitExtensionTitle(request.walk.question).headline;
+      if (request.method !== "ask") return splitExtensionTitle(request.title).headline;
       const first = request.questions[0];
       return first ? first.header || first.question : "";
     }
@@ -36,6 +49,16 @@ function requestTitle(item: PendingInput, t: ReturnType<typeof useI18n>["t"]): s
     case "refusal": return t("refusal.title");
     case "device-trust": return t("deviceTrust.dockTitle", { device: item.request.label });
   }
+}
+
+/** The one-line warning under the model's question: on current engines a message sent now withdraws it. */
+export function AskWithdrawNote() {
+  const { t } = useI18n();
+  return (
+    <div data-testid="ask-withdraw-note" role="note" style={{ padding: "0 4px 6px", color: "var(--text-dim)", fontSize: 11, lineHeight: 1.5 }}>
+      {t("inputDock.askWithdrawn")}
+    </div>
+  );
 }
 
 function RefusalInputCard({
@@ -100,6 +123,7 @@ function RefusalInputCard({
 
 export function InputDock({ pendingInputs, onRespond, composerRef }: InputDockProps) {
   const { t } = useI18n();
+  const engineVersion = useEngineVersion();
   const rootRef = useRef<HTMLElement>(null);
   const focusTargetRef = useRef<HTMLButtonElement>(null);
   const previousKeyRef = useRef<string | null>(null);
@@ -131,7 +155,8 @@ export function InputDock({ pendingInputs, onRespond, composerRef }: InputDockPr
     if (minimized || !composer || composer.value !== "" || document.activeElement === composer) return;
     requestAnimationFrame(() => {
       if (document.activeElement === composer || composer.value !== "") return;
-      const target = rootRef.current?.querySelector<HTMLElement>('[data-input-choice="true"]') ?? focusTargetRef.current;
+      // A text field is the thing to type into; the Submit button after it is not.
+      const target = rootRef.current?.querySelector<HTMLElement>('[data-input-autofocus="true"], [data-input-choice="true"]') ?? focusTargetRef.current;
       target?.focus({ preventScroll: true });
     });
   }, [composerRef, itemIdentity, minimized]);
@@ -263,6 +288,7 @@ export function InputDock({ pendingInputs, onRespond, composerRef }: InputDockPr
               <ChevronDown size={16} aria-hidden="true" />
             </button>
           </div>
+          {item.kind === "extension" && item.fromAsk === true && askWithdrawnByMessage(engineVersion) && <AskWithdrawNote />}
           <div style={{ maxHeight: "calc(40vh - 56px)", overflowY: "auto", overscrollBehavior: "contain", padding: "0 4px 2px", minWidth: 0 }}>
             {item.kind === "extension" && item.request.method === "ask" && (
               <AskDialogForm
@@ -273,7 +299,7 @@ export function InputDock({ pendingInputs, onRespond, composerRef }: InputDockPr
             )}
             {item.kind === "extension" && item.request.method !== "ask" && (
               <ExtensionInputCard
-                key={item.request.id}
+                key={extensionKey(item.request)}
                 request={item.request}
                 selectedOptionIndex={selectedOptionIndex}
                 onSelectOption={setSelectedOptionIndex}

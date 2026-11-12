@@ -1,6 +1,15 @@
 import { execFile } from "child_process";
 import { OMP_BIN_MISSING, resolveOmpBin } from "../omp/omp-cli";
-import type { UsageAccount, UsageProviderCapacity, UsageSnapshot, UsageWindow, UsageWindowState } from "./types";
+import type {
+  UsageAccount,
+  UsageAccountPolicy,
+  UsageProviderCapacity,
+  UsageSnapshot,
+  UsageUnreportedAccount,
+  UsageWindow,
+  UsageWindowAmount,
+  UsageWindowState,
+} from "./types";
 
 /**
  * Reading plan quota out of the omp engine.
@@ -74,6 +83,16 @@ export function fetchOmpUsageSnapshot(options: { timeoutMs?: number } = {}): Pro
     }, (error, stdout, stderr) => {
       if (error) {
         const killed = (error as NodeJS.ErrnoException & { killed?: boolean }).killed === true;
+        // A non-zero exit that still printed a readable payload (some builds
+        // exit 1 when one provider's fetch failed) is a reading, not a
+        // failure: the other accounts' numbers are good.
+        if (!killed && typeof stdout === "string" && stdout.trim()) {
+          const partial = parseOmpUsageOutput(stdout);
+          if (partial.available) {
+            resolve(partial);
+            return;
+          }
+        }
         const detail = (stderr || error.message || "").trim().replace(/\s+/g, " ").slice(0, 200);
         resolve(unavailableUsageSnapshot(killed ? "omp usage timed out" : detail || "omp usage failed"));
         return;
@@ -91,13 +110,30 @@ export function parseOmpUsageOutput(stdout: unknown): UsageSnapshot {
   if (typeof stdout !== "string" || !stdout.trim()) {
     return unavailableUsageSnapshot("omp usage returned no output");
   }
-  let payload: unknown;
-  try {
-    payload = JSON.parse(stdout);
-  } catch {
-    return unavailableUsageSnapshot("omp usage returned malformed JSON");
-  }
+  const payload = parseJsonObject(stdout);
+  if (payload === undefined) return unavailableUsageSnapshot("omp usage returned malformed JSON");
   return parseOmpUsagePayload(payload);
+}
+
+/**
+ * The JSON value in `stdout`, or undefined when there is none. A notice
+ * printed before or after the payload (an update line, a deprecation) must
+ * not turn a good reading into "malformed", so a failed whole-text parse
+ * falls back to the span from the first `{` to the last `}`.
+ */
+function parseJsonObject(stdout: string): unknown {
+  try {
+    return JSON.parse(stdout);
+  } catch {
+    const start = stdout.indexOf("{");
+    const end = stdout.lastIndexOf("}");
+    if (start < 0 || end <= start) return undefined;
+    try {
+      return JSON.parse(stdout.slice(start, end + 1));
+    } catch {
+      return undefined;
+    }
+  }
 }
 
 /**
@@ -171,7 +207,18 @@ export function parseOmpUsagePayload(payload: unknown): UsageSnapshot {
     if (account) accounts.push(account);
   }
 
-  if (accounts.length === 0) return unavailableUsageSnapshot("omp usage reported no quota windows");
+  const unreported = buildUnreportedAccounts(payload.accountsWithoutUsage);
+  if (accounts.length === 0) {
+    // Nothing measurable. When omp lists signed-in logins it could not read,
+    // the read FAILED (offline, every provider fetch refused) rather than
+    // the user having no quota: say so, and keep the list so the caller can
+    // tell which accounts went quiet.
+    const missing = unreported?.length ?? 0;
+    const reason = missing > 0
+      ? `omp could not read the quota of ${missing} signed-in account${missing === 1 ? "" : "s"}`
+      : "omp usage reported no quota windows";
+    return { ...unavailableUsageSnapshot(reason), ...(unreported ? { unreportedAccounts: unreported } : {}) };
+  }
 
   const generatedAt = readNumber(payload.generatedAt) ?? latestFetchedAt;
   const capacity = buildCapacity(payload.capacity);
@@ -181,6 +228,7 @@ export function parseOmpUsagePayload(payload: unknown): UsageSnapshot {
     fetchedAt: toIsoString(generatedAt) ?? new Date().toISOString(),
     stale: false,
     ...(capacity ? { capacity } : {}),
+    ...(unreported ? { unreportedAccounts: unreported } : {}),
   };
 }
 
@@ -195,6 +243,9 @@ function buildAccount(
   const limits = Array.isArray(report.limits) ? report.limits.filter(isRecord) : [];
   const unlimited = limits.length > 0 && limits.every(isUnlimitedLimit);
   const resetCredits = buildResetCredits(report.resetCredits);
+  const policy = buildPolicy(report.policy);
+  const inactiveGates = (Array.isArray(metadata.inactiveSharedGates) ? metadata.inactiveSharedGates : [])
+    .filter((gate): gate is string => typeof gate === "string" && gate.trim() !== "");
 
   const windows: UsageWindow[] = [];
   const seenIds = new Set<string>();
@@ -219,6 +270,8 @@ function buildAccount(
     unlimited,
     windows,
     ...(resetCredits ? { resetCredits } : {}),
+    ...(policy ? { policy } : {}),
+    ...(inactiveGates.length > 0 ? { inactiveGates } : {}),
     // Set only when a live response refreshed these windows: that is omp's
     // record of the account actually serving traffic, not merely polled.
     lastServedAt: toIsoString(readNumber(metadata.headersUpdatedAt)) ?? null,
@@ -296,6 +349,54 @@ function buildCapacity(value: unknown): Record<string, UsageProviderCapacity[]> 
   }
   return Object.keys(capacity).length > 0 ? capacity : undefined;
 }
+
+/** The `policy` object `omp usage --json` prints for an account an
+ * `auth.accountPolicies` entry matches. Every field is optional upstream, so a
+ * missing one is null; an object that says nothing at all is not a policy. */
+function buildPolicy(value: unknown): UsageAccountPolicy | undefined {
+  if (!isRecord(value)) return undefined;
+  const state = readString(value.state);
+  const source = readString(value.reserveSource);
+  const policy: UsageAccountPolicy = {
+    priority: readNumber(value.priority) ?? null,
+    reservePct: readNumber(value.reservePct) ?? null,
+    reserveSource: source === "global" || source === "override" ? source : null,
+    reclaimAbovePct: readNumber(value.reclaimAbovePct) ?? null,
+    state: state === "eligible" || state === "inside-reserve" || state === "exhausted" ? state : "unknown",
+    remainingPct: readNumber(value.remainingPct) ?? null,
+  };
+  const saysNothing = state === undefined && policy.priority === null && policy.reservePct === null
+    && policy.reclaimAbovePct === null && policy.remainingPct === null;
+  return saysNothing ? undefined : policy;
+}
+
+/**
+ * `accountsWithoutUsage`: stored logins omp has a usage reader for but no
+ * attributable reading of. Both 18.8.3 and 18.19.0 print the key (an empty
+ * list when nothing is missing; 18.19.0 adds a per-entry `policy`), and an
+ * engine that does not print it leaves it absent rather than reading as "none
+ * missing". They are kept OUT of the account list on purpose: nothing was
+ * measured, so a row would only invent a quota-less account.
+ */
+function buildUnreportedAccounts(value: unknown): UsageUnreportedAccount[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const rows: UsageUnreportedAccount[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) continue;
+    const provider = readString(entry.provider);
+    if (!provider) continue;
+    const policy = buildPolicy(entry.policy);
+    rows.push({
+      provider,
+      type: entry.type === "api_key" ? "api_key" : "oauth",
+      identity: readString(entry.email) ?? readString(entry.orgName) ?? readString(entry.accountId) ?? null,
+      accountId: readString(entry.accountId) ?? null,
+      ...(policy ? { policy } : {}),
+    });
+  }
+  return rows;
+}
+
 /**
  * OMP's resetCredits is a bank of saved rate-limit resets, not a plan limit or
  * a flexible-usage dollar balance. Preserve it only when the engine gives a
@@ -309,6 +410,10 @@ function buildResetCredits(value: unknown): UsageAccount["resetCredits"] {
   let earliestExpiresAt: string | null = null;
   for (const credit of Array.isArray(value.credits) ? value.credits : []) {
     if (!isRecord(credit)) continue;
+    // omp's own banked rule: a credit counts toward the balance only while it
+    // has an expiry, uses remaining, and has not been redeemed. A spent one
+    // must not pull the "expires soon" date earlier.
+    if (readNumber(credit.remainingCount) === 0 || readString(credit.status)?.toLowerCase() === "redeemed") continue;
     const expiresAt = toIsoString(readString(credit.expiresAt));
     if (expiresAt && (earliestExpiresAt === null || expiresAt < earliestExpiresAt)) {
       earliestExpiresAt = expiresAt;
@@ -336,6 +441,7 @@ function buildWindow(
   for (let suffix = 2; seenIds.has(id); suffix += 1) id = `${baseId}#${suffix}`;
   seenIds.add(id);
 
+  const amount = buildAmount(limit);
   return {
     id,
     label: buildWindowLabel(limit, scope, windowInfo),
@@ -348,7 +454,20 @@ function buildWindow(
     // constrains the model in the composer right now.
     tier: readString(scope.tier)?.trim().toLowerCase() ?? null,
     shared: scope.shared === true,
+    ...(amount ? { amount } : {}),
   };
+}
+
+/** Money and credit meters (a LiteLLM key budget in usd, a Codex spend cap in
+ * credits, Cursor's dollar pools) keep their own numbers so the UI can print
+ * "$12 of $40" beside the percentage. Percent windows have nothing to add. */
+const MONEY_UNITS = new Set(["usd", "credits"]);
+
+function buildAmount(limit: Record<string, unknown>): UsageWindowAmount | undefined {
+  const amount = isRecord(limit.amount) ? limit.amount : null;
+  const unit = readString(amount?.unit)?.trim().toLowerCase();
+  if (!amount || !unit || !MONEY_UNITS.has(unit)) return undefined;
+  return { unit, used: readNumber(amount.used) ?? null, limit: readNumber(amount.limit) ?? null };
 }
 
 /**
@@ -449,6 +568,15 @@ function buildWindowLabel(
     ?? windowId
     ?? DEFAULT_WINDOW_LABEL;
   const tier = readString(scope.tier);
+  // A LiteLLM budget names whose money it caps in its id; the engine's own
+  // label does not say.
+  const litellm = /^litellm:(key|user):budget$/i.exec(readString(limit.id) ?? "");
+  if (litellm) return `${litellm[1]!.toLowerCase()} budget`;
+  // "credits" is a billing meter, not a model: a Codex seat billed by credits
+  // has one spend cap over the whole account, so it must not read as a tier.
+  if (tier?.trim().toLowerCase() === "credits") {
+    return sanitizeLabel(/spend/i.test(base) ? "credit spend cap" : `${base} credits`, DEFAULT_WINDOW_LABEL);
+  }
   const label = tier && !base.toLowerCase().includes(tier.toLowerCase()) ? `${titleCase(tier)} · ${base}` : base;
   return sanitizeLabel(label, DEFAULT_WINDOW_LABEL);
 }

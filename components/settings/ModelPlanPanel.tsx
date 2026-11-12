@@ -66,7 +66,7 @@ const UNSET_ROLE = "__unset__";
  * only roles listed here get a description, the rest render bare. */
 const DESCRIBED_ROLES: Record<string, true> = {
   default: true, smol: true, slow: true, vision: true, plan: true,
-  commit: true, tiny: true, task: true, advisor: true,
+  commit: true, tiny: true, task: true, advisor: true, widget: true,
 };
 
 /** A live model call against a cold provider is slow; the bar is paced against

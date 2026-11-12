@@ -4,8 +4,11 @@ export interface ModelsData {
    *  free tier, or a model omp's catalog does not know yet
    *  (lib/model-price-fill.ts decides which). Not set when omp 18.4.5+ tags the
    *  zeros deliberate (`pricingStatus` free/included/variable); that tag is
-   *  rare on the wire, so the bundled-catalog judgement still does most work. */
-  modelList: { id: string; name: string; provider: string; supportsFastMode?: boolean; contextWindow?: number; unpriced?: true }[];
+   *  rare on the wire, so the bundled-catalog judgement still does most work.
+   *  `thinkingUnverified`: omp 18.10.3+ offers this model's reasoning ladder as
+   *  an opt-in because it has no capability data for it; the ladder in
+   *  `thinkingLevels` is then a guess until the user picks a level. */
+  modelList: { id: string; name: string; provider: string; supportsFastMode?: boolean; contextWindow?: number; unpriced?: true; thinkingUnverified?: true }[];
   defaultModel: { provider: string; modelId: string } | null;
   thinkingLevels: Record<string, string[]>;
   connectedProviders?: { id: string; name: string; disabled: boolean }[];
