@@ -11,6 +11,7 @@ const { DEVICE_TRUST_NOTE, DEVICE_OPERATION_TOOLS } = await jiti.import("../lib/
 const { SCHEDULE_TOOLS } = await jiti.import("../lib/scheduled/tools.ts");
 const { CHAT_MESSAGE_TOOLS } = await jiti.import("../lib/chat-messages/tools.ts");
 const { MODEL_SWITCH_TOOLS } = await jiti.import("../lib/model-switch/tool.ts");
+const { RUN_ON_WORKER_TOOL } = await jiti.import("../lib/workers/tool.ts");
 
 /**
  * Engines launched through displayMcpAcpServer() / claudeDisplayMcpConfig() do
@@ -19,8 +20,9 @@ const { MODEL_SWITCH_TOOLS } = await jiti.import("../lib/model-switch/tool.ts");
  * stand-in for Cody's device endpoint, so what an engine can discover and what
  * reaches the server is observed rather than read from source.
  */
-async function withBridge(run, { scheduled = true, messaging = true, modelSwitch = true } = {}) {
+async function withBridge(run, { scheduled = true, messaging = true, modelSwitch = true, workers = true } = {}) {
   const calls = [];
+  const events = [];
   const paths = [];
   const endpoint = createServer((request, response) => {
     let raw = "";
@@ -29,6 +31,26 @@ async function withBridge(run, { scheduled = true, messaging = true, modelSwitch
       const body = JSON.parse(raw);
       calls.push({ authorization: request.headers.authorization, body });
       paths.push(request.url);
+      const command = body.arguments?.command;
+      if (request.url === "/workers" && command === "stream") {
+        // The real route's shape: progress lines, a heartbeat, a line that is not JSON, then the result.
+        response.setHeader("content-type", "application/x-ndjson; charset=utf-8");
+        response.write(`${JSON.stringify({ type: "progress", text: "Running on proxmox - 1 s\nbuilding" })}\n`);
+        response.write(`${JSON.stringify({ type: "heartbeat" })}\nnot json\n`);
+        response.write(JSON.stringify({ type: "progress", text: "Running on proxmox - 2 s\ndone building" }).slice(0, 20));
+        setTimeout(() => {
+          response.write(`${JSON.stringify({ type: "progress", text: "Running on proxmox - 2 s\ndone building" }).slice(20)}\n`);
+          response.end(`${JSON.stringify({ type: "result", text: "exit 2 on proxmox", isError: true })}\n`);
+        }, 20);
+        return;
+      }
+      if (request.url === "/workers" && command === "hang") {
+        // A job that never ends: all that matters is whether the bridge hangs up when the call is cancelled.
+        response.setHeader("content-type", "application/x-ndjson");
+        response.write(`${JSON.stringify({ type: "progress", text: "Running on proxmox - 1 s" })}\n`);
+        response.on("close", () => events.push("hung up"));
+        return;
+      }
       response.setHeader("content-type", "application/json");
       response.end(JSON.stringify({ text: `server accepted ${body.tool}` }));
     });
@@ -46,6 +68,7 @@ async function withBridge(run, { scheduled = true, messaging = true, modelSwitch
       ...(scheduled ? { CODY_SCHEDULED_ENDPOINT: `http://127.0.0.1:${port}/scheduled` } : {}),
       ...(messaging ? { CODY_MESSAGING_ENDPOINT: `http://127.0.0.1:${port}/messaging` } : {}),
       ...(modelSwitch ? { CODY_MODEL_SWITCH_ENDPOINT: `http://127.0.0.1:${port}/model-switch` } : {}),
+      ...(workers ? { CODY_WORKERS_ENDPOINT: `http://127.0.0.1:${port}/workers` } : {}),
       CODY_DISPLAY_CAPABILITY: "capability-token",
       CODY_DISPLAY_SESSION_ID: "session-1",
     },
@@ -53,7 +76,7 @@ async function withBridge(run, { scheduled = true, messaging = true, modelSwitch
   });
   try {
     await client.connect(transport);
-    return await run({ client, calls, paths });
+    return await run({ client, calls, paths, events });
   } finally {
     await client.close().catch(() => undefined);
     await new Promise((resolve) => endpoint.close(resolve));
@@ -298,4 +321,84 @@ test("an engine started without a model-switch endpoint is told so plainly inste
     assert.match(result.content[0].text, /model switching capability is unavailable/);
     assert.equal(calls.length, 0);
   }, { modelSwitch: false });
+});
+
+test("run_on_worker is offered through the MCP bridge with the same arguments and the same words as for the host", async () => {
+  await withBridge(async ({ client }) => {
+    const { tools } = await client.listTools();
+    const hosted = RUN_ON_WORKER_TOOL;
+    const exposed = tools.find((tool) => tool.name === hosted.name);
+    assert.ok(exposed, `${hosted.name} is defined for the host but missing from the MCP bridge`);
+    const hostedProperties = hosted.parameters.properties ?? {};
+    assert.deepEqual(Object.keys(exposed.inputSchema.properties ?? {}).sort(), Object.keys(hostedProperties).sort(), `${hosted.name} takes different arguments through the bridge`);
+    assert.deepEqual([...(exposed.inputSchema.required ?? [])].sort(), [...(hosted.parameters.required ?? [])].sort(), `${hosted.name} requires different arguments through the bridge`);
+    assert.equal(exposed.description, hosted.description, `${hosted.name} teaches a different purpose through the bridge`);
+    for (const [name, spec] of Object.entries(hostedProperties)) {
+      const property = exposed.inputSchema.properties[name];
+      assert.equal(property.type, spec.type, `${hosted.name}.${name} has a different type through the bridge`);
+      assert.equal(property.description, spec.description, `${hosted.name}.${name} is described differently through the bridge`);
+      if (spec.enum) assert.deepEqual(property.enum, spec.enum, `${hosted.name}.${name} offers different values through the bridge`);
+      if (spec.items) assert.equal(property.items?.type, spec.items.type, `${hosted.name}.${name} lists a different kind of item through the bridge`);
+    }
+  });
+});
+
+test("a worker call through the MCP bridge reaches the workers endpoint with the session capability, and a plain JSON answer comes back as the result", async () => {
+  await withBridge(async ({ client, calls, paths }) => {
+    const args = { command: "cargo build --release", results: ["target/release/app"], arch: "x86_64", tools: ["rust"], timeoutSeconds: 600, fallbackLocal: false };
+    const result = await client.callTool({ name: "run_on_worker", arguments: args });
+    assert.equal(result.isError, undefined);
+    assert.deepEqual(result.content, [{ type: "text", text: "server accepted run_on_worker" }]);
+    assert.deepEqual(paths, ["/workers"], "a worker job never goes to the display, scheduling, messaging or device endpoints");
+    assert.deepEqual(calls, [{ authorization: "Bearer capability-token", body: { sessionId: "session-1", tool: "run_on_worker", arguments: args } }]);
+
+    // A command is required and an architecture the tool does not know never leaves the bridge.
+    for (const bad of [{}, { command: "ls", arch: "riscv" }]) {
+      const refused = await client.callTool({ name: "run_on_worker", arguments: bad }).then((value) => value, (error) => error);
+      assert.ok(refused instanceof Error || refused.isError === true, "the schema refuses it");
+    }
+    assert.equal(calls.length, 1);
+  });
+});
+
+test("a streamed worker answer through the MCP bridge becomes progress notifications and a final result with its error flag", async () => {
+  await withBridge(async ({ client }) => {
+    const progress = [];
+    const result = await client.callTool(
+      { name: "run_on_worker", arguments: { command: "stream" } },
+      undefined,
+      { onprogress: (update) => progress.push(update) },
+    );
+    assert.equal(result.isError, true);
+    assert.deepEqual(result.content, [{ type: "text", text: "exit 2 on proxmox" }]);
+    assert.deepEqual(progress.map((update) => update.message), ["Running on proxmox - 1 s\nbuilding", "Running on proxmox - 2 s\ndone building"], "a line split across two chunks arrives whole; heartbeats and noise are ignored");
+    assert.deepEqual(progress.map((update) => update.progress), [1, 2]);
+
+    // The same call without a progress listener still returns the result.
+    const quiet = await client.callTool({ name: "run_on_worker", arguments: { command: "stream" } });
+    assert.equal(quiet.isError, true);
+    assert.deepEqual(quiet.content, [{ type: "text", text: "exit 2 on proxmox" }]);
+  });
+});
+
+test("cancelling a worker call through the MCP bridge hangs up on the server so the job is stopped", async () => {
+  await withBridge(async ({ client, calls, events }) => {
+    const cancel = new AbortController();
+    const pending = client.callTool({ name: "run_on_worker", arguments: { command: "hang" } }, undefined, { signal: cancel.signal }).then((value) => value, (error) => error);
+    for (let waited = 0; waited < 100 && calls.length === 0; waited += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(calls.length, 1, "the job started");
+    cancel.abort();
+    await pending;
+    for (let waited = 0; waited < 100 && events.length === 0; waited += 1) await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(events, ["hung up"]);
+  });
+});
+
+test("an engine started without a workers endpoint is told so plainly instead of hanging", async () => {
+  await withBridge(async ({ client, calls }) => {
+    const result = await client.callTool({ name: "run_on_worker", arguments: { command: "ls" } });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /worker capability is unavailable/);
+    assert.equal(calls.length, 0);
+  }, { workers: false });
 });

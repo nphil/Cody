@@ -36,6 +36,7 @@ const PUBLIC_EXACT = new Set([
   "/api/internal/scheduled",
   "/api/internal/messaging",
   "/api/internal/model-switch",
+  "/api/internal/workers",
   // The ntfy app's answer buttons post here with no cookie and no login: the
   // signed single-use token in the body is the credential (lib/notifications/answer.ts).
   "/api/notifications/action",

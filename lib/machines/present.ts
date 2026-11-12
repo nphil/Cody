@@ -1,4 +1,13 @@
-import { DEFAULT_LOCAL_MACHINE_NAME, type MachineKind, type MachineReason, type MachineState, type MachineStatus } from "./types";
+import {
+  DEFAULT_LOCAL_MACHINE_NAME,
+  WORKER_PROBLEMS,
+  type MachineKind,
+  type MachineReason,
+  type MachineState,
+  type MachineStatus,
+  type WorkerFacts,
+  type WorkerProblem,
+} from "./types";
 
 /**
  * What the top bar, its dropdown and the Settings card agree on when they put
@@ -128,4 +137,46 @@ export function pickMeterDensity(machines: readonly MachineState[], available: n
     }
   }
   return available >= METER_LAYOUT.dot ? "dot" : "none";
+}
+
+// ── Workers ──────────────────────────────────────────────────────────────────
+
+/** i18n key for the plain sentence behind a failed worker check. A
+ * {@link WorkerProblem} has its own copy under `machines.worker.problem.`;
+ * every other reason is a failed connection and keeps `machines.reason.`. */
+export function workerReasonKey(reason: MachineReason | WorkerProblem): string {
+  return (WORKER_PROBLEMS as readonly string[]).includes(reason)
+    ? `machines.worker.problem.${reason}`
+    : machineReasonKey(reason as MachineReason);
+}
+
+/** A worker's memory for a sentence: whole gigabytes from 10 up ("64"), one
+ * decimal below ("7.8"). The file states it in MB; 1 GB is 1024 MB, as free(1)
+ * counts. */
+export function formatWorkerMemory(memMB: number): string {
+  const gigabytes = Math.max(0, memMB) / 1024;
+  return gigabytes >= 10 ? String(Math.round(gigabytes)) : gigabytes.toFixed(1);
+}
+
+/** The pieces of the one-line summary of a worker, in reading order: its own
+ * name, architecture, cores, memory and how many jobs run at once. The caller
+ * joins them with a separator. */
+export function workerFactPieces(
+  facts: WorkerFacts,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+  tn: (key: string, count: number) => string,
+): string[] {
+  return [
+    facts.name,
+    facts.arch,
+    tn("machines.worker.cores", facts.cpus),
+    t("machines.worker.memory", { gb: formatWorkerMemory(facts.memMB) }),
+    tn("machines.worker.slots", facts.slots),
+  ];
+}
+
+/** The tools to draw as chips and how many are left out, so a machine with a
+ * long toolchain list does not push the card off the screen. */
+export function visibleWorkerTools(tools: readonly string[], max = 8): { shown: string[]; hidden: number } {
+  return { shown: tools.slice(0, max), hidden: Math.max(0, tools.length - max) };
 }

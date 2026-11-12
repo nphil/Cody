@@ -13,6 +13,7 @@ async function main() {
   const scheduledEndpoint = process.env.CODY_SCHEDULED_ENDPOINT;
   const messagingEndpoint = process.env.CODY_MESSAGING_ENDPOINT;
   const modelSwitchEndpoint = process.env.CODY_MODEL_SWITCH_ENDPOINT;
+  const workersEndpoint = process.env.CODY_WORKERS_ENDPOINT;
   const capability = process.env.CODY_DISPLAY_CAPABILITY;
   const sessionId = process.env.CODY_DISPLAY_SESSION_ID;
   if (!endpoint || !capability) throw new Error("Cody display capability is unavailable");
@@ -77,6 +78,68 @@ async function main() {
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : "HTTP " + response.status);
     return typeof body.text === "string" ? body.text : "";
+  }
+
+  /** Same envelope as callSessionTool, for run_on_worker: the one call that can run for up to two hours,
+   * so there is NO fetch timeout here. The server answers application/x-ndjson, one JSON object a line:
+   * {"type":"progress","text"} (first non-empty line = status), {"type":"heartbeat"} (ignored) and a final
+   * {"type":"result","text","isError"}. A plain JSON {text} or {error} answer is accepted too. Progress goes
+   * on as MCP progress notifications when the client asked for them; cancelling the MCP request (extra.signal)
+   * aborts the fetch, which makes the server stop the job and clean up. */
+  async function callWorkersTool(toolArgs, extra) {
+    if (!workersEndpoint || !sessionId) throw new Error("Cody worker capability is unavailable");
+    const progressToken = extra?._meta?.progressToken;
+    let ticks = 0;
+    const reportProgress = (text) => {
+      if (progressToken === undefined || typeof extra?.sendNotification !== "function") return;
+      ticks += 1;
+      try {
+        extra.sendNotification({ method: "notifications/progress", params: { progressToken, progress: ticks, message: text.slice(0, 2000) } }).catch(() => undefined);
+      } catch {
+        // A client that cannot take progress still gets the result.
+      }
+    };
+    const response = await fetch(workersEndpoint, {
+      method: "POST",
+      headers: { Authorization: "Bearer " + capability, "Content-Type": "application/json", Accept: "application/x-ndjson, application/json" },
+      body: JSON.stringify({ sessionId, tool: "run_on_worker", arguments: toolArgs }),
+      signal: extra?.signal,
+    });
+    if (!(response.headers.get("content-type") ?? "").includes("application/x-ndjson") || !response.ok || !response.body) {
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : "HTTP " + response.status);
+      if (typeof body.error === "string") throw new Error(body.error);
+      return { text: typeof body.text === "string" ? body.text : "", isError: false };
+    }
+    let result = null;
+    const handleLine = (line) => {
+      if (!line.trim()) return;
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        return;
+      }
+      if (event?.type === "progress" && typeof event.text === "string") reportProgress(event.text);
+      else if (event?.type === "result") result = { text: typeof event.text === "string" ? event.text : "", isError: event.isError === true };
+    };
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffered = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffered += decoder.decode(value, { stream: true });
+      let newline = buffered.indexOf("\n");
+      while (newline >= 0) {
+        handleLine(buffered.slice(0, newline));
+        buffered = buffered.slice(newline + 1);
+        newline = buffered.indexOf("\n");
+      }
+    }
+    handleLine(buffered + decoder.decode());
+    if (!result) throw new Error("The connection to Cody ended before the worker job reported a result");
+    return result;
   }
 
   /** Same envelope as callSessionTool, for browser-hosted hardware. A page
@@ -279,6 +342,37 @@ async function main() {
       return { content: [{ type: "text", text }] };
     } catch (error) {
       return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to switch the model" }] };
+    }
+  });
+  // Heavy jobs on another machine. Written once in lib/workers/tool.ts; bin/cody-display-mcp.test.mjs fails when this copy drifts.
+  server.registerTool("run_on_worker", {
+    description: "Run a heavy command on another machine (a \"worker\") instead of on the server this chat runs on, and get its output and result files back. "
+      + "Use it for long CPU- or memory-hungry work: full builds and compiles (cargo, go, next build, bun build), whole test suites, bundling, image builds. "
+      + "Do NOT use it for quick commands, edits, git, or anything that needs this machine's running services, dev server, ports or secrets: those stay local with your normal shell tool. "
+      + "Cody copies the project to the worker (default: the git repository's tracked and untracked-but-not-ignored files, so node_modules and other ignored files are NOT copied: install dependencies inside `command`, for example `bun install && bun run build`), "
+      + "runs `command` there at low priority from the copy of `cwd`, streams the output, copies the paths in `results` back into the workspace, and deletes the copy. "
+      + "Edits you make to files while it runs are not copied. "
+      + "The worker is chosen for you (it must match `arch` and have every tool in `tools`; the one with the most free CPU and memory wins). "
+      + "If no worker can take the job right now it runs on this server instead and the result says so; pass fallbackLocal=false to wait in the queue for a worker instead. "
+      + "If the worker drops out mid-run, Cody runs the job once more elsewhere and tells you exactly what happened. "
+      + "The result starts with the exit code and where it ran, then the last 200 lines of output; the whole output is saved to a file whose path is given. "
+      + "Results copied back overwrite files in the workspace but never delete any.",
+    inputSchema: {
+      command: z.string().describe("The shell command, run with sh -c from the copy of `cwd` on the worker. Failures are reported through the exit code."),
+      cwd: z.string().optional().describe("Directory the command runs in. Default: this chat's workspace. Relative paths resolve against the workspace; it must be inside the workspace's git repository."),
+      include: z.array(z.string()).optional().describe("Globs, relative to `cwd`, of the files to copy to the worker (for example [\"src/**\", \"package.json\"]). Default: every tracked and untracked-but-not-ignored file of the git repository (the whole repository, not only `cwd`)."),
+      results: z.array(z.string()).optional().describe("Files or directories, relative to `cwd`, to copy back into the workspace when the command finishes, also when it fails (for example [\"dist\", \"target/release/app\"]). Default: none."),
+      arch: z.enum(["x86_64", "aarch64"]).optional().describe("Require a worker of this CPU architecture. Set it when the results are programs that must run on this server."),
+      tools: z.array(z.string()).optional().describe("Toolchains the worker must have, for example [\"node\", \"rust\", \"docker\"] (see what workers offer by asking the person, or leave empty)."),
+      timeoutSeconds: z.number().optional().describe("Stop the command after this many seconds of running (default 1800, at most 7200)."),
+      fallbackLocal: z.boolean().optional().describe("Default true: when no worker can take the job now, run it on this server and say so. false: wait in the queue for a worker (up to 30 minutes) and never run it here."),
+    },
+  }, async (input, extra) => {
+    try {
+      const { text, isError } = await callWorkersTool(input, extra);
+      return isError ? { isError: true, content: [{ type: "text", text }] } : { content: [{ type: "text", text }] };
+    } catch (error) {
+      return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to run the command on a worker" }] };
     }
   });
   server.registerTool("device_list", {

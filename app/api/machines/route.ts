@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { jsonError, requireAdminOrOpenInstance, requireUserOrOpenInstance } from "@/lib/auth/http";
 import { parseJsonWithinLimit } from "@/lib/bounded-form-data";
+import { workerChecks } from "@/lib/machines/jobs";
 import { reconcileMachines } from "@/lib/machines/sampler";
 import { findSshBinary } from "@/lib/machines/ssh";
 import { listMachineConfigs, MachinesConfigError, updateMachinesConfig } from "@/lib/machines/store";
@@ -26,6 +27,7 @@ function answer(canEdit: boolean): NextResponse {
     canEdit || !machine.destination ? machine : { id: machine.id, kind: machine.kind, name: machine.name },
   );
   const body: MachinesPayload = { machines, canEdit, sshAvailable: findSshBinary() !== null };
+  if (canEdit) body.workerChecks = workerChecks();
   return NextResponse.json(body, NO_STORE);
 }
 

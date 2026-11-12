@@ -27,6 +27,7 @@ const SUITES = [
   "lib/scheduled/*.test.mjs",
   "lib/statistics/*.test.mjs",
   "lib/usage/*.test.mjs",
+  "lib/workers/*.test.mjs",
   "components/*.test.mjs",
   "components/settings/*.test.mjs",
   "components/settings/providers/*.test.mjs",

@@ -6,12 +6,14 @@ import { isRecord } from "../type-guards";
 import {
   checkMachineDestination,
   checkMachineName,
+  checkWorkerFacts,
   DEFAULT_LOCAL_MACHINE_NAME,
   LOCAL_MACHINE_ID,
   MAX_SSH_MACHINES,
   type MachineConfig,
   type MachineFieldCode,
   type MachinesUpdate,
+  type WorkerFacts,
 } from "./types";
 
 /**
@@ -35,10 +37,20 @@ export function getMachinesConfigPath(): string {
   return path.join(getAgentDir(), FILE_NAME);
 }
 
+interface StoredMachine {
+  id: string;
+  name: string;
+  destination: string;
+  /** Set only for a machine switched on as a worker. */
+  worker?: true;
+  /** The last good reading of the worker's own description; only with `worker`. */
+  workerFacts?: WorkerFacts;
+}
+
 interface MachinesDocument {
   version: 1;
   localName: string;
-  machines: Array<{ id: string; name: string; destination: string }>;
+  machines: StoredMachine[];
 }
 
 function emptyDocument(): MachinesDocument {
@@ -68,7 +80,13 @@ function readDocument(): MachinesDocument {
       const destination = checkMachineDestination(entry.destination);
       if (!id || !name.ok || !destination.ok || id === LOCAL_MACHINE_ID) continue;
       if (document.machines.some((existing) => existing.id === id)) continue;
-      document.machines.push({ id, name: name.value, destination: destination.value });
+      const stored: StoredMachine = { id, name: name.value, destination: destination.value };
+      if (entry.worker === true) {
+        stored.worker = true;
+        const facts = checkWorkerFacts(entry.workerFacts);
+        if (facts.ok) stored.workerFacts = facts.facts;
+      }
+      document.machines.push(stored);
     }
   }
   return document;
@@ -87,7 +105,14 @@ export function listMachineConfigs(): MachineConfig[] {
   const document = readDocument();
   return [
     { id: LOCAL_MACHINE_ID, kind: "local", name: document.localName },
-    ...document.machines.map((machine): MachineConfig => ({ id: machine.id, kind: "ssh", name: machine.name, destination: machine.destination })),
+    ...document.machines.map((machine): MachineConfig => ({
+      id: machine.id,
+      kind: "ssh",
+      name: machine.name,
+      destination: machine.destination,
+      worker: machine.worker === true,
+      ...(machine.worker ? { workerFacts: machine.workerFacts ?? null } : {}),
+    })),
   ];
 }
 
@@ -147,21 +172,33 @@ export function updateMachinesConfig(update: MachinesUpdate): MachineConfig[] {
     if (update.machines.length > MAX_SSH_MACHINES) {
       throw new MachinesConfigError("too_many_machines", `At most ${MAX_SSH_MACHINES + 1} machines can be shown`);
     }
-    const known = new Set(current.machines.map((machine) => machine.id));
-    const taken = new Set<string>(known);
+    const knownMachines = new Map(current.machines.map((machine) => [machine.id, machine]));
+    const taken = new Set<string>(knownMachines.keys());
     for (const entry of update.machines) {
       if (!isRecord(entry)) throw new MachinesConfigError("invalid_request", "Each machine needs a name and an address");
       const name = checkMachineName(entry.name);
       if (!name.ok) failField(name.code);
       const destination = checkMachineDestination(entry.destination);
       if (!destination.ok) failField(destination.code);
+      if (entry.worker !== undefined && typeof entry.worker !== "boolean") {
+        throw new MachinesConfigError("invalid_request", "worker must be true or false");
+      }
       const requested = typeof entry.id === "string" ? entry.id : "";
       // An id is kept only for a machine that exists and is not already used by
       // an earlier entry in this list; anything else is a new machine.
-      const reuse = known.has(requested) && !next.machines.some((machine) => machine.id === requested);
+      const before = knownMachines.get(requested);
+      const reuse = before !== undefined && !next.machines.some((machine) => machine.id === requested);
       const id = reuse ? requested : mintId(taken);
       taken.add(id);
-      next.machines.push({ id, name: name.value, destination: destination.value });
+      const stored: StoredMachine = { id, name: name.value, destination: destination.value };
+      // `worker` left out keeps the machine's setting. Facts describe one
+      // machine at one address, so they stay only while both still hold.
+      const worker = entry.worker ?? (reuse && before.worker === true);
+      if (worker) {
+        stored.worker = true;
+        if (reuse && before.workerFacts && before.destination === destination.value) stored.workerFacts = before.workerFacts;
+      }
+      next.machines.push(stored);
     }
   } else {
     next.machines = current.machines;
@@ -182,4 +219,18 @@ export function updateMachinesConfig(update: MachinesUpdate): MachineConfig[] {
 
   writeDocument(next);
   return listMachineConfigs();
+}
+
+/** Remember what a check of a worker read. Written only while the machine
+ * still exists, is still a worker and still points at `destination` (a check
+ * that raced with an edit in Settings must not pin the old address's facts on
+ * the new one), and only when it differs from what is saved, so the periodic
+ * check does not rewrite the file every minute. */
+export function saveWorkerFacts(id: string, destination: string, facts: WorkerFacts): void {
+  const document = readDocument();
+  const machine = document.machines.find((candidate) => candidate.id === id);
+  if (!machine || machine.worker !== true || machine.destination !== destination) return;
+  if (JSON.stringify(machine.workerFacts) === JSON.stringify(facts)) return;
+  machine.workerFacts = facts;
+  writeDocument(document);
 }

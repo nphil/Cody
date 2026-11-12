@@ -3,6 +3,11 @@
 > Owner workflow preferences (release discipline, delegation/token strategy,
 > deployment context) live in **CLAUDE.md**; this file is the codebase map.
 
+> **This file is a map, not the manual** — it loads into every chat. It keeps the architecture, the File Map and,
+> per area, the rules whose breach already caused a bug. The full original text of each section is in
+> `docs/agents/<topic>.md`, named on that block's `Details:` line: open it before changing that area. New or
+> changed rules go in full into that file, with one short line here; list new files in the File Map.
+
 ## Git Workflow (project rule)
 
 `main` is the only long-lived branch and is always the latest, up-to-date state.
@@ -81,784 +86,333 @@ Shared foundations in `lib/omp/`:
 
 ## File Map
 
+Every path, one line each; the full descriptions are in `docs/agents/file-map.md`.
+
 ```
 app/api/
-  sessions/route.ts               GET  list all sessions
-  sessions/[id]/route.ts          GET/PATCH/DELETE session
-  sessions/[id]/context/route.ts  GET ?leafId= — context for a specific leaf
-  sessions/[id]/export/route.ts   GET exported HTML for a session
-  sessions/[id]/media/route.ts    GET one deferred tool-result image's bytes
-  sessions/[id]/scheduled/route.ts GET list / POST schedule a message for later (owner-checked)
-  sessions/[id]/scheduled/[itemId]/route.ts  PATCH change text/time / DELETE cancel
-  sessions/[id]/scheduled/[itemId]/send-now/route.ts  POST send it now (a failed one's Retry)
-  sessions/[id]/btw/route.ts      GET side-question (/btw) topics: the live engine's get_btw_history (3 s bound) else omp's sidecar on disk; omp only, owner-checked, never spawns
-  preview/screenshot/route.ts     POST server-side screenshot of a loopback URL
-  agent/new/route.ts              POST { cwd, message, toolNames?, provider?, modelId? }
-  agent/[id]/route.ts             GET state | POST any RPC command
-  agent/[id]/events/route.ts      GET SSE stream
-  agent/[id]/recover-model/route.ts POST {provider, modelId} reopen a chat whose saved model is gone
-  agent/running/events/route.ts   GET SSE stream of currently-running session ids
-  agent/[id]/display/route.ts     POST publish a display request | GET latest (auth-gated)
-  agent/[id]/display/events/route.ts GET SSE stream of display requests (snapshot + live)
-  sidebar-chats/route.ts          GET list sidebar chats for workspace
-  sidebar-chats/[id]/route.ts     DELETE a sidebar chat session by id
-  internal/display/route.ts       POST publish from engine MCP servers (capability-token auth)
-  internal/scheduled/route.ts     POST the scheduling tools for ACP engines (capability-token auth)
-  internal/messaging/route.ts     POST send_to_chat + message_status for ACP engines (capability-token auth)
-  internal/model-switch/route.ts  POST the switch_model tool for ACP engines (capability-token auth)
-  auth/**                         omp's provider list + login flow (via RPC); every
-                                   route refuses `unsupported` unless omp is active
-  cwd/validate/route.ts           POST validate/select a cwd
-  cwd/browse/route.ts             GET list subdirectories of a given path (no auth restriction on parent)
-  cwd/mkdir/route.ts              POST create a folder in a browsable directory
-
-  default-cwd/route.ts            POST create ~/omp-cwd-YYYYMMDD
-  files/[...path]/route.ts        GET file contents for viewer
-  git/status/route.ts             GET repo status + branch/ahead-behind for a cwd
-  git/diff/route.ts               GET one file's HEAD->worktree patch
-  info/route.ts                   GET server facts for the Info panel
-  todo/route.ts                   GET/POST project .cody/todo.json (validated, atomic)
-  tasks/route.ts                  GET .cody/tasks.json (validated)
-  tasks/run/route.ts              POST run a task by id into a new terminal
-  home/route.ts                   GET user home directory
-  models/route.ts                 GET { models, modelList, defaultModel, catalogSource }
-                                   dispatches on the active engine: an rpc-dialect
-                                   engine's own sessionless catalog, or an empty
-                                   `catalogSource:"session"` answer for ACP engines,
-                                   whose models live in the session's get_state.
-                                   `?catalog=full[&refresh=1]` (omp only): the
-                                   UNRESTRICTED catalog behind an --config overlay,
-                                   an hour's cache, what curation and the new-models
-                                   diff read from
-  models/new/route.ts             GET models in the catalog never shown before (the
-                                   seen ledger); `?cached=1` answers from the catalog
-                                   cache only and never spawns an engine — for a
-                                   status line, never the hub's own open. A COLD cache
-                                   answers `stale: true` with the last count this
-                                   instance showed (`cody-model-catalog-summary.json`)
-                                   and warms the catalog in the background, so the
-                                   Models rail says "568 models" on the first open
-                                   after a restart instead of nothing until a manual
-                                   Refresh; `pending: true` only before any count was
-                                   ever recorded
-  models/seen/route.ts            GET/POST the seen ledger
-                                   (`cody-model-catalog-seen.json`) that makes "new"
-                                   a fact instead of a guess; POST is admin-only
-  models/visibility/route.ts      GET/PUT who hides and pins which models
-                                   (`cody-model-visibility.json`): an admin's
-                                   instance-wide hide plus each user's own hide/pin.
-                                   `instanceHidden` is refused `unsupported` on omp,
-                                   whose instance hide is its own `enabledModels`
-  models-config/route.ts          GET/PUT — read/write ~/.omp/agent/models.yml (omp only);
-                                   a PUT that drops a provider the file had is a
-                                   REMOVAL: idle engines restart (settleProviderChange)
-  models-config/test/route.ts     POST test a configured model/provider (omp only)
-  omp-settings/route.ts           GET/PUT omp's OWN config.yml — `configEditor`,
-                                   not `nativeSettings`: pi declares the latter for
-                                   its OWN schema panel and must not land here. A PUT
-                                   that CHANGES `disabledProviders` restarts idle
-                                   engines and forgets the newly disabled provider's
-                                   blackouts (the Models hub spreads the whole object
-                                   on every curation write, so an unchanged list is a no-op)
-  omp-settings/schema/route.ts    GET the ACTIVE engine's own settings schema +
-                                   values; PUT a dotted-path patch. Engine-NEUTRAL:
-                                   it dispatches on HarnessAdapter.settings and
-                                   refuses `unsupported` when an engine has none —
-                                   never on an engine id
-  settings-seen/route.ts          GET/POST which engine settings are new for the caller (per
-                                   account, NOT admin-only); POST reports chips seen / keys
-                                   changed, once per Settings open
-  mcp/route.ts                    GET/POST/PUT/DELETE MCP servers in either
-                                   scope (`scope: "project"` default, `"user"`)
-  homelabber/route.ts             GET {base, source}: the web origin of HomeLabber for the
-                                   approval card's backup-code link — CODY_HOMELABBER_URL,
-                                   else the ORIGIN (only) of the `homelabber` server in
-                                   omp's user mcp.json, else the built-in default; any
-                                   signed-in user, never a header or a path
-  provider-keys/route.ts          GET the provider-key catalogue for the active
-                                   engine with stored/fromEnvironment flags (never
-                                   values); PUT {name,value} (admin) stores or clears
-                                   one — every engine, no capability gate. A CLEAR
-                                   restarts idle engines (their env carried the key)
-                                   and answers 409 `set_in_environment` when only the
-                                   server's environment holds the variable
-  providers/route.ts              GET the Providers hub's one list for the active
-                                   engine: sign-in roster + key store + effective
-                                   catalog + registry file, joined per provider.
-                                   `?cached=1` never starts an engine child
-  providers/verify/route.ts       POST {providerId} — "Check models": drops the
-                                   shared utility child and re-reads the catalog to
-                                   count what a provider now serves (admin-only,
-                                   `unsupported` on an ACP engine)
-  providers/enable/route.ts       POST {provider} — omp only: clears a provider from
-                                   `disabledProviders` (restarts idle engines when it
-                                   really was disabled)
-  plugins/route.ts                GET/POST plugin management (shells out to `omp plugin`)
-  plugins/marketplace/route.ts    GET browse configured marketplaces + catalogs | POST
-                                   add/remove/update marketplace, install/uninstall/upgrade
-  projects/route.ts               GET registered+discovered projects | POST add | DELETE hide
-  skills/route.ts                 GET loaded skills + surface flags | PATCH enable/disable
-                                  (the SKILL.md frontmatter key)
-  skills/install/route.ts         POST install through the active engine's own
-                                  installer (npx skills add)
-  skills/store/route.ts           GET browse/search/detail | POST card descriptions (skills.sh registry)
-  worktrees/route.ts              GET/POST/DELETE git worktrees
-  forge/route.ts                  GET the configured code hosts, tokens redacted to
-                                  hasToken + a last-four preview; PUT (admin) upsert
-                                  a host / set the default / point Cody's own update
-                                  check at a host; DELETE (admin) one host
-  forge/[id]/test/route.ts        POST "test connection": GET {api}/user on that host,
-                                  answering the login and (Gitea) the server version
-  distill/route.ts                POST one model-written summary of a thinking block
-                                  or a reply, streamed as SSE: `delta`* then exactly
-                                  one `done` (full text, replace never append) or one
-                                  `error` (unsupported|no_model|too_large|failed).
-                                  Ownership is canAccessSession alone, so a session
-                                  with no file yet (mid-turn) is allowed
-  distill/config/route.ts         GET/PUT the Distill model chain; 400 `unsupported`
-                                  under an ACP engine, PUT admin-or-open-instance
-  notifications/route.ts          GET/PUT this account's push-notification settings
-                                   (the ntfy token is write-only: GET says hasToken)
-  notifications/test/route.ts     POST send a test push with the saved settings
-  notifications/presence/route.ts POST {sessionId|null}: the chat this tab shows
-  notifications/action/route.ts   POST {t} PUBLIC: an ntfy answer button; the signed
-                                   single-use token is the only credential (CORS *)
-  daily-limit/route.ts            GET/PUT the personal daily time limit: today's state
-                                   (active time used on every device, time left, notice
-                                   due) | on/off, length, "Add 15 minutes", "Done for today"
-  daily-limit/beat/route.ts       POST {activeSeconds, endedSecondsAgo?}: one finished
-                                   stretch of ACTIVE use, merged into the account's union
-  machines/route.ts               GET the machines the top bar meters (this server +
-                                   ssh ones; an ssh address only for someone who may
-                                   edit) | PUT (admin, or an open instance) the list
-  machines/stream/route.ts        GET SSE: every machine's status and CPU/memory, a
-                                   frame per reading, a 10 s heartbeat. Holding it
-                                   open IS what makes the server sample at all
-  machines/test/route.ts          POST {destination} (admin) one real ssh sample;
-                                   200 either way, `ok:false` carries a reason code
-  statistics/route.ts             GET  usage totals, ring tree, timeline, insights
-                                   (?preset|from&to &groupBy &refresh) / one chat's
-                                   deep dive (?session=)
-  ../statistics/page.tsx          the Statistics page
-  disk/route.ts                   GET disk meters, largest chat scratch folders, the
-                                   janitor's last run | POST {action:"clean"} (admin)
-                                   runs the janitor now | PUT (admin) its settings
-  claude-credits/route.ts         GET (omp only) each Claude plan account and its backup
-                                  API key, last four only | PUT {accountId, key} /
-                                  DELETE {keyId} (admin): "Claude API credits as the
-                                  backup behind the Claude plans"
-
+  sessions/route.ts  GET list sessions
+  sessions/[id]/route.ts  GET/PATCH/DELETE session
+  sessions/[id]/context/route.ts  GET ?leafId= leaf context
+  sessions/[id]/export/route.ts  GET export HTML
+  sessions/[id]/media/route.ts  GET deferred tool-result image
+  sessions/[id]/scheduled/route.ts  GET/POST scheduled messages
+  sessions/[id]/scheduled/[itemId]/route.ts  PATCH/DELETE item
+  sessions/[id]/scheduled/[itemId]/send-now/route.ts  POST send now
+  sessions/[id]/btw/route.ts  GET /btw topics (omp only)
+  preview/screenshot/route.ts  POST loopback URL screenshot
+  agent/new/route.ts  POST start agent
+  agent/[id]/route.ts  GET state / POST RPC command
+  agent/[id]/events/route.ts  GET SSE stream
+  agent/[id]/recover-model/route.ts  POST reopen chat, model gone
+  agent/running/events/route.ts  GET SSE running session ids
+  agent/[id]/display/route.ts  POST/GET display request (auth-gated)
+  agent/[id]/display/events/route.ts  GET SSE display requests
+  sidebar-chats/route.ts  GET sidebar chats
+  sidebar-chats/[id]/route.ts  DELETE sidebar chat
+  internal/display/route.ts  POST engine MCP display (internal/*: capability-token auth)
+  internal/scheduled/route.ts  POST ACP scheduling tools
+  internal/messaging/route.ts  POST ACP send_to_chat
+  internal/model-switch/route.ts  POST ACP switch_model
+  auth/**  omp login flow via RPC; `unsupported` unless omp
+  cwd/validate/route.ts  POST validate cwd
+  cwd/browse/route.ts  GET list subdirectories
+  cwd/mkdir/route.ts  POST create folder
+  default-cwd/route.ts  POST create ~/omp-cwd-YYYYMMDD
+  files/[...path]/route.ts  GET file for viewer
+  git/status/route.ts  GET repo status
+  git/diff/route.ts  GET one file's patch
+  info/route.ts  GET Info panel facts
+  todo/route.ts  GET/POST .cody/todo.json
+  tasks/route.ts  GET .cody/tasks.json
+  tasks/run/route.ts  POST run task in terminal
+  home/route.ts  GET home directory
+  models/route.ts  GET models; ?catalog=full omp only
+  models/new/route.ts  GET never-shown models; ?cached=1 no spawn
+  models/seen/route.ts  GET/POST seen ledger (POST admin)
+  models/visibility/route.ts  GET/PUT model hide/pin; instanceHidden not on omp
+  models-config/route.ts  GET/PUT models.yml (omp only; settleProviderChange)
+  models-config/test/route.ts  POST test model (omp only)
+  omp-settings/route.ts  GET/PUT omp config.yml (configEditor)
+  omp-settings/schema/route.ts  GET/PUT engine-neutral settings schema
+  settings-seen/route.ts  GET/POST new engine settings
+  mcp/route.ts  GET/POST/PUT/DELETE MCP servers
+  homelabber/route.ts  GET HomeLabber origin (CODY_HOMELABBER_URL)
+  provider-keys/route.ts  GET key catalogue / PUT key (admin)
+  providers/route.ts  GET Providers hub list; ?cached=1 no spawn
+  providers/verify/route.ts  POST Check models (admin, not ACP)
+  providers/enable/route.ts  POST clear disabledProviders (omp only)
+  plugins/route.ts  GET/POST plugins (`omp plugin`)
+  plugins/marketplace/route.ts  GET/POST marketplaces, installs
+  projects/route.ts  GET/POST/DELETE projects
+  skills/route.ts  GET skills / PATCH enable
+  skills/install/route.ts  POST install (npx skills add)
+  skills/store/route.ts  GET/POST skills.sh store
+  worktrees/route.ts  GET/POST/DELETE git worktrees
+  forge/route.ts  GET code hosts, tokens redacted / PUT/DELETE admin
+  forge/[id]/test/route.ts  POST test connection
+  distill/route.ts  POST SSE summary (canAccessSession)
+  distill/config/route.ts  GET/PUT Distill model chain (not ACP)
+  notifications/route.ts  GET/PUT push settings
+  notifications/test/route.ts  POST test push
+  notifications/presence/route.ts  POST chat tab shows
+  notifications/action/route.ts  POST PUBLIC ntfy button (signed token)
+  daily-limit/route.ts  GET/PUT daily time limit
+  daily-limit/beat/route.ts  POST active-use stretch
+  machines/route.ts  GET/PUT metered machines (PUT admin)
+  machines/stream/route.ts  GET SSE machine status
+  machines/test/route.ts  POST ssh sample (admin)
+  machines/worker-check/route.ts  POST read a worker's /etc/cody-worker.json over ssh (admin)
+  internal/workers/route.ts  POST ACP run_on_worker (ndjson progress; capability-token auth)
+  statistics/route.ts  GET usage stats / ?session=
+  ../statistics/page.tsx  Statistics page
+  disk/route.ts  GET disk meters; POST clean, PUT (admin)
+  claude-credits/route.ts  GET/PUT/DELETE Claude backup keys (omp, admin)
 lib/
-  omp/                 shared omp foundations (paths, CLI probe, RpcProcess,
-                        marketplace.ts pure-Node catalog reader, plugin-cli.ts
-                        shared `omp plugin` execFile/JSON helpers,
-                        isolated-agent-dir.ts's shared empty-mcp.json symlink
-                        dance for sidebar chat, Distill, the session namer
-                        and the web-research planner, homelabber-base.ts: the
-                        origin of the `homelabber` MCP server for /api/homelabber)
-  claude-credits.ts    browser-safe half of the Claude API credits backup: the
-                       `anthropic-api`, `anthropic-api-2`, … provider ids (one per
-                       key), plan <-> credits selector helpers and the
-                       /api/claude-credits payload types. Server half:
-                       omp/claude-credits.ts (models.yml blocks, keys, status),
-                       omp/claude-credits-store.ts, omp/claude-credits-overlay.ts
-                       (the per-chat chain overlay) and routing/credits-cover.ts
-  agent-client.ts      typed fetch helper for /api/agent commands
-  time-zone.ts         zones in one pure, browser-and-server-safe place: IANA
-                       validation/canonicalisation (`normalizeTimeZone`), the
-                       precedence (`resolveTimeZone`), `formatLocalTime` /
-                       `describeLocalNow`, the message-command set and the
-                       hidden line's `LOCAL_TIME_CUSTOM_TYPE` — see "Time zones"
-  time-zone-prefs.ts   server only: a person's chosen zone and last-seen device
-                       zone (account record; `<accounts dir>/time-zone.json` on
-                       an open instance), `zoneForMessage`, `ownerTimeZone`
-  tool-time.ts         `formatToolTime()`: how a host tool writes a time the
-                       model reads
-  notifications/       push notifications to the owner's ntfy topic ("Push
-                       notifications" below). `catalog.ts` is the shared,
-                       browser-safe vocabulary (kinds, prefs, bounds); the rest
-                       is server only: `store.ts` (per-account settings, 0600),
-                       `recipients.ts`, `presence.ts`, `observer.ts` (per-chat
-                       state machine), `compose.ts` (text, answer buttons,
-                       digests), `dispatch.ts`, `ntfy.ts` (client), `tokens.ts`
-                       (answer-button tokens), `answer.ts` (what a button tap
-                       does), `quota-watch.ts`
-  device-time-zone.ts  browser: `deviceTimeZoneField()`, the zone to spread into
-                       a request body, read fresh on every call
-  daily-limit/         the personal daily time limit ("Daily time limit" below).
-                       Pure and browser-safe: `active-time.ts` (what counts as
-                       active, the 15 s beat controller), `ledger.ts` (the
-                       wall-clock interval union, local-day bounds), `state.ts`
-                       (settings, the arithmetic, beat parsing), `view.ts` (phase,
-                       tone, level, durations); `store.ts` is server only
-                       (`<accounts dir>/daily-limit.json`)
-  draft-store.ts       composer drafts: in-memory per session key, with the TEXT
-                        mirrored to sessionStorage (`cody:draft:<key>`, 64 K cap)
-                        so a reload or navigation never loses an unsent prompt;
-                        images/files stay in memory only
-  homelabber-approval.ts the pure half of HomeLabber's Face ID approvals in the
-                       chat: which tool calls are HomeLabber's, parsing a
-                       result (text, structured content or both) into a
-                       request's id/status/expiry/item outcomes, folding every
-                       call into one state per request id, phases/tones, the
-                       deep link and web URL, and the base-URL rules — see
-                       "HomeLabber approvals in the chat"
-  image-compress.ts    browser-side source-first batch preparation: exact 900 KiB prompt-frame budget, adaptive WebP fallback, explicit decode/budget errors
-  image-attachments.ts defensive server validation for base64 image command payloads (10-image bound)
-  context-usage.ts     derives idle/reconnect gauge usage from persisted messages
-  env.ts               readEnv(): CODY_* config with OMP_WEB_* fallback
-  display/             universal display/preview surface:
-    types.ts           DisplayRequestV1 + DisplayCandidate + bus event types
-    validation.ts      loopback-only http(s) URL normalization (rejects credentials)
-    bus.ts             globalThis per-session latest+listeners; publish/subscribe/alias
-    capability.ts      HMAC session-scoped display/to-do tokens (CODY_INTERNAL_DISPLAY_SECRET/ORIGIN)
-    provider.ts        RasterWebProvider: puppeteer-core + system Chromium → JPEG WS stream
-    native-gateway.ts  candidate ranking; optional CODY_PREVIEW_BASE_URL
-                       wildcard-subdomain reverse proxy
-    engine-tools.ts    bundled display/to-do MCP launch descriptors: --mcp-config JSON for a
-                       per-turn CLI, an ACP McpServerStdio for an ACP session
-    access.ts          authorizeDisplaySession(): request auth for display routes
-    csp.ts             buildContentSecurityPolicy(): loopback + this host's
-                       private LAN/CGNAT frame-src/connect-src for proxy.ts
-  forge/               code hosts — GitHub and self-hosted Gitea:
-    config.ts          cody-forge.json in the instance data dir (0600, atomic): the
-                       host roster, tokens, the default host and Cody's own update
-                       source; resolveApiUrl/authHeader/matchForgeHostUrl
-    client.ts          one fetch-based interface over both hosts (no octokit):
-                       repos, files, issues, pulls + diffs, releases + assets,
-                       Actions runs/jobs/logs, packages, git trees
-    tool.ts            the `forge` host tool omp sessions call (lib/rpc-manager.ts
-                       registers it). ACP engines do not get it: their bridge
-                       (bin/cody-display-mcp.js) is a separate process holding no
-                       Cody state, and giving it the forge would mean a new
-                       authenticated HTTP surface proxying arbitrary host calls
-  disk/                disk hygiene (see "Disk hygiene" below): `scratch.ts`
-                       (per-chat TMPDIR), `janitor.ts` + `sweep.ts` / `walk.ts` /
-                       `transcripts.ts` / `mentions.ts` (the hourly cleanup),
-                       `gate.ts` (refuse new work at < 5 % free), `status.ts`,
-                       `settings.ts` (`cody-disk.json`), `types.ts` (browser-safe
-                       shapes). Nothing here may use `@/` (loaded by the server)
-  machines/            the machines the top bar shows CPU/memory meters for:
-                       this server plus any ssh machine (see "Machine meters
-                       in the top bar"). Browser-safe: `types.ts` (statuses,
-                       reason codes, the strict name/destination checks, API
-                       payloads) and `present.ts` (which machine is "worst",
-                       how much of each fits in the room the bar has).
-                       Server only: `proc.ts` (/proc/stat, meminfo, loadavg
-                       to CPU % from deltas, memory and load; the ssh stream
-                       framing), `ssh.ts` (the ONE fixed sampling loop, the ssh
-                       argv, a failure to a reason code), `store.ts`
-                       (`cody-machines.json`, 0600, atomic), `sampler.ts`
-                       (collectors and the viewer-driven lifecycle).
-                       bin/cody-server.js loads sampler.ts to stop it at
-                       shutdown, so nothing in here may use `@/`
-  engine-guard.ts      requireEngine()/requireCapability(): the SERVER half of the
-                       capability rule. An omp-only route (models.yml, model roles,
-                       config.yml, `omp usage`, agent.db credentials, session
-                       import/archive/export) refuses 400 `unsupported` under any
-                       other engine instead of answering with omp's data
-  file-access.ts       allowed file roots for /api/files and worktrees
-  distill/             Distill's server half (see "Distill" under Key Design
-                       Decisions):
-    config.ts          cody-distill.json in the instance data dir (0600, atomic):
-                       the fallback chain of `provider/id[:effort]` selectors
-    prompts.ts         the two prompts, the 200 KB head/tail clamp and the
-                       one-line thinking normalizer
-    cache.ts           finished summaries per session (cody-distill/<id>.json,
-                       400 entries, oldest evicted)
-    runner.ts          engine support (same rule as session-namer), the fallback
-                       chain and the 2-at-a-time queue
-  distill-preferences.ts  browser-local Distill preferences (`cody:distill`):
-                       reply verbosity, collapsed-thinking summaries, plain
-                       language, normalizer
-  harness/             pluggable engine seam: adapters (omp/pi/claude/codex),
-                       runtime selection state, three transports (rpc-ui, ACP,
-                       per-turn), session index, binary probe + on-demand install
-                       (docs/harnesses.md)
-    housekeeping.ts    the server's own cleanup (first pass 60 s after boot,
-                       then HOURLY, timers unref'd): the disk janitor
-                       (lib/disk/janitor.ts) and omp's temp leftovers via
-                       lib/omp/temp-files.ts (`omp-sshots-*`,
-                       `omp-worker-stderr-*` older than 7 days). Built into
-                       Cody on purpose: an install must never depend on a
-                       host cron or user script to stop files piling up
-    pi-settings.ts     pi's settings, derived from the settings TABLES in the
-                       installed pi package's own docs/settings.md (parsed at
-                       runtime, failing soft) and written back to
-                       <pi agent dir>/settings.json — the read/write half of
-                       pi's HarnessAdapter.settings
-    provider-catalog.ts the provider → environment-variable catalogue
-                       (ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY,
-                       AWS_* for Bedrock, …) with the engines each provider is
-                       offered on; `providersForEngine()` picks the subset
-    provider-keys.ts   Cody-level provider credentials: a 0600 JSON store in the
-                       instance data dir and `engineChildEnv()`, the ONE place
-                       every engine child process (rpc-ui, ACP, terminal) gets
-                       its environment from, so a key entered once works under
-                       every engine
-    cli-login.ts       runCliLogin(): drives an engine's OWN login command in a
-                       node-pty (URL out, pasted code in, device code shown) —
-                       the shared driver behind claude-login / codex-login
-    claude-login.ts    `claude auth login` / `auth status` / `auth logout`
-    codex-login.ts     `codex login --device-auth` / `login status` / `logout`
-    omp-credentials.ts omp's stored credentials, read and removed through
-                       bin/cody-omp-credentials.mjs (never agent.db directly);
-                       feeds the per-account rows in lib/omp/provider-login.ts;
-                       a removal really deletes the row (omp only soft-deletes)
-    omp-claude-credits.ts the Claude API keys in omp's store under `anthropic-api`:
-                       list/add through bin/cody-omp-claude-credits.mjs (key on
-                       stdin, never argv); removal reuses omp-credentials.ts
-    pi-login.ts        pi's pi-ai OAuth flows, run in bin/cody-pi-login.mjs (a
-                       child that imports the INSTALLED pi package) and bridged
-                       over JSON lines
-    login-channel.ts   the one FIFO channel a sign-in's pasted values travel
-                       through: a value pasted before the engine asks is held
-                       for the first asker; cancel rejects every waiter
-  file-paths.ts        client/server path encoding helpers
-  markdown.ts          shared markdown helpers
-  message-rate.ts      the ONE place output-token throughput is computed: the
-                       engine-measured rate (the provider's output count over
-                       the request's own duration, plus ttft and a decode-only
-                       rate) and, separately and always labelled as such, the
-                       chars/4 streaming estimate
-  model-display.ts    shared display-only model-label formatter; route identifiers remain untouched
-  npx.ts               npx runner used by skill install
-  permission-request.ts pure client-side readers for an ACP engine's approval
-                        requests: option/request parsing off the wire and off
-                        get_state, plus the defensive ToolCallUpdate summary
-  pi-types.ts          local structural types for agent/RPC objects
-  preview-url.ts       loopback preview URL rules: normalize/extract/probe
-  preview-autoopen.ts  when an assistant-mentioned URL auto-opens the Preview panel
-  preview-screenshot.ts server-side headless-Chromium capture of loopback apps
-  project-ordering.ts  pure project sort/group/activity helpers (client + tests)
-  project-registry.ts  on-disk managed-project registry (~/.omp/agent/projects.json)
-  provider-brand.ts    provider id → product brand + which vendored mark to draw;
-                       modelBrand() reads the VENDOR off a model id so gateway rows
-                       (one OpenRouter key, many vendors) don't all wear one mark
-  provider-directory.ts / provider-directory-server.ts  the Providers hub's one
-                       list per engine: joins the sign-in roster, the key store,
-                       the effective catalog and the registry file into one row
-                       per provider (composeProviderDirectory, server-only —
-                       provider-directory.ts holds the pure/shared shapes and
-                       helpers, e.g. isSubscriptionLogin)
-  provider-state.ts    `settleProviderChange`: everything Cody remembers about a
-                       provider that must be forgotten when its credentials, key
-                       or enablement change — models / roster / usage / OpenRouter
-                       balance / saved-reset caches, the route-memory blackouts of a
-                       REMOVED provider, and a restart of idle engine children.
-                       Every route that removes or disables a provider calls it
-                       (logout, provider-keys, omp-settings, providers/enable)
-  model-allow-list.ts  helpers for omp's native `enabledModels` glob allow-list
-                       (Cody edits it, never re-filters by it — see "Model
-                       curation" below); modelKey()/providerGlob() are the
-                       `provider/id` and whole-provider-glob dialects every
-                       models file below shares
-  model-catalog-full.ts the unrestricted omp catalog behind its --config overlay
-                       (`GET /api/models?catalog=full`), hour-long cache
-  model-catalog-seen.ts the "seen" ledger (`cody-model-catalog-seen.json`) that
-                       makes "new since you last looked" a fact, not a guess —
-                       see the design-decision note under Settings shell
-  settings-new-keys.ts pure rules for the Settings "New" badge: diff, accumulate, fade
-  settings-seen.ts     the Settings "New" ledger (`cody-settings-seen.json`)
-  settings-new-reporter.ts browser-safe batching and the on-screen dwell for it
-  model-visibility.ts  who hides/pins which models, instance-wide (admin) and
-                       per user (`cody-model-visibility.json`); the HIDE set is
-                       an inversion, not an allowlist, so a model neither list
-                       names stays visible — see the same note
-  models-effective.ts  the effective (already-curated) catalog loader shared by
-                       /api/models and /api/providers's per-provider counts;
-                       flags `unpriced` rows (every rate zero or absent, and
-                       not tagged `pricingStatus` free/included/variable by
-                       omp 18.4.5+ — that tag is rare on the wire (set on a
-                       handful of catalog models; omp derives the rest), so
-                       the bundled-catalog judgement in model-price-fill
-                       still does most of the work, and is all older engines
-                       have)
-  models-dev.ts        the one models.dev reader (hourly cache), shared by the
-                       Add-model-from-catalog picker and the price fill
-  model-price-fill.ts  fills models.dev prices into models.yml for models omp's
-                       bundled catalog does not list yet — see "Prices for
-                       models omp does not know yet" below
-  composer-model-visibility.ts  browser-side mirror of the visibility file so
-                       the composer repaints without a round trip, and the
-                       store of record on an open instance (no accounts)
-  rpc-manager.ts       session registry + Cody-owned host tools + startRpcSession over RpcProcess;
-                       sidebar chats (`kind:"sidebar"`) are ISOLATED and carry no
-                       preloaded context — see "Sidebar chat" below: a bare
-                       `--cwd` (sidebarBareCwd), an own agent dir with an empty
-                       mcp.json and symlinked credentials (sidebarAgentDir), the
-                       --no-* flags, an overlay, and SIDEBAR_CONTEXT_TOOLS
-                       registered through set_host_tools
-  session-tools.ts     the three CROSS-SESSION tools every chat gets
-                       (list_sessions, session_status, read_session): name-or-id
-                       resolution that lists candidates instead of guessing,
-                       the ownership gate, the condensed transcript (messages
-                       and tool NAMES only), snapshot-only — nothing here
-                       blocks on another session's run
-  session-acquire.ts   a chat's live engine session for work nobody is typing
-                       for (scheduled messages, run recovery): reuses a live
-                       child or starts one exactly as POST /api/agent/[id]
-                       would; `SessionUnavailableError` (gone / sidebar)
-  run-recovery/        keeps unattended runs going ("Overnight runs" below):
-                       `supervisor.ts` (observer per main chat, the one-minute
-                       watchdog, recovery, crash and boot resume; state on
-                       globalThis), `journal.ts` (cody-run-journal.json: runs
-                       in flight), `judge.ts` (tool-overdue rules),
-                       `limits.ts` (every threshold), `text.ts` (the recovery
-                       turn and push wording), `notify.ts`, `shutdown.ts`
-                       (import-free "server is going down" flag)
-  scheduled/           scheduled send ("Scheduled messages" below). Browser-safe:
-                       `types.ts` (item views, SCHEDULED_LIMITS, error codes),
-                       `client.ts` (fetch helpers), `ui.ts` (every composer
-                       decision that is not React: quick times, row words, menu
-                       placement, long press, the refresh plan, the phone row's
-                       arithmetic), `sync.ts` (when the list is read again).
-                       Server only: `store.ts` (the schedule file, 0600,
-                       atomic), `service.ts` (create / change / cancel / send
-                       now — the one place routes AND tools go through),
-                       `scheduler.ts` (the timer), `delivery.ts` (into the
-                       chat), `quota.ts` ("when quota resets"), `tools.ts`
-                       (schedule_message / list_scheduled / cancel_scheduled),
-                       `notify.ts`, `access.ts` (the routes' ownership gate)
-  chat-messages/       one chat's agent messaging another ("Cross-session
-                       awareness" below): `types.ts` (urgencies, limits, the
-                       record), `registry.ts` (in-memory deliveries, the loop
-                       guard), `header.ts` (the sender line), `delivery.ts`
-                       (into the target's wrapper, and the status read from its
-                       ledger), `tools.ts` (send_to_chat / message_status)
-  sidebar-context-tools.ts  the sidebar's three WORKSPACE tools
-                       (list_workspace_files, read_workspace_file,
-                       read_project_context) plus the session three above,
-                       appended verbatim rather than re-declared
-  sidebar-context-budget.ts  how much of a small model's window one tool result
-                       may take; an unknown window is assumed to be the
-                       SMALLEST supported (8,192), never unlimited
-  session-active-models.ts  every model in use in the CURRENT run (live model,
-                       Smart resolution, subagents' resolvedModel, fallback
-                       targets, this run's assistant turns) with what uses
-                       each; feeds the quota popup's "Also in use" section
-  session-namer.ts     3-4 word model-written session names: a one-shot run of the
-                       ACTIVE rpc-dialect engine (omp's `tiny` role only when omp
-                       is that engine; null for ACP engines), plus the pure
-                       normalizer that turns its answer into a name
-  session-reader.ts    session .jsonl parsing + path cache + buildSessionContext;
-                       per-session routes (GET /api/agent/[id]/*) resolve paths via
-                       resolveSessionPath() which searches cody-sidebar-chats/** as fallback;
-                       listAllSessions() excludes sidebar (scans only main sessions root);
-                       isSidebarSessionPath() gates access control in DELETE /api/sidebar-chats/[id]
-  btw.ts               side questions (omp 18.7 `/btw`), pure + browser-safe: topic types, parseSideQuestionCommand, the frame/snapshot merge rules (applyBtwFrame, mergeBtwSnapshot), describeBtwError, the omp-version gate
-  btw-history.ts       server-only bounded reader of omp's btw-history sidecar beside the session file (running → interrupted when no engine is live)
-  sidebar-mode.ts      the Side Bar's pure view state (browser-safe reducer): which view is chosen (This chat / New chat), a `/btw` request taken exactly once, a bare `/btw`'s cursor still waiting to land, and the choice dropped when This chat goes away
-  skills-service.ts    pure-Node skill discovery mirroring the ACTIVE engine's
-                       providers (omp's list, pi's narrower one) + getSkillsSurface(): what the surface can do here
-  engine-capabilities.ts  THE client read of /api/info: capability flags, the
-                       active engine's identity and its version, memoized once
-                       per page load. AppShell loads it and threads
-                       `capabilities` / `engine` down as props; callers off
-                       that path (engineSupports) share the same request
-  skills-registry.ts   client for the public skills.sh registry endpoints (the
-                       same ones `npx skills` uses): category browse, fuzzy/
-                       semantic search, cached SKILL.md detail extraction
-  storage-keys.ts      the cody: browser-storage namespace + legacy migration
-                       + engineScopedKey(): the keys that must not survive an
-                       engine switch (session ids, pinned models)
-  thinking-level-labels.ts  the one raw-reasoning-level → label-key map shared
-                       by the composer selector, its pending status, chat
-                       notices and the subagent dialog
-  project-todo.ts      .cody/todo.json schema, atomic mutation/history (human panel only)
-  workspace-tasks.ts   .cody/tasks.json schema validation + grouping
-  tool-presets.ts      PRESET_NONE/DEFAULT/FULL + getPresetFromTools()
-  transcript-anchor.ts the reader pin's anchor: what a scrolled-up reader is
-                       looking at, by transcript identity (turn index / part /
-                       block index + offset), captured on scroll and restored
-                       after every commit — see "Chat scroll" below
-  transcript-scroll.ts the scroll rules of a transcript that is read AND
-                       followed: the pin/unpin decision for a scroll event
-                       and the row anchor (stable row key + offset) that holds
-                       a reader's place — used by the subagent transcript
-  subagent-transcript.ts  the open subagent transcript as a bounded window of
-                       pages: rows keyed by byte offset, prepend/append, and
-                       trimming that drops the page farthest from the reader
-  types.ts             shared TypeScript types
-  normalize.ts         normalizeToolCalls() — field name mismatch between file format and our types
-  worktree.ts          project/worktree resolution and git worktree operations
-
+  omp/  shared omp foundations: paths, CLI probe, RpcProcess, marketplace.ts, plugin-cli.ts, isolated-agent-dir.ts, homelabber-base.ts, cody-launch-defaults.ts (+ .yml layers), gc-strip.ts (omp gc --strip), services.ts (omp ps)
+  claude-credits.ts  browser-safe Claude API credits types/selectors; server half omp/claude-credits.ts, omp/claude-credits-store.ts, omp/claude-credits-overlay.ts, routing/credits-cover.ts
+  agent-client.ts  typed fetch helper for /api/agent
+  time-zone.ts  pure zone rules: resolveTimeZone, formatLocalTime, describeLocalNow
+  time-zone-prefs.ts  server only: stored zones, zoneForMessage, ownerTimeZone
+  tool-time.ts  formatToolTime(): how host tools write a time
+  notifications/  ntfy push; catalog.ts browser-safe, server only: store.ts, recipients.ts, presence.ts, observer.ts, compose.ts, dispatch.ts, ntfy.ts, tokens.ts, answer.ts, quota-watch.ts
+  device-time-zone.ts  browser: deviceTimeZoneField()
+  daily-limit/  daily time limit; pure: active-time.ts, ledger.ts, state.ts, view.ts; store.ts server only
+  draft-store.ts  composer drafts: memory plus sessionStorage text
+  homelabber-approval.ts  pure half of HomeLabber approvals in chat
+  image-compress.ts  browser-side image batch preparation
+  image-attachments.ts  server validation of base64 image payloads
+  context-usage.ts  idle/reconnect gauge usage from messages
+  env.ts  readEnv(): CODY_* config with OMP_WEB_* fallback
+  display/  universal display/preview surface
+    types.ts  DisplayRequestV1, DisplayCandidate, bus events
+    validation.ts  loopback http(s) URL normalization
+    bus.ts  per-session latest+listeners; publish/subscribe/alias
+    capability.ts  HMAC session-scoped display/to-do tokens
+    provider.ts  RasterWebProvider: puppeteer-core JPEG WS stream
+    native-gateway.ts  candidate ranking; CODY_PREVIEW_BASE_URL proxy
+    engine-tools.ts  display/to-do MCP launch descriptors
+    access.ts  authorizeDisplaySession()
+    csp.ts  buildContentSecurityPolicy() for proxy.ts
+  forge/  code hosts: GitHub and Gitea
+    config.ts  cody-forge.json: hosts, tokens, update source
+    client.ts  fetch-based client over both hosts
+    tool.ts  `forge` host tool (omp only; lib/rpc-manager.ts, bin/cody-display-mcp.js)
+  disk/  disk hygiene: scratch.ts, janitor.ts, sweep.ts, walk.ts, transcripts.ts, mentions.ts, gate.ts, status.ts, settings.ts; no `@/`
+  machines/  top-bar meters + worker state; browser-safe types.ts/present.ts; server only proc.ts, ssh.ts, store.ts, sampler.ts, jobs.ts (job counts + checks on globalThis); no `@/` (bin/cody-server.js)
+  workers/  `run_on_worker`: tool.ts (definition + runOnWorker), run.ts (one job), scheduler.ts (FIFO queue), placement.ts, health.ts (check + monitor), facts.ts, files.ts, tarball.ts, transfer.ts, execute.ts, remote.ts, shell.ts (the ssh seam), output.ts, progress.ts, local.ts, format.ts, live.ts, types.ts; no `@/`; tests use local-shell.mjs
+  engine-guard.ts  requireEngine()/requireCapability(): omp-only routes 400
+  file-access.ts  allowed file roots for /api/files and worktrees
+  distill/  Distill server half
+    config.ts  cody-distill.json: fallback chain
+    prompts.ts  prompts, head/tail clamp, thinking normalizer
+    cache.ts  finished summaries per session
+    runner.ts  engine support, fallback chain, queue
+  distill-preferences.ts  browser-local Distill preferences
+  harness/  pluggable engine seam: adapters, transports, probe/install (docs/harnesses.md)
+    housekeeping.ts  hourly cleanup: lib/disk/janitor.ts, lib/omp/temp-files.ts
+    pi-settings.ts  pi settings from its docs/settings.md; HarnessAdapter.settings
+    provider-catalog.ts  provider → env-var catalogue; providersForEngine()
+    provider-keys.ts  Cody provider credentials store; engineChildEnv()
+    cli-login.ts  runCliLogin(): engine login in node-pty
+    claude-login.ts  `claude auth` login/status/logout
+    codex-login.ts  `codex login` device auth/status/logout
+    omp-credentials.ts  omp credentials via bin/cody-omp-credentials.mjs; lib/omp/provider-login.ts
+    omp-claude-credits.ts  Claude API keys in omp store; bin/cody-omp-claude-credits.mjs
+    pi-login.ts  pi OAuth flows via bin/cody-pi-login.mjs
+    login-channel.ts  FIFO channel for pasted sign-in values
+  file-paths.ts  client/server path encoding helpers
+  markdown.ts  shared markdown helpers
+  message-rate.ts  the one output-token throughput computation
+  model-display.ts  display-only model-label formatter
+  npx.ts  npx runner for skill install
+  permission-request.ts  client readers for ACP approval requests
+  pi-types.ts  structural types for agent/RPC objects
+  preview-url.ts  loopback preview URL normalize/extract/probe
+  preview-autoopen.ts  when a mentioned URL auto-opens Preview
+  preview-screenshot.ts  server-side Chromium capture of loopback apps
+  project-ordering.ts  pure project sort/group/activity helpers
+  project-registry.ts  managed-project registry (projects.json)
+  provider-brand.ts  provider id → brand/mark; modelBrand()
+  provider-directory.ts / provider-directory-server.ts  Providers hub rows; composeProviderDirectory is server-only
+  provider-state.ts  settleProviderChange: forget provider caches; called by providers/enable
+  model-allow-list.ts  omp `enabledModels` helpers; modelKey()/providerGlob()
+  model-catalog-full.ts  unrestricted omp catalog (`/api/models?catalog=full`)
+  model-catalog-seen.ts  "seen" ledger for new models
+  settings-new-keys.ts  pure Settings "New" badge rules
+  settings-seen.ts  Settings "New" ledger
+  settings-new-reporter.ts  browser batching/dwell for New reports
+  model-visibility.ts  hidden/pinned models, admin and per user
+  models-effective.ts  curated catalog loader; flags `unpriced` rows
+  models-dev.ts  the one models.dev reader (hourly cache)
+  model-price-fill.ts  fills models.dev prices into models.yml
+  composer-model-visibility.ts  browser mirror of the visibility file
+  rpc-manager.ts  session registry, host tools, startRpcSession; isolated sidebar chats
+  session-tools.ts  cross-session tools: list_sessions, session_status, read_session
+  session-acquire.ts  live engine session for unattended work; SessionUnavailableError
+  run-recovery/  unattended-run recovery: supervisor.ts journal.ts judge.ts limits.ts text.ts notify.ts shutdown.ts
+  scheduled/  scheduled send; browser-safe: types.ts client.ts ui.ts sync.ts; server: store.ts service.ts scheduler.ts delivery.ts quota.ts tools.ts notify.ts access.ts
+  chat-messages/  chat-to-chat messaging: types.ts registry.ts header.ts delivery.ts tools.ts
+  sidebar-context-tools.ts  sidebar workspace tools + session tools
+  sidebar-context-budget.ts  per-tool-result size cap for small model windows
+  session-active-models.ts  models in use in the current run (quota popup)
+  session-namer.ts  model-written session names; omp tiny role only
+  session-reader.ts  session .jsonl parsing, resolveSessionPath, listAllSessions
+  btw.ts  /btw side questions, pure + browser-safe
+  btw-history.ts  server-only reader of omp's btw-history sidecar
+  sidebar-mode.ts  Side Bar view state reducer, browser-safe
+  skills-service.ts  skill discovery per active engine; getSkillsSurface()
+  engine-capabilities.ts  client read of /api/info: capabilities, engine
+  skills-registry.ts  client for the skills.sh registry
+  storage-keys.ts  cody: storage namespace; engineScopedKey()
+  thinking-level-labels.ts  reasoning-level to label-key map
+  project-todo.ts  .cody/todo.json schema + mutation (human panel only)
+  workspace-tasks.ts  .cody/tasks.json validation + grouping
+  tool-presets.ts  PRESET_NONE/DEFAULT/FULL, getPresetFromTools()
+  transcript-anchor.ts  reader-pin anchor by transcript identity
+  transcript-scroll.ts  pin/unpin and row-anchor scroll rules
+  subagent-transcript.ts  bounded page window of the subagent transcript
+  types.ts  shared TypeScript types
+  normalize.ts  normalizeToolCalls() field-name fix
+  worktree.ts  project/worktree resolution, git worktree ops
+  statistics/  Statistics page server half; scan.ts, indexer.ts, joblog.ts, oneshot.ts, query.ts, days.ts, sunburst.ts, workers.ts, test-helpers.mjs (plus access/billing/labels/paths/present/rates/request/service/store/types)
+  usage/  quota readers; client-merge.ts (browser keeps last good), credential-health.ts (ended logins), last-good.ts (server keeps last good), quota-copy.ts (plain words)
+  model-switch/  agent-requested model switch: resolve.ts (pure), switch.ts, tool.ts
+  engine-crash.ts / engine-crash-events.ts / engine-crash-host.ts / engine-crash-log.ts  why an engine stopped on its own; who hears it; cgroup facts; the chat's crash line
+  model-presets/roster-check.ts  exact-id check against omp's live roster
+  plan-keeper/fold.ts  the plan as a person reads it (checked, summarised, current phase)
+  scheduled/model-ui.ts  Send menu "Model" row logic, no React
+  notifications/signed-out.ts  notice for an ended provider login
+  ask-result.ts  `ask` call/result normalised for the transcript card
+  bash-output-meta.ts  omp's meta for cut-down shell output
+  extension-title.ts  one-line dock header from a multi-line engine prompt
+  helper-memory-limit.ts  how big a helper's history may grow (browser- and Bun-safe)
+  irc-display.ts  parent-to-subagent IRC messages shown plainly
+  task-call-preview.ts  counted phrases for the task-call preview
 components/
-  AppShell.tsx        layout + URL state + tab management
+  AppShell.tsx  layout, URL state, tabs
   SessionSidebar.tsx  session tree + FileExplorer
-  ChatWindow.tsx      chat composition + completion sound wrapper
-  ChatInput.tsx       input bar + model/thinking/tools/compact controls
-  SendPill.tsx        the Send button: one pill whose main part sends and whose
-                      joined ▾ zone (and a right-click, and a long press) opens
-                      ScheduleMenu
-  ScheduleMenu.tsx    that menu: a popover on a mouse, a bottom sheet on touch —
-                      Send now · When quota resets · Send at… (quick times and a
-                      native date-time field)
-  ScheduledBar.tsx    the scheduled messages as one slim bar above the composer
-                      (collapsed summary; opened: one row each with Edit / Send now
-                      / Cancel icon buttons, Retry when failed)
-  DailyLimitRing.tsx  the daily time limit's circle in the controls row (liquid fill,
-                      popover) and the glyph the other surfaces reuse
-  DailyLimitNotice.tsx the calm "you've reached today's limit" bar above the composer
-  SidebarChatPanel.tsx the Side Bar: a "This chat | New chat" switch (a SegmentedControl,
-                      shown only where side questions exist) over two views that both
-                      stay mounted, so flipping it never stops a streaming sidebar
-                      answer. New chat = the sidebar chat: rpc-managed session, model
-                      picker (grouped by provider) + thinking level, message display,
-                      composer (no file editing, no tools). Image attachments go
-                      through the MAIN composer's engine — `prepareImageBatchForAttachment`
-                      (lib/image-compress.ts), same 900 KiB prompt-frame budget and
-                      WebP fallback — by click, drop or paste. `auto` is a real
-                      thinking OPTION, not an absence: unset means "the model's own
-                      default", which is what the main composer shows and sends, and
-                      without the row the trigger rendered blank. This chat =
-                      SidebarSideQuestions
-  SidebarSideQuestions.tsx  the Side Bar's "This chat" view (omp's /btw): topics newest first (ten, the rest behind Show all) with streaming markdown answers, Cancel, Copy and a follow-up box per topic, and the new-question box at the bottom built like the New chat composer. Presentational: the state lives in useSideQuestions and arrives over useSideQuestionsBridge
-  ComposerPanels.tsx  composer-attached goal + todo + subagent panels (collapsible, live states)
-  GoalPanel.tsx      the Goal row of ComposerPanels: the engine's goal (objective, status, tokens vs budget, live time, Pause/Resume/Drop with a two-tap Drop, "Keep working automatically") or the fallback note
-  TodoList.tsx        todo phase grid with preview/show-all (used by ComposerPanels)
-  SubagentTranscriptDialog.tsx  header + Result → Task → Transcript in ONE scroll container + steer footer (wide, fixed height)
-  SubagentTranscript.tsx the transcript section of that dialog: rows drawn by
-                      MessageView, the one "Show earlier" control, "Jump to
-                      latest", loading / error / empty states
-  MessageView.tsx     renders one message (user/assistant/toolCall/toolResult)
-  HomelabberApproval.tsx the React half of those approvals: the transcript-wide
-                      index (context + provider), `useApprovalCard`, the status
-                      row with the live countdown and the two ways to approve
-  CommandPalette.tsx  ⌘K/Ctrl+K palette (cmdk): session switch, new session, theme
-  ImageLightbox.tsx   click-to-preview lightbox for chat images (ClickableImage)
-  BranchNavigator.tsx in-session branch switcher
-  DiffView.tsx        folding unified-diff renderer (FileViewer + GitPanel)
-  GitPanel.tsx        right-panel Git tool: changed files + diffs + branch info
+  ChatWindow.tsx  chat composition + completion sound
+  ChatInput.tsx  input bar + model/thinking controls
+  SendPill.tsx  Send button; ▾ opens ScheduleMenu
+  ScheduleMenu.tsx  send now / quota reset / send-at menu
+  ScheduledBar.tsx  scheduled messages bar
+  DailyLimitRing.tsx  daily-limit ring + shared glyph
+  DailyLimitNotice.tsx  "limit reached" bar
+  SidebarChatPanel.tsx  Side Bar shell; images via lib/image-compress.ts
+  SidebarSideQuestions.tsx  Side Bar "This chat" view (/btw)
+  ComposerPanels.tsx  goal/todo/subagent panels
+  GoalPanel.tsx  Goal row of ComposerPanels
+  TodoList.tsx  todo phase grid
+  SubagentTranscriptDialog.tsx  subagent dialog + steer footer
+  SubagentTranscript.tsx  transcript section of that dialog
+  MessageView.tsx  one message
+  HomelabberApproval.tsx  approval index, useApprovalCard
+  CommandPalette.tsx  ⌘K palette (cmdk)
+  ImageLightbox.tsx  chat image lightbox
+  BranchNavigator.tsx  branch switcher
+  DiffView.tsx  unified-diff renderer
+  GitPanel.tsx  right-panel Git tool
   todo/
-    TodoPanel.tsx       right-panel To-do list UI: input, active/done rows, drag-reorder,
-                        inline title/notes/color editing, delete with undo, clear-completed
-    TodoItemRow.tsx     memo'd row component: checkbox with animation, colored dot palette,
-                        chevron-toggled inline notes textarea, grip drag-handle, trash, hover-reveals
-    TodoQuickAdd.tsx    top-bar quick-add input; Enter adds + keeps focus, Escape clears
-    useTodoDocument.ts  hook: poll/SSE watch on /api/todo, optimistic mutations, busy/error state
-  TasksPanel.tsx      embedded Commands runner for .cody/tasks.json
-  PreviewPanel.tsx    right-panel Preview: walks the display candidate ladder —
-                      direct/gateway iframe, else the streamed surface below —
-                      plus clipboard/pop-out controls and manual URL mode
-  StreamedDisplay.tsx streamed-rung client: display socket + canvas + input,
-                      shared by PreviewPanel and the pop-out window route
-  DisplayWindow.tsx   /display/<sessionId>: the streamed surface alone, full
-                      viewport, no chat chrome
-  InfoPanel.tsx       right-panel Info tool: versions + workspace diagnostics
-  ChatMinimap.tsx     scroll minimap alongside the message list
-  MarkdownBody.tsx    markdown renderer
-  InputDock.tsx       non-modal composer panel for extension, permission, and
-                      refusal questions; keeps the transcript visible
-                      Also draws the model's `ask` walk (one card per field) and the
-                      one-line "a message withdraws this question" warning.
-  ExtensionDialog.tsx select / input / editor requests, including the checkbox view of
-                      an `ask` multi-choice step and masked (`secret`) inputs.
-                      `lib/ask-walk.ts` is the pure logic behind both (tested).
-  PermissionRequestCard.tsx one approval an ACP engine is blocked on, shown
-                      inside InputDock with the transcript still in view
-  ProviderIcon.tsx    vendored brand marks (models.dev logo set + simple-icons for
-                      the few it stubs); ProviderIcon = a provider, ModelIcon = a
-                      model's vendor. Never hotlinked — see the note below
-  ModelsConfig.tsx    omp's models.yml editors (provider/model entry forms, the
-                      thinking-level ladder) plus the coloured brand tiles
-                      Settings draws providers with; rendered inside
-                      settings/providers/ProviderDetail's "Advanced" form for a
-                      custom endpoint — the old tree-and-detail dialog that used
-                      to live here is gone, its registry/roles/composer-picker
-                      views having moved to the Models and Providers hubs
-  McpConfig.tsx       MCP server editor (Settings › Extensions › MCP), scoped
-                      to this project's mcp.json or the user-level one
-  PluginsConfig.tsx   embedded under Settings › Extensions › Plugins; opens
-                      PluginMarketplace
-  PluginMarketplace.tsx marketplace dialog: browse/search/install across
-                      configured `omp` marketplaces, manage marketplaces
-                      (opened from PluginsConfig and the System hub's card)
-  SkillsConfig.tsx    embedded under Settings › Extensions › Skills; opens
-                      SkillsStore
-  SkillsStore.tsx     skill store dialog: skills.sh browse/search/detail/install
-                      (opened from SkillsConfig and the System hub's card)
-  FileExplorer.tsx    file tree inside sidebar
-  FileViewer.tsx      file content in a tab
-  TabBar.tsx          tab bar (Chat + open file tabs)
-  SettingsTabs.tsx    now just shared TYPES/constants (SettingsTab,
-                      EngineCapabilities, ALL_CAPABILITIES, PlatformInfo,
-                      DEFAULT_HARNESS_LABEL, OMP_ENGINE_ID,
-                      SCHEMA_TAB_CAPABILITY, extensionsGroupDescription,
-                      getNormalizedActive) — the tab-bar COMPONENT and its
-                      hand-listed category table are gone; see Settings shell
-  SettingsConfig.tsx  ~20-line entry point: hands AppShell's props to
-                      settings/SettingsShell and re-exports its request type
-  settings/           the Settings dialog itself — see "Settings shell" below
-                      for the registry/data-cache/writer contracts this
-                      directory is built on; file by file:
-    registry.ts         SETTINGS_SECTIONS, the hub table every rail reads
-    shell-context.tsx   useSettingsShell() / useSettingsOpener() contracts
-    SettingsShell.tsx   the dialog: desktop rail+pane, phone MobileStack,
-                        dialog-wide search, the busy/leave-confirm guard
-    SettingsSidebar.tsx / MobileStack.tsx  desktop rail; phone root list + stack
-    SettingsSearch.tsx / search-index.ts  results list; the static ∪ dynamic
-                        search index (each panel's SEARCH_ENTRIES + schema rows)
-    Drawer.tsx          the one nested-surface primitive (side / push / dialog
-                        presentations; never a second Dialog)
-    Directory.tsx       the sectioned-row-list primitive (Connected/Discovered,
-                        the engine roster, MCP servers)
-    DangerZone.tsx      the confirmed-destructive-row block, one per hub
-    SaveStatus.tsx      per-hub save/error corner indicator
-    SegmentedControl.tsx the MCP/Skills/Plugins and Catalog/Assignments switch
-    primitives.tsx      NativeSetting row, chip styles, SettingsHighlightContext
-    new-badges.ts       the "New" badge context, `isBadgedRow`, the hub/sub-view dot
-                        computation and the `N new` label
-    EngineRoster.tsx    install/switch/update/reinstall/revert/uninstall for
-                        every known engine; shared by Settings › System ›
-                        Engines and the setup flow's engine step
-                        (`mode="pick"`). An engine that is SELECTED but not
-                        installed reads as exactly that — never "active", in
-                        either mode — and pick mode auto-advances on a
-                        successful install
-    AccountSettings.tsx / AccessTokensSection.tsx / account-controls.tsx
-                        Settings › Account: profile, password, tokens, roster
-    SystemUpdates.tsx    Settings › System: the Cody update card over the
-                        EngineRoster
-    RetryFallbackPanel.tsx / ModelPlanPanel.tsx  Behavior's retry/fallback
-                        chain editor and the plan-apply wizard
-    ProviderLoginFlow.tsx the one sign-in state machine (SSE frames → URL +
-                        paste box, device code, prompt, progress, success/
-                        error), used by providers/ProviderDetail and the
-                        setup wizard's provider step
-    panels/             one file per hub (Account, Preferences, Notifications,
-                        Code hosts [= Forge], Providers, Models, Engine
-                        [= Behavior], Extensions, System), each a thin
-                        composition of the pieces above plus that hub's own
-                        SEARCH_ENTRIES export. NotificationsPanel edits the
-                        ntfy settings (`/api/notifications`), English-only
-                        like every Settings panel
-    providers/          the Providers hub: ProviderDirectory (the Connected /
-                        Discovered list), ProviderDetail (the sign-in / keys /
-                        custom-endpoint drawer), ClaudeCreditsSection (the
-                        Anthropic drawer's "API credits (backup)" key rows;
-                        claude-credits-view.ts is its pure half),
-                        AddProviderPicker, LocalEndpointForm,
-                        provider-groups.ts (the Add picker's sections),
-                        controls.tsx (shared row bits)
-    models/             the Models hub: ModelCatalog, ModelCurationDialog
-                        (omp's per-provider selection), ModelAssignments +
-                        ModelRoles (role → model), DistillAssignment
-                        (Cody's own Distill chain, gated on
-                        /api/distill/config, not on a capability),
-                        NewModelsNotice
-    engine/             the Behavior hub: RecommendedSettings +
-                        recommended-cards.ts (the curated-card table),
-                        SchemaSettingsList (the engine's complete schema,
-                        chip-grouped, secrets masked), HelperMemoryCard
-                        (helper agents' memory limit; logic in helper-memory.ts)
-    DiskSection.tsx     the System hub's "Disk space" card (`/api/disk`):
-                        meters, largest scratch folders, "Clean idle scratch
-                        now", idle-days setting. Highlight id `disk`
-    MachinesSection.tsx the System hub's "Machines" card: rename this server,
-                        add / edit / remove ssh machines (a removal answers with an
-                        Undo toast that re-adds it), a Test button
-                        (`/api/machines`, admin writes). Highlight id `machines`
-  machines/           the top-bar machine meters: MachineMeters.tsx (the
-                      measured slot, a chip per machine at the density that
-                      fits — this server wears a server glyph, not an initial,
-                      in the slim chip — the phone's one-indicator ring) and
-                      MachinesPanel.tsx (the dropdown's per-machine cards).
-                      This server's DEFAULT name ("This server") is stored in
-                      English and shown in the reader's language by
-                      `machineDisplayName` (lib/machines/present.ts); a name
-                      the person chose is shown as typed
-  ui/                 shared primitives: Dialog/Tooltip/Collapsible, fields, toast
-
+    TodoPanel.tsx  right-panel To-do UI
+    TodoItemRow.tsx  memo'd row
+    TodoQuickAdd.tsx  top-bar quick add
+    useTodoDocument.ts  /api/todo hook
+  TasksPanel.tsx  runner for .cody/tasks.json
+  PreviewPanel.tsx  right-panel Preview (iframe or stream)
+  StreamedDisplay.tsx  streamed-display client
+  DisplayWindow.tsx  /display/<sessionId> pop-out
+  InfoPanel.tsx  right-panel Info tool
+  ChatMinimap.tsx  scroll minimap
+  MarkdownBody.tsx  markdown renderer
+  InputDock.tsx  non-modal question panel (`ask` walk)
+  ExtensionDialog.tsx  extension select/input requests; lib/ask-walk.ts
+  PermissionRequestCard.tsx  ACP approval card in InputDock
+  ProviderIcon.tsx  vendored brand marks; never hotlinked
+  ModelsConfig.tsx  models.yml editors; in settings/providers/ProviderDetail
+  McpConfig.tsx  MCP server editor
+  PluginsConfig.tsx  Plugins settings; opens PluginMarketplace
+  PluginMarketplace.tsx  marketplace dialog
+  SkillsConfig.tsx  Skills settings; opens SkillsStore
+  SkillsStore.tsx  skills.sh dialog
+  FileExplorer.tsx  sidebar file tree
+  FileViewer.tsx  file tab content
+  TabBar.tsx  Chat + file tabs
+  SettingsTabs.tsx  shared types/constants only
+  SettingsConfig.tsx  entry to settings/SettingsShell
+  settings/  Settings dialog ("Settings shell")
+    registry.ts  SETTINGS_SECTIONS hub table
+    shell-context.tsx  useSettingsShell/useSettingsOpener
+    SettingsShell.tsx  dialog, search, leave guard
+    SettingsSidebar.tsx / MobileStack.tsx  rail; phone stack
+    SettingsSearch.tsx / search-index.ts  search UI + index
+    Drawer.tsx  nested-surface primitive
+    Directory.tsx  sectioned-row-list primitive
+    DangerZone.tsx  destructive-row block
+    SaveStatus.tsx  per-hub save indicator
+    SegmentedControl.tsx  switch control
+    primitives.tsx  NativeSetting, SettingsHighlightContext
+    new-badges.ts  "New" badge logic
+    EngineRoster.tsx  engine install/update; mode="pick"
+    AccountSettings.tsx / AccessTokensSection.tsx / account-controls.tsx  Account hub
+    SystemUpdates.tsx  Cody update card
+    RetryFallbackPanel.tsx / ModelPlanPanel.tsx  retry chain; plan wizard
+    ProviderLoginFlow.tsx  sign-in state machine (SSE)
+    panels/  one file per hub, exports SEARCH_ENTRIES
+    providers/  Providers hub: ProviderDetail, ClaudeCreditsSection
+    models/  Models hub: ModelCatalog, DistillAssignment
+    engine/  Behavior hub: RecommendedSettings, SchemaSettingsList
+    DiskSection.tsx  System Disk card (/api/disk)
+    MachinesSection.tsx  System Machines card (/api/machines); "Use as worker" switch + Check worker
+    ServicesSection.tsx  System Services card (omp ps background processes)
+    ReplayDataRow.tsx  System Disk "Old chat data" row (omp gc --strip)
+    engine/list-draft.ts  list-setting text box to saved list, no React
+  machines/  top-bar meters: MachineMeters.tsx, MachinesPanel.tsx (running jobs per worker); machineDisplayName (lib/machines/present.ts)
+  statistics/  Statistics page parts: StatisticsPage, ControlsBar, ChartSection, Sunburst, Timeline, Summary, Insights, DeepDive, NodeDetail, StatsTable, Breadcrumb, BottomSheet, Segmented, StatisticsStates, parts.tsx, statistics-css.ts, statistics-query.ts, useStatisticsData.ts
+  AskResultPanel.tsx  answers of an `ask` call in the card
+  NoticeActions.tsx  buttons under a notice-shelf message
+  QuotaAutoSpend.tsx  "spend saved resets automatically" switches in the quota popover
+  ScheduleModelPicker.tsx  Send menu's model view
+  engine-crash-toast.ts  pop-up for an `engine_crashed` frame
+  ui/  shared primitives: Dialog, Tooltip, toast
 hooks/
-  useSettingsData.ts       the Settings dialog's route cache (useSettingsRoute/
-                           useSettingsRoutes): one in-flight request per route,
-                           an `unsupported` answer cached as a value, prefix
-                           invalidation for writers
-  useConfigWriter.ts       the one writer for omp's config.yml: per-family FIFO
-                           queues, coalesced schema patches, useNativeSettings
-                           for the curated cards
-  useSchemaIndex.ts        the active engine's settings schema, indexed with
-                           each row's effective value, `ui.condition` result and
-                           changed-from-default flag; backs Behavior AND the
-                           dialog-wide search
-  useSettingsNewKeys.ts    one answer per Settings open + the seen/changed reporters
-                           for the "New" badge
-  useModelCatalog.ts       Settings › Models' one row shape across omp/pi/ACP
-                           catalogs, with who hid/pinned what and what is new
-  useLocalAiScan.ts        client for `/api/local-ai`, feeding Providers ›
-                           Discovered
-  useSettingsHistory.ts    mirrors the phone stack's depth into browser history
-                           so a back gesture pops exactly one level
-  useAgentSession.ts       messages + streaming + SSE + fork/navigate/reconciliation logic
-  claude-credits-notices.ts  the pure decisions behind the "plan limit -> API credits"
-                           chat notices: which event is the switch, what silences the
-                           plan's own warning, when the plan is back
-  useAudio.ts              completion sound + browser AudioContext unlock
-  useDragDrop.ts           shared drag/drop state
-  useDisplayRequests.ts    display-request SSE → snapshot/live request state
-  useMachineMeters.ts      the machines SSE as a page-wide store (useSyncExternalStore):
-                           MachineMeters and MachinesPanel subscribe, AppShell does
-                           NOT (a frame a second would re-render the whole shell);
-                           one stream, opened with the first subscriber, closed
-                           with the last and while the page is hidden (that is
-                           what lets the server stop sampling); reconnects, and a
-                           30 s silence watchdog
-  useDailyLimit.ts         the daily time limit's one client store (`useDailyLimit`),
-                           its actions, and `useDailyLimitTracker` (mounted once in
-                           AppShell): counts ACTIVE time only, a timer only inside a
-                           stretch of activity, never while hidden or idle
-  useNotificationPresence.ts  tells the server which chat this tab is showing
-                           (POST /api/notifications/presence: on change, on
-                           visible, every 30 s while visible, null on hide /
-                           pagehide via sendBeacon) so push notifications skip
-                           the chat you are looking at
-  useScheduledMessages.ts  this chat's scheduled messages for the composer's rows
-                           and the Send menu: read on open, tab focus, network
-                           return, a run ending and at the next due time —
-                           never polled (lib/scheduled/sync.ts holds the rules)
-  useSideQuestions.ts      this chat's /btw topics: history read on open and on every stream (re)connect, deltas applied once per animation frame, ask / follow-up / cancel, the omp-version and `Unknown command` latch; returns ONE memoised object (it carries `sessionId`), so it changes only when a topic, flag or error does
-  useSideQuestionsBridge.ts  how those topics reach the Side Bar: AppShell makes the bridge, ChatWindow publishes into it (`usePublishSideQuestions`), SidebarChatPanel subscribes (`useBridgedSideQuestions`, `useSyncExternalStore`); also the `SideQuestionsRequest` token a typed `/btw` uses to ask AppShell for the Side Bar's This chat view
-  useDistill.ts            the client store over POST /api/distill: SSE framing,
-                           per-key in-memory cache, FIFO queue capped at two
-                           concurrent streams (a queued request for a key is
-                           replaced by a newer one, a DISPATCHED one is left
-                           to finish), the permanent `unsupported` latch and
-                           the separate temporary 401/403 backoff
-  useIsMobile.ts           responsive breakpoint hook
-  useSubagentTranscript.ts the open subagent transcript's data: newest page,
-                           earlier pages on request, live append, bounded window
-  useTranscriptScroll.ts   follow / reader anchor / edge auto-load for that scroller
-  usePrefersReducedMotion.ts OS reduce-motion preference (SMIL-safe)
-  useTheme.ts              theme state: saved per account (/api/accounts/me) and mirrored in localStorage "cody:theme"; first visit follows prefers-color-scheme
-
+  useSettingsData.ts  Settings route cache (useSettingsRoutes)
+  useConfigWriter.ts  sole writer of omp config.yml; useNativeSettings
+  useSchemaIndex.ts  indexed engine settings schema; Behavior + search
+  useSettingsNewKeys.ts  "New" badge seen/changed reporters
+  useModelCatalog.ts  Settings Models row shape
+  useLocalAiScan.ts  client for /api/local-ai
+  useSettingsHistory.ts  phone settings stack in browser history
+  useAgentSession.ts  messages, streaming, SSE, fork
+  claude-credits-notices.ts  pure plan-limit to API-credits notices
+  useAudio.ts  completion sound, AudioContext unlock
+  useDragDrop.ts  shared drag/drop state
+  useDisplayRequests.ts  display-request SSE to request state
+  useMachineMeters.ts  machines SSE page-wide store
+  useDailyLimit.ts  daily limit store; useDailyLimitTracker
+  useNotificationPresence.ts  POST /api/notifications/presence
+  useScheduledMessages.ts  scheduled messages; lib/scheduled/sync.ts
+  useSideQuestions.ts  chat's /btw topics; one memoised object
+  useSideQuestionsBridge.ts  /btw topics bridge to Side Bar
+  useDistill.ts  client store over POST /api/distill
+  useIsMobile.ts  responsive breakpoint hook
+  useSubagentTranscript.ts  subagent transcript data window
+  useTranscriptScroll.ts  follow, reader anchor, edge auto-load
+  usePrefersReducedMotion.ts  OS reduce-motion preference
+  useTheme.ts  theme state, saved per account
+  agent-model-switch.ts  page side of the switch_model tool
+  auto-redeem-controls.ts  which auto-spend switches the quota popover offers
+  credential-notices.ts  omp's no-sign-in / saved-reset messages as plain facts
+  useEngineVersion.ts  active engine version from /api/info
+  useHelperLimitConfig.ts  config.yml slice for helper history size
 bin/
-
-  cody-server.js           custom server; also WS upgrade for /api/display/socket
-                           (stream frames + input) and native-gateway host routing;
-                           mints the display capability secret at boot; stops the
-                           machine sampler (every ssh child) at shutdown
-  cody-display-mcp.js      bundled stdio MCP server exposing open_preview (plus the session, scheduling,
-                           chat-messaging, model-switch and device tools) to Claude/Codex engines (posts to /api/internal/*)
-  cody-pi-login.mjs        pi's provider sign-in helper: imports the INSTALLED pi
-                           package's AuthStorage/OAuth flows and speaks JSON
-                           lines to lib/harness/pi-login.ts (list / login /
-                           logout), so pi's own auth.json holds the credential
-  cody-omp-credentials.mjs omp's credential list/remove helper: runs omp's own
-                           AuthStorage under Bun (list / remove / removeProvider),
-                           emits identities and block state only, never a token;
-                           purges omp's soft-delete tombstones (see "Removal is
-                           real" under Several accounts)
-  cody-omp-auth-api.mjs    the one AuthStorage surface the omp Bun helpers call:
-                           namespaced (omp 18.3.4+) first, flat names as fallback
-  cody-omp-claude-credits.mjs  list / add the Claude API keys (`anthropic-api`) through
-                           omp's own AuthStorage under Bun: the key arrives on STDIN,
-                           only ids and the last four characters come back
-  cody-session-tail.js     read-only live view of a chat session for the FIRST
-                           web terminal of a workspace (spawned by
-                           lib/terminal-manager.ts); renders + follows the
-                           session .jsonl, never writes it, q/Ctrl+C drops to
-                           the login shell
+  cody-server.js  custom server; /api/display/socket WS upgrade
+  cody-display-mcp.js  stdio MCP server for Claude/Codex engines (incl. run_on_worker → /api/internal/workers)
+  cody-pi-login.mjs  pi sign-in helper for lib/harness/pi-login.ts
+  cody-omp-credentials.mjs  omp credential list/remove under Bun; never a token
+  cody-omp-auth-api.mjs  AuthStorage surface for omp Bun helpers
+  cody-omp-claude-credits.mjs  list/add Claude API keys (stdin key)
+  cody-session-tail.js  read-only session view; lib/terminal-manager.ts
+  cody-omp-reset-cli.mjs  spends a saved reset via `omp usage reset`
 ```
 
 `desktop/` is a separate top-level tree, not part of the Next.js app above:
@@ -869,5428 +423,436 @@ WSL2 distro flattened from this image. Own CI
 ---
 
 ## User accounts & auth (`lib/auth/`)
-
-Cody has app-level user accounts: a login screen (`/login`,
-`components/LoginScreen.tsx`), signed-cookie sessions, per-account profiles
-(Settings → Account), and per-account chat sessions.
-Accounts are **identities, not OS users** — terminals and the harness run as
-the container's single user regardless of who is signed in; `UserRecord.osUser`
-is a reserved seam if per-uid isolation is ever wanted.
-
-- `lib/auth/users.ts` — JSON store at `<agent dir>/cody-accounts/accounts.json`
-  (override: `CODY_ACCOUNTS_DIR`), atomic 0600 writes, scrypt password hashes
-  (`lib/auth/password.ts`, node:crypto only — no new dependency). The
-  env-managed bootstrap account `cody` materializes whenever `CODY_PASSWORD`
-  is set; its password lives in the environment, never in the store, and it is
-  always an admin. First account ever created becomes the administrator.
-- `lib/auth/session.ts` — stateless HMAC-signed cookie (`cody_session`,
-  30 days). Secret persisted 0600 beside the store. Revocation = bump the
-  user's `tokenVersion` (password changes do this).
-- `lib/auth/guard.ts` — the one "who is this request" answer: cookie first,
-  then HTTP Basic with `CODY_PASSWORD` (kept for scripts/healthcheck; resolves
-  to the bootstrap account). **Auth is required iff a password is set or any
-  account exists** — bare `npm run dev` stays open until the first account.
-- `proxy.ts` — perimeter: unauthenticated HTML → redirect `/login`, API →
-  401 JSON (deliberately no `WWW-Authenticate`: it would summon the browser's
-  native dialog over the login screen). Public paths: `/login`,
-  `/api/accounts/{state,login,signup}`, hashed `_next` assets. The WS upgrade
-  gate in `bin/cody-server.js` accepts the same two credentials.
-  The cross-site guard (`lib/request-security.ts`, applied to every route)
-  rejects cross-site `fetch()`/XHR and non-GET navigations (form-post CSRF)
-  but ALLOWS cross-site GET/HEAD navigations — links into Cody, the preview
-  gateway's iframe, detach-to-tab. Navigating is how browsers arrive
-  anywhere, mutating GETs are bugs by contract, and the SameSite=Lax session
-  cookie stays off cross-site iframe loads regardless. Before this exemption,
-  ANY cross-site link into Cody answered a bare 403 JSON.
-- Session privacy: `lib/auth/session-owners.ts` sidecar maps omp session id →
-  account id (omp owns the JSONL files, so ownership cannot live inside them).
-  Owned sessions are visible only to their owner (admins included); unowned
-  ones (pre-account, terminal-created, orphaned by account deletion) are
-  visible to all. Enforced in `resolveSessionPathOr404` (which now REQUIRES the
-  request — every per-session route passes it), the SSE events route, and the
-  session list. Blocked = the same 404 as missing.
-- Signup policy: `CODY_ALLOW_SIGNUP=0` hides self-service signup, but the
-  first HUMAN signup is always allowed and becomes the admin — the
-  env-managed bootstrap account never uses up that slot. The container needs
-  no password: docker/entrypoint.sh sets `CODY_REQUIRE_ACCOUNTS=1` (unless
-  `CODY_ALLOW_NO_AUTH=1`), which makes `isAuthRequired()` true even with zero
-  accounts, so a fresh instance shows only the first-run setup screen until
-  the opener creates the admin account.
-
----
+- Accounts are identities, not OS users; `guard.ts` is the one "who is this request" answer; auth required iff password set or any account exists.
+- `lib/request-security.ts` blocks cross-site fetch/XHR but ALLOWS cross-site GET/HEAD navigations (else any link into Cody got 403).
+- Pass the request to `resolveSessionPathOr404` in every per-session route — owned sessions are owner-only, even admins (else 404).
+Details: docs/agents/accounts-auth.md
 
 ## Pluggable engines (`lib/harness/`)
-
-The coding agent under the UI is a swappable **engine**: omp (founding,
-full-featured), plus pi, Claude Code and Codex (experimental). Full
-architecture: `docs/harnesses.md`. The load-bearing rules:
-
-- `getHarness()` resolves persisted selection (`cody-engine.json`) →
-  `CODY_HARNESS` env → omp. `selectHarness(id)` persists a switch; the
-  select route then calls `restartAllRpcSessions()`.
-- **Cody-level state always lives in the instance data dir** (`lib/omp/paths`
-  `getAgentDir()`): accounts, checkpoints, engine selection, session owners,
-  the engine session index, the tools prefix, per-engine provider keys
-  (`cody-provider-keys.json`), who hides/pins which models
-  (`cody-model-visibility.json`), the model-catalog "seen" ledger
-  (`cody-model-catalog-seen.json`) and the Settings "New" ledger
-  (`cody-settings-seen.json`). Never route these through the
-  active adapter's `getAgentDir()` — they must survive engine switches.
-- **Browser state that names an engine's things is scoped per engine.**
-  `ENGINE_SCOPED_KEYS` / `engineScopedKey()` (lib/storage-keys.ts) address
-  `cody:composer-models`, `cody:unread-session-ids` and
-  `cody:last-open-by-project` as `<key>:<engineId>`. Session ids are the
-  engine's own, and the composer's pinned-model list is an allowlist over ONE
-  engine's catalog: unscoped, an omp→pi switch left the composer saying "No
-  models" while `/api/models` had returned pi's whole catalog — with the
-  Models settings tab hidden on pi, so there was no way to recover it. An
-  unknown engine (`/api/info` still in flight) reads as "nothing stored", never
-  as the unscoped key; the pre-scoping value is deliberately abandoned rather
-  than adopted, because adopting it IS the bug. Everything else Cody stores
-  (theme, language, panel widths, sound) belongs to the human and stays global.
-- Non-omp live chat has two shapes, and `lib/harness/engine-transport.test.mjs`
-  pins which engine rides which:
-  - **ACP** (`acp-session.ts`) — one long-lived stdio JSON-RPC server,
-    `session/new` once and `session/prompt` per turn. An engine is a data
-    description (`AcpEngineSpec`), never a class. Claude Code and Codex speak it through
-    `@agentclientprotocol/claude-agent-acp` and `@agentclientprotocol/codex-acp`
-    — neither CLI has an ACP mode of its own. It is the only transport with a
-    real approval channel (`session/request_permission`), which is why an ACP
-    engine can stop mid-turn and ask.
-  - **Per turn** (`TurnEngineSession` + a `<id>-stream.ts` translator) — one
-    CLI process per prompt, NDJSON translated into the pi event vocabulary.
-    NO ENGINE RIDES IT ANY MORE: Claude Code was the last, and
-    `turn-session.ts`/`claude-stream.ts` are dead code kept only because
-    `EngineCommandError` still lives there. Retiring them (rehome that class,
-    delete both modules and their two test files, drop
-    `TURN_SESSION_ALLOWLIST` from `lib/architecture.test.mjs`) is a standing
-    follow-up, not a refactor to do incidentally.
-
-  Both throw code `"unsupported"` for commands beyond
-  prompt/abort/get_state/get_messages — the UI tolerates that by design — and
-  both keep session metadata in `cody-engine-sessions.json`
-  (`lib/harness/engine-sessions.ts`), keyed by Cody session id; ownership
-  uses the same session-owners sidecar as omp.
-- **An engine's binary is not always its CLI.** An ACP adapter is what Cody
-  installs, probes and version-checks, while the CLI underneath is a separate
-  concern — so `HarnessAdapter` states them apart: `installAlso` installs the
-  CLI as its own package (Cody owns its version), `skipNativeOptional` stops
-  the adapter shipping a duplicate copy, `engineEnv()` joins the two halves
-  with one env table used by the live session, the post-install probe AND a
-  Cody terminal, `cliArgs` names the argv that opens the interactive CLI (an
-  ACP adapter run bare is a JSON-RPC server, not a TUI), and `healthArgs` is
-  the probe that runs the REAL entry point. Codex is the worked example:
-  `codex-acp --version` answers from its own bundle and reports healthy with
-  no Codex to drive, so the install is verified with `codex-acp cli -V`;
-  Claude Code is the same shape, verified with `claude-agent-acp --cli
-  --version`.
-- **`--omit=optional` does nothing for a global npm install.** Verified four
-  ways against npm 10.9 (flag, `--no-optional`, `NPM_CONFIG_OMIT`,
-  `--userconfig`): all of them installed the ~300 MB platform binary anyway.
-  What works is the platform gate — `--os=none --cpu=none` matches no
-  package's `os`/`cpu`, so npm skips exactly the platform-specific optional
-  dependencies. That is what `skipNativeOptional` sends, and it is applied
-  PER PACKAGE, because the CLI installed beside the adapter needs precisely
-  the binary the flag suppresses.
-- **Cody's display tools reach an ACP engine over MCP.** `open_preview` and
-  friends ride `session/new`'s `mcpServers` as an `McpServerStdio`
-  (`lib/display/engine-tools.ts` `displayMcpAcpServer`, wired through
-  `AcpEngineSpec.mcpServers`). Two traps: the descriptor must carry NO `type`
-  field (adapters discriminate stdio by its absence and silently drop a
-  server that has one), and building it throws when the display secret is
-  unset, so the hook catches — a failed token must cost the session its
-  Preview button, never its chat.
-- **An ACP tool `title` is a sentence, not a tool name.** The Claude adapter
-  renders a Bash call as the command line. The real name rides in the agent's
-  own `_meta`, so `AcpEngineSpec.toolNameMetaPath` names the path as DATA
-  (`["claudeCode", "toolName"]`) and `acp-session.ts` stays engine-neutral —
-  `lib/architecture.test.mjs` guards that seam, and the module's docstring
-  promises it.
-- Capability flags (`HarnessCapabilities`, including `chatExtras`) gate UI
-  surfaces: a `false` **hides** the settings tab / panel card / composer
-  control, it never renders a broken one. `/api/info` serves the active
-  engine's capabilities to the client.
-- **The client gates on the WHOLE flag set, not a hand-picked subset.**
-  `AppShell` threads `capabilities` (all of them) and `engine` (identity) into
-  `ChatWindow` → `ChatInput` and into `SessionSidebar`; the composer derives
-  `chatExtras`/`fastMode`/`subagents` from that prop rather than receiving
-  three booleans. The three-boolean version is what produced four separate
-  leaks at once: with `models` and `skills` never threaded, the `Smart`
-  model-roles row (which fetches omp's `config.yml`) rendered on pi because it was
-  gated on `chatExtras`, which pi HAS. When a control needs a flag nobody
-  passed yet, read it off `capabilities` — do not add a fourth boolean.
-- **A few surfaces are one engine's own files, not a capability.** Session
-  import writes omp's `.jsonl` layout and archive moves it with omp's gc
-  layout; the routes refuse under any other engine (`requireEngine("omp", …)`)
-  and the controls follow with `engine.id === OMP_ENGINE_ID`
-  (components/SettingsTabs.tsx). The same is true of the composer's plan-quota
-  ring: `omp usage --json` is the only reader `lib/usage` has, so `/api/usage`
-  answers `{available:false, reason}` elsewhere — a VALUE, not an error — and
-  the ring hides rather than rendering a permanently empty dashed circle
-  (`useUsage(enabled)` also stops the 90-second poll behind it).
-- **Engine-specific copy names the ACTIVE engine.** Every user-facing string
-  that used to say "omp"/"OMP" now interpolates `{name}` from
-  `engine.shortName` (`chatInput.smartModelHint`,
-  `.smartModelUnavailable`, `.thinkingAuto`, `.toolPresetCoreWarning*`,
-  `.groupEngineBuiltin`, `agentSession.startingAgent`,
-  `info.section.engine`; the fallback toasts no longer name the engine at
-  all, they name the JOB, see the model-switch marker note below). The sole
-  intentional exception is the Smart model
-  label: it is exactly `Smart`, with no engine, role, or resolved-model
-  suffix. `agentSession.startingAgent` fires on any slow first connect —
-  i.e. exactly an ACP engine's cold start — which is why it said
-  "Starting omp…" to a Codex user. The Info panel's copyable diagnostics say
-  `Engine: <shortName> <version>` for the same reason: the VALUE was always
-  the active engine's, only the label lied.
-- **Composer request state has two authorities.** Fast catalog support is a
-  capability prediction, while `fastModeActive` and explicit
-  `fastModeUnavailable` come from the live engine. The compact Fast control
-  says **Fast off**, **Fast requested**, **Fast inactive**, **Fast unavailable**,
-  **Fast unverified**, or **Checking**. Requested means the engine accepted a
-  priority request; it is never positive confirmation that the provider is
-  actually servicing it. Inactive means the enabled request is not receiving
-  engine priority and normal service applies, not that it was rejected; it can
-  still be turned off. An active engine answer outranks stale catalog metadata.
-  Reasoning-level changes are allowed during a run, lock only while awaiting
-  engine acknowledgement, and apply to the next model invocation (including a
-  tool continuation), never the stream already in progress.
-- **Slow mode and the usage-limit stage are engine-reported and follow the
-  active model** (`lib/slow-mode-state.ts`, omp 18.6.3+). `get_state` carries
-  `slowModeSupported`/`slowModeEnabled`/`slowModeScope` and `usageLimit`;
-  `deriveSlowModeState` returns `null` — and the **Slow** switch in the model
-  dropdown does not render at all, never as a disabled control — when the
-  engine omits them (older omp, pi, ACP) or the model has no slow mode. The
-  switch sends `set_slow_mode {enabled}` (`Unknown command` hides it, like the
-  other newer-omp commands) and re-reads state. Scope matters in the words:
-  `session` is this chat's own flex tier; `global` is persisted config
-  (`providers.anthropic.slowMode` in `config.yml`) that EVERY chat shares, and
-  the switch's hint says plainly that it is saved for every chat. A missing
-  scope is read as `session` so the switch never promises reach it cannot
-  confirm. `usageLimit` (`low_priority` with a reset time, or `wrap_up` with
-  `extraUsage`) is shown as a status dot on the quota ring, a suffix on its
-  tooltip, one line right under the QuotaPopover hero (tooltip = the full
-  sentence), and ONE chat notice when a chat first sees a stage or moves
-  between stages — never on leaving one, because the field also vanishes on a
-  model switch. All copy is `slowMode.*` (en/ja/zh-CN) via
-  `describeUsageLimit`; times go through `formatResetTime` in the reader's zone.
-- **A capability flag is a UI convenience; the ROUTE is the boundary**
-  (`lib/engine-guard.ts`). Every omp-shaped endpoint used to answer 200
-  whichever engine was selected — probed directly under another engine they served
-  omp's model catalog, model roles, models.yml, config.yml, login providers,
-  plan quota and version, each presented as that engine's. Some were reachable
-  through the UI too, because the flag that hid them is not the flag they
-  needed: an engine that declares `nativeSettings` (it has its own config)
-  rendered omp's `config.yml` panels with a Save that wrote to a file it
-  never reads; pi has `chatExtras` and so offered omp's `Smart` model-roles
-  row and an Export that shells `omp --export`. Every such route now either
-  DISPATCHES on `getHarness()` (`/api/models`, `/api/omp-version`) or on an
-  ADAPTER METHOD (`/api/omp-settings/schema` → `HarnessAdapter.settings`), or
-  REFUSES with 400 `{code:"unsupported"}`, which is the same answer
-  every capability-gated route gives and the one the client hides on. Prefer the adapter
-  method: a `getHarness()` dispatch is still a list of engine ids in
-  engine-neutral code, and the id whose branch is the `else` silently becomes
-  the default for every engine nobody thought about. Pinned by
-  `lib/engine-route-guards.test.mjs`.
-- **A launch that means "another engine" must never be spelled the same way
-  as one that means "this engine".** `runUtilityCommand(cmd, ms, launch)`
-  treats an absent `launch` as "spawn the installed omp", and
-  `utilityRpcLaunchFor` used to return `undefined` — that same value — for
-  every engine with no `rpcUi`. So `/api/models` faithfully asked omp for its
-  catalog and served it as Claude Code's: 150 omp models in the composer of
-  an engine that had never heard of them, which is what the owner reported.
-  `utilityRpcLaunchFor` now THROWS `unsupported` for a non-rpc engine, and
-  `undefined` means omp and only omp.
-- **ACP models are SESSION state, not a catalog** (`AcpModelSurface` in
-  `lib/harness/acp-session.ts`). There is nothing sessionless for
-  `/api/models` to read, so it answers `catalogSource: "session"` with an
-  empty list — empty, and deliberately NOT a `modelError`, because nothing
-  broke. The models themselves are captured at `session/new`/`session/load`
-  and reported through `get_state` as `{model, availableModels,
-  modelSelectable}`; `set_model` switches them and emits `config_update`, the
-  event Cody already treats as authoritative for the running model. TWO wire
-  shapes are live at once and both are handled: `configOptions` with
-  `category: "model"` + `session/set_config_option` (current spec; the Claude
-  Code and Codex adapters), and the older `models: {availableModels,
-  currentModelId}` + `session/set_model` + `current_model_update` (kept for an
-  agent that publishes no `configOptions` at all). The
-  shape decides which call is made, so `acp-session.ts` still names no
-  engine. Whether an agent offers models is per SESSION — it depends on the
-  account the session opened with — so it is reported as data, never as a
-  static capability flag that could not tell the truth about it.
-- **ACP session MODES are session state the same way** (`AcpModeSurface`,
-  `session/new` → `modes: {availableModes, currentModeId}`). Claude publishes
-  Manual / Accept edits / Plan / Auto, Codex none — and "none" is the answer for every rpc-dialect engine
-  too, so the list rides `get_state` as `{availableModes, currentModeId}`
-  and the composer's mode button (`ChatInput`, `data-testid`
-  `agent-mode-button`) exists only while the list is non-empty. `set_mode`
-  → `session/set_mode`; the agent's own `current_mode_update` and the echo of
-  our call both surface as `mode_changed`. On the client the list is
-  id-scoped (`sessionModes.forSession`), like `autoModelSwitch`: a list
-  adopted for one session is never offered on the next, and a state fetch
-  WITHOUT the field clears it — unlike models there is no global catalog to
-  fall back on, so absence is the truth. `set_mode` on an engine without
-  modes answers `unsupported`, and rpc-manager's default branch now says the
-  same for any command Cody never mapped, instead of a bare "Unsupported
-  command" that reached the client without a code.
-- **Provider credentials are Cody-level state, delivered as environment**
-  (`lib/harness/provider-keys.ts`). Every engine already reads its keys from
-  the process environment (pi/omp env maps,
-  Claude `ANTHROPIC_API_KEY`, Codex `OPENAI_API_KEY`), so the store is a
-  0600 JSON file in the instance data dir and `engineChildEnv()` is the one
-  function every child spawn (`lib/omp/rpc-process.ts`,
-  `lib/harness/acp-session.ts`, `lib/terminal-manager.ts`) builds its env
-  from: process env, then stored keys, then the spec's own entries (a spec
-  must be able to override — `CLAUDE_CODE_EXECUTABLE`, `CODEX_PATH`). Values
-  never reach the browser; the panel gets `stored` / `fromEnvironment`
-  flags. This is what the owner's "pi didn't work" came down to:
-  no credentials, and Cody dropping the error — an assistant turn ending
-  with `stopReason: "error"` used to append an EMPTY bubble; it is now an
-  error notice in the provider's words, with a pointer at the keys panel when
-  the text smells like a 401.
-- **Engine start-up failure detection.** `lib/omp/rpc-process.ts` recognises an engine that exits before answering by its stderr line. omp 18.19 prefixes it with `error:` and a typed name (`SessionModelRestoreError:`) where 18.8.3 printed the bare sentence; the regex accepts both, so a missing/unavailable model on `--resume` is reported the same on either engine.
-- **Engine install needs Bun.** `lib/harness/install.ts` checks the Bun version before installing omp 18.19+ (engine floor Bun 1.4.4) and refuses with a plain message; older omp keeps the old floor. `docker/Dockerfile` ships Bun 1.4.4. The `bin/cody-omp-*.mjs` helpers need Bun >= 1.4.4 as well (they open agent.db; 18.16+ installs an SQLite lock shim on Linux and logs "SQLite OFD lock shim unavailable" once on stderr if it cannot).
-- **Providers, sign-in roster and catalog.** The Providers list joins three sources: the engine's sign-in roster, Cody's curated catalog (`lib/harness/provider-catalog.ts`) and the model catalog. Row ids must be unique: a roster id that a catalog row does not list in `loginIds` still merges into the row whose `id` equals it (omp 18.16.0 added a `mistral` sign-in; the Mistral entry now lists `loginIds: ["mistral"]`). The eight API-key vendors omp added after 18.8.3 (`cloudflare-workers-ai`, `coralbricks`, `inception`, `liquid`, `modular`, `otari`, `sambanova`, `scaleway`) are catalog rows marked `needsRoster`: they are listed only when the engine's roster or model catalog names them, or a key for them is already saved, so 18.8.3 never shows a paste box its omp would ignore. One variable per field: the first name from omp's own rules (`CLOUDFLARE_API_TOKEN`, `CORAL_API_KEY`, `INCEPTION_API_KEY`, `LIQUID_API_KEY`, `MODULAR_API_KEY`, `OTARI_API_KEY`, `SAMBANOVA_API_KEY`, `SCW_SECRET_KEY`); the aliases (`CLOUDFLARE_AUTH_TOKEN`, `CORALBRICKS_API_KEY`, `SCW_API_KEY`) still work in the server's environment. Cloudflare Workers AI also needs `CLOUDFLARE_ACCOUNT_ID` (a non-secret field) when the token is a pasted key rather than a stored sign-in. Devin is one row with a key and three sign-ins (`devin`, `devin-cli`, `devin-windsurf`; all store as provider `devin`). Real-roster regression fixtures: `lib/harness/fixtures/omp-login-roster-18.8.3.json` (81 entries) and `-18.19.0.json` (92).
-  New curated vendors also need an entry in `components/settings/providers/provider-groups.ts` (`KEY_IDS`, or `GATEWAY_IDS` for a router like Otari).
-- **Sign-ins omp refuses over RPC.** omp's RPC mode cannot answer a prompt asked before any URL. From omp 18.18.7, Google Antigravity first makes the user type `yes` to a risk warning, so a Cody sign-in fails at once with "requires interactive prompts which are not supported in RPC mode". omp's roster carries no flag for this, so `lib/omp/provider-login.ts` keeps `TERMINAL_ONLY_SINCE` (provider id → first omp version that refuses it) and `list()` sets `terminalOnly: true` on those roster rows only when the installed omp is at least that version (`getOmpVersion`; an unreadable version flags nothing). The Providers detail then shows "Sign in from the omp terminal: type /login" instead of the Sign in button, and `ProviderLoginFlow` never auto-starts it. Any refusal that slips through (`requires interactive prompts` / `requires secret input`, `not supported in RPC mode`) is translated by `explainLoginError` into a `TerminalOnlyLoginError` with code `terminal_only`; the login route forwards the code in the SSE `error` frame and the panel shows its own translated words. When omp flags more providers this way, add them to `TERMINAL_ONLY_SINCE`.
-
-  A login can ask more than one `input` (Cloudflare Workers AI: API token, then account id). The login driver answers each request with whatever the user submits next; a stale prompt waiter used to swallow the second submission and is fixed (`deliver`).
-- **Refreshing models after sign-in or sign-out.** omp 18.18.2+ refreshes its scoped model list only inside the process that signed in or out. Every Cody sign-in success, sign-out and account removal therefore goes through `settleProviderChange` (`lib/provider-state.ts`): drop Cody's model cache and sign-in roster, restart idle chat engines, leave mid-reply ones alone. Do not call `invalidateModelsCache` directly from a new login/logout path.
-- **Moving sign-ins between machines (omp auth export / import).** Not offered in Cody: Cody deliberately never lets credential secrets into its own process, and an in-app export would. The terminal commands are `omp auth export` and `omp auth import` on the server's omp.
-- **Signed-out providers and saved-reset notices (omp 18.15+).** omp hops BEFORE the turn onto the first keyed `retry.fallbackChains` entry when a model's provider has no login, announcing it as `retry_fallback_applied` with `reason: "no credential for <provider>"` (src/session/turn-recovery.ts). With no keyed fallback it refuses the prompt with `No API key found for <provider>.` (18.19.0: typed PromptPreflightError; 18.8.3: plain Error; same text, so the result is a failed prompt response / `prompt_error` / `prompt_result` error on both). hooks/credential-notices.ts is the one pure module that reads those strings (`missingCredentialProvider`, `missingApiKeyProvider`) and maps the `claude-auto-reset` / `codex-auto-reset` notice sources (`savedResetEligibleProvider`). The hop is told as "You are signed out of X; using Y until you sign in" (hooks/useAgentSession.ts `announceFallbackApplied`, composer chip reason `signed_out`); the refusal goes through `engineErrorNotice` (and `rollBackFailedSend`) and reads "You are signed out of X, so your message was not sent". Both notices carry a button, found by the shelf from the notice `dedupeKey` (`signed-out:<provider>` / `saved-reset:<provider>`, see `noticeCtaForDedupeKey`): components/NoticeActions.tsx renders "Sign in to X" (Settings > Providers, `provider-<id>` highlight) or "Use reset" (confirm dialog, `useResetCredits().redeem` on the first redeemable credit of that provider; no button when none) plus a link to the auto-redeem setting (first of `claudeResets.autoRedeem5h|Weekly|autoRedeem` / `codexResets.*` the engine schema has). `creditsNoticeKind(from, to, reason)` returns null for a signed-out reason, so a hop off a signed-out Claude plan onto the credits is never worded "Claude plan limit reached". Notices with buttons stay 20 s (plain ones 5 s). Other `claude-auto-reset`/`codex-auto-reset` notices (redeemed, already redeemed, will retry) show omp's own words as plain info/warning, never through the engine-error describer (a 429 code would read as a usage error). The saved-reset EXPIRY warning (C5-20, omp 18.9+) is built only for omp's terminal status line (modes/status-line-host.ts) and is never a `notice` frame, so an RPC host cannot show it; Cody's own expiry badge covers it. Cody always spawns omp with a prompt UI, so the "no prompt UI" saved-reset notice itself is not reachable in Cody chats (the consent is an ordinary select dialog); the mapping is kept for headless/ACP engines.
-- **Signed-out notices keep Cody's "no credentials" banner and the chain rules.**
-  - `components/ChatInput.tsx` `modelErrorCode === "no_credentials"` banner: comes from `lib/models-cache.ts classifyModelError` on "No models available" from `get_available_models`, i.e. only when the whole model LIST is empty (nothing signed in). In that state every fallback chain entry is also unkeyed, so omp finds no hop candidate and refuses the prompt (AU-10 text) - the banner and the refusal agree. A single signed-out provider among others does NOT empty the list, so the banner never fires there; the hop notice is the right signal. Keep the banner.
-  - `lib/routing/chain-binding.ts` / `reconcile.ts` / `lib/claude-credits.ts` have no credential logic (an empty chain still means "no fallback"; omp's `#findKeyedRetryFallback` honours an empty chain and `retry.modelFallback` too, so an empty chain yields no hop, the refusal appears instead). Nothing can be bypassed that Cody relied on. Evidence: read from omp 18.19.0 source (turn-recovery.ts ~2094-2110, agent-session.ts ~9549), and CatchupAuthNotices-2's runs on both engines (keyed chain: hop frame then agent_start; no chain: late failed response + prompt_result error on both 18.8.3 and 18.19.0).
-  - 18.8.3 never sends the hop; the notice code is inert there and the refusal text is handled.
-- **Saved-reset consent dialog has a multi-line title.** omp's saved-reset consent is an extension `select` whose TITLE is "Spend a saved X rate-limit reset?\n<one line per account>". The InputDock header is a single ellipsized line, so the account lines were squashed/cut. Now: header shows the first line (`splitExtensionTitle().headline`), and ExtensionInputCard shows the remaining lines as a wrapped paragraph above the options. Option descriptions ("Redeem now and set <keys> to yes.") already render via `optionDetails` (verified in components/ExtensionDialog.tsx; text comes from the engine, so the new per-window keys appear automatically).
-- **Provider SIGN-IN is each engine's own, behind one seam**
-  (`HarnessAdapter.providerLogins`: `ProviderLoginSurface` in
-  `lib/harness/types.ts`, gated by `capabilities.providerLogin`). A
-  subscription (Claude Pro/Max, ChatGPT, Nous Portal, GitHub Copilot, …) is a
-  credential only the engine's own store may hold, and every engine has a
-  login of its own that prints a URL and takes a code back — omp's rpc-ui
-  extension frames, pi's pi-ai flows, `claude auth login`,
-  `codex login --device-auth`. The surface is
-  `list()` → rows `{id, name, authenticated, kind: oauth|device, canLogout}`,
-  `login(id, ui)` with `ui = {onUrl, onDeviceCode, onPrompt, onManualInput,
-  onProgress, signal}`, optional `logout(id)`. `/api/auth/providers`,
-  `/login/[provider]` (SSE + POST for the pasted value) and
-  `/logout/[provider]` dispatch on it and refuse `unsupported` without it;
-  the route turns the `ui` calls into the frames the panel already rendered
-  for omp (`auth`, `device_code`, `prompt_request`, `progress`, `success`,
-  `error`, `cancelled`) and holds a value pasted BEFORE the engine asks —
-  the paste box is on screen from the first URL, and a redirect URL usually
-  arrives first. `components/settings/providers/ProviderDetail.tsx` renders
-  the Sign in / Re-login / Sign out row in every provider's detail drawer
-  (Settings › Providers), for every engine with `providerLogin`;
-  `ProviderLoginFlow.tsx` is the one state machine it shares with the setup
-  wizard's provider step. Credentials
-  never pass through Cody: a driver relays a URL out and a code in and reads
-  the engine's answer. `/api/auth/all-providers` stays omp-only (it reads
-  omp's model catalog to list configured API-key providers).
-  **Every removal control reports its real outcome** (toast, plain words; a
-  failure also stays as an inline error): the per-account trash and the
-  provider-wide "Disconnect" read `postLogout()` (ProviderLoginFlow.tsx);
-  a 404 `not_found` is an info toast + refresh (the account was already
-  gone), never an alarm. The drawer's danger zone is `Disable in {engine}`
-  (toast with Undo) and ONE `Remove {provider}` that signs out every
-  sign-in holding accounts, forgets every key saved in Cody and deletes a
-  custom endpoint (`planRemoval` / `runRemoval` / `reportRemoval`, pure and
-  unit-tested; stops at the first failure and says what was and was not
-  removed). A key only the SERVER'S ENVIRONMENT sets is not Cody's to
-  remove: the row says "Set in the server's environment — remove it there"
-  (no button; `PUT /api/provider-keys` answers 409 `set_in_environment`),
-  and Disable is the way to hide it. The directory re-reads usage and the
-  OpenRouter balance after every change so a removed account leaves the
-  Usage block at once.
-- **Several accounts can serve one provider, and which one is IN USE is the
-  engine's fact, never a Cody guess** (omp only today). omp's `agent.db` may
-  hold more than one OAuth credential per provider (two Claude subscriptions,
-  say). omp keeps a conversation on the account that served it (session-
-  sticky; Anthropic's prompt cache is per account) and rotates to a sibling
-  only on a limit. It records the serving account after every turn as a
-  `credential_pin` entry in the session file (a sha256 of the account's
-  billing scope, omp `src/session/credential-pin.ts`). Cody reads THAT:
-  `bin/cody-omp-credentials.mjs` emits each OAuth row's `pinHash` (omp's own
-  `credentialPinHash`, falling back to the same persisted formula),
-  `lib/usage/cache.ts` indexes digest → credential row (server-only),
-  `lib/usage/session-pins.ts` reads a session's latest pin per provider
-  (append-only, incremental), and `/api/usage?session=` answers
-  `sessionAccounts: {provider: {accountId, since}}`.
-  `lib/usage/select.ts` `rankProviderAccounts(…, evidence)` then orders
-  `in_use` → `standby` (by headroom) → `limited` → `disabled`, with a
-  `basis` on the in-use row: `session` (the pin), `recent` (no conversation
-  in scope — Settings — so the account omp last refreshed from a live
-  response, `lastServedAt` = omp's `headersUpdatedAt`), or `expected` (the
-  conversation has not used the provider; omp routes its first request on
-  headroom). A pin naming a limited/disabled account is overruled. **Trap —
-  never rank "in use" by lowest utilization:** the account in use is the one
-  burning quota, so headroom picks the idle sibling. That shipped as
-  "Serving next · Secondary 0%" while every reply came from Primary at 41%.
-  A pin the server cannot match to an account (credential store unreadable,
-  account removed) is still reported, as `{accountId: null, since}`: the
-  conversation HAS used the provider, so the popover ranks with the
-  `recent` evidence instead of falling to `expected` — dropping it is what
-  made the Kestrel chat gauge the idle Secondary at 0% after omp 18.3.4
-  broke the credential read. The account rows say `In use` / `Standby` in
-  words, not only through the dot's hover title.
-  Accounts are named by POSITION everywhere in the composer (`usage.accountPrimary` /
-  `usage.accountSecondary` / `usage.accountNth`, computed in the snapshot's
-  original order, never the rank order) — no emails or org names in the
-  quota popup; Settings shows the identity as muted secondary text.
-  Credential ROWS come from the store, not the usage snapshot:
-  `bin/cody-omp-credentials.mjs` runs omp's own `AuthStorage` under Bun
-  (`list` / `remove` / `removeProvider`, the reset-credits pattern) and
-  never emits tokens or keys; `lib/harness/omp-credentials.ts` bridges it,
-  and `lib/omp/provider-login.ts` joins rows to usage state as
-  `ProviderLoginOption.accounts` (`ProviderLoginAccount {id, position,
-  label, state, planType, resetsAt, canRemove}`) and implements
-  `removeAccount`/`logout`. `POST /api/auth/logout/[provider]` with a JSON
-  body `{accountId}` removes ONE credential (404 `not_found` = already gone,
-  a stale list, never shown as a failure; 400 `unsupported` on an engine
-  without `removeAccount`); no body is the provider-wide logout and answers
-  `{removed, count}` (`removed:false` = nothing was stored, never a silent
-  success). `accounts` is `undefined` (never `[]`) when the read fails, and
-  the sign-in row then behaves exactly as before. `accounts: []` on a
-  CONNECTED sign-in means the credential is not in omp's store at all (it
-  comes from the server's environment or a config file): the card says it can
-  only be removed there.
-  **Removal is real, and it sticks.** omp's `removeById` / `remove` only
-  SOFT-delete: the row stays with `disabled_cause` set (`deleted by user`),
-  the API key or refresh token still inside, and they can only act on ACTIVE
-  rows. Cody used to list those tombstones as removable "Disabled" accounts,
-  so Remove answered 404 "no account matching that id" forever (the owner's
-  OpenRouter: a key deleted weeks earlier, listed, un-removable, and still
-  READ — `lib/openrouter/key.ts` ignored `disabled_cause`, so its balance,
-  an "out of credits" blackout and a Usage row outlived the removal). Now:
-  the helper's `remove` / `remove_provider` delete the tombstone row, its
-  block and lease rows after omp's own soft delete (`purgeTombstones` — the
-  ONE raw SQL write in the Bun helpers, guarded by `disabled_cause IS NOT
-  NULL` so it can never delete a credential that can still serve); `list`
-  omits `deleted by user` / `replaced by` tombstones (omp's own `omp usage`
-  omits the same two) and sweeps the `deleted by user` ones; an
-  auto-disabled account (failed refresh) is still listed and now IS
-  removable. `position` therefore renumbers after a removal, in Settings and
-  the composer alike. `lib/openrouter/key.ts` reads ACTIVE rows only.
-  After ANY removal, key clear or enable/disable, the route calls
-  `settleProviderChange` (`lib/provider-state.ts`): models, roster, usage
-  (`resetUsageCache` — a 60 s cache served stale while it refreshed), the
-  OpenRouter balance (a `no_key` read is final, never served "stale", and an
-  in-flight read from before the change is not cached), the saved-reset
-  balances, the removed provider's route-memory blackouts, and **idle engine
-  children restart** (`restartIdleRpcSessions`): a live child holds the
-  credential it loaded and the key's environment variable it was spawned
-  with, and an environment variable is never re-read, so a removal cannot
-  depend on the child noticing. A child mid-reply is left alone and the
-  response says how many (`restarted`, `active`). (The earlier note that no
-  restart is needed held for the credential store alone — never for a key
-  Cody put in the child's environment.)
-  **A login that ended is "signed out", not "disabled".** When the provider
-  refuses to renew a login for good (omp's token refresh answers
-  `invalid_grant` "Refresh token expired", or the token was revoked or
-  invalidated) omp disables the credential and writes why into
-  `disabled_cause`. A bare red "Disabled" read as a spent quota: an expired
-  Claude login sat unnoticed for two days (2026-11-10). Cody cannot stop a
-  provider ending a login; it makes it impossible to miss and one click to fix.
-  `lib/usage/credential-health.ts` `isSignedOutCause` is the ONE classifier
-  (every other cause — a deliberate logout, a block — stays `disabled`), and
-  `UsageAccountService` has `signed_out` beside `disabled`, set by
-  `lib/omp/provider-login.ts` (credential row) and `rankProviderAccounts`
-  (`UsageAccount.disabled.cause`). It is unusable exactly where `disabled` is
-  (ranking, `availability.ts`, Claude-credits coverage, routing), but says
-  what to do: the Providers drawer's account row shows "Signed out — sign in
-  again" and a "Sign in again" button that starts the SAME `ProviderLoginFlow`
-  as the card's own button (the card reads a plain "Sign in" when every stored
-  account is signed out); the provider's row in the directory wears a "Signed
-  out" badge (`ProviderRow.signedOut`) and stays in the Connected list
-  although omp reports a provider whose only credential is disabled as not
-  authenticated — `connected` keeps meaning "usable right now", never fold
-  signed-out into it; the composer's quota popover shows "Signed out" on that
-  account's row, a button to `openSettings("providers", { highlight:
-  "provider-<id>" })` (`ProviderDirectory` answers a `provider-` highlight by
-  opening that drawer), and when no account of the model's provider is usable
-  the ring wears the usage-limit dot's warning style (`signed-out-dot`).
-  **Observed against a REAL omp store:** signing in again with the SAME
-  identity makes omp insert a new active row and hard-delete the stale
-  disabled one (no tombstone), so Cody adds no cleanup; a different identity
-  leaves the stale row, removable like any other
-  (`lib/harness/omp-auth-helpers.test.mjs`). The push notification
-  `accountSignedOut` (see Push notifications) is what reaches an owner who is
-  not looking at Settings.
-  **Every AuthStorage call in the three Bun helpers
-  (`cody-omp-credentials`, `-reset-credits`, `-unblock`) goes through
-  `bin/cody-omp-auth-api.mjs`**, which prefers omp 18.3.4+'s namespaced API
-  (`storage.credentials.list()`, `.blocks`, `.resets`) and falls back to
-  the older flat names, resolving lazily per call (the unblock helper must
-  never touch `storage.credentials`). 18.3.4 renamed the flat methods away
-  and every hand-written fixture kept passing, so
-  `lib/harness/omp-auth-helpers.test.mjs` runs all three helpers against
-  the REAL installed omp (an empty store, and stores seeded through omp's own
-  API by `lib/omp/omp-test-store.mjs` for the soft-delete cases — a
-  hand-written fixture cannot soft-delete);
-  `lib/settings-routes-logout.test.mjs` drives the route end to end against
-  such a store.
-- **The composer reads whichever catalog is real.** `useAgentSession` keeps
-  `modelCatalogSource` from `/api/models` and, when it says `"session"`,
-  serves the composer the list it adopted off `get_state` instead (a
-  session-scoped catalog). It exposes `modelSelectable` — `null` for a
-  global-registry engine, where the rpc-dialect `set_model` surface
-  (`chatExtras`) decides as it always did, and a boolean for a session-scoped
-  one, where the SESSION decides. `ChatWindow` gates the picker on that, so no
-  new capability flag was invented for something a flag cannot know. A
-  session-scoped engine also seeds no `newSessionDefaultModel`: the agent
-  resolves its own on `session/new` and reports it back, and the picker only
-  appears once a session exists — before that there is genuinely nothing to
-  choose from.
-- The Docker image ships NO engine — omp included. Every engine installs
-  from the picker into the persistent tools prefix (`CODY_TOOLS_DIR`,
-  default `<data dir>/tools`; entrypoint puts its `bin` first on PATH), and
-  the install route doubles as UPDATE (specs pin `@latest`; updating the
-  active engine restarts live sessions). Binary resolution per engine:
-  `CODY_<NAME>_BIN` override → tools prefix → PATH
-  (`lib/harness/engine-bin.ts`; omp's probe in `lib/omp/omp-cli.ts` checks
-  the tools prefix too). Selecting the already-active engine is the
-  "decide later" no-op — but it is offered ONLY once some engine is actually
-  installed, because with none installed it is the one action that strands a
-  new user in an app where every turn fails.
-- **Onboarding is one dependency-ordered flow driven by READINESS, not a flag**
-  (`lib/setup-status.ts`, `hooks/useSetupStatus.ts`,
-  `components/SetupWizard.tsx`, `components/SetupResumeBar.tsx`). Readiness is
-  three facts — an engine installed AND active, a provider connected, a
-  non-empty catalog — read from the two CHEAP routes that carry them
-  (`/api/engines`, `/api/providers?cached=1`; never `/api/models`, which
-  spawns the utility child). Four rules, each one a defect observed on a
-  genuinely fresh instance:
-  - **The engine is step 1, not a separate screen.** The old
-    `components/EnginePicker.tsx` overlay ran before an unrelated wizard and
-    offered "Decide later and keep using OMP" with nothing installed; taking
-    it produced a working-looking app where every turn failed. The engine step
-    now leads the flow, `Next` is disabled until an engine exists, and a
-    successful install auto-advances (the install IS the choice). The picker
-    module is gone — `EngineRoster` in `mode="pick"` is the step.
-  - **Every step declares its prerequisite** (`STEP_REQUIREMENTS`), and a step
-    whose requirement is unmet renders `PrerequisiteNotice` — the missing
-    thing plus a button that jumps to the step that fixes it. Before this, the
-    default-model step said "connect a provider in the previous step" with no
-    way there, and the plan step printed the engine's own
-    `omp binary not found. Install oh-my-pi or set CODY_OMP_BIN`.
-  - **It resumes.** The flow opens on the first INCOMPLETE requirement, and
-    `SetupResumeBar` (bottom-right; the left gutter is the sidebar, which
-    clips a fixed element anchored there) names the nearest missing one and
-    reopens the flow there. `setupDone` stops Cody NAGGING; it never decides
-    whether the instance works, so skipping cannot hide a broken install.
-  - **An unread fact is `pending`, never "missing"** (`UNKNOWN_READINESS`).
-    Announcing a missing provider because the answer had not arrived yet is
-    how a working instance gets told it is broken;
-    `lib/setup-status.test.mjs` pins both directions.
-  `/api/engines` is deliberately unreachable before the first account exists.
-- **Engine release notes come from the version an update would install**
-  (`lib/harness/package-changelog.ts`, `/api/engines/changelog`): while the
-  registry knows a newer version than the installed binary, the changelog is
-  pulled from the LATEST published npm tarball (fetched once per exact
-  version, minimal ustar walk, registry-host-pinned) and every section newer
-  than the installed version is flagged `isNew` — the installed package's own
-  CHANGELOG.md can only describe the past, which is precisely the version the
-  user is about to leave. A failed fetch falls back to the installed file and
-  the UI says so (`source: "installed"` while an update is pending).
-- **The update check follows the ECOSYSTEM, not npm** (`lib/harness/updates.ts`
-  `fetchLatestPackageVersion`). npm engines are looked up on
-  registry.npmjs.org (scoped names fully URL-encoded, which that registry
-  accepts). A wrong-registry lookup is not a loud failure: it reports
-  "no update available" for the rest of the instance's life. All five specs
-  were checked against the live registries.
-- **An engine installed as TWO packages has TWO versions, and Cody says which
-  is which** (`HarnessAdapter.engineCli`, `EngineUpdateStatus.components`).
-  For Claude Code and Codex, `installSpec` names the ACP ADAPTER
-  (claude-agent-acp 0.70.x, codex-acp 1.x) while `installAlso` names the CLI a
-  user actually means by the engine's name (claude 2.1.x, codex 0.14x.x) —
-  different number lines on different release schedules. Three rules fall out
-  of that, and each one was a live bug before it was a rule:
-  - **The displayed version is the ENGINE's.** Anything that labels a number
-    with the engine's NAME goes through `engineOwnVersion()`
-    (`lib/harness/index.ts`): the picker card and the System › Engines
-    list (`/api/engines` `version`, with the adapter's alongside as
-    `adapterVersion`), the Info panel (`/api/info` `ompVersion`), and the
-    update card's headline (`EngineUpdateStatus.engineVersion`). A card
-    reading "Claude Code v0.70.0" beside a `claude --version` of 2.1.241 is
-    not a rounding error. `installedVersion`/`latestVersion` stay the PACKAGE
-    `installSpec` names, because that is what a revert pins and what
-    `verifiedVersion` measures.
-  - **The update check asks BOTH registries.** `engineCli.packageName` is the
-    second lookup. The adapter goes months between releases while the CLI
-    ships most days, so an adapter-only comparison reports a CLI many releases
-    behind as "up to date" and never offers the update that would fix it —
-    measured, not hypothetical.
-  - **Revert restores the PAIR.** `install-history.json` records
-    `previousEngineVersion` beside `previousVersion`, and the install route
-    pins both halves when the requested version matches the record. Pinning
-    only the adapter while the CLI installs `@latest` reinstalls the very
-    thing being reverted if the CLI was the cause. It is also why the revert
-    offer survives an update that left the adapter version untouched.
-  `engineCli.getVersion()` is the adapter's own `healthArgs` with `engineEnv`
-  applied — the CLI that will actually run, not whatever npm last unpacked —
-  so the version that gets VERIFIED is the version that gets SHOWN. Version
-  probes are therefore cached per binary AND per argv
-  (`lib/harness/engine-bin.ts`), and an install drops every argv's answer for
-  every binary, because a cache HIT never expires and the companion CLI's bin
-  name is not something the installer models.
-- **HarnessAdapter.verifiedVersion** is the exact engine version this Cody
-  build was last audited against — every adapter carries one (omp: 18.19.0,
-  claude-agent-acp: 0.73.0, codex-acp: 1.8.0, pi: 0.73.1).
-  It is shown verbatim on the System hub's engine roster card (Settings ›
-  System › Engines) ("Built to vX.Y.Z", served through /api/engines), and
-  the full semver drives warnings: checkEngineUpdates compares patch, minor,
-  and major releases to the verified version (latestBeyondVerified /
-  installedBeyondVerified). The System hub warns before an update and marks
-  an installed version past that exact marker: core surfaces keep working
-  (settings are schema-driven, unknown RPC frames are tolerated), but brand-new
-  engine features may not appear in Cody until Cody updates. Bump the marker
-  in the same commit as each compatibility audit. It is always a version of
-  the package installSpec names, so for a two-package engine it is the
-  ADAPTER's — which is why the notice names engineCli.adapterLabel rather than
-  the engine's brand ("Claude Code ACP adapter v1.0.0", never "Claude Code
-  v1.0.0" while Claude Code is on 2.1.x). The CLI half becoming newer still
-  raises no notice: Cody speaks to the adapter, and an ACP engine's Cody
-  surfaces are capability-gated almost entirely off.
-- **The seam is CI-enforced** (`lib/architecture.test.mjs`): outside
-  `lib/omp/` and `lib/harness/`, importing `lib/omp/*` fails the test unless
-  the file is on the in-test allowlist with a written reason, stale allowlist
-  entries fail too (the list only ratchets down), and the adapter/translator
-  modules (`harness/omp|claude|codex|claude-stream|acp-session`) are
-  private to the seam —
-  everything else goes through `@/lib/harness` or its engine-neutral
-  submodules. New engine-neutral code must NOT import `lib/omp` directly;
-  route it through the harness (capabilities, adapter methods, or the engine
-  dispatch pattern in `app/api/sessions/route.ts`).
-
-**Notes for maintainers (omp 18.19 catch-up).**
-- `task.workerThreads: 0` is omp's escape hatch if worker threads misbehave in a container (no Cody setting).
-- Sidebar chats keep a bare cwd (`sidebarBareCwd`): `--no-context-files` does not exist on 18.8.3 and the sidebar has no tools/subagents.
-- `luna.md`/`agents/` live under `$PI_CODING_AGENT_DIR/agents` on omp 18.18.8+ (`~/.omp/agent/agents` before); `lib/routing/request.ts` reads both roots.
-- Checked and left alone: joined `--flag=value` forms (both engines accept the spaced form too, joined works everywhere); `omp-uploads-*` is swept by omp itself, `yt-*`/`omp-dump-anon-*` fall under the hourly disk janitor's temp sweep.
+- Engine-neutral code never imports `lib/omp/*`; go through `@/lib/harness` (CI: `lib/architecture.test.mjs`); prefer an adapter method over `getHarness()` id branches.
+- Capability flags only hide UI; the ROUTE is the boundary (`lib/engine-guard.ts`): use an adapter method or refuse 400 `unsupported`, else omp's data is served as another engine's.
+- Transports: omp rpc-ui; ACP (`acp-session.ts`, `AcpEngineSpec` data; Claude Code/Codex; only one with approvals). Per-turn (`turn-session.ts`) is dead code.
+- Cody state lives in the instance `getAgentDir()`, never the adapter's; engine-named browser keys use `engineScopedKey()`.
+- Two-package engines (ACP adapter + CLI): show `engineOwnVersion()`, check both registries, revert pins both. After login/key removal call `settleProviderChange`.
+- `undefined` launch means omp only (`utilityRpcLaunchFor` throws for non-rpc engines) — else omp's models showed as Claude Code's. ACP models/modes are session state.
+Details: docs/agents/engines.md
 
 ## Settings shell (`components/settings/`)
-
-Settings is one dialog built from a single table, not ad hoc panels. Nine
-hubs exist today: **Account**, **Preferences**, **Notifications**, **Code
-hosts** (`you`); **Providers**, **Models**, **Behavior**, **Extensions** (the
-active engine, named by its short name); **System** (the server).
-
-- **`registry.ts`** is the source of truth: `SETTINGS_SECTIONS`, one entry per
-  hub with its label, `group`, icon, `needsCapability` gate (ANY-of over a
-  list — a hub whose sub-surfaces gate individually stays as long as one of
-  them can render), `phoneOrder`, optional `subViews` (Models ›
-  Catalog/Assignments; Extensions › MCP/Skills/Plugins) and the
-  dynamically-imported panel component. A hub not in this table does not
-  exist. `getVisibleSections`/`getVisibleSubViews` are the ONLY places
-  capability gating happens for the rail — a panel never re-decides its own
-  visibility.
-- **`SettingsShell.tsx`** owns the open hub/segment, the search query, the
-  highlight (a `data-search-id` to scroll to and outline once), the visited
-  set (a hub stays MOUNTED once opened — a Providers sign-in SSE survives a
-  look at System), the phone stack's levels and a `busy` register a login SSE
-  or a dirty form holds so a navigation confirms before cutting work off.
-  Desktop is a 230px rail (`SettingsSidebar.tsx`) over a pane; phone is a
-  full-bleed `MobileStack.tsx` whose levels mirror browser history through
-  `hooks/useSettingsHistory.ts`, so a back gesture, Escape and the ‹ button
-  all pop exactly one level (`requestPop`). Both widths render the same hubs
-  under the same ids (`settings-tab-<id>` / `settings-panel-<id>`).
-- **The dialog-wide search** (`SettingsSearch.tsx` + `search-index.ts`) unions
-  two kinds of entry: STATIC ones, each panel module's own `SEARCH_ENTRIES`
-  export (a card, a toggle, a whole hub as a fallback result), and DYNAMIC
-  ones, the active engine's schema rows from `hooks/useSchemaIndex.ts` — so
-  typing a setting's name jumps to it even when it has no hand-built card.
-  `components/settings-search-index.test.mjs` pins that a hidden hub or a
-  gated card DROPS from the union entirely (never shown dimmed) and that a
-  schema row a curated card already owns collapses into that one result
-  instead of appearing twice.
-- **The data layer.** `hooks/useSettingsData.ts` is the route cache every
-  panel and every rail status line reads through (`useSettingsRoute` /
-  `useSettingsRoutes`): one in-flight request serves every concurrent caller,
-  an `{code:"unsupported"}` answer is cached as a VALUE so the hub hides and
-  nothing retries a route the engine refused, and `invalidateSettingsRoutes`
-  marks a prefix stale so mounted hooks re-fetch while the stale body keeps
-  painting (no flash). `hooks/useConfigWriter.ts` is the one writer for omp's
-  config.yml — per-family FIFO queues (`settings`/`schema`/`roles`/`plan`/
-  `delete`) so a slow write in one family cannot starve another,
-  `patchSettingsSchema` coalesces rapid writes (a slider) into one PUT every
-  350 ms, and every settled write invalidates the same cached reads the
-  panels above read through. See the `patchSection` trap note under Model
-  orchestration below — it now lives here, not in `SettingsConfig.tsx`.
-- **Shared nested-surface primitives**, so no hub reaches for a second
-  `Dialog` (which would stack a second portal, backdrop and focus trap, and
-  break Escape): `Drawer.tsx` (side panel on desktop, a pushed phone-stack
-  level on narrow screens, or a centred dialog — the caller picks, the shell
-  overrides on phone), `Directory.tsx` (the sectioned-row-list every hub's
-  own list renders through — Providers' Connected/Discovered, the engine
-  roster, MCP servers), and `DangerZone.tsx` (the confirmed-destructive-row
-  block, always last in a hub).
-- **Design decision — a new model is never silently hidden.** Three
-  mechanisms work together so curation cannot make "new" invisible: (1) the
-  "seen" ledger (`lib/model-catalog-seen.ts`, `cody-model-catalog-seen.json`)
-  records what the catalog looked like last time it was SHOWN, not what is
-  currently allowed, so a model excluded by curation still diffs as new;
-  (2) omp's allow-list is written with whole-provider globs (`provider/**`,
-  `lib/model-allow-list.ts`) rather than frozen id lists whenever a provider
-  is left open, so a provider the user has not restricted keeps admitting
-  models it did not have yet; (3) personal and instance hides
-  (`lib/model-visibility.ts`) are a HIDE set, not an allowlist — the
-  inversion means a model neither list names stays visible by default,
-  instead of needing to be added to something before it can be seen. Losing
-  any one of the three turns curation into a trap: without the ledger,
-  "new" is a guess; without globs, curating a provider once freezes its
-  roster forever; without the inversion, every model would need an explicit
-  add.
-- **Design decision — a new engine setting is badged once, per person, and
-  fades with use.** An engine update adds settings and the Behavior hub
-  renders whatever schema the engine declares, so nothing said a setting was
-  new. `lib/settings-seen.ts` (`cody-settings-seen.json`, instance data dir,
-  0600, atomic temp+rename) keeps, per engine, the key set Cody saw the LAST
-  time it looked (the normalized schema, `harness.settings.readSchema()
-  .schema.settings[].key`, terminal-only rows included) plus the keys
-  introduced since, each with the engine version that brought it. A key in
-  the schema that the last snapshot lacked is new; the snapshot then moves to
-  the current set, new keys accumulate across upgrades while unfaded and drop
-  out when the engine stops declaring them. The FIRST look at an engine only
-  records its keys (a fresh install or a lost ledger never badges ~550
-  settings); a missing or corrupt file reads the same way. The rules are pure,
-  browser-safe functions in `lib/settings-new-keys.ts` (`FADE_AFTER_SEEN = 3`)
-  and are unit-tested without a browser. Fading is per person (`user.id`; one
-  fixed `__instance` key on an open instance): the chip fades after it was
-  seen in 3 separate Settings opens, or the first time the key is changed
-  through Settings, and one person's views never fade another's chip — so
-  `/api/settings-seen` is NOT admin-only. "Seen" means the "New" chip was at
-  least half on screen for ~600 ms in a visible page (`NewChip` →
-  `observeSeen` in `lib/settings-new-reporter.ts`); a hub kept mounted under
-  `display:none` never intersects. Counting is once per (person, key, OPEN):
-  the dialog sends one random `openId` per Settings open
-  (`hooks/useSettingsNewKeys.ts`) and the ledger stores the last counted
-  `openId` beside each counter, so a retried POST, or the same key shown in
-  two panels, cannot count twice. The answer is read once per open, so a chip
-  is never pulled from under the cursor because the count reached 3; it fades
-  at the next open. A CHANGE hides it at once: every settled write in
-  `hooks/useConfigWriter.ts` announces its keys through
-  `subscribeSettingsWritten`. Terminal-only rows never badge (the route
-  leaves them out of `newKeys`; `isBadgedRow` in
-  `components/settings/new-badges.ts` double-checks) though their keys are
-  still recorded. Surfaces: the chip in the label row of `NativeSetting`
-  (`newKey` prop) on the All-settings rows and on the curated, MCP and retry
-  cards; a dot on the hub rows of the rail and the phone root list and on the
-  Models › Assignments / Extensions sub-view tabs, where a key's home is
-  resolved by `settingHome()` in `search-index.ts` (it reuses `cardHome()`:
-  retry cards → Models › Assignments, MCP cards → Extensions › MCP, every
-  other key → Behavior); `N new` counts on the All-settings tab buttons, group
-  headers and phone contents; and a chip on dialog-wide search results
-  (`SearchEntry.isNew`). Settings copy is English-only, so no `lib/i18n`
-  entries.
-- **Safety & approvals cards (Settings > Behavior).** The Recommended "Safety & approvals" group has seven cards: `tools.approvalMode`, `tools.approval.bash`, `tools.approval.extension`, `tools.restrictedFolders`, `bash.gitGuard`, `session.warnCost`, `session.maxCost`. `tools.approvalMode` also takes `always-ask-cached` ("Ask and remember", omp 18.12.3+). Cody offers it only when the installed schema lists it, but the typed config read/write (`lib/omp/settings-config.ts`) always accepts it. The typed read keeps EVERY `tools.approval.<tool>` entry holding allow/prompt/deny (e.g. `computer.control`, omp 18.14+), so a save never drops one; the Settings UI has no editor for them. `tools.restrictedFolders` and `bash.gitGuard` are schema-declared (18.13.1 / 18.8.7) so their cards hide on older engines like the other versioned cards (`INTRODUCED_IN` in `components/recommended-cards.test.mjs`). `session.warnCost` / `session.maxCost` have no UI metadata in omp, so they are `CURATED_ONLY` number cards (section `session`, `unset: true`, `minVersion: "18.13.0"`, hidden below that version by `curatedSupported`). omp accepts only POSITIVE USD amounts for them (0 is rejected), so "off" means the key is absent: the card starts empty and Reset removes it. Cody has no /forget-approvals button; the card hint says to type the slash command in the composer. The `ask.timeout` note in `SETTING_NOTES` describes 18.19 behaviour (submit the form's current values) and says older engines pick the recommended answer; the cfg:// approval part is left out because only the terminal UI registers a host for it.
-
-  The `tools.approval.extension` card ("Extension Tool Requests") is Cody's own: omp reads no such key. Its one consumer is the auto-approve branch of `trackExtensionUiRequest` in `lib/rpc-manager.ts`, which, when the value is `allow`, answers a tool approval through `autoApprovalReply` (`lib/notifications/compose.ts`, built on the same `toolApprovalSelect` / `isToolApprovalTitle` the notification buttons use). omp 18.8.3 and 18.19.0 ask the approval as a `select` titled `Allow tool: <name>…`, so the reply is the option that allows THIS call once (`Approve`, or `Approve Once` beside grants), never a session-wide, remembered or `Deny` option; a list it cannot recognise is left for the person. The legacy `confirm` form still gets `confirmed: true`. Provider safety-check prompts (`Provider safety checks:` in the title) and restricted-folder prompts (`Reason: Restricted folder:`) are never auto-approved. Tests: `lib/rpc-manager.test.mjs` ("auto approve …").
+- `registry.ts` `SETTINGS_SECTIONS` is the source of truth; gate visibility only in `getVisibleSections`/`getVisibleSubViews`, never in a panel.
+- Never open a second `Dialog` in a hub — use `Drawer.tsx`/`Directory.tsx`/`DangerZone.tsx` (breaks Escape/focus).
+- `useConfigWriter.ts` is the one config.yml writer; `useSettingsData.ts` caches `unsupported` so nothing retries.
+- New models stay visible only with all 3: seen ledger (`lib/model-catalog-seen.ts`), `provider/**` globs, hide-set (`lib/model-visibility.ts`).
+- `tools.approval.extension` auto-approve never answers provider safety-check or restricted-folder prompts.
+Details: docs/agents/settings.md
 
 ## Settings: schema-driven, not hand-listed
-
-Cody renders each engine's settings from the ENGINE's own declaration, so a
-setting added upstream appears without a Cody change.
-
-- **The route is engine-neutral; the derivation is per engine.**
-  `HarnessAdapter.settings` (`EngineSettingsSurface` in `lib/harness/types.ts`)
-  is one pair of methods — `readSchema()` → `{path, schema, values, reason?}`
-  and `write(patch)` → `{written, rejected, values}` — implemented two ways:
-  omp from its TypeScript schema (`lib/harness/omp.ts`, the one adapter the
-  seam lets import `lib/omp`), and pi from the four-column settings
-  tables in its installed package's `docs/settings.md`
-  (`lib/harness/pi-settings.ts`, writing `<pi agent dir>/settings.json`).
-  `/api/omp-settings/schema` gates on `nativeSettings`, reads the hook, and
-  refuses `unsupported` when there is none. It used to switch on engine ids,
-  which made "no branch of mine" mean "omp's branch" — every other engine got
-  omp's ~550-key schema back under its own name, and its PUT wrote omp's
-  `config.yml` while another engine was active, reporting success. A hook
-  cannot do that. Adding the panel to an engine is now: implement the
-  surface, hang it off the adapter, flip the flag.
-- **Derived, never hand-listed — even when there is no schema to read.** That
-  is the whole property: pi has no schema, but ships every setting's type, default and description in
-  `docs/settings.md`, which is regular enough to parse (pi's
-  `dist/core/settings-manager.js` carries the same defaults in imperative
-  code with no types, descriptions or grouping — a hand-written key list
-  dressed up as a pipeline). A prose source means failing soft at every step:
-  a row that yields no renderable control is skipped, a documented `object`
-  or object-bearing `array` is left out rather than rendered as a control
-  that would destroy it on save, and a missing file answers `schema: null`
-  plus a `reason` the panel prints — the same answer an engine that is not
-  installed yet gives, which is an answer and not an error.
-- **A write is read → mutate → write the WHOLE file.** pi's settings.json
-  holds keys the panel never lists (`thinkingBudgets`, `packages` object
-  entries, anything a newer pi added); a writer that rebuilt the file from
-  the schema would delete every one of them. Dotted keys persist nested, a
-  `null` patch entry is the panel's Reset and prunes the parent it empties,
-  and the file's existing mode and trailing newline survive.
-- `lib/omp/package-source.ts` — the shared way to read one of OMP's own source
-  files out of the installed package. Bun-only imports are aliased to a
-  permissive Proxy stub and jiti transpiles what is left. The stub must return
-  `undefined` for `then`, or the module becomes thenable and the load hangs
-  forever on an unsettled top-level await.
-  Two loader rules for omp's newer source layout. (1) Import attributes: a
-  `import x from "./f.md" with { type: "text" };` line is now recognised by the
-  one `sourceImports` regexp (it used to be missed and could swallow the next
-  import), so a prompt-text import is aliased to the stub like any other.
-  (2) `SETTINGS_DATA_MODULES` (a `Record<string, true>`, today only
-  `magic-keywords.ts`): a settings domain file's relative import of one of
-  these in-package data tables is loaded for real (its own imports stubbed,
-  `depth` 1) and handed to the domain as an override, because rows derived
-  from the table at load time (`magicKeywords.<id>` per keyword, and the
-  master switch's "standalone ultrathink, chillax, … keywords" text) came back
-  empty under the stub. A table that fails to load falls back to the stub (no
-  per-keyword rows), never to an error. Covered by the "derives the
-  per-keyword magic switches" test in `lib/omp/settings-schema.test.mjs`; the
-  18.19.0 key snapshot `lib/harness/fixtures/omp-schema-keys.json` now lists the
-  five `magicKeywords.*` rows (440 keys).
-- **Upstream keeps moving modules into sibling packages, and the stub destroys
-  data.** 18.2.5 moved the whole terminal UI into `@oh-my-pi/pi-tui`, leaving
-  `export { MODEL_ROLE_IDS } from "@oh-my-pi/pi-tui/…"` behind and enum values
-  like `treeFilterMode`'s in that package. pi-tui is Bun-only (a real import
-  dies on `Bun is not defined`), so two mechanisms read the data anyway, both
-  in `package-source.ts`:
-  - `loadOmpPackageSymbol(root, segments, symbol, isValid)` follows a
-    re-export — load the file, and when the symbol is not what the caller
-    expects, resolve the specifier it is re-exported from and read the
-    declaring file. Without it `getOmpModelRoleIds` silently fell back to its
-    frozen copy, which is the exact failure reading the source prevents.
-  - A BARE import is bridged rather than stubbed: the dependency's own source
-    is loaded (with all of ITS imports stubbed, one hop only) and handed to
-    the parent through a generated CJS module (which reads the value off
-    `globalThis`, never `require(__filename)`: in the built server that is a
-    webpack chunk, and requiring it back blanked the schema in production
-    while every jiti-run test passed). This is what keeps
-    `treeFilterMode` in the panel at all — under the plain stub its enum had
-    no values and the row dropped out. Relative imports stay stubbed on
-    purpose: their behaviour is unchanged from before the split, and
-    stub-loading dozens of in-package modules is a far larger blast radius.
-  - Both resolve a specifier through the dependency's own `exports` map
-    (`resolveSourceSpecifier`), because these packages publish `src/*.ts`
-    under it. Every failure returns null; every caller has a fallback.
-- `lib/omp/settings-schema.ts` — reads `<omp package>/src/config/settings-schema.ts`
-  through it. There is **no settings-schema RPC command**, so it goes through the
-  installed package's source. Credentials, `ui.secret` settings, and settings
-  without `ui` metadata never reach the browser.
-- **The model-role list is read the same way, not hand-listed**
-  (`lib/omp/model-roles.ts` `getOmpModelRoleIds`, from
-  `<omp package>/src/config/model-roles.ts` `MODEL_ROLE_IDS`). The vocabulary
-  changes between releases — omp removed `designer` in 18.1.5 — and a frozen
-  copy kept writing `modelRoles.designer` into `config.yml` for a role the
-  resolver no longer had, while the plan editor kept offering it. `/api/model-roles`
-  and `/api/model-plan` serve the live list as `roleNames`; the Models panels,
-  the fallback-chain editor and the planner prompt all render from that, and
-  `heuristicPlan`/`validatePlan` take it as an argument so a role the engine
-  dropped is never assigned. `FALLBACK_MODEL_ROLE_IDS` applies only when the
-  package cannot be read.
-- `lib/omp/settings-values.ts` — generic read/write for any schema-declared path.
-  Dotted paths persist nested (`prewalk.enabled` → `prewalk: { enabled }`), the
-  form OMP's own resolver reads. Unknown paths are rejected, not written.
-  `readPersistedBoolean`/`readPersistedStringList` are the side door for the
-  schema-declared settings that carry no `ui` metadata: the panel must not
-  render them, but their values still change what OMP does, and Cody has to
-  mirror those decisions (`skills.enableClaudeUser` / `skills.enableCodexUser`
-  gate which foreign user-level skill roots `lib/skills-service.ts` lists).
-- `lib/omp/settings-conditions.ts` — restates OMP's value-derived `ui.condition`
-  predicates so Cody hides the same rows OMP hides.
-- `lib/omp/settings-surface.ts` — **the one hand-maintained list in this
-  pipeline**: which settings only configure the harness's terminal UI and so do
-  nothing in a browser. The schema carries no metadata for it (the harness has
-  no notion of a second front end), so those rows get a "Terminal only" chip
-  rather than being hidden — the same file still drives the CLI.
-  `settings-surface.test.mjs` fails if a rule stops matching the installed
-  schema, so an upstream rename surfaces as a test failure, not a vanished
-  chip — with one necessary refinement: a rule that names a setting the
-  installed engine does not declare is ambiguous (renamed away, or targeting a
-  NEWER engine), so the unmatched-rule check only judges an engine at least as
-  new as `HarnessAdapter.verifiedVersion`.
-  Terminal-only list, 18.8.6-18.19.0 additions (checked against the 18.19.0
-  source: none is read under `src/modes/rpc` or `src/modes/acp`):
-  `update.auto`, `session.worktreeScope`, `composer.predictions`,
-  `composer.predictionAlternatives`, `terminal.programStatus`,
-  `worktree.onStart`, `worktree.onExit`, `extensionHandlers.modeControl`,
-  `extensionRenderers.assistantText`, `extensionRenderers.transcriptPresenters`,
-  `btw.inject`, `async.printWake`, `title.refreshAfterPrompts`. `steeringMode`,
-  `followUpMode` and `interruptMode` are NOT terminal-only any more: the engine
-  core reads them for rpc-ui sessions too and Cody drives their live values
-  through `set_steering_mode` / `set_follow_up_mode` / `set_interrupt_mode`.
-  `SETTING_NOTES` gained Cody notes for `out.enabled`,
-  `providers.openaiLiveSteering` (18.14 default flipped to Off: a message sent
-  during a GPT reply waits for the next tool call), `task.autoParallel` (one
-  extra request to the `judge` role per new prompt), `task.perCallModel`,
-  `async.widgets` (background-job widgets cost extra small-model calls that
-  Cody never shows; the `widget` role resolves like `smol`), and a refreshed
-  memory-store note (omp 18.9 made the per-memory scoring much cheaper but it is
-  still per stored memory). `settings-surface.test.mjs` keeps every rule and note
-  matching the installed schema.
-
-  `lib/omp/settings-schema.ts` `CODY_DEFAULT_OVERRIDES` (`Record<string,
-  boolean | number | string>`): the value a Cody chat has while nothing
-  configures it, for settings whose engine default follows the host — `out.enabled`
-  (off under rpc-ui, on in the terminal) and `display.shellVisualization` (Cody
-  launches with it off, `lib/omp/cody-launch-defaults.yml`). The panel shows that
-  value instead of the declared default so a switch never reads On while the
-  engine keeps the feature off.
-
-  `lib/omp/settings-conditions.ts`: `composerPredictionsEnabled` (a
-  `SETTING_CONDITIONS` rule on `composer.predictions`) and
-  `GLOBAL_LAYER_CONDITIONS` (`Record<string, true>`: `contextFilesExtraNotProject`,
-  `restrictedFoldersNotProject`, `perCallModelAllowNotProject`). The engine hides
-  those three list editors while a project file supplied the list; Cody reads and
-  writes the global layer only, so they are always satisfied (no "only takes
-  effect when…" hint). `hooks/useSchemaIndex.ts` `describeCondition` knows the
-  set.
-  `task.autoParallel` (omp 18.19.0) and `task.perCallModel` (18.14.2) carry cost /
-  behaviour notes in `SETTING_NOTES`; the settings themselves, and `task.steps`,
-  `task.structured`, `task.agentSoftRequestBudget`, appear in the panel through the
-  engine's own schema with its own descriptions.
-- **This whole pipeline is tested against a REAL omp package, and for a long
-  time it was not.** Six test files (`settings-schema`, `settings-values`,
-  `settings-surface`, `model-roles`, `recommended-roundtrip`,
-  `recommended-cards`) looked for `/tmp/ompkg/package/bin/omp`, which nothing
-  in this repo creates, so every one of them SKIPPED — locally and in CI — and
-  18.2.5's package split went undetected until it was read by hand.
-  `lib/omp/omp-test-package.mjs` now resolves whatever omp is actually
-  available (`CODY_OMP_BIN`, that extraction, the tools prefix, PATH), so they
-  run; point `CODY_OMP_BIN` at an unpacked newer engine to audit it before
-  updating. Two consequences for what these tests may assert: the curated-card
-  split (schema-declared vs curated-only) and the settings-tab ORDER are
-  DERIVED from whichever engine is installed — 18.2.5 moved two keys and
-  reordered every tab — so they are asserted as invariants ("every card can
-  render", "these tabs exist"), never as counts or positions.
-- `components/settings/engine/SchemaSettingsList.tsx` — the Behavior hub's
-  "All settings" list: the complete schema, chip-grouped, secrets masked.
-  Indexed for search by `hooks/useSchemaIndex.ts`, the one component-facing
-  module that reads `lib/omp/settings-conditions`, so a Recommended card and
-  its schema row can never disagree about visibility.
-- `lib/omp/settings-config.ts` stays: it backs the server-side reset paths
-  (`/api/omp-settings`'s section deletes, `/api/model-plan`) that
-  `RetryFallbackPanel`/`ModelPlanPanel` and the config writer's "Reset to
-  defaults" calls hit — see "Model orchestration" below for its
-  `RESETTABLE_SECTIONS`/`RESETTABLE_PATHS`. It writes the same config.yml the
-  schema route does; `useConfigWriteSeq` is what tells a panel holding its
-  own copy of the file (the schema list) to reload once a reset lands,
-  without bouncing on its own save.
-- `jiti` must remain in `serverExternalPackages` — bundling it breaks its
-  runtime file resolution.
-- **Trap — `ui` fields can be getters that throw.** In omp 18.3 some
-  descriptions are computed (`get description() { … formatKeyHint(…) }`) from
-  an import the source loader stubs, so reading one throws. Uncaught, that one
-  throw made `getOmpSettingsSchema()` return null and blanked the whole
-  settings panel (and every Cody note). `readText` in
-  `lib/omp/settings-schema.ts` reads each text field defensively and drops only
-  the field that failed.
-- Behavior sits with the other engine-scoped hubs in the registry, named from
-  the active harness (`HarnessAdapter.shortName`, served by the schema
-  route), so switching `CODY_HARNESS` renames it rather than requiring a UI
-  edit — see "Settings shell" below for where it sits among the other hubs.
-- **"Terminal only" is per engine, and deliberately not shared.**
-  `lib/omp/settings-surface.ts` lists omp's keys; `PI_TERMINAL_ONLY_KEYS` in
-  `lib/harness/pi-settings.ts` lists pi's. The two engines' key names only
-  partly overlap, so one shared list would mislabel whichever renamed a key
-  first. Both are conservative: a row is chipped only when it is clearly
-  terminal chrome, and it is chipped rather than hidden because the same file
-  drives the CLI the user runs in a Cody terminal.
-- There is no "Native OMP" chip: it labelled the majority of rows and named a
-  harness. Only the exceptions carry a chip — "Cody only" for browser-local
-  preferences, "Workspace", and "Terminal only" above.
-
-- **Recommended cards for newer engine keys.** `defaultThinkingLevel` is now a
-  card (it left `CURATED_ONLY`); `textVerbosity` carries the "omp 18.17+ defaults
-  to Low" hint; `advisor.continueSeverity` (18.12.1) is an Advisor card; the
-  retry cards gained `retry.fallbackOn` (18.9) and `retry.rateLimitWalksChain`
-  (18.13.3), rendered by `RetrySchemaCard` in
-  `components/settings/RetryFallbackPanel.tsx` and shown only when the installed
-  schema declares the key, so 18.8.3 shows neither. `advisor.syncBacklog` also
-  accepts `strict` (`lib/omp/settings-config.ts`, `BACKLOGS`;
-  `hooks/useConfigWriter.ts`).
-- **List settings accept pasted lists.** `ArrayControl` in
-  `components/settings/engine/SchemaSettingsList.tsx` takes a pasted JSON array
-  (or newline text) through `components/settings/engine/list-draft.ts` (pure,
-  tested in `list-draft.test.mjs`) instead of making the user add each entry.
-  `lib/omp/settings-values.ts` validates `contextFiles.extra` as bare file names
-  (no path separators), which is what the engine accepts (18.14.2).
-- **Web-search order.** The setup wizard writes the full engine order
-  (`WEB_SEARCH_FULL_ORDER` in `components/setup-wizard-steps.tsx`, now also
-  `deepseek`, `keenable`, `sofya`). omp migrates `providers.webSearchOrder`
-  into its `web` model role and fallback chain on load (18.8.3 too; ids the
-  engine does not know are dropped), so one list serves both; `hackernews` is
-  left out on purpose (omp routes `site:news.ycombinator.com` there itself).
+- Settings come from the ENGINE's declaration via `HarnessAdapter.settings` (`readSchema()`/`write(patch)`); never switch on engine ids — it wrote omp's `config.yml` for others.
+- Never hand-list keys; pi is parsed from its `docs/settings.md`; writes are read→mutate→write the WHOLE file.
+- `package-source.ts` reads omp source via jiti: stub must return `undefined` for `then` (else hangs); keep `jiti` in `serverExternalPackages`.
+- Schema tests MUST run on a REAL omp (`CODY_OMP_BIN`) — they once all skipped.
+Details: docs/agents/settings.md
 
 ## Key Design Decisions & Traps
 
 ### Sidebar chat: a tiny baseline, context on demand, sized for a local GPU
-
-The Side Bar has two views behind a switch: **New chat** (everything below: the
-isolated small-model chat) and, wherever omp has `/btw`, **This chat** (side
-questions about the main conversation, which see it — see "Side questions:
-`/btw`"). Nothing below changes for New chat.
-
-The sidebar is meant to run on small LOCAL models (the owner's llama-swap P40:
-8,192–24,576 windows, 2k–8k reserved for output — so the smallest leaves
-~6,100 tokens for everything). Measured against a fake OpenAI endpoint, a
-sidebar "hi" was sending **133,559 tokens** before this: 43,438 of verbatim
-`AGENTS.md` inside a `<project><instructions><file>` block, and 89,303 of
-user-scope MCP tool schemas (111 tools). It now sends **~726** (310 prompt +
-416 schemas).
-
-Neither source has an omp flag or setting. `--no-rules` covers `.omp/rules`,
-NOT `AGENTS.md`/`CLAUDE.md`; `--no-tools`/`--no-extensions` cover omp's own
-builtins and extension discovery, NOT `<agent dir>/mcp.json`. The two levers
-that do work, each measured in isolation:
-
-| configuration | tokens |
-|---|---|
-| baseline | 133,559 |
-| bare `--cwd` (no context file to discover) | 90,105 |
-| agent dir with an empty user `mcp.json` | 43,602 |
-| **both** | **144** |
-
-- `sidebarBareCwd()` — an empty Cody-owned directory the child runs from, so
-  context-file discovery finds nothing. The workspace is carried separately as
-  `WrapperEngineContext.contextCwd`, because `this.cwd` is now that bare dir
-  and every tool read would otherwise resolve against it.
-- `sidebarAgentDir()` — a sidebar-only agent dir whose `mcp.json` is
-  `{"mcpServers":{}}`, with `agent.db`/`models.yml`/`config.yml`/`blobs`
-  SYMLINKED to the real ones so credentials, providers (including the local
-  endpoints) and image blobs still work. Safe because SQLite puts `-wal`/`-shm`
-  beside the symlink TARGET (verified), and omp already opens that database
-  from concurrent processes. A missing target is skipped, not linked dangling.
-  The symlink logic itself is `lib/omp/isolated-agent-dir.ts`, shared with
-  Distill, the session namer and the web-research planner (see "Distill" and
-  "Model presets" below) — only the directory location is sidebar-specific.
-- **Every tool result is budgeted** (`lib/sidebar-context-budget.ts`). An
-  unknown context window is assumed to be the SMALLEST supported, never
-  unlimited: guessing large is how a 4B model receives a result it cannot fit,
-  and the cost of guessing small is one extra page. One result may take ~25% of
-  what remains after the output reserve, so several reads plus the conversation
-  still fit; truncation always reports a `nextOffset`, and slices cut on line
-  boundaries so a paged read never splits a line.
-- The system prompt's job is to say the model has NO context yet and must ask.
-  A model that assumes it was handed the project answers from training-set
-  guesses about a codebase it has never seen, which is worse than saying it
-  cannot help. `lib/rpc-manager.test.mjs` asserts that contract (starts without
-  context, names a context tool, still cannot edit) rather than the sentence —
-  the previous assertion pinned "cannot read or edit files", which this design
-  made false.
+- Small LOCAL models: "hi" once sent 133,559 tokens (AGENTS.md + MCP schemas), now ~726; no omp flag, so need BOTH `sidebarBareCwd()` and `sidebarAgentDir()` (empty `mcp.json`).
+- `this.cwd` is the bare dir; real workspace is `WrapperEngineContext.contextCwd`. Budget every tool result (`lib/sidebar-context-budget.ts`); unknown window = SMALLEST.
+- System prompt must say the model has NO context yet and must ask.
+Details: docs/agents/sidebar-chat.md
 
 ### Never reproduce a provider's safety text
-
-Anything written into long-term memory, or into a file that is injected as
-context (this file, `CLAUDE.md`, omp's `RULES.md`), comes back in LATER
-prompts — every workspace, every model, every subagent. A provider's own
-refusal wording is therefore self-propagating: quote it once and later
-sessions carry it as context, where the same classifier reads it and refuses
-the turn before any work begins.
-
-That is not hypothetical. Diagnosing one refusal in a Cody session was
-auto-retained as a transcript memory (`mnemopi.autoRetain`, recalled
-globally), and unrelated sessions in other projects were then redirected to a
-fallback model on their first turn, on unrelated topics. A test fixture in
-this repo had pinned the same wording verbatim "so the test uses the real
-string" — the fixture now asserts the SHAPE (stop reason plus classifier tag)
-and never the blurb.
-
-So: paraphrase, or name only the machine-readable stop reason / error code.
-Describe a refusal structurally — which stop reason, which code path, what the
-harness did next — which is what makes it fixable anyway. If such text is
-already stored, DELETE the memory rather than superseding it, and de-quote the
-file. The standing rule lives in omp's user `RULES.md` so it reaches every
-agent and subagent, not just whoever reads this file.
+- Never write a provider's refusal wording into memory or injected files (`CLAUDE.md`, `RULES.md`) — it returns in later prompts and makes sessions refuse at turn one.
+- Paraphrase or name the stop reason/error code; DELETE stored text; tests assert SHAPE, never the wording.
+Details: docs/agents/ground-rules.md
 
 ### Cody is meant to be SHARED — never ship the owner's environment
-
-Cody is published for other people to install fresh, with their own accounts,
-engines and provider credentials. That is a standing constraint on every
-change, not a one-off audit: a stranger with an empty data dir, no engine on
-PATH and no credentials must reach a working first chat, and every failure
-must name the panel that fixes it.
-
-- **Never hardcode this deployment**: the owner's forge/registry, hostnames,
-  LAN addresses, `/data/agent`, his MCP servers or his provider plans. A value
-  that varies per install is an env var with a sane default, or a first-run
-  step. Anything CI-only that genuinely cannot be portable (a self-hosted
-  forge login) is driven from repository variables with the current value as
-  the fallback, so a fork works and the owner's release path is untouched.
-- **Never seed a stranger's config with a provider they do not have.** The
-  pay-as-you-go price overlay (`lib/model-pricing-overlay.ts`) used to write
-  `alibaba-token-plan` rates into `models.yml` on EVERY first run: a brand-new
-  instance grew a file naming a prepaid plan the user had never heard of, and
-  the Providers hub then listed it as connected. `seedPayAsYouGoPricesOnce`
-  now takes the set of providers the catalog actually reaches and writes
-  nothing — not even the file — for an install that has none of them.
-- **A `models.yml` entry with no endpoint and no models is an OVERRIDE, not a
-  provider.** `readOmpProviderDirectory` (lib/harness/omp.ts) skips entries
-  carrying only `cost`/`modelOverrides`; treating them as custom endpoints is
-  what turned the price seed into a phantom "connected" row. Pinned by
-  `lib/provider-directory.test.mjs`.
-- **Prices for models omp does not know yet** (`lib/model-price-fill.ts`).
-  omp prices every turn from its BUNDLED catalog (`@oh-my-pi/pi-catalog`, read for membership by `readBundledCatalog` in
-  `lib/omp/bundled-catalog.ts`; layouts below), so a
-  model reached through runtime discovery before omp's next release (a new
-  GPT on a ChatGPT subscription) reads as free. `/api/models` reconciles in
-  the background at most every 30 min: an `unpriced` model omp's catalog does
-  NOT list, with an exact models.dev match on the same provider (or a
-  declared `PRICE_PROVIDER_ALIASES` entry — only `openai-codex → openai`,
-  because omp's own catalog prices the two identically) and a nonzero rate,
-  gets that rate in `providers.<id>.modelOverrides.<model>.cost`, so omp
-  still does the math. A model omp LISTS at zero is omp's decision (prepaid
-  plan, free tier) and is never touched. Every write is recorded in
-  `cody-price-fill.json`; if models.yml no longer holds exactly that value
-  the user changed it, and the entry becomes a permanent tombstone. Once
-  omp's catalog lists the model, Cody removes its value (handback). Only the
-  four flat rates exist in models.yml's override schema — a long-context
-  tier is not carried. Verified on a live omp: the utility registry reports
-  the written cost for a discovered `openai-codex` model.
-  **Bundled catalog layouts.** Two on-disk layouts exist and Cody reads whichever engine is installed: up to omp 18.13 `src/models.json` is plain `provider -> modelId -> model` (exported as `./models.json`); from 18.14 it is a compact encoded object and the package no longer exports it, so the package's own `src/model-catalog-format.ts` decoder is loaded (never hand-decoded in Cody, it would go stale with the next format change). A failed read is a typed `reason`, never an empty catalog: callers treat it as "cannot tell", not as "omp ships nothing" (price fill then does nothing rather than pricing against a wrong set). Pinned by `lib/omp/claude-credits.test.mjs` (both layouts via `fixtures/claude-credits/fake-omp-package.mjs`).
-- **An engine's own CLI advice is not Cody's advice.** `OMP_BIN_MISSING`
-  (lib/omp/omp-cli.ts) is the one missing-binary string, and it names Settings
-  › System › Engines — not "install oh-my-pi or set CODY_OMP_BIN", which is
-  what the setup wizard showed a new user verbatim. Same rule for a catalog
-  with no credentials: `classifyModelError` tags it `no_credentials` and the
-  composer prints Cody's own sentence pointing at Settings › Providers,
-  instead of omp's "Use /login … or create models.yml". Match on the shared
-  constant (`isOmpBinMissing`), never on a copied substring.
-- **Verify shareability the way everything else here is verified**: a live run
-  against an EMPTY agent dir with no engine on PATH and no credentials — not
-  just a green test suite. Both of the traps above passed every test.
+- Never hardcode this deployment (hosts, `/data/agent`, registry, MCP servers); use env vars with defaults or a first-run step.
+- Never seed config with a provider the user lacks (`seedPayAsYouGoPricesOnce`); a `models.yml` entry without endpoint/models is an OVERRIDE.
+- Use Cody's own messages (`isOmpBinMissing`), not engine CLI advice.
+- Verify on an EMPTY agent dir, no engine, no credentials.
+Details: docs/agents/ground-rules.md
 
 ### Human terminal engine launch is entrypoint-scoped
-- `TerminalManager.create()` launches the active engine once, then drops into
-  the configured interactive shell. `continue()` restarts only that shell.
-- The wrapper belongs only to browser PTYs created by the New Terminal action.
-  Never move it into shell profiles or process-global environment handling:
-  task runs, server subprocesses, and agent tool calls must stay plain commands.
-- Container SSH auto-launch is separately guarded in
-  `docker/entrypoint.sh` by `SSH_CONNECTION`, a real TTY, and
-  `CODY_NO_AUTO_ENGINE`; non-interactive SSH commands must bypass it.
-- **Terminal omp launches never self-update.** Terminal omp launches get an overlay layer pinning `update.auto: false` so omp can never self-update the engine under Cody's gated install (omp 18.17+ setting; harmless on older).
+- Engine wrapper only on New Terminal browser PTYs (`TerminalManager.create()`); never in shell profiles/global env — tasks, servers, tool calls stay plain.
+- SSH auto-launch guarded in `docker/entrypoint.sh` (`SSH_CONNECTION`, TTY, `CODY_NO_AUTO_ENGINE`).
+- Terminal omp pins `update.auto: false` (no self-update).
+Details: docs/agents/session-runtime.md
 
 ### RPC session lifecycle (`lib/rpc-manager.ts`)
-- One wrapper per session id, keyed in a `globalThis` registry.
-- `globalThis` survives Next.js hot-reload; plain module-level Map does not.
-- Idle sessions are disposed after a timeout — never while an event stream is
-  attached (see "A viewed session stays warm" below); concurrent
-  `startRpcSession()` calls must share a single start promise.
-- **One child per session, even across a close.** A wrapper leaves the
-  registry the moment its destroy begins, but its child holds the session file
-  until it has exited (stdin closed, SIGTERM after 5 s, SIGKILL after 10 s).
-  `startRpcSession` therefore waits for a RETIRING child of the same id first
-  (`noteRetiring` in each registry `onDestroy`, `waitForRetiringChild`, at most
-  30 s). Without it a page's event stream, which reconnects within a second of
-  a close, spawned a second child beside the first; omp then moved the second
-  one's writes to a NEW session file because the first still owned the
-  original. That is how the LumaShow chat split in two on 2026-10-09, with an
-  engine running on each half. Pinned by "a session closed a moment ago is not
-  started again until its old child has exited" in `lib/rpc-manager.test.mjs`.
-- **Every ack the wrapper awaits is bounded** (`PROMPT_ACK_TIMEOUT_MS`, 30 s;
-  `IMAGE_PROMPT_ACK_TIMEOUT_MS`, 60 s when the prompt carries images):
-  `RpcProcess.sendCommand` never times out unless told to, and a child that
-  accepts a `prompt` (or the `/mcp list` prompt) but never acks it used to
-  leave `promptRunning` true forever — every later call answered
-  `session_busy` until a restart. On `RpcCommandTimeoutError` the wrapper
-  recycles the child (`destroyAndWait`) and answers `session_unresponsive`;
-  the next request spawns fresh. The bound is on the ACK only, never on the
-  run. omp 18.4.6+ acks a prompt once it has ADMITTED it (earlier builds ack
-  on receipt): an idle session first normalizes images and, on a text-only
-  model, waits on a vision description (capped at 20 s upstream) — hence the
-  wider image bound — and a queued steer/follow-up acks once it is in omp's
-  queue. The turn itself then reports through events. Pinned in
-  `lib/rpc-manager.test.mjs`.
-- **A fresh spawn never receives a client-supplied session id.**
-  `/api/agent/new` strips `sessionId` from the forwarded command; a stale or
-  forged id would address the wrong session in the child.
-- **Every child is opted in to ask dialogs, at spawn and at restart**
-  (`enableAskDialog` → `set_ask_dialog`, omp 18.4.9+; the flag lives in the
-  child process). An omp that predates it answers `Unknown command` — ignored,
-  that build keeps its select/editor fallback. An engine with a restricted
-  vocabulary (pi) is never asked: its id-less error could never settle the
-  request. `ask` is a pending dialog like select/confirm/input/editor:
-  replayed to a reconnecting stream, dropped by omp's `cancel` frame. From omp
-  18.18.3 the built-in `ask` tool no longer uses the structured `ask` request, so
-  `set_ask_dialog` changes nothing for the model's own questions; it still opts in
-  extensions' `ctx.ui.askDialog` calls (an extension-only path, so `AskDialogForm`
-  is now rare). The call stays harmless on every engine (an omp that predates it
-  answers `Unknown command`).
-- **A live session can MOVE to a new id** (omp 18.4.9). When another omp
-  process owns the session file for writing, this one's next write moves the
-  live session to a NEW sibling `.jsonl` under a NEW session id
-  (`parentSession` = the old id) and leaves the old file untouched. The only
-  wire signal is `{type:"notice", level:"warning", source:"session-persistence"}`;
-  `get_state` then reports the new id and file. The wrapper follows it through
-  `noteIdentityChange`, the path a fork's id change takes: the registry
-  re-keys (the `onIdentityChange` callback) exactly once, whichever of the
-  notice-triggered `get_state` or a state poll (`buildWebState`) sees it first.
-  Because no command asked for it, it also COPIES owner (a session without
-  one is visible to every account), preset, Local-only snapshot and
-  plan-keeper overlay to the new id (the old id stays valid, so copy, never
-  move), aliases the display bus, and — once the new file is on disk — emits
-  `cody_session_moved {sessionId, previousSessionId, sessionFile}` to every
-  attached stream. The browser adopts it through the fork path
-  (`onSessionForked`: AppShell swaps the selected session, remounts and
-  rewrites `?session=`), carrying the tab's per-id state (unsent outbox rows,
-  Smart pick, the web-hosted fallback goal, draft) to the new id and explaining itself in a global
-  toast that outlives the remount. A fork/new_session/switch_session in
-  flight (`requestedIdentityChanges`) owns its own change and announces
-  nothing. Reproduce for real by resuming one session file in two omp
-  processes and writing from both (the second one's first write moves) —
-  never run two on one file on purpose. Pinned in `lib/rpc-manager.test.mjs`,
-  through the real `startRpcSession` with a fake omp binary.
-- **Idle cache warming is invisible.** omp (18.3.5+, `providers.cacheWarming`,
-  default `idle`; the frames arrive from 18.4.5) refreshes the provider's
-  prompt cache while a session sits idle and emits `cache_warming_start/end`.
-  Those frames are forwarded but never reset the idle timer, flip the running
-  state or signal the sidebar, so an unattended child still idles out after 10
-  minutes (warming costs real provider calls until the child is gone).
-
-- **Engine RPC commands added by omp 18.13–18.19 (`lib/rpc-manager.ts`).** `PASSTHROUGH_COMMANDS` now also forwards `navigate_tree`, `abort_branch_summary`, `set_label` and `get_session_lease` verbatim (omp 18.13.2+/18.14.1+). omp 18.8.3 answers them with an ordinary `Unknown command: <type>` failed response, so every caller must treat that as "feature absent" and fall back; pi never sees them (they are not in its `rpcUi.commands`). `navigate_tree` was removed from `UNSUPPORTED_COMMANDS`. The UI does NOT call any of them yet: the transcript tree's "navigate" stays display-only (`handleNavigate` in `hooks/useAgentSession.ts`) because moving the real leaf would have to spawn an engine just to browse and would change what "Edit from here" means — a product decision, not a compatibility fix.
-- **Shell command "exclude from context" (`!!`) is capability-gated.** omp 18.16+ announces `supportsBashExcludeFromContext` in its `ready` frame; `AgentSessionWrapper` keeps it as `bashExcludeSupported` (reset on relaunch, re-read on the next `ready`). A `bash` command with `excludeFromContext: true` against an engine without it is refused with `WebRpcError` code `bash_exclude_unsupported` (plain message, i18n `agentSession.*`) instead of being silently treated as a normal command that the model would then see. Do not re-add a version-number check; the `ready` flag is the contract.
-- **Spend cap errors (`cost_cap`).** omp 18.13+ refuses the next model request once the chat passes `session.maxCost` (`--max-cost`) and says so in a `notice` frame with `source: "cost-gate"` (warning level at `session.warnCost`, error level at the cap). `lib/error-text.ts` classifies the cap's wording as kind `cost_cap` (plain sentence, no provider guess; `readCostGateAmounts` pulls the amounts out); `hooks/useAgentSession.ts` shows it as a warning-tone notice with its own i18n sentence (`agentSession.errorCostCap*`) instead of a raw "--max-cost" error; `lib/notifications/observer.ts` tracks `costCapRunId` so a run the cap ended before any model reply is reported as failed with the spend-limit sentence (and a prompt refused outright, which never starts a run, still sends one error notification). 18.8.3 has no cost gate, so none of this fires there.
-- **Launch defaults layer (`lib/omp/cody-launch-defaults.{yml,ts}`).** Cody-driven chats get `display.shellVisualization: false` via a `PI_CONFIG_FILES` layer (omp 18.17+ attaches a live copy of the shell screen to every bash progress frame and the saved entry: a 2 s bash call sent 65 frames of up to 112 KB). `buildEngineRpcLaunch` in `lib/rpc-manager.ts` merges the layer FIRST in the existing `PI_CONFIG_FILES` list (model preset / Claude credits / Local-only layers keep their order). The user's `config.yml` is never written; if the user explicitly set `display.shellVisualization: true` there, `codyLaunchDefaultsLayer()` returns null and the layer is dropped. The Settings panel shows the Cody default (`CODY_DEFAULT_OVERRIDES` / `SETTING_NOTES`). Older engines ignore the unknown key.
-  Cody's launch defaults are therefore one `PI_CONFIG_FILES` layer file per omp setting (`lib/omp/cody-launch-defaults.yml` for `display.shellVisualization`, `lib/omp/cody-launch-defaults-async-widgets.yml` for `async.widgets`, nested keys only); each layer is dropped when config.yml explicitly sets that key to true, and engines without the key ignore it.
-- **A start can open a different copy of the chat (omp 18.13.2+).** When omp
-  cannot keep writing a session file (another process holds it, or it changed
-  underneath) it carries the chat on in a NEW sibling file. That file holds the
-  whole transcript again and its header names the old session in
-  `continuationOf`; resuming the OLD id then opens the NEWEST copy. So an id
-  mismatch after a start is no longer only a new chat's temporary key.
-  `startRpcSession` tells them apart by `sessionFile`: with one it is a resume
-  that landed on another copy, so what the app files under the old id
-  (`carryConversation`: owner, preset, Local-only snapshot, crash notices,
-  scheduled messages, plan checklist, display/scratch aliases) is carried to the
-  new id, never renamed (the old id still names a real, frozen file that a
-  bookmark, a scheduled message or a tab may ask for again), and
-  `getAliases().set(oldId, child)` makes a LATER start for the old id find the
-  live child instead of opening a second one on the file the first holds.
-  Aliases are consulted by `startRpcSession` only, never by `getRpcSession`:
-  every read route keeps reading the old file by its own id. If the newest copy
-  already runs under its own id the freshly started child is destroyed and the
-  live one returned. A live move (`announceSessionMove`) sets the same alias,
-  but only when the new file's header says `continuationOf === previousId`; an
-  older omp writes no link, so its old file stays an ordinary chat. The events
-  route emits `cody_session_moved {sessionId, previousSessionId, sessionFile,
-  reason: "continued"}` when a stream asked for one id attaches to a chat that
-  runs as another; `hooks/useAgentSession.ts` adopts the id and shows a one-time
-  notice (`agentSession.sessionContinuedTitle/Body`). Tests:
-  `lib/rpc-manager.test.mjs`, `lib/session-continuation.test.mjs`.
+- One wrapper per id in a `globalThis` registry; concurrent `startRpcSession()` share one promise and wait for a RETIRING child (`waitForRetiringChild`) — else a 2nd child split a chat.
+- Every awaited ack bounded (`PROMPT_ACK_TIMEOUT_MS`); on timeout recycle child, answer `session_unresponsive` — else `session_busy` forever.
+- Never forward a client `sessionId` to a fresh spawn (`/api/agent/new` strips it).
+- Live session can MOVE to a new id/file (`notice` `session-persistence`): copy owner/preset state, never rename; re-key once (`noteIdentityChange`).
+Details: docs/agents/session-runtime.md
 
 ### Push notifications (`lib/notifications/`)
-
-When a chat needs the owner, finishes, fails or quota runs low, Cody publishes
-to the owner's ntfy topic (server, topic, optional Bearer token and Cody's own
-address are per-account settings, never hardcoded). Settings › Notifications
-edits them; `app/api/notifications/{route,test,presence,action}`.
-- **Settings** live in `<accounts dir>/notifications.json` (0600, atomic),
-  keyed by account id plus `__instance` for an open instance. Reads degrade
-  value by value to the defaults; writes are strict (`400
-  invalid_notification_settings`). The token is write-only: GET returns
-  `hasToken`. A deleted account's record is dropped on the next save.
-- **Recipients**: a chat's owner (read at send time — the stamp is written after
-  spawn); an unowned chat goes to the instance record on an open instance, else
-  to every administrator. Quota goes to every account (or the instance record).
-- **The observer channel is NOT a listener.** `AgentSessionWrapper` and
-  `AcpEngineSession` have `observeEvents(fn)` in a set of its own: listeners
-  gate the idle destroy and host-tool routing, so a permanent listener would
-  keep every child alive and hang host tools. Observers also get three signals
-  no stream carries: `cody_ui_request_resolved {id}` (omp emits nothing when a
-  dialog is answered or times out), `cody_ui_requests_cleared` (restart/close)
-  and `cody_run_stopped` (the instant Stop is pressed). The todo-pause and crash
-  notices carry `reason: "awaiting_reply"` / `"engine_exit"`; the client ignores
-  the extra field. Registered in `startRpcSession` (not for `kind: "sidebar"`)
-  and `startEngineSession`; read `session.sessionId` fresh every time.
-- **Answer buttons** are ntfy `http` actions posting a signed token to the
-  PUBLIC `/api/notifications/action` (proxy.ts `PUBLIC_EXACT`; CORS `*`, no
-  cookie is ever read). A token answers ONE request with ONE answer for ONE
-  recipient, once, within 24 h / the request's own deadline, and carries a digest
-  of the request so a reused id (ACP `perm-1` after a restart) is never answered.
-  Select ≤ 3, single non-multi ask ≤ 3, confirm Allow/Deny; ACP only the
-  agent's first `allow_once`/`reject_once` — NEVER an `*_always`. Turning
-  buttons or notifications off, or changing the chat's owner, kills buttons
-  already on a phone (403). The route rebuilds the command from the pending
-  request (`getPendingUiRequest` / `getPendingPermission`), never from the token.
-- **Pending-input notifications** carry a sequence id (`cody-` + 24 hex of
-  sha256(session, request)) and are cleared (PUT `/<topic>/<seq>/clear`, after
-  their publish settles) on resolve, cancel, expiry, restart and close.
-- **Presence**: the browser POSTs the visible chat (30 s heartbeat, null on
-  hide); a report < 75 s old suppresses that chat's notifications for that
-  person when `skipWhenViewing`.
-- **Quota** (`quota-watch.ts`): reads the shared usage snapshot only when the
-  usage reader exists and someone has a quota kind on — 60 s after a run ends
-  (≥ 3 min apart) and every 10 min while a chat is live; started/stopped from
-  `bin/cody-server.js`. Announced windows are remembered by a hash in
-  `notifications-state.json` and pruned as they reset. Messages never name an
-  account's email (`UsageAccount.label` can contain one) — provider, "account
-  n/m", window, reset time in the recipient's zone.
-- **Account signed out** (`signed-out.ts`, sent from `quota-watch.ts`): the
-  `accountSignedOut` kind (problems group, on by default, priority 4) says a
-  stored login ended — "Claude · Secondary was signed out" / "Its login
-  expired, so Cody is using your other accounts. Sign in again: Settings ›
-  Providers." (one account: "Claude was signed out"; no other usable account:
-  "…so Cody cannot use it."). Sent ONCE per credential row and cause: `so-` +
-  a hash of provider, row id and the cause's own hash is remembered in
-  `notifications-state.json` and forgotten only when that row is no longer
-  signed out (signed in again, removed) — never because the credentials could
-  not be read. Names the provider and the account's POSITION, never its
-  email. The check reads omp's credential store alone (`listOmpCredentials`,
-  no engine spawn, omp only) on quota-watch's schedule — once 30 s after the
-  server starts, 60 s after a run ends, every 10 min while a chat is live — and
-  runs whether or not any quota kind is on. Its click URL is
-  `<codyUrl>/?settings=providers`: `AppShell` opens the Settings hub named by
-  `?settings=<hub>` on load (`getInitialSettingsTab`,
-  `lib/initial-navigation.ts`; an unknown hub opens nothing).
-- **Scheduled messages** (`lib/scheduled/notify.ts`): the `scheduled` kind
-  (progress group, on by default, priority 3) says a scheduled message was sent
-  into its chat, or gave up and why ("Open the chat to retry or cancel it").
-  Never fired for a Send now the person pressed themselves — they are looking.
-  The preview is the person's own words, clipped to a line.
-- **Engine crash alerts.** When a chat's engine exits without anyone asking (not
-  Stop, close, a settings/routing restart, idle dispose or server shutdown),
-  `AgentSessionWrapper.handleProcessExit` (lib/rpc-manager.ts) classifies the
-  exit with `classifyEngineExit` (lib/engine-crash.ts, browser-safe, tested in
-  lib/engine-crash.test.mjs) from the exit code/signal, the last stderr lines,
-  the cgroup counter deltas (`oom_kill` in memory.events, `max` in pids.events,
-  read once at spawn and once at exit by lib/engine-crash-host.ts, never
-  throwing) and the disk areas (lib/disk-space.ts `describeDiskError`). One
-  reason comes out: `out_of_memory`, `disk_full` (names tmp/data/quota),
-  `too_many_processes`, `crashed` (with the last error line, one line, capped,
-  secrets stripped) or `server_restarted` (lib/run-recovery/supervisor.ts
-  `resumeInterrupted` on boot for chats the journal says were running).
-  `crashRecoveryOutlook(session)` says whether Cody restarts the chat
-  automatically (`automatic`), has given up after 3 tries (`gave_up`) or needs a
-  message (`manual`). That one notice goes four ways: the wrapper's `notice`
-  event (reason `engine_exit`, with a `crash` payload; the observer pushes its
-  sentence on the existing `error` kind), the running-sessions SSE as an
-  `engine_crashed` frame (lib/engine-crash-events.ts,
-  `canAccessSession`-filtered; the plain running-id frames are unchanged) that
-  SessionSidebar turns into a toast (components/engine-crash-toast.ts; click
-  opens the chat), the persistent row stored in `<agent
-  dir>/cody-engine-crashes.json` (lib/engine-crash-log.ts, at most 5 per chat,
-  30 days) and merged into `GET /api/sessions/[id]` by time as a
-  `cody-engine-crash` custom message with an entry id starting `cody-crash-`,
-  and the live row useAgentSession appends. Words live in `engineCrash.*` keys
-  (en/ja/zh-CN) and `ENGINE_CRASH_TEXT` (server English); the locale test pins
-  them together.
-- **Traps**: nothing here may use `@/` (the custom server loads it through bare
-  jiti — `lib/server-import-graph.test.mjs`); shared state (presence, spent
-  nonces, log throttle, watcher) is on `globalThis`; every ntfy call is
-  fire-and-forget with a 10 s timeout and never throws into a session; a
-  redirect is never followed (a redirected POST becomes a 200 page that looks
-  like success); what a non-ntfy server answers is never echoed back. Tests that
-  need an open instance must `delete process.env.CODY_REQUIRE_ACCOUNTS`.
-
-**A notification button can only grant ONCE.** omp asks a tool approval as a `select` titled "Allow tool: <name>" with rows such as "Allow once", "Allow for session", "Deny". `lib/notifications/compose.ts` (`toolApprovalSelect`) offers a lock-screen/notification button only for the once and deny rows; `lib/notifications/answer.ts` (`cleanUiAnswer`) re-checks the same rule server-side, so a forged or stale tap cannot send a broader grant (session-wide, "always", or an unknown row). Broader grants stay inside the chat dialog. The predicates (`isToolApprovalTitle`, `isAskOtherRow`, `isAskDoneRow`, `isAskSelectedTitle`) live in `lib/ask-walk.ts` and are imported by compose/answer so the dock and the notifications read omp's wording one way. For the model's own questions: a plain pick gets one button per real option (omp's "Other (type your own)" row is dropped, so no button only opens a typed follow-up); a multi-choice step (a "(N selected)" title or a Done row) gets no buttons and its notification says to open the chat.
+- Answer buttons post a signed token to PUBLIC `/api/notifications/action`; one request/answer/recipient, once; route rebuilds the command from the pending request, never the token.
+- A button can only grant ONCE: `toolApprovalSelect` offers only once/deny rows, `cleanUiAnswer` re-checks; never session-wide or ACP `*_always`.
+- `observeEvents` is NOT a listener — a permanent listener keeps children alive and hangs host tools.
+- Traps: no `@/` imports (bare jiti); state on `globalThis`; ntfy calls fire-and-forget, 10 s timeout, never follow redirects.
+Details: docs/agents/notifications.md
 
 ### Time zones: the device that sent the message decides (`lib/time-zone.ts`, `lib/time-zone-prefs.ts`)
-
-Agents used to reason in UTC: omp's own "Today:" line has a date and no time or
-zone, and a container with no `TZ` ran every shell in UTC. The owner travels
-with a tablet, so the rule is **the zone of the browser that sent THIS
-message, read when it was sent** — not the server's, not a saved setting.
-
-- **Precedence** (`resolveTimeZone`, first valid wins): the zone the person
-  CHOSE in Settings → Preferences → Time zone ("Automatic" = none chosen) > the
-  browser sending this message > the account's last-seen device zone > the
-  server's `TZ`, then its system zone > UTC. Zones are IANA names stored
-  canonically by `normalizeTimeZone` (the server may keep `Asia/Calcutta` for a
-  pick of `Asia/Kolkata` — compare canonical forms, never raw strings); a
-  layer that is not a zone is skipped, an explicit save of one is `400
-  invalid_time_zone`. Per account (`UserPreferences.timeZone`/`.deviceTimeZone`);
-  an instance with no accounts keeps one record in `<accounts dir>/time-zone.json`
-  (also what an unowned session on an instance WITH accounts uses).
-  `readTimeZonePrefs` always re-reads the account: a request's record predates
-  its own write.
-- **The browser reports it twice.** Every message-bearing command
-  (`isMessageCommandType`: prompt, steer, follow_up, abort_and_prompt) carries
-  `timeZone` from `deviceTimeZoneField()` — stamped per attempt in
-  `lib/agent-client.ts`, so an outbox retry goes out from where the person is
-  now; the new-chat spawn and the terminal POST carry it too — and
-  `hooks/useDeviceTimeZone.ts` (mounted in `AppShell`) PUTs `/api/time-zone` on
-  load, focus, visible and online when the zone changed, which keeps the
-  last-seen zone current for work nobody is typing for.
-- **Routes settle it, sessions get only the result.** `/api/agent/[id]` and
-  `/api/agent/new` call `zoneForMessage` (resolve + remember the device) and
-  hand the session the resolved `timeZone`; a client value that is not a zone
-  never reaches an engine. A child started with nobody typing uses
-  `ownerTimeZone(sessionId)`.
-- **A zone becomes a child's `TZ` in exactly one place:**
-  `engineChildEnv(extra, { timeZone })` (`lib/harness/provider-keys.ts`). Callers
-  pass the zone: `RpcProcess`, `AcpEngineSession`, Cody terminals, and the
-  one-shot children (Distill, session namer, plan keeper, planner, research —
-  the owner's/actor's zone, else the instance-level one). Sidebar chats get it
-  too.
-- **A running process cannot change its `TZ`.** `alignSessionTimeZone` runs
-  BEFORE a message is handed over: omp restarts the same wrapper in place
-  (`AgentSessionWrapper.alignTimeZone` → `restart(profile, zone)`; listeners,
-  ledger and event stream stay attached, concurrent sends join one restart); an
-  ACP engine's idle child is closed and the session started again from the
-  engine's own stored session. Never while a turn runs, a follow-up is held or a
-  delivery is unsettled (a restart would fail it) — then nothing restarts, and
-  the next idle message from the new zone does. The message is not delivered
-  until the restart finishes, so nothing is lost; a failed restart reaches the
-  sender, whose outbox keeps it.
-- **The agent is told every prompt** by `lib/omp/extensions/cody-local-time.ts`
-  (a second `--extension` beside the refusal guard, main omp sessions only): on
-  `before_agent_start` it asks the wrapper which zone this message is from (an
-  `input` dialog titled `CODY_TIME_ZONE`, answered by `answerTimeZoneRequest`
-  from memory and never forwarded to a page — the refusal guard's channel in
-  reverse) and returns ONE hidden custom message (`cody-local-time`, `display:
-  false`, `details.zone`): "Current local time: Friday 2 October 2026, 14:58 EDT
-  (America/New_York, UTC-04:00). Use this time zone for any times you state to
-  the user." When the previous line in the transcript (read back from the
-  branch, so restarts, resumes and forks all know) named another zone it opens
-  "The user's device time zone changed: was X, now Y.", and when the shell still
-  runs in another zone it closes "Shell commands (`date`) still report X until
-  the next idle restart." It is a message at the tail, never a system-prompt
-  edit: replacing the system prompt would break the provider's prompt cache on
-  every turn. No answer (an older Cody) means the process's own zone. The file
-  repeats a few helpers of `lib/time-zone.ts` because omp loads it with no
-  Cody imports; `lib/omp/cody-local-time.test.mjs` runs both on the same inputs.
-  Subagents and the sidebar are not given the line (their shells and Cody's
-  tools are still in the right zone).
-- **Hidden on every path.** `isHiddenFromTranscript` (`lib/message-display.ts`)
-  is the one predicate: `entryToUiMessage` drops the entry on reload, the
-  wrapper drops the live `message_start`/`message_end` frames (only this type —
-  the MCP mount notice still drives its toast), `isVisibleTranscriptMessage`,
-  `MessageView` and the turn grouping in `ChatWindow` never make a row or a gap.
-  A new reader of session entries must go through `entryToUiMessage`.
-- **Cody's tools speak local time.** Every host tool that prints a time takes
-  `timeZone` in its context and writes it with `formatToolTime`
-  ("2026-10-01 19:31 EDT", "…08:31 UTC+09:00" where the zone has no
-  abbreviation): `list_sessions`/`session_status`, `forge`, `read_app_logs`
-  (whose zoneless `since` is read in that zone). The zone is the newest
-  message's (`AgentSessionWrapper.currentTimeZone()`, `getSessionTimeZone()`
-  for the ACP bridge route).
-- **What ACP engines (Claude Code, Codex) get:** `TZ` in the child's
-  environment and the idle respawn above, and Cody's tool results in local
-  time. They have no extension API, so there is no hidden per-prompt line and
-  no prompt is rewritten for them.
-- **The Settings row** is `components/settings/TimeZoneSetting.tsx` (rows from
-  `lib/time-zone-options.ts`): "Automatic (this device: X)" is the first, REAL
-  option (value `""`), and a saved zone selects the row naming the same zone by
-  canonical name, so an alias the server stored still shows as chosen. The
-  picker is `components/ui/Select.tsx` with its optional `search={{placeholder,
-  empty}}` (base-ui Combobox, input inside the popup; every typed word must
-  appear, any order, `_` `/` `-` count as spaces); without `search` the plain
-  path is unchanged. Saves go through the panel's Save corner, not a toast.
+- Zone = browser that sent THIS message; `resolveTimeZone`: chosen > sender > last-seen > server `TZ` > UTC. Compare canonical names (`normalizeTimeZone`), not raw strings.
+- Child `TZ` set only in `engineChildEnv(extra, { timeZone })`; a running process can't change it, so `alignSessionTimeZone` restarts it, never mid-turn.
+- omp gets time via hidden `cody-local-time` tail message, never a system-prompt edit (breaks prompt cache); ACP engines: `TZ` + idle respawn only.
+- Hide via `isHiddenFromTranscript`; entry readers must use `entryToUiMessage`.
+Details: docs/agents/time-and-limits.md
 
 ### Agent-driven Preview panel (`lib/preview-url.ts`, `lib/preview-autoopen.ts`)
-- The agent reaches the Preview tab two ways. Deliberately: the `open_preview`
-  host tool settles SERVER-side (rpc-manager `SERVER_HOST_TOOLS`) — it
-  publishes on the display-request bus (`lib/display/bus.ts`), the panel
-  auto-opens via the display SSE, and the tool result reports server-probed
-  reachability back to the model. `open_url` host-tool calls carrying a
-  loopback URL funnel into the same bus from the browser (a host_tool_call
-  arrives outside any user gesture, so `window.open` would be
-  popup-blocked). Implicitly: loopback URLs in **live**
-  assistant replies (`message_end` frames only — history loads and reconnect
-  hydration never trigger) are offered to `createPreviewAutoOpener`, which
-  opens the panel only once a no-cors probe confirms something answers,
-  retrying briefly so a still-booting dev server is not missed.
-- Auto-open policy: once per (session, url) pair; explicit host-tool opens
-  mark the pair handled so follow-up prose cannot re-open a panel the user
-  closed; a session switch abandons pending probes. URL rules are shared in
-  `normalizePreviewUrl` — loopback only (an agent may only publish its own dev
-  server; candidate resolution widens it afterwards), with 0.0.0.0 / [::] /
-  [::1] canonicalized to localhost.
-- Every trigger — host tool, URL sniffing, manual URL bar — POSTs to
-  `/api/agent/[id]/display`, so one pipeline feeds `PreviewPanel`: it consumes
-  the latest `DisplayRequestV1` from `useDisplayRequests` (SSE snapshot + live
-  events), and a live event both opens the panel and marks the (session, url)
-  pair handled for the auto-opener.
-- Host tools exist only on omp's rpc-ui protocol; every other engine gets the
-  assistant-text detection path here, plus the bundled display MCP server (see
-  `lib/display/` below) — as `--mcp-config` on a per-turn CLI's argv, or as an
-  ACP `McpServerStdio` named at `session/new`.
+- Every trigger POSTs `/api/agent/[id]/display`; URLs must pass `normalizePreviewUrl` (loopback only).
+- Auto-open once per (session, url); only live `message_end` frames, never history/hydration — so a closed panel doesn't reopen.
+Details: docs/agents/display-preview.md
 
 ### Preview screenshots (`lib/preview-screenshot.ts`)
-- `preview_screenshot` is a SERVER-implemented host tool (rpc-manager
-  `SERVER_HOST_TOOLS`): registered at wrapper initialize, merged into every UI
-  `set_host_tools` (omp replaces the roster per call, so a reconnect
-  re-register must never drop it), and settled in `handleFrame` with
-  `sendFrame` — no attached browser required. The result carries the image as an
-  image content block plus a text line, so vision models see their own work.
-- **Every capture must fit one RPC frame.** The image rides to omp as base64
-  inside a single NDJSON line (1 MiB, no outbound chunking), and a dropped
-  result hangs the tool call forever — so captures walk a ladder against
-  `SCREENSHOT_MAX_BYTES` (600 KiB raw ≈ 800 KiB base64): PNG at the requested
-  size → WebP same size → WebP capped to 1280 long edge → WebP capped to 800.
-  First rung within budget wins, so an ordinary capture stays crisp PNG; the
-  extension in `--screenshot=out.<ext>` is what selects the encoder (verified on
-  Chromium 151). `ScreenshotResult.mimeType` reports what was actually produced
-  (sniffed from the bytes) and width/height report what was actually rendered.
-  Nothing over budget is ever returned: the last rung throws
-  `ScreenshotError("too_large")`, which the API maps to 413 and the host tool
-  answers as a normal tool error.
-- Rendering shells out to a headless Chromium in one-shot `--screenshot` mode
-  (no CDP, no new dependency). Binary resolution: `CODY_CHROMIUM_BIN` →
-  Playwright caches → PATH → common install paths; the Docker image bundles
-  Debian chromium and pins `CODY_CHROMIUM_BIN=/usr/bin/chromium` (smoke test
-  asserts it). Loopback-only via `normalizePreviewUrl` — that rule is the SSRF
-  guard, do not widen it casually. `--no-sandbox` only when running as root.
-- Chat display: `ToolCallBlock` renders tool-result image blocks as
-  always-visible thumbnails (not behind the collapse). History loads defer
-  those images (`deferMedia`) — the reader replaces each with a url-source
-  block minted by `toolResultImageUrl` pointing at
-  `/api/sessions/[id]/media?entryId=&index=`, which streams the bytes with
-  blob resolution on. The media route MUST enumerate images with the same
-  predicate the deferral used (`isDeferrableToolResultImage`) or indexes
-  drift.
-- The Preview panel's camera button posts `/api/preview/screenshot` and
-  attaches the image to the composer via `ChatInputHandle.addFiles`, carrying
-  the mime type the server actually produced (never an assumed PNG) — the
-  screenshot rides the existing image-attach path into whichever engine is
-  active (turn engines currently reject image prompts with
-  `images_unsupported`, same as a manual attach).
+- Every capture must fit one RPC frame (1 MiB NDJSON, a dropped result hangs the tool): ladder vs `SCREENSHOT_MAX_BYTES` PNG→WebP→1280→800, else `ScreenshotError("too_large")`.
+- Loopback-only via `normalizePreviewUrl` is the SSRF guard — never widen.
+- Media route must enumerate images with `isDeferrableToolResultImage` or indexes drift.
+Details: docs/agents/display-preview.md
 
 ### Universal display/preview surface (`lib/display/`)
-- **Session-scoped request bus** (`bus.ts`): `DisplayRequestV1` per session in a
-  `globalThis` map (latest + listeners, hot-reload safe). Engines that rekey a
-  session mid-run (`session_info_update`) call `aliasDisplaySession(old, new)` —
-  the alias chain, latest request, and listeners all move to the new id.
-- **Loopback-only publication**: `validation.ts` accepts http(s) URLs on
-  localhost/127.0.0.1/[::1] and rejects credentials. The preview surface is for
-  dev servers the agent started, not a general browser. Resolution then
-  rewrites that loopback URL into the candidates below.
-- **Fidelity ladder** (`native-gateway.ts`): resolution returns
-  `candidates: DisplayCandidate[]`, ranked best-fidelity-first, and the client
-  uses the first one that works. There is no single `transport` any more, and
-  streaming is NOT the default — it is the floor.
-  1. `direct` — a real iframe against the dev server's own origin, ranked
-     **local-first**: the loopback URL we were handed leads the group, then one
-     candidate per non-loopback IPv4 interface (`os.networkInterfaces()`) that
-     answers a probe, so a dev server bound to `0.0.0.0` is framed straight
-     from the tablet over LAN/Tailscale. Highest fidelity: real DOM, real
-     fonts, real input, no re-encode.
-     The loopback rung is what makes a co-located install (Windows desktop
-     shell, on-device Android, plain `npm run dev`) render natively with zero
-     configuration and no Chromium — but it is only usable by a browser on this
-     machine, so `lib/display/ladder.ts` **drops it structurally** for any
-     other client. That gate cannot be a probe: a remote device probing
-     `127.0.0.1` may get an opaque success from an unrelated local app and
-     frame the wrong thing.
-  2. `native` — the `CODY_PREVIEW_BASE_URL` wildcard-subdomain HTTP+WS reverse
-     proxy. It strips credentials in BOTH directions (cookie/authorization on
-     the way in, set-cookie on the way out) so the iframe never carries Cody
-     credentials into the dev server and the dev server can never plant
-     cookies on the preview domain — and it strips `X-Frame-Options` + the
-     `frame-ancestors` directive from responses it re-serves under its token
-     origin, so ANY target (a frame-guarded Cody dev server included) is
-     frameable through it, like any port-forwarding preview proxy. Only
-     present when configured, and only minted when a server-side cookie-less
-     probe gets a 2xx (`gatewayRenderable`): an auth-gated target could at
-     most render a login form whose session cookie the gateway discards — a
-     dead end, so it rides the streamed rung instead. **Do NOT "fix"
-     auth-gated gateway targets by passing set-cookie through** (cookie
-     tossing / session fixation against Cody itself); run the dev server
-     without auth instead — a bare `npm run dev` with no accounts is already
-     open. Covered by `lib/native-gateway.test.mjs`.
-  3. `stream` — always last, always present: a server-side Chromium
-     (`CODY_CHROMIUM_BIN`, puppeteer-core, CDP screencast) renders the URL and
-     ships JPEG frames + pointer/keyboard input over the
-     `/api/display/socket?sessionId=` WS handled in `bin/cody-server.js`.
-     Needs nothing of the client's network, so it cannot fail to be available.
-- **Client-side ranking** (`lib/display/ladder.ts`): `orderDisplayCandidates()`
-  is pure and shared (the panel imports it; future native clients can too). It
-  encodes the three facts only the document knows — mixed content is
-  hard-blocked, loopback means *this* machine, and our own hostname provably
-  routes here so it outranks the rest of the direct group. Unit-tested in
-  `lib/display.test.mjs`; there is deliberately no "remote mode" flag, because
-  one server can serve a local webview and a remote tablet at the same time and
-  each resolves correctly from the same candidate list.
-- **Capability tokens** (`capability.ts`): engine-side MCP servers post to
-  `/api/internal/display` with an HMAC session-scoped token.
-  `CODY_INTERNAL_DISPLAY_SECRET`/`CODY_INTERNAL_DISPLAY_ORIGIN` are minted by
-  `bin/cody-server.js` at boot and live only in the environment, never persisted.
-- **Per-engine wiring**: omp gets a Cody-owned `open_preview` host
-  tools. `lib/rpc-manager.ts` sends `set_host_tools` at session start, merges them
-  into any browser-registered tool list, and routes their `host_tool_call`s to their
-  server implementations. Every other engine gets the bundled stdio MCP server
-  (`bin/cody-display-mcp.js`) via `lib/display/engine-tools.ts`: `claudeDisplayMcpConfig`
-  for a per-turn CLI's `--mcp-config`, `displayMcpAcpServer` for an ACP session's
-  `mcpServers`. The ACP builder mints a capability token, so it throws when the server's
-  internal display origin/secret are absent; an adapter's `mcpServers` hook must catch
-  that and report an empty list. `scripts/engine-bringup.mjs` drives adapters with no
-  server behind them, and a throw there aborts `session/new`: no bridge is a missing
-  Preview button, a throw is a chat that will not open.
-
-- **The project To-do list is human-only; agents have no access to it.** `.cody/todo.json`
-  sits at the resolved project root so it is visible in the project and survives session
-  or engine changes. Cody writes it atomically and preserves unknown top-level keys,
-  and only the human does so, through `/api/todo` (the sidebar panel). Agents have no
-  tool, prompt, MCP bridge or internal route for it, so it behaves as if it did not
-  exist from their side. The file is NOT hidden: an agent listing the project's files
-  can still see `.cody/todo.json` (and could read or edit it with ordinary file tools),
-  which is accepted. Do not add an agent-facing path back: "update your todo list" means
-  the agent's OWN plan (omp `todo` → the composer's Tasks list), and a tool named after
-  the sidebar list made the wrong tool the obvious pick. The To-do tab (panel id
-  `tasks`) calls this section To-do; the legacy `.cody/tasks.json` runner is its
-  collapsed Commands section only when that file exists.
-- **Client**: `hooks/useDisplayRequests.ts` subscribes to the SSE route;
-  `AppShell` auto-opens the right panel in `preview` mode on live requests —
-  the explicit, server-driven trigger alongside the client-side URL sniffing
-  in `lib/preview-autoopen.ts` above. `PreviewPanel` then walks `candidates`
-  in order and commits to the first usable rung, subject to two gates:
-  - **Mixed content**: an `http:` candidate is skipped outright when the page
-    is on `https:` — the browser hard-blocks it, no probe can save it.
-  - **Current hostname wins**: a candidate whose `host` equals
-    `window.location.hostname` moves to the front of the direct group. That
-    host is provably routable from this device — it is how the page loaded.
-  A `direct`/`native` rung is confirmed with a no-cors probe (an opaque
-  response proves something answered; a network error falls through to the
-  next rung); `stream` needs no probe.
-- **The active rung is visible**: a quiet persistent badge in the subtitle bar
-  plus a transient pill naming the method (Direct / Gateway / Streamed) once
-  per resolved request. On the streamed rung the badge also names the CODEC —
-  `Streamed · H.264` vs `Streamed · JPEG stills` — because those are the same
-  rung and would otherwise look identical. A silent downgrade is the whole thing
-  we are preventing, and it has two flavours now: falling to the streamed rung at
-  all, and falling from video to stills inside it. If fidelity drops, the user
-  sees why. The pop-out window has no subtitle bar, so it carries the same label
-  in `document.title` and flashes a pill on every change.
-- **Streamed-rung client** (`components/StreamedDisplay.tsx`): one implementation
-  of the socket protocol, shared by the panel and the pop-out route. It presents
-  two ways over one socket, with the same controls and the same geometry: JPEG
-  stills and H.264. The canvas **backing store is `cssSize × devicePixelRatio`**
-  (capped at 3) with the CSS box untouched, and that same factor rides every
-  `resize` as `deviceScaleFactor` — the provider renders at that density, so the
-  frame lands 1:1 and nothing resamples at either end. The first `resize` goes out
-  on `socket.onopen`, not on `ready`: the provider reads its launch density from
-  it and waits only briefly.
-  - **Stills**: frames decode off-thread via `createImageBitmap` and present
-    through an `ImageBitmapRenderingContext` (`transferFromImageBitmap`), which
-    also skips a blit; Chromium leaves the canvas's intrinsic size alone, so the
-    backing store stays authoritative. A `new Image()` + `drawImage` path covers
-    engines without `createImageBitmap`, and a binary frame is accepted as a
-    `Blob` or an `ArrayBuffer`.
-  - **H.264 negotiation**: `hello` is answered with
-    `{type:"capabilities",decoders:[…]}` — RFC 6381 strings this engine actually
-    verified with `VideoDecoder.isConfigSupported`, and `[]` when it has no
-    `VideoDecoder` at all, which keeps the session on stills. The probe walks
-    levels DESCENDING per profile (High, Main, Constrained Baseline) and
-    advertises ONE ceiling string per profile. That is deliberate: a level in a
-    capability string is a ceiling and H.264 levels are nested, so the highest
-    accepted level states the entire answer for that profile, and probing
-    downward can never advertise a level below what the engine decodes — which
-    matters because the encoder derives `level_idc` from frame size (5.0 at
-    2560×1600, 5.1 at 2880×1800). Do not "simplify" it into advertising every
-    string. The codec in the provider's `video` message is opaque input to
-    `configure`: it is parsed from the real SPS and its level need not appear in
-    the advertised list, so never require an exact match against it.
-  - **H.264 frames**: one binary message is exactly one access unit. `key` vs
-    `delta` comes from scanning every Annex-B start code for NAL type 5 — no AUD
-    is emitted, so there is nothing else to key off — and deltas are DISCARDED
-    until the first key, because a decoder handed a delta first throws and the
-    throw kills the decoder, not the frame. Every IDR repeats its SPS/PPS, which
-    is what lets a late joiner and a just-reset decoder recover. A decoder error
-    closes the decoder, reopens it, reports `H.264 — recovering` and sends
-    `{type:"keyframe"}`; four consecutive faults stop and say so rather than
-    cycling keyframe requests forever. A second `hello` is authoritative: tear the
-    decoder down and go back to stills, mid-stream if need be.
-  - **Trap — one context kind per canvas**: `getContext` refuses a second kind
-    forever, and stills hold a `bitmaprenderer` while video needs a 2d context.
-    The negotiated renderer therefore keys the canvas **ELEMENT**, and each
-    context is cached against the element it came from; presenting into the
-    swapped-out canvas paints something nobody is showing.
-  - **Trap — Annex-B means no `description`**: the WebCodecs AVC registration
-    signals Annex-B by the ABSENCE of an `AVCDecoderConfigurationRecord`, so
-    `configure` must be called without one. Filling it in from the `video` message
-    configures the wrong format outright.
-  - **Trap — close every `VideoFrame`**: in a `finally`, superseded frames
-    included. A frame pins a decoder buffer, the pool is a handful deep, and
-    leaking one per frame stalls the stream within a second — the classic
-    WebCodecs bug, and it looks like a network fault.
-  - **Trap — crop the alignment padding**: coded axes are macroblock-aligned, so
-    up to 15 px of the right and bottom edge is padding, not content.
-    `visibleRect` is honored first (for a provider that sets SPS cropping), then
-    an axis is cropped to `round(viewport × deviceScaleFactor)` when it overshoots
-    by less than a macroblock; a bigger difference is a resize the encoder has not
-    caught up with and is presented whole so CSS scales it, exactly as a
-    wrong-sized JPEG behaves. Crop, never letterbox, never stretch. And
-    `codedWidth`/`codedHeight` on a decoded frame are no substitute for either
-    bound — a decoder can report 1026 rows for a 1008-row picture.
-  - **Trap — pointer space is the viewport's CSS pixels**: NOT the backing store
-    and NOT the coded size. Remote input space is CSS px, so scaling by
-    `canvas.width / rect.width` sends every click at `deviceScaleFactor`× too far,
-    and folding in macroblock padding skews it by a few pixels that get blamed on
-    everything else.
-- **Clipboard bridge**: `hello.input` may advertise `"clipboard"`. Only then does
-  the panel show copy/paste controls, and only then does the surface intercept
-  Ctrl/Cmd+C and Ctrl/Cmd+V rather than forwarding them (every other key,
-  Ctrl+A and Tab included, is forwarded untouched). Copy is a round-trip —
-  `{type:"clipboard",action:"read"}` → `{type:"clipboard",text}` →
-  `navigator.clipboard.writeText`; paste reads the local clipboard on the click
-  gesture and sends `{type:"clipboard",action:"write",text}`, clamped to 8192
-  chars to match the provider's `insertText` slice and stay inside the socket's
-  64 KiB frame cap. The gate is the advertised capability, NEVER
-  `renderer === "raster"` — a surface that cannot bridge the clipboard offers no
-  clipboard UI, which is what keeps the protocol usable for X11/Android later.
-- **Pop-out window** (`app/display/[id]/page.tsx` → `components/DisplayWindow.tsx`):
-  the streamed surface at full viewport on the same authenticated socket, auth-
-  gated by `proxy.ts` like any page. It follows the display SSE, so a newly
-  published request re-targets it instead of going dark when the server recycles
-  the provider. The point is size: a real window measures larger and reports its
-  own size and density, so the remote surface renders at that size natively
-  instead of being upscaled from a sidebar. Distinct from the panel's detach
-  button, which hands a direct/gateway URL to the browser. Every client of a
-  session shares ONE remote surface, so the panel re-asserts its own viewport
-  when focus returns and the pop-out is gone.
-- **CSP**: `proxy.ts` builds `Content-Security-Policy` dynamically via
-  `lib/display/csp.ts`. `frame-src` and `connect-src` (the probe fetch and HMR
-  sockets need the latter) allow loopback, this host's own RFC1918/CGNAT
-  interface addresses on any port, and the `CODY_PREVIEW_BASE_URL` wildcard when
-  configured — nothing else, since candidates are minted as raw interface IPs.
-  **Trap**: CSP has no CIDR notation and permits a wildcard only as the leftmost
-  label, so ranges are emitted as exact per-interface hosts — Chromium silently
-  discards `http://192.168.*.*:*` as an invalid source, which would collapse
-  `frame-src` and block every direct preview. Public origins stay unframeable.
-  The page CSP is applied to rendered pages only, NOT `/api/` responses: the
-  two HTML-serving API routes (session export, docx preview) author their own
-  stricter document CSP with `frame-ancestors 'self'` so the app can iframe
-  them (top-bar history panel, file viewer) — a middleware `set()` would
-  clobber exactly those headers, and per spec `frame-ancestors` is also what
-  overrides the global `X-Frame-Options: DENY`.
-  The session-export policy additionally allows `https://cdnjs.cloudflare.com`
-  in `script-src`: the exporter of omp 18.8.3 renders the transcript client-side with
-  SRI-pinned `marked`/`highlight.js` from that CDN, and blocking it renders an
-  empty transcript. omp 18.19's exported viewer loads its script from stencil.so
-  instead, so the policy also allows `stencil.so` and `build.stencil.so`; opening an
-  export now needs internet access.
-- The Docker image installs `chromium` and sets `CODY_CHROMIUM_BIN` so both
-  `preview_screenshot` captures and the `stream` rung — the fallback that must
-  never be missing — work out of the box.
-- **Trap**: the display bus and the capability secret are process-local. A
-  multi-process deployment (multiple Next.js workers or replicas) would need a
-  shared store for both before display requests survive crossing processes.
+- Fidelity ladder `candidates`: `direct` (loopback rung dropped by `ladder.ts` for other clients, never by probe) > `native` gateway > `stream` (always last).
+- Do NOT fix auth-gated gateway targets by passing set-cookie through — session fixation.
+- CSP (`csp.ts`): no CIDR, emit exact per-interface hosts; not applied to `/api/` responses.
+- H.264 traps: `configure` without `description`; close every `VideoFrame`; crop padding; pointer space is CSS px.
+- Bus and capability secret are process-local; `displayMcpAcpServer` throws without secret — adapter must catch (a throw aborts `session/new`).
+- `.cody/todo.json` is human-only; no agent path.
+Details: docs/agents/display-preview.md
 
 ### The shared browser (`lib/display/shared-browser.ts`)
-
-A browser the agent drives and the human watches at the same time. The
-streamed rung already renders a URL in a server-side Chromium and carries
-real pointer/keyboard input back; `shared_browser` hands the agent the
-DevTools endpoint of THAT Chromium, so automation acts on the exact surface
-on screen. The alternative it replaces — the agent launching its own headless
-browser and posting screenshots afterwards — means the human watches a copy
-that never moves, which was the complaint that produced this.
-
-- **Streamed, never auto.** The ladder's higher rungs frame the dev server in
-  the human's OWN browser, which by construction cannot show them anything
-  the agent's browser does. A shared request is published with
-  `mode: "stream"`, so there is exactly one candidate and it is the one Cody
-  renders.
-- **Raster, never H.264.** The H.264 rung degrades into a *different*
-  Chromium when a client turns out to have no decoder — which would strand
-  the agent on a browser nobody streams any more, with a CDP endpoint that
-  still answers. An endpoint handed to automation has to stay valid for the
-  whole run, and JPEG stills are plenty for watching a test drive itself.
-- **Handing out the endpoint IS the share**, and it lengthens the idle window
-  (`SHARED_IDLE_DISPOSE_MS`, 10 min, vs `IDLE_DISPOSE_MS`, 30 s). A human
-  closing the panel or switching tabs is not a reason to kill a browser an
-  agent is mid-run on; it would fail the automation with a dead endpoint and
-  no explanation.
-- **Discoverability is the whole feature.** A capability nothing reaches for
-  does not exist, so the instruction rides three places: the tool
-  DESCRIPTION (always in the schema, for every engine), the MCP declaration
-  in `bin/cody-display-mcp.js` (so an ACP engine gets the same tool through
-  `POST /api/internal/display` with `shared: true`), and a standing rule in
-  the operator's user-level `RULES.md`, which reaches every session and
-  subagent rather than only sessions that happen to read this file.
-- **The automation adopts the open tab.** `browser.open({app:{cdp_url}})`
-  connects to the provider's Chromium and takes over the page it is already
-  streaming; a second tab is fine too, since the provider streams the browser
-  the human is watching either way.
+- `shared_browser` hands the agent the DevTools endpoint of the Chromium the human watches; published `mode: "stream"` (one candidate), never auto.
+- Raster, never H.264 — H.264 can degrade into a different Chromium, stranding the agent's endpoint.
+Details: docs/agents/display-preview.md
 
 ### Cross-session awareness (`lib/session-tools.ts`)
-
-One conversation regularly needs to know what another is doing, and Cody is
-the only party that can answer: an engine's own agent hub sees nothing but its
-own subagents, while Cody holds the live child registry AND every transcript
-on disk. Three read-only tools, in every session's tool list:
-`list_sessions` (what exists, what is running, when it last moved),
-`session_status` (one session's live phase plus its newest message; with no
-argument, every running session) and `read_session` (a condensed transcript,
-paged). A main chat also gets `send_to_chat` and `message_status` (below).
-
-- **Addressed by the NAME the user set.** An exact session id wins, then a
-  case-insensitive substring of the name; more than one match returns the
-  candidate list rather than picking one. Guessing which conversation was
-  meant and then reporting on it is a far worse failure than asking, because
-  nothing downstream can tell it happened.
-- **Snapshot-only, never a wait.** A tool that blocked until another session
-  finished would tie up the caller's own turn on a run it cannot influence.
-  "Poll it" is a call the model repeats; the module promises nothing more.
-- **Phase comes off the registry, not a round trip.**
-  `getLiveSessionPhases()` reads each wrapper's own flags
-  (`EngineSession.livePhase?.()`, optional because an ACP session cannot break
-  "running" down and reports just that). Asking the other child over RPC is
-  exactly what must not happen: the session being asked about may be wedged,
-  and awaiting it would hang the asker.
-- **Ownership is the boundary, and an UNOWNED caller is the trap.** Listings
-  go through `filterSessionsForUser` so an inaccessible session's id or title
-  is never enumerated, and every single-target read re-checks
-  `canAccessSession`; blocked and missing answer identical text. A main
-  session has no request behind its tool calls, so the acting account is the
-  session's OWNER (`getSessionOwner` → `findUserById`). When a session has no
-  recorded owner (pre-accounts, terminal-created) `user: null` would mean
-  "sees everything", so it is paired with `restrictToUnowned`, which limits it
-  to other unowned sessions. Both the host-tool path and the internal route
-  compute it the same way: `user === null && hasAnyUser()`.
-- **One declaration, two callers.** The sidebar appends
-  `SESSION_AWARENESS_TOOLS` verbatim instead of re-declaring the schemas — a
-  second copy is how the sidebar and the main chat start describing the same
-  tool differently. The main chat gets a larger page
-  (`MAIN_SESSION_RESULT_CHARS`, 24k) than the sidebar's
-  smallest-window-assumption budget; both still report a continuation offset.
-- **ACP engines reach them over MCP** like the display tools:
-  `POST /api/internal/sessions` (capability-token authenticated, on
-  `proxy.ts`'s `PUBLIC_EXACT` list for the same reason display is) with
-  the three tools declared in `bin/cody-display-mcp.js`. The route trusts
-  `capability.sid` alone — a body may name any session id, but it must match
-  the token, and the caller's identity is derived server-side from it.
-- **Sending to another chat: `send_to_chat` / `message_status`**
-  (`lib/chat-messages/`). Before them the only way to reach another chat was
-  `schedule_message`, a follow-up that waits out the target's whole turn: measured
-  over 121 real cross-chat messages (2026-11), median 27 min, p90 5.8 h, worst
-  9.6 h, every slow one parked behind one long turn. `send_to_chat {session,
-  message, urgency}` takes the composer's own path (`delivery.ts`): `next_step`
-  (default) is `prompt` + `streamingBehavior: "steer"`, which the wrapper sends
-  straight to the engine, so a running turn reads it at its next step and an
-  idle chat starts a turn on it; `after_turn` is the follow-up, held in
-  `heldQueue`. A chat with no live child is started with `acquireSession` in the
-  owner's zone, as the scheduler does. The target sees one header line before
-  the sender's words naming the sender chat's title and id, saying an agent sent
-  it with no user authority, and how to answer (`send_to_chat` back); senders no
-  longer type their own "not Nitin" disclaimer. The tool returns a `msg_…`
-  delivery id at once and waits at most 15 s, and only for the engine to TAKE the
-  message (never to read or answer it); a slower engine leaves the record
-  `sending` and the delivery finishes in the background.
-  `message_status` reads the TARGET wrapper's delivery ledger by
-  `clientMessageId` `chat-<id>` (queued / started / delivered / failed /
-  withdrawn; queued + held = `after_turn`), falls back to the transcript
-  (`ref msg_…` is in the header) when the ledger row is gone, says `lost` when
-  neither has it, and says whether the target answered with `send_to_chat`
-  (marked when the target sends back after READING the message). Resolution and
-  ownership are `resolveSessionArgument` / `mayRead` exactly as for the other
-  session tools (a chat the caller may not see, and a delivery id between such
-  chats, answer like a missing one). Limits (`CHAT_MESSAGE_LIMITS`): 32 KB, 20
-  sends per sending chat per 10 min (two agents answering each other would never
-  stop), and the low-disk gate (`checkDiskForNewTurn`: refused unless it is a
-  steer into a turn already running). The delivery ledger is in memory
-  (`globalThis.__codyChatMessages`, 500 ids, 24 h) like the engine's own and does
-  not survive a restart. Main chats only (the sidebar's schema budget is a small
-  model's); ACP engines call the same handlers through `POST
-  /api/internal/messaging` (`bin/cody-display-mcp.js`, capability token, on
-  `proxy.ts`'s `PUBLIC_EXACT`, trusting `capability.sid` alone), and
-  `bin/cody-display-mcp.test.mjs` fails on drift. An ACP engine runs one turn at
-  a time: a busy chat takes a `next_step` message only if it advertises steering
-  and refuses `after_turn`, with a sentence telling the sender to resend.
-  `lib/chat-messages/delivery.ts` is imported lazily from `tools.ts` (delivery
-  imports the session manager, which imports the tools).
+- Resolve sessions by exact id, then name substring; several matches return candidates, never a guess — a wrong guess is undetectable.
+- Snapshot-only; phase from `getLiveSessionPhases()`, never RPC to the other child — it may be wedged and hang the asker.
+- Ownership: `filterSessionsForUser`/`canAccessSession`; no recorded owner → `user: null` + `restrictToUnowned`.
+- `send_to_chat` (main chats only): `next_step` (default) = steer, `after_turn` = held follow-up; 20 sends/10 min; ACP via `/api/internal/messaging`, trusting `capability.sid` only.
+Details: docs/agents/automation.md
 
 ### Scheduled messages (`lib/scheduled/`)
-
-The Send button's ▾ menu and the agent's own tools put a message into a chat
-LATER: at a chosen time, or when the chat's own model's quota refills. When it
-is due it is an ordinary user turn — nothing about the chat is special-cased,
-and nothing repeats (one-off, by design).
-
-- **One store, one timer** (`store.ts`, `scheduler.ts`). The store is
-  `cody-scheduled.json` in the instance data dir (0600, atomic; every change is
-  one synchronous read-modify-write, so a cancel and a claim cannot both win).
-  `startScheduledSender()` / `stopScheduledSender()` run from
-  `bin/cody-server.js` beside the quota watch. The timer is armed for the NEXT
-  moment something can happen (an item's time, a retry's back-off, a quota
-  re-check) — never on a fixed cadence — is `unref`'d, and sleeps at most a
-  minute, because Node's timers do not count time a suspended machine spent
-  asleep. A message due while the server was down is sent on boot (3 s after
-  start); one found `sending` at boot was interrupted and goes back to waiting
-  as an attempt. Different chats are served side by side, one chat's messages
-  in the order they were due.
-- **Delivery is the composer's own path** (`delivery.ts`): the chat's child is
-  started if none is alive (`acquireSession` in `lib/session-acquire.ts`, in
-  the OWNER's zone; shared with run recovery), then a `prompt` with
-  `streamingBehavior: "followUp"` (a chat mid-turn holds it until the turn
-  ends) and a `clientMessageId` that is stable for the life of one delivery
-  (`sched-<id>[-<n>]`), so a retry rejoins the wrapper's ledger instead of
-  sending twice; a retry after a crash also looks for its own message in the
-  transcript first. A send that could not be handed over retries on a back-off
-  (15 s, 1, 3, 10, 30 min), then stays `failed` for the person — Retry, Edit or
-  Cancel; an engine's own refusal is final at once. A message is sent exactly
-  once: it is claimed (`pending` → `sending`) before delivery and removed only
-  once the chat has STARTED it. Sent and failed both notify the owner (the
-  `scheduled` kind: progress group, on by default, priority 3; `notify.ts`).
-- **Queued is not delivered.** A chat that is mid-turn only HOLDS a follow-up
-  (the wrapper's in-memory `heldQueue`, or omp's own queue), and an engine loss
-  or a server restart takes the hold with it: two overnight check-ins were lost
-  exactly that way on 2026-10-08. So a send that comes back queued keeps its
-  item `sending` with `handedAt` and the exact `handedClientMessageId`
-  (`isHandedOver`), and every round asks the live wrapper's ledger about it
-  (`checkHandedOver`, never starting a session; re-read every 30 s,
-  `HANDED_CHECK_MS`): started/delivered → removed and "sent"; still queued →
-  waits; withdrawn (the person's Stop handed it back to the composer) → removed
-  silently; failed → retried under a fresh id (that wrapper memoizes the old
-  id's outcome); unknown or no live wrapper (engine replaced, server restarted)
-  → retried on the usual back-off, transcript check first. The composer row
-  reads "waiting for the current reply to finish…" (`schedule.rowWaiting`).
-  An engine without a ledger (ACP) keeps the old rule: a taken send is
-  delivered.
-- **A message may carry its own model** (`ScheduledModelChoice`: provider, modelId,
-  optional thinkingLevel — `types.ts`; stored on the item as `model`). The
-  composer's ▾ menu has a Model row (below), an agent's `schedule_message` takes
-  `model` + `reasoning`. Create NEVER calls a model: it validates the shape, the
-  engine is not asked, nothing is spawned (the quota read is a usage read and the
-  chat-model fallback is a transcript read). At DELIVERY `putChatOnModel`
-  (`delivery.ts`) switches the chat with the same `switchChatModel` the composer's
-  and the agent's switches use (`lib/model-switch/switch.ts`: model first, then
-  reasoning), and only then sends the prompt. Nothing is approximated: a switch
-  the engine refuses (model gone, credentials gone) fails the message with the
-  engine's reason and the message is NOT sent on another model; a switch that is
-  `deferred` (the chat is mid-turn) leaves the message waiting; a chat already on
-  the model and level sends straight away. `PATCH` with `model: null` takes the
-  choice away (the chat's own model again).
-- **"When quota resets"** is about THE MODEL THE MESSAGE GOES OUT ON: the chosen
-  `model` when there is one, else the chat's own — the composer sends the one it
-  shows (`chatModel`), an agent's call asks the chat (`resolveChatModel`) — and
-  the account that model is on (`planQuotaForChat`: the same ranking the ring
-  uses). So "carry on on Opus when Sonnet's quota is spent" waits for OPUS and
-  works even when the chat's own model has nothing left. Nothing goes before the
-  reset; then a FRESH usage read must say the model is usable (`judgeQuota`: a
-  provider that reports nothing counts as usable, a read that did not happen
-  does not), re-read every 3 minutes; a later reset the provider names is slept
-  until; 24 h after the reset it waited for, it gives up as `failed`. **A model
-  whose provider names NO reset time is no longer refused**: the item is stored
-  with `quota.unknownReset` and keeps waiting — first check immediately, then
-  every 3 minutes — and is given up on 7 days after it was scheduled
-  (`QUOTA_UNKNOWN_RESET_GIVE_UP_MS`), with a reason that says "waiting 7 days"
-  rather than "24 hours after the reset". A reset over 30 days away is still
-  refused up front (`no_quota_reset`, now only when the usage read itself is
-  unavailable).
-- **Limits, in one place** (`types.ts` `SCHEDULED_LIMITS`; the routes, the tools
-  and the composer all read it): 20 waiting per chat, 100 per account (the
-  chat's owner's), a time within 30 days and not in the past, 64 KB a message.
-  A failed message is kept 7 days. Ownership is the boundary: every route goes
-  through `access.ts` (a chat of another account, a sidebar chat and a missing
-  chat all answer the same 404) and a tool through `resolveSessionArgument`.
-- **Agents schedule too** (`tools.ts`): `schedule_message`, `list_scheduled`,
-  `cancel_scheduled`, written once. omp gets them as server host tools
-  (`SCHEDULE_TOOLS`, merged into every MAIN chat's `set_host_tools` beside the
-  session tools; the sidebar chat is not offered them — its schema budget is a
-  small local model's). ACP engines reach them over MCP: three tools in
-  `bin/cody-display-mcp.js` calling `POST /api/internal/scheduled`
-  (capability-token authenticated, on `proxy.ts`'s `PUBLIC_EXACT`, trusting
-  `capability.sid` alone like `/api/internal/sessions`);
-  `bin/cody-display-mcp.test.mjs` fails when the bridge's copy of a name,
-  schema or description drifts from `tools.ts` (the bridge's copy also carries
-  `model` and `reasoning`, and `list_scheduled` lines show "on <model>"). The
-  target chat is a name or id resolved with the ownership gate; `model` is resolved HERE with `lib/model-switch/resolve.ts` (a name or part of
-  one, never a guess: several matches schedule nothing and list the candidates;
-  an unknown name lists the closest; `reasoning` must be a level that model
-  offers and needs `model`) against the models of an engine that is already
-  running — the chat's own, else the caller's; scheduling never starts one, and
-  with none running it says so and schedules nothing; `at` without an offset is read in the
-  OWNER's zone; results use `formatToolTime`. The descriptions teach what the
-  tools are for (continue after a quota reset, run a job at a set time, check
-  back on CI) and that the message arrives as a normal user turn. A message the
-  agent scheduled is marked "by the agent" in the composer. The operator's
-  user RULES.md carries one line telling every session and subagent the
-  capability exists. `schedule_message` to ANOTHER chat is a follow-up and waits out that chat's
-  whole turn; its description points agents at `send_to_chat` (Cross-session
-  awareness) for "tell that chat now".
-  `schedule_message` now takes an optional `model` (and `reasoning`, which needs
-  `model`), resolved with `lib/model-switch/resolve.ts` against the target
-  chat's catalog; a scheduled item that names a model is switched with
-  `switchChatModel` (scope chat) just before delivery. For a later switch ("back
-  to Sonnet at 1am") the agent schedules a message with `model` set; the
-  `switch_model` description teaches exactly that. `switch_model` itself changes
-  things once, now.
-- **The composer** (`components/SendPill.tsx`, `ScheduleMenu.tsx`,
-  `ScheduledBar.tsx`, `hooks/useScheduledMessages.ts`). The Send pill gains a
-  joined ▾ zone (+22 px on a desktop, +24 px on a phone, where Send stays an
-  icon); the ▾, a right-click and a long press (450 ms, touch/pen) on Send open
-  the menu — a popover on a mouse, a bottom sheet with 48 px rows on a touch
-  screen. Choosing a row schedules at once and clears the box (the same
-  snapshot/restore as a failed send, `restoreComposer`); only "Pick…" asks for a
-  Schedule press. The menu has a **Model** row under the time rows
-  (`components/ScheduleModelPicker.tsx`, state and words in
-  `lib/scheduled/model-ui.ts`, all tested): "Same as chat" (the default —
-  "Currently <name>") or any model of the composer's own catalog (pinned models
-  first, one group per provider, search over everything), and — once a model
-  that has a reasoning ladder is chosen — chips "Default / Low / … / Max" built
-  from the SAME per-model levels the composer's reasoning control reads
-  (`modelThinkingLevels`, passed down from `ChatWindow`). Choosing a model
-  re-validates the level (kept when the new model offers it, else Default).
-  "Send now" and "Pick…" carry the choice too. "When quota resets" there reads
-  the CHOSEN model's quota (`scheduleChosenQuota` in `ChatInput`) and its reason
-  text names that model. The request body carries `model` (the choice) and
-  `chatModel` (what the composer shows, for a quota wait with no choice).
-  Editing a message puts its model back in the menu. The queued-messages bar
-  shows a small model chip (icon + display name, id when the catalog knows no
-  better; tooltip: the full `provider/id` and level) on a row only when a model
-  was chosen (`describeScheduledItem` → `modelLabel`, `modelTitle`). A row that cannot work is OFF with its reason, never hidden:
-  an empty box or attachments still preparing, a chat that does not exist yet,
-  images attached, a `!` shell line (a scheduled message arrives as a plain
-  prompt, so the command would reach the model as text), or no reset time
-  known. "Tonight 11 PM" disappears once it has passed. The queued messages are
-  ONE slim full-width bar above the composer (the Tasks/Agents bars' look: icon ·
-  title · detail · chevron), collapsed by default: "2 scheduled · next 9:30 PM",
-  "1 scheduled · 9:30 PM · <first words>", "waiting for the current reply…", and
-  in the error colour "1 failed to send" (it never opens by itself). The words
-  come from `summarizeScheduled` (`lib/scheduled/ui.ts`, tested). Opened it is a
-  list (max height, scrolls) with one row per message: time, "by the agent", the
-  text ellipsised, and icon buttons Edit / Send now / Cancel (Retry / Edit /
-  Cancel when failed; none while it is sending), 38 px on a touch screen; a
-  failed row adds a second line with the reason, and on a phone the time sits over
-  the text. The bar renders in `ChatInput` above the waiting/outbox rows because
-  the hook lives there (the Send menu shares it). Edit cancels the item and puts
-  its text back in the box ahead of whatever is typed there. The list is never
-  polled: it is read when the chat opens, the tab or the network returns, a run
-  ends (an agent may have scheduled something during it) and at the next due
-  time (`sync.ts`, `planScheduledRefresh`).
-- **Traps.** Nothing under `lib/scheduled/` that `bin/cody-server.js` loads may
-  use `@/` (`lib/server-import-graph.test.mjs`). `scheduler.ts` imports
-  `delivery.ts` lazily: delivery imports the session manager, which imports the
-  tools, which import the store. The Send pill's main button is `aria-disabled`,
-  not `disabled`: a disabled button swallows the pointer events the long press
-  listens to. The ▾ menu's chips compute from the moment it OPENED, but "In 1
-  hour" is resolved when it is CHOSEN. A failed read of the list keeps the rows
-  the page already has rather than blanking them. A stored `model` is an exact provider/id: `lib/scheduled/model-ui.ts` and
-  `store.ts` must not import `@/` (server import graph); the picker's chips must
-  use the composer's `modelThinkingLevels`, never a second ladder; `delivery.ts`
-  imports `lib/model-switch/switch.ts` lazily-safe (it already loads
-  `rpc-manager` in the same module, so no new cycle); do not add a switch call
-  to `service.ts` (create must stay model-free).
+- Due message = ordinary user turn via `delivery.ts`; stable `sched-<id>[-<n>]` id; claimed `pending`→`sending` first, removed only once chat STARTED it.
+- Queued ≠ delivered: held follow-up dies with engine loss/restart (2 lost 2026-10-08); queued send stays `sending`, `checkHandedOver` asks the ledger.
+- Create NEVER calls a model; `putChatOnModel` switches at delivery; a refused switch fails the message, never sent elsewhere.
+- No `@/` under `lib/scheduled/`; `scheduler.ts` imports `delivery.ts` lazily; Send is `aria-disabled`, not `disabled` (long press).
+Details: docs/agents/automation.md
 
 ### Machine meters in the top bar (`lib/machines/`, `components/machines/`)
+- Sample only while someone watches (`GET /api/machines/stream`); live state is a page-wide store, never `AppShell` state.
+- `checkMachineDestination` is a WHITELIST (value feeds ssh argv and a shell line); remote command is constant `SAMPLE_COMMAND`.
+- Never add `-n` to ssh or give its stdin to anything outliving the server — Cody holds that pipe; EOF kills the far loop, even on SIGKILL.
+- Errors only a person can fix retry every 5 min (login loops get Cody banned); sampler on `globalThis`; no `@/` in `lib/machines/`.
+Details: docs/agents/usage-monitoring.md
 
-Live CPU and memory for every machine Cody runs on or uses: "This server" plus
-any ssh machine an admin adds under Settings › System › Machines. They sit left
-of the session's `$` cost; the three token figures that used to be there are
-gone (tokens stay in the session popover and the button's tooltip).
-
-- **The list** is `cody-machines.json` in the instance data dir (0600, atomic).
-  The local entry is always there, its name editable, default "This server": a
-  fresh install shows nothing of anyone's network, and no owner's hosts are in
-  code. An ssh machine is a name plus a destination (an alias from
-  `~/.ssh/config`, or `user@host`). `checkMachineDestination` is a WHITELIST
-  (letters, digits, `. _ - : @`, never a leading `-`): the value is an ssh
-  argument and, through `ProxyCommand … %h`, part of a shell line. Names are
-  one collapsed line, 24 characters at most; 12 machines at most.
-- **Sampling happens only while somebody looks.** `GET /api/machines/stream`
-  is the subscription: the first viewer starts a collector per machine (a timer
-  reading `/proc` for this server; ONE long-lived `ssh` per other machine
-  running the fixed loop in `ssh.ts`), the last viewer leaving starts a 60 s
-  countdown, and then every ssh process is killed. The hook closes the stream
-  while the page is hidden. One record per machine, no history. The live state
-  is a page-wide store the two drawing components subscribe to, never
-  `AppShell` state: a frame every second or two would re-render the whole shell.
-  It is one more long-lived stream per visible page: over plain HTTP/1.1 the
-  browser's six connections per host are shared with the chat's own streams.
-- **ssh is given nothing a person typed** except the checked destination (one
-  argv entry after `--`, no local shell). The remote command is the constant
-  `SAMPLE_COMMAND`: `sh -c '…'` with no quote, backslash or `!` inside, so a
-  fish or csh login shell can parse it. `BatchMode`, `ConnectTimeout`,
-  keep-alives and `ControlMaster=no`/`ControlPath=none` (a `ControlPersist`
-  config would leave a process behind) are set; the host-key policy is NOT: the
-  person's own `ssh_config` rules, and `host_key` tells them to connect once from
-  a terminal. Failures only a person can fix (`auth`, `host_key`,
-  `unknown_host`, `no_ssh`) are retried every 5 minutes, not every few seconds:
-  a loop of refused logins is how fail2ban or CrowdSec bans Cody's address.
-- **The far loop dies with Cody, however Cody dies.** An orphaned `ssh` does
-  NOT exit when its parent does (it ignores the broken output pipe; one test
-  orphan carried on for 54 minutes, keeping its loop alive on the far machine).
-  So ssh's stdin is a pipe Cody holds open and never writes to (no `-n`), and
-  the loop's background `cat` kills it at EOF: a normal `stop()` ends stdin, and
-  a `SIGKILL` or an out-of-memory kill closes it for us. `ssh.test.mjs` proves
-  both, including a SIGKILLed parent. Never put `-n` back, and never hand
-  ssh's stdin to something that outlives the server.
-- **Statuses** are `online | connecting | offline | unavailable` (reachable but
-  not Linux) with a `reason` CODE; the browser turns codes into plain copy
-  (`machines.reason.*`) and `lib/machines/present.test.mjs` holds all three
-  locales to every status, reason and API error code. A machine that drops
-  loses its numbers (never stale ones) and gets one quiet "connecting" retry
-  before it shows offline. The stream carries no address and no ssh output;
-  `GET /api/machines` hides destinations from non-editors; only the admin-only
-  `POST /api/machines/test` returns ssh's own first line.
-- **The sampler lives on `globalThis`** (`__codyMachineSampler`).
-  `bin/cody-server.js` loads `sampler.ts` through jiti only to call
-  `stopMachineSampler()` at shutdown, while the routes load it through Next's
-  bundler: two module copies, one sampler. Nothing under `lib/machines/` may use
-  `@/` (`lib/server-import-graph.test.mjs`). Timers and the ssh pipes are
-  `unref`'d, so a stuck connection can never hold the server open.
-- **Top bar layout** (`MachineMeters.tsx`). The component owns a `flex: 1 1 0`
-  slot between the left controls and the session button and measures it with a
-  ResizeObserver; `pickMeterDensity` picks the richest of `full` (name, labelled
-  bars) → `compact` (icon labels) → `mini` (an initial and two 18 px bars: two
-  machines fit in the 89 px that 1280 px with the sidebar and workspace panel
-  open leaves) → `dot` → nothing. Widths are in `METER_LAYOUT` and MUST match
-  the `.mm-*` CSS in `app/globals.css`. A phone always gets the 24 px `dot` (a
-  ring for the machine that needs a look, or a struck-through server when one
-  is down); to make room the session button drops its ⓘ icon while it shows a
-  context figure, and no divider is drawn. Under about 385 px with omp's extra
-  buttons even that does not fit, and it is left out rather than overlapped.
-- The dropdown is the shared top-panel pattern (`activeTopPanel ===
-  "machines"`); its "Manage machines" opens Settings › System with
-  `highlight: "machines"`.
+### Workers: heavy jobs on other machines (`lib/workers/`, `lib/machines/`)
+- `run_on_worker` copies the project to an ssh machine switched on as a worker (Settings › Machines › "Use as worker"), runs the command there niced, streams output as tool progress, copies the named `results` back and deletes the copy. Definition lives ONLY in `lib/workers/tool.ts`; `bin/cody-display-mcp.js` repeats it for ACP and `bin/cody-display-mcp.test.mjs` fails on drift.
+- A worker = ssh destination + `/etc/cody-worker.json` + writable `/srv/cody-work`; facts go through `checkWorkerFacts`, never trusted raw. Same ssh rules as the meters: whitelisted destination, constant/`shQuote`d remote commands, NEVER `-n`; the job's ssh stdin is the far side's dead-man's switch.
+- Only the exit marker proves a command ended. No start marker = never ran (next worker); start but no exit = dropped: rerun ONCE elsewhere or here, second loss = error. Never report a half result as success.
+- Results come back through Cody's own tar reader (`tarball.ts`): regular files/dirs under the named `results` paths only; never `..`, absolute, `.git` or a link out.
+- One FIFO queue per server (`globalThis.__codyWorkerScheduler`); busy + `fallbackLocal` (default true) runs here and says so. No `@/` under `lib/workers/`.
+Details: docs/agents/workers.md
 
 ### Statistics page (`lib/statistics/`, `components/statistics/`, `app/statistics/`)
-
-`/statistics` shows where the usage went: one ring chart (sunburst) of cost or
-tokens, a per-day timeline, and a few plain findings. It reads every omp
-transcript on the instance, so it covers chats, side chats (btw), subagents, the
-advisor, context compaction and omp's own helper calls (memory extraction,
-auto-thinking, the unexpected-stop judge) as well as Cody's background jobs.
-
-- **Entry points.** The session cost popover in the top bar has a "Usage
-  statistics" row (`components/AppShell.tsx`, a `<Link>`), and Cmd-K has the same
-  item (`components/CommandPalette.tsx`, `onOpenStatistics`). The page's back link
-  returns to the chat the user came from.
-- **The index** (`lib/statistics/store.ts`, `indexer.ts`, `scan.ts`) is derived
-  state in `<agent dir>/cody-statistics/index.json` (0600, atomic): daily
-  aggregates per provider/model/worker inside one transcript file, plus a read
-  offset per file. Rows and offsets share the file on purpose so a crash cannot
-  count bytes twice. The indexer reads only bytes it has not read (a shrunk or
-  rewritten transcript is dropped and re-read as a unit), never follows a
-  symlink, sniffs each line's leading `{"type":"…"` before parsing, and keeps 400
-  days / 400k rows at most. Delete the file and the next request rebuilds it.
-  `lib/statistics/service.ts` is the only place that meets the live install: a
-  request waits ~300 ms for a running pass and otherwise answers with what is on
-  file and `updating: true`; a pass starts when the last one is >10 min old, and
-  `?refresh=1` at most every 20 s. Nothing in it throws.
-- **Background jobs** (chat titles, Distill, plan keeper, the onboarding planner,
-  web research) run `omp -p --no-session`, so no transcript exists. The one
-  hook is `recordOneShotUsage` (`lib/statistics/oneshot.ts`, called from
-  `lib/model-plan/one-shot.ts` with each finished assistant message); it appends
-  to a monthly JSONL log in the same dir (`joblog.ts`) that the indexer folds in.
-- **Honest figures** (`billing.ts`). A subscription login (Claude plan, ChatGPT
-  plan, Copilot, …) shows what the usage WOULD cost on the API and is labelled
-  "Plan · estimate"; pay-as-you-go (API keys, gateways, Claude API credits) is
-  real money; a local runtime has no price; a model with no known price is
-  counted in tokens and flagged "Price unknown", never as 0. Prices are learnt
-  from the transcripts (`rates.ts`: each call records its cost per counter), so
-  there is no catalogue to keep in step; the cache saving and a compaction's cost
-  come from the same learnt prices.
-- **Who sees what** (`access.ts`). Only the viewer's own chats, by the rule the
-  chat list uses (`lib/auth/session-owners.ts`); a chat someone else owns answers
-  404 like one that does not exist. Usage that belongs to no chat is shown only on
-  an open instance or to an admin.
-- **The query layer** (`query.ts`, `sunburst.ts`, `present.ts`, `labels.ts`,
-  `request.ts`) is pure: it turns the index into the ring tree (both cost and
-  tokens on every node, so the Cost/Tokens switch needs no second request), the
-  timeline, the insights (numbers only; the page words them in every locale) and
-  the per-chat deep dive. Days are bucketed in the server's zone
-  (`lib/time-zone.ts`).
-- **Page** (`components/statistics/`). `StatisticsPage.tsx` owns the state and
-  the URL (`?range=today|7d|30d|90d`, or `?from&to` for custom days, plus
-  `?by=provider|project|model|worker` and `?metric=cost|tokens`, written with
-  `replaceState` so Back leaves the page instead of walking through setting
-  changes; `app/statistics/page.tsx` reads them on the server through
-  `statistics-query.ts`, so a reload or shared link opens the same view). The
-  back arrow returns to the chat the user came from (`router.back()` when the
-  Navigation API says the previous entry is `/`; `document.referrer` is useless
-  here because the app sends no referrer). The circle is plain SVG
-  (`Sunburst.tsx`, framed by `ChartSection.tsx`) with a table twin
-  (`StatsTable.tsx`) that carries the same numbers for keyboard and
-  screen-reader use; `ControlsBar.tsx` (period, custom days, Cost/Tokens, ring
-  order), `Summary.tsx`, `Insights.tsx`, `NodeDetail.tsx`, `DeepDive.tsx` (one
-  chat), `Timeline.tsx` (clicking a day focuses the page on it, with a way back)
-  and `StatisticsStates.tsx` (first run, empty, error, skeleton) are the other
-  parts; on touch a tap selects a slice and its detail opens in
-  `BottomSheet.tsx`. `useStatisticsData.ts` fetches `/api/statistics`, keeps the
-  old numbers on screen while a new range loads and asks again every 2.5 s
-  while the server says `updating`. Styling is one string in
-  `statistics-css.ts` over the design tokens.
-  *Layout.* The page never needs sideways scrolling on a desktop. The
-  chart/table split is decided by the width of the page body, not the window
-  (`.stats-body` is a CSS container, `@container stats-body (min-width: 860px)`
-  gives the two columns; narrower stacks the chart above the table). The table
-  is one `<tbody>` per row: from a 641px viewport up it shows name, cost, tokens
-  and the share bar on the main line and the input / output / cache read /
-  cache write / cache hit split as one muted line underneath (the Total row
-  too); on a phone (≤640px) it keeps all nine columns, scrolls sideways inside
-  its frame and pins the name column. A frame narrower than 440px also drops
-  the share bar.
-- **Tests.** `lib/statistics/*.test.mjs` (suite entry in `scripts/test.mjs`).
-  Nothing in them touches the live data dir: the indexer is handed a directory.
-- **Keys.** `statistics.*` in `lib/i18n/locales/{en,ja,zh-CN}.json`.
+- Index `cody-statistics/index.json` is derived state; rows and read offsets share one file so a crash never counts bytes twice.
+- Subscription = "Plan · estimate"; unknown price = tokens + "Price unknown", never 0 (`billing.ts`, prices learnt in `rates.ts`).
+- `access.ts`: only own chats, others' answer 404; `service.ts` never throws; chart needs its `StatsTable.tsx` twin.
+Details: docs/agents/usage-monitoring.md
 
 ### Overnight runs: stalls, crashes and restarts carry on (`lib/run-recovery/`)
-
-Two nights running (2026-10-08, 2026-10-09) a long unattended LumaShow run died
-without anyone being told. Once a host script stopped Cody's container mid-run
-and nothing picked the run up again. Once the container hit its process limit
-and the main agent's `edit`/`bash` calls (and one tool in each of eight
-subagents) never returned: the omp process stayed alive, said nothing for
-4.5 h, and Cody showed the chat as running the whole time. The run supervisor
-is the part of Cody that notices both.
-
-- **An observer, never a listener** (`superviseRun`, called beside
-  `observeSessionForNotifications` in `startRpcSession` and
-  `startEngineSession`; never for a sidebar chat). It uses only
-  `observeEvents` and `onClose`: `onDestroy`/`onIdentityChange` hold ONE
-  callback each and belong to the registry. Its state lives on
-  `globalThis.__codyRunRecovery`, because the custom server owns the timer
-  while the Next bundle registers sessions, and they are separate module
-  instances; anything that imports the session manager is reached through a
-  lazy `import()`.
-- **The run journal** (`journal.ts`, `cody-run-journal.json` in the instance
-  data dir, 0600, atomic): one entry from `agent_start` until a terminal
-  `agent_end` or the person's Stop, heartbeat at most once a minute, re-keyed
-  when omp moves the session to a new id. A close while a run is in flight
-  KEEPS the entry only when the server is shutting down
-  (`markServerShuttingDown`, the first thing in `bin/cody-server.js`'s
-  shutdown and in the registry's exit cleanup), the engine crashed (the
-  wrapper's `engine_exit` notice — the terminal `agent_end` that follows it is
-  not the run finishing), or the supervisor itself is recycling the engine.
-  Every other close (delete, archive, engine switch or update) drops it.
-  Pruned at 24 h and 200 entries. An ending run leaves its recoveries in the
-  file's `history`, and the chat's next run takes them back: the cap counts a
-  CHAT's restarts, so recovered runs that end and wedge again cannot reset it.
-- **Three verdicts**, one look a minute; every number is in `limits.ts`.
-  (1) A main-agent tool is overdue (`judge.ts`, omp only): a tool with its own
-  timeout — bash 300 s, eval 30, browser 30, computer 120, ssh 60, fetch 20,
-  lsp 20, debug 30, ida 120, or its `timeout` argument; `0` means none — is
-  overdue 15 min past it; a known-quick tool (read, edit, write, grep, …)
-  after 20 min with no `tool_execution_update` (a `write xd://github`
-  run_watch streams one per poll); `wait`, `ask`, `task`, `yield`, `goal`
-  and any other tool name never. (2) No frame for 10 min, then a `get_state`
-  left unanswered for 10 more (omp is known to freeze 3–5 min on its own
-  databases after a turn, so the bound stays above that). (3) No progress at
-  all for 60 min, unless a tool is still inside its own deadline. The clocks
-  stand still while the chat waits on the person or compacts; cache-warming
-  frames are not activity, and a /btw answer proves the engine is alive but
-  not that the run is moving.
-- **Recovery** (`recoverRun`): `destroyAndWait("stalled: …")`, then
-  `acquireSession` (the retiring-child guard keeps the old and new engines
-  from overlapping), then ONE user turn, `streamingBehavior: "steer"`,
-  `clientMessageId: recover-<id>-<n>`, that says Cody wrote it, names what
-  went wrong and when, says in-flight tool results are unknown and subagents
-  and background jobs were stopped, and asks the agent to check what finished
-  before it carries on (`text.ts`). The run it starts is watched from the
-  send (`expectRun`), so an engine that wedges before its `agent_start` is
-  still caught. An engine that died on its own is recovered after 30 s. At
-  boot, every journal entry younger than 6 h is resumed, one chat at a time
-  and 3 s apart, with "Cody's server restarted at …"; an older one is
-  dropped with a "Not resumed" push. At most 3 recoveries per chat in 12 h
-  (counted across its runs), then one "stopped trying" push and the entry
-  goes. Pushes use the `error` kind (`notify.ts`, same pattern as
-  `lib/scheduled/notify.ts`).
-- **Every stop leaves a reason in the log.** `destroy(reason)` /
-  `destroyAndWait(reason)` log `[rpc-manager] stopping the engine of running
-  chat <id>: <reason>` when the stop cuts a run short, and an engine that
-  exits mid-run logs its last stderr line. Before this nothing recorded why a
-  chat lost its engine: the 07:07 stop on 2026-10-09 could not be explained
-  afterwards. Each recovery and give-up also writes one `[run-recovery]` line.
-- **Engine exits nobody asked for are also named to the user** (`lib/engine-crash.ts`: out of memory, disk full, too many processes, crashed, or restarted; see "Push notifications", Engine crash alerts).
-- `CODY_RUN_RECOVERY=0` turns off the watchdog, crash recovery and boot
-  resume (the journal is still written).
-- **Known gaps.** An ACP agent that exits on its own emits no `engine_exit`
-  notice, so it is not crash-recovered (its close drops the entry). Tool
-  deadlines are judged for omp only; other engines get verdicts 2 and 3.
-- **Host limits matter as much as Cody.** The 2026-10-09 wedge was Docker's
-  default pids limit (2048, threads included) refusing forks: omp's native
-  thread pool failed to start (`ThreadPoolBuildError … WouldBlock` in
-  `~/.omp/logs/native-panic-*`) and tool promises never settled. The
-  container template now carries `--pids-limit 16384`; check
-  `/sys/fs/cgroup/pids.events` (`max` counts refused forks) before blaming
-  the engine.
-
-- **Run recovery: `tool_execution_update` for unknown tool ids.** `lib/run-recovery/supervisor.ts` `toolUpdated` now only refreshes a call that is already in flight. Since omp 18.10.2 the engine no longer drops a tool's late progress frames (a background job that keeps reporting after the call or the run ended); the old code created a tracker entry from such a frame, and since that call never gets an end the entry outlived the run as a ghost: `insideOwnDeadline` excused real silence from a `bash` call and `findOverdueTool` called a healthy run stalled. A call enters the table only through its `tool_execution_start`.
+- `superviseRun` observes only (`observeEvents`/`onClose`) — `onDestroy`/`onIdentityChange` are the registry's; state on `globalThis.__codyRunRecovery`.
+- Journal entry kept on close only for server shutdown, engine crash or supervisor recycle; max 3 recoveries per chat in 12 h.
+- Verdicts: overdue tool (omp only), no frame 10 min + `get_state` unanswered 10 more, no progress 60 min; `tool_execution_update` must never create a tracker entry.
+- `CODY_RUN_RECOVERY=0` disables; wedged tools: Docker pids limit — check `/sys/fs/cgroup/pids.events` first.
+Details: docs/agents/automation.md
 
 ### Browser-hosted hardware (`lib/devices/`)
+- Trust: ONE chat-card permission per device (`answerTrust`; key = USB vendor id + serial); no tool/option/frame grants it, trust PUT refuses `Authorization`; raw tools skip it. Never reuse/widen a grant across sessions; a new USB mode = fresh grant.
+- Writes: never replay one after disconnect/cancel/mode change; `context.confirm` only declares risk; ACK/CRC/progress is never readback proof; unknown readback = write once + UNVERIFIED; timeout = unknown completion.
+- Boundaries: never burn eFuses or write EDL boot0/boot1/rpmb or table-overlapping partitions; protected ESP/DFU/STM32/STK500 ranges need exact `allow-bootloader`/`allow-spi-boot`; MTK, CMSIS-DAP, UF2 not shipped.
+- ADB forward/reverse: "Host" = Cody server `127.0.0.1` only, never LAN; server verifies rules (`riskDeclared`, 16/session); one device listen address = one rule.
+- Operations: changing an operation tool means editing `DEVICE_OPERATION_TOOLS` AND `bin/cody-display-mcp.js`; pop-ups only via `noticeForOperation` (news, not progress); no hand-rolled packet loops in `eval`; BLE UUIDs via `canonicalBleUuid` ("0x18f0" breaks `requestDevice`).
+- Evidence: emulator-tested only, unverified on real hardware; trust is no go-ahead for a test; `docs/hardware-host-helper.md` is design only.
+Details: docs/agents/hardware.md
 
-The hardware is connected to the machine running Cody in the browser, not to the
-server. The page owns the real `SerialPort`, `USBDevice`, or BLE
-characteristic; the server only relays frames within that Cody session. Browser
-grants are user-selected, secure-context capabilities. Do not claim, widen, or
-re-use a grant across sessions.
-
-- **Discover first.** `device_list` reports the current browser's secure-context
-  and Serial/USB/Bluetooth capabilities plus its granted device IDs. If it has
-  no device, ask the user to use the Devices panel's browser picker. Web Serial
-  is unavailable on Android, where the WebUSB serial polyfill is used when
-  available; browser/OS/driver support is reported rather than assumed.
-- **A BLE UUID reaches the browser only as a full 128-bit string or an
-  assigned name** (`canonicalBleUuid`, lib/devices/client.ts). Web Bluetooth
-  accepts a 16/32-bit alias only as a NUMBER; the STRING `"0x18f0"` makes
-  `BluetoothUUID.getService` throw, and Android Chrome fails the whole
-  `requestDevice` picker on it ("Invalid Service name"). Every hex alias is
-  expanded onto the Bluetooth base UUID before `requestDevice`,
-  `getPrimaryService` or `getCharacteristic`, whatever form the agent or
-  the user typed. Verified against headless Chromium's own `BluetoothUUID`.
-- **Grants, identity, and leases are strict.** A device is owned by one session;
-  raw requests and a high-level operation hold mutually exclusive leases.
-  Re-adoption is limited to the same full USB VID/PID/serial identity. A device
-  which re-enumerates into another identity or mode needs a fresh user grant in
-  the browser's picker, then a new operation (the agent is asked afresh unless
-  the unit was remembered: same vendor id and serial number, see "Device
-  trust"). Do not retry or replay a write across
-  disconnect, cancellation, or mode change. Raw USB IN/control-IN calls are
-  bounded (five seconds by default); an expired connection is invalidated.
-- **Use the raw tools only for discovery or a protocol Cody does not implement.**
-  `device_open`, `device_read`, `device_write`, `device_close`,
-  `usb_transfer`, and `ble_gatt` are available after a grant. Opening USB
-  reports claimed interfaces, descriptors, and endpoints; a requested
-  unclaimable interface fails rather than becoming a partial success. On
-  Windows an interface held by another driver cannot be claimed; this is a host
-  driver issue, not a retryable device error. Do not hand-roll packet loops in
-  `eval` for an implemented protocol (ESP, ADB, fastboot, DFU, EDL, Gecko, STM32,
-  or STK500).
-
-#### Operations, artifacts, and progress
-
-Use high-level operation tools for supported work:
-`device_detect`, `device_dump`, `device_flash`, `device_exec`,
-`device_push`, `device_pull`, `device_sideload`, `device_install`,
-`device_verify`, `device_monitor`, `device_monitor_send`, `device_forward`,
-`device_reverse`, `device_tunnels`, `device_operation_status`, and
-`device_operation_cancel`. Start requests name the exact browser `device`,
-`protocol`, and where relevant target, offset, interface, and artifact
-`fileId` with its displayed SHA-256. The operation runs independently in the
-page. Read progress/status or cancel it; no argument can give or move the user's
-trust (see "Device trust"). Phase/state/declared/terminal events are immediate; live
-progress and output are coalesced at 200 ms. Status deliberately retains only
-128 terminal records, each bounded to 256 events, 512 output lines, and 64 KiB
-of output.
-
-Pop-ups are for news, not progress. Every hardware `notice` frame comes from
-`lib/devices/operation-notices.ts` (`noticeForOperation`, pure and tested alone):
-a long (15 s) or bulk (flash, dump, pull, push, sideload, install) operation
-finishing, a failure, and a cancel the system made. The trust question is NOT a
-pop-up (it waits in the chat's input dock), nor is a countdown, and the operations
-a Deny failed are not announced (`DECLINED_MESSAGE_PREFIX`): the person just said
-no. Started/progress/output/state events and a routine read that succeeded
-raise nothing, and a finish is news only as the step from running to finished
-(`onOperation` hands the listener the snapshot it replaced): a page that re-sends
-the finished operations it remembers to a restarted server announces none of them.
-A run of failures is one pop-up plus one "N more" summary (`DeviceNoticeBatcher`,
-5 s window). The frame carries `source: "device"` and a `dedupeKey`, and the
-browser shows it as written (`shelfItemFor`), never through the engine-error
-describer, so a repeat folds into one notice with a count. The Devices panel
-does the same for its list (`lib/devices/activity-groups.ts`, `ActivityFeed`): a
-finished agent command that declared no risk to the device (`riskDeclared`), is not a
-flash/dump/transfer and saved no file is routine, and a burst of routine commands
-on one device is one compact entry whose rows open to each command's full card.
-Whatever is running, significant, or waiting for the person (a trust question, a
-countdown) keeps its own card, and what waits for the person is listed first.
-`operation-notice-wiring.test.mjs`
-drives the whole chain (operation manager, frame validator, device bridge,
-session wrapper); keep it passing when touching any link.
-
-Engines launched through the MCP bridge (`displayMcpAcpServer()`,
-`claudeDisplayMcpConfig()`) get their device tools from the hard-coded copy in
-`bin/cody-display-mcp.js`, not from `DEVICE_OPERATION_TOOLS`. Adding or
-changing an operation tool means changing both; `bin/cody-display-mcp.test.mjs`
-starts the real bridge and fails when a tool is missing or takes different
-arguments.
-
-#### Device trust: one permission per device (`lib/devices/trust*.ts`)
-
-There is exactly ONE permission between an agent and a device, it is given per
-device, and it is asked in the chat, not in the Devices panel. It replaced the
-per-operation approval cards, the typed protected-region overrides, the armed
-approval countdown and the connection-scoped shell grant; none of them exists any more.
-
-- **The gate** (`DeviceOperationManager.requireTrust`, operations.ts). An agent
-  operation (`manager.start`) that is anything but read-only `detect`
-  (`actionNeedsTrust`) waits until the person has trusted its device. The first one
-  raises ONE question for that device (`trustRequests()`: one `DeviceTrustRequest`
-  per device, its operations in state `awaiting-trust`); every later operation on the
-  device queues behind it (`waiting` counts them) and nothing touches the device - no
-  lease, no artifact read - until the answer. `answerTrust(requestId, { allow,
-  remember })`: **Allow** lets every queued operation go on; **Deny** fails them all
-  with `declinedMessage(label)` ("The user declined control of <device>; do not ask
-  again until they reconnect it") and the agent is refused with that same sentence,
-  raising no new question, until the device is disconnected (`deviceDisconnected`
-  ends both a connection's trust and a refusal). The person's own operations
-  (`startUser`: Devices-panel buttons and terminals) are never gated. An agent typing
-  into a terminal (`send`) needs the device trusted at that moment too. An
-  unanswered question has no time limit: it ends when answered, when the operations
-  behind it are cancelled, or when the device leaves the bus (the cancel says why).
-  The gate covers the high-level operation tools; the raw tools (`device_open`,
-  `device_read`, `device_write`, `usb_transfer`, `ble_gatt`) are still governed only
-  by the browser's own device grant, as before.
-- **Who can give it.** Only `answerTrust`, which only the chat card's Allow reaches
-  (`DeviceTrustCard` -> `respondToInput` -> `useDeviceTrustRequests` ->
-  `deviceTrustHub`, lib/devices/trust-hub.ts, the registry each session's manager
-  adds itself to, so a chat with no device never loads the bridge). No tool, request
-  option, server frame or `PageOperationCommand` names it. The card latches with a
-  ref so a double-click sends one answer, and neither button carries
-  `data-input-choice`, so the dock's Enter and digit shortcuts can never consent to
-  hardware control.
-- **Remembering.** "Remember this device" (ticked by default, not rendered for a
-  device without a serial number) makes the Allow last. The key (`deviceTrustKey`) is
-  the USB vendor id plus the serial number and NOT the product id: one unit
-  enumerates as adb, then fastboot, then recovery and stays trusted; a second unit
-  of the same model has its own serial number and is asked about. A device with no
-  serial number has no key and is trusted for the connection only (until unplug or
-  reload). Remembered devices are stored per account on the server:
-  `<accounts dir>/device-trust.json` (`trust-store.ts`, 0600, atomic write, keyed by
-  user id, `__instance` on an open instance), through `GET/PUT/DELETE
-  /api/devices/trust` (owner-scoped, 4 KB bodies, 100 devices per account). PUT
-  refuses any request that carries an `Authorization` header, so an access token, a
-  capability token or an agent's script can never remember a device; the key and the
-  time are set by the server; DELETE only removes. The page's copy is
-  `ServerTrustBook` (`pageTrustBook()`, trust-client.ts): the gate waits for its
-  first read (`ready`, 4 s limit) before deciding about a keyed device, a hidden tab
-  re-reads when it returns, and `remember()` is called from `answerTrust` alone. A
-  save that fails leaves the device trusted for the connection and the chat says why.
-- **Seeing and revoking it.** The device card shows a Trusted (or Trusted for now, or
-  Agent blocked) chip, and **Forget** (device card, or Settings > Preferences >
-  Trusted devices, `TrustedDevicesSetting`): `withdrawTrust` / the store's DELETE end
-  the connection's trust and the remembered entry, cancel what the agent had running
-  on the device (`TRUST_WITHDRAWN_REASON`; a question still waiting stays open) and
-  the next operation asks again. Forget can only remove trust.
-- **What stayed.** Backup before a write, readback verification, UNVERIFIED
-  reporting, the hard refusals (eFuse burns, EDL boot0/boot1/rpmb, partitions that
-  overlap a table) and the browser's own USB picker are unchanged, and the REQUEST
-  still names an exact `options.protectedOverride` for a protected ESP/DFU/STM32/STK500
-  range (named by whoever makes the request: the refusal says which, nothing is
-  typed in a prompt). A flasher still calls `context.confirm(risk)`, but that now
-  only DECLARES the exact action, target, range, digest and backup: the manager
-  checks it against the request (`bindRisk`), writes `Starting <action> on
-  <target>. Backup: ...` to the operation's log, emits a `declared` event, marks the
-  snapshot `riskDeclared` and asks nobody. No extra prompt exists for bootloader or
-  partition-table targets (they get a PROTECTED note in the declared details).
-- **A visible wait before sending.** `options.sendDelaySeconds` (1-300, accepted by
-  every start tool, checked in `requestFor` and `validateRequest`) is a countdown,
-  not an approval. The manager strips the key before a flasher sees the request
-  (several refuse option keys they do not know), so a protocol can neither read nor
-  move the clock. Once the device is trusted and the flasher declares its first risk,
-  the operation is in state `countdown` (`snapshot.countdown`: startedAt, releaseAt,
-  the declared binding): the card reads "Starting in N s" with its own Cancel,
-  nothing is sent, and the wait runs once, before the first command. At the due time
-  `refuseRelease` checks once more that the page did not oversleep
-  (`COUNTDOWN_SLACK_MS`), that the connection is the one it started on
-  (`currentIdentity`, `transport.connected()`), and fails with "Not sent: ..."
-  otherwise. Tests: `operation-trust.test.mjs` (the gate, remembering, Forget),
-  `operation-countdown.test.mjs`, the route and store tests, `DeviceTrustCard.test.mjs`.
-
-Input uploads (picker, drop, or an authorized local-path import) and device
-outputs are browser-owned session artifacts. `DeviceArtifactStore` hashes each
-Blob and waits for its IndexedDB commit in `cody-device-artifacts`; hydrate
-restores that session's escrow after reload. Artifacts never become server files
-or cross another session. Use the Devices panel's explicit download to retain an
-important backup outside browser storage. An output backup is selectable as a new input without download/re-upload; selecting it does not itself restore anything, and there is no generic or automatic restore. The panel displays artifact hashes, output,
-progress, cancellation, and the exact action each operation declared before it sent anything.
-
-ADB shell access is covered by the device's trust like everything else: once the
-device is trusted an agent `device_exec` streams arbitrary shell commands,
-and `device_monitor` / `device_monitor_send` open and type into an ADB PTY. There
-is no separate shell grant and no literal-diagnostics tier. `DeviceTerminal` is the
-person's own terminal and is never gated; an agent may type into it only while the
-device is trusted, and Forget, a disconnect or page replacement cancels the agent's
-active ADB work and refuses its later input.
-
-Serial consoles use protocol serial and the same user terminal surface as ADB.
-Both use xterm for ANSI/control characters plus mobile input/line-ending controls.
-Serial supports baud selection and DTR/RTS/break. Android can use the existing
-CDC polyfill or a descriptor-bound raw WebUSB CDC data/control interface pair;
-CDC Union descriptors disambiguate composite devices. Stalled/short USB writes
-fail instead of reporting delivery. Prompt chunks appear without waiting for a
-newline. Explicit disconnect waits for the borrowed operation lease to finish.
-
-For an agent-run TWRP command the device is trusted first (the one question in
-the chat), then device_exec accepts protocol adb and the exact command without a
-regex filter or per-command prompt. No total shell-command timeout is imposed;
-a missing initial daemon response is bounded, but quiet established connections
-stay alive. Output is streamed into bounded logs and nonzero exit status fails.
-A reboot/disconnect before status arrives means unknown completion, not success.
-Port rules, shells, pulls, detection, and terminals share one ADB connection per
-device; push staging, sideload, reboot, and the TWRP script still need the device
-lease alone, so they fail with a lease-busy error while any of those is open.
-
-#### Devices panel layout (connect -> device -> actions)
-
-`components/DevicePanel.tsx` reads top to bottom as the job does. `ConnectCard`
-offers the three ways a browser is handed hardware (USB, serial, Bluetooth) and
-states what this browser can do; it shrinks to one row once a device exists.
-`DeviceCard` is one card per granted device: identity, current mode, state, and
-tabs holding only the actions that mode has. `ArtifactPanel` ("Files &
-backups") is the session-level file library the action forms draw their input
-from. Operations appear in the card of the device they ran on; those of
-disconnected devices are listed in a closed disclosure at the bottom.
-
-`lib/devices/ui-model.ts` is the single table behind it: the mode from the USB
-descriptors (`deviceMode`), the protocols offered (`offeredProtocols`), the
-groups for those protocols (`availableGroups`) and which `(protocol, action)`
-pairs each group exposes. A new flasher action MUST be added to a group there;
-`ui-model.test.mjs` fails when any action a shipped flasher declares is
-unreachable. Terminal-shaped actions (`adb` monitor, `serial` monitor,
-`fastboot` exec) are covered by `DeviceTerminal` / `FastbootCommand`, and EDL's
-exec, dump and flash by `EdlWorkflow` (connect, partition tables, check, flash and
-erase of a partition picked from the last table read, the whole-area backup
-offered only after a passing check, a backup set and its restore), not by the
-generic `ActionForm`. A device in a mode Cody cannot read (`unknown-usb`),
-or a card with "Show every protocol" on, offers every protocol. There is no
-confirmation or armed card in `OperationList.tsx` any more: an operation
-waiting for the trust answer says so on its card (`awaiting-trust`; the question
-itself is in the chat), and one counting down shows `CountdownCard` ("Starting in
-N s", the exact action and target, its own Cancel). `DeviceCard` shows the
-Trusted / Agent blocked chip with Forget under its title (`TrustStatus`,
-`useTrustLevel`). The activity under each device is `ActivityFeed`, not a flat list.
-Every control is at least 44 px (`components/devices/ui.tsx`); the panel is
-used with a finger, and the right panel can be as narrow as 300 px, so layouts
-wrap rather than scroll sideways.
-
-#### ADB port forward and reverse
-
-`device_forward` (`adb forward`), `device_reverse` (`adb reverse`), and
-`device_tunnels` (`--list` / `--remove` / `--remove-all` for this session) are
-real, relay-backed ADB features, not a local shell helper. The browser cannot
-listen on a TCP port, and the server cannot reach the device, so the rule is
-split: the page owns the authenticated ADB connection and the server owns the
-TCP endpoint, joined by `{ type: "tunnel" }` frames on the existing device
-socket (`lib/devices/tunnel.ts` vocabulary, `tunnel-host.ts` server half,
-`tunnel-client.ts` page half, `adb.ts` forward/reverse).
-
-- **"Host" means the machine running Cody.** A forward listens on
-  `127.0.0.1:PORT` of the Cody server (what an agent calls `localhost`), never
-  on the tablet or PC holding the device, and never on a LAN address. A reverse
-  dials `127.0.0.1:PORT` of the Cody server. Browsers cannot listen or open raw
-  TCP, so the tablet's own `localhost` is unreachable by design.
-- **Grammar.** Forward device side: `tcp:`, `localabstract:`, `localreserved:`,
-  `localfilesystem:`, `dev:`, `jdwp:`. Reverse device side: `tcp:` (also
-  `tcp:0`), `localabstract:`, `localreserved:`, `localfilesystem:`. Host side is
-  always `tcp:PORT` (forward: 1024+ or `tcp:0`). `;` and control characters are
-  refused (`parseDeviceSpec` / `parseHostSpec`).
-- **One rule = one long-running operation.** It follows the normal operation
-  path: request -> the device's trust (the one question in the chat, if it has not
-  been answered) -> the rule is declared (action `adb.forward` / `adb.reverse`,
-  exact target, host port, who can then connect) -> running until
-  `device_operation_cancel`, `device_tunnels remove`, the card's Cancel, a
-  disconnect, or a lost connection. Nothing listens and the device is not
-  touched before the trust answer. Cancelling removes the listener, closes every
-  connection, and (reverse) asks the device to `killforward` before the
-  connection is closed.
-- **The server verifies; it does not trust the page blindly.** A `listen` or
-  `reverse` claim is accepted only for an operation of this session whose
-  snapshot is `running` and has declared its rule (`riskDeclared`); one rule per
-  operation, 16 per session (both reserved before the listener binds, so
-  concurrent claims cannot overshoot), 64 connections per rule; privileged ports and
-  Cody's own port (`PORT`, `CODY_INTERNAL_DISPLAY_ORIGIN`) are refused for both
-  listening and dialing; page-minted connection ids must start `p-`. Rules die
-  with the page socket, a replacing page, the device's `gone`, or the
-  operation's terminal snapshot (`TunnelHost.closeAll/closeDevice/closeOperation`).
-- **One device listening address, one rule.** adbd rebinds silently, so a second
-  reverse rule on the same `tcp:PORT` (or the same host port) on one connection
-  is refused; otherwise cancelling the first would delete the second's listener.
-  `tcp:0` always gets a fresh device port. Reverse registration is bounded
-  (15 s) and cancellable; a rule that is installed after the operation gave up
-  is removed again, and its device and host addresses stay reserved until that
-  late answer has settled and been cleaned up, so a replacement rule cannot be
-  deleted by it. Waiting for a closing ADB connection is cancellable too.
-- **Directional EOF.** The device ending its stream and the host client closing
-  are separate events; the page always hears the host side finish (`end` after
-  an ordinary close, `reset` after an abrupt one), so short-lived requests do
-  not leave connection objects in the browser.
-- **Credit-based flow control**, not unbounded buffering: 48 KiB chunks, a
-  512 KiB window per connection, acknowledged only after the far sink accepted
-  the bytes. Half-close does not exist in ADB, so (like a PC) the first end
-  closes the stream after the bytes already sent.
-- **Shared ADB connection.** Forward/reverse, `detect`, `pull`/`dump`,
-  `verify`, terminals and read/shell `exec` join the lease already held for the
-  device (`DeviceOperationManager.acquireLease`, one real `borrowHardwareTransport`)
-  and one authenticated session (`adb.ts` `AdbHold`): the connection is bound
-  to the hold, not to one operation's signal, and torn down only when the last
-  operation leaves or every remaining one is cancelled. A new operation waits
-  for a closing or aborted connection to be fully gone before it authenticates,
-  so two ADB sessions never overlap on one USB transport. Cancelling one rule
-  never drops another. Anything that rewrites the device or connection (push
-  staging/reacquire, sideload, reboot, TWRP script) keeps the exclusive lease.
-- `device_exec` with `options.kind` `reverse-list`, `reverse-remove`, or
-  `reverse-remove-all` manages rules *on the device* (including ones other
-  programs made); remove and remove-all are declared like any other change.
-
-ADB transfers hash in bounded chunks (`blob-stream.ts`). Pull/backup uses an OPFS
-spool, commits the result to IndexedDB escrow, then removes the spool. Raw/symlink
-push uses direct sync, offers a backup, and is declared for the exact path (no
-typed `write:<path>`: the device's trust covers it). Regular-file
-push retains verified staging/atomic replacement. `device_sideload` serves AOSP
-`sideload-host` block requests; it reports the input SHA-256, not installation
-verification.
-
-#### Trust-gated flashing and honest verification
-
-Caller options cannot supply authority, device geometry, or trust. Each
-structured mutation declares its real target, input digest, and backup status
-before anything is sent (`context.confirm`: a declaration the manager checks and
-logs, never a question); the device's trust, given earlier in the chat, is the only
-permission. Protected destinations (the boot chain, partition tables) are noted
-PROTECTED in the declared details and proceed with no extra prompt. Unknown
-readback is not a write veto:
-Fastboot explicitly warns, writes once, and reports UNVERIFIED.
-An ACK, progress counter, CRC or successful command is never readback proof.
-A transport timeout is unknown completion, never permission to replay a write.
-
-Every system cancel records its reason (`cancel(id, reason)` -> `snapshot.error`),
-so the card and `device_operation_status` say why an operation ended: a tablet whose
-volume keys are held drops off the bus, `deviceDisconnected` cancels what waits
-on it, and the card would otherwise simply vanish.
-
-Protocols with intrinsic erase geometry preserve and verify their whole erase
-footprint. Fastboot addresses named partitions: when fetch is available it
-backs up the whole partition and verifies raw bytes or sparse RAW/FILL extents;
-sparse DONT_CARE bytes and bytes beyond the image are explicitly unverified.
-Without fetch, boot recovery and use ADB device_verify with the raw image's
-exact target path, byte length, and SHA-256. Sparse file hashes cannot be used
-as expanded-image hashes.
-
-#### Supported protocol boundaries
-
-- **ESP serial/SPI:** `detect`, `dump`, and verified `flash` are supported
-  through esptool. Detected ESP targets accept exact caller offsets within detected capacity and
-  `firmware`, `flash`, `factory`, or `spi-boot` targets; a 4 KiB
-  leading/trailing read-modify-write plan preserves the whole erase footprint.
-  ESP32 factory spans the intrinsic prefix/spi-boot/firmware range, and the
-  ESP8266 offset-zero `0..0x10000` range is conservatively spi-boot
-  protected; either needs exact `allow-spi-boot` when intersected. The flasher writes
-  once, uses esptool device MD5, then reads the full footprint back and
-  SHA-256-verifies it. `device_exec` takes esptool-style commands
-  (`parseEspCommand`): read-only `chip_id`, `read_mac`, `flash_id`,
-  `get_security_info`, `efuse_summary` and `efuse_dump`, and the stub-only
-  `erase_flash` / `erase_region ADDRESS SIZE`. An erase refuses a ROM-only
-  connection and any flash whose SPI ID does not map to a size esptool-js
-  recognises, escrows every byte it will remove (checking the stub's read-digest
-  frame), and declares itself in the log with no override asked: the SPI boot area
-  it touches, a chip with secure boot or flash encryption burned, and an eFuse map
-  that is not reviewed are all named in the declared details. It then proves the
-  range blank with the device's own MD5. eFuse reads
-  use the register maps in `lib/devices/esp-efuse.ts` (ESP32, S2, S3, C3, C2, C6,
-  H2); `efuse_dump` declares itself first and keeps key-block contents out of the operation
-  log. eFuse burns and `espsecure` are not offered (irreversible).
-- **Fastboot:** detection, arbitrary getvar, streamed dump/backup, raw/sparse
-  named-partition flash, volatile download/boot, set_active, erase, reboot modes,
-  OEM/flashing commands, and arbitrary vendor commands are available. Missing
-  fetch permits an UNVERIFIED flash after the warning; available fetch keeps full backup
-  and image-defined readback. Boot-critical and partition-table targets
-  (preloader/LK/TEE/RPMB/GPT/boot0/boot1/eFuse) and vendor/security commands are
-  declared in the log with a PROTECTED note or the exact command; nothing is typed
-  or asked. FastbootCommand uses the selected artifact for
-  boot/flash/stage/update. `flash` reads `max-download-size` (decimal, or hex with
-  `0x`) and resparses a larger image into sparse pieces (`sparse-image.ts`, at
-  most 1 GiB each) that are flashed in turn; a failed piece stops with no retry.
-  `stage` / `get_staged` move data to and from the bootloader's staging buffer.
-  `update` / `flashall` flash the images of a package ZIP (`zip-archive.ts`,
-  `android-info.ts`): its `android-info.txt` must be met by the device (it is
-  read under its own bound, 64 KiB and 256 requirements, refused on its recorded
-  size before it is opened; `partition-exists` also needs that image in the
-  package, and like AOSP only its first value names the partition), stored and
-  deflated members are CRC-checked when opened, every partition is backed up
-  before ONE declared risk (the package digest and every partition's backup),
-  and each partition is written once and read back before the next. A failed
-  update names four states: written and verified, written but not verifiable,
-  POSSIBLY MODIFIED (a `flash:` command was sent; with its backup id), and
-  untouched. A cancel (Cancel, or the browser reporting the USB device gone,
-  which cancels) leaves no error in the operation record, so the same accounting
-  (preceded by one line naming every partition and the backup taken of it) is
-  published line by line to the operation's retained output BEFORE the
-  cancellation is rethrown (`updateFromPackage`'s catch). The loop also checks
-  the signal after each partition is recorded: a cancel that lands while the
-  last readback is only being compared locally (a raw image's `hashBlob`, a
-  fill extent) throws nothing by itself and the manager discards the result of a
-  cancelled run, so without that check the accounting would be lost. The tests
-  drive it through `DeviceOperationManager` (`managedUpdate`, which can cancel
-  from a progress report) and read `snapshot.output`). Logical
-  partitions need fastbootd; bootloader/radio/super/userdata
-  images, `-w`, and mode switches are not part of it. Host filesystem
-  generation (format) is not implemented.
-- **USB DFU:** `detect`, `dump`, verified `flash`, and `abort`/`clear_status`
-  maintenance are descriptor-bound. Flash is allowed
-  only for bcdDFU `0x011a` on the actual selected `@Internal Flash` DfuSe
-  map, with contiguous readable/erasable/writable g-sectors inside the STM32
-  program range; it requires target `internal-flash`, an explicit absolute
-  offset, and raw binary (not a `.dfu` container). All internal flash is
-  conservatively protected and needs exact `allow-bootloader`. Cody escrows,
-  merges, writes, and exact-reads every touched sector without manifestation or
-  reset before proof. Generic bcdDFU `0x0110` flash (`flashDfu11` in dfu.ts) is
-  also supported: target is the exact selected alternate, offset 0, raw binary
-  (a `.dfu` suffix is refused); the request must name `allow-unknown` (or the
-  role the alternate's name implies); the current image is escrowed when the
-  device can upload; the image is sent as numbered blocks plus the zero-length
-  block; a manifestation-tolerant device is read back and SHA-256-compared, an
-  intolerant one restarts itself and is reported UNVERIFIED. A backup the device
-  uploaded but Cody could not save refuses the write; only a device that will
-  not upload downgrades to the UNVERIFIED warning. `exec` also takes `reset`
-  (USB reset through `HardwareTransport.reset`; a failed reset is an error
-  unless `HardwareTransport.connected()` shows the device left the bus) and, for
-  DfuSe, `leave ADDRESS` (`DfuSession.leave` validates the GETSTATUS that follows:
-  an explicit DFU error, a reply that is not a six-byte status, or a failed read
-  while the device is still connected is an error; only a device that left the
-  bus may stay silent). Manifestation, leave and reset make the device leave the
-  bus on purpose, and the browser reports that as a disconnect that would cancel
-  the operation: each opens `context.expectDeviceRestart(DFU_DEPARTURE_WINDOW_MS)`
-  just before the transfer that causes it (the zero-length block, the leaving
-  download, the reset). Only an idle (tolerant) device ends the window; every
-  other path leaves it to expire, because the browser's `disconnect` event can
-  trail the transfer that failed and arrive while the operation is finishing.
-  A disconnect during the download blocks and the user's Disconnect still
-  cancel. Real-route tests: `dfu-browser-lifecycle.test.mjs`
-  (`fakeUsbDfuDevice` in `usb-dfu.test-helper.mjs` over `fakeDfuDevice`, whose
-  `onDeparture` hook tells the fake browser the device left). The Devices form
-  offers `allow-unknown` for DFU through `flashOverrideChoices` (ui-model.ts).
-  No caller descriptor option creates a capability.
-- **ADB:** detection, shell/PTY, push, pull/dump, recovery sideload and raw-image
-  readback verification use Cody's persistent browser IndexedDB RSA credential.
-  A trusted device permits arbitrary shell, including mount/dd and recovery
-  scripts; there is no shell grant and no separate literal-diagnostics tier.
-  A user's terminal never grants the agent access by itself. Normal file push retains verified
-  staged chunks and atomic replacement; direct block/symlink push instead offers
-  a backup and is declared for the exact path. Pull streams into escrow.
-  Reboot mode and queued TWRP OpenRecoveryScript remain the original bounded
-  helpers in this checkpoint; arbitrary commands use the shell path.
-  A new USB mode needs the user's new grant. `adb forward` / `adb reverse` are
-  supported through the server relay (see "ADB port forward and reverse").
-  `device_install` (`install` in adb.ts) stages an APK with the push path's
-  verified chunks, runs `pm install` with validated flags on that exact file, and
-  removes the copy and its staging files on every exit (copy failure, `pm`
-  failure, and cancel: it keeps the connection for that cleanup, and
-  `stagingIo(adb, capabilities, signal)` stops at the next step when cancelled).
-  The retained lifetime belongs to the OPERATION, not the transport: the hold an
-  operation entered is found through `contextHolds` (keyed by context), so the
-  connection made on a replacement transport after a resumed copy (or a restart,
-  or a wait reacquisition) lives and dies with the same hold, and a cancel after
-  the resume still removes the files over it. Cancel also ends the subprocess in
-  flight without touching that connection: `shellStatus(adb, command, signal)`
-  spawns with a dependent signal (ya-webadb closes only that stream and rejects
-  `exited`; its own `spawnWaitText` takes no signal, so it is not used), `pm
-  install` and every staging step receive the operation's signal, and a cancelled
-  operation is never classified as a connection failure (it would reconnect and
-  close the connection the cleanup needs). ya-webadb waits for the daemon's
-  acknowledgement of a subprocess's OPEN without any limit and looks at the
-  signal only afterwards, so `untilAborted` races that wait against the signal
-  (a stream that opens late is closed). `adbFor(context, { signal })` makes the
-  AUTHENTICATION of a replacement connection (after a lost connection mid-copy)
-  cancellable without tying an authenticated connection to the signal: the
-  connection still lives as long as the hold, the signal stops reaching it once
-  it is up. `removeRemote` is the cleanup: waiting for the connection, opening
-  the stream and running `rm` are all under one limit (`adbLimits.cleanupMs`,
-  10 s, exported only so tests can shorten it), it never starts a new
-  authentication (no cached session means nothing to clean over), and when the
-  limit passes the retained count is released so the lease comes back. The
-  operation tells the operator `pm` may still finish installing. The sandbox
-  device (`adb-device.test-helper.mjs`) can hold `pm` silent (`pm: () => undefined`),
-  stay silent before an OPEN acknowledgement (`silentOpen`), speak the shell v2
-  protocol (`features: "shell_v2"`), share storage between two connections
-  (`root`) and report a lost connection (`syncFault: "disconnect"`);
-  `mutedTransport()` is a daemon that answers nothing, not even the CONNECT.
-  Replacement is off unless `options.replace`: `-R` on Android 9+ (API read from
-  `ro.build.version.sdk`; unreadable counts as modern), nothing on older Android,
-  where `-R` is an unknown option and refusing is already the default. The
-  declared risk names the exact `pm install` command and the APK's SHA-256.
-  `device_exec` `options.kind` `root`, `unroot`, `tcpip` (with `options.port`)
-  and `usb` restart adbd, and the device usually leaves the USB bus. The flasher
-  calls `context.expectDeviceRestart(windowMs)` after it declares the restart; while that
-  window is open `DeviceOperationManager.deviceDisconnected` does not cancel THAT
-  operation (the connection's trust still ends with the disconnect; `disconnectDevice` passes
-  `"forgotten"` and still cancels everything), the manager waits up to 4 s to see
-  the disconnect before reacquiring, and `reacquireTransport` retries (it needs no
-  current lease: `OperationRecord.identity` says which device) until
-  `options.timeoutSeconds` (default 45) for the SAME stable USB identity.
-  `tcpip` and `usb` verify adbd's effective legacy listener with `adbTcpListeners`
-  (fixed `service.adb.listen_addrs`, then `service.adb.tcp.port` even when `0`,
-  then `persist.adb.tcp.port`), refuse before anything is declared or sent when fixed addresses make
-  the request impossible, and report `verified: false` when a property overrides
-  the result. Wireless debugging (`persist.adb.tls_server.enable`,
-  `service.adb.tls.port`) is a SEPARATE TLS listener that `adb usb` leaves
-  running: `adbTcpListeners().wireless` reports it, the `usb` declaration says
-  whether it is on, and `usb` is `verified: false` ("not USB-only") while it is on
-  even with the legacy port at `0`. Never write "no TCP listener" from the three
-  legacy properties alone.
-  `wait-for-device` (`adbWaitOptions`) uses ONE deadline for lease
-  acquisition (`record.waitDeadline`, handed to the flasher as
-  `context.deadline`), authentication (`adbFor(context, { deadline })`), queries
-  and every reacquisition; a failed reacquisition leaves no lease and nothing is
-  authenticated until one succeeds; `pause()` (pause.ts) makes every poll
-  cancellable. A wait is never cancelled by its device leaving the bus
-  (`DeviceOperationManager.departureExpected`: an announced restart window OR a
-  `record.waitDeadline` still ahead; the connection's trust still ends with the departure, only the
-  same granted identity is ever taken again, and `disconnectDevice`'s
-  `"forgotten"` still cancels). `awaitLease` (operations.ts) races every wait
-  acquisition and every reacquisition against the deadline and Cancel (a
-  reacquisition's backstop is `PROVIDER_TIMEOUT_GRACE_MS` later, so a provider's
-  own `timeoutMs` error wins a photo finish) and releases a lease that arrives
-  after the wait gave up; WebUSB open/configure/claim can take as long as it
-  likes. The server (`DeviceBridge.departedDevice`) remembers the ids of
-  devices that left the page (15 min, 16 at most, cleared when another page takes
-  over, never for a roster drop) and `device_exec` accepts them for
-  `wait-for-device` by exact id only. Call `reacquireHardwareTransport` on its
-  provider (`.call`): the browser implementation uses `this`. Tests:
-  `adb-lifecycle.test.mjs` (manager level) and `adb-browser-lifecycle.test.mjs`,
-  which drives the real `DeviceBridgeConnection` with `fakeBrowser()` /
-  `fakeUsbAdbDevice()` from `usb-adb.test-helper.mjs` (a `disconnect` event, then
-  the device returning as a NEW USB object with the same vendor/product/serial;
-  a `device.open` replaced by a held promise for the slow-open cases).
-  yume's `AdbBanner` has no string form: use `banner.state` (`bannerText` builds
-  the `state::props` text). MTK
-  preloader/BROM/download-agent support is **not implemented** (parked); see
-  `docs/hardware-parity.md` for every tool's command-by-command status.
-- **Qualcomm EDL (USB `05c6:9008`, `edl*.ts`) — read-only commands plus guarded `flash`, `erase`, backup sets, restore and the boot-drive change.** Implemented
-  from the Sahara/Firehose wire format; the GPLv3 `edl` tool was read as a
-  behavioural reference only and none of its code or tables are used (Cody is
-  MIT). Cody ships no loader: the user chooses one as a session artifact.
-  `usbProtocolCandidates` (client.ts) offers `edl` only for that vendor/product
-  pair with a vendor-class interface that has one bulk IN and one bulk OUT
-  endpoint (the 0xff/0xff/0xff triplet alone names far too many devices; the
-  Sahara HELLO still decides). Layers: `edl-link.ts` (a buffered pipe over the
-  lease: ONE constant 64 KiB bulk-IN request size, because the browser transport
-  remembers the largest length ever asked and a smaller request can come back
-  with MORE bytes; it also remembers where each USB transfer ended), `edl-sahara.ts`
-  (the boot ROM: HELLO, command mode for chip serial / hardware id / public-key
-  hash, image transfer of the loader, reset; a ROM needing Sahara above 2 is
-  refused; rejections quote the status code), `edl-xml.ts` (Firehose answers come
-  from a device nobody vouches for, so this is a bounded scanner, not a parser:
-  no DOCTYPE/entities/CDATA, every dimension capped, control characters made
-  harmless), `edl-firehose.ts`, `edl-gpt.ts` (CRC32, header and entry checks,
-  `evaluateSpan`), `edl-session.ts` (what state is the device in: boot ROM or
-  programmer, the recovery ladder, the declared loader upload), `edl-disk.ts`
-  (shared reads/saves/hashes and partition lookup), `edl-protect.ts` (which names
-  are refused, protected or ordinary), `edl-write.ts` (flash and erase),
-  `edl-manifest.ts` (the backup-set manifest: format, strict parser, and every
-  check a restore makes against the saved tables), `edl-backup.ts` (backup and
-  restore) and `edl.ts` (the flasher). Components: `components/devices/EdlWorkflow.tsx`
-  (Commands tab: connect, partition tables, check, reset; Flash tab: `EdlFlash`,
-  a partition from the last table read or typed, the chosen file as the image
-  with a pad choice, flash and erase; Backup tab: one partition, the whole area
-  after a passing check, `EdlBackupSets` for a backup set and a restore from the
-  manifests in the session). Nothing in these forms asks for a confirmation or an
-  override: the person's own click, or the agent's trust, is the permission, and
-  what each operation declares is in its log; `setbootablestoragedrive` has no form and is
-  reached through the agent tools. `adviseFlash` is the one decision the Flash
-  card makes (protected/refused name, size against the partition, pad); the
-  flasher checks it all again.
-  - **Writes only inside a grant.** Firehose commands exist only as the closed
-    union `FirehoseCommand`, built from validated integers and fixed words, and
-    `assertFirehoseXml` parses every document about to be sent. Reading
-    (`nop`, `configure` for eMMC, `getstorageinfo`, `read`, `power reset`) needs
-    nothing. `program`, `erase` and `setbootablestoragedrive` go out only under a
-    `WriteGrant`, and a grant exists only after `grantWrites` declared the exact
-    sector ranges (`context.confirm`: logged, and held for the visible countdown if one was asked
-    for). The guard then refuses any
-    write outside the declared merged ranges, of a kind not declared, in another
-    sector size, or in a physical partition other than 0 (so the eMMC boot areas
-    and RPMB cannot be addressed at all). patch, peek, poke, digests, `power`
-    other than reset and unknown tags are refused under any grant; `patch` is
-    deliberately not shipped (a same-unit GPT restore writes the saved sectors
-    byte for byte, so nothing needs it). `parseEdlCommand` accepts connect,
-    printgpt, check, erase, backup, restore, setbootablestoragedrive and reset.
-  - **Flash and erase** (`edl-write.ts`). Target = exact GPT partition name. A
-    flash needs an image of exactly the partition's size, or `options.pad`
-    `zero`|`ff` to fill the rest (the partition is always written whole). Before
-    anything is written the partition is saved, the saved file is checked to
-    hold exactly those bytes and the partition is read a second time to agree
-    with it (no saved copy = no write); one declaration carries
-    the exact sectors and the backup, and the protected boot-chain / radio / identity /
-    partition-table names (`edl-protect.ts`) add a PROTECTED note to it (no override, no prompt).
-    Names like boot0/boot1/rpmb/mmcblk*boot* and partitions
-    that overlap a partition table or another partition are refused with no
-    override; where the backup table lives is read from the header in the last
-    sector (`backupTableFloor`), not assumed from the primary header, and a header
-    whose entry array sits somewhere implausible refuses the write. Writes run in blocks; a cancel lands BETWEEN blocks (the link rides
-    a signal that follows the operation's only after `edlTimeouts.cancelGrace`),
-    because a programmer left waiting for the rest of a block takes the next
-    command for sector data. A failure once a block's data was attempted, even
-    part of it, is reported as POSSIBLY MODIFIED with the saved copy's id
-    (explicit stage tracking in the block hooks, not a byte count); "nothing was
-    written" is said only when no data had gone out. The partition is read back
-    and compared by SHA-256:
-    a mismatch is reported as POSSIBLY MODIFIED with the id of the saved copy; a
-    programmer that will not read back leaves the write UNVERIFIED. An erase
-    reports what the partition reads as afterwards (all zero, all 0xFF,
-    unchanged, mixed) and never claims a value. Neither sends a loader: run
-    Connect first. Flash/erase are emulator-tested only.
-  - **Boot drive** (`setBootableDrive` in `edl-write.ts`). `exec setbootablestoragedrive`
-    takes the drive number 0-7 as its target (nothing else is accepted), needs a
-    running programmer, and declares itself once. The declaration says plainly
-    that there is no saved copy (the protocol cannot
-    report the setting) and the result is always `verified: false` / UNVERIFIED: a
-    NAK is quoted and means it was not applied, a verdict that never arrives after
-    the command went out is POSSIBLY CHANGED. Emulator-tested only.
-  - **Backup sets and restore** (`edl-backup.ts`, `edl-manifest.ts`). `exec backup`
-    (no target; read-only) needs the span check to pass, then saves the primary
-    table region (sectors 0 .. end of its entry array), every partition (one
-    file each) and the backup table region at the end of the disk, each read a
-    second time and required to hash the same, plus a JSON
-    manifest that names each by SHA-256 and records the unit: chip serial,
-    public-key hash (boot ROM only), eMMC serial and product, disk GUID, sector
-    size, measured capacity. The result's SHA-256 is the manifest's: the set's
-    id. A set taken while a programmer was already running has no public-key
-    hash and says NOT RESTORABLE, as does one holding a partition Cody would
-    never write. Bytes outside the tables and partitions, the eMMC boot areas
-    and RPMB are not in a set. `exec restore` takes the LOADER as the request's
-    file and the manifest as `options.manifestSha256` (a declared risk's digest
-    must be the request's own, so the loader owns that slot). It finds every
-    saved file with `context.findArtifact(sha256)` (`DeviceArtifactStore.findBySha256`),
-    hashes each again, parses the saved tables and requires the manifest to agree
-    with them, all before the device is touched. It needs a boot ROM it can
-    identify in this very operation (a running programmer is refused): chip
-    serial and public-key hash are compared before the loader is declared;
-    after `configure` the eMMC serial and product, sector size, capacity and the
-    disk GUID of an intact table on the device (primary, else backup; neither
-    intact = refused) must match as well. Every region the set covers is then
-    read and hashed; a region that already holds the set's bytes is left alone
-    (the set is its copy), and what each of the others holds is saved (and must
-    hash the same on the second read) before anything is written. ONE
-    declaration carries the merged ranges,
-    partitions are written in disk
-    order, then the backup table, then the primary table last, and each region is
-    read back and compared before the next starts. The first mismatch, or a
-    programmer that will not read back, stops the restore and the tables are
-    written only if every partition verified. An interruption names the regions
-    that are done, the one in doubt and those never started. Saved copies of
-    overwritten partitions can be flashed back; no command writes saved
-    partition tables back. Emulator-tested only.
-  - **Actions.** `detect` (Sahara identity; leaves the ROM's re-offered HELLO
-    unread so the next operation finds an ordinary device), `exec connect`
-    (loader only if the device is still in the boot ROM, after declaring
-    the file's SHA-256; `configure`; storage), `exec printgpt` (primary
-    AND the real backup table at the end of the disk, both saved byte for byte),
-    `exec check` (table span vs. the capacity the programmer reports, the backup
-    header in the last sector, the last sector readable), `exec reset`
-    (declared; announces the departure), `dump NAME` (one GPT partition) and
-    `dump user-area` (only with `options.sectors` equal to the verified count and
-    only when the check passes IN THE SAME OPERATION).
-  - **Data integrity.** Reads are segmented (16 MiB per `read`) and the raw bytes
-    are counted exactly, and three independent guards decide whether a read can
-    be trusted. (1) *Alignment* (`FirehoseSession.requireDataEnd`): the last
-    byte of the data must coincide with the end of a USB transfer the link
-    actually saw (a short packet, or the zero-length packet that follows a
-    transfer that filled the read request), so the closing answer is a transfer
-    of its own. Data that ends inside a transfer, or whose count was made up with
-    the first bytes of the next one (white space in front of the answer, its XML
-    declaration, a log line), is refused without looking at what the bytes say. A
-    programmer that ends its data transfers with neither a short nor a
-    zero-length packet cannot be read from (Cody asks for them with
-    `ZLPAwareHost`), and the refusal says so. (2) *Programmer text taken for
-    data* (`RawMessageWatch`): alignment cannot see text of the programmer's own
-    that arrives as a transfer of its own and completes the byte count, because
-    it ends on a transfer end (and it can repeat on every read). So a stretch
-    between two ends of the device's transfers - the start and the end of the
-    data count - refuses the read, wherever it sits and even when no disk byte
-    arrived, when it is (a) nothing but complete documents (read with the
-    reader's own rule for what may precede one, `leadBeforeDocument`), or, when
-    it is shorter than one sector and its end was marked, (b) nothing but white
-    space (the padding in front of an answer) or (c) the start of a document (an
-    XML declaration, a tag). (b) and (c) rest on disk data arriving in whole
-    sectors; NUL and 0xFF stretches (erased flash) and a sector or more of
-    blanks stay data, and so does the same text inside a transfer of data.
-    (3) *Two reads*: a copy that later justifies a write - the
-    preflash and pre-erase copies, each region a restore overwrites, every region
-    of a backup set - is read a second time and the two SHA-256s must agree
-    before anything is declared (for a set: before the manifest is
-    written); `readsDisagree` is the one refusal. A plain `dump` is read once.
-    On top of that the SHA-256 is computed on the wire and compared with the
-    artifact store's, and a failed or cancelled read saves nothing. A cancelled
-    read leaves data in flight: the next operation's `discover` discards it.
-  - **What only hardware can prove.** Everything is emulator evidence. Open
-    questions are listed in `docs/hardware-checklist.md` ("Qualcomm EDL"): whether
-    the ROM's HELLO survives Cody closing and re-opening the USB device, whether
-    the programmer re-enumerates after it starts, the exact framing of XML versus
-    raw data on the wire, whether the ROM accepts a reset from command mode,
-    whether Android Chrome claims the 9008 interface, and whether browser storage
-    can hold a 3.5 GB artifact. Not covered: UFS, NAND/SPI-NOR, other LUNs, the
-    eMMC boot areas and RPMB, Sahara 3, memory-debug (900E).
-- **Serial bootloaders:** Gecko provides detection/XMODEM framing only until a
-  verified readback-capable flash profile exists. STM32 flash is limited to ROM
-  PID `0x0410` (STM32F103 medium-density), factory-size discovery, and 1 KiB
-  page-aligned backup/program/readback; unknown geometry refuses and every
-  program-flash write needs the request to name `allow-bootloader`. STK500 is limited to
-  ATmega328P signature `1e950f`, 32 KiB flash, 128-byte pages, application
-  `[0,0x7000)`, and its protected top 4 KiB bootloader; bootloader writes need
-  `allow-bootloader`. Both retain full physical-footprint escrow/readback.
-- **CMSIS-DAP/DAPLink and generic UF2 are not shipped.** WebUSB transport is
-  assessed feasible for a future target-specific CMSIS-DAP profile, but there
-  is no DAP dependency, generic memory-write/flash operation, or host helper
-  here. Generic UF2 copy does not prove programming or retention and has no
-  flash capability.
-
-#### Evidence and the optional helper
-
-Browser and fake-transport tests exercise the software guards only. No real browser
-grants or physical hardware operations were performed; hardware behavior is **unverified on real hardware**. Follow
-`docs/hardware-checklist.md` for the manual, recoverable-device evidence
-before treating any protocol as field-verified; it authorizes no destructive
-operation, and each real attempt is still the operator's own decision (Cody's
-device trust is permission to drive a device, not a go-ahead for a test).
-
-`docs/hardware-host-helper.md` is a design, not a shipped component. A future
-optional local helper would be per-user and local-only, signed and bound to one
-origin/session/device/protocol, use typed allowlisted vendor invocations (never
-shell/PATH passthrough), require native point-of-risk confirmation and
-revocation, and enforce the same backup/readback rule. It supplies no current
-vendor CLI parity, elevated capability, CMSIS-DAP, or generic UF2 flashing.
 ### Nothing Cody or its engine writes may grow without bound
-- Every store that grows per turn, per spawn or per screenshot needs an owner
-  that prunes it, inside Cody (see `lib/harness/housekeeping.ts`) — never a
-  host cron. Measured on the owner's instance before this rule: 21 GB of leaked
-  checkpoint packs, a 5.2 GB memory DB, ~75 screenshots a day in /tmp, ~50 temp
-  dirs per `npm test`, and 7,700 memories (88% of the store) that were Cody's own
-  one-shot jobs (plan keeper, Distill, session namer, model planner) retained
-  because their overlay's memory switch was ignored. Those junk memories were
-  also RECALLED into real chats. When adding anything that writes per event,
-  add its pruning in the same change.
+- Every per-turn/spawn/screenshot store needs a pruner inside Cody (`lib/harness/housekeeping.ts`), never a host cron — leaks hit 21 GB packs, 5.2 GB memory DB.
+- Add pruning in the same change as any per-event write; one-shot jobs must not retain memories (ignored overlay switch: 7,700 junk ones got recalled).
+Details: docs/agents/disk.md
 
 ### Disk hygiene: per-chat scratch, the janitor, the low-disk gate (`lib/disk/`)
-On 2026-11-04 the owner's server hung when its disk filled: Cody's /tmp held
-208 GB (50,193 top-level leftovers: test temp dirs, a cargo target dir per
-attempt, toolchains) and /data 162 GB. Every chat inherited the shared /tmp and
-nothing owned what it left. The host now only has native ZFS quotas (no cron,
-no script, by the owner's choice), so Cody's own janitor is the ONLY cleanup.
-- **Per-chat scratch** (`scratch.ts`). Every MAIN chat's engine (omp rpc and ACP;
-  never sidebar, one-shots, terminals or logins) runs with
-  `TMPDIR`/`TMP`/`TEMP`/`CODY_SCRATCH` = `<tmp>/cs/<12 hex>` (`CODY_SCRATCH_ROOT`
-  moves the root). Short on purpose: unix sockets under TMPDIR are capped at 108
-  bytes. The index `cody-scratch.json` (0600) maps a dir to every id the chat had
-  (temp id → real id, omp's move to a new id), so a restart, resume or reboot
-  reuses the same dir. Never removed on engine exit or idle dispose (a resumed
-  chat still needs its venv or build dir); removed on chat delete unless another
-  live engine runs in it, and by the janitor. `engineChildEnv(extra, { timeZone,
-  scratchDir })` applies it and always sets `CODY_DISK_AREAS` (what the extension
-  probes). Every main chat's engine also gets `CODY_DATA_SCRATCH=<data root>/<the same 12
-  hex>` (`dataScratchRoot()`: env `CODY_DATA_SCRATCH_ROOT`, else `<agent
-  dir>/cody-data-scratch`; the agent dir is on the data volume). It exists
-  because per-chat `TMPDIR` is on /tmp, a different filesystem from the code
-  checkouts, and some test harnesses need temp space on the SAME disk as the
-  code (agents had been pointing `TMPDIR` at `~/tmp`, which then filled with
-  killed runs' leftovers). `scratchEnv(dir)` makes it (0700, lazily, on every
-  spawn) and refuses a root that is the temp dir, home, agent dir or scratch
-  root. Lifetime = the tmp scratch's: kept across restarts, removed by
-  `removeScratchDir` together with the tmp dir (chat delete, janitor), and a
-  data dir that no index entry and no tmp dir owns is an orphan
-  (`listOrphanDataScratch`) that the janitor removes after `scratchIdleDays`
-  (never a live chat's, never one a process uses, only with a readable process
-  table). A chat whose tmp dir a reboot emptied keeps its data twin until its
-  index entry is forgotten (30 days). The Settings disk card's per-chat size is
-  tmp + data bytes; the janitor's disk budget pass now looks at both disks and
-  only removes a chat's scratch if it holds something on a disk that is over
-  budget. Tests that start real sessions must point `CODY_SCRATCH_ROOT` inside
-  their private root. `lib/bash-output.ts` also accepts
-  `<scratchRoot>/<12 hex>/pi-bash-*.log`.
-- **The janitor** (`janitor.ts`, `sweep.ts`, `walk.ts`, `transcripts.ts`,
-  `mentions.ts`; settings in `cody-disk.json` via `settings.ts`; last report in
-  `cody-janitor-report.json`). Hourly, single-flight, never throws. Removes the
-  scratch of chats idle `scratchIdleDays` (default 3; a live chat's never),
-  orphan scratch dirs, top-level entries of the temp dir idle `tmpIdleHours` (24)
-  and top-level DIRECTORIES of `~/tmp` idle `homeTmpIdleHours` (72; files there
-  are helper scripts and tokens and are kept), and checkpoint shadow repos past
-  `checkpointMaxAgeDays`/`checkpointMaxGb` (never a live workspace's). Inside `~/tmp` only, top-level directories whose NAME looks like a killed test
-  run's leftover are swept after `testLeftoverIdleHours` (default 6, never
-  longer than `homeTmpIdleHours`) instead of 72 h, under every other check
-  (nothing inside changed, no process names it, no recent transcript names it,
-  not a dot-entry/special/protected). `looksLikeTestLeftover` (`sweep.ts`)
-  matches (a) a stand-alone 3–7 digit number that is not a pid in the process
-  table now (`lumashow-ui-test-123456-abc`; a 4-digit 1970–2100 number is a
-  year, not a pid; no process table → this shape never matches), or (b) a
-  mkdtemp suffix: `-` or `.` then exactly six `[A-Za-z0-9]` with a digit and a
-  letter (`paneldim-a1B2c3`). Everything else in `~/tmp` keeps 72 h. A temp
-  entry goes only when ALL hold: nothing inside changed (mtime AND ctime) in the
-  window, no process references it (one /proc scan per run: cwd, exe, root, fds,
-  maps, cmdline, environ, bound unix sockets — environ matters because a venv's
-  python resolves to /usr/bin), no chat file changed in 72 h names it in its
-  recent tail (128 MiB per run), and it is not a dot-entry, special file, mount,
-  symlink, the scratch root, the agent/home dir, the server cwd or `<tmp>/jiti`
-  (the server's transpile cache: deleting it crashes the next import). Any doubt
-  (truncated walk, `find` error, unreadable /proc) keeps the entry, and a second
-  look runs just before the first removal. Above `budgetPercent` (70) used it also
-  removes scratch of non-live chats idle ≥ 6 h, oldest first. Deletion is a
-  separate niced `rm -rf`: Node's recursive rm floods the libuv pool every chat
-  shares (measured 2.4 s stalls). Live chats are read from
-  `globalThis.__ompSessions`; a registry that cannot be read keeps everything.
-- **The low-disk gate** (`gate.ts`, thresholds in `status.ts`: low < 15 % free,
-  critical < 5 %). At critical, `/api/agent/[id]` and `/api/agent/new` answer
-  507 `disk_full` with a plain sentence before anything starts; commands that
-  start NEW work are refused, while steer/abort into a running turn pass so a
-  person can tell an agent to clean up. The outbox treats it as a final failure
-  (Retry/Edit stay); scheduled sends and run recovery postpone and retry without
-  using up an attempt. `describeEngineError` names ENOSPC/EDQUOT in plain words.
-- **The agent rule** (`lib/omp/extensions/cody-disk-budget.ts`, a fourth
-  `--extension` for main omp chats, inherited by subagents): appends the
-  "Scratch and disk budget" rule to the system prompt (sizes read once per
-  process, so the prompt cache holds; it says those figures override any
-  remembered one), and below 15 % free adds a hidden `cody-disk-low` line per
-  prompt and an `additionalContext` note on tool results (throttled). Trap: in
-  omp ANY extension that registers `tool_call`/`tool_result` vetoes
-  `task.speculativeLaunch`, so the `tool_result` handler is registered lazily,
-  only once a disk has been seen low. Constants mirror `status.ts` (tested). When `CODY_DATA_SCRATCH` is set the rule gets one more fixed line: tests that
-  need temp space on the code's disk use `$CODY_DATA_SCRATCH`, never `~/tmp`,
-  `/data/home/tmp` or another fixed folder (text is fixed per process: prompt
-  cache).
-- **Helper-agent memory limit** (`lib/omp/extensions/cody-context-budget.ts`, a
-  fifth `--extension` for main omp chats): for SUBAGENTS only, appends one
-  system-prompt line saying at what size omp summarises their history and to
-  keep `context_notes` current. The size is what omp itself applies to that helper's model, read from
-  `<agent dir>/config.yml` (re-read when its mtime changes: one `statSync` per
-  helper start) by `resolveHelperLimit` in `lib/helper-memory-limit.ts`; the
-  extension passes the live `ctx.model` (provider, id, contextWindow) so the
-  per-model thresholds apply (Bun-only, no config → a generic line). The text is fixed per agent+model window+config (prompt
-  cache) and it registers no `tool_call`/`tool_result` handler (see the disk
-  note: that vetoes `task.speculativeLaunch`). The Behavior › Context card
-  "Helper agents' memory limit" (`components/settings/engine/HelperMemoryCard.tsx`,
-  logic in `helper-memory.ts`) edits that map through `/api/omp-settings`, which
-  reads and replaces the `task.agentCompactionThresholdOverrides` map WHOLE
-  (so the client spreads it and unknown agents survive), and toggles
-  `compaction.experimentalContextManagement` (all chats, not only helpers).
-- **Helper memory limit: one implementation.** The helper memory limit has ONE
-  implementation: `lib/helper-memory-limit.ts` (`resolveHelperLimit`,
-  `effectiveHelperLimit`, `limitTokens`, `clampPercent`, `parseOverride`). It
-  mirrors omp 18.9+ `resolveCompactionPoint`, in this order: the agent's
-  `task.agentCompactionThresholdOverrides[<agent>]` (a token count or "N%");
-  else the entry for the helper's model in `compaction.modelThresholds`
-  (`enabled` not false; exact `provider/id` key beats the longest prefix
-  pattern ending in `*`; the value is `"f<N>"` = N% of the window shown as a
-  fixed-size trigger, `"N%"`, or a plain number = a base token count with
-  optional `reserveTokens`); else root `compaction.thresholdTokens`; else root
-  `thresholdPercent`. `limitTokens` follows the engine's arithmetic: a token
-  limit at or above the model's window means "window minus the reserve"
-  (`max(15 %, reserveTokens ?? 16384)`; an impossible reserve falls back to
-  15 %), a share is clamped to 1-99 % and floored. The model is optional:
-  without it (the subagent chips and transcript header, whose progress events
-  carry no provider/id: `subagentContextGauge` in `lib/subagent-format.ts`,
-  config from `hooks/useHelperLimitConfig.ts`) only the override, root
-  keys and the new window-minus-reserve and clamp rules apply; the helper's own
-  prompt line (`lib/omp/extensions/cody-context-budget.ts`, which imports the
-  module by relative path — its only Cody import) knows the model and so also
-  honours `modelThresholds`. The Settings card
-  (`components/settings/engine/helper-memory.ts`) uses the same module; never
-  write a second copy. `compaction.modelThresholds` and
-  `compaction.reserveTokens` have no `ui` in omp (hidden), so they stay out of
-  the schema and the panel; a per-model editor belongs to the Models hub, not
-  Behavior. `readNativeSettings` returns `compaction.thresholdTokens` /
-  `thresholdPercent` (validated, round-tripped on write).
-- **Settings › System › Disk space** (`components/settings/DiskSection.tsx`,
-  `/api/disk`: GET for any signed-in user, POST `{action:"clean"}` and PUT
-  settings admin-only): meters against the quotas, the five largest scratch
-  folders by chat title, the undo-snapshot total, the last clean, "Clean idle
-  scratch now", and the idle-days setting (the rest, including `testLeftoverIdleHours`, under Advanced).
-- **Background services (Settings › System › Services).** `lib/omp/services.ts` wraps `omp ps --all --json` (works on 18.8.3 and 18.19): list + stop/kill of detached engine services. `app/api/services/route.ts` is admin-only and validates the pid/name against the live list before stopping anything.
-- **Replay data (Settings › System › Disk).** `lib/omp/gc-strip.ts` + `app/api/disk/replay-data/route.ts` drive `omp gc strip-replay-data` (18.19+; feature-detected, hidden on 18.8.3): GET previews bytes saved, POST applies. Admin only. `gc.autoCompress` is deliberately not exposed (APFS/NTFS only, no-op on Linux).
+- MAIN chats get `TMPDIR`/`CODY_SCRATCH`=`<tmp>/cs/<12 hex>` (`scratch.ts`) plus `CODY_DATA_SCRATCH`; kept across restarts, removed on chat delete/janitor.
+- Janitor (`janitor.ts`) is the ONLY cleanup (no host cron); removes a temp entry only if unchanged and unreferenced by process/chat; doubt keeps; never `<tmp>/jiti`.
+- Gate (`gate.ts`, `status.ts`): below 5 % free, new work gets 507 `disk_full`; steer/abort still pass so agents can be told to clean up.
+- Trap: in omp any extension `tool_call`/`tool_result` handler vetoes `task.speculativeLaunch`; `cody-disk-budget.ts` registers `tool_result` lazily.
+Details: docs/agents/disk.md
 
 ### Disk exhaustion is a first-class failure (`lib/disk-space.ts`)
-- The instance data dir is finite and often quota-capped (a ZFS dataset on
-  Unraid appdata). When it fills, npm dies with `errno -122` — EDQUOT, which
-  libuv has no name for, so npm prints "Unknown system error -122" and the
-  admin sees what looks like a Cody bug. `describeDiskError()` matches the
-  NUMERIC errno (-122 linux, -69 macOS) as well as EDQUOT/ENOSPC text,
-  because the unnamed form is the one that actually shows up.
-- Engine installs preflight both filesystems they touch — the tools prefix AND
-  the npm cache (`$npm_config_cache` else `$HOME/.npm`), which are frequently
-  different mounts and where the cache is the one that filled in the field.
-  Unreadable free space NEVER blocks an install: unknown is not empty.
-- `/api/info` serves `storage` for the agent dir and the Info panel turns the
-  row warning-colored under 2 GB, so the condition is visible before it bites.
-- **The preflight threshold is measured, not fixed.** npm updates a package by
-  renaming the old tree aside and unpacking the new one, so an update needs
-  room for BOTH. omp is ~1.4 GB installed (two ~160 MB native addons among the
-  rest), which a flat 512 MB floor waved straight through into the failure it
-  existed to prevent. `requiredFreeBytes()` measures the installed tree and
-  demands `size + 256 MB`, falling back to the floor only for a first install
-  or an unmeasurable tree.
-- **An interrupted install poisons every later one.** npm leaves its
-  rename-aside tree (`@scope/.name-XXXXXX`) behind, then tries to rename onto
-  that exact path next time and fails `ENOTEMPTY` forever — one out-of-disk
-  install permanently blocked updates on a real instance until the directory
-  was deleted by hand. `cleanStaleInstallDirs()` sweeps them before every
-  install, matching npm's pattern for that package only.
-- **npm exiting 0 is not proof the engine runs.** A disk-full install left a
-  TRUNCATED native addon that loaded fine as a file and then killed the
-  process with a Bus error on every invocation — Cody had reported the engine
-  as installed. Installs now probe `<binary> --version` before reporting
-  success and fail with the probe's own error otherwise, which also surfaces
-  the revert affordance.
-- **Trap — `formatBytes` lives in `lib/format-bytes.ts`, not `disk-space.ts`.**
-  The latter imports `node:fs`; a CLIENT component importing from it pulls
-  `fs` into the browser bundle and fails the build with "Can't resolve 'fs'".
-  Typecheck and unit tests both pass — only `next build` (or loading the page)
-  catches it.
+- Full disk = npm `errno -122` (EDQUOT); `describeDiskError()` matches the number. Preflight checks tools prefix AND npm cache; unknown space never blocks.
+- `requiredFreeBytes()` = installed size +256 MB; `cleanStaleInstallDirs()` unblocks updates; probe `--version` (npm exit 0 ≠ working).
+- Trap: `formatBytes` is in `lib/format-bytes.ts`; client import of `disk-space.ts` pulls `fs`, breaking only `next build`.
+Details: docs/agents/disk.md
 
 ### Checkpoints must never snapshot a home directory or Cody's own state
-- Shadow repos live under the AGENT dir, keyed by a hash of the workspace
-  path. Two consequences bit a production instance hard:
-  - A session that opened `/data/home` as its workspace grew a **3.5 GB**
-    shadow repo out of `.npm`, `.gradle` and a node_modules tree — those roots
-    carry no `.gitignore`, so nothing was excluded. `isUncheckpointableRoot()`
-    now refuses home, filesystem roots, and the agent/data dir (which would
-    otherwise feed on its own output). Refusal returns null, the established
-    "no checkpoint here" answer every caller already tolerates.
-  - `checkpoints.test.mjs` created workspaces in `/tmp` but the shadow repos
-    followed `getAgentDir()`, so every test run inside the container leaked
-    into live appdata — **465** stale `cody-ckpt-*` repos. The test now sets
-    `PI_CODING_AGENT_DIR` to a temp dir BEFORE importing the module. Any test
-    touching agent-dir state must do the same.
-- A second production failure was /data/home/LumaShow: it is not a git repo,
-  has no .gitignore, and contains about **4.3 GB** of untracked files (including
-  a ~1 GB Android NDK under tools/, 148 MB of tarballs under downloads/, a
-  538 MB disk image under backups/, and Rust target/ trees). Every 15-second
-  git add -A timeout left another 400–530 MB temporary pack/object behind:
-  **52 leaked packs used 21 GB**, and there were **zero successful checkpoints**.
-  Each send waited 15 seconds or longer before reaching the agent.
-- New shadow repos exclude common dependency, compiler and cache dirs:
-  node_modules/, target/, .gradle/, .venv/, venv/, __pycache__/,
-  .pytest_cache/, .mypy_cache/, .ruff_cache/, .next/, .nuxt/, .svelte-kit/,
-  .vite/, .output/, .turbo/, .cache/, dist/, and coverage/. NOT `build/`: in
-  plenty of projects that name holds source, and an excluded directory quietly
-  drops out of every undo snapshot.
-  Each snapshot measures untracked files and excludes files larger than 20 MB using
-  escaped, workspace-root-anchored literal patterns in the shadow repo's info/exclude.
-  Those per-file rules are regenerated every time, so a file that shrinks can be
-  captured later. Never exclude tracked files that grow; restore must be able to
-  put those back.
-- Sends spend at most 14 seconds on a snapshot. A timeout returns null and starts
-  one low-priority warm-up (up to 10 minutes); further sends skip immediately
-  while it runs. Restore uses the same per-workspace queue and waits for that
-  warm-up. If it fails, cody-backoff.json skips snapshots for six hours; a later
-  successful snapshot clears the marker.
-- After a timed-out git process is killed, temporary tmp_pack_*, tmp_obj_*, and
-  the fresh index.lock it left are removed. The first shadow-repo use in each
-  process also sweeps those leftovers and removes an index.lock older than the
-  snapshot timeout.
+- `isUncheckpointableRoot()` refuses home, fs roots, agent/data dir (returns null) — a home workspace made a 3.5 GB shadow repo.
+- Tests touching agent-dir state MUST set `PI_CODING_AGENT_DIR` to a temp dir BEFORE importing the module (465 leaked repos).
+- Exclude dependency/cache dirs and files >20 MB, NOT `build/`, never tracked files; on failure `cody-backoff.json` skips 6 h.
+Details: docs/agents/disk.md
 
 ### Two kinds of branching — don't confuse them
-- **Fork** (Fork button on user message): creates a new independent `.jsonl` file. Shown as a child in the sidebar tree via `parentSession` header field.
-- **In-session branch** (Continue button / BranchNavigator): navigates the entry tree within the same file. Multiple entries share the same `parentId`. Switching between them calls `/api/sessions/[id]/context?leafId=`.
-- **Fork from here** (footer of a reply, omp 18.4.11+): omp's own `fork {entryId}`, sent as the web command `fork_session` (never `fork`, which is `branch` above). It KEEPS everything through that reply (a cut inside a tool-call batch is extended through its results) and the artifacts; this live process moves onto the new file like a branch, and the page follows through `onSessionForked`. `parentSession` is the parent's file path.
-- **Duplicate chat** (a session row's menu, ⌘K): `fork_session` with no entry, a whole-chat copy (`parentSession` is the parent's bare id; the sidebar links both forms). It works on a chat with no live child — the route starts one first. omp only forks an IDLE chat, so the wrapper refuses up front while it is running and omp's own `session_busy` reads the same (`fork.busy`); the controls are disabled or hidden while it works. An `Unknown command`/`unsupported` answer hides both for the page (`lib/fork-session.ts`); pi and ACP never offer them (`useForkAvailable`: omp only).
+- Fork = new independent `.jsonl` (`parentSession`); in-session branch = same file, shared `parentId`, via `/api/sessions/[id]/context?leafId=`.
+- Fork-from-here is web command `fork_session`, never `fork` (that's `branch`); omp forks only an IDLE chat.
+Details: docs/agents/session-runtime.md
 
 ### ToolCall field normalization
-Sessions store toolCall blocks as `{type:"toolCall", id, name, arguments}` but `ToolCallContent` uses `{toolCallId, toolName, input}`. `normalizeToolCalls()` in `lib/normalize.ts` handles this — called in both `session-reader.ts` (file load) and streaming event handling.
+- Stored `{type:"toolCall", id, name, arguments}` differs from `ToolCallContent` `{toolCallId, toolName, input}`.
+- `normalizeToolCalls()` in `lib/normalize.ts` converts — call it in `session-reader.ts` (file load) and streaming handling.
+Details: docs/agents/session-runtime.md
 
 ### Event protocol differences vs pi
-omp emits no `prompt_done` / `prompt_error` / `compaction_start` /
-`compaction_end` events. Completion is `agent_end` (`isTerminal !== false`),
-and errors surface as failed RPC responses plus `notice` events.
-omp 18.4.4+ DOES emit `queue_update {steering, followUp}` (queued message
-TEXT, only when the snapshot changes) and `get_state.queuedMessages`;
-`queuedMessageCount` still also counts advisor cards and next-turn messages
-that the text lists leave out. Cody's queue rows come from its own delivery
-ledger, which works on every omp, so these are forwarded and not rendered.
-New frame types (`turn_start/end`, `notice`, `todo_reminder`, ...) must be
-handled or safely ignored: `cache_warming_start/end` (idle prompt-cache
-refresh) are forwarded without touching state; a `notice` may carry a
-`source` — `session-persistence` at `warning` means the live session moved to
-a new file (see "RPC session lifecycle"), at `error` a persistence failure;
-`agent-end` a failed post-turn maintenance. `extension_ui_request`
-`method:"ask"` is a structured multi-question dialog (answered with `answers`,
-or `cancelled`; from omp 18.18.3 only an extension's `ui.askDialog` sends it, the model's own `ask` walks `select`/`input`/`editor` requests), and `method:"cancel"` retires an expired dialog.
-**Mount notices are for the model, not the person.** omp announces `xd://`
-tool roster changes twice: a `notice` (`source: "xdev"`, text
-`xd://: mounted …; unmounted …`) and, persisted, an `xdev-mount-notice`
-custom message whose `content` is a model prompt (`<system-notice>` plus every
-tool's description) and whose `details` is `{added, removed}`. A fresh child
-mounts every Cody host and browser tool, and from omp 18.7 the persisted one
-is written for that spawn-time roster too, before the first user message.
-Only an MCP server's tools (`mcp__*`) changing is news: `describeMcpMountChange`
-(lib/mount-notice.ts) words the toast from `details`, and the `notice` path
-drops every non-MCP line. Never toast the message `content`.
-
-- **Manual compaction frames.** omp 18.13.3+ emits `manual_compaction_start` / `manual_compaction_end` for every manual compaction (typed `/compact`, extension, another tab). `hooks/useAgentSession.ts` shows the "compacting" banner from `manual_compaction_start` and settles from `manual_compaction_end` ONLY when this page has no `compact` request in flight (`compactRpcInFlightRef`); the page's own request still settles from its command response. Older engines send neither frame, so the page's own button behaves exactly as before.
-- **Edit rejections (stale-tag edit failures).** omp 18.19 marks a rejected `edit` tool result with `details.errorKind` (e.g. `stale tag`). `lib/session-reader.ts` keeps `errorKind` on tool-result details; `MessageView.getEditRejectionReason()` shows it as an "error · stale tag" chip on the tool card; `countEditRejections()` in the hook totals them into `SessionStatsInfo.editRejections` (`lib/pi-types.ts`) which the Session stats list in `AppShell.tsx` renders as "Edit rejections". Absent on 18.8.3 → nothing shown.
-- **Shell output notes (`lib/bash-output-meta.ts`).** `bashOutputNotes(meta)` turns omp 18.17+ bash result metadata (`elidedLines/elidedBytes`, `columnTruncatedLines`/`columnLimit`, `minimized`) into a typed list of notes; `BashExecutionView` in `MessageView.tsx` renders them under the card (`messageView.bashNote*` i18n keys) so a trimmed command output says it was trimmed instead of looking complete. `BashExecutionMessage.meta` carries the metadata (`lib/types.ts`). Nothing renders when the engine sends no metadata (18.8.3).
-- **Narration blocks (assistant thinking with `narration: true`).** omp 18.12+ on Anthropic/Bedrock marks thinking blocks that are really prose to the user (`ThinkingContent.narration`, `lib/types.ts`). They are answer text, never thinking: `lib/message-display.ts` `isFinalAnswerBlock` counts them as answer and `groupHasThinking` does not count them as thinking; `MessageView.BlockView` renders them with `TextBlock` (never the collapsed thinking box) and `isLiveText` treats them as unboxed text; `lib/session-reader.ts` does not defer them when thinking is deferred; `ChatWindow.hasFinalAssistantAnswer` treats a non-empty narration as a final answer. Live frames carry whole message snapshots, so the flag arrives with the block. Engines without the field never set it, so behaviour there is unchanged.
-**Notes for maintainers (omp 18.19 catch-up).**
-- `agent_end` rewriting in `rpc-manager.handleFrame` only applies when `event.isTerminal !== false`: 18.19 sends `isTerminal:false` for an end followed by a continuation (steer, auto-retry), 18.8.3 always sends `true` (or omits it). Do not "simplify" it to always rewrite.
-- Engine builtin slash commands (`/unpin`, `/forget-approvals`, …) appear in the palette automatically (grouped as `engineBuiltin` in `ChatInput`); no per-command Cody code.
-- Checked and left alone: `queue_update.liveSteered` (Cody never reads `queue_update`; `withdrawQueued`/`steerNow` already settle by trying the command and reading its boolean), `resumedToolCallIds` on `ready` (ignored; run-recovery's text nudge works on both engines), `live_connect` / `dictation_*` frames (the server has no microphone or WebRTC peer; `handleEvent` has no `default:` so unknown frames fall through harmlessly).
+- omp has no `prompt_done`/`prompt_error`/`compaction_start`/`compaction_end`; completion is `agent_end`, errors are failed RPC responses plus `notice`. Handle or ignore unknown frames.
+- `agent_end` rewrite in `rpc-manager.handleFrame` only when `isTerminal !== false` (false = continuation: steer, auto-retry); never simplify.
+- Mount notices are for the model: only `mcp__*` changes are news (`describeMcpMountChange`); never toast message `content`.
+Details: docs/agents/session-runtime.md
 
 ### Todo reminder: quiet, and never over a question
-omp auto-continues an unfinished todo list after a terminal turn (unless its
-own last-line check says the agent asked something) by appending a
-`role:"developer"` message wrapped in `<system-reminder>` and emitting
-`todo_reminder`. Cody cannot stop the append, so it handles both halves:
-- **Pause when the agent asked the user.** `lib/reply-question.ts`
-  `replyAsksUser` scans every prose line of the last reply — questions, line
-  start cues, hand-offs anywhere in a sentence ("…, then tell me", "let me
-  know", "say \"next\"", "your call", "want me to", "should I"), and a
-  user-action section ("What you need to do:", "Your turn", "Next step for
-  you", "Action needed") that has real content under it. A section that
-  says "nothing"/"none" does not count; fenced/inline code, quoted text and
-  self-directed lines ("I'll tell the agent…") are ignored. rpc-manager's
-  `todo_reminder` case aborts the continuation on a hit and emits the info
-  notice ("Waiting for your reply — the agent's task list is on hold.").
-  Bias: a false pause costs the user one "continue"; a miss lets the agent
-  run on as if they had answered — keep new cues tied to a boundary (line
-  start, sentence punctuation, "and/then/please") so mid-clause mentions
-  don't fire.
-- **Render it as a slim row, not a bubble.** `lib/system-reminder.ts`
-  `foldSystemReminder` turns an omp developer message that is entirely a
-  `<system-reminder>` into a `custom` message: `customType:"todo-reminder"`
-  (todo reminders, `details` = `{count, attempt, max, items[{text,depth}]}`)
-  or `"engine-note"` (any other reminder, e.g. tool-use). It runs at BOTH
-  boundaries — `entryToUiMessage` (session-file load) and the live
-  `message_end` branch in `hooks/useAgentSession.ts` — so the row is the same
-  live and after reload. `MessageView`'s `EngineReminderRow` shows one
-  collapsed line ("Reminded the agent about 26 open tasks (2 of 3)") with a
-  chevron to expand the list; it is hidden in the "hidden" activity mode. Any
-  other developer message (e.g. the post-compaction "Resume…" nudge) keeps the
-  plain labelled bubble. A `custom` message with `display:false` (omp's
-  hidden extension messages, e.g. the `eager-todo-prelude` nudge) is the
-  engine talking to the MODEL, so it renders as the same collapsed "Engine
-  note" row, never as a bubble.
+- omp appends a `<system-reminder>` and emits `todo_reminder`; Cody cannot stop it, so `replyAsksUser` (`lib/reply-question.ts`) aborts the continuation when the agent asked; tie new cues to boundaries.
+- `foldSystemReminder` renders a slim row at BOTH `entryToUiMessage` and live `message_end`; `display:false` messages are "Engine note" rows, never bubbles.
+Details: docs/agents/turn-flow.md
 
 ### Live plan keeper (`lib/plan-keeper/`)
-
-**Live plan keeper (`lib/plan-keeper/`).** One `PlanKeeper` per live rpc
-session, created by `RpcSession.getPlanKeeper()` and fed from `handleFrame`:
-`tool_execution_start` (args) and `tool_execution_end` (result), assistant
-`message_end`, hidden `custom` messages of type `async-result`,
-`launch-completion` and `rewind-report`, `subagent_lifecycle` terminal states,
-`turn_end`, `agent_start` and `auto_compaction_end` (`notifyListRebuilt`), and
-the terminal `agent_end`. It keeps a numbered activity log (60 entries, 16,000
-characters; a tool entry is `tool (intent · command) => head … tail of the
-result`, engine boilerplate removed) and asks omp's `smol`, then `tiny`, then
-the engine default (through `runOneShotModel` in the isolated one-shot agent
-dir, 45 s limit) which open tasks the log proves finished. Pace: 2 s debounce,
-30 s between model calls during a turn, an immediate pass at turn end, never two
-at once, one retry after a failed call. The model answers
-`{done:[{id,entry,quote}], subtasks, subtasksDone, labels, summaries}`; tasks
-are named by id (`T1`…), and `evidence.ts` decides what is applied: the id or
-one clearly closest rewording, the quote found in the log (the cited entry
-first; a single word only there), and for
-verify/test/gate/publish/release/deploy tasks a pass or a push in that entry
-with no later failure of the same check. Proof must be newer than the task
-(`taskSince`).
-
-A tick is written to the engine with `set_todos` AND recorded in
-`cody-plan/<sessionId>.json` (`autoCompleted`, keyed `phase\0task`). The engine
-keeps `set_todos` in memory only and rebuilds its list from the session file
-after a compaction, restart or rewind, so `syncEngine` runs first in every pass
-and on `notifyListRebuilt` to put ticks back. Rules that must hold: read the
-list fresh immediately before writing; change only the status of the tasks being
-ticked; never reorder; when the agent's own `todo` call lands around a write,
-rebuild on its result (`rebaseOnto`); the agent's `todo` results, read off the
-wire in `noteAgentTodo`, withdraw a tick the agent reopened, removed, re-added
-or re-planned. Every list Cody serves applies the overlay (`applyPlanOverlay` in
-`buildWebState` and `GET /api/sessions/[id]`). `fold.ts` is pure and shared by
-server, browser and keeper: `buildPlanView` lays the list out (phase headings
-with counts, current phase open, finished phases one line, folds of 3+ finished
-tasks once a phase has more than 8 done or the list more than 15 rows, at most 3
-per phase, never an open task) and `planFoldsToSummarise` names the folds that
-still need their line. The overlay also holds `labels` (short text for tasks
-over 60 characters) and `folds` (summary and task count, keyed by the fold's
-first task). The keeper fails soft: any failure applies nothing. Tests:
-`lib/plan-keeper.test.mjs`, `components/TodoList.test.mjs`.
-
-omp 18.19.0 removed the todo status `blocked` and the `blocker` text; it reads an
-old blocked task back as `pending`. Cody keeps accepting both (`TodoItem` in
-`lib/pi-types.ts`, `parseTodoPhases` in `lib/session-reader.ts`, the plan keeper
-and `TodoList`) because omp 18.8 still sends them and old chat files contain
-them; 18.19 simply never produces one. The keeper already treats `blocked` as an
-ordinary open task, so nothing in it relied on a "blocked is untouchable"
-guard. `lib/plan-keeper-engine.test.mjs` runs the keeper's `set_todos` check-off
-against a REAL engine (`CODY_OMP_BIN`, scripted local model server, throw-away
-agent dir) and covers both versions: an engine restart keeps the tick on 18.12.4+
-(the engine saves `set_todos` edits as a `user_todo_edit` entry) and loses it
-on older engines (the keeper puts it back), and a list holding a blocked task
-is accepted on both.
+- Small model proposes done tasks; `evidence.ts` decides (quote in log, newer than task). Fails soft. Ticks go via `set_todos` AND `cody-plan/<sessionId>.json`.
+- Engine keeps `set_todos` in memory only — `syncEngine` re-applies ticks first each pass; read list fresh, change only status, never reorder.
+- Serve lists through `applyPlanOverlay`; keep accepting `blocked` (omp 18.8, old chats still have it).
+Details: docs/agents/turn-flow.md
 
 ### Approval prompts: inline, and the agent owns the buttons
-- An ACP engine (`lib/harness/acp-session.ts`) can stop mid-turn and ask
-  permission. The turn GENUINELY blocks on the answer, so the card is not a
-  notification — it is the only way that turn ever finishes.
-- Frames: `permission_request` {requestId, toolCall, options} adds a card,
-  `permission_resolved` {requestId, outcome} removes it. Resolution is emitted
-  for EVERY settlement — this browser, another tab, an abort, the turn ending,
-  the session dying — so it is the single removal path.
-  `respond_permission` answers; `{answered:false}` means it was already gone.
-- **`get_state.pendingPermissions` is the reload path, and it is not optional.**
-  The request event fired before the reloaded page existed, so state is the
-  only place the open approval can still be found; without adopting it a
-  blocked turn renders as a session that waits forever with nothing to click.
-  It is adopted in `loadSession` (which needs no run in flight) AND in
-  `reconcileAgentState` — there it must be read BEFORE the busy early-return,
-  because a turn blocked on an approval is precisely a busy turn.
-- **Render the agent's own options, in its order. `kind` is a styling hint,
-  never an identity.** An agent can send five options with TWO sharing
-  `kind: "allow_always"` ("Allow for session" and "Allow always") — ACP has no
-  session-scoped kind. Deduping, grouping or reordering by kind deletes a real
-  grant. `optionId` is the identity (and the React key), `name` is the label
-  and is passed through untranslated: it is the only thing separating two
-  options that share a kind.
-- Styling says two things and no more: allow vs refuse (allow_once is the one
-  filled primary; refusal is the quiet secondary, because refusing is safe),
-  and durable vs one-shot (`*_always` carries a "Remembered" badge and is
-  never the filled button, so a lasting grant cannot be a one-click accident).
-- The double-click latch is a **ref**, not the `disabled` state: two clicks
-  dispatched inside one task both read the pre-render state, and `disabled`
-  only reaches the DOM after React commits — measured sending three answers
-  through a state-only guard.
-- `toolCall` is whatever the agent sent. One engine builds a different payload
-  for a shell command than for a file edit, and `title`/`kind` are both
-  optional, so every field is read defensively (`lib/permission-request.ts`)
-  and an unrecognised kind renders verbatim rather than as a missing i18n key.
-- **omp 18.4 - 18.18.2: the `ask` dialog is ONE form, not a series.** From 18.18.3
-  this `ask` request is sent only for an EXTENSION's `ui.askDialog`. After the wrapper
-  sends `set_ask_dialog`, omp emits `extension_ui_request` `method:"ask"` with
-  `questions[]` (`recommended` is an INDEX; omp never sends an "Other" option,
-  so the form always adds a free-text field). `components/AskDialogForm.tsx`
-  renders every question together inside InputDock; the answer builder and
-  validity rules live in `lib/ask-dialog.ts` (tested). omp THROWS on a bad
-  answer set (wrong count/id, unknown or repeated label, single-select with
-  more than one answer), which fails the agent's tool call — so the form keeps
-  every draft valid by construction and Submit stays disabled until every
-  question has a selection or non-blank custom text. Reply is
-  `{answers:[{id,selectedOptions,customInput?}]}` in question order, or
-  `{cancelled:true}`. Typing "Other" on a single-select clears the radio and
-  picking a radio clears the text; multi-select keeps both. A reconnect replays
-  the request with the same id, so the InputDock-keyed form keeps its draft.
-- **omp 18.18.3+: the model's `ask` is one HTML `<form>` that RPC walks field by field** with ordinary `select` / `input` / `editor` requests (the same frames in `docs`: `select` "Which color?" [..., "Other (type your own)"]; a multi-choice field is asked again after every tick as `select` "(N selected) <question>" with a "✔ Done selecting" row; notes are an `editor` titled "Notes", no timeout). omp sends no tick state, so Cody rebuilds it: `lib/ask-walk.ts` (`createAskWalkTracker`: `observe`, `reply`, `withdrawn`) recognises a step by its "(N selected)" title and its Done / Other rows, remembers the ticks the user made, and marks the `select` request with a `walk` view. `useAgentSession` feeds every dialog through the tracker; a tick keeps the dialog up in a "settling" state (`ASK_WALK_SETTLE_MS`, 5 s fallback) because omp asks again under a new request id. `InputDock` keys a walk card by the question (`walk:<question>`) so a whole checkbox field is one card that keeps its focus. `ExtensionDialog` shows checkboxes (`role="checkbox"`, `aria-checked`), a hint line, "Done" as the primary button (it answers with omp's exact Done row), and an "Other" row that shows the line typed behind it. Preselected boxes omp never reports show as plain rows plus the count. Every answer is the exact row string omp offered; the screen wording is localised, omp's text is not. A dialog counts as the model's own (`fromAsk`) when it arrives while the `ask` tool is running and is not a tool approval (`dialogBelongsToAsk`).
-- **A message sent while an ask is open withdraws it (omp 18.14.2+).** omp sends a `cancel` for the open dialog and the tool result is "Ask interrupted by message". The tracker drops the walk on that `cancel`; `InputDock` shows a warning (`inputDock.askWithdrawn`) on engines where `askWithdrawnByMessage(version)` is true (version via `hooks/useEngineVersion.ts`, unknown version = no warning). A half-typed answer is not kept.
-- **`secret: true` inputs (omp 18.13.2+).** An `input` request with `secret: true` renders as `type="password"` with `autoComplete="new-password"`, autocapitalize/autocorrect/spellcheck off and the `data-1p-ignore` / `data-lpignore` / `data-bwignore` hints. Only extensions issue it today (omp refuses secret provider logins over RPC). Types: `secret?: boolean` on the input request in `lib/types.ts` and `lib/pi-types.ts`.
-- Text fields (input / editor, masked or not) take the focus when the dock opens (`data-input-autofocus`).
-- **The `ask` transcript card.** An `ask` tool call renders its answers as question/answer rows (components/AskResultPanel.tsx, pure helpers in lib/ask-result.ts) instead of the raw args JSON. `askAnswersFromDetails` normalises both engines: omp 18.19 `details.answers/notes/timedOut` (one HTML form in `args.html`) and omp 18.8 `details.question|results` (`args.questions[]`). A `<input type="password" name=…>` field found in `args.html` has its answer shown as bullets (max 12), as omp's own TUI does; the result text (which carries the raw JSON) is hidden while the panel shows. History loads keep a BOUNDED whitelist of ask details (lib/session-reader.ts stripToolResultDetails → `keepAskToolResultDetails`: ≤50 rows, strings ≤4000 code points); extend that whitelist if the panel ever reads more. An errored or cancelled ask keeps the plain args + result text. Header preview: `askCallPreview` (first 18.8 question, else `i`, else the form's tag-stripped text).
+- ACP turn truly blocks on the card; `permission_resolved` is the single removal path; `get_state.pendingPermissions` is the reload path — adopt in `loadSession` and in `reconcileAgentState` BEFORE busy return.
+- Render agent's options in its order; `kind` is styling only, `optionId` is identity (two share `allow_always`) — never dedupe/reorder by kind.
+- Double-click latch is a ref, not `disabled` state (3 answers measured); read `toolCall` fields defensively.
+Details: docs/agents/approvals.md
 
 ### HomeLabber approvals in the chat (`lib/homelabber-approval.ts`, `components/HomelabberApproval.tsx`, `/api/homelabber`)
-- **What it is.** HomeLabber (the owner's homelab admin server, an MCP server
-  named `homelabber`) answers a tool call that needs his Face ID with a PENDING
-  request instead of acting; the HomeLabber app pings his phone, and after he
-  approves, HomeLabber runs the stored action itself. The agent follows with
-  `approval_wait {id}` until the request settles (`pending → approved →
-  executing → executed`, or `failed`, `denied`, `expired`, `cancelled`).
-  This is NOT the ACP approval prompt above: nothing here blocks the turn, no
-  button answers it, and Cody never approves anything. The card only shows the
-  state and links to where he approves.
-- **The pending answer arrives flagged as an error** (`ok:false` becomes the
-  MCP `isError`, so omp prefixes `Error: `), and so do `failed`, `denied`,
-  `expired` and `cancelled`. `ToolCallBlock` asks `useApprovalCard(block,
-  result)` first: a recognised approval draws its own tone (warning while
-  waiting or expired, accent while running, success when done, error for
-  denied or failed, neutral when cancelled or lapsed) and is never
-  auto-expanded as a failure. Everything else, a refusal such as "approvals
-  are paused" included, keeps the red error card. The raw JSON and result stay
-  one chevron away.
-- **Recognising the call** (`homelabberCall`): `mcp__homelabber_<tool>` (omp),
-  `mcp__homelabber__<tool>` (Claude Code), and omp's `write` to
-  `xd://mcp__homelabber_<tool>` with the JSON arguments in `content` — omp
-  mounts MCP tools as `xd://` devices, so that is the usual spelling in a
-  Cody chat. Any HomeLabber tool can be gated, so the tool id is no allow-list.
-- **Reading the answer** (`parseHomelabberApproval`): live `structuredContent`
-  is authoritative, including nested device results. Reloaded transcripts retain
-  flattened data JSON; its outer object is parsed without treating command output
-  or prose as an approval. Untrusted fenced data must be one complete JSON object.
-  Diagnostic section output is never treated as an approval. Shapes:
-  pending `data.approval = {id, status, expiresAt}`; `approval_wait`
-  `data = {id, status, expiresAt?, items[{seq, tool, status, message,
-  changeId}]}`. Any `waitSeconds` is fine — the answer's `status` decides,
-  never the arguments. An id is `[A-Za-z0-9_-]{8,64}` because it goes into URLs.
-  A replay of a gated call may carry a later durable state including `uncertain`;
-  list tools are not request cards. `uncertain` means inspect state, never repeat.
-- **`items[].data` is never read.** HomeLabber returns a tool's own result
-  data once in that field (an issued SSH certificate, say). The parser does not
-  copy it, so no card can print a secret; the expanded raw result shows what
-  any tool's result shows.
-- **One state per request id, shared by context.** `buildApprovalIndex`
-  folds every HomeLabber call into the latest `ApprovalState` per id (a request
-  only moves forward: a late `pending` poll never undoes `approved`), and
-  `HomelabberApprovalProvider` (ChatWindow, around the transcript) publishes it
-  with the SAME identity until a request really changes — a chat with no
-  approvals, nearly every chat, never re-renders for it. The gated call's card
-  follows the index; an `approval_wait` poll only labels itself (a header chip)
-  with what it saw, so five polls are not five cards. It is a context, not a
-  prop, because `MessageView`'s memo re-renders a message only for ITS OWN tool
-  results and the poll that says "done" lives in a later message. The subagent
-  transcript has its own provider, scoped to its own rows; the sidebar has none.
-- **Agent procedure:** `lib/omp/extensions/cody-homelabber-gate.ts` is loaded by
-  Cody on main omp launches and inherited by delegated omp sessions. Its
-  `before_agent_start` appends the same gate procedure to their runtime prompts.
-  Caller tokens may be shared; listing a grant is not proof of agent ownership.
-  Guidance grants no authority and does not override Principle 0.
-- **The row** (`ApprovalStatusRow`, under the header, outside the collapsible
-  panel): a lock, "Waiting for your Face ID in HomeLabber", a live countdown to
-  `expiresAt` (one 1 s ticker per WAITING card, nothing else ticks), "Open
-  HomeLabber" → `homelabber://approve/<id>` (opens the app when Cody is open on
-  the phone; filled on touch devices, outlined elsewhere) and "Details in HomeLabber"
-  → `<base>/approvals/<id>` in a new tab. When `expiresAt` passes with no later
-  answer the card flips ONCE (a single timer) to a neutral "approval window has
-  closed": Cody cannot know whether he answered after the agent stopped
-  polling, so only HomeLabber's own `expired` ever says expired.
-- **Hidden activity** keeps the gated call (its raw result is an error, which
-  that mode already shows) and hides quiet polls like any other call.
-- **A folded turn stays open while an answer is owed.** Once a turn ends, its
-  tool calls fold into the collapsed "Process details" group, which would bury
-  a request still waiting on his Face ID together with the link that answers
-  it (seen in the first browser pass: a settled chat showed the user message
-  and one closed group). `ProcessDetailsGroup` takes `waitingUntil`
-  (`latestWaitingDeadline`: the latest `expiresAt` among the group's requests
-  whose state is still `pending`, null when none or when no epoch is known)
-  and opens while that is in the future. It STAYS open when the window closes
-  or he answers — the card changing under a reader is the news, a group
-  vanishing is not — until he toggles it or the page reloads; a reload folds
-  it again, because a closed window holds nothing open. A manual toggle always
-  wins.
-- **Trap — "has the deadline passed" must not re-arm itself.**
-  `useDeadlinePassed` keeps the last time it looked in state and arms ONE
-  timer for the deadline (`deadlineCheckDelay`, null once the look is past the
-  deadline). The first version re-read the clock in an effect keyed on that
-  same state, so a card whose window had already closed set state on every
-  run and React threw "Maximum update depth exceeded" — no unit test and no
-  static render shows an effect loop; a real browser's console did.
-- **The base URL** is `GET /api/homelabber`: `CODY_HOMELABBER_URL`, else the
-  ORIGIN of the `homelabber` server in omp's user-level `mcp.json` (omp only;
-  never headers, path, query or userinfo — an MCP URL can itself be a
-  credential), else `https://homelabber.nateshome.net`. An IP address or
-  `localhost` is rejected (`homelabberBaseFromMcpUrl`): it is a
-  machine-to-machine address, not where his phone is signed in. **Trade-off:**
-  that default is the owner's own hostname, chosen by him, against "never ship
-  the owner's environment" above. It is only reached by a chat that already has
-  a `homelabber` MCP tool call, and `CODY_HOMELABBER_URL` (or a hostname-based
-  MCP URL) replaces it, but another install with a HomeLabber of its own MUST
-  set one of those or its backup-code link would point at the owner's server.
-- **Trap — MCP timeout.** omp gives every MCP `tools/call` a 30 s deadline
-  (`OMP_MCP_TIMEOUT_MS`, else the server's `timeout` in mcp.json, default
-  30 000 ms; `src/mcp/timeout.ts`, applied by `transports/http.ts` to the whole
-  POST), so a 45–50 s `approval_wait` dies with "Request timeout after
-  30000ms". HomeLabber's `approval_wait` therefore takes `waitSeconds` 0..28
-  (default 25). Cody does not touch MCP configuration.
-- Strings are `homelabberApproval.*` in all three locales. Tests:
-  `lib/homelabber-approval.test.mjs` (parser, index, links, base rules),
-  `components/HomelabberApproval.test.mjs` (the card),
-  `lib/homelabber-route.test.mjs` (the route).
+- Card shows state/links only; Cody never approves. Pending/denied arrive as errors; `useApprovalCard` draws recognised approvals, others stay red.
+- `parseHomelabberApproval`: live `structuredContent` rules; never read `items[].data` (secrets); `uncertain` = inspect, never repeat.
+- Past `expiresAt` card says "approval window has closed"; only HomeLabber's `expired` says expired. `useDeadlinePassed`: ONE timer only.
+- omp MCP timeout 30 s: `approval_wait` `waitSeconds` 0..28. Other installs MUST set `CODY_HOMELABBER_URL`.
+Details: docs/agents/approvals.md
 
 ### Long tool calls narrate themselves
-- `tool_execution_update` frames are handled, not dropped: the newest text
-  line a tool streams about itself lands on the running-tool state
-  (`RunningToolInfo.statusText`), and `tool_execution_start` stamps
-  `startedAt`. The chat status line and the pending-tool headers append that
-  line plus an elapsed clock once a call runs past ~8s
-  (`LONG_TOOL_THRESHOLD_MS`, ChatWindow).
-- The motivating case: omp's `gh` tool `run_watch` — usually invoked as a
-  `write` to the `xd://github` tool device — blocks for an entire GitHub
-  Actions run while polling (3s then 15s intervals), streaming a "Watching
-  GitHub Actions Run #N" snapshot per poll. Without the update wiring that
-  call renders as a frozen "write xd://github" for many minutes and reads as
-  a hang. Contract-tested in `hooks/useAgentSession.test.mjs`.
-- **Trap — the ticking clock must not ride the crossfade.** The status line
-  renders through `StatusTextCrossfade`, which re-animates on ANY text
-  change; folding the per-second elapsed tick into that string made the
-  whole line flicker every second. The clock renders as a plain sibling span
-  (`phaseElapsed`, tabular digits); only real status changes crossfade.
+- `tool_execution_update` text goes to `RunningToolInfo.statusText`; past ~8 s (`LONG_TOOL_THRESHOLD_MS`) status adds it plus elapsed — else `run_watch` looks hung.
+- Trap: elapsed clock = plain sibling span, never inside `StatusTextCrossfade` text (per-second flicker).
+Details: docs/agents/session-runtime.md
 
 ### Composer model + tools controls
-- **Smart model row**: the model dropdown's pinned first row is labeled
-  exactly `Smart`; engine roles and the resolved model are intentionally not
-  appended. It is the labeled face of auto model selection. A NEW session with
-  no explicit pick sends no `set_model`, so omp resolves `modelRoles.default`
-  (the saved plan); Smart re-selects that state (`selectSmartModel()` clears
-  `newSessionModel`). On a live session it resolves the configured default
-  role to a concrete model client-side and pins it (omp's `set_model` RPC
-  takes exact provider/model — no role aliases). Picking any named model pins
-  it and OMP roles stop applying to that session's main turns.
-- **Smart-ness survives the pin** (`smartPinnedModel` in useAgentSession):
-  both a live Smart pick (`markSmartPinnedModel`) and the engine's own
-  resolution of a Smart spawn (`pendingSmartSpawnRef`, claimed by the first
-  authoritative model) record the pin as Smart's answer, id-scoped to their
-  session — loads and reconciles reuse `loadSession`, so a reset there would
-  wipe it mid-conversation. The composer keeps the label `Smart` while the
-  running model still matches; it does not append that model to the label. The
-  Advisor indicator is ShieldCheck, never Sparkles: Sparkles is the Smart glyph,
-  and an accent sparkle beside the model name read as "auto-picked".
-- **Display names and picker controls stay presentation-only.** `formatModelDisplayName()` in `lib/model-display.ts` is the shared display boundary for the composer, transcript, and usage surfaces; it may improve a catalog label but never changes the routing identifier. Fast remains beside the existing Composer model picker, and its adjacent Manage models gear opens Settings › Models. Only Smart is pinned; the ordinary named-model list has no sticky selection.
-- **Composer quota is model-scoped, but the popup covers the whole session.** The RING gauges the selected/live model: select usage windows for that model; a reported tier explicitly scopes its bucket even when it is also marked shared; only untiered buckets apply to the account as a whole. Render the raw engine-reported plan without inferring a `$tier` convention. Saved resets are a separate single summary that keeps explicit zero visible; only meaningful positive account rows expand it. Under Smart routing, subagents and fallback chains other providers consume quota in the same session, so `lib/session-active-models.ts` derives every model in use this run (live model, Smart resolution, each subagent's `resolvedModel`, fallback `to`, this run's assistant turns) and the popup renders their windows EXPANDED under "Also in use", each attributed to what uses it ("Subagent scout (research)", "Fallback for this conversation"); OpenRouter credits appear the same way when only a subagent rides that gateway. Limits nothing in the session touches stay in the collapsed "Other limits" section that says they cannot stop the selected model.
-- **The popover is a hierarchy, not a report** (`components/QuotaPopover.tsx`).
-  The owner runs several accounts per provider and many models, and the old
-  popover gave every fact equal weight: about 800 px of cards, pills and
-  explanation paragraphs over the transcript. The order is fixed:
-  1. The selected model, with its % used, and one meter for the BINDING
-     window (the tightest one on the serving account). Other windows get
-     one line each.
-  2. Accounts, only when there is more than one: one line each. "Use reset"
-     sits on a limited account's own row when that account holds a credit.
-  3. Also in use, one line each.
-  4. Saved resets and other limits, collapsed.
-  5. A one-line freshness footer.
-
-  Explanations live in tooltips, never inline, and colour marks state only.
-  The one thing allowed between the hero and its meter is the usage-limit
-  stage line (`usageLimit` prop, one ellipsised line, warning/error colour,
-  full sentence in its tooltip) and only while the account is past its limit.
-  About 320 px tall collapsed.
-- **Quota popover: what omp 18.19.0 adds, and what 18.8.3 still gets.** The quota ring's popover (components/QuotaPopover.tsx) words only facts the engine actually sent, so the installed 18.8.3 renders exactly as before and 18.19.0 adds lines. `buildQuotaView` is a thin wrapper over `buildQuotaViewCore`: it adds per-read facts (`refreshFailed`, `unreported`) to whichever view came out, and the per-account facts (`policy` + `showPriority`, `fiveHourIdle`, `windowsStaleSince`; helper `accountFacts`) sit on the hero view or on each `QuotaAccountRowView`. Every field exists only when it has something to say; nothing is invented for an engine that does not report it. All wording lives in lib/usage/quota-copy.ts (pure, takes `t`): `describeAccountPolicy` (the default policy says nothing; the priority is named only when another login of the same provider has a non-default one, `providerUsesPriority`), `isFiveHourIdle` (omp's `inactiveGates` contains `5h` AND no 5-hour window is reported), `describeWindowAmount` (`UsageWindow.amount`: "$5 of $20", "40 of 100 credits"; a window with no length, `windowMs` null, renders normally), `creditExpiryState` / `formatCreditDate` (a saved reset is "soon" within `EXPIRES_SOON_MS` = 48 h; the date is a clock time today, a weekday within six days, a plain "Dec 30" beyond), `describeCreditClears` (from the credit's `clears` ids such as `anthropic:7d:fable`; ids Cody cannot name are dropped, nothing nameable means no line). Footer: a failed refresh with an older good reading shows "Numbers from <read time> · refresh failed at <time>" (the reason, when omp wrote a readable one, is the tooltip), never "Updated just now"; an account carried over from an earlier read says "Quota as of <time>"; logins omp could not read are one muted line ("omp could not read the quota of N signed-in accounts"), counted by provider only, never by identity or email. A limited login's row has a tooltip that explains the fallback model; with no reset time it reads "Limited" (`usage.accountLimitedNoTime`), never a leaked "{time}".
-
-  Logins that cannot serve: `resolveModelAvailability` can answer `unavailable` (every login signed out or turned off). A login that ended gets the existing sign-in view (`signedOut` set, so the ring wears its dot and the popover its "Sign in again" button). A login omp turned off for any other reason gets `QUOTA_DISABLED`: warning colour and the words "Login turned off", but NO `signedOut`, so no dot and no sign-in button (the owner may have turned it off on purpose, and a sign-in is not the fix). The same holds with no model selected. `modelLimitReached` (the picker's "Limit reached" mark) stays exhausted-only: `unavailable` never marks or blocks a model in the picker.
-
-  Saved resets inside the popover: each credit line shows its end date, an "Expires soon" tag when it is within 48 h (the Saved resets header carries the same tag so it is seen without opening anything), a "Clears: …" line from `credit.clears`, and "Expired <time>" for one already past; when `snapshot.failedProviders` is set, a note names the provider(s) whose list could not be read, so a short list is not read as "none". Automatic spending (components/QuotaAutoSpend.tsx): `AutoSpendSection` is bound to the running engine's own settings schema (`useSchemaIndex`); `buildAutoRedeemGroups` (hooks/auto-redeem-controls.ts) offers exactly the keys that engine has: 18.19.0 gets one Ask / Spend / Never switch per limit (`<group>Resets.autoRedeem5h`, `autoRedeemWeekly`, and Claude's separate `claudeResets.autoRedeemFable` with a note that weekly consent does not cover it), 18.8.3 gets the single legacy `<group>Resets.autoRedeem`, an engine with none gets no switches, and nothing renders before the schema has loaded. "Ask" is written as `unset`, never by clearing the key (clearing would let an old single key flow back in). Writes use the same `setValue` the Settings panel uses, so the two can never disagree.
-
-  Tests (engine-independent, real `omp usage --json` fixtures of both engines in lib/usage/fixtures/): components/QuotaPopover.auth.test.mjs, lib/usage/quota-copy.test.mjs, hooks/auto-redeem-controls.test.mjs. Time assertions are timezone-agnostic on purpose (`\d{1,2}:\d{2}`, dates built from local-time parts).
-- **The ring says whose quota it is, and how old the reading is.** With more
-  than one account on a provider, every window label carries the account's
-  POSITION (`brandedAccountLabel` → "Claude · Primary · 5-hour window"), and
-  that label is what the ring's tooltip and the popover headline quote — so a
-  percentage can never be read as the wrong subscription's. The per-account
-  rows say `In use` / `Standby` and one line under them says what "in use"
-  rests on (this conversation's last reply, the most recent request, or an
-  expectation for a conversation that has not used the provider yet).
-- **Saved resets are read gently** (`lib/harness/reset-credits-cache.ts`).
-  omp discovers them live per account — for Claude up to three requests
-  each — and Anthropic rate-limits those endpoints per source address;
-  polling discovery from every tab's timer and focus event got every read a
-  429 and every Claude row "Failed to load saved resets". One process-wide
-  read now serves everyone for 10 minutes, a failed check backs off
-  (2→15 min), the popover's Refresh forces at most one live check a minute,
-  and a failed check keeps the account's last CONFIRMED balance
-  (`cody-reset-credits.json`, 0600) marked stale rather than erasing it.
-  Rows are named like the account list ("Claude · Primary"), never by the
-  org/email string omp reports.
-- **Saved-reset redemption (Claude and Codex).** Cody spends a saved reset through omp's own locked command when the installed engine has it, and through the old Bun helper otherwise. `redeemResetCredit` (lib/harness/reset-credits.ts) probes the engine once per binary and package version (`probeUsageResetSupport`: reads `omp usage --help` and checks the ACTION list for `reset`, no version-number compare; a failed probe is not cached and counts as unsupported). When supported, it hands the helper (bin/cody-omp-reset-credits.mjs) the omp binary; the helper first re-lists the account and refuses with `offer_changed` unless the grant the user chose is still the one omp will spend (`credits[0]`; omp's command spends the account's next credit and takes no credit id), then runs `omp usage reset <provider>/<credentialId>` (bin/cody-omp-reset-cli.mjs: fixed argv, no shell, `NO_COLOR=1`, 90 s timeout, `PI_CODING_AGENT_DIR` set). That command holds omp's cross-process lock (`<agent.db>.reset-<hash>`), so a Cody click cannot double-spend with a running omp. The command prints text, not JSON (`--json` only affects listing), so `parseUsageResetResult` maps exit code plus sentence to Cody's unchanged outcomes: `Reset applied for` with exit 0 -> `reset`; lock contention / lock timeout / "another omp process started spending" -> `reset_in_progress`; "another omp process spent" -> `already_redeemed`; nothing to reset, no credit, ineligible, offer changed, unconfirmed, cooldown, account unavailable, credit list failed -> their existing codes. Anything unrecognised, an exit 0 without the spend sentence, or a timeout is `inconclusive` (never reported as spent). If the binary cannot launch, the helper falls back to the direct storage call. Listing always stays on the Bun helper (works on every engine). The listing also carries each credit's `clears` (limits it refreshes, e.g. `anthropic:7d:fable` for the Fable launch reset) and `failedProviders` (a provider that did not answer; the other provider's accounts still show).
-
-  Fable (omp 18.19.0): a Claude launch reset that also clears the Fable weekly cap is an ordinary Claude credit whose `clears` includes `anthropic:7d:fable`; it appears in the normal saved-reset list. Whether it is spent automatically is the engine-side setting `claudeResets.autoRedeemFable` alone; nothing in the helper acts on it.
-- **Saved-reset auto-redeem settings (omp 18.18.7+).** omp 18.18.7 replaced `codexResets.autoRedeem` / `claudeResets.autoRedeem` with per-window `autoRedeem5h` / `autoRedeemWeekly` (Claude also `autoRedeemFable`). The engine copies a legacy value into 5h and weekly IN MEMORY only and leaves config.yml untouched, so the file alone reads "unset" while omp is already spending saved resets. `migrateLegacyAutoRedeem(data, schemaKeys)` in `lib/omp/settings-values.ts` mirrors that rule (nested `group.autoRedeem` wins over the quoted dotted key; boolean true/false becomes yes/no, strings carry over; a window key that is already set, nested or flat, is never overwritten; Fable is never filled). `readSchemaSettings` applies it, so the Settings panel, the quota popover and `/api/omp-settings/schema` all show what the engine acts on. It is gated on the engine's schema declaring BOTH window keys of a group, so 18.8.x values pass through untouched. One engine quirk is mirrored on purpose: when the legacy key is a quoted dotted key with no nested group beside it, omp fills a dotted key it never reads (checked on 18.19.0 with `omp config get`: "unset"), so Cody fills nothing there either; showing or writing "yes" would grant a new spending consent. `writeSchemaSettings` extends the one existing write: when the patch touches any `group.autoRedeem*` key and the legacy key is still in the file, it writes BOTH 5h and weekly with their migrated values, applies the patch, and removes the legacy key, all in the same atomic write; other keys are never touched. The Claude 5h / weekly / Fable rows carry the note "Fable is a separate consent: it is not copied from the old switch." (`SETTING_NOTES` in `lib/omp/settings-surface.ts`, listed in the test's `NOTE_SINCE` as 18.18.7). A legacy value that is not unset/yes/no is written as "unset". Tests: `lib/omp/settings-values.test.mjs` compares the migration with `omp config get` on the installed engine (run it with CODY_OMP_BIN against 18.8.3 and 18.19.0).
-- **Freshness is refreshed where it changes, and stated where it is read.** A
-  usage read happens on mount, on a session switch, when the popover OPENS,
-  on an explicit Refresh in the popover footer, and — the one that matters —
-  on the falling edge of a run (`isStreaming` true→false in `ChatInput`),
-  because a turn ending is the only moment the numbers provably moved. The
-  hook's 90 s/5 min cadence alone left the ring quoting a pre-turn reading
-  for up to a minute and a half after the reply landed. The footer tells the
-  three states apart: `Reading…` while a read is out, `Updated <ago>` (plus
-  `May be out of date` for a server-flagged stale snapshot), and
-  `Could not refresh · last read <ago>` in warning colour when the last
-  attempt FAILED — where the numbers on screen are the previous good ones and
-  claiming an age for them would be claiming an answer that never arrived.
-- **Engine-initiated model switches wear a persistent marker and name the
-  job** (`autoModelSwitch`): `retry_fallback_applied` (error and usage-aware
-  routing both emit it) and any bare `model_changed` whose model differs
-  from the last authoritative one set a warning chip beside the model
-  control; click re-shows the detail as a toast. The frame carries only
-  `{from, to, role}`, so the JOB is derived from `role`: a built-in role
-  (`default` = this conversation, `tiny` = session naming, `task`, `advisor`,
-  ...) or `subagent:<id>`, and a CHILD subagent's fallback never arrives as
-  a top-level frame at all: it is read off that child's progress frames
-  (`resolvedModel` changing with `resolvedModelIsFallback` set,
-  `activityFromProgressChange`), attributed to that subagent by roster name,
-  and never repaints the composer's model marker (`announceFallbackApplied`,
-  `hooks/session-control-scope.ts` `fallbackAttributionFor*`). The provider
-  error is remembered PER JOB from `auto_retry_start`, because usage-aware
-  fallback fires before any request with no retry at all: such a switch says
-  "hit a usage limit or error" rather than borrowing another job's error.
-  The echo of Cody's own `set_model` (`recentUserModelPicksRef`, 15s
-  window) is never dressed up as an engine switch.
-- **A refusal is not a limit, and the switch message says which**
-  (`classifyFallbackReason`, hooks/session-control-scope.ts). The remembered
-  `auto_retry_start` error is classified into `refusal` (the model declined on
-  content-policy grounds: omp's stop detail is `refusal`/`sensitive`) or
-  `usage` (quota, rate limit, out of credits), and the notice, toast and
-  composer detail each use their own sentence. The two need opposite actions,
-  which is why one generic "hit a usage limit or error" was wrong: a quota
-  clears itself at the reset, while a refusal is PINNED for the rest of the
-  run — omp passes `pinFallback: classifierRefusal` and
-  `#maybeRestoreRetryFallbackPrimary` returns early on a pinned chain, so
-  `retry.fallbackRevertPolicy: cooldown-expiry` never reverts it and only a
-  manual re-pick returns to the original model. Refusal is matched FIRST
-  because a wrapped message can carry both, and mislabelling a refusal sends
-  the user to inspect a perfectly healthy quota. Unrecognized text stays
-  unclassified and the provider's own words are shown.
-  `hooks/fallback-reason.test.mjs` pins the precedence and the real Anthropic
-  refusal string.
-- **Live model and reasoning switches apply at the step boundary steering
-  uses, never mid-stream.** omp's `steer` does not abort an in-flight
-  provider stream either: it is delivered after the current assistant
-  message and its tools, and `getModel`/`getReasoning` are sampled before
-  EACH provider call. `set_thinking_level` is therefore safe any time (sent
-  immediately, `thinkingLevelTarget` shown as "Applying High" until the
-  engine confirms). `set_model` is NOT: on the Codex WebSocket provider,
-  omp's model switch closes the socket and the running response ends as a
-  provider ERROR whose turn is dropped from replay. So a live pick is held
-  as `modelSwitchPending` (`phase: "waiting"`, status "Switching to X at
-  next step") while `assistantProviderCallRef` says a stream is open, and
-  dispatched at the first boundary frame (assistant `message_end`,
-  `tool_execution_start`, `turn_end`, `agent_end`); a newer pick replaces
-  the waiting one, a re-pick of the current model cancels it, and the
-  applied `model_changed` posts an inline notice "Model switched to X.
-  Applies from the next step." (`dispatchPendingModelSwitch`). ACP engines
-  keep the picker disabled while a turn runs: mid-prompt `set_model`
-  acceptance is unverified there, and `handleModelChange` refuses it
-  without `chatExtras` regardless of the UI.
-- **Running subagents cannot be switched, and Cody says so instead of
-  pretending.** omp's RPC exposes only `get_subagents`,
-  `get_subagent_messages` and `set_subagent_subscription`; `set_model` and
-  `set_thinking_level` address the root session. A child resolves its model
-  and effort once at spawn (request model > `task.agentModelOverrides` >
-  agent frontmatter, with the task role expanded from settings re-read from
-  disk per spawn), so role changes reach subagents started AFTERWARDS. The
-  transcript dialog shows each child's resolved model (with a fallback
-  marker), role and reasoning (`progress.thinkingLevel`, parsed from the
-  `:<level>` suffix omp appends to `resolvedModel` or from wrapped
-  `thinking_level_changed` events) plus that explanation, with no control.
-- **Tools preset control** (composer, Wrench icon): "full" leaves omp's
-  toolset alone; "default"/Core spawns omp with `--tools read,bash,edit,write`,
-  which also kills the `task`, `todo`, `github` and `web_search` builtins —
-  no subagents, no task lists — so the menu says so in warning color and the
-  trigger tints warning when restricted. The control had been removed from
-  the UI while the stored preference (`cody:tool-preset`) kept applying to
-  every spawn; `lib/tool-preset-preference.ts` therefore migrates a
-  restricted value back to "full" unless it was chosen through the current
-  labeled control (ack marker). Never reintroduce an invisible restriction.
-- Todo phases refresh on every `turn_end` (plus todo tool end and
-  `todo_reminder`) — the 15s reconcile poll alone made checkoffs land in
-  batches, especially when subagents did the checking.
-
-#### Composer word completion (omp 18.4 `predict_word`)
-- Ghost text after the caret, same engine/setting (`spelling.autocomplete`,
-  default `auto`) as omp's terminal editor. Pieces: pure rules in
-  `lib/word-completion.ts` (when to ask, stale-answer guard, accept text),
-  `hooks/useWordCompletion.ts` (150 ms pause → `predict_word` → one
-  suggestion; any text/caret change drops it), `components/ComposerGhostText.tsx`
-  (transparent twin of the textarea with identical computed font/padding and
-  `clientWidth`, scroll synced, ghost out of flow so wrapping never changes).
-- Keys: Tab accepts with a trailing space, Right-arrow without, Esc rejects
-  (`predict_word_feedback accepted:false`; Esc still aborts a running turn).
-  Only while a suggestion is *visible*; slash/@/history menus disable the
-  feature outright, so their Tab handling is never stolen. Accept uses
-  `execCommand("insertText")` so Ctrl+Z undoes it (setValue fallback).
-- Never sent: empty composer, caret not at end of a line, IME composition,
-  touch devices (`useIsCoarsePointer`), non-omp engines, `!`/`/` lines, no
-  session id. A ghost that would overflow its line is not shown or accepted.
-- `POST /api/agent/[id]` answers `{suffix:null}` / success for these two
-  commands when no session is live and NEVER spawns (`getRpcSession`, not
-  `startRpcSession`) — the composer fires them at typing rate.
-- `Unknown command` (omp 18.3) / `unsupported` turns the feature off for the
-  page, silently (`isUnsupportedCommandError`); other errors back off 30 s.
-- Engine facts (18.4.9, measured): first call after spawn ≈ 9 s (cold
-  daemon; the stale guard discards it), then 1–30 ms; a newer request
-  supersedes a queued one (answers `null`). `settings-surface.ts` exempts
-  `spelling.autocomplete` from the Terminal-only chip; rest of `spelling.` stays.
-- **The Send pill's ▾ menu reuses this catalog.** Its Model row
-  (`components/ScheduleModelPicker.tsx`) lists the models and reasoning levels the
-  composer's own model picker already holds (`ChatInput` builds
-  `scheduleCatalog` from the same pinned/all lists and `modelThinkingLevels`), so a
-  scheduled message can be sent on another model than the chat is on; it never
-  renames or re-routes a model (display names via `formatModelDisplayName`, the
-  stored value is the exact provider/id). See "Scheduled messages".
-
-**Agent-requested model switch (`switch_model`).** An agent can move its own
-chat onto another model — "switch to Opus 4.8 with high reasoning" — through the
-host tool `switch_model` (`lib/model-switch/tool.ts`). `scope` defaults to
-`chat`: ONLY the chat the agent runs in changes (`session` targets another of
-the owner's chats by id or title, ownership-gated by `resolveSessionArgument`
-like the scheduling tools). `scope: "everywhere"` is the explicit, rarer form:
-it rewrites **only** `modelRoles.default` (`provider/id`, plus `:level` when a
-reasoning level was given) through `readModelRoles`/`writeModelRoles` (the
-Settings panel's helpers — every other role and every other setting in
-config.yml is untouched), calls `invalidateModelsCache`, then
-`restartIdleRpcSessions` (a running chat, including the calling one, keeps its
-engine until it next restarts) and answers with what the default was before and
-the exact `switch_model` call that undoes it. `everywhere` needs `model`, cannot
-be combined with `session`, and is refused on engines other than omp (only omp
-has default-model settings).
-
-What a name means is decided against the target chat's OWN live catalog
-(`get_available_models`; ACP: the models inside `get_state`), in
-`lib/model-switch/resolve.ts`, and never by guessing: exact `provider/id` → bare
-id → display name → same letters/digits without punctuation (`4.8` = `4-8`) →
-every word present. A phrase that fits several models answers with the
-candidates and changes nothing; an unknown one answers with the closest names
-(bigram similarity) and, when its last word is a reasoning level ("opus 4.8
-high"), says to pass it as `reasoning`. `reasoning` is validated against that
-model's own ladder (`modelThinkingLevels` =
-`selectableThinkingLevels(thinkingLevelsForMeta(model))`; a model without
-reasoning has only `off`): `none`→`off`, `extra high`/`x-high`→`xhigh` and
-similar spellings are accepted, a level the model lacks is refused with the
-valid ones, never rounded to a neighbour.
-
-`lib/model-switch/switch.ts` (`switchChatModel(sessionId, {provider, modelId,
-thinkingLevel?}, opts)`, free of `@/` imports so later scheduled-send code in
-the custom server can reuse it; `tool.ts` loads it lazily because it imports
-`rpc-manager`, which imports the tool list) decides WHEN the change reaches the
-engine: reasoning alone is applied at once in any state; a model change is
-applied at once for an idle chat (`applies: next-turn`) and for the chat's own
-agent inside a tool call on the rpc dialect (`atStepBoundary`; no provider
-stream is open then — the tool call starts after the assistant message finished
-— so the next request of the turn already uses the new model); any other running
-chat waits for the composer's own boundary frames (assistant `message_end`,
-`tool_execution_start`, `turn_end`, `agent_end`), an ACP engine only for
-`turn_end`/`agent_end` and its reasoning cannot be set (`unsupported`). A newer
-deferred switch replaces an older one for the same chat, a closing chat drops
-it, and a deferred switch the engine then refuses is announced as an info
-`notice` frame on the chat's own stream (its caller has already been answered).
-The commands go in the order omp needs: `set_model` first, then
-`set_thinking_level` (omp re-applies the new model's default level after
-`set_model`); the result carries the engine's own `get_state` afterwards
-(`not_applied` when it still reports the old model, `reasoning_failed` when the
-model moved but the level did not).
-
-The page is told BEFORE the engine switches: `EngineSession.announce?(event)`
-(rpc wrapper: `emit`, no replay to late pages; ACP session: `emit`) puts a
-`cody_agent_model_switch {provider, modelId, name?, thinkingLevel?,
-modelChanges}` frame on the chat's stream. `hooks/agent-model-switch.ts` (a pure
-marker the hook keeps in `agentModelSwitchRef`) lets `useAgentSession`'s
-`model_changed`/`config_update`/`thinking_level_changed` handlers recognise the
-change as the agent's, so the composer shows `agentSession.modelSwitchedByAgent`
-/ `modelSwitchedByAgentWithLevel` / `thinkingLevelSetByAgent` ("Model switched
-to X by the agent, at your request.") instead of the engine-fallback warning,
-and the model leaves Smart mode exactly as a manual pick does.
-
-Registered for omp MAIN chats only (`MODEL_SWITCH_TOOLS` in `SERVER_HOST_TOOLS`
-and `MAIN_SESSION_TOOLS`, like `SCHEDULE_TOOLS`) — NOT the sidebar chat, whose
-schema budget assumes the smallest local model. ACP engines reach it over MCP:
-`bin/cody-display-mcp.js` registers `switch_model` and calls `POST
-/api/internal/model-switch` (capability-token authenticated, on `proxy.ts`'s
-`PUBLIC_EXACT`, env `CODY_MODEL_SWITCH_ENDPOINT` from
-`lib/display/engine-tools.ts`/`capability.ts`); `bin/cody-display-mcp.test.mjs`
-fails when the bridge's copy of the tool definition drifts from
-`lib/model-switch/tool.ts`. Tests: `lib/model-switch/resolve.test.mjs`
-(resolution + level validation), `lib/model-switch/switch.test.mjs` (timing,
-order, refusals, `everywhere` writes only `modelRoles.default` and returns the
-previous value, tool texts), `hooks/agent-model-switch.test.mjs`.
-
-- **Composer thinking levels.** The composer's level list is `auto` + `thinkingLevelsFor(model)` (`off` + the model's own
-  `thinking.efforts` when `reasoning` is true, else only `off`). It passes omp's per-model list through,
-  so a live-discovered model shows the real ladder only when omp itself built it as reasoning: omp 18.8.3
-  does that for an unlisted Fable build only while models.dev/online discovery knows it (offline it
-  arrives as non-reasoning, which Cody cannot repair), omp 18.19.0 lists Fable 5.2 in its bundled
-  catalog and shows `low..max` even offline. Credits twins mirror the catalog (see above).
-- **Unverified thinking ladders.** omp 18.10.3+ may send `thinking.unverified: true` (with `reasoning: false`) for a model it has no capability data for. `hasUnverifiedLadder` (lib/thinking-levels.ts) is the one test for it; such a model still offers its ladder, the composer's reasoning menu shows a note, and `/api/models` entries carry `thinkingUnverified`. An engine that never sends the marker behaves exactly as before.
+- Smart row sends no `set_model` on a new session, so omp resolves `modelRoles.default`; `smartPinnedModel` keeps the label `Smart` while the model matches.
+- Live `set_model` waits for a step boundary (`modelSwitchPending`), never mid-stream — on Codex WebSocket it ends the response as an error; `set_thinking_level` is safe any time.
+- Never reintroduce an invisible restriction: Core preset (`--tools read,bash,edit,write`) kills `task`/`todo`/`github`/`web_search`; `lib/tool-preset-preference.ts` resets unacked values.
+- `classifyFallbackReason` tests refusal FIRST: a refusal pins the fallback for the rest of the run (only a manual re-pick returns); a quota clears itself at reset.
+- Word completion (`predict_word`): `POST /api/agent/[id]` NEVER spawns (`getRpcSession`, not `startRpcSession`) — typing rate; `Unknown command`/`unsupported` disables it silently, other errors back off 30 s.
+Details: docs/agents/composer.md
 
 ### Running state SSE + reconciliation
-- The sidebar listens to `/api/agent/running/events`, backed by `subscribeRunningSessions()` in `lib/rpc-manager.ts`, so running badges update without polling.
-- `useAgentSession` still treats per-session SSE as primary for chat events, but while a run is active it periodically calls `GET /api/agent/[id]` and also reconciles on `visibilitychange`/`online`. This fixes missed `agent_end` events from background tabs or half-open connections.
-- Prompt runs use a monotonic run id; late SSE or slow reconciliation responses from an old run must be ignored so they cannot resurrect stale streaming bubbles.
+- Sidebar uses `/api/agent/running/events`; `useAgentSession` also polls `GET /api/agent/[id]` while running and on `visibilitychange`/`online` — catches missed `agent_end`.
+- Monotonic run id: ignore late SSE/reconcile replies from an old run — no stale streaming bubbles.
+Details: docs/agents/session-runtime.md
 
 ### Sending during a run: one pipeline, an outbox, and no silent drops
-
-Three owner reports shared one root: the composer guessed whether a turn was
-running, and every wrong guess lost a message. Enter during a turn left the
-text in the box, a steer "hung" and then showed up after a refresh, and a
-second Enter was silently ignored while the first was in flight.
-
-- **The engine decides, not the client.** An existing session is sent a
-  `prompt` with `streamingBehavior` ("steer" | "followUp", from the Settings
-  submit-during-run preference). omp starts a run when idle and queues the
-  message when streaming. The wrapper marks `promptRunning` for the idle case
-  exactly as it does for a plain prompt. A plain `prompt` without
-  `streamingBehavior` sent while omp is streaming is ACKED and then fails
-  asynchronously with AgentBusyError on an already-settled id, so the message
-  vanishes. Never send one to an existing session.
-- **Every send carries a `clientMessageId`**, and the session wrapper keeps a
-  bounded delivery ledger for at least 30 minutes. Status moves monotonically
-  through `queued`/`started` to `delivered` or `failed`; repeat POSTs with the
-  same ID join the original delivery instead of sending a duplicate.
-  An ack is `{ delivery: "queued" | "started", clientMessageId, status?: "delivered" }`;
-  the optional status prevents a late ack from re-adding a delivered message.
-  Only SETTLED rows age out (an hour) or yield to the cap: a row the engine
-  has not finished with (`sending`/`queued`/`started`, `isUnsettledDelivery`)
-  lives as long as the wrapper, because a follow-up can wait behind an
-  all-night run, and a pruned row reads `unknown` — the scheduler and a
-  resuming page would then send it a second time.
-- **Resume checks the server before retrying.** The browser asks
-  `GET /api/agent/<sessionId>?clientMessageId=<id>` for each unfinished outbox
-  entry. The response is `{ deliveries: [...] }`; known entries adopt their
-  ledger status. Only unknown IDs are checked against the loaded transcript
-  (timestamp, text, and image count); a match settles the entry, otherwise the
-  browser retries with the same ID. A failed ledger lookup never triggers a
-  blind resend.
-- **Manual Retry checks before resending.** A known queued/started/delivered
-   result is adopted. A known server failure or an unknown ID absent from the
-   loaded transcript starts a new delivery with a fresh ID; an unknown ID that
-   matches the transcript is already delivered. Resume retries absent entries
-   with their original ID. A client timeout is only a guess; server failure is
-   final unless later delivery is proven.
-- **Delivery changes arrive by ID.** The wrapper emits `cody_delivery` SSE
-  frames with `clientMessageId` and status. A user `message_end` still renders
-  the message, but it does not settle an outbox row by text.
-- **OMP 18.3 prompt_result is correlated by RPC ID.** Structured failures are
-   surfaced once and deduped against the transcript; an aborted queued prompt
-   fails rather than claiming it was read. A terminal `agent_end` settles a
-   started send as delivered; engine loss settles started as delivered and
-   queued as failed. A joined all-mode user message and an image-only user
-   message can both prove delivery from the transcript.
-- **The route waits a bounded time for the ack** and answers 202
-   `pending` while the command stays in flight. Automatic transport and resume
-   retries keep the ID; manual Retry follows the ledger-first check above. A
-   steer, follow-up or queued-prompt ack timeout never recycles the child: only
-   the idle plain-prompt no-ack path may, because nothing was running to lose.
-- **omp serializes ordinary RPC commands** (`RpcInputDispatcher`), so one slow
-  command delays every later one, `get_state` included. (omp 18.4.9 runs
-  `prompt`, `steer_subagent`, `bash` and `predict_word` off that line: a
-  prompt still being admitted no longer holds up `get_state`, `abort`, `steer`
-  or `follow_up` behind it, though it still STARTS after earlier serial
-  commands such as a long `compact`.) GET routes therefore
-  bound `get_state` and fall back to the wrapper's last known state plus the live
-  flags it tracks itself, marked `stale`, instead of hanging a session switch
-  behind someone else's command.
-- **Client outbox** (`lib/outbox.ts`, sessionStorage per session). The composer
-  clears immediately; each message moves sending → queued/started → delivered,
-  or ends failed with Retry and Edit (Edit restores text and images). Retries on
-  network error, 202, 409 `session_restarting` and 503 back off up to 2 minutes,
-  then stop at failed. Nothing is ever dropped without a visible row; unfinished
-  entries resume only after the ledger-first check above.
-- **A chat whose saved model is gone** (omp 18.6.3+ exits `--resume` with
-  `error: Could not restore model <provider/id>` when the saved model no longer
-  exists or has no credentials; 18.4.x silently fell back). `rpc-process.ts`
-  turns that stderr line into `ModelUnrestorableError`; `startRpcSession` turns it
-  into `WebRpcError` code `model_unrestorable` `{provider, modelId}` (HTTP 400,
-  the details are forwarded by `agentCommandErrorResponse`), and the events
-  route sends it as a `model_unrestorable` frame, then ends the stream (the
-  client closes its EventSource, otherwise the browser reopens it every second).
-  The outbox classifies it as `blocked`, NOT retry and NOT failed: the row stays
-  `sending` with `blocked: true`, reads "Waiting for a model" with a clock icon,
-  and the optimistic bubble is undone. `ModelRecoveryBanner` (ChatWindow) says
-  "This chat used X, which is no longer available" and offers the current
-  catalog (composer visibility honoured; the chat's Smart default pre-selected).
-  The pick calls `POST /api/agent/[id]/recover-model`, which respawns ONCE with
-  `--model provider/id` (`restoreModel`) and then `set_model`s — `--model` alone
-  does NOT write the session's `model_change` entry, so without that later plain
-  restarts would fail again. Then the hook reconnects the stream and
-  `releaseBlocked` sends every held entry under its own id (fresh retry budget).
-  Viewing a chat never spawns the engine, so the notice is reactive (first send
-  or stream attach); scheduled sends surface it as a non-retryable delivery error.
-  Traps found live: (1) the `connected` frame starts a ledger lookup whose
-  "unknown" answer sends the reload recovery to match the on-screen transcript
-  against unsent entries — and the OPTIMISTIC bubble matches, so a message still
-  being sent was marked delivered and a refused one vanished. Entries this page
-  sent and still owns (`sending`, `outboxLiveIdsRef`) are skipped
-  (`idsNeedingResumeCheck`). (2) The banner can arrive (events frame) before the
-  message's own 400, so `noteModelUnrestorable` blocks every `sending` entry
-  (`blockWaiting`) and takes the unconfirmed optimistic run down (no "Waiting for
-  model…" spinner or Stop); a refusal for an attempt that began before the pick
-  (`modelRecoveredAtRef`) is stale and re-sends. (3) After the pick the composer's
-  model comes from `setCurrentModelOverride` + `refreshLiveModelState`, not the
-  session file read when the chat opened. The picker is `components/ui/Select.tsx`
-  (searchable), never a native `<select>`.
-- Brand-new-session prompts and SidebarChatPanel sends also enter the same
-   outbox. Queue rows are derived from outbox state. The composer snapshots and
-   clears text, images and files before preparation; preparation failure restores
-   the snapshot if the composer is still empty, or keeps it in a failed Edit row
-   alongside any newer draft.
-- **A delivered user message always renders.** `message_end` with role `user`
-  is appended even when the client believes no run is active (the old
-  `agentRunningRef` guard dropped steers that landed after a missed
-  `agent_start`). The transcript is deduped against the loaded messages;
-  `cody_delivery` independently settles the matching outbox entry by client ID.
-- **Steers go to the engine at once; only follow-ups are held.** A follow-up
-  sent mid-run (or behind follow-ups still held) waits in the wrapper's
-  `heldQueue` — editable, deletable, handed back on Stop — and goes out when
-  the run ends, with a 1 s guard that re-checks until the hold is empty. A
-  steer is never held: omp delivers it into the reply it is streaming (live
-  steering), cuts a tool batch short, or reads it at the next step. The 0.41
-  hold kept a steer typed while the model was only WRITING until the whole
-  reply finished, and then sent it as a brand-new prompt.
-- **Agents use the same two lanes.** `send_to_chat` (`lib/chat-messages/`) maps
-  `urgency` one to one: `next_step` is the steer, `after_turn` the follow-up
-  (`streamingBehaviorOf`, the one place the mapping lives). A steer lands at the
-  engine's next step boundary, so the sender is told "next step", not "now": a
-  tool batch in progress finishes first, and a non-live-steering provider reads
-  it when its reply ends. Measured on 52 agent-sent steers: median 8 s, p90
-  106 s, worst 157 s, against a median of 27 min for the same messages sent as
-  follow-ups through `schedule_message`.
-- **"Steer" is a real interrupt, and only of the model's reply**
-  (`steer_now`, `AgentSessionWrapper.steerNow`). The button shows on a held
-  follow-up AND on a steer the engine has queued but not read (the agent is
-  still thinking or writing — non-live-steering providers such as Anthropic
-  only read a steer when the reply ends). A held follow-up is first handed
-  over as a steer. Then, if no tool is running, the wrapper sends omp `abort`
-  WITHOUT the Stop latch: omp restores undelivered and live-steered messages
-  to its steering queue on abort, and a queued steer bypasses its
-  post-interrupt suppression, so it continues straight into the steer. That
-  aborted run's terminal `agent_end` is forwarded as NON-terminal (the page
-  keeps its run, held follow-ups are not flushed ahead of the steer); if no
-  `agent_start` follows within `STEER_CONTINUATION_GRACE_MS` the end is
-  replayed as real. While a tool runs nothing is aborted (`next_step`): omp
-  already lands the steer at the batch end and asks backgroundable bash/eval
-  to detach, and subagents are separate sessions an abort never touches. A
-  follow-up the engine already holds is first promoted to omp's steering queue
-  (`promote_queued_message`, omp 18.4.6+), which makes it an ordinary queued
-  steer; an omp without that command keeps the old refusal (`not_steer`),
-  because after an abort it would leave the follow-up waiting. A user Stop
-  clears a pending steer interrupt.
-- **Stop takes the queue back** (`abortRestoringQueue`, omp 18.7+ `abort_and_restore_queue`).
-  A plain `abort` makes omp carry on into EVERY queued steer and follow-up in a
-  new run (measured: five more model calls). The 18.7 command withdraws every
-  user-authored queued message first — input a run took but never recorded
-  included — then aborts, and answers `{steering, followUp, imagesDropped?,
-  truncated?}` oldest first: omp's own text (raw, whitespace kept, `[Image]`
-  for a picture-only message) and its own re-encoded images. The web `abort`
-  sends it when the engine has it; an `Unknown command` answer is remembered
-  (`queueRestoreUnsupported`) and falls back to the plain abort, as pi does.
-  `steerNow`, the stop latch, the todo pause and `abort_compaction` keep the
-  plain abort: they WANT the queue to run. Everything a Stop gives back leaves
-  in ONE `cody_queue_returned` frame (`messages`, `truncated?`,
-  `imagesDropped?`) with the held follow-ups merged in by send order
-  (`lib/queue-restore.ts`), so the composer takes one draft. The composer gets
-  omp's text and images, never the ledger's; a ledger row only decides WHICH
-  row becomes `withdrawn` (exact submitted text, then trimmed, then the
-  picture-only stand-in; the same queue first), and a message no row accounts
-  for still comes back. A `queued` engine row omp did not hand back is in no
-  queue any more (cut from an oversized answer, or read an instant before), so
-  it is failed with Retry/Edit — a `steer`/`follow_up` send gets no
-  `prompt_result` to say so. omp reports each withdrawn `prompt` `aborted`
-  before OR after the answer, so while the restore is in flight
-  (`stopRestore`) those results are deferred instead of failing rows the
-  answer is about to withdraw. `truncated`/`imagesDropped` become notices
-  (`stopQueue.*`).
-- **Delete and Edit reach into omp's own queue** (`AgentSessionWrapper.withdrawQueued`).
-  A message Cody still holds is simply dropped from the hold. One already
-  handed to the engine is taken back with `remove_queued_message` (omp
-  18.4.4+; `queue` is `steering` for a steer or a promoted follow-up,
-  `followUp` otherwise) and `withdrawn:true` returns its text and attachments
-  for Edit. omp finds a queued message by the text **as submitted** (it keeps
-  the raw text from before slash/template expansion), never the trimmed ledger
-  `text`, so a ledger row keeps a `submitted` copy (message + images) only
-  while it is `queued` and never in a snapshot. `removed:false` /
-  `promoted:false` mean omp already read it (`already_sent` / `already_read`);
-  an `Unknown command` answer from an older omp keeps today's answers
-  (`already_sent` / `not_steer`). Since 18.4.6 the ack means ADMITTED, so a
-  `queued` row really is in omp's queue. The page still offers Delete/Edit
-  only on held rows (`ChatInput` `editable`), so engine-held rows need that
-  gate loosened before users can reach this. omp 18.7 also returns the pictures
-  it queued (`images`, its own copies; `imagesDropped` when an oversized answer
-  left them out): Edit gets those, or the ones the message was sent with when
-  omp has none.
-- **A missed frame cannot strand a row.** While any outbox row is `queued`
-  or `started`, the client re-reads the ledger every 3 s
-  (`OUTBOX_LEDGER_POLL_MS`, a map lookup on the server, never an engine round
-  trip). The ledger client accepts `withdrawn` and `held`: rejecting
-  `withdrawn` used to fail the WHOLE lookup, silently.
-- **A run the page did not start gets its own run id.** A held follow-up
-  handed over at `agent_end` starts a run server-side; `agent_start` with no
-  run believed active bumps `promptRunIdRef`, so the previous run's terminal
-  reload cannot land on top of the new one.
+- Always send `prompt` with `streamingBehavior` to an existing session; a plain prompt while streaming is acked, then fails AgentBusyError — message vanishes.
+- Every send has `clientMessageId` and a ledger; never prune unsettled rows (reads `unknown`, gets resent); Resume/Retry check the ledger first, lookup failure never resends.
+- Outbox (`lib/outbox.ts`): a row always stays visible; settle by `cody_delivery` ID, never text.
+- Steers go at once; only follow-ups wait in `heldQueue`; Stop uses `abortRestoringQueue` (plain abort runs every queued message).
+- Acks are bounded (202 `pending`); steer/follow-up ack timeout never recycles the child; GET routes bound `get_state` (`stale`) because omp serializes RPC commands.
+Details: docs/agents/turn-flow.md
 
 ### A viewed session stays warm, and a closed one never leaves a deaf stream
-- **Idle disposal skips a session with an attached event stream**
-  (`resetIdleTimer`). A cold child costs a spawn (~2.7 s) plus omp's first-
-  prompt preparation (~4 s, measured: the memory backend's first recall), so
-  disposing the chat a user is looking at turned their next message into a
-  ~7 s wait before the agent even started.
-- **Every close is announced** (`EngineSession.onClose`, both the omp wrapper
-  and `AcpEngineSession`): idle, `restartIdleRpcSessions` after a settings
-  save, a crash. The events route ends its stream on it, after sending
-  `retry: 1000`, so the browser reconnects within a second and that reconnect
-  starts the replacement child. Before this, a stream stayed subscribed to
-  the dead wrapper, the next POST spawned a new one nobody listened to, and
-  the page sat on "Sent" until a manual refresh showed the agent had moved on.
-  An auto-reconnect re-registers host tools and re-checks the outbox.
-- **The tool roster is sent only when it changes** (`publishHostTools`,
-  signature-deduped, forced for a fresh child). `device_list` is always
-  published; the working hardware tools follow the granted-device count and
-  are withdrawn only after `DEVICE_TOOLS_RELEASE_GRACE_MS`. `device_list`
-  used to follow the browser's device socket, which flaps on every reload,
-  session switch and backgrounded tab: each flip re-sent the roster to omp's
-  one-at-a-time command line (delaying a send queued behind it) and printed
-  "xd://: unmounted device_list" / "mounted device_list" into the transcript.
-- **Status reads coalesce** (`COALESCED_READS`: `get_state`, `get_subagents`).
-  While one is waiting its turn in omp's queue, an identical ask joins it. The
-  page's pollers (15 s reconcile, stream watchdog, turn-end refresh, the
-  subagent dialog, the plan keeper) otherwise stacked dozens of copies during
-  a stall, which the child then worked through one by one ahead of the next
-  prompt.
-- **A steer into a running turn takes no workspace checkpoint.** It exists to
-  interrupt, the workspace is mid-edit anyway, and it must not wait on a full
-  `git add -A` of the workspace before it reaches omp. Prompts that start a run
-  and mid-run follow-ups still snapshot as before.
-- **omp can freeze for minutes on its own databases.** Measured: after a turn,
-  omp's post-turn memory work waited ~4.5 min on a locked `agent.db`
-  (`SQLiteError: database is locked` in `~/.omp/logs`); bun's SQLite waits
-  synchronously, so the child answered NO command meanwhile — `get_state`,
-  `get_subagents` and the next prompt all queued. Cody cannot unlock it; the
-  bounded ack (202 pending), the ledger poll and the dedupe above are what keep
-  the UI truthful through it. Check those logs first when "Sending…" lingers.
-- **`mnemopi.proactiveLinking` freezes a session after every reply.** omp's
-  memory ingest (`pi-mnemopi` `EpisodicGraph.ingestMemory`, linkExisting)
-  scores each new memory against EVERY stored one on the engine's JS thread.
-  Measured on the owner's instance (omp 18.3.4, ~10k memories, 20.6 M
-  `graph_edges` rows, 5.2 GB `mnemopi.db`): each `agent_end` froze the whole
-  child — main agent AND in-process subagents, every transcript silent for
-  the same 3 min 14 s — so a message sent then sat at "Sending…". Off by
-  default in omp; Settings shows a Cody note on it (`SETTING_NOTES`). The
-  symptom to recognise: all of a session's subagent `.jsonl` files go quiet at
-  the same second and resume at the same second.
+- Idle disposal skips sessions with an attached stream (`resetIdleTimer`) — cold child costs ~7 s.
+- Every close is announced (`EngineSession.onClose`); events route sends `retry: 1000` and ends, so the browser reconnects and starts the child — else stuck on "Sent".
+Details: docs/agents/session-runtime.md
 
 ### Composer-attached panels (`components/ComposerPanels.tsx`)
-- The live todo plan (`TodoList`) and the subagent roster live **pinned above
-  the chat input**, not inside the scrollable message list. `ComposerPanels`
-  renders both, each independently collapsible via its header row (`chevron`);
-  panels start collapsed (headers always show live progress / running-summary).
-  Subagent chips carry live state (pulsing dot while `started`, check/alert/ban
-  for terminal states) fed by the same `subagent_lifecycle`/`subagent_progress`
-  SSE frames; clicking a chip opens the transcript dialog. `TodoList` keeps a
-  non-collapsible default (`collapsible` prop) for SSR tests.
-- **Layout is full-width stacked rows, never fit-content side-by-side**: a
-  collapsed panel is a slim full-width header bar, an expanded one the same
-  bar plus body, so the two headers stay aligned in all four expansion
-  states (the old wrap layout floated a collapsed chip mid-air beside a tall
-  card at a different width). Subagent chips fill an equal-column grid
-  (`auto-fill minmax(240px,1fr)`) instead of a ragged content-hugging wrap,
-  and the show-all toggle is a footer link mirroring TodoList's "Show all
-  tasks" footer. Pinned by `ComposerPanels.test.mjs`.
+- Todo plan + subagent roster are pinned ABOVE the input (`ComposerPanels`), not in the scrollable list; collapsible, start collapsed; `TodoList` keeps a non-collapsible default for SSR tests.
+- Layout = full-width stacked rows, never fit-content side-by-side — headers stay aligned (`ComposerPanels.test.mjs`).
+Details: docs/agents/composer.md
 
 ### Native goals (`lib/goal-state.ts`, `components/GoalPanel.tsx`)
-- **omp 18.4.11+ owns the goal; Cody mirrors it.** The engine creates it, counts
-  the tokens and seconds spent on it, pauses it on Stop, persists it in the
-  session file and (optionally) keeps working on it. Three carriers share one
-  shape (`GoalModeState`): `get_state.goal`, the `goal_updated` frame and the
-  `{goal, state}` answer of the `goal` command (`op`: get|create|resume|pause|
-  drop; `token_budget` only on create). `lib/goal-state.ts` is the pure reading
-  of all three (parse, `adoptGoal` reducer, elapsed/age maths, `/goal` and
-  budget syntax, controls per status, continuation-mode helpers); it imports
-  only `type-guards`.
-- **The `goal` KEY in `get_state` is the capability probe**, never a flag:
-  `buildWebState` passes `goal` (and `goalAgeMs`) through only when the engine
-  reported the key. Absent = older omp (answers `Unknown command: goal`), pi
-  (restricted vocabulary) or ACP (`send()` refuses unknown commands) — all of
-  them refuse `goal` as `unsupported` before anything is sent. `/goal` tries
-  the native create first and, on `isUnsupportedCommandError`, falls back to the
-  old web-hosted behaviour (expanded prompt + sessionStorage note, shown in the
-  same panel as a dismissible note; a `--budget` is dropped with a notice).
-  Never write the sessionStorage goal when native works.
-- **State is folded, never overwritten** (`adoptGoal`): the engine stamps every
-  change (`updatedAt`), reports can race (a state poll answered from cache vs a
-  frame), so the newest stamp wins; a `complete` goal never goes back to
-  working; a `dropped` one leaves nothing; and the engine CLEARS a completed
-  goal's state at the turn's terminal `agent_end` WITHOUT an event (`get_state.goal`
-  becomes `null`), so `null` must not erase the finished card — it stays, with
-  what the goal cost, until dismissed or a new goal starts. The terminal
-  agent_end, `reconcileAgentState` and `loadSession` all adopt `state.goal`.
-- **Time ticks locally between flushes**, and the engine counts IDLE time too
-  (wall clock while the goal is active, flushed only when something happens),
-  so the server stamps `goalAgeMs = now - goal.updatedAt` (it shares the
-  engine's clock) and `goalElapsedSeconds` adds age + time since receipt.
-  Tokens move per tool completion / turn end (that is when the engine flushes).
-- **A chat nobody is running still shows its goal**: `buildSessionContext`
-  derives `context.goal` from the newest `mode_change` entry on the branch
-  (`goal` / `goal_paused` / `none`; `goalFromPersistedMode` maps an active goal
-  to paused, which is what omp does when a process reopens the file). The live
-  state wins; the file only decides when `GET .../state` says `running:false`.
-  Resume/Drop on such a goal spawn the engine first like any command.
-- **Hidden steering never draws a row**: omp sends `goal-mode-context` before
-  EVERY turn while a goal is active, `goal-continuation` between auto-continued
-  turns and `goal-budget-limit` at the budget as `display:false` custom messages;
-  `isHiddenFromTranscript` hides all three (they would be two "Engine note" rows
-  per turn).
-- **"Keep working automatically" = `goal.continuationModes` + `rpc`**
-  (`hooks/useGoalAutoContinue.ts`). omp's default is `["interactive"]`, so a goal
-  driven from Cody only works when you send a message. The switch adds/removes
-  `rpc` through the ordinary config writer WITHOUT `applyNow`: a running engine
-  watches config.yml (directory watch, 200 ms debounce, atomic renames fine) and
-  re-reads the setting at every continue decision — verified live: flipping it
-  mid-chat makes the next turn end continue — while `applyNow` restarts idle
-  children and an engine that starts up PAUSES an active goal. It is one global
-  setting (every chat), and nothing starts by itself when it is switched on for an
-  idle active goal (the engine decides only at turn end / create / resume), so
-  `kickGoal` waits for the file watcher and then does pause + resume (`resume`
-  is a no-op on an enabled goal). Any child restart (routing change, idle
-  recycle, `applyNow` from another control) pauses an active goal: the panel
-  shows it paused with Resume.
-- **`/goal [--budget N] <objective>`** (also mid-run — ChatInput routes it to the
-  dispatcher while streaming): `goal create` then the objective as the first
-  prompt, sent as a STEER (with rpc continuation on the engine starts its own turn
-  the moment the goal exists; the steer folds into it, never races it). `N` takes
-  `200000`, `200k`, `1.5m`, `200,000`. A scheduled `/goal` still carries the
-  expanded prompt (`GOAL_PROMPT`, no native goal). Budget-limited goals offer only
-  Drop (resume is a no-op, the budget cannot be raised over RPC).
-- The panel starts collapsed while active and opens itself for paused /
-  budget-limited / complete (they wait on a decision); Drop needs a second tap
-  within 4 s. `lib/web-mode-state.ts` keeps `ActiveGoal` only for the fallback.
+- omp owns the goal, Cody mirrors; the `goal` KEY in `get_state` is the capability probe; never write the sessionStorage goal when native works.
+- Fold via `adoptGoal`: newest `updatedAt` wins; null `get_state.goal` at `agent_end` must NOT erase a finished card.
+- Auto-continue adds `rpc` to `goal.continuationModes` WITHOUT `applyNow` (a restart pauses an active goal).
+Details: docs/agents/turn-flow.md
 
 ### Side questions: `/btw` (`lib/btw.ts`, `hooks/useSideQuestions.ts`, `hooks/useSideQuestionsBridge.ts`, `components/SidebarSideQuestions.tsx`)
-- **omp 18.7's `/btw`**: a question asked WHILE the main reply keeps running, answered in the Side Bar's "This chat" view, never entering the transcript. omp keeps every topic in a sidecar beside the session file (`<session minus .jsonl>/btw-history/entry-<id>.json`, shared with its own TUI), one question at a time. RPC: `btw {question, recordId?}` → `{record}` (`recordId` = a follow-up in that topic), `btw_cancel {recordId?}`, `get_btw_history`; frames `btw_delta {recordId, delta}` and `btw_record {record}`. An older omp answers `Unknown command`, and Cody hides the whole surface (latched per page; `ompVersionHasBtw` reads the installed version from `loadEngineInfo()` first). pi/ACP engines never see it: the route is `requireEngine("omp")`, their vocabularies answer `unsupported`.
-- **Typed `/btw <question>` is intercepted, never sent.** omp's own `/btw` is a TUI command: over the RPC `prompt` path it would reach the model as literal text. `ChatInput.handleSend` takes it (`parseSideQuestionCommand`) BEFORE the streaming gate, so it works idle and mid-run; attachments → refused with a toast (draft kept); a refusal restores the draft; an empty `/btw` only checks that asking is possible. Once the engine took the question (or for a bare `/btw`) `ChatWindow.askSideQuestion` calls `onOpenSideQuestions`: AppShell's `handleOpenSideQuestions` opens the right panel on the Side Bar tab (on a phone the panel is full-screen, so it also closes the session drawer) and bumps a request token the Side Bar consumes once — it flips to This chat, and a bare `/btw` also puts the cursor in the question box. A refusal opens nothing. `scheduleBlock` refuses it (`btw.scheduleReason`). Another engine's own `/btw` (Claude Code has one) is untouched: `onSideQuestion` is only passed for omp (ChatWindow `sideQuestionsCapable`). The palette offers `/btw` while a run is live too and drops omp's engine-reported copy.
-- **Frames never touch the chat.** `rpc-manager.handleFrame` takes `btw_delta`/`btw_record` on an early path (resets the idle timer so an answering child is not idled out, emits, returns): never `notifyRunningChange`, run flags or the delivery ledger. The browser hands them to `useSideQuestions.applyFrame` BEFORE the message-update coalescer (routed through it, every delta would flush the pending `message_update` early). A `notice` with `source:"btw-history"` (omp could not save a topic) goes to the Side Bar's error row, and `lib/notifications/observer.ts` ignores it (its `level:"error"` would become the text of an unrelated failed run).
-- **Merge rules are the bug magnet (`lib/btw.ts`).** omp writes the first `btw_record` BEFORE the `btw` response, the response can reach the browser after the first deltas, and a history read can be older than a frame that arrived while it was in flight. A frame is authoritative (`btw_record` replaces; the last one of a turn carries the full answer, healing any missed delta). A command answer or history read is a snapshot: `mergeBtwSnapshot` replaces a topic only when it is at least as far along (more turns; finished beats running, so an `interrupted` read ends a stale running one) and NEVER grows a topic the page shows as running (its deltas may still arrive as frames and would be appended twice). A snapshot never removes a topic.
-- **History without spawning.** `GET /api/sessions/<id>/btw` (omp only, owner-checked like `local-routing`): a live child answers `get_btw_history` inside a 3 s bound (`supported:true`; `Unknown command` → `supported:false`; a timeout → the sidecar read WITHOUT recovery, since a live writer's `running` is real); no child → `lib/btw-history.ts` reads the sidecar (≤ 200 files, ≤ 1 MiB each, ≤ 8 MiB total, symlinks refused) and maps `running` → `interrupted` (the writer died, as omp itself does on reopen). Opening a cold chat spawns nothing. The page reads it on open and on every stream (re)connect, and every 4 s while a topic shows as answering, so a dropped stream never leaves "Answering…" on screen.
-- **Asking from a chat with no stream open** (`ensureSideQuestionStream`) opens it first: that also starts a cold chat's engine, and frames only reach an attached page. `btw` is NOT part of the outbox/prompt machinery (no ledger row, no run state, no stop latch). The wrapper bounds its ack at 30 s (`BTW_ACK_TIMEOUT_MS` → `btw_ack_timeout`) and never recycles the child for it; `btw_cancel` with no live child answers `{cancelled:false}` without spawning. A follow-up is offered only after a COMPLETE answer (omp's own TUI rule); a cancelled/failed/interrupted topic is followed by a new question instead.
-- **UI: the Side Bar, never the composer.** Nothing sits under the composer. The state stays with the main chat (`useSideQuestions` inside its `useAgentSession`, next to the event stream that carries the frames) but is SHOWN in the Side Bar tab (`SidebarChatPanel` → `SidebarSideQuestions`), on another branch of the tree. `useSideQuestionsBridge` carries it across: AppShell owns one bridge, `ChatWindow` publishes `sideQuestions` into it, `SidebarChatPanel` subscribes with `useSyncExternalStore`, so AppShell itself never re-renders for a streaming answer. A release only counts for the publisher that made it (the old chat's cleanup cannot clear the new chat's state when one replaces the other), and the view is keyed on `sideQuestions.sessionId`, so a half-typed question never follows the reader into another chat. `engineOkForPage` (useSideQuestions) lets a chat opened later start with the omp-version answer instead of "unknown", so the switch does not blink away between two chats.
-- **The "This chat | New chat" switch** is a `SegmentedControl` (ids `sidebar-mode-*`, 40px segments on touch) at the top of the Side Bar, shown only while the bridge holds an `available` state. With none (another engine, an omp older than 18.7, no main chat yet) the Side Bar is exactly the New chat view. The rules live in the pure reducer `lib/sidebar-mode.ts` (tested; the component only dispatches `choose` / `request` / `gone` / `focused`): the choice is dropped when This chat goes away, so it cannot jump back by itself when another chat appears, and a request token is consumed once even when it arrives with the Side Bar's first mount (the tab loads on first use). BOTH views stay mounted (a streaming sidebar answer and any draft survive the flip), and while an answer arrives with New chat showing, the This chat segment wears a pulsing dot.
-- **This chat** lists topics newest first (ten, the rest behind Show all), scrolls back to the top when a new topic appears, and puts the new-question box at the bottom, built like the New chat composer: Enter sends, Shift+Enter adds a line, no attach button (side questions are text only), `.composer-textarea` keeps it 16px on touch, `.chat-input-shell` gives it the main composer's focus glow. Send is disabled while any answer runs (omp answers one at a time) and says why in its title; the box stays editable. Follow-up boxes live inside each topic and appear only after a COMPLETE answer. Sizes follow the pointer (`touch` prop, defaulting to `useIsMobile() || useIsCoarsePointer()`): a finger gets 16px inputs and ≥ 38px controls, a mouse the 30px / 13px of the New chat composer's Send button. A card's footer line is its one statement of state (Answered / Cancelled / Interrupted / Failed); a note under the answer appears only when it adds something (why it was interrupted, the engine's reason for a failure), never to repeat the footer.
+- omp 18.7+ only (older omp: surface hidden); typed `/btw` is intercepted in `ChatInput.handleSend`, never sent as prompt text (it would reach the model literally).
+- `btw_delta`/`btw_record` frames never touch run state or the ledger; `btw` is not outbox machinery; `useSideQuestions.applyFrame` runs BEFORE the coalescer.
+- History read never spawns a cold chat (`lib/btw-history.ts`).
+Details: docs/agents/sidebar-chat.md
 
 ### Composer context gauge
-- An icon-only context ring sits beside Send. It uses the accent color below
-  70% usage, warning from 70%, and error from 90%.
-- Clicking the ring opens its summary popover; clicking outside or pressing
-  Escape closes it.
-- Authoritative context usage drives the ring percentage and the
-  used/available/limit values. Session token traffic and per-model rows are
-  derived locally from loaded assistant-message usage; the active model is
-  labeled and highlighted.
-- `useAgentSession` prefers authoritative live usage when it includes a
-  percentage. While idle or reconnecting, `derivePersistedContextUsage()` falls
-  back to the latest assistant `contextSnapshot.promptTokens` (or
-  input + cache-read + cache-write usage) divided by the active model's
-  `contextWindow`, which `/api/models` deliberately projects for this purpose.
-  Live usage is cleared on session load/switch so one conversation cannot leak
-  a stale gauge into another; genuinely unknown usage keeps an empty ring
-  mounted instead of removing the control.
-- Per-model token totals include input, output, cache-read, and cache-write
-  tokens.
+- Ring prefers authoritative live usage with a percentage; idle falls back to `derivePersistedContextUsage()` using `contextWindow` from `/api/models`.
+- Clear live usage on session switch so no stale gauge leaks; unknown usage keeps an empty ring mounted.
+Details: docs/agents/composer.md
 
 ### Daily time limit: active time only, one union across devices (`lib/daily-limit/`, `hooks/useDailyLimit.ts`)
-
-A personal screen-time limit, off by default (Settings › Preferences › Daily
-time limit). It counts how long the person is ACTIVELY using Cody, never how
-long Cody is open or how long an agent works, and the total is shared by every
-device on the account. Nothing it does ever blocks a send or stops a run.
-- **What counts** (`active-time.ts`): the page is visible AND focused AND there
-  was real input in the last 60 s. A second counts only inside that window; the
-  60 s grace is what lets reading a long reply (no key, no click) keep counting.
-  Hiding or blurring closes the running stretch at that instant (the grace left
-  over is not banked), input that arrives while the page is not present is
-  ignored, and coming back counts nothing until the first real input. Real input
-  = keydown, pointerdown, a pointer that actually MOVED, wheel, touchstart/move,
-  a non-collapsed text selection. Input inside the Preview iframe is invisible
-  to the page (the browser keeps those events in the frame), so it does not
-  extend the grace.
-- **A `scroll` event is NOT input — the one deliberate departure from "scrolling
-  keeps it alive".** The chat's own auto-scroll fires `scroll` for every word an
-  agent streams, so counting it would make an agent working in a tab nobody is
-  touching count forever. Scrolling by hand is already covered by the wheel,
-  touch, keys and pointer that cause it. For the same reason a `pointermove` at
-  the position the pointer already had (the browser repeats it when content
-  scrolls under a parked mouse) and every untrusted event (`isTrusted` false) are
-  ignored.
-- **Reports are durations, not timestamps.** The page sends `{activeSeconds,
-  endedSecondsAgo}` every 15 s (`BEAT_INTERVAL_MS`): how long it was active and
-  how long before sending that ended. The server places it on ITS clock, so a
-  device whose clock is minutes off lands on the right seconds. The 15 s timer
-  exists only while a stretch can still be reported (it starts at the first
-  input and stops when the grace runs out or the page is hidden or blurred): a
-  hidden or idle tab owns no timer. The last report goes as a beacon only when
-  the page is hidden or closing (`pagehide`); a merely blurred page sends a
-  normal request and reads the answer. Capped at 90 s per beat on the server
-  (`parseBeat`).
-- **The server keeps a UNION, not counters** (`ledger.ts`, `store.ts`):
-  `<accounts dir>/daily-limit.json` (0600, atomic, keyed by account id plus
-  `__instance`) holds, per person, the settings, the per-day notes
-  (`extraSeconds`, the limit the notice was dismissed at) and the ledger of
-  wall-clock intervals. Intervals that overlap or sit within 1 s merge, so two
-  tabs or devices reporting the same seconds add nothing and a day of beats is a
-  handful of intervals. Pruned on every write to 14 days and 5000 intervals; a
-  deleted account's record goes with it (nothing is pruned while the account
-  store reads empty). Beats are ignored while the limit is off, and the file is
-  only rewritten when the union grew. Reads degrade field by field; writes are
-  strict (`400 invalid_daily_limit`).
-- **The day is the local date in the person's zone.** GET resolves it with
-  `effectiveTimeZone` (a read never writes the remembered device), PUT and beat
-  with `zoneForMessage`: chosen > this browser > last seen > server > UTC, as
-  under "Time zones". The day's edges are FOUND, not computed from an offset
-  (`localDayBounds`: a binary search over the zone's own date), so a 23- or
-  25-hour DST day and a zone whose clocks change at midnight come out right,
-  usage resets at the zone's midnight, and an interval across it splits there.
-  Usage is a window over the ledger chosen at read time, so a zone change needs
-  no rewrite; "Add 15 minutes" and the notice's dismissal are keyed by that
-  local date.
-- **The ring** (`DailyLimitRing`, `LimitGlyph`): ONE circle in the controls row,
-  no text beside it: a thin outline and an inside that fills like liquid from the
-  bottom as the day is used (a rect clipped to the inner circle, slid by a CSS
-  `transform` transition; the global `prefers-reduced-motion` rule zeroes it, so
-  the level jumps for anyone who asked for less motion). Its diameter IS the
-  Send/Stop pill's height: 28px on a desktop, 38px on a phone. Accent normally,
-  warning at 15 minutes left or less (`WARNING_SECONDS`), error at zero and below
-  ("reached" for the first minute over, then "over"). Tooltip and aria-label:
-  "1h 12m left today", "Daily limit reached", "12m over today's limit". A click
-  opens the popover (time left in big numbers, used today, the limit, "Add 15
-  minutes" once spent, a link to Settings › Preferences). It sits before the
-  quota ring and costs 42px on a phone row (see "Phone composer").
-- **Time's up** (`DailyLimitNotice`): one slim bar above the composer's stack
-  ("You've reached today's 2h limit", "Add 15 minutes", "Done for today"). The
-  SERVER decides it is due (`noticeDue`: on, limit reached, not dismissed at this
-  limit), so answering on the tablet clears it on the PC. It stays until one of
-  the two is pressed (it never hides itself and never blocks a send). Adding time
-  raises today's limit, so reaching the new one is a new occasion. The quiet
-  "12m over" state is just the ring for the rest of the day.
-- **One counter per page.** `useDailyLimitTracker()` is mounted once in AppShell;
-  every surface reads the same store (`useDailyLimit`, on `globalThis`). The
-  state is refreshed on load, focus, visible and online (never faster than every
-  5 s) and on the first input after midnight; each beat's answer is today's total
-  across devices. Turning the limit off hides every surface and detaches every
-  listener and timer.
-- **Traps.** `LimitGlyph`'s clip-path id comes from `useId`, which is unique only
-  inside ONE React root: a harness that renders circles with separate
-  `renderToStaticMarkup` calls shares ids, and every circle is clipped by the
-  first one's. Headless Chromium reports no hover, which Cody reads as a touch
-  screen (taller notice buttons): launch with
-  `--blink-settings=primaryPointerType=4,availablePointerTypes=4,primaryHoverType=2,availableHoverTypes=2`
-  to look at the desktop layout. A puppeteer `screenshot({clip})` fires `resize`
-  and closed an open popover, so capture the viewport and crop afterwards.
-- **Not done on purpose:** a push notification at the limit. The person is
-  looking at Cody when it happens (the notice is their signal), and a new kind
-  would touch the notification catalog, its settings page and its tests.
+- Counts only visible+focused+input in last 60 s; `scroll` is NOT input (agent auto-scroll would count forever). Never blocks a send or run.
+- Beats are durations `{activeSeconds, endedSecondsAgo}` on the server clock (`parseBeat` caps 90 s); server keeps a merged interval UNION in `daily-limit.json`, not counters.
+- Day = local date in person's zone via `localDayBounds` (searched, not offset-computed, for DST).
+- One counter per page: `useDailyLimitTracker()` mounted once in AppShell.
+Details: docs/agents/time-and-limits.md
 
 ### Token rate: measured from the engine's own numbers, never guessed
-- The transcript's `t/s` badge is the provider's **output-token count over
-  the request's measured duration** — the same arithmetic the engine reports
-  for its own status line (omp's `utils/token-rate.ts`: `output * 1000 /
-  duration`, 100 ms floor). omp records `duration`, `ttft` and `completedAt`
-  on every assistant message it writes AND sends them on `message_end`, so
-  `lib/message-rate.ts` computes the identical number client-side, per
-  message, with no poll lag. omp also reports `tokensPerSecond` on
-  `get_state`; Cody deliberately does NOT read it — same formula, but only as
-  fresh as the 15 s reconcile poll and scoped to the session's last message.
-- **The estimate is labelled as one.** Before any output count exists (a
-  provider that reports usage only at the end, or an ACP engine, which
-  accounts for itself in `usage_event` frames and puts nothing on its
-  messages) the badge falls back to `chars / 4` and wears a `~` plus a
-  tooltip saying so. That heuristic is not a tokenizer: it understates CJK by
-  ~3x and dense code somewhat, and its rate is a cumulative average that
-  every pause (a tool call mid-message, a stall) drags down. The two live in
-  one module so no call site can confuse them.
-- **A rate needs enough output to mean throughput** (`MIN_RATE_OUTPUT_TOKENS`,
-  48). Measured: a four-token "ok" whose 1.7 s was almost entirely the wait
-  for the provider computes to 2.3 t/s and wore the SLOWEST colour on a model
-  that was in fact answering at ~90 t/s. Below the floor there is no badge at
-  all rather than a misleading one; the tooltip on a real one names the ttft
-  and the decode-only rate, so a long provider wait reads as a wait instead
-  of as a slow model.
-- **`message.timestamp` is when the request STARTED, not when it ended.**
-  `completedAt` is the end. Tool durations therefore measure from
-  `completedAt` (the moment the tools were dispatched); measuring from
-  `timestamp`, as the code used to, charged the model's whole generation time
-  to the first tool call. A thinking box's generation time is `duration`
-  itself, not the wall-clock gap to the previous message, which also contains
-  whatever ran in between.
+- `t/s` = output tokens over measured `duration` (`lib/message-rate.ts`); do NOT read `get_state`'s `tokensPerSecond` — only as fresh as the 15 s poll.
+- No badge below `MIN_RATE_OUTPUT_TOKENS` (48) — a 4-token "ok" showed 2.3 t/s on a ~90 t/s model; the `chars / 4` fallback wears `~`.
+- `message.timestamp` is request START; measure tool durations from `completedAt`.
+Details: docs/agents/usage-monitoring.md
 
 ### Distill: summaries that never break with the engine
-- **What it is.** A user-chosen model (Settings › Models › Assignments ›
-  Distill: primary + ordered fallbacks, `lib/distill/config.ts`) summarizes
-  two things on the client's request (`hooks/useDistill.ts`): a COLLAPSED
-  thinking block shows a one-line running summary under its header
-  (`data-testid="thinking-summary"`, re-requested while streaming every
-  ≥600 chars and ≥4 s ONLY while collapsed — nothing to show a running
-  summary for while the box is open), plus a FINAL summary requested once
-  the block settles REGARDLESS of whether it happens to be expanded right
-  then (`thinkingSummaryKeys` in useDistill.ts decouples the two keys), so
-  it is already there, or already in flight, the moment the reader later
-  collapses it. A FINISHED reply is replaced by a distilled version at the
-  Preferences verbosity (Off/Low/Medium/High, `lib/distill-preferences.ts`)
-  with a "Show full reply" footer (`distilled-reply` / `distill-toggle`).
-  Replies are distilled ONLY when finalized in this page session or already
-  cached; history is never distilled on load, and replies under
-  `REPLY_DISTILL_MIN_CHARS` (400) are left alone because a paraphrase of a
-  short answer is not shorter.
-- **Isolated, or every attempt times out.** Every one-shot child (Distill's
-  and the session namer's) runs against `getOneShotAgentDir()`
-  (`lib/omp/isolated-agent-dir.ts`: empty `mcp.json`, `agent.db`/
-  `models.yml`/`config.yml`/`blobs` SYMLINKED to the real ones, never
-  copied, so credential refresh and provider edits still reach the one real
-  store) — the same idea `sidebarAgentDir()` and the web-research planner
-  already used, now one shared helper instead of three copies of it.
-  Measured cause of "summaries never appear": the real agent dir's
-  user-scope MCP servers made every spawn connect to them first — 45-58s on
-  a real install's two servers — before the model ever saw the prompt,
-  against a 20s per-attempt timeout that therefore could never succeed.
-  Isolated, the same spawn answers in single-digit seconds (~2-4s of fixed
-  omp startup, the rest is the model's own latency); `THINKING_TIMEOUT_MS`
-  is now 30s, sized off THAT measurement with margin for a legitimate
-  multi-turn retry a role's own fallback chain can trigger — not off the
-  old MCP tax. The web-research planner (`lib/model-presets/research.ts`)
-  keeps its OWN fresh directory per run instead of the shared one: it
-  spends its turn on untrusted web content, so a longer-lived shared dir is
-  the wrong shape for it regardless of the file-linking logic being shared.
-- **Trap — a config overlay must use NESTED keys.** omp resolves a setting
-  by path segments, so a flat `memory.backend: off` line in an overlay is a
-  key literally named "memory.backend" that nothing reads (verified with
-  `PI_CONFIG_FILES=<overlay> omp config get memory.backend`, omp 18.3.4). The
-  one-shot overlay (`lib/model-plan/one-shot.ts`) and the sidebar overlay
-  (`SIDEBAR_OVERLAY_YAML` in rpc-manager) were written flat, so none of their
-  switches applied: every Distill/session-name run booted the full memory
-  system (an ~800 MB embedding worker per run, recall into the prompt, its own
-  transcript retained into the shared memory DB), and the sidebar loaded the
-  workspace's project MCP config. ~4,400 omp processes a day were spawned on
-  the owner's instance. `one-shot.test.mjs` parses the overlay and fails on
-  any dotted top-level key.
-- **The subagent "summary" is not a model.** Chips and the transcript dialog
-  show the raw tool-call intent strings and the verbatim `<id>.md`; the
-  reusable one-shot mechanism is the session namer's `omp -p --mode=json`
-  run (`lib/model-plan/one-shot.ts`), which Distill drives with `--model=`
-  per attempt.
-- **The material is fenced and the task restated after it.** The other
-  assistant's raw text sits inside `<assistant_reasoning>`/
-  `<assistant_reply>` tags with the task repeated again right after the
-  closing tag (`buildDistillPrompt` in prompts.ts). The material is often
-  the OTHER assistant's own first-person narration ("I need to find...",
-  "I'll check..."), which a model that follows instructions weakly
-  continues instead of describing once system-prompt instructions are pages
-  behind it; putting the instruction where generation actually starts fixed
-  that for every chain model tried, not only the strongest one.
-- **Fall through, never fail hard.** Chain entries are validated
-  syntactically only; Cody holds no opinion about which models exist. A
-  spawn failure, non-zero exit, unknown model, timeout, empty answer, and a
-  THINKING answer that addresses the reader instead of describing the
-  material (`looksLikeReplyNotDescription` in prompts.ts catches the
-  unambiguous self-referential opens — "I don't have...", "Sure, I can..." —
-  the same english-only, high-precision trade-off session-namer's
-  `REFUSAL_RE` already makes for the same class of failure) are ONE case:
-  try the next selector, then the engine's own default with no `--model` at
-  all. A distill that still fails leaves the original thinking or reply
-  exactly as it was, with at most a muted "Could not distill · Retry" row.
-  A server queue-overflow eviction (`DistillQueueOverflowError`, the
-  waitlist was full and dropped the oldest, usually off-screen, waiter) is
-  explicitly NOT that failure: it reads as never-asked and the client
-  forgets the request, so a later visit to the same now-visible block tries
-  again instead of staying latched at "Could not distill" forever.
-- **Two kinds of "can't right now" are not the same.** `unsupported` (an ACP
-  engine, no binary) is a structural, PERMANENT latch. A 401/403 is a
-  transient auth hiccup (clock skew, an expired credential cache, a proxy
-  needing re-auth) and only pauses every request for `AUTH_BACKOFF_MS`
-  (60s), then tries again on its own — conflating the two used to mean one
-  clock-skewed request disabled Distill for the rest of the page until
-  reload.
-- **Plain language is a phrasing toggle, not a third feature.**
-  `plainLanguage` in `DistillPreferences` (default off, Settings ›
-  Preferences, next to the existing Distill controls) asks the SAME
-  summaries in everyday words instead of developer shorthand: a thinking
-  summary names the goal rather than a code identifier unless the identifier
-  IS the point, and a reply keeps every decision and outcome but explains
-  jargon and never touches a command the reader must actually run. It rides
-  on whichever of replies/thinking summaries is already on and starts
-  nothing by itself. Sent as `plain` in the POST body and folded into BOTH
-  the server cache key (`distillCacheKey`'s 5th segment) and the client
-  store key, so a technical and a plain-language summary of the same block
-  never collide or serve each other stale.
-- **Deltas are an optimization.** `createFrameReader` in one-shot.ts is the
-  pure NDJSON reducer: the answer comes from `turn_end`/`message_end` exactly
-  as the namer takes it, every other frame type (including ones this build
-  has never seen) is ignored silently, and a run whose streaming frames were
-  all renamed still ends in one `done` with the whole text. `done.text`
-  REPLACES what deltas built, never appends.
-- **Cody-owned state.** The chain (`cody-distill.json`) and the summary cache
-  (`cody-distill/<sessionId>.json`, keyed
-  `${entryId}:${blockIndex|-}:${kind}:${verbosity|-}:${plain|-}`) live in
-  the instance data dir, never in omp's config.yml or the engine's session
-  files, so an engine upgrade or switch cannot lose or rewrite them. Under
-  an ACP engine the routes answer `unsupported` and every Distill surface
-  hides.
-- **Smoothness.** The distilled reply streams through the coalescer, which reparses the full buffer on each animation frame, giving smooth multi-token reveals without a typewriter pacer. Thinking blocks auto-expand while streaming and collapse when finished, providing clear context hierarchy without jarring motion.
-- **Trap — a collapse box must not animate its own growth.**
-  `.collapse-box-panel` carries a `height` transition (with
-  `interpolate-size: allow-keywords`, so `auto` is animatable) for open/close
-  toggles. A thinking box grows on EVERY streamed token, so that transition
-  re-targeted itself per delta and the box visibly lurched the whole time it
-  streamed — the "janky thinking text" report. `ThinkingBlock` now marks the
-  actively streaming box `data-streaming`, and `globals.css` drops the
-  transition for exactly that box while the modifier class
-  (`.collapse-box-panel--motion`, set by `useCollapseMotion` on a real
-  toggle) is absent. Measured mid-stream afterwards: `transition-property:
-  none`, p95 frame 18.6 ms, one frame over 32 ms in 1119.
-- **Cancel subtask** (SubagentTranscriptDialog CancelSubtaskButton): omp 18.4+
-  has `cancel_subagent` (`{subagentId}` → `{cancelled:boolean}`), which really
-  kills the child (a lifecycle `aborted` frame follows). `runSubtaskCancel`
-  sends it first: `true` → success toast, `false` → "already finished" toast
-  (omp answers `false` for unknown/finished ids; it is a no-op, not an error),
-  and an error matching `isUnsupportedCommandError` (18.3's `Unknown command:`
-  or the wrapper's "not supported by this engine") flips a page-session flag
-  and falls back to the old path: steer the PARENT (OMP 18.3 uses write
-  proc://<id>/kill; the instruction names legacy hub cancel only for an older
-  engine that lacks proc://). That fallback never claims the child was killed.
-  The button needs no parent steer on 18.4+; on 18.3 it is gone when the
-  parent can't be steered. Any other failure is a toast and the button stays.
-- **Message this subagent** (`SteerSubagentBox`, dialog footer, running child
-  only): `steer_subagent {subagentId, message}` (omp 18.4+; not the parent
-  steer). omp holds the reply until the child accepts the message, so the box
-  is disabled while sending and cleared only on success. On "Unknown command"
-  the box hides for the rest of the page session with one info toast. The
-  unsupported verdicts live in one module store (`useSyncExternalStore`) shared
-  by the button and the box.
+- One-shot children MUST use `getOneShotAgentDir()` (empty `mcp.json`, symlinked `agent.db`/`config.yml`) — user MCP servers cost 45-58 s per spawn, past the 20 s timeout.
+- Trap: overlay keys must be NESTED; flat `memory.backend: off` is ignored (~4,400 omp processes/day). `one-shot.test.mjs` rejects dotted keys.
+- Any failure tries the next chain selector, then engine default (no `--model`); original text stays untouched; `DistillQueueOverflowError` is not a failure.
+- `unsupported` (ACP engine) is a permanent latch; 401/403 only pauses `AUTH_BACKOFF_MS`. `plain` is in both cache keys; state in data dir, not omp config.
+Details: docs/agents/distill.md
 
 ### Subagent integration (`lib/subagent-types.ts`, `lib/subagent-history.ts`)
-- **Lifecycle + progress, never "events"** (`SUBAGENT_SUBSCRIPTION_LEVEL` in
-  lib/rpc-manager.ts). omp's events level forwards every child's streaming
-  delta as a `subagent_event` carrying the FULL message so far (~70 KB each).
-  Measured on a real session: five children thinking at once wrote 5.3 GB in
-  five minutes. omp spills output Cody has not read yet to a temp file
-  (`/tmp/omp-rpc-output-*/output`) and drains it at a few hundred KB/s, so
-  every later frame of that session — replies, `agent_end`, the answer to
-  `get_subagents` — arrived hours late and the roster could never refresh.
-  Progress frames (omp-throttled to ~7/s per child, ~11 KB) carry what the UI
-  shows. If a session looks frozen, check that temp file's size first.
-- **Live detail**: `subagent_progress` frames carry the full `AgentProgress`
-  object — `lib/subagent-types.ts` parses it defensively into
-  `SubagentInfo.progress` (current tool/intent, tokens, cost, context
-  gauge, resolved model, retry state, detached flag, agentSource). The
-  composer chips surface the current activity + telemetry line; retry
-  (`⟳ retrying N/M`) takes precedence over the tool line. The transcript
-  dialog's activity list is derived from successive progress frames
-  (`activityFromProgressChange`: tool started, model switch or fallback,
-  reasoning change), and each frame bumps the child's transcript version so
-  an open dialog follows new output. omp 18.4+ adds `currentToolIntent`
-  (cleared per call, unlike the sticky `lastIntent`), `currentToolArgsKey`
-  and `recentTools[].{intent,argsKey,isError}`; `subagentActivityIntent`
-  prefers `currentToolIntent` for the chip and the dialog's tool line, and
-  falls back to `lastIntent` on 18.3 frames.
-- **The roster is run-scoped, on purpose** (`useAgentSession`): the composer
-  panel is a live view of the CURRENT run, newest activity first (actives
-  lead, then settled, both newest-first — `selectVisibleSubagents`). It is
-  NEVER seeded from on-disk history: run end drops finished children and
-  keeps ones still working (background/async tasks outlive the main turn).
-  A progress frame for a RUNNING child the roster does not know adopts it —
-  that is how a child reappears after a session switch or a missed
-  `started` frame; `mergeSubagents` refuses terminal frames for unknown ids
-  outside a run so late completions cannot resurrect chips. Seeding from
-  `extractSubagentHistory` is the removed design that bloated long
-  conversations to 20+ stale chips — do not bring it back; past runs stay
-  reachable through each task call's in-message summary (TaskResultPanel).
-  `get_subagents` snapshots rehydrate the LIVE roster on mount of ANY live
-  session (main agent idle or not — the event stream is attached then too),
-  after SSE reconnect, on send, and on the reconcile poll; the `/subagents`
-  route is now consumed only for its `subagentUsage` sum
-  (`refreshSubagentUsage`).
-- **On-disk history** (`lib/subagent-history.ts`, `/api/sessions/[id]/subagents*`):
-  omp persists each subagent's transcript to the parent session's sibling
-  artifacts dir (`<session-dir>/<subagent-id>.jsonl`) and the parent file's
-  task toolResults keep `progress[]`/`results[]` snapshots
-  (`extractSubagentHistory` still reads them for the route's roster payload
-  and usage sum). The transcript route (`?tail=1` newest page,
-  `?beforeByte=N` the page before N, `?fromByte=N` forward) reads ONLY the
-  bytes a page needs (`readSubagentTranscriptPage`: fd range reads, 64 KB
-  newline scans, one reusable buffer) — never the whole file, so there is no
-  size cap any more (real transcripts are 14–21 MB; a page costs ~2–10 ms and
-  ~110 KB whatever the file size). Every page is whole JSONL lines:
-  `fromByte`/`nextByte` are line starts, `offsets[i]` names the line each
-  message came from, `endByte` is the end of the last COMPLETE line (a line
-  still being written is never returned). A page is ≤256 KB and ≤200 lines,
-  except that one longer line comes back whole up to 8 MB (beyond that: one
-  "Entry omitted" placeholder). `slimSubagentMessage` bounds each message
-  before it ships: `providerPayload` and `thinkingSignature` (over half of a
-  real assistant line, never rendered) are dropped, rendered strings over 64K
-  chars get a visible "… truncated" marker, inline images over 512 KB become a
-  note. `get_subagent_messages` (RPC-registry-gated, forward-only, starts at
-  the OLDEST page) is only a fallback for a running child whose file the disk
-  reader cannot find. The dialog reads the final output — `<id>.md` via
-  `?mode=completion` (bounded read) with a live `get_subagents` snapshot
-  fallback for header enrichment.
-  IDs can be explicit task names with spaces/punctuation: validate a bounded safe
-  filename component and retain realpath confinement, not an AdjectiveNoun regex.
-- **The transcript dialog** (`SubagentTranscriptDialog` → `SubagentTranscript`,
-  `useSubagentTranscript`, `useTranscriptScroll`). Top to bottom: fixed header,
-  Result (once `<id>.md` exists; folded when long), Task (collapsed), Transcript,
-  steer footer. The dialog body is the ONE scroll container (the old nested 50dvh
-  scroller and its height/maxHeight flip are gone) and the popup has a fixed
-  height, so nothing resizes when pages land or the child finishes. The
-  transcript mounts with the dialog and fetches only while it is open.
-  - **Same rows as the chat.** Rows are the main chat's `MessageView`
-    (`activityDisplayMode="compact"`, thinking collapsed, tool calls as the
-    normal cards with results attached by id; a toolResult is never a row of its
-    own). `allowDistill={false}` plus no session/entry id: a subagent row can
-    never request a summary or fetch anything. Row keys are the line's byte
-    offset, never an array index — pages are PREPENDED.
-  - **Bounded, not virtualized.** The window keeps at most `MAX_WINDOW_MESSAGES`
-    (400) messages; past that `trimWindow` drops the page farthest from the
-    reader (never the page under them) and "Show earlier" / the auto-load /
-    "Jump to latest" bring pages back. Chosen over `content-visibility: auto`
-    because a row's cost here is React script time, not layout (measured in dev
-    for 22 rows: layout 20 ms, style 18 ms, script 688 ms) — which
-    content-visibility cannot skip — and exact row geometry keeps the scroll
-    anchor exact. The 20 MB file never costs more than the window.
-  - **Paging.** ONE "Show earlier" control at the top, only while earlier
-    content exists; the previous page also loads on its own once the reader is
-    within 240 px of the top (rate-limited: 250 ms, 2 s for a flip of direction,
-    so a window that renders almost nothing cannot loop). There is no forward
-    button: a running child's new lines append through the throttled
-    `transcriptVersion` (600 ms, one more fetch ~1 s after the child settles),
-    and a trimmed window walks down by itself near its bottom.
-  - **Follow vs read** (`lib/transcript-scroll.ts`). Pinned: every commit and
-    every content resize re-pins the bottom with an INSTANT scroll. Reading:
-    nothing scrolls the reader; the row at the top edge is held (stable key +
-    offset) through a prepended page, a trimmed page or a row expanding above
-    them. Our own writes are told apart by VALUE (`pinnedAfterScroll`), so there
-    is no window in which the reader's scrolling is ignored; wheel up, a
-    downward finger drag, Up/PageUp/Home or a scrollbar drag unpin at once,
-    returning within 40 px re-pins, and a click on any control inside the
-    scroller (opening a card, "Show earlier") unpins too so growth never drags
-    the reader. "Jump to latest" shows when rows arrived while reading, or when
-    the window was trimmed away from the live end (it reloads the newest page).
-    The scroller sets `overflow-anchor: none` and `scroll-behavior: auto` so the
-    browser's own anchoring and smooth scrolling never fight this.
-  - **Entry point.** The dialog opens only from the live roster's composer
-    chips. A finished session has no chips (the roster is run-scoped) and
-    TaskResultPanel rows are not clickable, so past runs' transcripts have no
-    way in today.
-- **In-message task summary** (`components/MessageView.tsx` TaskResultPanel):
-  the session reader allowlists a SIZE-BOUNDED subset of `task` toolResult
-  details (telemetry only — no `output`/`stderr`, long text truncated to
-  240 chars, `lib/session-reader.ts` `keepTaskToolResultDetails`), and
-  expanded `task` tool calls render a per-subagent summary (status, agent,
-  task, tokens/cost/duration/model, async marker) above the raw result text.
-- **Chip extras**: agent-source labels (`user`/`project`), nested-subagent
-  count (`inflightTaskDetails`/`extractedToolData.task` progress), and the
-  `⤴` async marker (live `detached` flag or history `details.async`
-  presence). Shared formatters live in `lib/subagent-format.ts`.
-
-A `task` call is summarised on its card by `lib/task-call-preview.ts` (batch:
-"N subagents: names", omp 18.19 `task.steps`: first step plus "(N steps)").
-Since omp 18.18 a parent agent's message to a running subagent is a `user`
-message carrying `parentIrc {from, body}` beside the model-facing `<irc …>`
-wrapper; `lib/irc-display.ts` turns it into the same incoming-IRC card peers
-use, so a subagent transcript shows the plain text and the sender. omp 18.17+
-puts `progress`, `broadcast`, `replyTo` in the IRC message details; the card
-shows them as small tags. `AgentProgress.stage`/`watch` (omp 18.19) come only
-from the completion probe, which omp never runs under RPC, so Cody does not
-read them.
+- Subscribe to lifecycle+progress, NEVER "events" (`SUBAGENT_SUBSCRIPTION_LEVEL`) — 5.3 GB in 5 min froze sessions (check `/tmp/omp-rpc-output-*`).
+- Roster is run-scoped; never seed from `extractSubagentHistory` (20+ stale chips).
+- Transcript route reads only needed bytes (`readSubagentTranscriptPage`), never the whole 14–21 MB file.
+- Validate ids as safe filename components with realpath confinement, not an AdjectiveNoun regex.
+Details: docs/agents/subagents.md
 
 ### Worktrees and project grouping
-- `lib/worktree.ts` resolves linked worktree top-levels back to the main repo `projectRoot`; `listAllSessions()` attaches that to each `SessionInfo` so all worktrees for one repo are grouped together in the sidebar.
-- Worktree operations are served by `/api/worktrees` and guarded by the same allowed-root rules as `/api/files`.
-- New worktrees are created under `<repoRoot>-worktrees/<sanitized-branch>`. Existing branches are reused; otherwise `git worktree add -b` creates the branch.
-- Removing a dirty worktree returns `409` with `{ dirty: true }` so the UI can ask before retrying with `force`.
-- Sessions whose cwd points at a removed worktree are inferred back into the main project instead of becoming a phantom project row.
+- `lib/worktree.ts` maps linked worktrees to the main repo `projectRoot`; sessions in removed worktrees map back, not to a phantom row.
+- `/api/worktrees` uses `/api/files` root rules; removing a dirty worktree returns `409` `{ dirty: true }` so the UI asks before `force`.
+Details: docs/agents/projects-and-files.md
 
 ### Managed projects sidebar (`lib/project-registry.ts`, `/api/projects`)
-- The sidebar lists **managed projects**: explicitly added directories (registered in
-  `~/.omp/agent/projects.json`, written atomically as temp-file + rename) plus
-  session-discovered ones — hidden entries excluded. Removing a project only
-  marks it hidden (reversible via re-adding); hidden entries suppress session
-  re-discovery.
-- Registry paths are canonical `projectRoot`s: `POST` resolves worktrees to
-  their main repo via `resolveProject`, and `resolveProject` returns the
-  symlink-free on-disk form for plain directories so registered and
-  session-discovered paths compare equal on Windows casing.
-- `GET /api/projects` re-authorizes registered roots with `allowFileRoot()` —
-  the in-memory browse allowlist does not survive restarts, and empty managed
-  projects derive no root from sessions.
-- The client sorts the merged list by most-recently-added (registration
-  order), then by path for session-discovered projects
-  (`lib/project-ordering.ts`); the order deliberately does NOT depend on
-  session activity, so project rows never jump around while sessions refresh.
-  Expanded project paths live
-  in `localStorage` (`cody:expanded-projects`, see `lib/storage-keys.ts`), defaulting to only the
-  active/restored project expanded, and stale keys are pruned against the
-  current project list (only after the first project fetch — an empty
-  still-loading list must never wipe storage).
-- Each project's session tree is capped at 5 roots with a show-more toggle;
-  project rows are cards matching the session items' height/margins/accent
-  treatment, and the active project's worktree selector renders directly
-  below its row.
+- Registry holds canonical `projectRoot`s (`resolveProject`); removing only hides (blocks re-discovery).
+- `GET /api/projects` re-authorizes roots via `allowFileRoot()`; the allowlist doesn't survive restarts.
+- Order = registration, not activity; prune `cody:expanded-projects` only after first fetch.
+Details: docs/agents/projects-and-files.md
 
 ### File access allow-list
-- `/api/files` is intentionally not a general filesystem browser. Allowed roots come from session cwds, their resolved project roots, `~/omp-cwd-*`, and roots explicitly added with `allowFileRoot()`.
-- `/api/cwd/validate`, `/api/cwd/browse`, `/api/cwd/mkdir`, `/api/default-cwd`, and `/api/worktrees` call `allowFileRoot()` when they make a new location browsable.
-- **Authorization rule for `/api/cwd/mkdir`**: if a path is browsable via `/api/cwd/browse` (i.e., reachable through user's directory-picker navigation), it can be written to. The old mkdir flow POST'd to `/api/files/ops` (action="mkdir"), which required the parent to already be in `allowedFileRoots` — but a freshly-browsed directory outside allowed-roots would 403. The new route uses the same parent-resolution logic as browse (`resolveDirectory` + authorization), so "Add project" → "browse /tmp" → "New folder" succeeds immediately, registering the created folder as a new allowed root, unifying the authorization model: **one rule for every cwd operation**.
+- `/api/files` is no general browser: roots = session cwds, project roots, `~/omp-cwd-*`, `allowFileRoot()`; `/api/cwd/browse` and `/api/worktrees` call it.
+- One rule for every cwd operation: browsable via `/api/cwd/browse` means `/api/cwd/mkdir` may write there (and registers the new folder as a root).
+Details: docs/agents/projects-and-files.md
 
 ### Session list caching — new sessions must appear immediately
-- `listAllSessions()` (sidebar, command palette) is cached twice: a 30s TTL
-  list cache in `lib/session-reader.ts` plus an mtime-keyed directory walk in
-  `lib/omp/session-files.ts` (`listSessionFiles`).
-- The walk cache keys on the **sessions root** mtime. On Windows/NTFS a new
-  `.jsonl` inside an existing project subdirectory does NOT bump the root
-  mtime, so the walk stays stale indefinitely.
-- `invalidateSessionListCache()` (fired on `agent_end`, `session_info_update`,
-  compaction, renames) must therefore ALSO clear the walk cache via
-  `invalidateSessionFileListCache()` — never add a session-mutation path that
-  forgets this. Regression test: `session-reader.test.mjs`.
-- **No cache fixes a file that does not exist yet.** A brand-new session has
-  no `.jsonl` until its first message is *persisted* — measured at ~5s after
-  `agent_start` against omp, and unbounded in principle. Until then the
-  session cannot be listed from disk at all, so the sidebar's row exists only
-  client-side. `retainPendingSessions()` (`lib/project-ordering.ts`) keeps
-  those rows until the server list reports the same id; the sidebar
-  accumulates them rather than rendering only the selected one, which is what
-  makes a new session survive the user switching away mid-run. The server
-  side still self-heals separately: `signalWhenSessionFileAppears()` in
-  `lib/rpc-manager.ts` polls for the file after `agent_start` and re-signals
-  the sidebar once it lands.
-- **The list reads a 4 KiB prefix, and omp 18.7 can fill it before the first
-  message.** The spawn-time `xdev-mount-notice` (~3 KB with Cody's roster)
-  pushed the first user message past the window: the row said "(no messages)"
-  and the session namer, which needs that message, never named the chat.
-  `scanSessionInfo` reads a 64 KiB prefix once more when the 4 KiB one holds
-  no user message; scans are memoized per (size, mtime), so that is one extra
-  read per file version. Regression test: `lib/omp/session-list-window.test.mjs`.
-- - **Chat list ordering ("last active").** Each session in `/api/sessions`
-  carries `lastActiveAt`: the time of the newest user message or assistant
-  reply, read from the file tail (`lastActiveFromTail` in
-  `lib/omp/session-files.ts`: 64 KiB tail, widened to 1 MiB only when that holds
-  no such message; memoized with the rest of the scan on size+mtime). File mtime
-  (`modified`) is only the fallback, because title rewrites bump it. The sidebar
-  has a Recent / Projects switch (`cody:sidebar-view`, default Recent). Recent
-  is one flat list across all visible projects ordered by `sortRecentSessions`
-  (`lib/project-ordering.ts`): not-yet-persisted chats from
-  `retainPendingSessions` first, then `lastActiveAt` desc, ties keep list order.
-  The sort is a memo over the session list, so it re-sorts when the list
-  refreshes and never on running/unread/clock ticks. Per-project trees also sort
-  by `lastActiveAt`; the project order itself is unchanged.
-
-**One row per chat, even after a move.** `SessionInfo.continuationOf` (read from
-the header by `scanSessionInfo`) lets `collapseContinuedSessions`
-(`lib/session-reader.ts`) drop the earlier copy once a listed row continues it
-and nothing was said in it after the new file began; a copy that was written
-afterwards holds turns the other lacks, so both stay (that is also when omp's own
-resume leaves the older copy alone). omp decides this by whether the older copy's
-newest entry id is held by the newer file; Cody does not read whole files for the
-list, so it uses `earlier.lastActiveAt <= copy.created` instead. A chat that moved
-several times is one row, forks of an earlier copy hang from the row shown, and
-`/api/sessions/<id>` still reads every copy by its own id. Delete and Archive of
-the row take the earlier copies along (`listSupersededCopies`) so none returns as
-a chat. `lib/session-tools.ts` (cross-session awareness) collapses the same way.
-The list's first-prompt scan (`scanSessionInfo`) is a head window plus a tail
-window; when a chat's first prompt sits behind a large leading entry (for
-example a `memory_recall` custom entry written before the first turn) the head
-window holds no user message, so the scan walks the gap line by line
-(`forEachFileLineSync` stops when the callback returns true) instead of
-reporting an empty chat. Tests: `lib/session-collapse.test.mjs`,
-`lib/omp/session-list-window.test.mjs`.
+- `invalidateSessionListCache()` MUST also call `invalidateSessionFileListCache()` — the walk cache keys on root mtime, which NTFS subdir writes don't bump.
+- A new session has no `.jsonl` for ~5 s; `retainPendingSessions()` keeps its client-side row until the server lists it.
+- `scanSessionInfo` rereads a 64 KiB prefix when 4 KiB has no user message — else chats read "(no messages)" and never get named.
+Details: docs/agents/chat-ui.md
 
 ### Session switching: paint from cache, never wait on the engine
-
-The owner saw slow switches and sessions that stayed blank, even after a
-refresh, until a turn finished. Three causes, each measured on a real 21 MB
-session:
-
-- **The transcript never waits for engine state.** `loadSession` fetches the
-  transcript and `/state` concurrently and releases the loading gate when the
-  TRANSCRIPT settles. Gating it on the state fetch is what kept a session
-  blank: state rides omp's serialized RPC queue, so it can sit behind a
-  running turn's command for the whole turn.
-- **Server: parse once per file version.** `loadSessionFileCached`
-  (lib/session-reader.ts) memoizes the parse by path, size, mtime and load
-  options. The ownership check runs before any hit. Repeat GETs went from
-  0.9–1.6 s to 0.04–0.19 s.
-- **Client: stale-while-revalidate across switches.**
-  `lib/session-transcript-cache.ts` (12 sessions, 15 min) lives above the
-  per-switch remount, so a revisited session paints before any request
-  (2.4–3.0 s → ~0.45 s) and then refreshes. Deleting a session clears its
-  entry.
-- **A switch aborts the old session's requests** (AbortController per
-  mount), so a slow response from the session you left can never land on the
-  one you opened.
-- **An inconclusive read is not "idle".** A `stale` state without a
-  snapshot never finishes a running turn in `reconcileAgentState`. If the
-  server says running but has no fresh state, the SSE stream still connects,
-  so live frames are not dropped. A failed reload keeps what is painted and
-  posts a notice; a first load that fails shows Retry, never a blank pane.
+- `loadSession` releases the loading gate on the TRANSCRIPT, never on `/state` — state queues behind a running turn and left sessions blank.
+- Revisits paint from `lib/session-transcript-cache.ts`; a switch aborts old requests; a `stale` state without a snapshot never finishes a running turn.
+Details: docs/agents/chat-ui.md
 
 ### Chat scroll: a follower is pinned to the tail, a reader is pinned to their content
-- Two states, one flag (`completionScrollAllowedRef`, "following"). Following:
-  every commit and every content resize re-pins the bottom (`scrollToBottom`
-  "instant" — the follow effect, throttled to one rAF per run; the
-  ResizeObserver; the terminal re-pin layout effect). Reading (the user
-  scrolled up): NO programmatic scroll ever runs; the **reader pin** holds the
-  viewport on the same content instead. Sending a prompt re-engages following.
-- **The reader pin** (`lib/transcript-anchor.ts`, wired in useAgentSession):
-  on every user scroll the anchor is captured — the row at the container's
-  top edge, named by `data-turn-index` (+ `data-turn-part` for a message
-  rendered in slices: `group` / `process` / `answer`), the `data-block-index`
-  inside it, and both offsets — and after EVERY commit (a layout effect with
-  no deps) and on every content resize (the same ResizeObserver) the
-  anchored element is put back at its offset before paint. Identity, not DOM
-  node, is the point: three transitions remount the rows under a reader and
-  browser scroll anchoring lets go at each — `message_end` swaps the
-  streaming bubble for a committed row (thinking collapses), `agent_end`
-  unmounts the bubble and folds the turn into a collapsed process group, and
-  the terminal reload re-keys every tail row from `idx-N` to its entry id —
-  and Safari has no scroll anchoring at all. Measured before: a reader lost
-  282px at turn end with `scrollTop` untouched (the content moved under a
-  pixel restore). After: ≤5px for one frame on desktop, 0px on a phone.
-  The streaming bubble therefore carries `data-turn-index={messages.length}`
-  (the index it will have once committed) and every assistant block gets a
-  `data-block-index` wrapper, so an anchor inside the bubble is found again
-  in the row that replaces it.
-- **Nothing a reader is looking at folds or closes under them.** A run that
-  ends while the user is reading sets `readerHoldsTail`: the last turn stays
-  in its live, unfolded layout until they return to the bottom (`holdLiveTail`
-  into `buildTranscriptUnits`). A thinking box whose auto-expansion ends
-  (the next block starts, or the committed row replaces the bubble) stays
-  open when the anchor names that block and the anchored box was taller than
-  a bare header (`anchorIsInsideOpenBlock`, `TranscriptViewportContext`) —
-  latched as if the user had opened it, so a click still closes it.
-- **Scroll events: intent decides who moved.** wheel / touchstart / keyboard
-  / pointerdown mark intent for 1.2s. Without intent, our own scrolls are
-  told apart by VALUE (an instant write lands on a known `scrollTop`,
-  `expectedScrollTopRef`) or by a short window for a UA-animated one. What
-  remains (a momentum flick past the window, find-in-page, the browser's
-  own anchoring adjustment, a clamp when content below shrank) re-captures a
-  READER's anchor but can never demote a FOLLOWER: a clamp's scroll event is
-  delivered a frame late, by which time new tokens have grown the content
-  and the geometry reads "not at bottom" — measured stranding a follower
-  180px above the tail. Pin corrections are deferred while a touch scroll
-  (finger down, or momentum still delivering events) is in flight.
-- The lazy-load prepend needs no distance-from-end restore any more — the
-  pin holds the reader through it (the old restore ignored content still
-  streaming in at the bottom and ran after paint); only a CLICK on the banner
-  moves the viewport to the loaded page, and re-anchors there.
-- Programmatic smooth scrolling must respect `prefers-reduced-motion`
-  (`usePrefersReducedMotion` in `hooks/usePrefersReducedMotion.ts` — also the
-  only way to stop SVG SMIL animations, which CSS cannot).
+- Following re-pins the bottom; reading runs NO programmatic scroll — reader pin (`lib/transcript-anchor.ts`) restores by `data-turn-index`/`data-block-index` identity, not DOM node.
+- Nothing a reader looks at folds: `readerHoldsTail` keeps the last turn unfolded until the bottom is reached.
+- Scroll events never unpin a FOLLOWER (a late clamp stranded one 180px up); smooth scroll honors `prefers-reduced-motion`.
+Details: docs/agents/chat-ui.md
 
 ### MCP configuration (`lib/omp/mcp-config.ts`, `/api/mcp`, `components/McpConfig.tsx`)
-- Project MCP config resolution order: `.omp/mcp.json`, `.omp/.mcp.json`,
-  `mcp.json`, `.mcp.json` at the git top level (falls back to cwd for
-  non-git dirs). Server definitions support `stdio`, `http`, and `sse`;
-  exactly one of `command`/`url` is required and validated before any write.
-- Writes are atomic (temp file + rename), preserve unrelated top-level keys
-  (`disabledServers`, `enabledServers`, `$schema`, ...), and support rename via
-  `previousName`.
-- **Both writable scopes go through one target.** `writeMcpServer(target, …)`
-  and `deleteMcpServer(target, …)` take `{scope: "user" | "project", cwd?}`:
-  `"project"` resolves `cwd` as above and REQUIRES it, `"user"` is
-  `getUserMcpPath()` (`<agent dir>/mcp.json`) and ignores it. Same cross-process
-  lockfile mutex, same atomic rename for both. `/api/mcp` POST/DELETE default to
-  `scope: "project"`, so a caller written before user scope existed is unchanged.
-- **A user-level secret never reaches the browser** (`lib/mcp-secrets.ts`, a
-  pure module because `components/` may not import `lib/omp/*`). GET serves the
-  user config with every `headers`/`env` value replaced by
-  `MCP_SECRET_SENTINEL`; `writeMcpServer` merges each sentinel back from the
-  same locked snapshot it writes, and REFUSES the write when nothing is stored
-  for that key — a save can never blank a credential the form did not show. The
-  editor renders the sentinel as `••••••••` and swaps it back on submit. Project
-  configs are served raw: that file lives in the repo the user can already read.
-- **User scope is admin-only** (`userScopeDenied` in the route): every session
-  loads those servers, and a stdio entry there is a command that runs in
-  everyone's sessions; the `url` cannot be masked and can itself be the
-  credential (an ha-mcp webhook). So the full user config rides GET only for an
-  admin, user-scope POST/PUT/DELETE answer 403 `admin_required` otherwise, and
-  a member gets the name/status rows plus `canManageUser: false`, which hides
-  the Add button. The no-accounts open instance is exempt, as `/api/models/seen`
-  already is: the viewer there IS the administrator. Project scope stays open —
-  that file lives in a workspace the member can already edit from a session.
-- **Enable/disable is the user file's `disabledServers`**, not the server's own
-  `enabled` flag: omp reads that denylist from the USER path only and it always
-  wins (`src/mcp/config.ts`). `setUserServerDisabled(name, disabled)` owns it —
-  the key is dropped when the list empties, a rename carries the entry, and a
-  delete removes it (otherwise the name keeps a ghost row and silently
-  suppresses a future server). Reached over PUT `{action, scope:"user", name}`;
-  PUT without `action` is still the validate-only check.
-- The MCP settings live under Settings › Extensions › MCP. A `SegmentedControl`
-  picks the scope ("This project" / "All sessions"); only the project scope is
-  workspace-gated, because a user-level server is exactly what is configurable
-  without a project. Server list rows
-  show a config-derived status dot
-  (valid+enabled / disabled / invalid) — no live-connectivity probe exists in
-  the RPC protocol, so failures surface as toasts (`toast.error`) from the
-  editor actions, not inline text.
-- The endpoint is guarded by the same allowed-root rules as `/api/files` — for
-  the project scope. A user-scope call carries no cwd and is not root-checked.
+- User secrets never reach browser (`lib/mcp-secrets.ts`): `MCP_SECRET_SENTINEL`; write REFUSES if no stored value backs a sentinel.
+- User scope admin-only (`userScopeDenied`): stdio runs in everyone's sessions.
+- Enable/disable = user `disabledServers` (`setUserServerDisabled`), not `enabled`; delete must remove entry.
+Details: docs/agents/mcp-plugins.md
 
 ### Plugins and skills
-- `/api/plugins` shells out to the user's `omp plugin` CLI (`list/install/uninstall/enable/disable/upgrade`, `--json` where available) — never the Bun-only SDK. `lib/omp/plugin-cli.ts` holds the shared `execFile`/loose-JSON-parse helpers (`runOmpCli`, `parseJsonLoose`), used by both `/api/plugins` and `/api/plugins/marketplace`.
-- **`plugin upgrade` targets.** omp 18.4.5+ accepts a bare marketplace plugin name and npm/git-installed plugins; 18.3.x accepts only `name@marketplace` (anything else exits with "Invalid plugin ID"). `/api/plugins` `update` already forwards the source verbatim (works on both, 18.3.x just refuses npm plugins), and the marketplace route's `parsePluginId` check is an input guard, not a workaround, and stays so a bare name never reaches an 18.3.x engine.
-- **Plugin marketplace** (`/api/plugins/marketplace`, `lib/omp/marketplace.ts`, `components/PluginMarketplace.tsx`): browse data is a pure-Node read of `marketplaces.json` (the registry of `omp plugin marketplace add`ed catalogs, at `getMarketplacesRegistryPath()`) plus each marketplace's cached `marketplace.json` catalog (`getPluginsDir()`'s cache dir, `~` expanded) — no child process. `lib/omp/paths.ts`'s `getOmpDataRoot()` is the shared root for both (`~/.omp`, or its XDG equivalent): omp's own `DirResolver` gates XDG activation on the SAME `PI_CODING_AGENT_DIR`-override check for config-root-scoped paths (plugins, marketplaces) as for agent-scoped ones, so `getOmpDataRoot()` reuses the existing `xdgDataAgentRoot()` value rather than re-deriving a separate check — the override disables XDG resolution instance-wide, not per-category. Installed-state (which catalog plugins are already installed, at what version/scope) comes from `omp plugin list --json`, same as `/api/plugins`. Every mutation (add/remove/update marketplace, install/uninstall/upgrade a plugin) shells out to the CLI; name/id segments are validated against omp's own `^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$` rule before reaching argv.
-- **Bundled plugin versions.** `readMarketplaceCatalog` now shows a bundled (`source: "./…"`) plugin's own `.claude-plugin/plugin.json` / `plugin.json` version before the catalog entry's, matching what `omp plugin upgrade` installs (18.11+).
-- `/api/skills` uses `lib/skills-service.ts`, a pure-Node scanner mirroring the ACTIVE engine's discovery. omp: project `.omp/skills` (walk-up), `~/.omp/agent/skills`, then the `.claude` / `.agent(s)` / `.codex` / `.github` compat dirs and managed skills. pi: a narrower set (`buildPiScanRoots`).
-- **The scan is one level deep.** Every root sits inside a repo or a user config dir, so a recursive walk would list every vendored, checked-out or archived `SKILL.md` as a loaded skill.
-- Skill toggling edits only the `disable-model-invocation` frontmatter key on the target `SKILL.md`; keep that surgical so user formatting survives.
-- `/api/skills/install` shells through `npx skills add ... --agent universal`, which installs into the ecosystem-standard `.agents/skills` dirs omp reads; project installs run with the selected cwd.
-- **The surface reports what it can do.** `GET /api/skills` returns `installScopes` and `canToggle` beside the skills, so the store hides a scope selector or a Check button for an engine whose installer cannot honour them, rather than rendering a control that fails.
-- **The composer's skill lookup is capability-gated.** `ChatInput` fetches `/api/skills` to dim dormant skills in the `/` palette; it reads `capabilities.skills` off the flag set AppShell threads down. Without that gate, Claude Code and Codex (`skills: false`) ran a full filesystem scan on every `/` keystroke.
-- The skill store (`components/SkillsStore.tsx`, `/api/skills/store`, `lib/skills-registry.ts`) talks to skills.sh's public endpoints — `/api/search` (fuzzy for one word, semantic over descriptions for phrases) and `/api/download/{owner}/{repo}/{slug}` for SKILL.md details. The documented `/api/v1/*` surface needs a Vercel OIDC token, so browse views are category-seeded searches, never a scraped ranking. Well-known (non-GitHub) sources install as whole-provider bundles (`https://<domain>`) because the CLI has no per-skill selector for them; the UI says so.
+- `/api/plugins` shells out to `omp plugin` (`runOmpCli`), never the Bun-only SDK; `parsePluginId` keeps bare names from omp 18.3.x; marketplace browse is pure-Node.
+- `lib/skills-service.ts` scans ONE level deep (else vendored `SKILL.md` listed); toggle edits only `disable-model-invocation`.
+- Gate composer skill lookup on `capabilities.skills` — else Claude Code/Codex scan per `/` keystroke.
+Details: docs/agents/mcp-plugins.md
 
 ### Update notifications (`/api/omp-update`, `/api/app-update`)
-- Automatic in-app self-updating has been removed in favor of explicit user notifications and manual terminal commands.
-- `GET /api/app-update` returns `updateAvailable`, the exact terminal command, and `managedBy` naming the channel that ships to this deployment. A container install (detected via `/.dockerenv`) is compared against the latest `nphil/Cody` GitHub release and updated with `docker pull ghcr.io/nphil/cody:latest`; anything else queries the npm registry for `@nphil/cody` and uses the detected install manager (`bun` vs `npm` via `detectInstallMethod`), e.g. `npm install -g @nphil/cody` or `bun add -g @nphil/cody`.
-- `POST /api/omp-update` (`action: "check"`) runs `omp update --check` and returns `updateAvailable` plus `updateCommand: "omp update"`.
-- `POST /api/omp-update` (`action: "restart"`) restarts active OMP sessions after a manual CLI update.
-- Notifications in `AppShell` and the Cody card in Settings › System
-  (`components/settings/SystemUpdates.tsx`) present the update notification
-  alongside copyable terminal update commands.
+- No in-app self-updating: only notifications plus copyable terminal commands (`SystemUpdates.tsx`).
+- `/api/app-update`: `/.dockerenv` → `nphil/Cody` release, else npm `@nphil/cody` (bun/npm via `detectInstallMethod`).
+Details: docs/agents/mcp-plugins.md
 
 ### Usage-aware routing: one registry, blackouts, role binding (`lib/routing/`)
-
-Quota telemetry becomes a routing decision in exactly one place, and every
-surface reads that answer. The order is the design:
-**observe → remember → bind roles → bind agents**, run once per usage poll
-from `app/api/usage/route.ts` (`lib/routing/request.ts` gathers only what is
-already cheap; `reconcileRouting` is omp-gated and never throws).
-
-**Observation is unconditional; WRITING is opt-in and off by default**
-(`autoBindEnabled()`, `CODY_ROUTE_AUTOBIND=1` or the persisted `autoBind`
-flag). Recording blackouts and folding them into the snapshot is Cody's own
-state and only makes the ring honest. Re-pointing a role edits the user's
-configuration, and that must never happen merely because they installed a
-new version — an instance that updates and finds its roles rewritten on the
-first usage poll is the exact failure this guard prevents. Pinned by
-`lib/routing/routing.test.mjs` ("observation never writes to the engine's
-config").
-
-- **`lib/usage/availability.ts` is the single verdict.** Built on
-  `select.ts`'s primitives, never a second matching dialect. Two rules are
-  load-bearing: **unknown is usable** (a provider reporting no quota — an
-  API key, a local endpoint — must never be routed around; only positive
-  evidence blocks a model), and **exhaustion is per SERVING account** (a
-  spent idle sibling says nothing). An exhausted untiered window takes its
-  own tiers down with it: 5% left on the Fable bucket is unreachable when
-  the account-wide weekly window is spent.
-- **A block is a harder fact than a percentage, and it lives in a different
-  store.** omp writes `auth_credential_blocks` when a provider answers with
-  a limit and then refuses to send on that credential; `omp usage --json`
-  knows nothing about it. Measured on a live install: an Anthropic account
-  reporting **4% used** was blocked for five hours, so the ring showed
-  headroom while every turn fell back — and the Token Plan key was blocked
-  for six days while reporting nothing at all. `applyCredentialBlocks`
-  (lib/usage/credential-order.ts) folds blocks in as exhausted untiered
-  windows, synthesizing an account for a blocked credential whose provider
-  reports no usage (an API key) — otherwise it stays invisible and keeps
-  being chosen. Block windows carry `source: "block"`: set from ONE rejected
-  request, never measured, and labelled that way in the UI. `POST
-  /api/usage/unblock` {provider, accountId} is the Providers panel's
-  "Retry now" (admin-only, `bin/cody-omp-unblock.mjs` via
-  lib/harness/omp-unblock.ts). It lifts only a block (a measured exhaustion
-  is refused), never loads a credential (`AuthStorage.create` without
-  `reload()`), clears the matching blackout, re-reconciles and restarts idle
-  sessions, because a running omp keeps its own in-memory copy of the block
-  (`#credentialBackoff`) until it restarts. Safe: a provider still limiting
-  re-writes the block on the next request.
-- **Usage reading (`lib/usage`): a failed or partial read never erases a good one.** `omp usage --json` is a photograph, and the camera sometimes fails (timeout, a provider endpoint rate-limiting one login, an engine restart). The rules, all in pure modules so the cache, the browser hook and the tests share them:
-  - **`lib/usage/last-good.ts`.** A FAILED read (timeout, crash, no usable JSON) keeps serving the last good reading for up to 6 hours (`LAST_GOOD_MAX_AGE_MS`), flagged `stale: true` with `refreshFailed {at, reason}`; older than that the plain failure shows ("unavailable"). A SUCCESSFUL read that does not mention an account the previous good one had carries that account forward for up to 30 minutes (`CARRY_FORWARD_MAX_AGE_MS`), its windows labelled by `UsageAccount.windowsStaleSince` (the time of the reading they come from, never refreshed by later reads, so the account ages out). Carried windows whose reset time has passed are dropped, and an account the newest read does name (measured, signed out or disabled) is always the newest word.
-  - **`lib/usage/cache.ts`** owns `lastGood`; it is dropped with the cache (engine switch, login, logout, tests), and a read that was in flight when the cache was reset cannot become the new world's last good (generation guard). A re-served last-good reading backs off like a failure (`USAGE_FAILURE_BACKOFF_MS`), so no caller can turn a failing probe into a spawn loop. Credential blocks come from `listOmpCredentialsKeepingLast` (the last good store read, 15 minutes at most) so a block that vanished for one read cannot flip a refused account back to usable.
-  - **`lib/usage/client-merge.ts` (`mergeUsageRead`, used by `hooks/useUsage.ts`).** The browser keeps a good reading on screen when a poll answers `available: false` (a restarting server, a first read that failed) and marks it stale instead; a newer good reading always replaces it, and a reading older than six hours is not kept.
-  - **Parser tolerance (`lib/usage/omp-usage.ts`).** A notice printed before or after the JSON (an update line, a deprecation) no longer makes the output "malformed" (falls back to the `{`...`}` span); a non-zero exit that still printed a readable payload (some builds exit 1 when one provider's fetch failed) is a reading, not a failure. `accountsWithoutUsage` (both 18.8.3 and 18.19.0 print the key; 18.19.0 also lists capless LiteLLM keys and a per-entry `policy`) is kept as `UsageSnapshot.unreportedAccounts`, never as account rows (nothing was measured). When NOTHING is measurable but omp listed signed-in logins it could not read, the read is unavailable with "omp could not read the quota of N signed-in accounts" rather than "no quota windows". A saved reset that is spent (`remainingCount` 0 or status `redeemed`) no longer pulls the "expires soon" date earlier.
-  - **New 18.19 fields, all optional (18.8.3 prints none of them):** `reports[].policy` becomes `UsageAccount.policy` (priority, reservePct, reserveSource, reclaimAbovePct, state, remainingPct); `metadata.inactiveSharedGates` becomes `UsageAccount.inactiveGates` (`["5h"]`: no 5-hour session is open, so the window is absent, not dropped); `limits[].amount` of a money meter (usd, credits) becomes `UsageWindow.amount {unit, used, limit}`; a LiteLLM budget is labelled "key budget" / "user budget"; a Codex `credits` tier is a billing meter, labelled "credit spend cap".
-- **`lib/usage/quota-tiers.ts` is the one place that says which windows constrain which model** (header comment is the rule list): Claude tiered windows (Fable, Mythos) bind only that family; a Codex Spark model spends only the Spark meter and every other model only the 5-hour and weekly plan windows; a credit-billed Codex seat has no plan windows, so `openai-codex:spend-cap` stands in for them (beside plan windows the cap only bounds credit overage and gates nothing); Cursor's weekly pool binds only Cursor's own models (Auto, Composer, Grok) and the prepaid pool only every other model (a plan reporting one combined window binds all); Factory Droid's extra-balance meter is a top-up, not a gate; plan-label tiers (Copilot `individual`, Devin) name no model and constrain none. `select.ts` and `availability.ts` call it; do not re-implement the rules elsewhere.
-- **`AvailabilityState` has a fifth value, `unavailable`.** When every account a provider has is signed out or disabled, nothing can serve the model: `unavailable` with `unusable: "signed_out" | "disabled"`, never `unknown` (which every caller reads as "usable") and never `exhausted` (which means "wait for the reset"). `cannotServe()` is what a caller that asks "may I send here?" reads; `pickAvailableRoute` skips an unavailable candidate like a spent one and reports `chosenState: "unavailable"` only when every skip was a login problem. Routing consumers outside `lib/usage` (blackouts, chain binding, credits cover) intentionally still act only on `exhausted`: a signed-out provider is not a blackout that ends at a reset, omp walks the chain itself (see "Signed-out providers"), and the UI says "sign in".
-- **Credential blocks are scoped (omp 18.19).** omp stores each rate-limit block with a `blockScope` (Claude `''`/`tier:fable`/`tier:mythos`; Codex `chat`/`spark`/`shared`; Cursor `pool:auto`/`pool:api`; others account-wide). `bin/cody-omp-credentials.mjs` returns every credential row with `blocks: [{scope, until(epoch ms)}]` (unexpired only, one per scope, scope `''` when the engine has none) beside the merged `blockedUntil`; `OmpCredentialRow.blocks` is optional, and a row without it reads as one `''` block. `applyCredentialBlocks` (lib/usage/credential-order.ts) makes ONE window per (credential, scope): id `<provider>:blocked:<credentialId>` for `''` (unchanged, so remembered blackouts match) and `<provider>:blocked:<credentialId>:<scope>` otherwise, with `source: "block"`, `blockScope`, and `tier` from `tierOfBlockScope`. Never test "account-wide" with `!window.tier`; call `isAccountWideWindow` (lib/usage/quota-tiers.ts) — blackouts, credits-cover and chain-binding do. `listOmpCredentialsKeepingLast` (lib/harness/omp-credentials.ts) returns the last successful list (marked `stale`, up to 15 minutes) when a later helper call fails, so a block already seen is not lost to a transient failure. Real-engine test: `lib/harness/omp-credentials-blocks.test.mjs` (run with `CODY_OMP_BIN` for each engine).
-
-- **Usage is about accounts, not the active engine.** `/api/usage` answers
-  whenever the omp binary is installed, whichever engine is active, and the
-  composer ring and picker badges ("Limit reached · resets …") render for
-  every engine where the engine's provider maps unambiguously (Claude Code →
-  anthropic, Codex → openai-codex). Blackouts are observed for every engine;
-  config writes and restarts stay omp-only.
-- **Blackouts are remembered, with the provider's own reset as the expiry**
-  (`lib/routing/route-memory.ts`, `cody-route-memory.json`, 0600, atomic).
-  A quiet or failed telemetry read reports nothing, and "nothing" reads as
-  usable — which is how a session dials an account that has been spent for
-  days, every turn. A `credits` blackout (prepaid: OpenRouter) has **no
-  expiry**: money does not return on a timer, so it clears only when a read
-  sees a positive balance, and a FAILED balance read is never a zero one.
-  **A blackout must not outlive its provider.** `applyBlackouts` fabricates
-  an account for a blacked-out provider the live report no longer has, so a
-  remembered blackout keeps a provider in Usage after it is gone. Three
-  rules: a read that finds NO key at all (`no_key`) covers the `credits`
-  blackout and lifts it (a removed key can never give a positive balance;
-  any other failed read still covers nothing); removing a provider's last
-  credential or key forgets its blackouts outright
-  (`clearProviderBlackouts`, called through `settleProviderChange`); and a
-  provider omp's config DISABLES (`disabledProviders`) leaves the one
-  snapshot routing and Usage read (`withoutProviders` in `reconcileRouting`,
-  fed by `reconcileRoutingForRequest`), derives no blackout, and has the
-  ones already remembered forgotten (a newly disabled one through
-  `settleProviderChange`, a long-disabled one on the next usage read — the
-  owner's OpenRouter was already disabled when this was found); a live
-  read re-derives the truth when it is enabled again. A
-  credential that is disabled or removed never yields a "blocked account"
-  (`applyCredentialBlocks` skips rows with a `disabledCause`).
-- **Roles follow the quota** (`lib/routing/role-binding.ts`). When a role's
-  configured model is blacked out, Cody re-points `modelRoles.<role>` at the
-  first entry of the USER's own `retry.fallbackChains` that is not — never
-  re-sorted by utilization, because a chain is a preference — and stores
-  their assignment as `baseline` to restore verbatim. The user always wins:
-  an assignment that no longer matches what Cody wrote is adopted as the new
-  baseline. Nothing usable in the chain means the role is left exactly as
-  configured; inventing a destination the user never listed is not Cody's
-  call. A Claude plan model that saved API credits cover is left alone: the
-  credits are its next hop ("Claude API credits as the backup" below).
-- **Chains skip what cannot answer** (`lib/routing/chain-binding.ts`). omp's
-  REACTIVE fallback (`#tryRetryModelFallback`) only checks that a candidate
-  has a key, so a provider out of credits or blocked on every account was
-  still dialled. Cody writes each `retry.fallbackChains.<key>` without
-  entries whose EVERY account is exhausted (`allAccountsExhausted`, a
-  provider-wide credits blackout, or blocks), stores the user's chain as
-  baseline in route memory BEFORE rewriting, restores entries the moment
-  they are usable, and adopts a chain the user edited as the new baseline.
-  One spent account beside a healthy sibling drops nothing: omp rotates
-  accounts itself. All entries spent → the full chain is kept. Role binding
-  walks the baselines. Any chain or role change restarts idle sessions.
-  Also: a failed usage read never lifts a blackout (only a fresh read that
-  sees the account does), and a cached window past its own reset counts as
-  reset. A Claude plan entry the saved API credits cover is kept as well.
-- **Subagents must resolve through a ROLE, not a model name**
-  (`lib/routing/agent-roles.ts`). In omp's `resolveEffectiveAgentModelSelection`,
-  `role` is `undefined` for any source that is not a `@alias` — and the role
-  is what keys the child's inherited retry-fallback chain, so a concrete pin
-  means **no chain at all**, however carefully `retry.fallbackChains.task`
-  was written. Worse, a pin that resolves to nothing falls through to
-  `activeModelPattern`: ask an Opus session for a cheap subagent and every
-  spawn silently runs on Opus. Cody writes `task.agentModelOverrides`
-  (which outranks agent frontmatter) as aliases — `luna → @smol`,
-  `scout → @smol`, `task → @task`, `reviewer`/`security-reviewer → @slow`
-  (omp's own reviewer declares `@slow`; the older `@task` default meant the
-  `slow` role never ran), … — filling gaps and repairing pins it
-  can PROVE are broken (unresolvable against the cached catalog, or blacked
-  out). A working concrete pin, an alias the user wrote, and an `on`/`off`
-  value are left untouched; with no cached catalog no pin is ever judged
-  unresolvable.
-  `seance` (omp's bundled read-only "consult a saved chat" agent, 18.12+) is in
-  `BUNDLED_AGENTS` and maps to `@smol` in `DEFAULT_AGENT_ROLES` because it has no
-  `model:` of its own.
-- **`retry.usageAwareFallback` is the same-provider-first switch.** With it
-  on, omp checks usage health before each request (auth-storage
-  `getModelUsageHealth`): the provider is healthy while ANY account is, and
-  the session is moved onto that account before any chain is walked. Only
-  providers with a ranking strategy (anthropic, openai-codex,
-  alibaba-token-plan, …) are judged; the rest read "unknown", which is why
-  chain filtering above still matters (OpenRouter credits). Trap — "Confirm
-  interactively" behaves differently under Cody. omp's `turn-recovery.ts` computes
-  `shouldFallback = depleted || policy === "auto" || !confirmer`, and
-  `setUsageFallbackConfirmer` is wired only by the ACP agent and the
-  interactive TUI controller — never by `--mode rpc-ui`, which is how Cody
-  drives omp. So "Confirm interactively" cannot ask anyone and always
-  answers yes: any model inside the reserve margin switches away silently.
-  Surfaced as a warning clause on the setting itself
-  (`SETTING_NOTES` in lib/omp/settings-surface.ts → `OmpSetting.codyNote`,
-  rendered by SchemaSettingsList), kept honest by settings-surface.test.mjs
-  (a note for a setting newer than the installed engine is only judged against
-  engines that have it — `NOTE_SINCE` in the test). Also noted: 18.3.5+
-  `providers.cacheWarming` (default `idle`, NOT pinned off for rpc-ui: omp
-  replays the last request before the prompt cache expires — a real, billed
-  provider call for up to 30 min after the last reply, only for models with a
-  `promptCache` lifetime and a >$0.05 expected saving; Cody's 10-minute idle
-  destroy skips sessions with a viewer, so warming runs while a tab is open)
-  and 18.4.3+ `task.speculativeLaunch`.
-- **Engine error text goes through one describer** (`lib/error-text.ts`
-  `describeEngineError`, used by `engineErrorNotice` in useAgentSession for
-  every engine, ACP notices included): it tells a refusal (safety policy,
-  e.g. Anthropic `Refusal (…)`, Codex "flagged for possible cybersecurity
-  risk") from usage, credits, auth, overload, transport and an outdated
-  engine (`claude_code_version_too_old`), strips JSON wrappers, request ids,
-  `raw-http-request=` paths, stack frames and trailing links, and caps the
-  text. Identical notices collapse into one with a ×N count.
-- **Routing notices are coalesced** (`ROUTING_BURST_MS`, useAgentSession):
-  fallback-applied/succeeded events collect for 1.5 s and deliver ONE toast
-  plus one notice. A lone event keeps its old wording; a subagent-attributed
-  switch raises no toast at all (it already has a home in the subagent
-  panel). The composer's persistent `autoModelSwitch` marker is unchanged —
-  it is the durable signal.
+- Per usage poll: observe → remember → bind roles → bind agents; WRITING is opt-in (`autoBindEnabled()`, `CODY_ROUTE_AUTOBIND=1`) so an update never rewrites user roles.
+- `lib/usage/availability.ts` is the single verdict (unknown is usable); `quota-tiers.ts` says which windows bind which model — use `isAccountWideWindow`, never `!window.tier`.
+- Blackouts persist in `cody-route-memory.json`, provider's reset = expiry (prepaid `credits` has none); a failed read never lifts one.
+- A credential block (`applyCredentialBlocks`) outranks a usage percentage: an account at 4% used was blocked for 5 hours.
+- Subagents resolve via `@alias` roles (`agent-roles.ts`); a concrete model pin has no fallback chain.
+Details: docs/agents/routing.md
 
 ### Claude API credits as the backup behind the Claude plans
-
-The owner signs two Claude plan accounts into omp and holds a prepaid API key for
-each. The keys are a BACKUP: used only once the plans are out, as the SAME model
-on the SAME vendor (never a jump to Codex/OpenRouter while a key exists), and the
-chat returns to the plan by itself when the limit lifts. Settings › Providers ›
-Anthropic › "API credits (backup)" holds one key per plan account
-(`ClaudeCreditsSection`, masked to the last four). omp only.
-The Providers directory never lists `anthropic-api…` as rows of their own
-(`buildProviderDirectory` skips them when it adds unclaimed catalog ids, as
-`harness/omp.ts` skips their models.yml blocks): they are the Anthropic row's
-business, and a row for each would be a second, deletable "provider" whose
-removal silently breaks the credits.
-
-- **What omp does with an Anthropic API key (omp 18.8.3, measured with its own
-  `AuthStorage` and fake credentials; `lib/omp/claude-credits-omp.test.mjs` pins
-  it).** Key order: runtime `--api-key` → models.yml `apiKey` → stored OAuth →
-  login-stored API key → `ANTHROPIC_API_KEY` → other stored keys. The OAuth step
-  has a last-resort pass (`allowBlocked`) that returns a BLOCKED plan account so
-  the provider's own limit error comes back — it never falls through to a key.
-  `limits.rotate` only rotates between credentials of the SAME type. So with a
-  plan signed in, an API key under `anthropic` (stored, env or Cody's key box) is
-  never used, even with both plans blocked; it wins only if every plan is
-  removed. Today a plan limit goes to the next entry of `retry.fallbackChains`.
-- **Mechanism: one extra provider PER KEY that omp's own chain walks to.** The
-  first key lives under `anthropic-api`, the second under `anthropic-api-2`, …
-  (`claudeCreditsProvider(slot)`, up to 8), each serving the plans' models with
-  its key. Not one shared pool, because omp rotates to a sibling credential of ONE
-  provider only when the error reads like a quota, and Anthropic's reply for an
-  empty prepaid balance ("credit balance is too low", HTTP 400) does not. Measured
-  against real omp: with both keys in one provider 2 of 6 fresh chats picked the
-  empty key and fell to the next vendor with the other key unused; with one
-  provider per key 6 of 6 went plan → key 1 (400) → key 2, and omp then skips the
-  empty key's selector for about 5 minutes. Each piece exists only while a key does:
-  1. the keys, in omp's AuthStorage, one per provider
-     (`bin/cody-omp-claude-credits.mjs`: it refuses any provider outside the
-     `anthropic-api*` family and answers with the existing row when the same key is
-     already stored under another; removal also purges omp's soft-delete
-     tombstone, though SQLite keeps freed pages until overwritten).
-     `cody-claude-credits.json` (0600, no secret) records which plan account each
-     key belongs to and which provider holds it (routing reads that without
-     starting omp); a replaced key stays in its provider, a new one takes the first
-     free provider;
-  2. one Cody block per key's provider in models.yml (`syncClaudeCreditsProviders`):
-     model IDs, plus `reasoning` and `thinking` copied from the bundled catalog row when the engine needs them (an unlisted-but-discovered model such as `claude-fable-5-2` on omp 18.8.3 builds as non-reasoning on its own, so the twin mirrors the catalog's thinking ladder; on omp 18.19 the catalog lists it and omp fills the rest itself), names suffixed " (API credits)" / " (API credits 2)", `auth: none`.
-     Never omit `auth`: omp then forces OAuth-style request shaping; with `none` an
-     `sk-ant-api…` key goes as `X-Api-Key` with no `Authorization` header. A
-     hand-written provider of one of those names is never touched, a block keeps its
-     `baseUrl` (a new one inherits the first's), the Providers directory hides them,
-     and every chat launch levels them with omp's catalog (a new Claude model gets
-     its twins at once, not when someone opens Settings). The Claude model list comes
-     from `readClaudePlanModels` through the shared catalog reader (see "Prices for models
-     omp does not know yet"), so saving a key works on both layouts. omp 18.19.0 holds a
-     plan for 60 s when a refusal repeats with stale usage: a fake usage server in tests
-     must report a reset of now + `retry-after`;
-  3. a per-chat config overlay (`cody-claude-credits/<digest>.yml`) appended to
-     `PI_CONFIG_FILES` by `withClaudeCreditsOverlay` (profile → preset → credits →
-     Local-only, which replaces the launch so a Local-only chat never reaches a
-     paid API). It rewrites every EFFECTIVE chain (config.yml + the chat's preset,
-     `effectiveFallbackChains`): `anthropic-api/*`, `anthropic-api-2/*`, … FIRST in
-     key order (omp resolves a wildcard against the model that just failed, so one
-     entry serves every role and a non-Claude model skips it) and the exact twins
-     after each `anthropic/<id>` entry (a Claude model parked at the END of a chain
-     is backed too). Launch-only: config.yml, presets and the Model plan are never
-     edited; the last key removed removes the overlay; content-addressed, newest 12
-     kept, none deleted before 7 days.
-- **Order, proven against real omp with fake backends**: plan accounts first (omp's
-  own rotation) → key 1 after every plan's limit error → key 2 when key 1 is
-  refused → no other provider before them → every key spent, the chain goes on to
-  its next provider. omp returns to the plan itself at cooldown expiry
-  (`retry.fallbackRevertPolicy` default `cooldown-expiry`; the settings row warns
-  when it is `never`). The switch costs one refused plan request per chat start.
-  `retry.usageAwareFallback` is untouched: with it on omp pins the fallback and
-  never reverts.
-- **Routing never jumps ahead of the credits** (`lib/routing/credits-cover.ts`).
-  A spent Claude plan model the saved keys can answer for is "covered": role
-  binding leaves the role alone, chain filtering keeps the entry, the agent-role
-  repair does not call a covered pin exhausted. Covered stops when every saved key
-  is blocked itself: omp's block on a refused key shows in the usage snapshot as an
-  exhausted account of that key's provider (`applyCredentialBlocks` gives EACH
-  blocked key its own), so "spent" means as many blocked credits accounts as keys.
-- **Chat UX** (`hooks/claude-credits-notices.ts`, `useAgentSession`): ONE notice,
-  "Claude plan limit reached — now using your Claude API credits." (the
-  `retry_fallback_applied` from `anthropic/` to any `anthropic-api*/`); the plan's
-  own limit warning is held 1 s and dropped when `auto_retry_start` arrives; the
-  "fallback succeeded" notice is skipped; the model chip reads "… (API credits)";
-  the silent restore (a bare `model_changed`) says "Claude plan is back". The
-  generic "Retrying (1/3)…" banner for a Claude plan usage limit is held 1.6 s
-  (`PLAN_LIMIT_RETRY_BANNER_HOLD_MS`, longer than rpc-manager's 1.2 s hold on the
-  switch frame) and never shows when the credits take over; any other retry shows
-  at once. A key that is empty adds a second hop (key 1 → key 2): it is announced
-  by the generic fallback notice, which carries the provider's reason.
-- **Not covered**: Cody's background one-shots (`lib/model-plan/one-shot.ts`:
-  session titles, the plan researcher; Distill's own chain) are separate omp runs
-  without the credits overlay, so on a Claude limit they still follow the normal
-  chain (a title may be written by the next provider); the Claude Code engine has
-  its own login; no balance is shown (Anthropic exposes none for a plain key); the
-  generic `ANTHROPIC_API_KEY` box is unused by omp while a plan is signed in.
+- One extra provider PER KEY (`anthropic-api`, `-2`, …) that omp's chain walks to; a shared pool fails (omp rotates only on quota-like errors). omp only.
+- omp ignores an `anthropic` API key while a plan is signed in; never list `anthropic-api*` as Providers rows; models.yml twins need `auth: none`.
+- Chain rewrite is launch-only via `withClaudeCreditsOverlay`; config.yml and presets are never edited; Local-only comes last.
+- `credits-cover.ts`: routing never jumps past a covered plan model until every saved key is itself blocked.
+Details: docs/agents/routing.md
 
 ### Model orchestration: roles, plans, chains, resets
-- **OMP defaults and role scope.** With no `modelRoles` in config.yml, OMP owns role resolution. Its sixteen built-in roles (omp 18.12.3+; fifteen on older engines such as 18.8.3; read from the engine, `FALLBACK_MODEL_ROLE_IDS` mirrors the newest set) are `default`, `smol`, `slow`, `vision`, `plan`, `commit`, `tiny`, `memory`, `task`, `advisor`, `widget` (job-widget captions; resolves like `smol` until assigned), `image`, `web`, `speech`, `dictation`, and `judge`; no removed or custom role is implicit. Preserve saved custom-role mappings. “Reset to OMP defaults” deletes only Cody's overrides: `DELETE /api/model-roles` drops `modelRoles`, `DELETE /api/omp-settings` `{sections:["retry"]}` removes the retry section, and `DELETE /api/model-plan` removes the plan's roles, fallback chains, and usage-aware flag while preserving unrelated retry tuning. Deletion allow-lists live in `lib/omp/settings-config.ts` (`RESETTABLE_SECTIONS`/`RESETTABLE_PATHS`).
-- **Roles come from the engine, never a frozen list.** omp's role vocabulary changes between releases (16 roles from omp 18.12.3: `widget`, which writes job widgets and captions and resolves like `smol` until assigned). Anything that lists roles to the user, proposes them or writes them to `modelRoles` must read the engine's live list (`getOmpModelRoleIds()` in lib/omp/model-roles.ts) and filter Cody's own vocabulary through `planRoleNames()` in lib/model-plan/derive.ts, so `widget` is never offered or written on an engine that lacks it. Label-only maps (`modelPlan.role.*`, `agentSession.job.*`, `ROLE_LABEL_KEYS`, `DESCRIBED_ROLES`) may always know every role. The derive functions (`heuristicPlan`, `constrainPlanDraft`, `deriveChains`, `validatePlan`) and `planWithModel` take an optional `roleNames` list; the default is every role Cody knows, so production callers (app/api/model-plan/route.ts) must pass the engine-filtered list.
-- **Non-chat models in the Settings role picker.** `get_available_models` returns chat models only. LM Studio decision models (omp's `judge` role, provider id `lm-studio`) come from Cody's own local scan: `lib/local-ai.ts` reads LM Studio's native `/api/v1/models` and returns them as `decisionModels`, kept out of `models`. Only the `judge` row of Settings > Models > Assignments offers them.
-- **Live config takes a restart.** An OMP child reads config.yml at spawn (only subagent preflight reloads it), so plan apply and every reset call `restartIdleRpcSessions()` (rpc-manager): idle children reconnect on demand with the new config; running turns complete on their old config. Responses carry `{restarted, active}` for the UI to announce the result.
-- **One effective roster.** `lib/model-plan/roster.ts` builds the planner allow-list directly from OMP's effective `get_available_models` response. That response already applies `enabledModels`; never add a second Cody filter. The planner's `bestAvailableModel` uses the same provider tiering and lets the provider assigned to `default` lead its tier.
-- **Native hints are optional.** The planner reads omp's native smol/slow/image/web/speech/dictation/judge suitability ranks through `readNativeRolePriorities(packageRoot)` (`lib/model-plan/roster.ts`): first the catalog rules file `src/compat/rules.json` -> `behavior.roleDefaults` (omp 18.8.4+/18.14, read as JSON, not through Bun), then the legacy `<root>/src/priority.json` (older engines). A missing, malformed or unavailable source leaves planning functional (no ranks). Pinned by `lib/model-plan/roster.test.mjs`. Keep task balanced; native-smol suitability remains a valid light-workload signal.
-- **Provider tiering is semantic.** Rank direct Claude/Codex providers first, then other direct APIs, then gateways (including OpenRouter), then genuinely local endpoints. A zero price is common for remote subscriptions or gateways and is never locality evidence; only the endpoint address can establish localness.
-- **Fallback chains keep source intent.** For every role assignment that resolves to the same source, derive one invariant source tier: native suitability, then meaningful provider price, then role-only intent when price is unknown. Same-provider suitable siblings remain eligible so distinct quota buckets can absorb a fallback. Emit selectors in OMP precedence order: exact model first, provider wildcard second, role last.
-- **Fallback switches announce themselves**: OMP's `retry_fallback_applied` ({from, to, role}) and `retry_fallback_succeeded` ({model, role}) frames surface as toasts in `useAgentSession` (i18n `agentSession.fallback*`).
-- **Trap — `patchSettingsSection` in `hooks/useConfigWriter.ts`** (formerly SettingsConfig.tsx's `patchSection`) must spread the SECTION (`base?.[key]`), never the whole settings object; the whole-object spread filled config.yml sections with junk top-level keys after the first save. `patchSettingsTop` is the one deliberate exception — top-level keys and arrays like `enabledModels` genuinely need the whole object spread.
-- **OMP 17.4 compaction**: `compaction.strategy`/`remoteEnabled` no longer exist upstream — `compaction.methodOrder` (ordered preference list) replaced them. `settings-config.ts` reads legacy keys through OMP's own migration mapping and deletes them when writing `methodOrder`.
-- **Advisor launches.** OMP RPC defaults advisor off even when `advisor.enabled` is saved. `buildEngineRpcLaunch` reads that preference for each new, resumed, and relaunched main chat and passes `--advisor` when enabled; an explicit launch override wins. Sidebar chats and engines without advisor support never receive it. Saving the setting does not update an already-running child.
-- **`advisor.subagents` is Cody's logical key, not omp's.** omp has no such schema key; its settings loader migrates it to `task.agentAdvisor.task` (`"on"`/`"off"`/model pattern; an early build persisted booleans). `settings-config.ts` keeps the `advisor.subagents` boolean on the wire (card key, `NativeSettings`, the reset path) but reads/writes/resets `task.agentAdvisor.task`: a legacy un-migrated `advisor.subagents` is read as a fallback and removed on the next write, never written; turning review on keeps a model pattern the user chose; reset drops the real key and tidies empty `task`/`agentAdvisor` maps. `memory.backend` also accepts 18.4's `sharpshooter`.
-- Retry/fallback UI lives in `components/settings/RetryFallbackPanel.tsx` (see its module comment for the never-persist-an-empty-chain rule).
+- Roles come from the engine (`getOmpModelRoleIds()`, `planRoleNames()`), never a frozen list — else `widget` leaks to old engines.
+- One roster (`lib/model-plan/roster.ts`) = omp's `get_available_models`, already filtered by `enabledModels`; no second Cody filter.
+- Config is read at spawn: plan apply and resets call `restartIdleRpcSessions()`; resets delete only Cody's overrides.
+- Trap: `patchSettingsSection` must spread the SECTION, not the whole settings object (junk keys in config.yml).
+Details: docs/agents/models.md
 
 ### Model presets: per-conversation role overlays, researched on the web (`lib/model-presets/`)
-
-A preset (built-ins Max / High / Medium / Low, plus user-created ones) is a
-complete answer to "which model, at which reasoning level, plays each omp
-role", with the fallback chains that go with it. Presets live in Cody's
-instance data dir (`cody-model-presets.json`), never in `config.yml`.
-
-- **Per conversation, never global.** A chat is bound to one preset
-  (`cody-session-presets.json`); the binding is materialized as an omp config
-  layer (`cody-model-presets/<hash>.yml`) appended to `PI_CONFIG_FILES` at
-  spawn (`launchWithSessionOverlays` in rpc-manager: preset overlay first, then
-  the Claude credits overlay, Local-only routing last, so Local-only still wins
-  and never reaches a paid API). Switching presets in
-  one chat never touches another chat or the user's own `config.yml`. The
-  binding follows omp's temp-id -> real-id rename, is copied on fork and is
-  forgotten on delete; a deleted preset reads as base settings.
-- **Only in Smart mode, and it never fights the user.** The composer offers
-  presets as rows under Smart (`hooks/useSessionPreset.ts`,
-  `hooks/session-preset-state.ts`). A preset is applied ONLY by a direct pick:
-  nothing re-applies one on load, reconnect or session switch. A manual model
-  or reasoning pick leaves Smart (and therefore the preset) exactly as a
-  manual pick always has. A pick during a turn answers 409 `session_busy` and
-  is resent once the run ends.
-- **Editing a preset moves the chats bound to it** without killing a turn:
-  idle chats restart now, a mid-turn chat at `agent_end`
-  (`restartSessionForRoutingWhenIdle`, `routingRestartPending`).
-- **Research is a sandboxed omp print-mode child**
-  (`lib/model-presets/research.ts`): tools restricted to `web_search`, a
-  fresh temp cwd (no project `.mcp.json` or context files) and a fresh agent
-  dir with an EMPTY `mcp.json` and only `agent.db`/`models.yml`/`config.yml`
-  symlinked (`lib/omp/isolated-agent-dir.ts`'s shared helper, given a
-  research-specific file list with no `blobs`; a FRESH per-run directory
-  here, not the reusable one Distill and the session namer share, because
-  this child spends its turn on untrusted web content).
-  `--tools` alone is not enough: user MCP servers bypass it, and
-  an untrusted web page must never reach a tool that can touch files or
-  commands. Proposals are validated against the live roster (selectors, each
-  model's own `thinkingEfforts`, vision), cite their sources, and are only
-  written to a preset when the user applies them. One run at a time; the
-  snapshot survives a restart (`cody-model-research.json`).
-- **Trap: the server's import graph cannot use `@/` aliases.**
-  `bin/cody-server.js` loads `lib/` through a bare `createJiti`, so one alias
-  anywhere under `lib/rpc-manager.ts` stops the server booting, while every
-  test (which loads with `tsconfigPaths`) still passes.
-  `lib/server-import-graph.test.mjs` walks that graph from the server's own
-  entry list.
-
-- **Preset selectors must be exact on omp 18.14+.** A preset's role and chain entries are `provider/id[:level]` selectors that omp resolves itself. From omp 18.14.0 a provider-qualified selector must name an exact model id; omp no longer picks a close sibling. `PUT /api/model-presets/[id]` therefore checks every role value and chain entry against the live roster (`lib/model-presets/roster-check.ts`, pure rules in `lib/model-presets/selector.ts`: `selectorProblem`) and refuses an unresolvable one with a `unknown_model` 400 that names the closest ids. The check only runs on engines at or above `EXACT_SELECTOR_SINCE` (18.14.0), skips role refs (`@smol`), wildcards (`openai/*`), providers the roster does not list, and a roster that cannot be read. Chain keys are never checked.
+- Per conversation, never global: an omp config layer in `PI_CONFIG_FILES` at spawn, never `config.yml`; applied ONLY by direct pick.
+- Research runs a sandboxed omp child: `web_search` only, EMPTY `mcp.json` (`--tools` alone doesn't stop user MCP) — untrusted web content must not reach file tools.
+- Trap: the server import graph cannot use `@/` aliases — the server won't boot while tests pass.
+Details: docs/agents/models.md
 
 ### Auth and model config
-- Auth flows go through RPC commands (`get_login_providers`, `login`) against the omp child process; credentials live in omp's `agent.db` (SQLite). Cody reads and removes them only through the Bun helper over omp's own AuthStorage (`bin/cody-omp-credentials.mjs`) — plus one read-only SELECT of ACTIVE `openrouter` api keys in `lib/openrouter/key.ts` and the helper's guarded tombstone purge (see "Several accounts can serve one provider").
-- `models.yml` in the omp agent directory (`~/.omp/agent/models.yml`, `.yaml` fallback) is read and written from the Providers hub's detail drawer, in a custom endpoint's "Advanced" form (`components/ModelsConfig.tsx`'s editors, rendered by `settings/providers/ProviderDetail.tsx`) — not the Models hub, which only reads the resulting catalog.
-  - Model `kind` (chat/tiny/image/tts/stt/judge/embedding/rerank/video, never `search`), runner `api`s and the `compat` switches follow omp 18.19 as seen by the INSTALLED engine: `lib/model-kinds.ts` carries the release that first knew each newer key (`RUNNER_API_SINCE`, `MODELS_YML_SINCE`, `MODEL_TOKENIZERS`), and the editor (`components/ModelsConfig.tsx`, via `hooks/useEngineVersion`) offers a value only from that release on, plus whenever the file already carries it (so it can be seen and removed). Old engines ignore an unknown KEY but the api list and `tokenizer` are closed enums where one future value makes omp drop the WHOLE file, which is why those are gated. Gated fields: judge runner apis `openai-decisions`/`workers-ai-systemone` (18.9.2) and `liquid-systemone` (18.19.0); per-model `imageCountBudget` (18.11.3, positive integer, also validated on `modelOverrides`); `tokenizer` `o200k` (18.10.3) / `cl100k` (18.16.0); `compat.requiresThinkingPresence` (anthropic-messages, 18.13.0); `compat.supportsThinkingBindingControls` (bedrock-converse-stream, 18.9.1); `compat.statefulResponses` on anthropic-messages = message threads (18.17.0); provider `discovery.advertisedReasoning` (18.13.2, only on `openai-models-list`/`lm-studio`/`proxy` discovery; any other type is refused at save because omp 18.13.2+ drops the file). `lib/model-kinds.test.mjs` asks the installed engine's own models.yml schema (`lib/omp/fixtures/models-yml-schema-probe.mjs`) which apis/tokenizers it accepts, so a drifting table turns red on whichever engine runs the test. The kind↔api rule and omp's exact message live in `lib/model-kinds.ts`, shared by the editor (inline error, Save disabled) and `validateModelsConfig`. Unset kind / default statefulResponses persist as the key ABSENT (`withCompatFlag` drops an emptied `compat`). There is no `modelOverrides` editor UI; overrides are only validated and preserved.
+- Credentials live in omp's `agent.db`; Cody touches them only via `bin/cody-omp-credentials.mjs` (plus one read-only SELECT in `lib/openrouter/key.ts`).
 - API-key status endpoints must never return the raw key.
+- Gate new models.yml kinds/apis/tokenizers by engine version (`lib/model-kinds.ts`) — one future value in a closed enum (runner `api`, `tokenizer`) makes omp drop the WHOLE file.
+Details: docs/agents/models.md
 
 ### RPC transport limit — the utility process MUST negotiate v2
-- omp's NDJSON transport caps one logical frame at 1 MiB. At protocol **v1** it
-  cannot chunk, so it replaces any oversized reply with a failed response
-  carrying `"RPC response exceeded the transport limit"`. Protocol **v2**
-  chunks (`lib/omp/rpc-frame.ts`, reassembled by `RpcProcess`).
-- `get_available_models` grows with the provider catalog: measured 502 models /
-  1,058,841 bytes on a real install (466 from a single OpenRouter key) — just
-  over the limit. The session path always negotiated; `lib/omp/rpc-utility.ts`
-  did not, so `/api/models` failed and the composer showed a bare "Model error"
-  banner with an empty list. **Both** `startProcess` and
-  `runIsolatedUtilityCommand` now negotiate; `rpc-utility.test.mjs` guards it.
-  Engines that do not advertise v2 are never sent the command, so a restricted
-  dialect (pi) still starts.
+- omp caps a frame at 1 MiB; v1 fails oversized replies, v2 chunks. `get_available_models` hit 1,058,841 bytes — `/api/models` failed.
+- `startProcess` and `runIsolatedUtilityCommand` (`lib/omp/rpc-utility.ts`) must negotiate v2; never send it to engines not advertising v2 (pi).
+Details: docs/agents/session-runtime.md
 
 ### Model curation (`enabledModels`) — omp filters, Cody does not
-- OMP owns the allow-list: `get_available_models` already applies `enabledModels` (OMP `session/model-controls.ts`), whose entries are **glob patterns** matched against `provider/modelId` and bare ids. The API response is the one effective roster for the Composer picker, role controls, fallback chains, and planner. Cody MUST NOT apply a second enabled-model filter or dialect.
-- **Trap**: because omp filters, a restricted read cannot see what it excluded,
-  so curation would be a dead end — no way to find the other 464 OpenRouter
-  models to re-add one. `/api/models?catalog=full` therefore runs a throwaway
-  utility process with `PI_CONFIG_FILES` pointing at an overlay containing
-  `enabledModels: []` (omp's own `--config` layering). The user's `config.yml`
-  is never written. `--models` does NOT work for this: it only scopes Ctrl+P
-  cycling, while `getAvailableModels()` reads the setting directly.
-- Only the curation panel requests the full catalog, and only on mount. The
-  main UI never carries it.
-- UI shape (`components/settings/models/`): Models › Catalog shows a curation
-  strip, one summary row per curated provider (`openrouter — None of 466
-  enabled`, from `summarizeProviderCuration`), each opening
-  `ModelCurationDialog.tsx` — search, bulk enable/disable of the current
-  matches, a rendered-row cap (`CURATION_VISIBLE_LIMIT`, so DOM size is
-  constant), and a single PUT on confirm. Turning the restriction ON seeds
-  only in-use models
-  (`seedAllowList`) — seeding the whole catalog is what wrote hundreds of
-  entries into `config.yml` and then demanded hundreds of un-checks.
-- A provider whose every model is de-selected keeps its row and stays openable
-  (`summarizeProviderCuration` counts totals from the full catalog, enabled
-  from the effective list), so switching a provider off is always reversible.
-  Pure helpers + tests: `lib/model-allow-list.ts`.
+- omp applies the `enabledModels` globs in `get_available_models`; Cody MUST NOT add a second filter.
+- Trap: a curated read can't see what it hides, so only the curation panel fetches `/api/models?catalog=full` (`enabledModels: []` overlay).
+- Never write `config.yml` for that; `--models` doesn't work.
+Details: docs/agents/models.md
 
 ### Brand marks (`components/ProviderIcon.tsx`, `lib/provider-brand.ts`)
-- Marks are **vendored path data, never hotlinked**. The composer's model picker
-  has to draw identically on a home LAN with no route to the internet, and a
-  remote logo that fails to load is exactly the "the icons disappeared" bug this
-  replaced. Source is models.dev's own logo set
-  (`https://models.dev/logos/<provider>.svg`) — the catalog Cody already reads
-  model metadata from. **Trap**: models.dev answers 200 with a generic sparkle
-  placeholder for providers it has no mark for (Claude, Ollama, Qwen, Together,
-  Fireworks...), so a new mark must be eyeballed, not just fetched; the three
-  Cody needs come from simple-icons (CC0) instead.
-- Every mark keeps its **source viewBox** (the set mixes 24- and 40-unit grids)
-  rather than being rescaled by hand — the browser scales a viewBox for free and
-  rewriting Bézier coordinates risks silent distortion. simple-icons draws
-  edge-to-edge on a 24 grid while models.dev sits padded inside a 40 grid, so the
-  simple-icons marks carry a widened viewBox (`-3 -3 30 30`) to match the optical
-  weight of the rest. Detail that turns to mush at 13px is a bug, not a mark:
-  prefer a simpler source over a faithful-but-illegible one.
-- **`ProviderIcon` is a provider; `ModelIcon` is a model's VENDOR.** A gateway is
-  not a vendor — every model behind one OpenRouter key reports
-  `provider: "openrouter"`, so keying rows off the provider paints one identical
-  mark down hundreds of rows. `modelBrand()` reads the vendor off the model id,
-  by explicit prefix (`anthropic/claude-sonnet-4`) then by family name
-  (`gpt-…`, `qwen…`), and only then falls back to the provider. That fallback
-  order is also what gives a local runtime's models real marks: `llama-swap`
-  is an unknown provider, but its `gemma4-*` / `qwen3.5-*` models still draw
-  Gemini and Qwen.
-- An unmapped provider draws a neutral `Bot`, never a broken image. Adding a
-  provider is two edits: an id → brand entry in `lib/provider-brand.ts` and the
-  mark in `BRAND_MARKS`. Tests: `lib/provider-brand.test.mjs`.
+- Marks are vendored path data, never hotlinked — the picker must render offline.
+- Trap: models.dev returns 200 with a sparkle placeholder for unknown providers — eyeball each mark; keep the source viewBox, never rescale by hand.
+- `ProviderIcon` = provider, `ModelIcon` = VENDOR (`modelBrand()`); a gateway is not a vendor.
+Details: docs/agents/models.md
 
 ### Completion sound
 - `hooks/useAudio.ts` stores the toggle in `localStorage` and reuses one `AudioContext`.
-- Browser autoplay policy means sound must be unlocked from a user gesture; `ChatInput` calls the unlock hook from interactive controls, and `ChatWindow` plays the tone from `onAgentEnd`.
+- Audio needs a user gesture: `ChatInput` calls the unlock hook from interactive controls; `ChatWindow` plays the tone from `onAgentEnd`.
+Details: docs/agents/chat-ui.md
 
 ## omp Session File Format (v3)
-
-Location: `~/.omp/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`
-
-```jsonl
-{"type":"title","v":1,"title":"...","source":"...","updatedAt":"...","pad":"   ..."}   ← fixed 256-byte slot
-{"type":"session","version":3,"id":"<uuid>","timestamp":"...","cwd":"/path","parentSession":"/abs/path/to/parent.jsonl"}
-{"type":"model_change","id":"<8hex>","parentId":null,"provider":"...","modelId":"...","timestamp":"..."}
-{"type":"message","id":"<8hex>","parentId":"<8hex>","message":{"role":"user","content":"..."}}
-{"type":"message","id":"<8hex>","parentId":"<8hex>","message":{"role":"assistant","content":[...],...}}
-{"type":"message","id":"<8hex>","parentId":"<8hex>","message":{"role":"toolResult","toolCallId":"...","content":[...]}}
-{"type":"compaction","id":"<8hex>","parentId":"<8hex>","summary":"...","firstKeptEntryId":"<8hex>","tokensBefore":N}
-```
-
-- Line 1 is a fixed-width 256-byte padded title slot, rewritable in place.
-  Old pi files may lack it — the `{"type":"session"}` header is then line 1.
-- Entries form a tree via `(id, parentId)`. Additional entry types
-  (`title_change`, `session_init`, `mode_change`, `ttsr_injection`, ...) must
-  be tolerated by readers.
-- Large payloads (images) are externalized to the content-addressed blob store
-  at `~/.omp/agent/blobs` and referenced from entries.
-- Header may carry `continuationOf` (omp 18.13.2+): the id of the session this
-  file carries on from. See "RPC session lifecycle" and the list collapse above.
-- `model_usage` entries record a billed call that is not a transcript message
-  (late response, discarded turn with `purpose: "discarded-turn"`, cache refresh,
-  helper call). From omp 18.12.4 an entry written off the active branch names
-  the branch it interrupted in `activeLeafId` (`null` = a cleared session). The
-  head is NOT blindly the last entry: use `resolveSessionLeafId(entries)`
-  (`lib/omp/session-files.ts`); `buildSessionTree` leaves such dead-end entries
-  out. From omp 18.17.0 they count in omp's own totals, the cost cap and
-  `omp stats`, so Cody sums them too: `aggregateModelUsage(entries)`
-  (`lib/session-usage.ts`), `GET /api/sessions/<id>` returns it as `modelUsage`
-  (omitted when zero), the page adds it to the totals it sums from messages, and
-  the subagent usage scan (`lib/subagent-history.ts`) includes it.
-- Every entry may carry `runtime: {version, commit, branch, label}` (omp 18.11+,
-  the build that wrote it). Readers ignore unknown keys; Cody shows nothing from
-  it.
-- Fork and `/tan` pair a call the parent left unresolved with a `toolResult` that
-  has `isError: true` and the text "...its outcome is unknown." It renders as an
-  ordinary failed tool result; it is never shown as a success.
-- A compaction entry's `preserveData.snapcompact` can hold up to 12 MB (24 MB
-  with the reasoning-free copy) of base64 PNG frames on ONE line. Never render
-  `preserveData` (`compactionUiMessage` uses `summary` only). Readers that touch
-  raw lines must tolerate lines of tens of MB: `MAX_SESSION_LOAD_BYTES` is 1 GiB,
-  the statistics indexer steps over lines above 64 MiB, and the disk janitor's
-  transcript tail (`readTranscriptMentions`, 2 MiB) is raw text cut mid-line and
-  scanned by needle, so a huge last line costs one tail read and no allocation
-  per line (test: `lib/disk/transcripts.test.mjs`).
-- Silent custom entries (`date-cwd-reminder`, `memory_recall`,
-  `source_session_init`, `system-prompt-digest`) have `type: "custom"`, which the
-  reader never turns into a row. Custom MESSAGE types that are bookkeeping are
-  listed in `HIDDEN_CUSTOM_TYPES` (`lib/message-display.ts`): now also
-  `auto-parallel-plan`, `skill-notice`, `memory-recall-changes`,
-  `streaming-edit-recovery`. `session-transfer` (omp 18.10 `session pack/unpack`)
-  stays visible, titled by `messageView.sessionTransferLabel`.
-
-`entryIds[]` in `SessionContext` is a parallel array to `messages[]` — maps each displayed message back to its `.jsonl` entry id, used for fork and navigate_tree calls.
-
----
+- `~/.omp/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`; line 1 is a 256-byte title slot (old pi files lack it); tolerate unknown entry types.
+- `model_usage` is billing, not messages: head is NOT the last entry — use `resolveSessionLeafId`; sum with `aggregateModelUsage`.
+- Never render `preserveData` (up to 24 MB on one line); `entryIds[]` in `SessionContext` parallels `messages[]`.
+Details: docs/agents/session-format.md
 
 ## Design Tokens & UI Kit (`app/globals.css`, `components/ui/`)
-
-Warm-paper (light) / warm-ember (dark) palettes; every text/background pair is
-WCAG AA-verified (measured ratios noted in `globals.css` comments). Components
-must consume these variables — no hardcoded colors.
-
-```
-color:  --bg --bg-panel --bg-hover --bg-selected --border --bg-subtle
-        --text --text-muted --text-dim
-        --accent --accent-strong --accent-hover   (links / filled buttons / hover)
-        --user-bg --tool-bg
-type:   --font-serif (display headings, class .display-serif)  --font-mono
-shape:  --radius-control (8) --radius-card (12) --radius-modal (16)
-depth:  --shadow-card --shadow-pop --shadow-modal
-motion: --dur-fast (150ms) --dur-med (220ms) --dur-slow (320ms) --ease-out-warm
-edges:  --safe-top --safe-right --safe-bottom --safe-left
-```
-
-`components/ui/` holds the shared primitives (built on `@base-ui/react`):
-`primitives.tsx` (Dialog/Tooltip/Collapsible), `field.tsx` (form fields +
-ConfirmDialog), `Select.tsx` (**the** dropdown), `toast.tsx`
-(`toast.success/error/info`, mounted in AppShell).
-Icons come from `lucide-react` — do not add new inline SVGs. The command
-palette (`components/CommandPalette.tsx`, ⌘K/Ctrl+K) is built on `cmdk`.
+- Consume the CSS variables (`--bg`, `--text`, `--accent`, `--radius-card`, `--safe-*`); never hardcode colors — pairs are WCAG AA-verified.
+- Use `components/ui/` primitives and `lucide-react` icons; never add inline SVGs.
+Details: docs/agents/ui-kit.md
 
 ### One dropdown, and a placeholder is not a choice
-- **`components/ui/Select.tsx` is the only dropdown.** A native `<select>` is
-  painted by the browser — a different popup per platform, ignoring the theme
-  — so there are ZERO of them left in `components/`/`app/` and a new one is a
-  regression. It renders on the same `dropdown-surface` / `dropdown-item`
-  classes the composer's own menus use, so every menu in the app looks alike,
-  and it inherits keyboard nav, typeahead, edge flipping, focus return and a
-  portal that escapes `overflow: hidden` from base-ui's Select.
-- **`placeholder` is NOT selectable — an "unset / default / all" row is a real
-  option.** `<option value="">All providers</option>` is a value the user can
-  come back to; a placeholder is only the empty state of a control whose
-  choices are all real (a "Add a model…" action trigger, say). Translating the
-  first kind into `placeholder` silently deletes the reset: the migration did
-  exactly that to eight controls (All providers, All marketplaces, No
-  override, Model default, Distill's engine/model default, local routing's
-  unset, the model-level API override), each of which is now an explicit
-  `{ value: "", label }` at the head of its option list. When a `""` value
-  must persist as absent, keep the transform (`onChange={(v) => set("api", v
-  || undefined)}`) — the sweep dropped that too and would have written `""`
-  into `models.yml`.
+- `components/ui/Select.tsx` is the only dropdown; zero native `<select>` — a new one is a regression (browser-painted, ignores theme).
+- `placeholder` is NOT selectable: an "All/default/unset" row must be a real `{ value: "", label }` option; keep `|| undefined` transforms (else `""` lands in `models.yml`).
+Details: docs/agents/ui-kit.md
 
 ### Standalone immersion and the safe-area variables
-- An installed Cody uses the WHOLE screen: `appleWebApp.statusBarStyle` is
-  `"black-translucent"` and the viewport is `viewportFit: cover`, so the web
-  view extends under the iOS status bar and home indicator.
-- The price is that **every viewport-anchored edge pads itself back out**, and
-  it does so through the `--safe-*` variables defined once on `:root`
-  (`env(safe-area-inset-*, 0px)`) — never by writing `env()` at the call site.
-  One definition means one thing to override when verifying the plumbing in a
-  browser that reports no insets (`:root{--safe-top:47px}` in a test
-  stylesheet reproduces a notch exactly).
-- Consumers: `.shell-topbar` (content-box, so its inline 44/32px stays the
-  CONTROL height), the mobile `.sidebar-container`, `.settings-level-header`
-  (shared by MobileStack's levels and a pushed Drawer), `.login-page`, the
-  toast viewport, the workspace-panel toggle, ChatInput's fixed dropdowns and
-  its bottom padding, the terminal toolbar and soft keys.
-- **A padded parent owns the inset for its subtree.** Panels anchored to a
-  measured rect (the top-panel dropdown, BranchNavigator) inherit the offset
-  for free and must not add it again; the composer is the only element that
-  adds the bottom inset, so ChatWindow's docks contribute plain `8px`.
-- **theme-color is the theme's `--bg-panel`, not its `--bg`** — the browser and
-  OS chrome touch the TOP BAR, and a `--bg`-coloured status bar read as a band
-  above it. `preview.surface` in `lib/theme-catalog.ts` IS each theme's
-  `--bg-panel` (and `preview.background` its `--bg`); `useTheme`, the pre-paint
-  bootstrap, `layout.tsx`'s themeColor pair and the manifest's `theme_color`
-  all read it, and `lib/theme-catalog.test.mjs` reads `globals.css` and fails
-  on drift. The manifest's `background_color` stays `--bg` (splash, not chrome).
-- **iOS's `black-translucent` status-bar glyphs are UNCONDITIONALLY WHITE** —
-  confirmed against Apple's own developer-forum threads and every
-  black-translucent writeup that has actually tested it: glyph colour does
-  NOT adapt to system appearance, `theme-color`, or anything else. (0.17.1
-  assumed the opposite — system dark meaning white glyphs, system light
-  meaning dark glyphs — and keyed the strip off `prefers-color-scheme`. That
-  left a light Cody theme paired with a light system with white glyphs
-  sitting directly on its own light `--bg-panel` (unprotected), and
-  needlessly repainted a dark Cody theme's strip a light colour whenever the
-  system merely happened to be light (a visible, avoidable band on a theme
-  that was already fine).) The one fact that matters is the THEME's own
-  mode, full stop: `.shell-topbar` never touches a dark theme's own
-  `--bg-panel` (already legible for permanently-white glyphs, regardless of
-  the system), and always forces a light theme's inset strip alone to
-  `--status-strip-dark` (never legible otherwise) via a hard gradient stop
-  at `--safe-top` — `@media (display-mode: standalone) { html:not(.dark)
-  .shell-topbar {...} }`, `globals.css`, no `prefers-color-scheme` in sight.
-  A light Cody theme under a dark-mode phone (the case 0.17.1 was built to
-  protect) looks exactly as before: a dark strip, white glyphs legible on
-  it, the bar's own light `--bg-panel` starting right below. That is why the
-  top bar's background lives in the stylesheet, not inline — an inline
-  `background` would beat the media rule. A REAL Chromium (not CDP's
-  `Emulation.setEmulatedMedia`, which cannot fake `display-mode`) launched
-  with `--app=<url>` DOES report `display-mode: standalone` — puppeteer-core
-  + `CODY_CHROMIUM_BIN`, `--remote-debugging-port`, connect over CDP — so the
-  rule verifies end-to-end instead of with the clause removed: fake the
-  inset via an inline style PROPERTY (`documentElement.style.setProperty
-  ("--safe-top", "47px", "important")`, applied on `DOMContentLoaded` too —
-  an appended `<style>` element risks CSP and can throw if run before
-  `documentElement` exists this early, silently skipping any code after it
-  in the same callback), emulate `prefers-color-scheme` either way with
-  `Emulation.setEmulatedMedia` (that part does work), and read the strip's
-  computed background or screenshot it.
-- **`html, body` are `overflow: hidden`.** Every scrollable region in this
-  app (chat, sidebar, settings, dropdowns) is its own nested `overflow-y:
-  auto` pane, so html/body never need to scroll — but leaving them
-  scrollable is not neutral on iOS: Safari's elastic rubber-band at the
-  document edges is a separate, hardcoded behavior that `overscroll-behavior`
-  does not suppress (that property only stops scroll CHAINING) and that
-  fires on any vertical drag near the top even with zero overflow content,
-  revealing whatever is behind the scrolled-away content — `html, body`'s own
-  `background: var(--bg)` — right above `.shell-topbar`. `overflow: hidden`
-  is the only mitigation that actually works for that, and costs nothing
-  here since nothing scrolls at that level to begin with.
+- Edges pad via `--safe-*` vars, never `env()` at call sites; a padded parent owns the inset; only the composer adds the bottom one.
+- `theme-color` is `--bg-panel` (`preview.surface` in `lib/theme-catalog.ts`), not `--bg`; `theme-catalog.test.mjs` fails on drift.
+- iOS `black-translucent` glyphs are ALWAYS white: key off the theme's mode, never `prefers-color-scheme`; top-bar `background` stays in the stylesheet, not inline.
+- `html, body` stay `overflow: hidden` — iOS rubber-band isn't stopped by `overscroll-behavior`.
+Details: docs/agents/ui-kit.md
 
 ### Phone composer: one row, nothing wraps
-- Below 640px the controls row is `flex-wrap: nowrap`. Every fixed control is
-  38px and `flex-shrink: 0` (attach, reasoning, agent mode, the quota
-  ring's box, Stop); Send is the one wider piece — a 38px arrow plus its 24px ▾
-  zone (scheduled send), 62px in a single pill, also `flex-shrink: 0`; the model
-  selector is the ONLY item that shrinks and it ellipsises.
-- The arithmetic lives in `phoneBudget()` (`lib/scheduled/ui.ts`, tested) and
-  was checked against a real Chromium at each width: the row is the viewport
-  minus 60px (the 16px gutters, the shell's border and its 14/12px padding),
-  every box costs 38px plus a 4px gap, the row's zero-width spacer costs one
-  more gap, the ring's box keeps 4px to its right, and the model button spends
-  51px of its own on chrome before a letter of the name fits. With reasoning and
-  the ring beside attach and Send, the name gets 49px at 360px, 79px at 390px
-  and 101px at 412px — 24px less than before the ▾ zone, which is its whole
-  cost: nothing else gave up space for it. Add the agent-mode button and a
-  360px phone is down to 7px (the row still fits; it does not wrap), so a new
-  control on this row needs the budget redone first.
-- Controls an icon can speak for drop their labels there — Fast included: its
-  glyph carries the state the words did (accent + filled bg = requested,
-  `TriangleAlert` = inactive/unavailable, `ZapOff` = off, `Zap` = unverified,
-  spinner = checking), and the full sentence stays in `title`/`aria-label`.
-- The Slow switch (`slow-mode-toggle`) lives in the model dropdown, not on the
-  row. The only phone cost of slow mode is the 12px turtle glyph INSIDE the
-  model button while it is on (17px with its gap, `PHONE_COMPOSER.stateGlyph`,
-  taken from the name — no new box). The usage-limit stage is a 7px dot inside
-  the quota ring's existing box (`usage-limit-dot`): it adds no width.
-  A signed-out login (no usable account for the selected model's provider)
-  wears the same dot in the warning colour (`signed-out-dot`).
-- The daily-limit circle (`DailyLimitRing`, only while that limit is on) is one
-  more 38px box on the row, as tall as Send, with nothing kept to its right: it
-  costs 38 + 4px like reasoning (`phoneBudget(…, { timer: true })`). With
-  reasoning and the quota ring beside it the name gets 7px at 360px, 37px at
-  390px and 59px at 412px; Chromium measured the model button at 390px at
-  exactly the computed 88px, the row 330px wide on one line. Add the agent-mode
-  button too and a 360px row spills, as it already did.
-- ChatInput's own 16px sides ARE the chat column's gutter. Neither dock may
-  wrap it in a second one.
+- Below 640px the row is `nowrap`; every fixed control is 38px `flex-shrink: 0` (Send 62px with its ▾ zone); only the model selector shrinks and ellipsises.
+- `phoneBudget()` (`lib/scheduled/ui.ts`): a new control needs the budget redone first — at 360px with agent-mode the name has 7px left.
+- State dots sit inside existing boxes; ChatInput's 16px sides ARE the gutter — docks add none.
+Details: docs/agents/ui-kit.md
 
 <!-- BEGIN:nextjs-agent-rules -->
 

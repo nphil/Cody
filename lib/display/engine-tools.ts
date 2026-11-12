@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { devicesInternalEndpoint, displayInternalEndpoint, issueDisplayCapability, messagingInternalEndpoint, modelSwitchInternalEndpoint, scheduledInternalEndpoint, sessionsInternalEndpoint } from "./capability";
+import { devicesInternalEndpoint, displayInternalEndpoint, issueDisplayCapability, messagingInternalEndpoint, modelSwitchInternalEndpoint, scheduledInternalEndpoint, sessionsInternalEndpoint, workersInternalEndpoint } from "./capability";
 
 export interface DisplayMcpLaunch {
   serverPath: string;
@@ -9,6 +9,7 @@ export interface DisplayMcpLaunch {
   scheduledEndpoint: string;
   messagingEndpoint: string;
   modelSwitchEndpoint: string;
+  workersEndpoint: string;
   capability: string;
   engineLabel: string;
 }
@@ -23,6 +24,7 @@ export function createDisplayMcpLaunch(sessionId: string, engineLabel = "Cody"):
     scheduledEndpoint: scheduledInternalEndpoint(),
     messagingEndpoint: messagingInternalEndpoint(),
     modelSwitchEndpoint: modelSwitchInternalEndpoint(),
+    workersEndpoint: workersInternalEndpoint(),
     capability: issueDisplayCapability(sessionId),
     engineLabel,
   };
@@ -45,6 +47,7 @@ export function claudeDisplayMcpConfig(sessionId: string): string {
           CODY_SCHEDULED_ENDPOINT: launch.scheduledEndpoint,
           CODY_MESSAGING_ENDPOINT: launch.messagingEndpoint,
           CODY_MODEL_SWITCH_ENDPOINT: launch.modelSwitchEndpoint,
+          CODY_WORKERS_ENDPOINT: launch.workersEndpoint,
           CODY_ENGINE_LABEL: launch.engineLabel,
         },
       },
@@ -82,6 +85,7 @@ export function displayMcpAcpServer(sessionId: string, engineLabel = "Cody"): {
       { name: "CODY_SCHEDULED_ENDPOINT", value: launch.scheduledEndpoint },
       { name: "CODY_MESSAGING_ENDPOINT", value: launch.messagingEndpoint },
       { name: "CODY_MODEL_SWITCH_ENDPOINT", value: launch.modelSwitchEndpoint },
+      { name: "CODY_WORKERS_ENDPOINT", value: launch.workersEndpoint },
       { name: "CODY_ENGINE_LABEL", value: launch.engineLabel },
     ],
   };

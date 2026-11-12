@@ -71,3 +71,7 @@ export function messagingInternalEndpoint(): string {
 export function modelSwitchInternalEndpoint(): string {
   return internalEndpoint("/api/internal/model-switch");
 }
+
+export function workersInternalEndpoint(): string {
+  return internalEndpoint("/api/internal/workers");
+}

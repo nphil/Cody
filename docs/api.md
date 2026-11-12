@@ -435,20 +435,30 @@ plus any machine it reaches over ssh (Settings › System › Machines). Respons
 are `Cache-Control: no-store`; on an open instance (no accounts) the writes are
 open too.
 
-- `GET /api/machines` → `{machines, canEdit, sshAvailable}`. `machines[0]` is
-  always `{id:"local", kind:"local", name}` (default name `This server`); the
-  rest are `{id, kind:"ssh", name, destination}`. `destination` (an ssh alias
-  or `user@host`) is present only when `canEdit` is true. `sshAvailable` is
-  false when the server has no `ssh` program.
+- `GET /api/machines` → `{machines, canEdit, sshAvailable, workerChecks?}`.
+  `machines[0]` is always `{id:"local", kind:"local", name}` (default name
+  `This server`); the rest are `{id, kind:"ssh", name, destination, worker,
+  workerFacts?}`. `destination` (an ssh alias or `user@host`) is present only
+  when `canEdit` is true, and so are the worker fields: `worker` (the "Use as
+  worker" switch, a boolean), `workerFacts` (only on a worker: what its
+  `/etc/cody-worker.json` said at the last good check, `{name, arch, cpus,
+  memMB, slots, tools, onlyWhenIdle}`, or null before one) and `workerChecks`
+  (`{<machine id>: {ok:true, at} | {ok:false, reason, at}}`, the newest check of
+  each worker since the server started; not saved). `sshAvailable` is false
+  when the server has no `ssh` program.
 - `PUT /api/machines` — admin only. `{localName?, machines?}`; a field left out
   is left alone. `machines` is the whole ssh list as it should be afterwards:
   an entry with the `id` of a saved machine keeps it, one without is added, a
-  saved machine missing from the list is removed. Answers like `GET`. Anything
-  invalid is `400 {error, code}` and nothing is saved: `machine_name_required`
+  saved machine missing from the list is removed. An entry may carry `worker`
+  (boolean: switch "Use as worker" on or off); left out, the machine keeps its
+  setting, and a machine's saved facts are dropped when its destination changes.
+  Answers like `GET`. Anything invalid is `400 {error, code}` and nothing is
+  saved: `machine_name_required`
   / `_too_long` / `_invalid`, `machine_destination_required` / `_too_long` /
   `_invalid` (letters, digits and `. _ - : @` only, one optional `user@`),
   `machine_duplicate_name`, `machine_duplicate_destination`,
-  `too_many_machines` (12 in all), `invalid_request`. Body ≤ 16 KB.
+  `too_many_machines` (12 in all), `invalid_request` (also a `worker` that is
+  not a boolean). Body ≤ 16 KB.
 - `POST /api/machines/test` `{destination}` — admin only. Connects and takes one
   real reading; HTTP 200 either way: `{ok:true, ms, cpuPercent, cores, load1,
   memPercent, memTotalBytes, memUsedBytes}` or `{ok:false, reason, detail}`
@@ -456,16 +466,30 @@ open too.
   dropped failed not_linux`; `detail` is ssh's own first line). `400
   machine_destination_*` for a bad destination, `429 machine_test_busy` while
   two tests are already running.
+- `POST /api/machines/worker-check` `{id}` — admin only. `id` is a saved ssh
+  machine (its address comes from the server, never from the request). Reads the
+  machine's `/etc/cody-worker.json` over ssh once and, on success, keeps the
+  facts as the machine's `workerFacts`; HTTP 200 either way: `{ok:true, facts,
+  ms, at}` or `{ok:false, reason, detail, at}`, where `reason` is a connection
+  reason as for `/test` or one of `not_a_worker bad_facts no_work_root` (the
+  file is missing, is not valid facts, or the work root `/srv/cody-work` cannot
+  be written) and `detail` is ssh's or the file's own first line. `404
+  machine_unknown` for an id that is not in the list, `429 worker_check_busy`
+  while another check is running, `400 invalid_request`. Body ≤ 1 KB.
 - `GET /api/machines/stream` — SSE, any signed-in account. `data:` frames of
-  `{type:"machines", at, machines:[{id, name, kind, status, reason, metrics}]}`
+  `{type:"machines", at, machines:[{id, name, kind, status, reason, metrics,
+  worker?}]}`
   (the first frame at once, then one whenever a reading lands) and
   `{type:"heartbeat", at}` every 10 s. `status` is `online | connecting |
   offline | unavailable`; `reason` is a code or null; `metrics` is `{cpuPercent
   (null until a second reading), cores, load1, memTotalBytes, memUsedBytes,
-  memPercent, at}` or null. No address and no ssh output ever appear in it.
-  Holding the stream open is what makes the server sample: it starts with the
-  first viewer and stops a minute after the last one leaves. `503
-  too_many_viewers` past 64 open streams.
+  memPercent, at}` or null. A machine used as a worker also carries `worker:
+  {jobs, ready}`: how many of Cody's jobs run on it now, and whether its newest
+  check passed (false before the first one). No address and no ssh output ever
+  appear in it. Holding the stream open is what makes the server sample (and
+  keeps the periodic worker check going): it starts with the first viewer and
+  stops a minute after the last one leaves. `503 too_many_viewers` past 64 open
+  streams.
 
 ## `GET /api/statistics` — Incidental
 
@@ -740,6 +764,12 @@ The same applies to `switch_model`: Agent engines that reach Cody over MCP get
 it through `POST /api/internal/model-switch`, which is not part of this
 contract; it is authenticated by a per-session capability token and exists only
 for the bundled MCP server.
+
+Agent engines that reach Cody over MCP get `run_on_worker` (run a heavy command
+on a machine switched on as a worker) through `POST /api/internal/workers`, which
+is not part of this contract: it is authenticated by a per-session capability
+token, answers as NDJSON (progress lines, then the result) and exists only for
+the bundled MCP server. An omp main chat gets the tool as a host tool instead.
 
 ## Agent and the event stream
 

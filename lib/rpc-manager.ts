@@ -10,6 +10,7 @@ import { startSharedBrowser } from "./display/shared-browser";
 import { isLoopbackHost } from "./display/ladder";
 import { ForgeError } from "./forge/client";
 import { FORGE_HOST_TOOL, runForgeTool } from "./forge/tool";
+import { RUN_ON_WORKER_TOOL, runOnWorker } from "./workers/tool";
 import { getHarness } from "./harness";
 import type { EngineSession, EngineSessionOptions, HarnessAdapter, RpcUiSpawn } from "./harness/types";
 import { validateAgentImages } from "./image-attachments";
@@ -439,7 +440,11 @@ const SERVER_HOST_TOOLS: HostToolDefinition[] = [{
 // engine commands the composer's own picker sends. Main chats only, for the
 // same schema-budget reason.
 ...MODEL_SWITCH_TOOLS.map(({ handler: _handler, ...tool }) => tool),
-FORGE_HOST_TOOL];
+FORGE_HOST_TOOL,
+// Heavy jobs on another machine (lib/workers/tool.ts). Settled here because
+// the ssh keys and machine list live in this process. Like the tools above it
+// is part of SERVER_HOST_TOOLS, so only a main chat on a full profile gets it.
+RUN_ON_WORKER_TOOL];
 /** Every tool the SERVER settles itself, so `handleFrame` routes its calls
  * here instead of to a browser. The sidebar's context tools are server-side
  * for the same reason the rest are: they read the filesystem and the session
@@ -1254,6 +1259,8 @@ export class AgentSessionWrapper {
   private hostTools: Array<Record<string, unknown>> = [];
   /** host_tool_call ids awaiting a host_tool_result from the browser. */
   private pendingHostTools: Map<string, AgentEvent> = new Map();
+  /** In-flight server-settled host tool calls that can be stopped (run_on_worker): host_tool_call id -> its abort switch. */
+  private serverToolCalls: Map<string, AbortController> = new Map();
   /** URI schemes the web UI registered via set_host_uri_schemes. */
   private hostUriSchemes: Map<string, { writable?: boolean }> = new Map();
   private hostUriSchemeEntries: Array<Record<string, unknown>> = [];
@@ -2225,6 +2232,12 @@ export class AgentSessionWrapper {
       }
       case "host_tool_cancel": {
         const targetId = typeof event.targetId === "string" ? event.targetId : "";
+        // omp gave up on a server-settled call: stop the job; its late result is dropped.
+        const serverCall = targetId ? this.serverToolCalls.get(targetId) : undefined;
+        if (serverCall) {
+          serverCall.abort();
+          return;
+        }
         if (targetId && this.pendingHostTools.delete(targetId)) {
           this.emit(event);
           notifyRunningChange();
@@ -2734,6 +2747,44 @@ export class AgentSessionWrapper {
       }
       return;
     }
+    if (toolName === "run_on_worker" && this.engine.kind !== "sidebar") {
+      const controller = new AbortController();
+      const proc = this.proc;
+      this.serverToolCalls.set(id, controller);
+      // Once the call was cancelled or its engine replaced, omp no longer waits
+      // for an answer: nothing more is written for it.
+      const stale = () => controller.signal.aborted || this.proc !== proc;
+      try {
+        const result = await runOnWorker(event.arguments, {
+          cwd: this.cwd,
+          sessionId: this._sessionId,
+          scratchDir: this._scratchDir,
+          signal: controller.signal,
+          onProgress: (text) => {
+            if (stale()) return;
+            proc.sendFrame({ type: "host_tool_update", id, partialResult: { content: [{ type: "text", text }] } });
+          },
+        });
+        if (stale()) return;
+        this.sendHostToolResult({
+          type: "host_tool_result",
+          id,
+          ...(result.isError ? { isError: true } : {}),
+          result: { content: [{ type: "text", text: result.text }] },
+        });
+      } catch (error) {
+        if (stale()) return;
+        this.sendHostToolResult({
+          type: "host_tool_result",
+          id,
+          isError: true,
+          result: { content: [{ type: "text", text: `Worker request failed: ${error instanceof Error ? error.message : String(error)}` }] },
+        });
+      } finally {
+        if (this.serverToolCalls.get(id) === controller) this.serverToolCalls.delete(id);
+      }
+      return;
+    }
     if (toolName === "open_preview") {
       try {
         const request = await publishDisplayRequest(this._sessionId, event.arguments as Record<string, unknown>);
@@ -2936,6 +2987,12 @@ export class AgentSessionWrapper {
       });
     }
     this.pendingHostTools.clear();
+  }
+
+  /** Stop every in-flight server-settled host tool call (engine exit, restart, destroy): each job cleans up on its own and its late result is dropped. */
+  private abortServerToolCalls(): void {
+    for (const controller of this.serverToolCalls.values()) controller.abort();
+    this.serverToolCalls.clear();
   }
 
   /** Reject every outstanding host URI request (browser disconnected / destroy). */
@@ -3295,6 +3352,7 @@ export class AgentSessionWrapper {
     const old = this.proc;
     this.restarting = true;
     this.unsubscribeFrames?.();
+    this.abortServerToolCalls();
     try {
       await old.dispose();
       if (!this._alive) return;
@@ -4389,6 +4447,7 @@ export class AgentSessionWrapper {
       this.mcpListWaiter = null;
     }
     const disposed = this.proc.dispose().catch(() => {});
+    this.abortServerToolCalls();
     this.destroyPromise = disposed;
     this.pendingHostTools.clear();
     this.hostToolNames.clear();

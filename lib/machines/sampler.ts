@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { buildRawSample, countCores, metricsFrom, type RawSample } from "./proc";
 import { runSsh, type SshRun } from "./ssh";
 import { listMachineConfigs } from "./store";
+import { workerStateOf } from "./jobs";
 import {
   SAMPLE_INTERVAL_MS,
   type MachineConfig,
@@ -10,6 +11,7 @@ import {
   type MachineState,
   type MachineStatus,
   type MachineTestResult,
+  type MachineWorkerState,
 } from "./types";
 
 /**
@@ -245,6 +247,8 @@ export interface SamplerDeps {
   readConfig(): MachineConfig[];
   collect: CollectorFactory;
   timers: Timers;
+  /** What to say about a machine used as a worker; omitted, workers carry none. */
+  workerState?(machineId: string): MachineWorkerState;
 }
 
 /** After the last viewer leaves, how long the sampler keeps running. */
@@ -263,9 +267,13 @@ interface Runtime {
   collector: Collector | null;
 }
 
-function stateOf(runtime: Runtime): MachineState {
+function stateOf(runtime: Runtime, workerState: SamplerDeps["workerState"]): MachineState {
   const { config } = runtime;
-  return { id: config.id, name: config.name, kind: config.kind, status: runtime.status, reason: runtime.reason, metrics: runtime.metrics };
+  const state: MachineState = {
+    id: config.id, name: config.name, kind: config.kind, status: runtime.status, reason: runtime.reason, metrics: runtime.metrics,
+  };
+  if (config.worker && workerState) state.worker = workerState(config.id);
+  return state;
 }
 
 export class MachineSampler {
@@ -298,14 +306,18 @@ export class MachineSampler {
   /** Every machine, in the order Settings lists them. */
   states(): MachineState[] {
     if (!this.running) {
-      return this.deps.readConfig().map((config) => ({
-        id: config.id, name: config.name, kind: config.kind, status: "connecting", reason: "starting", metrics: null,
-      }));
+      return this.deps.readConfig().map((config): MachineState => {
+        const state: MachineState = {
+          id: config.id, name: config.name, kind: config.kind, status: "connecting", reason: "starting", metrics: null,
+        };
+        if (config.worker && this.deps.workerState) state.worker = this.deps.workerState(config.id);
+        return state;
+      });
     }
     const states: MachineState[] = [];
     for (const id of this.order) {
       const runtime = this.runtimes.get(id);
-      if (runtime) states.push(stateOf(runtime));
+      if (runtime) states.push(stateOf(runtime, this.deps.workerState));
     }
     return states;
   }
@@ -394,6 +406,11 @@ export class MachineSampler {
     }
   }
 
+  /** Send viewers a fresh frame soon; nothing to do while nobody is watching. */
+  refresh(): void {
+    if (this.running) this.scheduleEmit();
+  }
+
   private scheduleEmit(): void {
     if (this.cancelEmit) return;
     this.cancelEmit = this.deps.timers.after(EMIT_DELAY_MS, () => {
@@ -422,6 +439,7 @@ function liveDeps(): SamplerDeps {
     collect: (config, events) =>
       config.kind === "local" ? startLocalCollector(events) : startSshCollector(config.destination ?? "", events),
     timers: REAL_TIMERS,
+    workerState: workerStateOf,
   };
 }
 
@@ -447,6 +465,12 @@ export function getMachineStates(): MachineState[] {
 /** Call after the saved list changed. */
 export function reconcileMachines(): void {
   globalThis.__codyMachineSampler?.reconcile();
+}
+
+/** Call after something a viewer sees besides the readings changed (a worker's
+ * job count, its health): viewers get a fresh frame within a moment. */
+export function notifyMachinesChanged(): void {
+  globalThis.__codyMachineSampler?.refresh();
 }
 
 /** Server shutdown: kill every ssh this sampler started. */

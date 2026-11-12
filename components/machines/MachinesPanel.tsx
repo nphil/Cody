@@ -84,11 +84,32 @@ function MachineCard({ machine }: { machine: MachineState }) {
         <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12, fontWeight: 700, color: "var(--text)" }}>
           {name}
         </span>
+        {machine.worker && (
+          <span
+            style={{
+              flexShrink: 0,
+              padding: "0 6px",
+              border: "1px solid var(--border)",
+              borderRadius: "var(--radius-control)",
+              fontSize: 10.5,
+              lineHeight: "16px",
+              color: "var(--text-muted)",
+            }}
+          >
+            {t("machines.worker.tag")}
+          </span>
+        )}
         <span style={{ display: "inline-flex", alignItems: "center", gap: 5, flexShrink: 0, fontSize: 11, color: "var(--text-muted)" }}>
           <span aria-hidden="true" style={{ width: 7, height: 7, borderRadius: "50%", background: statusColor }} />
           {t(machineStatusKey(machine.status))}
         </span>
       </div>
+      {machine.worker && (machine.worker.jobs > 0 || !machine.worker.ready) && (
+        <div style={{ display: "flex", flexWrap: "wrap", columnGap: 10, rowGap: 2, fontSize: 11, lineHeight: 1.5, color: "var(--text-muted)" }}>
+          {machine.worker.jobs > 0 && <span style={{ color: "var(--text)" }}>{tn("machines.worker.jobsRunning", machine.worker.jobs)}</span>}
+          {!machine.worker.ready && <span>{t("machines.worker.panelNotReady")}</span>}
+        </div>
+      )}
       {metrics ? (
         <>
           <Gauge

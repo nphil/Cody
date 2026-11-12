@@ -6,7 +6,8 @@
  * machine is one Cody reaches over ssh, named by an alias from `~/.ssh/config`
  * or `user@host`.
  *
- * The card builds against `GET/PUT /api/machines` and `POST /api/machines/test`.
+ * The card builds against `GET/PUT /api/machines`, `POST /api/machines/test` and
+ * `POST /api/machines/worker-check` (the "Use as worker" switch and its check).
  * `PUT` takes the whole ssh list as it should be afterwards, so adding, editing
  * and removing are all "send the list again, changed". Gating is by what the
  * API reports, so no control is shown that would fail: a member sees names
@@ -16,7 +17,8 @@
 import { AlertCircle, Check, Loader2, Pencil, Plus, RefreshCw, Server, Trash2 } from "lucide-react";
 import { useCallback, useContext, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { toast } from "@/components/ui/toast";
-import { setSettingsRouteData, useSettingsRoute } from "@/hooks/useSettingsData";
+import { fetchSettingsRoute, setSettingsRouteData, useSettingsRoute } from "@/hooks/useSettingsData";
+import { formatRelativeTime } from "@/lib/format";
 import { useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
 import {
@@ -30,20 +32,30 @@ import {
   type MachinesPayload,
   type MachinesUpdate,
   type MachineTestResult,
+  type WorkerCheckResult,
+  type WorkerCheckSummary,
 } from "@/lib/machines/types";
-import { machineDisplayName, machineReasonKey, wholePercent } from "@/lib/machines/present";
+import {
+  machineDisplayName,
+  machineReasonKey,
+  visibleWorkerTools,
+  wholePercent,
+  workerFactPieces,
+  workerReasonKey,
+} from "@/lib/machines/present";
 import { dangerButtonStyle, primaryButtonStyle, smallButtonStyle } from "./account-controls";
 import { cardStyle, cardTitleStyle, dimLineStyle, mutedLineStyle } from "./EngineRoster";
-import { nativeInputStyle, SettingsHighlightContext } from "./primitives";
+import { nativeInputStyle, SettingsHighlightContext, ToggleSwitch } from "./primitives";
 
 export const MACHINES_ROUTE = "/api/machines";
 const TEST_ROUTE = "/api/machines/test";
+const WORKER_CHECK_ROUTE = "/api/machines/worker-check";
 
 const RING_STYLE = { boxShadow: "0 0 0 2px var(--accent)", borderColor: "var(--accent)" } as const;
 
 // ── Requests ─────────────────────────────────────────────────────────────────
 
-type SshEntry = { id?: string; name: string; destination: string };
+type SshEntry = { id?: string; name: string; destination: string; worker?: boolean };
 
 async function putMachines(body: MachinesUpdate): Promise<MachinesPayload> {
   const response = await fetch(MACHINES_ROUTE, {
@@ -67,6 +79,17 @@ async function postTest(destination: string): Promise<MachineTestResult> {
   return payload as MachineTestResult;
 }
 
+async function postWorkerCheck(id: string): Promise<WorkerCheckResult> {
+  const response = await fetch(WORKER_CHECK_ROUTE, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(formatApiError(payload));
+  return payload as WorkerCheckResult;
+}
+
 /** Undo of a removal. Reads the list as it is NOW and puts the machine back at its end, so nothing changed since (another tab, an edit) is lost. */
 async function restoreMachine(entry: SshEntry): Promise<MachinesPayload> {
   const read = await fetch(MACHINES_ROUTE);
@@ -75,7 +98,7 @@ async function restoreMachine(entry: SshEntry): Promise<MachinesPayload> {
   const current = body as MachinesPayload;
   const list: SshEntry[] = current.machines
     .filter((machine) => machine.kind === "ssh")
-    .map((machine) => ({ id: machine.id, name: machine.name, destination: machine.destination ?? "" }));
+    .map((machine) => ({ id: machine.id, name: machine.name, destination: machine.destination ?? "", worker: machine.worker === true }));
   return putMachines({ machines: [...list, entry] });
 }
 
@@ -110,6 +133,48 @@ function useMachineTest() {
   }, []);
 
   return { testing, result, error, run, reset };
+}
+
+/** What one row knows about its worker check: running now, the answer just received, or why it failed to run. */
+interface WorkerCheckState {
+  checking: boolean;
+  result: WorkerCheckResult | null;
+  error: string | null;
+  run: (id: string) => void;
+  reset: () => void;
+}
+
+/** One in-flight worker check per row; a newer run or a reset makes an older answer irrelevant. */
+function useWorkerCheck(): WorkerCheckState {
+  const [checking, setChecking] = useState(false);
+  const [result, setResult] = useState<WorkerCheckResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const seq = useRef(0);
+
+  const reset = useCallback(() => {
+    seq.current += 1;
+    setChecking(false);
+    setResult(null);
+    setError(null);
+  }, []);
+
+  const run = useCallback((id: string) => {
+    const mine = ++seq.current;
+    setChecking(true);
+    setResult(null);
+    setError(null);
+    void postWorkerCheck(id)
+      .then((next) => {
+        if (seq.current !== mine) return;
+        setResult(next);
+        // The server saved what it read; bring the card's own copy up to date.
+        void fetchSettingsRoute(MACHINES_ROUTE, { force: true });
+      })
+      .catch((failure: unknown) => { if (seq.current === mine) setError(messageOf(failure)); })
+      .finally(() => { if (seq.current === mine) setChecking(false); });
+  }, []);
+
+  return { checking, result, error, run, reset };
 }
 
 // ── Small pieces ─────────────────────────────────────────────────────────────
@@ -195,10 +260,16 @@ function MachineForm({ existing, ssh, onCancel, onSaved }: {
   const checkedName = checkMachineName(name);
   const checkedDestination = checkMachineDestination(destination);
   const valid = checkedName.ok && checkedDestination.ok;
+  // A worker check reads the machine as saved, so edits that are not saved yet are not what it would check.
+  const dirty = existing !== null && (name !== existing.name || destination !== (existing.destination ?? ""));
 
   const submit = () => {
     if (!checkedName.ok || !checkedDestination.ok) return;
-    const entry: SshEntry = { ...(existing ? { id: existing.id } : {}), name: checkedName.value, destination: checkedDestination.value };
+    const entry: SshEntry = {
+      ...(existing ? { id: existing.id, worker: existing.worker === true } : {}),
+      name: checkedName.value,
+      destination: checkedDestination.value,
+    };
     const list = existing ? ssh.map((item) => (item.id === existing.id ? entry : item)) : [...ssh, entry];
     setBusy(true);
     setError(null);
@@ -252,6 +323,7 @@ function MachineForm({ existing, ssh, onCancel, onSaved }: {
       </div>
 
       <TestOutcome result={test.result} error={test.error} />
+      {dirty && existing?.worker === true && <span style={dimLineStyle}>{t("machines.worker.saveFirst")}</span>}
       {error && <ErrorLine>{error}</ErrorLine>}
 
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -281,17 +353,93 @@ function MachineForm({ existing, ssh, onCancel, onSaved }: {
 
 // ── One ssh machine ──────────────────────────────────────────────────────────
 
-function MachineRow({ machine, canEdit, sshAvailable, busy, onEdit, onRemove }: {
+function WorkerStatus({ machine, saved, check }: { machine: MachineConfig; saved: WorkerCheckSummary | null; check: WorkerCheckState }) {
+  const { t, tn, locale } = useI18n();
+  const facts = machine.workerFacts ?? null;
+  // The answer just received carries ssh's own line; the saved one is newer only when another check ran since.
+  const shown: WorkerCheckResult | WorkerCheckSummary | null = check.result && check.result.at >= (saved?.at ?? 0) ? check.result : saved;
+  // "Checked 3 min ago" needs a clock; reading it during render is impure, so it ticks once a minute.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
+  const ago = shown ? formatRelativeTime(new Date(shown.at).toISOString(), locale, Math.max(now, shown.at)) : null;
+  const tools = facts ? visibleWorkerTools(facts.tools) : null;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}>
+      {facts
+        ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0 }}>
+            <div style={{ fontSize: 12, color: "var(--text-muted)", overflowWrap: "anywhere" }}>
+              {workerFactPieces(facts, t, tn).join(" · ")}
+            </div>
+            {tools && (tools.shown.length > 0 || tools.hidden > 0) && (
+              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 4 }}>
+                <span style={dimLineStyle}>{t("machines.worker.tools")}</span>
+                {tools.shown.map((tool) => (
+                  <span
+                    key={tool}
+                    style={{ padding: "0 6px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", fontSize: 11, lineHeight: "17px", fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}
+                  >
+                    {tool}
+                  </span>
+                ))}
+                {tools.hidden > 0 && <span style={dimLineStyle}>{t("machines.worker.moreTools", { count: tools.hidden })}</span>}
+              </div>
+            )}
+            {facts.onlyWhenIdle && <div style={dimLineStyle}>{t("machines.worker.onlyWhenIdle")}</div>}
+          </div>
+        )
+        : !check.checking && <div style={dimLineStyle}>{t("machines.worker.noFacts")}</div>}
+
+      {check.error
+        ? <ErrorLine>{check.error}</ErrorLine>
+        : shown && (shown.ok
+          ? (
+            <div role="status" style={{ display: "flex", gap: 6, alignItems: "flex-start", fontSize: 12, color: "var(--status-success)", minWidth: 0 }}>
+              <Check size={13} aria-hidden="true" style={{ flexShrink: 0, marginTop: 2 }} />
+              <span style={{ minWidth: 0 }}>{ago ? t("machines.worker.readyAgo", { ago }) : t("machines.worker.ready")}</span>
+            </div>
+          )
+          : (
+            <div role="alert" style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
+              <ErrorLine>{t(workerReasonKey(shown.reason))}</ErrorLine>
+              {"detail" in shown && typeof shown.detail === "string" && shown.detail !== "" && (
+                <div style={{ ...dimLineStyle, fontFamily: "var(--font-mono)", wordBreak: "break-all", paddingLeft: 19 }}>{shown.detail}</div>
+              )}
+              {ago && <div style={{ ...dimLineStyle, paddingLeft: 19 }}>{t("machines.worker.checkedAgo", { ago })}</div>}
+            </div>
+          ))}
+    </div>
+  );
+}
+
+function MachineRow({ machine, workerCheck, canEdit, sshAvailable, busy, onEdit, onRemove, onSetWorker }: {
   machine: MachineConfig;
+  /** The newest saved check of this machine as a worker, if any. */
+  workerCheck: WorkerCheckSummary | null;
   canEdit: boolean;
   sshAvailable: boolean;
   busy: boolean;
   onEdit: () => void;
   onRemove: () => void;
+  /** Saves the worker switch; resolves true when it was saved. */
+  onSetWorker: (on: boolean) => Promise<boolean>;
 }) {
   const { t } = useI18n();
   const test = useMachineTest();
+  const check = useWorkerCheck();
   const destination = machine.destination;
+  const isWorker = machine.worker === true;
+
+  const toggleWorker = (on: boolean) => {
+    if (!on) check.reset();
+    void onSetWorker(on).then((saved) => {
+      if (saved && on) check.run(machine.id);
+    });
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6, paddingTop: 10, borderTop: "1px solid var(--border)", minWidth: 0 }}>
@@ -340,6 +488,32 @@ function MachineRow({ machine, canEdit, sshAvailable, busy, onEdit, onRemove }: 
         )}
       </div>
       <TestOutcome result={test.result} error={test.error} />
+      {canEdit && sshAvailable && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", minWidth: 0 }}>
+            <ToggleSwitch checked={isWorker} onChange={toggleWorker} disabled={busy} label={t("machines.worker.switchAria", { name: machine.name })} />
+            <div style={{ flex: "1 1 160px", minWidth: 0 }}>
+              <div style={{ fontSize: 12, fontWeight: 600 }}>{t("machines.worker.switch")}</div>
+              <div style={dimLineStyle}>{t("machines.worker.switchHelp")}</div>
+            </div>
+            {isWorker && (
+              <button
+                type="button"
+                className="ui-focus-ring"
+                onClick={() => check.run(machine.id)}
+                disabled={busy || check.checking}
+                aria-label={t("machines.worker.checkAria", { name: machine.name })}
+                aria-busy={check.checking}
+                style={{ ...smallButtonStyle, opacity: busy && !check.checking ? 0.6 : 1 }}
+              >
+                {check.checking ? <Loader2 size={13} className="icon-spin" aria-hidden="true" /> : <RefreshCw size={13} aria-hidden="true" />}
+                {check.checking ? t("machines.worker.checking") : t("machines.worker.check")}
+              </button>
+            )}
+          </div>
+          {isWorker && <WorkerStatus machine={machine} saved={workerCheck} check={check} />}
+        </div>
+      )}
     </div>
   );
 }
@@ -383,7 +557,7 @@ export function MachinesSection() {
   const sshAvailable = payload?.sshAvailable === true;
   const machines = payload?.machines ?? [];
   const sshMachines = machines.filter((machine) => machine.kind === "ssh");
-  const sshList: SshEntry[] = sshMachines.map((machine) => ({ id: machine.id, name: machine.name, destination: machine.destination ?? "" }));
+  const sshList: SshEntry[] = sshMachines.map((machine) => ({ id: machine.id, name: machine.name, destination: machine.destination ?? "", worker: machine.worker === true }));
   const atLimit = machines.length >= MAX_MACHINES;
 
   const checkedLocal = checkMachineName(localName);
@@ -407,7 +581,7 @@ export function MachinesSection() {
   };
 
   const remove = (machine: MachineConfig) => {
-    const gone: SshEntry = { name: machine.name, destination: machine.destination ?? "" };
+    const gone: SshEntry = { name: machine.name, destination: machine.destination ?? "", worker: machine.worker === true };
     write({ machines: sshList.filter((item) => item.id !== machine.id) }, () => {
       toast.success(t("machines.settings.removed", { name: machine.name }), undefined, {
         durationMs: 8000,
@@ -421,6 +595,22 @@ export function MachinesSection() {
         },
       });
     });
+  };
+
+  /** Switch one machine's worker setting through the same whole-list PUT. Resolves true once saved. */
+  const setWorker = async (machine: MachineConfig, on: boolean): Promise<boolean> => {
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await putMachines({ machines: sshList.map((item) => (item.id === machine.id ? { ...item, worker: on } : item)) });
+      setSettingsRouteData(MACHINES_ROUTE, next);
+      return true;
+    } catch (failure: unknown) {
+      setError(messageOf(failure));
+      return false;
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -504,6 +694,7 @@ export function MachinesSection() {
                 <MachineRow
                   key={machine.id}
                   machine={machine}
+                  workerCheck={payload.workerChecks?.[machine.id] ?? null}
                   canEdit={canEdit}
                   sshAvailable={sshAvailable}
                   busy={busy}
@@ -512,6 +703,7 @@ export function MachinesSection() {
                     setEditingId(machine.id);
                   }}
                   onRemove={() => remove(machine)}
+                  onSetWorker={(on) => setWorker(machine, on)}
                 />
               )
           ))}

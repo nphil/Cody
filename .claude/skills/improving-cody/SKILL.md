@@ -61,5 +61,6 @@ npm run dev                       # port 30178 — NEVER `next build` in dev
   lives in the instance data dir and must survive engine switches.
 - Design tokens only (`app/globals.css`) — no hardcoded colors; icons from
   `lucide-react`; primitives from `components/ui/`.
-- Update `AGENTS.md` (file map + design decisions) in the same commit as any
-  structural change, so the next agent inherits the map you had.
+- In the same commit as any structural change, update the map: the File Map
+  line and a short rule summary in `AGENTS.md`, and the full design notes in
+  the matching `docs/agents/<topic>.md`, so the next agent inherits the map you had.

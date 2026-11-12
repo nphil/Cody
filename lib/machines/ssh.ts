@@ -60,7 +60,7 @@ export const SAMPLE_COMMAND = `sh -c '${SAMPLE_SCRIPT}'`;
  * trusted the way the person already trusts their others (connect once from a
  * terminal), and a stricter setting of theirs is respected.
  */
-export function sshArgs(destination: string): string[] {
+export function sshCommandArgs(destination: string, remoteCommand: string): string[] {
   if (!checkMachineDestination(destination).ok) throw new Error("Refusing to run ssh against an invalid destination");
   return [
     "-T",
@@ -73,8 +73,13 @@ export function sshArgs(destination: string): string[] {
     "-o", "LogLevel=ERROR",
     "--",
     destination,
-    SAMPLE_COMMAND,
+    remoteCommand,
   ];
+}
+
+/** The meters' connection: {@link sshCommandArgs} running the sampling loop. */
+export function sshArgs(destination: string): string[] {
+  return sshCommandArgs(destination, SAMPLE_COMMAND);
 }
 
 /** The `ssh` program on PATH, or null when this server has none. A scan rather

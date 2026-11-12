@@ -1,6 +1,7 @@
 import { jsonError, requireUserOrOpenInstance } from "@/lib/auth/http";
 import { getMachineStates, subscribeMachines } from "@/lib/machines/sampler";
 import type { MachineStreamFrame } from "@/lib/machines/types";
+import { startWorkerMonitor } from "@/lib/workers/health";
 
 /**
  * GET /api/machines/stream — live CPU and memory for every machine, as SSE.
@@ -9,7 +10,9 @@ import type { MachineStreamFrame } from "@/lib/machines/types";
  * whenever a reading lands (at most a few a second). Holding this open is what
  * makes the server sample at all: the sampler starts with the first viewer and
  * stops a minute after the last one leaves (`lib/machines/sampler.ts`), so a
- * closed browser costs nothing on any machine.
+ * closed browser costs nothing on any machine. Every open stream also keeps
+ * the periodic worker check running (`lib/workers/health.ts`: the first one
+ * starts it, the last one leaving stops it), so the health dots on workers stay true.
  *
  * A heartbeat every 10 s lets a page tell a quiet machine list from a dead
  * connection (the page reconnects after 30 s of silence). Frames carry
@@ -40,11 +43,13 @@ export function GET(request: Request) {
 
   let heartbeat: NodeJS.Timeout | undefined;
   let closed = false;
+  const stopMonitor = startWorkerMonitor();
   const cleanup = () => {
     if (closed) return;
     closed = true;
     clearInterval(heartbeat);
     unsubscribe();
+    stopMonitor();
     try {
       controllerRef?.close();
     } catch {
