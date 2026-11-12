@@ -2,7 +2,7 @@ import type { UsageSnapshot } from "../usage/types";
 import { notifyScheduledOutcome, type ScheduledOutcome } from "./notify";
 import { judgeQuota, readUsageNow } from "./quota";
 import { clientMessageIdFor, isHandedOver, listItems, mutateItem, transact, type StoredItem } from "./store";
-import { QUOTA_GIVE_UP_MS, SCHEDULED_LIMITS, type HandedOverCheck, type ScheduledHandOver } from "./types";
+import { QUOTA_GIVE_UP_MS, SCHEDULED_LIMITS, type HandedOverCheck, type ScheduledDeliveryResult } from "./types";
 
 /**
  * The one timer that sends scheduled messages.
@@ -27,7 +27,14 @@ import { QUOTA_GIVE_UP_MS, SCHEDULED_LIMITS, type HandedOverCheck, type Schedule
  *    `failed` for the person; either way the owner is told (lib/notifications).
  *  - "When quota resets" waits for the reset time, then for a fresh usage read
  *    that says the model is usable, re-checking every few minutes, and gives up
- *    24 hours after the reset it waited for.
+ *    24 hours after the reset it waited for. A model whose provider names no
+ *    reset time is re-checked the same way from the start, and given up on 7
+ *    days after the message was scheduled.
+ *  - A message with a model of its own switches the chat to it first
+ *    (lib/model-switch), then sends. A chat that is running a reply is not cut
+ *    short for it: the message waits (no attempt used) and asks again every 30
+ *    seconds. A switch the engine refuses fails the message; it never goes out
+ *    on another model.
  *  - A message is only done once the chat has STARTED it. A chat that is
  *    mid-turn merely queues a follow-up (in the wrapper's memory, or omp's own
  *    queue), and an engine loss or a server restart loses that queue. So a
@@ -57,8 +64,8 @@ export const MAX_PARALLEL_CHATS = 3;
 
 export interface SchedulerDeps {
   now: () => number;
-  /** Hand the message to its chat. Resolves once the chat has it, saying whether it started or is only queued behind a running turn (nothing: it started); rejects (with `retryable`) if not. */
-  deliver: (item: StoredItem) => Promise<ScheduledHandOver | void>;
+  /** Hand the message to its chat. Resolves once the chat has it, saying whether it started or is only queued behind a running turn (nothing: it started), or `busy` — nothing was sent, the chat must first finish its reply before it can be switched to the message's model; rejects (with `retryable`) if not. */
+  deliver: (item: StoredItem) => Promise<ScheduledDeliveryResult | void>;
   /** Where a message the chat only queued stands now. Never starts a session. */
   checkHandedOver: (item: StoredItem) => Promise<HandedOverCheck>;
   /** A fresh usage read. */
@@ -121,19 +128,21 @@ export interface FireOptions {
   manual?: boolean;
 }
 
-export type FireResult = "sent" | "queued" | "retry" | "failed" | "skipped";
+export type FireResult = "sent" | "queued" | "retry" | "failed" | "skipped" | "waiting";
 
-/** Claim a pending item, once, and only if it is still the one the caller decided about. */
-function claim(id: string, rev: number | null, now: number): StoredItem | null {
+/** Claim a pending item, once, and only if it is still the one the caller decided about. `firstTry`: this claim is what stamped `firstAttemptAt`. */
+function claim(id: string, rev: number | null, now: number): { item: StoredItem; firstTry: boolean } | null {
   let claimed = false;
+  let firstTry = false;
   const stored = mutateItem(id, (item) => {
     if (item.status !== "pending" || (rev !== null && item.rev !== rev)) return undefined;
     claimed = true;
+    firstTry = item.firstAttemptAt === undefined;
     const next: StoredItem = { ...item, status: "sending", firstAttemptAt: item.firstAttemptAt ?? now };
     delete next.notBefore;
     return next;
   }, now);
-  return claimed ? stored : null;
+  return claimed && stored ? { item: stored, firstTry } : null;
 }
 
 /** Take a message out of the schedule for good. True only for the call that removed it, so whatever follows (a notice) happens once. */
@@ -157,14 +166,16 @@ function removeOnce(id: string, stillMine: (item: StoredItem) => boolean, now: n
  * under, and `checkHandedItem` settles it once the chat says what became of it.
  */
 export async function fireItem(id: string, rev: number | null, deps: SchedulerDeps, options: FireOptions = {}): Promise<FireResult> {
-  const claimed = claim(id, rev, deps.now());
-  if (!claimed) return "skipped";
-  let handOver: ScheduledHandOver | void;
+  const taken = claim(id, rev, deps.now());
+  if (!taken) return "skipped";
+  const claimed = taken.item;
+  let handOver: ScheduledDeliveryResult | void;
   try {
     handOver = await withTimeout(deps.deliver(claimed), SEND_TIMEOUT_MS);
   } catch (error) {
     return settleFailure(claimed, error, deps, options);
   }
+  if (handOver === "busy") return settleBusy(claimed, taken.firstTry, deps);
   if (handOver === "queued") {
     const now = deps.now();
     mutateItem(id, (item) => (item.status === "sending"
@@ -215,6 +226,25 @@ async function settleFailure(claimed: StoredItem, error: unknown, deps: Schedule
 }
 
 /**
+ * Nothing was sent: the message goes out on a model other than the chat's, and
+ * switching a chat that is running a reply would cut it short. The message goes
+ * back to waiting with no attempt used (nothing failed, and there is no copy to
+ * look for in the transcript), says why, and asks again soon.
+ */
+function settleBusy(claimed: StoredItem, firstTry: boolean, deps: SchedulerDeps): FireResult {
+  const now = deps.now();
+  const target = claimed.model ? `${claimed.model.provider}/${claimed.model.modelId}` : "its model";
+  const note = `Waiting for this chat's current reply to finish before switching to ${target}.`;
+  mutateItem(claimed.id, (item) => {
+    if (item.status !== "sending") return undefined;
+    const waiting: StoredItem = { ...item, status: "pending", notBefore: now + HANDED_CHECK_MS, error: note };
+    if (firstTry) delete waiting.firstAttemptAt;
+    return waiting;
+  }, now);
+  return "waiting";
+}
+
+/**
  * One round's look at a message the chat only queued. A lost one is a retry
  * attempt like any other failure: the same back-off, and the retry's own
  * transcript check keeps a copy that got through from being sent twice.
@@ -253,11 +283,13 @@ function decideQuota(item: StoredItem, snapshot: UsageSnapshot | null, now: numb
   const verdict = judgeQuota(snapshot, quota.provider, quota.modelId);
   if (verdict.state === "usable") return { action: "send" };
   if (now >= quota.giveUpAt) {
+    // A message that never had a reset to count from was given a week from the moment it was scheduled; the others a day from their reset.
+    const patience = quota.unknownReset ? "7 days" : "24 hours";
     return {
       action: "fail",
       reason: verdict.state === "exhausted"
-        ? "The quota had not refilled 24 hours after it was due to."
-        : "Cody could not read the quota for 24 hours, so it could not tell that it had refilled.",
+        ? (quota.unknownReset ? `The quota had not refilled after waiting ${patience}.` : `The quota had not refilled ${patience} after it was due to.`)
+        : `Cody could not read the quota for ${patience}, so it could not tell that it had refilled.`,
     };
   }
   if (verdict.state === "unreadable" || verdict.resetsAt === null || verdict.resetsAt <= now) {
@@ -269,14 +301,15 @@ function decideQuota(item: StoredItem, snapshot: UsageSnapshot | null, now: numb
   return { action: "wait", notBefore, ...(verdict.resetsAt > item.dueAt && verdict.resetsAt <= horizon ? { dueAt: verdict.resetsAt } : {}) };
 }
 
-/** Put a quota message that is still blocked back to sleep, and show the reset it now waits for. */
+/** Put a quota message that is still blocked back to sleep, and show the reset it now waits for (a reset that was unknown is known now: the week's patience becomes the usual day past it). */
 function deferQuotaItem(id: string, rev: number, decision: Extract<QuotaDecision, { action: "wait" }>, now: number): void {
   mutateItem(id, (item) => {
     if (item.status !== "pending" || item.rev !== rev) return undefined;
     const next: StoredItem = { ...item, notBefore: decision.notBefore };
     if (decision.dueAt !== undefined && next.quota) {
       next.dueAt = decision.dueAt;
-      next.quota = { ...next.quota, giveUpAt: Math.max(next.quota.giveUpAt, decision.dueAt + QUOTA_GIVE_UP_MS) };
+      const { unknownReset: _unknown, ...known } = next.quota;
+      next.quota = { ...known, giveUpAt: Math.max(known.giveUpAt, decision.dueAt + QUOTA_GIVE_UP_MS) };
     }
     return next;
   }, now);

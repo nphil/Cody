@@ -29,8 +29,13 @@ import { readRefusalPolicyConfig, writeRefusalPolicyConfig } from "./refusal/con
 import { PlanKeeper } from "./plan-keeper/keeper";
 import { observeSessionForNotifications } from "./notifications/observer";
 import { markServerShuttingDown } from "./run-recovery/shutdown";
-import { superviseRun } from "./run-recovery/supervisor";
+import { crashRecoveryOutlook, superviseRun } from "./run-recovery/supervisor";
+import { cgroupDeltas, classifyEngineExit, engineCrashSentence, type CgroupCounters, type EngineCrashNotice } from "./engine-crash";
+import { publishEngineCrash } from "./engine-crash-events";
+import { copyEngineCrashes, recordEngineCrash } from "./engine-crash-log";
+import { readCgroupCounters, readEngineCrashDisks } from "./engine-crash-host";
 import { readPlanOverlay, writePlanOverlay } from "./plan-keeper/overlay";
+import { applyPlanOverlay } from "./plan-keeper/fold";
 import { materializeLocalModelProfile, resolveLocalModelPromptProfile, type LocalModelProfileLaunch, type ModelProfileTarget, type ResolvedLocalModelProfile } from "./local-model-profile-runtime";
 import { copySessionLocalRouting, materializeLocalRoutingOverlay, readLocalRoutingIntent, renameSessionLocalRouting, validateLocalRoutingModelSelection } from "./local-model-routing";
 import { copySessionPreset, renameSessionPreset, sessionPresetOverlay } from "./model-presets/overlay";
@@ -45,6 +50,8 @@ import { ownerTimeZone } from "./time-zone-prefs";
 import { SIDEBAR_CONTEXT_TOOLS } from "./sidebar-context-tools";
 import { SESSION_AWARENESS_TOOLS, type SessionLivePhase, type SessionToolContext } from "./session-tools";
 import { SCHEDULE_TOOLS } from "./scheduled/tools";
+import { CHAT_MESSAGE_TOOLS } from "./chat-messages/tools";
+import { MODEL_SWITCH_TOOLS } from "./model-switch/tool";
 import { moveSessionItems } from "./scheduled/store";
 import { findUserById, hasAnyUser, type UserRecord } from "./auth/users";
 import { DEVICE_OPERATION_TOOLS } from "./devices/operation-tools";
@@ -419,6 +426,15 @@ const SERVER_HOST_TOOLS: HostToolDefinition[] = [{
 // into a chat later, or when quota resets. Offered to main chats only — the
 // sidebar's schema budget assumes the smallest local model.
 ...SCHEDULE_TOOLS.map(({ handler: _handler, ...tool }) => tool),
+// Chats messaging each other (lib/chat-messages/tools.ts): send_to_chat reaches
+// a busy chat at its next step, where schedule_message waits out the whole
+// turn. Main chats only, for the same schema-budget reason.
+...CHAT_MESSAGE_TOOLS.map(({ handler: _handler, ...tool }) => tool),
+// Switching the model (lib/model-switch/tool.ts): an agent asked to move this
+// chat — or the default for new chats — onto another model does it through the
+// engine commands the composer's own picker sends. Main chats only, for the
+// same schema-budget reason.
+...MODEL_SWITCH_TOOLS.map(({ handler: _handler, ...tool }) => tool),
 FORGE_HOST_TOOL];
 /** Every tool the SERVER settles itself, so `handleFrame` routes its calls
  * here instead of to a browser. The sidebar's context tools are server-side
@@ -430,8 +446,8 @@ const SERVER_HOST_TOOL_NAMES = new Set([
   ...DEVICE_TOOLS.map((tool) => tool.name),
   ...DEVICE_OPERATION_TOOLS.map((tool) => tool.name),
 ]);
-/** The tools a MAIN chat's host-tool calls are settled with: the session three and the scheduling three share one handler contract. */
-const MAIN_SESSION_TOOLS = [...SESSION_AWARENESS_TOOLS, ...SCHEDULE_TOOLS];
+/** The tools a MAIN chat's host-tool calls are settled with: the session three, the scheduling three, the two chat-messaging tools and switch_model share one handler contract. */
+const MAIN_SESSION_TOOLS = [...SESSION_AWARENESS_TOOLS, ...SCHEDULE_TOOLS, ...CHAT_MESSAGE_TOOLS, ...MODEL_SWITCH_TOOLS];
 /** One session-tool result's char budget for a MAIN chat. The sidebar's own
  * budget assumes the smallest supported window (6 KB); a main session runs on
  * whatever model the user picked, where paging a transcript four times to
@@ -1160,6 +1176,8 @@ export class AgentSessionWrapper {
   private unsubscribeFrames: (() => void) | null = null;
   private initPromise: Promise<void> | null = null;
   private restarting = false;
+  /** The container's cgroup counters when the current child started, so its exit can be read against them (lib/engine-crash.ts). */
+  private cgroupAtSpawn: CgroupCounters = readCgroupCounters();
   private _alive = true;
   private mcpListWaiter: { resolve: (text: string) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> } | null = null;
   /** Unsubscribe for durable browser operation transcript updates. */
@@ -1800,6 +1818,7 @@ export class AgentSessionWrapper {
     copySessionPreset(fromId, toId);
     const owner = getSessionOwner(fromId);
     if (owner) setSessionOwner(toId, owner);
+    copyEngineCrashes(fromId, toId);
   }
 
   /**
@@ -1822,19 +1841,31 @@ export class AgentSessionWrapper {
     notifyRunningChange({ refreshSessionList: true });
   }
 
-  handleProcessExit(stderrTail: string): void {
-    // A restart disposes the old child on purpose — not a crash.
+  /**
+   * The child exited and nobody asked it to: say why (lib/engine-crash.ts),
+   * file it in the chat, tell every open page, and let the push carry the same
+   * words. A restart disposes the old child on purpose, and a destroyed
+   * wrapper (Stop, close, idle, shutdown) never gets here.
+   */
+  handleProcessExit(exit: { code: number | null; signal: string | null; stderrTail: string }): void {
     if (!this._alive || this.restarting) return;
-    const detail = stderrTail.trim().split("\n").pop() ?? "";
-    if (this.streaming || this.promptRunning) {
-      console.warn(`[rpc-manager] the engine of running chat ${this._sessionId || "(new)"} exited unexpectedly${detail ? `: ${detail}` : ""}`);
-    }
-    this.emit({
-      type: "notice",
-      level: "error",
-      reason: "engine_exit",
-      message: `The ${this.engine.label} process for this session exited unexpectedly${detail ? `: ${detail}` : "."}`,
+    const verdict = classifyEngineExit({
+      ...exit,
+      cgroup: cgroupDeltas(this.cgroupAtSpawn, readCgroupCounters()),
+      diskAreas: readEngineCrashDisks(),
     });
+    const notice: EngineCrashNotice = { ...verdict, recovery: crashRecoveryOutlook(this), at: Date.now() };
+    const message = engineCrashSentence(notice);
+    const sessionId = this._sessionId;
+    if (this.streaming || this.promptRunning) {
+      console.warn(`[rpc-manager] the engine of running chat ${sessionId || "(new)"} exited unexpectedly (${notice.reason}${exit.signal ? `, ${exit.signal}` : ""}${exit.code !== null ? `, code ${exit.code}` : ""}): ${message}`);
+    }
+    // A sidebar chat is not in the session list: it gets the shelf notice below and nothing more.
+    const announce = this.engine.kind !== "sidebar" && sessionId !== "";
+    // Filed before the notice goes out, so a page that reloads on it finds the line.
+    if (announce) recordEngineCrash(sessionId, notice);
+    this.emit({ type: "notice", level: "error", reason: "engine_exit", message, crash: notice });
+    if (announce) publishEngineCrash({ sessionId, title: displaySessionTitle(this._sessionName) ?? null, notice });
     // Terminal agent_end so a client mid-stream stops spinning immediately
     // instead of waiting for the reconcile poll.
     if (this.streaming || this.promptRunning) this.emit({ type: "agent_end", isTerminal: true, messages: [] });
@@ -1911,6 +1942,10 @@ export class AgentSessionWrapper {
         if (this._sessionFile && !existsSync(this._sessionFile)) {
           this.signalWhenSessionFileAppears();
         }
+        // After a restart or a rewind the engine holds the list from its
+        // session file, without the plan keeper's check-offs: put them back
+        // before the agent reads it.
+        this.getPlanKeeper()?.notifyListRebuilt();
         break;
       case "agent_end":
         this.scratchActivity?.();
@@ -1969,6 +2004,8 @@ export class AgentSessionWrapper {
         if (text !== null) {
           this.lastReplyText = text;
           this.getPlanKeeper()?.notifyMessageEnd(text);
+        } else {
+          this.getPlanKeeper()?.notifyCustomMessage(event.message);
         }
         break;
       }
@@ -1995,11 +2032,11 @@ export class AgentSessionWrapper {
       }
       case "tool_execution_start":
         if (typeof event.toolCallId === "string") this.runningToolCalls.add(event.toolCallId);
+        this.getPlanKeeper()?.notifyToolExecutionStart(event);
         break;
       case "tool_execution_end": {
         if (typeof event.toolCallId === "string") this.runningToolCalls.delete(event.toolCallId);
-        const toolName = typeof event.toolName === "string" ? event.toolName : "tool";
-        this.getPlanKeeper()?.notifyToolExecutionEnd(toolName, event.args, event.result);
+        this.getPlanKeeper()?.notifyToolExecutionEnd(event);
         break;
       }
       case "subagent_lifecycle": {
@@ -2079,6 +2116,7 @@ export class AgentSessionWrapper {
         // event.result.estimatedTokensAfter for the banner.
         patchEstimatedTokensAfter(event.result);
         invalidateSessionListCache();
+        this.getPlanKeeper()?.notifyListRebuilt();
         break;
       case "session_info_update":
         if (typeof event.title === "string") this._sessionName = event.title;
@@ -2595,7 +2633,7 @@ export class AgentSessionWrapper {
    */
   private async handleServerHostTool(id: string, toolName: string, event: AgentEvent): Promise<void> {
     // A sidebar session may call its workspace tools too; a main chat is only
-    // ever offered the session and scheduling tools, and serving it a tool its
+    // ever offered the session, scheduling and chat-messaging tools, and serving it a tool its
     // engine was never told about would be answering a call nothing can have
     // made.
     const available = this.engine.kind === "sidebar" ? SIDEBAR_CONTEXT_TOOLS : MAIN_SESSION_TOOLS;
@@ -2960,6 +2998,18 @@ export class AgentSessionWrapper {
   }
 
   /**
+   * Put a frame on this session's own event stream as if the engine had sent
+   * it (every attached page and observer gets it; the engine gets nothing).
+   * For a server-side action that has to explain itself to the page: the
+   * agent-requested model switch announces itself here before it switches, so
+   * the composer can tell the `model_changed` that follows from an engine
+   * fallback.
+   */
+  announce(event: AgentEvent): void {
+    this.emit(event);
+  }
+
+  /**
    * The dialog still waiting on this id, or null — answered, cancelled and
    * timed-out dialogs are gone, expired ones included (the same rule onEvent
    * applies to a page that attaches late). What an answer from outside the
@@ -3086,6 +3136,7 @@ export class AgentSessionWrapper {
       // A state poll can be the first to see a session move (noteIdentityChange).
       this.noteIdentityChange(previousId);
     }
+    const planOverlay = state.sessionId ? readPlanOverlay(state.sessionId) : null;
     const webState: WebSessionState = {
       sessionId: state.sessionId,
       sessionFile: state.sessionFile ?? "",
@@ -3136,10 +3187,13 @@ export class AgentSessionWrapper {
       // only when something happens, so how long it has been waiting is
       // answered here, on the clock the engine shares with this server.
       ...("goal" in state ? { goal: state.goal ?? null, goalAgeMs: goalAgeMs(parseGoalModeState(state.goal), Date.now()) } : {}),
-      todoPhases: state.todoPhases ?? [],
+      // With the plan keeper's check-offs applied: the engine forgets one it
+      // was given whenever it rebuilds its list (a compaction, a restart, a
+      // rewind), and the keeper only puts it back on its next run.
+      todoPhases: applyPlanOverlay(state.todoPhases ?? [], planOverlay),
       // Absent when the plan keeper has never touched this session — the
       // client treats that the same as an empty overlay.
-      ...(state.sessionId ? { planOverlay: readPlanOverlay(state.sessionId) ?? undefined } : {}),
+      ...(planOverlay ? { planOverlay } : {}),
       extensionStatuses: Array.from(this.extensionStatuses, ([key, text]) => ({ key, text })),
       extensionWidgets: Array.from(this.extensionWidgets.values()),
     };
@@ -3197,13 +3251,14 @@ export class AgentSessionWrapper {
       // The same scratch dir as before (found by the id it was made under),
       // made again if something removed it meanwhile.
       if (this.engine.scratchKey) this._scratchDir = ensureSessionScratch(this.engine.scratchKey) ?? this._scratchDir;
+      this.cgroupAtSpawn = readCgroupCounters();
       const proc = new RpcProcess({
         cwd: this.cwd,
         launch: this.engine.relaunch(resumable ? sessionFile : "", profile),
         timeZone,
         scratchDir: this._scratchDir,
-        onExit: ({ stderrTail }) => {
-          if (this.proc === proc) this.handleProcessExit(stderrTail);
+        onExit: (exit) => {
+          if (this.proc === proc) this.handleProcessExit(exit);
         },
       });
       this.proc = proc;
@@ -4735,7 +4790,7 @@ export async function startRpcSession(
       launch,
       timeZone,
       scratchDir,
-      onExit: ({ stderrTail }) => holder.wrapper?.handleProcessExit(stderrTail),
+      onExit: (exit) => holder.wrapper?.handleProcessExit(exit),
     });
     const created = new AgentSessionWrapper(proc, cwd, {
       rpcUi: harness.rpcUi!,

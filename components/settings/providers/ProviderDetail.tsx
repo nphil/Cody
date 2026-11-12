@@ -98,9 +98,13 @@ function formatLocalTime(iso: string | null): string | null {
 }
 
 function AccountStateChip({ state, resetsAt }: { state: ProviderLoginAccount["state"]; resetsAt: string | null }) {
+  const { t } = useI18n();
   if (state === "in_use") return <span style={{ ...chipStyle, color: "var(--accent)" }}>In use</span>;
   if (state === "standby") return <span style={{ ...chipStyle, color: "var(--text-dim)" }}>Standby</span>;
   if (state === "disabled") return <span style={{ ...chipStyle, color: "var(--status-error)" }}>Disabled</span>;
+  // The provider ended this login for good. Not an error in Cody and not a
+  // quota: the one fix is the sign-in button on the same row.
+  if (state === "signed_out") return <span style={{ ...chipStyle, color: "var(--status-warning)" }}>{t("providerSignedOut.chip")}</span>;
   const reset = formatLocalTime(resetsAt);
   return <span style={{ ...chipStyle, color: "var(--status-warning)" }}>{reset ? `Limited · resets ${reset}` : "Limited"}</span>;
 }
@@ -122,19 +126,23 @@ function AccountUsageBar({ account }: { account: UsageAccount }) {
 
 /** One account under a multi-account sign-in: identity, plan, the state omp
  * ranked it at, and — when it is not the credential's only remaining copy —
- * removal. */
-function AccountRow({ account, canEdit, busy, onRemove, usageAccount }: {
+ * removal. An account whose login ended also offers signing in again, which
+ * starts the same flow the card's own sign-in button does. */
+function AccountRow({ account, canEdit, busy, onRemove, onSignInAgain, usageAccount }: {
   account: ProviderLoginAccount;
   canEdit: boolean;
   busy: boolean;
   onRemove: () => void;
+  onSignInAgain: () => void;
   /** The matching usage-snapshot account (by credential id), when the engine
    * reports one; absent renders no bar at all rather than an empty one. */
   usageAccount?: UsageAccount | null;
 }) {
+  const { t } = useI18n();
   const title = account.position === 0 ? "Primary" : account.position === 1 ? "Secondary" : `Account ${account.position + 1}`;
+  const signedOut = account.state === "signed_out";
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, flexWrap: signedOut ? "wrap" : "nowrap" }}>
       <span style={{ flex: "1 1 120px", minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
         <span style={{ fontSize: 12, fontWeight: 600 }}>{title}</span>
         <span style={{ fontSize: 11, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={account.label}>
@@ -144,6 +152,12 @@ function AccountRow({ account, canEdit, busy, onRemove, usageAccount }: {
       {account.planType && <span style={{ fontSize: 11, color: "var(--text-muted)", whiteSpace: "nowrap" }}>{account.planType}</span>}
       {usageAccount && <AccountUsageBar account={usageAccount} />}
       <AccountStateChip state={account.state} resetsAt={account.resetsAt} />
+      {signedOut && canEdit && (
+        <button type="button" className="ui-focus-ring" data-testid="account-sign-in-again" onClick={onSignInAgain} style={buttonStyle}>
+          <LogIn size={12} aria-hidden="true" />
+          {t("providerSignedOut.button")}
+        </button>
+      )}
       {account.canRemove && canEdit && (
         <button type="button" className="ui-focus-ring" onClick={onRemove} disabled={busy} aria-label={`Remove ${account.label}`} style={{ ...quietButtonStyle, padding: "6px 8px" }}>
           {busy ? <Loader2 size={12} aria-hidden="true" className="icon-spin" /> : <Trash2 size={12} aria-hidden="true" />}
@@ -179,7 +193,11 @@ export function LoginMethodCard({ row, method, canEdit, shortName, autoStart, on
   const connected = method.state === "connected";
   const accounts = method.accounts;
   const hasAccounts = (accounts?.length ?? 0) > 0;
-  const showAddAccount = hasAccounts;
+  // Every stored account lost its login: nothing is signed in, so the card's
+  // own button is a plain "Sign in" — "Add secondary account" would call the
+  // dead one the primary.
+  const allSignedOut = hasAccounts && (accounts ?? []).every((account) => account.state === "signed_out");
+  const showAddAccount = hasAccounts && !allSignedOut;
 
   const logout = async () => {
     setLogoutError(null);
@@ -222,6 +240,15 @@ export function LoginMethodCard({ row, method, canEdit, shortName, autoStart, on
     onChanged();
   };
 
+  // The card's own Sign in / Re-login / Add account button and an account
+  // row's "Sign in again" both start the same flow below.
+  const startSignIn = () => {
+    setLogoutError(null);
+    setRemoveError(null);
+    setStarting(true);
+    setExpanded(true);
+  };
+
   return (
     <div style={cardStyle}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
@@ -233,7 +260,7 @@ export function LoginMethodCard({ row, method, canEdit, shortName, autoStart, on
       </div>
       {canEdit && (
         <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-          <button type="button" className="ui-focus-ring" onClick={() => { setLogoutError(null); setRemoveError(null); setStarting(true); setExpanded(true); }} aria-expanded={expanded} style={connected ? buttonStyle : primaryButtonStyle}>
+          <button type="button" className="ui-focus-ring" onClick={startSignIn} aria-expanded={expanded} style={connected ? buttonStyle : primaryButtonStyle}>
             {showAddAccount ? <UserPlus size={12} aria-hidden="true" /> : connected ? <RefreshCw size={12} aria-hidden="true" /> : <LogIn size={12} aria-hidden="true" />}
             {showAddAccount ? (accounts?.length === 1 ? "Add secondary account" : "Add account") : connected ? "Re-login" : "Sign in"}
           </button>
@@ -264,6 +291,7 @@ export function LoginMethodCard({ row, method, canEdit, shortName, autoStart, on
               canEdit={canEdit}
               busy={removingId === account.id}
               onRemove={() => { setRemoveError(null); setRemoveTarget(account); }}
+              onSignInAgain={startSignIn}
               usageAccount={usageAccounts?.find((entry) => String(entry.credentialId) === account.id) ?? null}
             />
           ))}
@@ -987,7 +1015,9 @@ export function ProviderDetail({ row, response, open, onClose, initialLoginId = 
   // id for a joined row — never the brand, which a custom endpoint pointed at
   // OpenRouter could also wear without being the account this reads.
   const isOpenRouter = row.id === "openrouter" && !custom;
-  const [selectedLogin, setSelectedLogin] = useState<string>(() => initialLoginId ?? loginMethods.find((method) => method.state === "connected")?.loginId ?? loginMethods[0]?.loginId ?? "");
+  // A login whose account was signed out opens first: that is the one the
+  // owner came to fix.
+  const [selectedLogin, setSelectedLogin] = useState<string>(() => initialLoginId ?? loginMethods.find((method) => method.accounts?.some((account) => account.state === "signed_out"))?.loginId ?? loginMethods.find((method) => method.state === "connected")?.loginId ?? loginMethods[0]?.loginId ?? "");
   const currentLogin = loginMethods.find((method) => method.loginId === selectedLogin) ?? loginMethods[0];
   const loginOptions: SelectOption<string>[] = loginMethods.map((method) => ({
     value: method.loginId as string,

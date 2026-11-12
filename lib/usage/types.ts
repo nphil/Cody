@@ -62,8 +62,13 @@ export interface UsageResetCredits {
  *  - `standby`: healthy, held in reserve, taken over automatically when the
  *    one in use is limited;
  *  - `limited`: its binding window is spent;
- *  - `disabled`: omp disabled the credential outright. */
-export type UsageAccountService = "in_use" | "standby" | "limited" | "disabled";
+ *  - `disabled`: omp disabled the credential outright;
+ *  - `signed_out`: omp disabled it because its login ended (a token refresh
+ *    the provider refused for good, an invalidated token) — not a quota
+ *    problem, and only signing in again brings it back. Unusable exactly like
+ *    `disabled`; kept apart so every surface can say what to do about it
+ *    (`isSignedOutCause`, lib/usage/credential-health.ts). */
+export type UsageAccountService = "in_use" | "standby" | "limited" | "disabled" | "signed_out";
 
 /** What the `in_use` answer rests on, strongest first:
  *  - `session`: omp's own `credential_pin` for this conversation — the

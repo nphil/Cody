@@ -71,7 +71,8 @@ import { ScheduledBar } from "./ScheduledBar";
 import { DailyLimitNotice } from "./DailyLimitNotice";
 import { DailyLimitRing } from "./DailyLimitRing";
 import type { ScheduleChoice } from "./ScheduleMenu";
-import type { ScheduledItemView } from "@/lib/scheduled/types";
+import type { ScheduledItemView, ScheduledModelChoice } from "@/lib/scheduled/types";
+import type { ScheduleModelCatalog, ScheduleModelOption } from "@/lib/scheduled/model-ui";
 import { scheduleBlock, scheduleErrorMessage, type QuotaResetSource } from "@/lib/scheduled/ui";
 import { BTW_COMMAND_NAME, parseSideQuestionCommand } from "@/lib/btw";
 
@@ -97,6 +98,8 @@ interface ModelOption {
 const NO_MODES: SessionModeOption[] = [];
 /** Stable empty list keeps quota derivation memo-friendly when no session is live. */
 const NO_ACTIVE_MODELS: readonly SessionActiveModel[] = [];
+/** Stable empty ladder map: a composer that was handed no reasoning levels offers no reasoning choice in the Send menu. */
+const NO_THINKING_LEVELS: Record<string, string[]> = {};
 /** Stable empty list keeps the preset section memo-friendly when presets
  *  are unsupported or not yet loaded. */
 const NO_PRESETS: ComposerPresetOption[] = [];
@@ -217,6 +220,8 @@ interface Props {
   currentModeId?: string | null;
   onModeChange?: (modeId: string) => void;
   availableThinkingLevels?: string[] | null;
+  /** Every model's own reasoning ladder, keyed `provider:modelId` (the models route's `["off", ...efforts]`): what the Send menu's reasoning selector offers for a model chosen for a scheduled message. */
+  modelThinkingLevels?: Record<string, string[]>;
   /** Display name for the current model when the catalog does not know it. */
   modelNameOverride?: string | null;
   retryInfo?: { attempt: number; maxAttempts: number; errorMessage?: string } | null;
@@ -599,7 +604,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   onSend, onAbort, isStreaming, canSendWhileStreaming = false, canAttachWhileStreaming = false, canAttachImagesWhileStreaming = false, capabilities = ALL_CAPABILITIES, engine = null, model, sessionId, activeModels = NO_ACTIVE_MODELS, isAutoModelSelection, modelNames, modelList, modelError, modelErrorCode, modelsLoading, modelsRefreshKey, onModelChange, onSelectSmartModel, localOnly, onSelectLocalOnly, presets = NO_PRESETS, baseDefaultModel = null, activePresetId, pendingPresetPick = null, onPresetChange, autoModelSwitch, modelSwitchPending, modelChangeWhileStreaming = false, fastModeEnabled, fastModeActive, fastModeCapable, fastModeSupported, fastModePending, fastModeUnavailable, onFastModeChange,
   slowMode, slowModePending, usageLimit, onSlowModeChange,
   onAbortCompaction, isCompacting, compactResult,
-  thinkingLevel, onThinkingLevelChange, thinkingLevelPending, thinkingLevelTarget, availableModes = NO_MODES, currentModeId = null, onModeChange, availableThinkingLevels, modelNameOverride,
+  thinkingLevel, onThinkingLevelChange, thinkingLevelPending, thinkingLevelTarget, availableModes = NO_MODES, currentModeId = null, onModeChange, availableThinkingLevels, modelThinkingLevels, modelNameOverride,
   retryInfo, inputHistory = [], onAbortRetry,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
@@ -1280,6 +1285,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     sideQuestion: onSideQuestion !== undefined && parseSideQuestionCommand(value) !== null,
   });
   const scheduleInFlightRef = useRef(false);
+  // The model the person chose in the Send menu for the message being written (null: whatever the chat is on when it goes). It belongs to that message: it is let go when the box empties (sent, scheduled or cleared), and another chat starts clean.
+  const [scheduleModel, setScheduleModel] = useState<ScheduledModelChoice | null>(null);
+  useEffect(() => {
+    if (!hasComposerContent) setScheduleModel(null);
+  }, [hasComposerContent]);
+  useEffect(() => {
+    setScheduleModel(null);
+  }, [sessionId]);
   const scheduleCreate = scheduled.create;
   const scheduleLimits = scheduled.limits;
   const handleSchedule = useCallback(async (choice: ScheduleChoice) => {
@@ -1289,6 +1302,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const textSnapshot = value;
     const imageSnapshot = attachedImages;
     const fileSnapshot = attachedTextFiles;
+    const modelSnapshot = scheduleModel;
     clearInput();
     try {
       let message = composeMessageWithTextAttachments(msg, fileSnapshot);
@@ -1305,17 +1319,19 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }
         if (expansion.kind === "expand") message = expansion.prompt;
       }
+      // A chosen model rides along: the chat is switched to it when the message goes, and "When quota resets" waits on its account. The chat's own model only tells the server what to wait on when none was chosen.
       await scheduleCreate(choice.kind === "quota"
-        ? { message, whenQuotaResets: true, ...(model ? { model: { provider: model.provider, modelId: model.modelId } } : {}) }
-        : { message, at: new Date(choice.at).toISOString() });
+        ? { message, whenQuotaResets: true, ...(modelSnapshot ? { model: modelSnapshot } : {}), ...(model ? { chatModel: { provider: model.provider, modelId: model.modelId } } : {}) }
+        : { message, at: new Date(choice.at).toISOString(), ...(modelSnapshot ? { model: modelSnapshot } : {}) });
     } catch (error) {
       const reason = scheduleErrorMessage(error, t, scheduleLimits);
       restoreComposer(textSnapshot, imageSnapshot, fileSnapshot, reason);
+      setScheduleModel(modelSnapshot);
       toast.error(t("schedule.toastFailed"), reason);
     } finally {
       scheduleInFlightRef.current = false;
     }
-  }, [scheduleBlockReason, value, attachedImages, attachedTextFiles, clearInput, restoreComposer, scheduleCreate, scheduleLimits, model, t]);
+  }, [scheduleBlockReason, value, attachedImages, attachedTextFiles, scheduleModel, clearInput, restoreComposer, scheduleCreate, scheduleLimits, model, t]);
 
   // Edit takes the message back: the server forgets it and its text returns to
   // the box, ahead of whatever is already typed there.
@@ -1330,6 +1346,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const restoredText = [item.message, valueRef.current].filter(Boolean).join("\n\n");
     valueRef.current = restoredText;
     setValue(restoredText);
+    if (item.model) setScheduleModel(item.model);
     setAtQuery(null);
     setHistoryMenuOpen(false);
     requestAnimationFrame(() => {
@@ -2403,6 +2420,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   );
   const quotaRingTitleShown = usageLimitText ? `${quotaRingTitle} \u00b7 ${usageLimitText.line}` : quotaRingTitle;
   const quotaRingLabelShown = usageLimitText ? `${quotaRingLabel} \u00b7 ${usageLimitText.line}` : quotaRingLabel;
+  // True when no account that could serve the selected model is left because
+  // its login ended; the ring wears the usage-limit dot's warning style.
+  const signedOutRing = !quota.known && quota.signedOut !== undefined;
   // Only ticks while the popover is open — "updated 2 min ago" has to stay
   // true while someone reads it, but nothing else in the composer cares.
   const [usageNow, setUsageNow] = useState(() => Date.now());
@@ -2506,11 +2526,40 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     setContextPopoverOpen(false);
   }, [draftKey]);
 
-  // The quota ring's knowledge of THIS chat's own model, narrowed to what the
-  // menu's "When quota resets" row reads (lib/scheduled/ui.ts).
-  const scheduleQuotaSource: QuotaResetSource | null = quota.known
-    ? { known: true, provider: quota.provider, resetsAt: quota.resetsAt, accounts: quota.accounts }
+  // What the Send menu's "When quota resets" row reads: the model chosen for the message when there is one (its account is what has to refill), else this chat's own model — the ring's reading. A chosen model Cody cannot map to a usage account reads as unknown, never as the chat's.
+  const scheduleChosenQuota = React.useMemo(() => {
+    if (!scheduleModel) return null;
+    const usageProvider = usageProviderFor(engineId, scheduleModel.provider);
+    if (!usageProvider) return null;
+    return buildQuotaView(usageSnapshot, usageLoading, usageFailed, { provider: usageProvider, modelId: scheduleModel.modelId }, activeModels);
+  }, [scheduleModel, engineId, usageSnapshot, usageLoading, usageFailed, activeModels]);
+  const scheduleQuotaView = scheduleModel ? scheduleChosenQuota : quota;
+  const scheduleQuotaSource: QuotaResetSource | null = scheduleQuotaView?.known
+    ? { known: true, provider: scheduleQuotaView.provider, resetsAt: scheduleQuotaView.resetsAt, accounts: scheduleQuotaView.accounts }
     : null;
+  // What the Send menu's Model row lists: the composer's own catalog (the same pinned groups, the full list behind a search, the same names), so a model offered there is one the chat can be switched to. No row without a way to switch models at all.
+  const scheduleCatalog: ScheduleModelCatalog | null = React.useMemo(() => {
+    if (!onModelChange || allModelOptions.length === 0) return null;
+    return {
+      current: model ? { provider: model.provider, modelId: model.modelId, name: displayModelName ?? model.modelId } : null,
+      groups: modelGroups,
+      all: allModelOptions,
+      levels: onThinkingLevelChange ? modelThinkingLevels ?? NO_THINKING_LEVELS : NO_THINKING_LEVELS,
+      duplicateNames: duplicateModelNames,
+      limitText: (option: ScheduleModelOption) => {
+        const limit = modelLimitReached(usageSnapshot, engineId, option.provider, option.modelId);
+        if (!limit) return null;
+        const reset = limit.resetsAt ? formatResetTime(limit.resetsAt, locale, Date.now()) : null;
+        return reset
+          ? tOrFallback("chatInput.modelLimitReachedReset", "Limit reached · resets {time}", { time: reset })
+          : tOrFallback("chatInput.modelLimitReached", "Limit reached");
+      },
+    };
+  }, [onModelChange, onThinkingLevelChange, modelThinkingLevels, allModelOptions, modelGroups, duplicateModelNames, model, displayModelName, usageSnapshot, engineId, locale, tOrFallback]);
+  // The scheduled rows name a chosen model the way the picker does.
+  const scheduleModelName = useCallback((provider: string, modelId: string) => (
+    allModelOptions.find((option) => option.provider === provider && option.modelId === modelId)?.name ?? null
+  ), [allModelOptions]);
 
   return (
     <div
@@ -3021,6 +3070,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           items={scheduled.items}
           busy={scheduled.busy}
           isMobile={isMobile}
+          modelName={scheduleModelName}
           onEdit={handleScheduledEdit}
           onSendNow={handleScheduledSendNow}
           onCancel={handleScheduledCancel}
@@ -3930,17 +3980,20 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     )}
                     <circle cx="13" cy="13" r="2" fill="currentColor" opacity="0.72" />
                   </svg>
-                  {usageLimit && (
-                    // A stage marker inside the ring's existing box (no new
+                  {(usageLimit || signedOutRing) && (
+                    // A marker inside the ring's existing box (no new
                     // control): amber on the slower lane, red on the wrap-up
-                    // allowance. The words are in the tooltip and the popover.
+                    // allowance — and the same amber when every login that
+                    // could serve this model ended, since Cody has nothing to
+                    // gauge until it is signed in again. The words are in the
+                    // tooltip and the popover.
                     <span
-                      data-testid="usage-limit-dot"
+                      data-testid={usageLimit ? "usage-limit-dot" : "signed-out-dot"}
                       aria-hidden="true"
                       style={{
                         position: "absolute", top: isMobile ? 7 : 2, right: isMobile ? 7 : 2,
                         width: 7, height: 7, borderRadius: "50%",
-                        background: usageLimit.stage === "wrap_up" ? "var(--status-error)" : "var(--status-warning)",
+                        background: usageLimit?.stage === "wrap_up" ? "var(--status-error)" : "var(--status-warning)",
                         border: "1.5px solid var(--bg-panel)", boxSizing: "content-box",
                       }}
                     />
@@ -3962,6 +4015,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     onRefresh={refreshQuotaNow}
                     anchorTop={contextPopoverAnchor?.top ?? null}
                     anchorRight={contextPopoverAnchor?.right ?? null}
+                    onClose={() => setContextPopoverOpen(false)}
                   />
                 )}
               </div>
@@ -4006,6 +4060,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 sendDisabled={sendPreparing || preparingImageCount > 0 || !hasComposerContent}
                 block={scheduleBlockReason}
                 quota={scheduleQuotaSource}
+                models={scheduleCatalog}
+                scheduleModel={scheduleModel}
+                onScheduleModelChange={setScheduleModel}
                 onSend={handleSend}
                 onSchedule={handleSchedule}
               />

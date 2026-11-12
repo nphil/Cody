@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getAgentDir } from "../omp/paths";
 import { asNumber, asString, isRecord } from "../type-guards";
-import { SCHEDULED_LIMITS, type ScheduledMode, type ScheduledSource, type ScheduledStatus } from "./types";
+import { SCHEDULED_LIMITS, type ScheduledModelChoice, type ScheduledMode, type ScheduledSource, type ScheduledStatus } from "./types";
 
 /**
  * Where scheduled messages live between now and when they are sent.
@@ -36,6 +36,8 @@ export interface StoredQuota {
   label: string;
   /** Epoch ms after which a still-blocked message is given up on. */
   giveUpAt: number;
+  /** The provider names no reset time for the model: the message waits for a fresh read to say it is usable, re-checking every few minutes until `giveUpAt`. */
+  unknownReset?: true;
 }
 
 export interface StoredItem {
@@ -67,6 +69,8 @@ export interface StoredItem {
   handedClientMessageId?: string;
   error?: string;
   quota?: StoredQuota;
+  /** The model (and level) the message is sent on: the chat is switched to it first. Absent: whatever the chat is on. */
+  model?: ScheduledModelChoice;
 }
 
 /** What a caller supplies; the store adds identity, status and bookkeeping. */
@@ -78,6 +82,7 @@ export interface NewItem {
   dueAt: number;
   source: ScheduledSource;
   quota?: StoredQuota;
+  model?: ScheduledModelChoice;
 }
 
 export function scheduledStorePath(): string {
@@ -103,7 +108,17 @@ function readQuota(value: unknown): StoredQuota | undefined {
   const label = asString(value.label);
   const giveUpAt = asNumber(value.giveUpAt);
   if (!provider || !modelId || label === undefined || giveUpAt === undefined) return undefined;
-  return { provider, modelId, label, giveUpAt };
+  return value.unknownReset === true ? { provider, modelId, label, giveUpAt, unknownReset: true } : { provider, modelId, label, giveUpAt };
+}
+
+/** The chosen model, or undefined when the entry has no usable one — such an item simply goes out on whatever the chat is on, as before models could be chosen. */
+function readModel(value: unknown): ScheduledModelChoice | undefined {
+  if (!isRecord(value)) return undefined;
+  const provider = asString(value.provider);
+  const modelId = asString(value.modelId);
+  if (!provider || !modelId) return undefined;
+  const thinkingLevel = asString(value.thinkingLevel);
+  return thinkingLevel ? { provider, modelId, thinkingLevel } : { provider, modelId };
 }
 
 /** One stored entry, or null when it cannot be trusted: a hand-edited or half-written entry must never become a message sent to the wrong chat. */
@@ -149,6 +164,8 @@ function readStoredItem(value: unknown): StoredItem | null {
   const error = asString(value.error);
   if (error) item.error = error;
   if (quota) item.quota = quota;
+  const model = readModel(value.model);
+  if (model) item.model = model;
   return item;
 }
 
@@ -249,6 +266,7 @@ export function insertItem(input: NewItem, now: number = Date.now()): InsertResu
       deliveryNo: 0,
       attempts: 0,
       ...(input.quota ? { quota: input.quota } : {}),
+      ...(input.model ? { model: input.model } : {}),
     };
     return { items: [...items, item], result: { ok: true, item } };
   }, now);

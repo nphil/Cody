@@ -20,6 +20,7 @@ export const NOTIFICATION_EVENT_IDS = [
   "fallback",
   "quotaLow",
   "quotaOut",
+  "accountSignedOut",
 ] as const;
 
 export type NotificationEventId = (typeof NOTIFICATION_EVENT_IDS)[number];
@@ -34,7 +35,7 @@ export interface NotificationEventSpec {
   group: NotificationGroupId;
   label: string;
   description: string;
-  /** Scoped to one chat (presence suppression applies), or instance-wide (quota). */
+  /** Scoped to one chat (presence suppression applies), or instance-wide (quota, signed-out logins). */
   scope: "session" | "account";
   defaultEnabled: boolean;
   defaultPriority: NtfyPriority;
@@ -128,6 +129,15 @@ export const NOTIFICATION_EVENTS: readonly NotificationEventSpec[] = [
     group: "problems",
     label: "Quota used up",
     description: "An account hit its limit, was blocked by the provider, or ran out of credits.",
+    scope: "account",
+    defaultEnabled: true,
+    defaultPriority: 4,
+  },
+  {
+    id: "accountSignedOut",
+    group: "problems",
+    label: "Account signed out",
+    description: "A provider login expired, so that account cannot be used until you sign in again.",
     scope: "account",
     defaultEnabled: true,
     defaultPriority: 4,

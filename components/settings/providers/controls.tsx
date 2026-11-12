@@ -71,7 +71,9 @@ export function hostOf(url: string | undefined): string | null {
 /** The winning method as the row's status line reads it. */
 export function describeWinning(row: ProviderRow, shortName: string): { tone: "ok" | "warn" | "muted"; text: string } {
   if (row.disabled) return { tone: "warn", text: `Disabled in ${shortName}` };
-  if (!row.connected) return { tone: "muted", text: "Not connected" };
+  // Every account lost its login: listed (the owner signs in again from its
+  // drawer), but not "Not connected" in the grey of a provider never set up.
+  if (!row.connected) return row.signedOut ? { tone: "warn", text: "Not signed in" } : { tone: "muted", text: "Not connected" };
   const winner = row.methods.find((method) => method.winning);
   if (!winner || winner.state !== "connected") return { tone: "ok", text: "Connected" };
   switch (winner.kind) {

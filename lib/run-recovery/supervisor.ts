@@ -1,3 +1,6 @@
+import { recordEngineCrash } from "../engine-crash-log";
+import { publishEngineCrash } from "../engine-crash-events";
+import type { EngineCrashNotice, EngineCrashRecovery } from "../engine-crash";
 import { readEnv } from "../env";
 import { checkDiskForNewTurn, type DiskGateRefusal } from "../disk/gate";
 import type { EngineEvent, EngineSession } from "../harness/types";
@@ -721,6 +724,37 @@ function isWorkingNow(state: RunRecoveryState, sessionId: string): boolean {
 }
 
 /**
+ * What Cody will do about a chat whose engine has just died on its own, said
+ * before the death is announced: restart the chat by itself (a run was in
+ * flight, recovery is on and the cap in the last twelve hours is not reached),
+ * stop trying, or wait for the person. The same tests the recovery itself
+ * makes, so what the notice promises is what happens.
+ */
+export function crashRecoveryOutlook(session: EngineSession): EngineCrashRecovery {
+  const state = globalThis.__codyRunRecovery;
+  if (!state?.deps.enabled() || state.deps.isShuttingDown()) return "manual";
+  for (const tracker of state.trackers) {
+    if (tracker.session !== session) continue;
+    if (!tracker.runActive || tracker.recycling) return "manual";
+    const { deps } = state;
+    const history = journal.recentRecoveries(safely(state, "journal", () => journal.findRun(tracker.currentId())) ?? null, deps.now(), deps.limits.recoveryWindowMs);
+    return history.length >= deps.limits.maxRecoveries ? "gave_up" : "automatic";
+  }
+  return "manual";
+}
+
+/** A chat that was running when the server went down: its line in the chat, and the pop-up for any page already open. The push is the recovery's own. */
+function announceServerRestart(sessionId: string, recovery: EngineCrashRecovery, now: number): void {
+  const notice: EngineCrashNotice = { reason: "server_restarted", recovery, at: now, detail: null, disk: null, quota: false, code: null, signal: null };
+  try {
+    recordEngineCrash(sessionId, notice, now);
+    publishEngineCrash({ sessionId, title: null, notice });
+  } catch {
+    // The announcement is a courtesy; the resume must go on.
+  }
+}
+
+/**
  * At boot: every run the journal still holds was cut off by the restart.
  * Resume the recent ones, one chat at a time, and say so about the rest. A
  * chat that is already working again (somebody opened it in the first seconds)
@@ -743,10 +777,14 @@ async function resumeInterrupted(state: RunRecoveryState): Promise<number> {
     try {
       const now = deps.now();
       const history = journal.recentRecoveries(entry, now, deps.limits.recoveryWindowMs);
-      if (now - entry.updatedAt > deps.limits.bootMaxAgeMs) {
+      const tooOld = now - entry.updatedAt > deps.limits.bootMaxAgeMs;
+      const capped = history.length >= deps.limits.maxRecoveries;
+      // The chat's own record of why its engine is gone: written before the resume, so the line sits above whatever the resume says.
+      announceServerRestart(entry.sessionId, tooOld ? "manual" : capped ? "gave_up" : "automatic", now);
+      if (tooOld) {
         safely(state, "journal", () => journal.endRun(entry.sessionId, now));
         await notifyRecovery(entry.sessionId, { kind: "not_resumed", lastActivityAt: entry.updatedAt, at: now }, undefined, deps);
-      } else if (history.length >= deps.limits.maxRecoveries) {
+      } else if (capped) {
         await giveUp(state, entry.sessionId, history.length, undefined);
       } else {
         const result = await recoverRun(state, {

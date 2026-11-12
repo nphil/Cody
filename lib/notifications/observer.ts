@@ -1,4 +1,5 @@
 import { describeEngineError } from "../error-text";
+import { engineCrashSentence, readEngineCrashNotice } from "../engine-crash";
 import type { EngineEvent, EngineSession } from "../harness/types";
 import { getEngineSession } from "../harness/engine-sessions";
 import { readPermissionOptions } from "../permission-request";
@@ -313,7 +314,9 @@ export function createSessionObserver(session: ObservedSession, overrides: Parti
     if (reason === "awaiting_reply") {
       if (waitingRunId !== runId) sendReplyEnded(deps.now(), true);
     } else if (reason === "engine_exit") {
-      sendError("The engine for this chat stopped unexpectedly.");
+      // The wrapper says why (out of memory, disk full, ...) and what happens next; an exit with no such payload keeps the plain line.
+      const crash = readEngineCrashNotice(event.crash);
+      sendError(crash ? engineCrashSentence(crash) : "The engine for this chat stopped unexpectedly.");
     } else if (event.level === "error") {
       // An ACP turn that fails says so in a notice, then ends with stopReason
       // "error" and no text of its own.

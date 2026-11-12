@@ -4,6 +4,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { isRecord } from "../type-guards";
 import { engineChildEnv } from "../harness/provider-keys";
+import { recordOneShotUsage, type OneShotUsageTag } from "../statistics/oneshot";
 
 /**
  * One prompt, one answer, run through the user's own omp binary in print mode.
@@ -42,6 +43,10 @@ export interface OneShotRequest {
   extraEnv?: Record<string, string | undefined>;
   /** IANA zone the child runs under (its `TZ`); absent leaves the server's. */
   timeZone?: string;
+  /** Says what the run is for. A tagged run's token usage is filed in Statistics,
+   * because a `--no-session` run leaves no transcript to read it from; an
+   * untagged run is not counted. */
+  usage?: OneShotUsageTag;
 }
 
 /** The model's last answer, or the reason there is none — never both. */
@@ -158,7 +163,12 @@ function excerptToolResult(result: unknown): string {
  */
 export function createFrameReader(
   onDelta?: (text: string) => void,
-  toolHooks: { onToolStart?: (event: ToolStartEvent) => void; onToolEnd?: (event: ToolEndEvent) => void } = {},
+  hooks: {
+    onToolStart?: (event: ToolStartEvent) => void;
+    onToolEnd?: (event: ToolEndEvent) => void;
+    /** Each finished assistant message once, with the token usage it carries. */
+    onAssistantMessage?: (message: Record<string, unknown>) => void;
+  } = {},
 ): {
   consume(line: string): void;
   sawFrame(): boolean;
@@ -167,12 +177,24 @@ export function createFrameReader(
   const last: LastAnswer = { turn: null, message: null };
   let seen = false;
   let reported = "";
+  const reportedUsage = new Set<string>();
 
   const report = (text: string | null): void => {
     if (!onDelta || !text || text === reported || !text.startsWith(reported)) return;
     const delta = text.slice(reported.length);
     reported = text;
     onDelta(delta);
+  };
+
+  // `message_end` and `turn_end` both carry the finished message, so one call
+  // arrives twice; its timestamp is what says they are the same call.
+  const reportUsage = (frame: Record<string, unknown>): void => {
+    const message = frame.message;
+    if (!hooks.onAssistantMessage || !isRecord(message) || message.role !== "assistant" || !isRecord(message.usage)) return;
+    const key = typeof message.timestamp === "number" ? String(message.timestamp) : JSON.stringify(message.usage);
+    if (reportedUsage.has(key)) return;
+    reportedUsage.add(key);
+    hooks.onAssistantMessage(message);
   };
 
   return {
@@ -190,7 +212,7 @@ export function createFrameReader(
       // Tool frames never carry assistant text; handled separately from the
       // answer-bearing types below, and reported before they are skipped.
       if (type === "tool_execution_start") {
-        toolHooks.onToolStart?.({
+        hooks.onToolStart?.({
           toolCallId: typeof frame.toolCallId === "string" ? frame.toolCallId : "",
           toolName: typeof frame.toolName === "string" ? frame.toolName : "",
           args: frame.args,
@@ -198,7 +220,7 @@ export function createFrameReader(
         return;
       }
       if (type === "tool_execution_end") {
-        toolHooks.onToolEnd?.({
+        hooks.onToolEnd?.({
           toolCallId: typeof frame.toolCallId === "string" ? frame.toolCallId : "",
           toolName: typeof frame.toolName === "string" ? frame.toolName : "",
           isError: frame.isError === true,
@@ -206,6 +228,7 @@ export function createFrameReader(
         });
         return;
       }
+      if (type === "turn_end" || type === "message_end") reportUsage(frame);
       // Any other well-formed frame proves the child spoke; only these four
       // can carry text, and everything else is skipped before it is inspected.
       if (type !== "turn_end" && type !== "message_end" && type !== "message_start" && type !== "message_update") {
@@ -298,7 +321,12 @@ function runOmpPrint(
     // real install — see research.ts's module doc for why.
   ], { cwd: request.cwd ?? tmpdir(), stdio: ["ignore", "pipe", "pipe"], env: engineChildEnv(request.extraEnv, { timeZone: request.timeZone }) });
 
-  const reader = createFrameReader(hooks.onDelta, { onToolStart: hooks.onToolStart, onToolEnd: hooks.onToolEnd });
+  const usageTag = request.usage;
+  const reader = createFrameReader(hooks.onDelta, {
+    onToolStart: hooks.onToolStart,
+    onToolEnd: hooks.onToolEnd,
+    onAssistantMessage: usageTag ? (message) => recordOneShotUsage(usageTag, message) : undefined,
+  });
   let pending = "";
   let stderr = "";
   let settled = false;

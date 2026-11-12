@@ -12,6 +12,9 @@ export const STORAGE_KEYS = {
   lang: "cody:lang",
   /** Sidebar width in pixels. */
   sidebarWidth: "cody:sidebar-width",
+  /** Session list view: "recent" (one list across projects, newest activity
+   *  first) or "projects" (grouped under each project). */
+  sidebarView: "cody:sidebar-view",
   /** Whether tool-call cards render collapsed by default. */
   /** Browser-local baseline used by reset-credit balance UI. */
   resetCreditBalancePrefix: "cody:reset-credit-balance",

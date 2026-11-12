@@ -7,10 +7,10 @@ import type { EngineSession } from "../harness/types";
 import { getAgentDir, getSessionsDir } from "../omp/paths";
 import { asNumber, isRecord } from "../type-guards";
 import { PathMentions, scanProcessUsage, type MentionRoot } from "./mentions";
-import { listSessionScratch, removeScratchDir, scratchRoot, type ScratchEntry } from "./scratch";
+import { dataScratchDirFor, dataScratchRoot, listOrphanDataScratch, listSessionScratch, removeDataScratchDir, removeScratchDir, scratchRoot, type ScratchEntry } from "./scratch";
 import { readDiskSettings, type DiskSettings } from "./settings";
 import { readDiskAreas, type DiskArea } from "./status";
-import { collectSweepCandidates, sweepCandidates, type SweepPlan, type SweepReferences, type SweepRoot } from "./sweep";
+import { collectSweepCandidates, readLivePids, sweepCandidates, type SweepPlan, type SweepReferences, type SweepRoot } from "./sweep";
 import { indexSessionFiles, lastActivityBySession, readTranscriptMentions, type SessionFile } from "./transcripts";
 import { measureTree } from "./walk";
 
@@ -192,6 +192,10 @@ interface ScratchState {
    *  orphan, which names no chat) the process table could be read and the walk finished. */
   removable: boolean;
   dev: number | null;
+  /** The chat's twin on the data disk (`CODY_DATA_SCRATCH`), and what is in it. */
+  dataDir: string | null;
+  dataBytes: number;
+  dataDev: number | null;
   removed: boolean;
 }
 
@@ -233,7 +237,7 @@ async function guarded(run: Run, step: string, work: () => Promise<void> | void)
  *  that finds it gone fails the next import it makes (measured), so it cannot
  *  be told from litter by age. */
 function protectedPaths(env: JanitorEnvironment): string[] {
-  return [scratchRoot(), getAgentDir(), os.homedir(), process.cwd(), path.join(env.tmpRoot, "jiti")].map((entry) => path.resolve(entry));
+  return [scratchRoot(), dataScratchRoot(), getAgentDir(), os.homedir(), process.cwd(), path.join(env.tmpRoot, "jiti")].map((entry) => path.resolve(entry));
 }
 
 function realPathOrNull(target: string): string | null {
@@ -259,6 +263,7 @@ function mentionRoots(env: JanitorEnvironment): MentionRoot[] {
     add(path.resolve(env.homeTmpRoot), underHome ? [`~/${relative}`, `$HOME/${relative}`, `\${HOME}/${relative}`] : []);
   }
   add(scratchRoot());
+  add(dataScratchRoot());
   return roots;
 }
 
@@ -285,8 +290,48 @@ async function removeScratch(run: Run, state: ScratchState, reason: JanitorRemov
     }
     state.removed = true;
     record(run, { path: state.entry.dir, bytes: state.bytes, reason }, state.dev);
+    if (state.dataDir !== null && state.dataBytes > 0) record(run, { path: state.dataDir, bytes: state.dataBytes, reason }, state.dataDev);
   } catch (error) {
     note(run, `Could not remove the scratch folder ${state.entry.dir}: ${errorText(error)}`);
+  }
+}
+
+/** Does a running process use this data-disk dir (or its real path, when the root is a link)? Unknown counts as used. */
+function heldByProcess(processes: PathMentions | null, dir: string): boolean {
+  if (processes === null) return true;
+  const real = realPathOrNull(dir);
+  return processes.has(dir) || (real !== null && processes.has(real));
+}
+
+/**
+ * Data-disk scratch dirs no chat owns any more (the chat's index entry and its
+ * tmp dir are both gone, e.g. after the chat was forgotten): removed once
+ * nothing inside changed for `scratchIdleDays`, no process uses them and no
+ * running chat's engine lives in the twin tmp dir. The pairs of chats that
+ * still exist go with their tmp dir (`removeScratch`). Needs the running chats
+ * and the process table, like an orphan tmp dir does.
+ */
+async function removeOrphanDataScratch(run: Run, live: LiveSessions | null, processes: PathMentions | null, deadline: number): Promise<void> {
+  if (live === null || processes === null) return;
+  const liveNames = new Set([...live.dirs].map((dir) => path.basename(dir)));
+  const idleMs = run.settings.scratchIdleDays * DAY_MS;
+  for (const dir of listOrphanDataScratch()) {
+    if (liveNames.has(path.basename(dir)) || heldByProcess(processes, dir)) continue;
+    const tree = await measureTree(dir, { deadline });
+    if (!tree.complete || tree.crossedDevice || run.now - tree.newestModifiedMs < idleMs) continue;
+    try {
+      if (!run.dryRun) {
+        const again = run.env.liveSessions();
+        if (again === null || [...again.dirs].some((candidate) => path.basename(candidate) === path.basename(dir))) continue;
+        if (!(await removeDataScratchDir(dir))) {
+          note(run, `Could not remove the scratch folder ${dir}`);
+          continue;
+        }
+      }
+      record(run, { path: dir, bytes: tree.bytes, reason: "scratch-orphan" }, tree.dev);
+    } catch (error) {
+      note(run, `Could not remove the scratch folder ${dir}: ${errorText(error)}`);
+    }
   }
 }
 
@@ -303,19 +348,24 @@ async function measureScratch(
   const entries = listSessionScratch().sort((a, b) => Number(isRunning(live, a)) - Number(isRunning(live, b)));
   for (const entry of entries) {
     const tree = await measureTree(entry.dir, { deadline });
-    let activeAt = Math.max(entry.lastUsedAt, tree.newestModifiedMs);
+    const dataDir = dataScratchDirFor(entry.dir);
+    const data = dataDir === null ? null : await measureTree(dataDir, { deadline });
+    let activeAt = Math.max(entry.lastUsedAt, tree.newestModifiedMs, data?.newestModifiedMs ?? 0);
     for (const id of entry.sessionIds) activeAt = Math.max(activeAt, activity.get(id) ?? 0);
     const orphan = entry.sessionIds.length === 0;
     const isLive = isRunning(live, entry);
-    const held = processes?.has(entry.dir) ?? false;
+    const held = (processes?.has(entry.dir) ?? false) || (dataDir !== null && processes !== null && heldByProcess(processes, dataDir));
     states.push({
       entry,
       bytes: tree.bytes,
       activeAt,
       live: isLive,
       orphan,
-      removable: !isLive && !held && !tree.crossedDevice && (!orphan || (processes !== null && tree.complete)),
+      removable: !isLive && !held && !tree.crossedDevice && !(data?.crossedDevice ?? false) && (!orphan || (processes !== null && tree.complete && (data?.complete ?? true))),
       dev: tree.dev,
+      dataDir,
+      dataBytes: data?.bytes ?? 0,
+      dataDev: data?.dev ?? null,
       removed: false,
     });
   }
@@ -324,29 +374,38 @@ async function measureScratch(
 
 /** If a disk the scratch dirs live on is over its budget, remove the scratch of the longest-idle chats, one at a time, until it is not. */
 async function relieveBudget(run: Run, states: ScratchState[], before: DiskArea[]): Promise<void> {
-  const scratchDev = deviceOf(scratchRoot());
-  if (scratchDev === null) return;
+  const devices = [deviceOf(scratchRoot()), deviceOf(dataScratchRoot())].filter((dev): dev is number => dev !== null);
+  if (devices.length === 0) return;
   const limit = run.settings.budgetPercent / 100;
-  const overBudget = (): boolean => {
+  /** The devices (of the scratch dirs) that are over budget now. */
+  const overBudget = (): Set<number> => {
+    const over = new Set<number>();
     let areas: DiskArea[];
     try {
       areas = run.env.readAreas();
     } catch {
-      return false;
+      return over;
     }
-    return areas.some((area) => {
-      if (area.totalBytes <= 0 || deviceOf(area.path) !== scratchDev) return false;
+    for (const area of areas) {
+      const dev = deviceOf(area.path);
+      if (area.totalBytes <= 0 || dev === null || !devices.includes(dev)) continue;
       const first = before.find((earlier) => earlier.id === area.id)?.usedBytes ?? area.usedBytes;
-      const used = Math.min(area.usedBytes, first - (run.freedByDevice.get(scratchDev) ?? 0));
-      return used / area.totalBytes > limit;
-    });
+      const used = Math.min(area.usedBytes, first - (run.freedByDevice.get(dev) ?? 0));
+      if (used / area.totalBytes > limit) over.add(dev);
+    }
+    return over;
   };
-  if (!overBudget()) return;
+  if (overBudget().size === 0) return;
+  // A chat's folder is worth removing only if it holds something on a disk that is over budget.
+  const frees = (state: ScratchState, over: Set<number>): boolean =>
+    (state.bytes > 0 && state.dev !== null && over.has(state.dev)) || (state.dataBytes > 0 && state.dataDev !== null && over.has(state.dataDev));
   const idle = states
     .filter((state) => !state.removed && state.removable && run.now - state.activeAt >= BUDGET_MIN_IDLE_MS)
     .sort((a, b) => a.activeAt - b.activeAt);
   for (const state of idle) {
-    if (!overBudget()) return;
+    const over = overBudget();
+    if (over.size === 0) return;
+    if (!frees(state, over)) continue;
     await removeScratch(run, state, "scratch-budget", BUDGET_MIN_IDLE_MS);
   }
 }
@@ -457,9 +516,21 @@ async function execute(options: JanitorOptions): Promise<JanitorReport> {
     files = await indexSessionFiles(env.sessionsDir);
   });
 
+  // The process ids now running: a pid-looking number in a `$HOME/tmp` folder name only counts as stale when it is not one of these.
+  let livePids: Set<number> | null = null;
+  await guarded(run, "Reading process ids", async () => {
+    livePids = await readLivePids(env.procRoot);
+  });
+
   const sweepRoots: SweepRoot[] = [{ path: env.tmpRoot, idleMs: settings.tmpIdleHours * HOUR_MS, reason: "tmp-idle", directoriesOnly: false }];
   if (env.homeTmpRoot !== null && realPathOrNull(env.homeTmpRoot) !== realPathOrNull(env.tmpRoot)) {
-    sweepRoots.push({ path: env.homeTmpRoot, idleMs: settings.homeTmpIdleHours * HOUR_MS, reason: "home-tmp-idle", directoriesOnly: true });
+    sweepRoots.push({
+      path: env.homeTmpRoot,
+      idleMs: settings.homeTmpIdleHours * HOUR_MS,
+      reason: "home-tmp-idle",
+      directoriesOnly: true,
+      leftover: { idleMs: settings.testLeftoverIdleHours * HOUR_MS, livePids },
+    });
   }
   let candidates: SweepPlan = { candidates: [], searched: [] };
   await guarded(run, "Listing the temp folders", async () => {
@@ -482,6 +553,7 @@ async function execute(options: JanitorOptions): Promise<JanitorReport> {
         await removeScratch(run, state, state.orphan ? "scratch-orphan" : "scratch-idle", settings.scratchIdleDays * DAY_MS);
       }
     }
+    await removeOrphanDataScratch(run, live, processes, phaseEnd(SCRATCH_PHASE_SHARE));
   });
 
   await guarded(run, "Temp folders", async () => {
@@ -542,7 +614,7 @@ async function execute(options: JanitorOptions): Promise<JanitorReport> {
     freedBytes: run.removed.reduce((sum, removal) => sum + removal.bytes, 0),
     scratch: states
       .filter((state) => !state.removed)
-      .map((state) => ({ dir: state.entry.dir, sessionIds: state.entry.sessionIds, bytes: state.bytes, lastUsedAt: state.activeAt, live: state.live })),
+      .map((state) => ({ dir: state.entry.dir, sessionIds: state.entry.sessionIds, bytes: state.bytes + state.dataBytes, lastUsedAt: state.activeAt, live: state.live })),
     checkpointBytes,
     areasBefore,
     areasAfter,

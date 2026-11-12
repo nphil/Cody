@@ -59,6 +59,7 @@ const MAIN_FIELD: SettingField = {
 const ADVANCED_FIELDS: readonly SettingField[] = [
   { key: "tmpIdleHours", label: "Clear other leftovers in the temp folder after", unit: "hours", hint: "Only things nothing is using and no recent chat mentions." },
   { key: "homeTmpIdleHours", label: "Clear leftover folders in the home temp folder after", unit: "hours", hint: "Loose files there are always kept." },
+  { key: "testLeftoverIdleHours", label: "Clear test leftovers in the home temp folder after", unit: "hours", hint: "Folders named like a finished test run's (a stale process number, or a random 6-character ending). Same safety checks." },
   { key: "budgetPercent", label: "Start clearing the oldest scratch folders when a disk is", unit: "% full", hint: "Applies to the temp disk and the data disk." },
   { key: "checkpointMaxGb", label: "Keep undo snapshots under", unit: "GB", hint: "The oldest snapshots go first; live chats keep their newest." },
   { key: "checkpointMaxAgeDays", label: "Delete undo snapshots nobody has used for", unit: "days", hint: "" },

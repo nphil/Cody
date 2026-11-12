@@ -9,7 +9,8 @@ import {
 import { useI18n } from "@/lib/i18n";
 import type { SubagentInfo } from "@/hooks/useAgentSession";
 import type { PlanOverlay, TodoPhase } from "@/lib/pi-types";
-import { countNestedSubagents, formatCost, formatDuration, formatTokens, shortModel } from "@/lib/subagent-format";
+import { countNestedSubagents, formatCost, formatDuration, formatTokens, shortModel, subagentContextGauge } from "@/lib/subagent-format";
+import { useHelperLimitConfig } from "@/hooks/useHelperLimitConfig";
 import { subagentActivityIntent } from "@/lib/subagent-types";
 import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
 import { TodoList } from "./TodoList";
@@ -29,9 +30,11 @@ function SubagentStatusBadge({ subagent }: { subagent: SubagentInfo }) {
 }
 
 /** Icon-first telemetry keeps the compact roster scannable without label noise. */
-function SubagentMetric({ icon: Icon, label, children }: {
+function SubagentMetric({ icon: Icon, label, warn = false, children }: {
   icon: LucideIcon;
   label: string;
+  /** Warning colour: the figure is shown with a limit Nitin set, not the model's own. */
+  warn?: boolean;
   children: ReactNode;
 }) {
   return (
@@ -39,7 +42,8 @@ function SubagentMetric({ icon: Icon, label, children }: {
       aria-label={label}
       title={label}
       data-subagent-metric={label}
-      style={{ display: "inline-flex", alignItems: "center", gap: 3 }}
+      data-subagent-metric-warn={warn ? "true" : undefined}
+      style={{ display: "inline-flex", alignItems: "center", gap: 3, ...(warn ? { color: "var(--status-warning)" } : {}) }}
     >
       <Icon size={11} strokeWidth={1.8} aria-hidden />
       <span>{children}</span>
@@ -48,7 +52,7 @@ function SubagentMetric({ icon: Icon, label, children }: {
 }
 
 /** Compact live/secondary line under a chip label (tool, retry, telemetry). */
-function SubagentActivityLine({ subagent }: { subagent: SubagentInfo }) {
+function SubagentActivityLine({ subagent, helperConfig }: { subagent: SubagentInfo; helperConfig: unknown }) {
   const { t } = useI18n();
   const progress = subagent.progress;
   const retryActive = Boolean(progress?.retryState ?? progress?.retryFailure);
@@ -83,10 +87,12 @@ function SubagentActivityLine({ subagent }: { subagent: SubagentInfo }) {
   const source = subagent.agentSource && subagent.agentSource !== "bundled" ? subagent.agentSource : null;
   const tokens = formatTokens(progress?.tokens);
   const cost = formatCost(progress?.cost);
-  const ctxTokens = formatTokens(progress?.contextTokens);
-  const context = ctxTokens
-    ? `${ctxTokens}/${formatTokens(progress?.contextWindow) ?? "?"}`
-    : null;
+  const gauge = subagentContextGauge(progress, subagent.agent, helperConfig);
+  const context = gauge ? `${gauge.used}/${gauge.total}` : null;
+  const contextLabel = gauge
+    ? t("chatWindow.contextGauge", { used: gauge.used, total: gauge.total })
+      + (gauge.limit ? ` — ${t("chatWindow.contextLimited", { percent: gauge.limit.percent, window: gauge.limit.window })}` : "")
+    : "";
   // A handoff (task prewalk switching the child to the cheap model at its
   // first edit) is otherwise invisible: the chip would simply start naming
   // a different model with nothing to say why.
@@ -102,7 +108,7 @@ function SubagentActivityLine({ subagent }: { subagent: SubagentInfo }) {
     nested > 0 ? <SubagentMetric key="nested" icon={GitBranch} label={t("chatWindow.subagentNestedCount", { count: nested })}>{nested}</SubagentMetric> : null,
     tokens ? <SubagentMetric key="tokens" icon={Cpu} label={t("chatWindow.tokensUnit", { count: tokens })}>{tokens}</SubagentMetric> : null,
     cost ? <SubagentMetric key="cost" icon={CircleDollarSign} label={cost}>{cost}</SubagentMetric> : null,
-    context ? <SubagentMetric key="context" icon={Gauge} label={t("chatWindow.contextGauge", { used: ctxTokens ?? "?", total: formatTokens(progress?.contextWindow) ?? "?" })}>{context}</SubagentMetric> : null,
+    context ? <SubagentMetric key="context" icon={Gauge} warn={gauge?.limit != null} label={contextLabel}>{context}</SubagentMetric> : null,
     modelAndReasoning ? <SubagentMetric key="model" icon={Bot} label={modelAndReasoning}>{modelAndReasoning}</SubagentMetric> : null,
     duration ? <SubagentMetric key="duration" icon={Clock3} label={duration}>{duration}</SubagentMetric> : null,
   ].filter(Boolean);
@@ -178,6 +184,7 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
   const [collapsed, setCollapsed] = useState(!defaultExpanded);
   const [showAll, setShowAll] = useState(false);
   const runningCount = subagents.filter((subagent) => subagent.source !== "history" && subagent.status === "started").length;
+  const helperConfig = useHelperLimitConfig(subagents.length > 0);
 
   // An emptied roster means a new run: the next roster starts truncated again.
   const emptied = subagents.length === 0;
@@ -284,15 +291,15 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
                     </span>
                   )}
                 </span>
-                <SubagentActivityLine subagent={subagent} />
+                <SubagentActivityLine subagent={subagent} helperConfig={helperConfig} />
               </button>
             );
           })}
         </div>
       )}
       {!collapsed && truncatable && (
-        // Footer link, not a chip in the grid: mirrors TodoList's own
-        // "Show all tasks" footer so the two panels read as one family.
+        // Footer link, not a chip in the grid: the roster stays a calm set of
+        // chips and the way to the rest sits under it, at full width.
         <button
           type="button"
           className="ui-focus-ring w-full cursor-pointer border-t border-border bg-transparent px-3 py-2 text-left text-xs text-accent hover:text-accent-hover"
@@ -319,9 +326,9 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
  * truncated. */
 export function ComposerPanels({ todoPhases, planOverlay = null, subagents, onSelectSubagent, defaultExpanded = false, goal = null, fallbackGoal = null, goalBusy = null, onGoalOp, onGoalDismiss, goalAutoContinue = null, engineName }: {
   todoPhases: TodoPhase[];
-  /** Plan-keeper overlay (subtasks + auto-mark contents) for the in-progress
-   * task. Absent/null renders the plan exactly as it did before the keeper
-   * existed. */
+  /** Plan-keeper overlay: subtasks, which tasks the keeper checked off,
+   * short labels and summaries of finished work. Absent/null renders the
+   * bare plan. */
   planOverlay?: PlanOverlay | null;
   subagents: SubagentInfo[];
   onSelectSubagent: (subagent: SubagentInfo) => void;

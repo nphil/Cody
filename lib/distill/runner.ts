@@ -110,6 +110,7 @@ export function engineAttempt(bin: string, timeZone?: string): DistillAttempt {
     // Isolated, never the real agent dir directly — rule 4 in the module
     // doc above.
     extraEnv: { PI_CODING_AGENT_DIR: getOneShotAgentDir() },
+    usage: { purpose: "distill" },
   });
 }
 

@@ -630,6 +630,10 @@ export class AcpEngineSession implements EngineSession {
     };
   }
 
+  announce(event: EngineEvent): void {
+    this.emit(event);
+  }
+
   /** The approval the agent is still blocked on under this id, or null once it was answered, cancelled or the turn ended. */
   getPendingPermission(requestId: string): { requestId: string; toolCall: unknown; options: unknown[] } | null {
     const pending = this.pendingPermissions.get(requestId);

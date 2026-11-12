@@ -6,7 +6,8 @@ import { AlertTriangle, Bot, CalendarClock, ChevronDown, Gauge, Hourglass, Loade
 import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
 import { useI18n } from "@/lib/i18n";
 import type { ScheduledItemView } from "@/lib/scheduled/types";
-import { describeScheduledItem, nextDueTransition, summarizeScheduled } from "@/lib/scheduled/ui";
+import { describeScheduledItem, nextDueTransition, summarizeScheduled, type ModelNameLookup } from "@/lib/scheduled/ui";
+import { ModelIcon } from "./ProviderIcon";
 
 /**
  * Every message waiting to be sent, as ONE slim bar above the composer — the
@@ -17,7 +18,8 @@ import { describeScheduledItem, nextDueTransition, summarizeScheduled } from "@/
  * opens it by itself.
  *
  * Opened, it is a short list (it scrolls past a few rows), one line per
- * message: when, who scheduled it, the text, and Edit / Send now / Cancel — or
+ * message: when, who scheduled it, the model it goes out on (only when one was
+ * chosen), the text, and Edit / Send now / Cancel — or
  * Retry / Edit / Cancel on a failed one — as icon buttons that name themselves
  * on hover and to a screen reader. A failed row grows a second line for the
  * reason, because that is the one thing a person on a phone cannot hover to read.
@@ -29,6 +31,8 @@ export interface ScheduledBarProps {
   busy: ReadonlySet<string>;
   /** The phone layout: the time sits over the text instead of beside it. */
   isMobile: boolean;
+  /** A model's display name as the composer's picker spells it; the model's id is shown where this knows nothing. Keep it stable: the bar is memoised. */
+  modelName?: ModelNameLookup;
   /** Take the message back into the input. */
   onEdit: (item: ScheduledItemView) => void;
   onSendNow: (item: ScheduledItemView) => void;
@@ -99,18 +103,19 @@ function IconAction({ onClick, title, label, accent = false, disabled, touch, ch
   );
 }
 
-function ScheduledListRow({ item, now, working, touch, isMobile, onEdit, onSendNow, onCancel }: {
+function ScheduledListRow({ item, now, working, touch, isMobile, modelName, onEdit, onSendNow, onCancel }: {
   item: ScheduledItemView;
   now: number;
   working: boolean;
   touch: boolean;
   isMobile: boolean;
+  modelName?: ModelNameLookup;
   onEdit: (item: ScheduledItemView) => void;
   onSendNow: (item: ScheduledItemView) => void;
   onCancel: (item: ScheduledItemView) => void;
 }) {
   const { t, locale } = useI18n();
-  const row = describeScheduledItem(item, now, locale, t);
+  const row = describeScheduledItem(item, now, locale, t, modelName);
   const failed = row.state === "failed";
   const sending = row.state === "sending";
   // In the chat's queue behind a reply that may run for hours: nothing is spinning, and — as for a send in flight — it can no longer be edited or cancelled here.
@@ -143,6 +148,16 @@ function ScheduledListRow({ item, now, working, touch, isMobile, onEdit, onSendN
     >
       <Bot size={11} strokeWidth={2} aria-hidden="true" />
       {t("schedule.byAgent")}
+    </span>
+  ) : null;
+  const modelChip = item.model && row.modelLabel ? (
+    <span
+      data-testid="scheduled-row-model"
+      title={row.modelTitle ?? undefined}
+      style={{ flexShrink: 1, minWidth: 0, maxWidth: isMobile ? undefined : "32%", display: "inline-flex", alignItems: "center", gap: 3, overflow: "hidden", fontSize: 10.5, color: "var(--text-muted)", whiteSpace: "nowrap" }}
+    >
+      <ModelIcon provider={item.model.provider} modelId={item.model.modelId} size={10} style={{ flexShrink: 0 }} />
+      <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{row.modelLabel}</span>
     </span>
   ) : null;
   const preview = (
@@ -198,6 +213,7 @@ function ScheduledListRow({ item, now, working, touch, isMobile, onEdit, onSendN
           <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, overflow: "hidden" }}>
             {whenLabel}
             {agentMark}
+            {modelChip}
           </span>
           {preview}
           {note}
@@ -206,6 +222,7 @@ function ScheduledListRow({ item, now, working, touch, isMobile, onEdit, onSendN
         <>
           {whenLabel}
           {agentMark}
+          {modelChip}
           <span style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", padding: note ? "3px 0" : 0 }}>
             {preview}
             {note}
@@ -237,7 +254,7 @@ function ScheduledListRow({ item, now, working, touch, isMobile, onEdit, onSendN
 }
 
 /** Memoised: the composer re-renders on every keystroke and nothing here depends on the text being typed. */
-export const ScheduledBar = memo(function ScheduledBar({ items, busy, isMobile, onEdit, onSendNow, onCancel, defaultExpanded = false }: ScheduledBarProps) {
+export const ScheduledBar = memo(function ScheduledBar({ items, busy, isMobile, modelName, onEdit, onSendNow, onCancel, defaultExpanded = false }: ScheduledBarProps) {
   const { t, locale } = useI18n();
   const touch = useIsCoarsePointer();
   const now = useTransitionClock(items);
@@ -303,6 +320,7 @@ export const ScheduledBar = memo(function ScheduledBar({ items, busy, isMobile, 
               working={busy.has(item.id)}
               touch={touch}
               isMobile={isMobile}
+              modelName={modelName}
               onEdit={onEdit}
               onSendNow={onSendNow}
               onCancel={onCancel}

@@ -25,6 +25,7 @@ const SUITES = [
   "lib/routing/*.test.mjs",
   "lib/run-recovery/*.test.mjs",
   "lib/scheduled/*.test.mjs",
+  "lib/statistics/*.test.mjs",
   "lib/usage/*.test.mjs",
   "components/*.test.mjs",
   "components/settings/*.test.mjs",
@@ -35,13 +36,18 @@ const SUITES = [
 ];
 
 const scratch = mkdtempSync(join(tmpdir(), "cody-test-run-"));
+// Run inside a Cody chat, this process inherits that chat's scratch folders.
+// Tests that spawn engines must see a clean environment, as CI does.
+const env = { ...process.env, TMPDIR: scratch, TMP: scratch, TEMP: scratch };
+delete env.CODY_SCRATCH;
+delete env.CODY_DATA_SCRATCH;
 let status = 1;
 try {
   // node --test expands the glob patterns itself; no shell is involved.
   const result = spawnSync(
     process.execPath,
     ["--experimental-strip-types", "--test", ...process.argv.slice(2), ...SUITES],
-    { stdio: "inherit", env: { ...process.env, TMPDIR: scratch, TMP: scratch, TEMP: scratch } },
+    { stdio: "inherit", env },
   );
   status = result.status ?? 1;
 } finally {

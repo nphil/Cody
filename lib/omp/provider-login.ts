@@ -21,6 +21,7 @@ import type { ProviderLoginAccount, ProviderLoginList, ProviderLoginSurface, Pro
 import { listOmpCredentials, removeOmpCredential, removeOmpProvider, type OmpCredentialRemoval, type OmpCredentialRow, type OmpCredentialsSnapshot } from "../harness/omp-credentials";
 import { invalidateModelsCache } from "../models-cache";
 import { getUsageSnapshot } from "../usage/cache";
+import { isSignedOutCause } from "../usage/credential-health";
 import { rankProviderAccounts } from "../usage/select";
 import type { UsageAccount, UsageAccountService } from "../usage/types";
 import { enableProvider } from "./model-roles";
@@ -98,8 +99,12 @@ function buildProviderAccounts(
         : undefined);
     // AuthStorage's own disabled/blocked state is authoritative — it is the
     // source lib/usage's snapshot itself was built from — and only falls
-    // through to the ranked quota state when neither applies.
-    const state: UsageAccountService = row.disabledCause !== null ? "disabled" : row.blockedUntil !== null ? "limited" : (rank?.state ?? "standby");
+    // through to the ranked quota state when neither applies. A disabled row
+    // whose login ended reads "signed_out": signing in again is the one fix,
+    // which a bare "disabled" never said.
+    const state: UsageAccountService = row.disabledCause !== null
+      ? (isSignedOutCause(row.disabledCause) ? "signed_out" : "disabled")
+      : row.blockedUntil !== null ? "limited" : (rank?.state ?? "standby");
     return {
       id: String(row.id),
       label: row.identity ?? providerName,

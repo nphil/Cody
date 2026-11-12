@@ -467,6 +467,43 @@ open too.
   first viewer and stops a minute after the last one leaves. `503
   too_many_viewers` past 64 open streams.
 
+## `GET /api/statistics` — Incidental
+
+What the Statistics page (`/statistics`) reads: usage and cost across every
+chat the viewer owns, built from the omp transcripts plus Cody's own
+background-job log (`<agent dir>/cody-statistics/`). Any signed-in account (or
+anyone, on an open instance). Never cached (`Cache-Control: no-store`).
+
+- `GET /api/statistics?preset=today|7d|30d|90d` or `?from=YYYY-MM-DD&to=YYYY-MM-DD`
+  (both together; pulled in to the last 400 days and to today), plus
+  `&groupBy=provider|project|model|worker` (default `provider`; the order of
+  the rings) and `&refresh=1` (ask for a fresh pass over the transcripts; at
+  most one per 20 s). With no period the last 7 days. Answers
+  `{zone, generatedAt, updating, indexedAt, progress, indexError, dataFrom,
+  dataTo, period, previous, totals, previousTotals, groupBy, dims, tree, series,
+  timeline, insights, unpricedModels}`. `period`/`previous` are `{from, to,
+  days, preset}` (`previous` is the same length straight before it); `totals` is
+  `{cost, paygCost, tokens, input, output, cacheRead, cacheWrite,
+  unpricedTokens, chats, messages, cacheHitRate}`. `tree` is the ring tree: every
+  node carries both `cost` and `tokens`, so the page's Cost/Tokens switch needs
+  no second request. `cost` is what the usage would cost on the API;
+  `paygCost` is the part of it that is real pay-as-you-go money, and a node's
+  `billing` (`subscription | payg | local | unknown`) says which kind of figure
+  it is. `insights` are `{id, values}` pairs the page words itself.
+- `GET /api/statistics?session=<chat id>` (optionally with the same period
+  query) — one chat's deep dive: `{chat, openable, title, cwd, project,
+  lifetime, inPeriod, topTurns, workers, subagents, updating}`. Without a
+  period `inPeriod` is null. A chat the viewer does not own answers like one
+  that does not exist.
+- The index is built in the background. A request waits about 300 ms for a
+  running pass, otherwise answers with what is on file and `updating: true`;
+  the page asks again until it clears. Usage that belongs to no chat (the
+  planner, Distill or research without a chat) is shown only on an open
+  instance or to an admin.
+- Errors: `400` with `code` `invalid_range`, `invalid_preset`,
+  `invalid_group_by` or `invalid_session`; `404 not_found` for an unknown or
+  not-yours chat.
+
 ## `GET /api/engines` — Stable
 
 The engine roster, in one authenticated round trip.
@@ -613,20 +650,37 @@ refusal is `{error, code}` with one of the codes below.
 {"items":[{"id":"sch_k3J9x2Qa","sessionId":"01a00e5c-…","message":"Continue the refactor",
            "mode":"quota","at":"2026-10-06T03:40:00.000Z","source":"agent","status":"pending",
            "createdAt":"2026-10-05T21:12:04.221Z",
-           "quota":{"label":"Claude · Secondary","giveUpAt":"2026-10-07T03:40:00.000Z"}}],
+           "quota":{"label":"Claude · Secondary","giveUpAt":"2026-10-07T03:40:00.000Z"},
+           "model":{"provider":"anthropic","modelId":"claude-opus-4-8","thinkingLevel":"high"}}],
  "limits":{"perChat":20,"perAccount":100,"maxDays":30,"maxMessageBytes":65536}}
 ```
 
 - **When it goes.** POST and PATCH take exactly one of `at` — an ISO 8601
   instant WITH an offset or `Z` (`2026-10-05T23:40:00-04:00`; a time with no
-  offset is refused, never guessed at) — or `whenQuotaResets: true`, with an
-  optional `model: {provider, modelId}` (the chat's model as the composer shows
-  it; absent, the server asks the chat). `at` is the item's due time: the one
-  chosen, or for a quota message the reset it is waiting for.
-- **"When quota resets"** waits for that model's binding window to reset, then
-  for a fresh usage read that says the model is usable (re-checked every few
-  minutes; a later reset the provider reports is waited for), and gives up as
-  `failed` 24 hours after the reset. `quota.label` is the provider and the
+  offset is refused, never guessed at) — or `whenQuotaResets: true`. `at` is the
+  item's due time: the one chosen, or for a quota message the reset it is
+  waiting for (when waiting began, if the provider names no reset).
+- **Which model.** An optional `model: {provider, modelId, thinkingLevel?}` pins
+  the message to a model the way the composer's picker spells it, with an
+  optional reasoning level from that model's own ladder. When it goes, the chat
+  is first switched to that model and level (the same switch the composer makes,
+  scope `chat`), then the message is sent; a switch the engine refuses (the
+  model is gone, no credentials) fails the item with the reason, and nothing is
+  ever sent on another model. Absent, the message goes out on whatever the chat
+  uses at that moment. PATCH takes `model` too (`null` clears it). `chatModel:
+  {provider, modelId}` is only what "When quota resets" waits on when no `model`
+  was chosen (the chat's own model as the composer shows it; absent, the server
+  asks the chat).
+- **"When quota resets"** waits on the chosen `model`'s account (the chat's own
+  model when none was chosen): for its binding window to reset, then for a fresh
+  usage read that says the model is usable (re-checked every 3 minutes; a later
+  reset the provider reports is waited for), and gives up as `failed` 24 hours
+  after the reset. A provider that reports no reset time for the model is not
+  refused: the item waits with `quota.unknownReset: true`, re-checked every 3
+  minutes for up to 7 days, and goes the moment the model reads usable (usable
+  already: at the next check). Only a model whose quota Cody cannot read at all
+  is refused (`no_quota_reset`). Creating one makes no model call and works for a
+  chat whose engine is not running. `quota.label` is the provider and the
   account's position ("Claude · Secondary"), never an email.
 - **`status`**: `pending` (a quota message past its reset is still pending while
   it re-checks), `sending` (being handed over right now; it cannot be edited or
@@ -639,8 +693,9 @@ refusal is `{error, code}` with one of the codes below.
   more than 30 days away.
 - **Codes**: `400` `invalid_json`, `invalid_body`, `message_required`,
   `message_too_long` (also `413`), `invalid_time`, `time_in_past`,
-  `time_too_far`, `choose_one_time`, `no_model`, `no_quota_reset` (the provider
-  reports no reset time for that model); `404` `session_not_found`,
+  `time_too_far`, `choose_one_time`, `no_model`, `invalid_model` (the `model`
+  could not be read), `no_quota_reset` (Cody cannot read that model's quota, so
+  it cannot wait for it to refill); `404` `session_not_found`,
   `item_not_found` (another chat's item answers the same); `409`
   `too_many_for_chat`, `too_many_for_account`, `already_sending`.
 - **Send now** makes one attempt and no background retries (whoever pressed it
@@ -652,6 +707,16 @@ Agent engines that reach Cody over MCP (Claude, Codex) get the same three tools
 through `POST /api/internal/scheduled`, which is not part of this contract: it is
 authenticated by a per-session capability token and exists only for the bundled
 MCP server.
+
+The two chat-messaging tools (`send_to_chat`, `message_status`) are reached the
+same way, through `POST /api/internal/messaging`: authenticated by the same
+per-session capability token, not part of this contract, and used only by the
+bundled MCP server. An omp main chat gets them as host tools instead.
+
+The same applies to `switch_model`: Agent engines that reach Cody over MCP get
+it through `POST /api/internal/model-switch`, which is not part of this
+contract; it is authenticated by a per-session capability token and exists only
+for the bundled MCP server.
 
 ## Agent and the event stream
 
@@ -898,6 +963,12 @@ A Stop gave queued messages back instead of running them (see `abort`).
 absent for one the server has no delivery row for. Put them back in the input
 box: they will not be sent. `truncated` and `imagesDropped` appear only when omp
 could not fit the whole queue, or its pictures, in its one answer.
+
+```json
+{"type":"cody_agent_model_switch","provider":"anthropic","modelId":"claude-opus-4-8","name":"Claude Opus 4.8","thinkingLevel":"high","modelChanges":true}
+```
+
+`cody_agent_model_switch` — `{ type, provider, modelId, name?, thinkingLevel?, modelChanges }`. Sent on a chat's event stream just before the engine applies a model or reasoning switch the chat's agent made at the user's request (the `switch_model` tool). It carries what was asked for; the `model_changed` / `config_update` / `thinking_level_changed` frame that follows is the agent's doing, not an engine fallback. `modelChanges` is false for a reasoning-only change. Not replayed to a page that attaches later.
 
 Ignore unknown types silently — that is the only forward-compatible policy, and
 a lesser engine simply never emits most of them. Two shapes worth knowing

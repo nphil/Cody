@@ -35,6 +35,7 @@ import { translate, useI18n } from "@/lib/i18n";
 import type { SessionActiveModel } from "@/lib/session-active-models";
 import { Tooltip, Collapsible, CollapsibleTrigger, CollapsiblePanel } from "./ui/primitives";
 import { ConfirmDialog } from "./ui/field";
+import { useSettingsOpener } from "./settings/shell-context";
 import type { UsageLimitState } from "@/lib/pi-types";
 import { describeUsageLimit } from "@/lib/slow-mode-state";
 
@@ -81,10 +82,11 @@ export interface QuotaOtherWindowView {
 
 /** One account among several serving the same provider as the selected
  *  model. omp routes to exactly one at a time (`serving`); every other
- *  reports `standby`, `limited`, or `disabled`. Rendered only when more than
- *  one account can serve the model — a single-account provider never grows
- *  this list. `label` is a position ("Primary", "Secondary", …), never the
- *  account's raw identity, which can be an email address or an org name. */
+ *  reports `standby`, `limited`, `signed_out` or `disabled`. Rendered only
+ *  when more than one account can serve the model — a single-account
+ *  provider never grows this list. `label` is a position ("Primary",
+ *  "Secondary", …), never the account's raw identity, which can be an email
+ *  address or an org name. */
 export interface QuotaAccountRowView {
   key: string;
   label: string;
@@ -140,6 +142,11 @@ export interface QuotaAbsentView {
   reason: string | null;
   others: QuotaOtherWindowView[];
   inUse: QuotaInUseWindowView[];
+  /** Set when every account that could serve the selected model's provider
+   *  was signed out: its login expired and omp disabled it, so the only fix
+   *  is signing in again. The ring wears the warning dot and the popover
+   *  links to Settings › Providers on `provider` (a usage-provider id). */
+  signedOut?: { provider: string };
 }
 
 /** What the ring and the popover's quota half should say. A missing signal is
@@ -184,6 +191,21 @@ const QUOTA_MODEL_PREPAID: QuotaAbsentView = {
   titleKey: "usage.prepaidTitle",
   noteKey: null,
   scopeKey: "usage.prepaidScope",
+  reason: null,
+  inUse: [],
+  others: [],
+};
+
+/** The selected model's provider has accounts, but none Cody can use is left:
+ *  every login ended. Not a silence about limits — the quota cannot be read
+ *  until the owner signs in again, and saying that is the whole point. The
+ *  caller adds `signedOut` with the provider the link needs. */
+const QUOTA_SIGNED_OUT: QuotaAbsentView = {
+  known: false,
+  color: "var(--status-warning)",
+  titleKey: "usage.signedOutTitle",
+  noteKey: "usage.signedOutNote",
+  scopeKey: "usage.signedOutScope",
   reason: null,
   inUse: [],
   others: [],
@@ -298,12 +320,14 @@ function brandedAccountLabel(accounts: UsageAccount[], account: UsageAccount): s
 
 /** Tone for each per-account state dot — accent for the account in use,
  *  muted for a healthy standby, the shared error tone for anything blocked
- *  (limited or disabled alike). */
+ *  (limited or disabled alike), and the warning tone for a signed-out one:
+ *  unlike a spent window the owner can fix it, right now. */
 const ACCOUNT_STATE_COLOR: Record<UsageAccountService, string> = {
   in_use: "var(--accent)",
   standby: "var(--text-muted)",
   limited: "var(--status-error)",
   disabled: "var(--status-error)",
+  signed_out: "var(--status-warning)",
 };
 
 /** i18n key for each per-account state, used as the dot's accessible name —
@@ -314,6 +338,7 @@ const ACCOUNT_STATE_LABEL_KEYS: Record<UsageAccountService, string> = {
   standby: "usage.accountStandby",
   limited: "usage.accountLimited",
   disabled: "usage.accountDisabled",
+  signed_out: "usage.accountSignedOut",
 };
 
 /** What "In use" rests on, now surfaced through the Accounts header's info
@@ -541,6 +566,13 @@ export function buildQuotaView(
       // would otherwise claim "nothing it runs counts against a quota" about
       // an account that is literally spending money per token.
       if (isPrepaidProvider(model.provider)) return { ...QUOTA_MODEL_PREPAID, inUse, others };
+      // Every login that could serve this provider has ended. Signing in
+      // again is the one fix, so say that rather than "unmetered" — and name
+      // the provider so the popover can open Settings on it.
+      const lead = ranks[0];
+      if (lead?.state === "signed_out") {
+        return { ...QUOTA_SIGNED_OUT, signedOut: { provider: lead.account.provider }, inUse, others };
+      }
       // Three different silences, and the copy has to tell them apart: no
       // account serves this provider / the account is unmetered / the account
       // reports quota that all belongs to other models.
@@ -697,7 +729,9 @@ function WindowLine({
  *  either its percentage or a "Limited · resets …" note in its place. A
  *  limited row with a redeemable saved reset gets a contextual "Use reset"
  *  action right on the row — the one place that shortcut belongs, since it
- *  is scoped to exactly the account it would clear. */
+ *  is scoped to exactly the account it would clear. A signed-out row's note
+ *  is itself the control: its login ended, and Settings › Providers is where
+ *  it is signed in again. */
 function AccountRow({
   account,
   reset,
@@ -705,6 +739,7 @@ function AccountRow({
   locale,
   t,
   onUseReset,
+  onSignIn,
 }: {
   account: QuotaAccountRowView;
   reset: ResetCreditAccount | null;
@@ -712,6 +747,7 @@ function AccountRow({
   locale: string;
   t: (key: string, vars?: Record<string, string | number>) => string;
   onUseReset: (reset: ResetCreditAccount, label: string) => void;
+  onSignIn: () => void;
 }) {
   const tone = ACCOUNT_STATE_COLOR[account.state];
   const resetTime = account.state === "limited" ? formatResetTime(account.resetsAt, locale, now) : null;
@@ -747,12 +783,25 @@ function AccountRow({
           {t("usage.useReset")}
         </button>
       )}
-      <span
-        title={account.blocked ? t("usage.blockedTag") : undefined}
-        style={{ flexShrink: 0, fontSize: 11, fontWeight: 700, color: rightText ? tone : tone, fontVariantNumeric: "tabular-nums" }}
-      >
-        {rightText ?? `${Math.round(account.percent)}%`}
-      </span>
+      {account.state === "signed_out" ? (
+        <button
+          type="button"
+          data-testid="quota-account-sign-in"
+          title={t("usage.accountSignedOutTooltip")}
+          onClick={onSignIn}
+          className="ui-focus-ring"
+          style={{ flexShrink: 0, padding: "1px 6px", border: `1px solid ${tone}`, borderRadius: 5, background: "transparent", color: tone, cursor: "pointer", fontSize: 11, fontWeight: 700 }}
+        >
+          {t(ACCOUNT_STATE_LABEL_KEYS.signed_out)}
+        </button>
+      ) : (
+        <span
+          title={account.blocked ? t("usage.blockedTag") : undefined}
+          style={{ flexShrink: 0, fontSize: 11, fontWeight: 700, color: tone, fontVariantNumeric: "tabular-nums" }}
+        >
+          {rightText ?? `${Math.round(account.percent)}%`}
+        </span>
+      )}
     </div>
   );
 }
@@ -862,6 +911,7 @@ export function QuotaPopover({
   onRefresh,
   anchorTop = null,
   anchorRight = null,
+  onClose,
 }: {
   resetCredits?: UseResetCreditsResult;
   /** Concrete models with work attributable to this session. */
@@ -886,10 +936,21 @@ export function QuotaPopover({
   onRefresh?: () => void;
   anchorTop?: number | null;
   anchorRight?: number | null;
+  /** Dismisses the popover; called just before it hands the owner to Settings,
+   * so it never floats over the dialog it opened. */
+  onClose?: () => void;
   /** The account's usage-limit stage (omp 18.6.3+), shown as one line under the hero. */
   usageLimit?: UsageLimitState | null;
 }) {
   const { t, locale } = useI18n();
+  const openSettings = useSettingsOpener();
+  // A login that ended is fixed in Settings › Providers: open the provider's
+  // own drawer there (ProviderDirectory answers to this `provider-<id>` id,
+  // the one its rows already carry as their search anchor).
+  const openSignIn = (usageProvider: string) => {
+    onClose?.();
+    openSettings("providers", { highlight: `provider-${usageProvider}` });
+  };
   const usageLimitText = usageLimit ? describeUsageLimit(usageLimit, t, (iso) => formatResetTime(iso, locale, now)) : null;
   const formatUse = (use: SessionActiveModel["uses"][number]): string => {
     if (use.kind === "main") return t("usage.useMain", { label: use.label });
@@ -998,6 +1059,9 @@ export function QuotaPopover({
   const secondaryWindows = quota.known
     ? quota.windows.filter((entry) => entry.label !== quota.label || entry.resetsAt !== quota.resetsAt)
     : [];
+  // Set only when no account is left that Cody can use because its login
+  // ended (see QUOTA_SIGNED_OUT): the hero then links to Settings.
+  const signedOutProvider = quota.known ? null : quota.signedOut?.provider ?? null;
 
   const anchor = anchorTop != null && anchorRight != null ? { top: anchorTop, right: anchorRight } : null;
   const innerMaxHeight = anchor ? `min(70vh, 560px, ${Math.max(0, anchor.top - 14)}px)` : "min(70vh, 560px)";
@@ -1104,6 +1168,22 @@ export function QuotaPopover({
             {quota.reason && (
               <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)" }}>{quota.reason}</div>
             )}
+            {signedOutProvider !== null && (
+              <button
+                type="button"
+                data-testid="quota-sign-in-again"
+                title={t("usage.accountSignedOutTooltip")}
+                onClick={() => openSignIn(signedOutProvider)}
+                className="ui-focus-ring"
+                style={{
+                  marginTop: 6, display: "inline-flex", alignItems: "center", gap: 4, padding: 0,
+                  border: "none", background: "transparent", color: "var(--accent)", fontSize: 12, fontWeight: 600, cursor: "pointer",
+                }}
+              >
+                {t("usage.signInAgain")}
+                <ChevronRight size={13} strokeWidth={2.2} aria-hidden="true" />
+              </button>
+            )}
           </>
         )}
 
@@ -1137,6 +1217,7 @@ export function QuotaPopover({
                   onUseReset={(reset, label) => setResetSelection({
                     accountId: reset.id, creditId: reset.credits[0]!.id, account: label,
                   })}
+                  onSignIn={() => openSignIn(quota.provider)}
                 />
               ))}
             </div>

@@ -104,6 +104,8 @@ app/api/
   sidebar-chats/[id]/route.ts     DELETE a sidebar chat session by id
   internal/display/route.ts       POST publish from engine MCP servers (capability-token auth)
   internal/scheduled/route.ts     POST the scheduling tools for ACP engines (capability-token auth)
+  internal/messaging/route.ts     POST send_to_chat + message_status for ACP engines (capability-token auth)
+  internal/model-switch/route.ts  POST the switch_model tool for ACP engines (capability-token auth)
   auth/**                         omp's provider list + login flow (via RPC); every
                                    route refuses `unsupported` unless omp is active
   cwd/validate/route.ts           POST validate/select a cwd
@@ -231,6 +233,10 @@ app/api/
                                    open IS what makes the server sample at all
   machines/test/route.ts          POST {destination} (admin) one real ssh sample;
                                    200 either way, `ok:false` carries a reason code
+  statistics/route.ts             GET  usage totals, ring tree, timeline, insights
+                                   (?preset|from&to &groupBy &refresh) / one chat's
+                                   deep dive (?session=)
+  ../statistics/page.tsx          the Statistics page
   disk/route.ts                   GET disk meters, largest chat scratch folders, the
                                    janitor's last run | POST {action:"clean"} (admin)
                                    runs the janitor now | PUT (admin) its settings
@@ -508,6 +514,12 @@ lib/
                        chat), `quota.ts` ("when quota resets"), `tools.ts`
                        (schedule_message / list_scheduled / cancel_scheduled),
                        `notify.ts`, `access.ts` (the routes' ownership gate)
+  chat-messages/       one chat's agent messaging another ("Cross-session
+                       awareness" below): `types.ts` (urgencies, limits, the
+                       record), `registry.ts` (in-memory deliveries, the loop
+                       guard), `header.ts` (the sender line), `delivery.ts`
+                       (into the target's wrapper, and the status read from its
+                       ledger), `tools.ts` (send_to_chat / message_status)
   sidebar-context-tools.ts  the sidebar's three WORKSPACE tools
                        (list_workspace_files, read_workspace_file,
                        read_project_context) plus the session three above,
@@ -811,8 +823,8 @@ bin/
                            (stream frames + input) and native-gateway host routing;
                            mints the display capability secret at boot; stops the
                            machine sampler (every ssh child) at shutdown
-  cody-display-mcp.js      bundled stdio MCP server exposing open_preview (plus the session and
-                           device tools) to Claude/Codex engines (posts to /api/internal/*)
+  cody-display-mcp.js      bundled stdio MCP server exposing open_preview (plus the session, scheduling,
+                           chat-messaging, model-switch and device tools) to Claude/Codex engines (posts to /api/internal/*)
   cody-pi-login.mjs        pi's provider sign-in helper: imports the INSTALLED pi
                            package's AuthStorage/OAuth flows and speaks JSON
                            lines to lib/harness/pi-login.ts (list / login /
@@ -1241,6 +1253,38 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   response says how many (`restarted`, `active`). (The earlier note that no
   restart is needed held for the credential store alone — never for a key
   Cody put in the child's environment.)
+  **A login that ended is "signed out", not "disabled".** When the provider
+  refuses to renew a login for good (omp's token refresh answers
+  `invalid_grant` "Refresh token expired", or the token was revoked or
+  invalidated) omp disables the credential and writes why into
+  `disabled_cause`. A bare red "Disabled" read as a spent quota: an expired
+  Claude login sat unnoticed for two days (2026-11-10). Cody cannot stop a
+  provider ending a login; it makes it impossible to miss and one click to fix.
+  `lib/usage/credential-health.ts` `isSignedOutCause` is the ONE classifier
+  (every other cause — a deliberate logout, a block — stays `disabled`), and
+  `UsageAccountService` has `signed_out` beside `disabled`, set by
+  `lib/omp/provider-login.ts` (credential row) and `rankProviderAccounts`
+  (`UsageAccount.disabled.cause`). It is unusable exactly where `disabled` is
+  (ranking, `availability.ts`, Claude-credits coverage, routing), but says
+  what to do: the Providers drawer's account row shows "Signed out — sign in
+  again" and a "Sign in again" button that starts the SAME `ProviderLoginFlow`
+  as the card's own button (the card reads a plain "Sign in" when every stored
+  account is signed out); the provider's row in the directory wears a "Signed
+  out" badge (`ProviderRow.signedOut`) and stays in the Connected list
+  although omp reports a provider whose only credential is disabled as not
+  authenticated — `connected` keeps meaning "usable right now", never fold
+  signed-out into it; the composer's quota popover shows "Signed out" on that
+  account's row, a button to `openSettings("providers", { highlight:
+  "provider-<id>" })` (`ProviderDirectory` answers a `provider-` highlight by
+  opening that drawer), and when no account of the model's provider is usable
+  the ring wears the usage-limit dot's warning style (`signed-out-dot`).
+  **Observed against a REAL omp store:** signing in again with the SAME
+  identity makes omp insert a new active row and hard-delete the stale
+  disabled one (no tombstone), so Cody adds no cleanup; a different identity
+  leaves the stale row, removable like any other
+  (`lib/harness/omp-auth-helpers.test.mjs`). The push notification
+  `accountSignedOut` (see Push notifications) is what reaches an owner who is
+  not looking at Settings.
   **Every AuthStorage call in the three Bun helpers
   (`cody-omp-credentials`, `-reset-credits`, `-unblock`) goes through
   `bin/cody-omp-auth-api.mjs`**, which prefers omp 18.3.4+'s namespaced API
@@ -1879,11 +1923,55 @@ edits them; `app/api/notifications/{route,test,presence,action}`.
   `notifications-state.json` and pruned as they reset. Messages never name an
   account's email (`UsageAccount.label` can contain one) — provider, "account
   n/m", window, reset time in the recipient's zone.
+- **Account signed out** (`signed-out.ts`, sent from `quota-watch.ts`): the
+  `accountSignedOut` kind (problems group, on by default, priority 4) says a
+  stored login ended — "Claude · Secondary was signed out" / "Its login
+  expired, so Cody is using your other accounts. Sign in again: Settings ›
+  Providers." (one account: "Claude was signed out"; no other usable account:
+  "…so Cody cannot use it."). Sent ONCE per credential row and cause: `so-` +
+  a hash of provider, row id and the cause's own hash is remembered in
+  `notifications-state.json` and forgotten only when that row is no longer
+  signed out (signed in again, removed) — never because the credentials could
+  not be read. Names the provider and the account's POSITION, never its
+  email. The check reads omp's credential store alone (`listOmpCredentials`,
+  no engine spawn, omp only) on quota-watch's schedule — once 30 s after the
+  server starts, 60 s after a run ends, every 10 min while a chat is live — and
+  runs whether or not any quota kind is on. Its click URL is
+  `<codyUrl>/?settings=providers`: `AppShell` opens the Settings hub named by
+  `?settings=<hub>` on load (`getInitialSettingsTab`,
+  `lib/initial-navigation.ts`; an unknown hub opens nothing).
 - **Scheduled messages** (`lib/scheduled/notify.ts`): the `scheduled` kind
   (progress group, on by default, priority 3) says a scheduled message was sent
   into its chat, or gave up and why ("Open the chat to retry or cancel it").
   Never fired for a Send now the person pressed themselves — they are looking.
   The preview is the person's own words, clipped to a line.
+- **Engine crash alerts.** When a chat's engine exits without anyone asking (not
+  Stop, close, a settings/routing restart, idle dispose or server shutdown),
+  `AgentSessionWrapper.handleProcessExit` (lib/rpc-manager.ts) classifies the
+  exit with `classifyEngineExit` (lib/engine-crash.ts, browser-safe, tested in
+  lib/engine-crash.test.mjs) from the exit code/signal, the last stderr lines,
+  the cgroup counter deltas (`oom_kill` in memory.events, `max` in pids.events,
+  read once at spawn and once at exit by lib/engine-crash-host.ts, never
+  throwing) and the disk areas (lib/disk-space.ts `describeDiskError`). One
+  reason comes out: `out_of_memory`, `disk_full` (names tmp/data/quota),
+  `too_many_processes`, `crashed` (with the last error line, one line, capped,
+  secrets stripped) or `server_restarted` (lib/run-recovery/supervisor.ts
+  `resumeInterrupted` on boot for chats the journal says were running).
+  `crashRecoveryOutlook(session)` says whether Cody restarts the chat
+  automatically (`automatic`), has given up after 3 tries (`gave_up`) or needs a
+  message (`manual`). That one notice goes four ways: the wrapper's `notice`
+  event (reason `engine_exit`, with a `crash` payload; the observer pushes its
+  sentence on the existing `error` kind), the running-sessions SSE as an
+  `engine_crashed` frame (lib/engine-crash-events.ts,
+  `canAccessSession`-filtered; the plain running-id frames are unchanged) that
+  SessionSidebar turns into a toast (components/engine-crash-toast.ts; click
+  opens the chat), the persistent row stored in `<agent
+  dir>/cody-engine-crashes.json` (lib/engine-crash-log.ts, at most 5 per chat,
+  30 days) and merged into `GET /api/sessions/[id]` by time as a
+  `cody-engine-crash` custom message with an entry id starting `cody-crash-`,
+  and the live row useAgentSession appends. Words live in `engineCrash.*` keys
+  (en/ja/zh-CN) and `ENGINE_CRASH_TEXT` (server English); the locale test pins
+  them together.
 - **Traps**: nothing here may use `@/` (the custom server loads it through bare
   jiti — `lib/server-import-graph.test.mjs`); shared state (presence, spent
   nonces, log throttle, watcher) is on `globalThis`; every ntfy call is
@@ -2318,7 +2406,7 @@ on disk. Three read-only tools, in every session's tool list:
 `list_sessions` (what exists, what is running, when it last moved),
 `session_status` (one session's live phase plus its newest message; with no
 argument, every running session) and `read_session` (a condensed transcript,
-paged).
+paged). A main chat also gets `send_to_chat` and `message_status` (below).
 
 - **Addressed by the NAME the user set.** An exact session id wins, then a
   case-insensitive substring of the name; more than one match returns the
@@ -2356,6 +2444,45 @@ paged).
   the three tools declared in `bin/cody-display-mcp.js`. The route trusts
   `capability.sid` alone — a body may name any session id, but it must match
   the token, and the caller's identity is derived server-side from it.
+- **Sending to another chat: `send_to_chat` / `message_status`**
+  (`lib/chat-messages/`). Before them the only way to reach another chat was
+  `schedule_message`, a follow-up that waits out the target's whole turn: measured
+  over 121 real cross-chat messages (2026-11), median 27 min, p90 5.8 h, worst
+  9.6 h, every slow one parked behind one long turn. `send_to_chat {session,
+  message, urgency}` takes the composer's own path (`delivery.ts`): `next_step`
+  (default) is `prompt` + `streamingBehavior: "steer"`, which the wrapper sends
+  straight to the engine, so a running turn reads it at its next step and an
+  idle chat starts a turn on it; `after_turn` is the follow-up, held in
+  `heldQueue`. A chat with no live child is started with `acquireSession` in the
+  owner's zone, as the scheduler does. The target sees one header line before
+  the sender's words naming the sender chat's title and id, saying an agent sent
+  it with no user authority, and how to answer (`send_to_chat` back); senders no
+  longer type their own "not Nitin" disclaimer. The tool returns a `msg_…`
+  delivery id at once and waits at most 15 s, and only for the engine to TAKE the
+  message (never to read or answer it); a slower engine leaves the record
+  `sending` and the delivery finishes in the background.
+  `message_status` reads the TARGET wrapper's delivery ledger by
+  `clientMessageId` `chat-<id>` (queued / started / delivered / failed /
+  withdrawn; queued + held = `after_turn`), falls back to the transcript
+  (`ref msg_…` is in the header) when the ledger row is gone, says `lost` when
+  neither has it, and says whether the target answered with `send_to_chat`
+  (marked when the target sends back after READING the message). Resolution and
+  ownership are `resolveSessionArgument` / `mayRead` exactly as for the other
+  session tools (a chat the caller may not see, and a delivery id between such
+  chats, answer like a missing one). Limits (`CHAT_MESSAGE_LIMITS`): 32 KB, 20
+  sends per sending chat per 10 min (two agents answering each other would never
+  stop), and the low-disk gate (`checkDiskForNewTurn`: refused unless it is a
+  steer into a turn already running). The delivery ledger is in memory
+  (`globalThis.__codyChatMessages`, 500 ids, 24 h) like the engine's own and does
+  not survive a restart. Main chats only (the sidebar's schema budget is a small
+  model's); ACP engines call the same handlers through `POST
+  /api/internal/messaging` (`bin/cody-display-mcp.js`, capability token, on
+  `proxy.ts`'s `PUBLIC_EXACT`, trusting `capability.sid` alone), and
+  `bin/cody-display-mcp.test.mjs` fails on drift. An ACP engine runs one turn at
+  a time: a busy chat takes a `next_step` message only if it advertises steering
+  and refuses `after_turn`, with a sentence telling the sender to resend.
+  `lib/chat-messages/delivery.ts` is imported lazily from `tools.ts` (delivery
+  imports the session manager, which imports the tools).
 
 ### Scheduled messages (`lib/scheduled/`)
 
@@ -2404,15 +2531,37 @@ and nothing repeats (one-off, by design).
   reads "waiting for the current reply to finish…" (`schedule.rowWaiting`).
   An engine without a ledger (ACP) keeps the old rule: a taken send is
   delivered.
-- **"When quota resets"** is about THE CHAT'S OWN model — the composer sends the
-  model it shows, an agent's call asks the chat (`resolveChatModel`) — and the
-  account the chat is on (`planQuotaForChat`: the same ranking the ring uses).
-  Nothing goes before the reset; then a FRESH usage read must say the model is
-  usable (`judgeQuota`: a provider that reports nothing counts as usable, a read
-  that did not happen does not), re-read every 3 minutes; a later reset the
-  provider names is slept until; 24 h after the reset it waited for, it gives up
-  as `failed`. No known reset time, or one over 30 days away, is refused up
-  front.
+- **A message may carry its own model** (`ScheduledModelChoice`: provider, modelId,
+  optional thinkingLevel — `types.ts`; stored on the item as `model`). The
+  composer's ▾ menu has a Model row (below), an agent's `schedule_message` takes
+  `model` + `reasoning`. Create NEVER calls a model: it validates the shape, the
+  engine is not asked, nothing is spawned (the quota read is a usage read and the
+  chat-model fallback is a transcript read). At DELIVERY `putChatOnModel`
+  (`delivery.ts`) switches the chat with the same `switchChatModel` the composer's
+  and the agent's switches use (`lib/model-switch/switch.ts`: model first, then
+  reasoning), and only then sends the prompt. Nothing is approximated: a switch
+  the engine refuses (model gone, credentials gone) fails the message with the
+  engine's reason and the message is NOT sent on another model; a switch that is
+  `deferred` (the chat is mid-turn) leaves the message waiting; a chat already on
+  the model and level sends straight away. `PATCH` with `model: null` takes the
+  choice away (the chat's own model again).
+- **"When quota resets"** is about THE MODEL THE MESSAGE GOES OUT ON: the chosen
+  `model` when there is one, else the chat's own — the composer sends the one it
+  shows (`chatModel`), an agent's call asks the chat (`resolveChatModel`) — and
+  the account that model is on (`planQuotaForChat`: the same ranking the ring
+  uses). So "carry on on Opus when Sonnet's quota is spent" waits for OPUS and
+  works even when the chat's own model has nothing left. Nothing goes before the
+  reset; then a FRESH usage read must say the model is usable (`judgeQuota`: a
+  provider that reports nothing counts as usable, a read that did not happen
+  does not), re-read every 3 minutes; a later reset the provider names is slept
+  until; 24 h after the reset it waited for, it gives up as `failed`. **A model
+  whose provider names NO reset time is no longer refused**: the item is stored
+  with `quota.unknownReset` and keeps waiting — first check immediately, then
+  every 3 minutes — and is given up on 7 days after it was scheduled
+  (`QUOTA_UNKNOWN_RESET_GIVE_UP_MS`), with a reason that says "waiting 7 days"
+  rather than "24 hours after the reset". A reset over 30 days away is still
+  refused up front (`no_quota_reset`, now only when the usage read itself is
+  unavailable).
 - **Limits, in one place** (`types.ts` `SCHEDULED_LIMITS`; the routes, the tools
   and the composer all read it): 20 waiting per chat, 100 per account (the
   chat's owner's), a time within 30 days and not in the past, 64 KB a message.
@@ -2428,14 +2577,29 @@ and nothing repeats (one-off, by design).
   (capability-token authenticated, on `proxy.ts`'s `PUBLIC_EXACT`, trusting
   `capability.sid` alone like `/api/internal/sessions`);
   `bin/cody-display-mcp.test.mjs` fails when the bridge's copy of a name,
-  schema or description drifts from `tools.ts`. The target chat is a name or id
-  resolved with the ownership gate; `at` without an offset is read in the
+  schema or description drifts from `tools.ts` (the bridge's copy also carries
+  `model` and `reasoning`, and `list_scheduled` lines show "on <model>"). The
+  target chat is a name or id resolved with the ownership gate; `model` is resolved HERE with `lib/model-switch/resolve.ts` (a name or part of
+  one, never a guess: several matches schedule nothing and list the candidates;
+  an unknown name lists the closest; `reasoning` must be a level that model
+  offers and needs `model`) against the models of an engine that is already
+  running — the chat's own, else the caller's; scheduling never starts one, and
+  with none running it says so and schedules nothing; `at` without an offset is read in the
   OWNER's zone; results use `formatToolTime`. The descriptions teach what the
   tools are for (continue after a quota reset, run a job at a set time, check
   back on CI) and that the message arrives as a normal user turn. A message the
   agent scheduled is marked "by the agent" in the composer. The operator's
   user RULES.md carries one line telling every session and subagent the
-  capability exists.
+  capability exists. `schedule_message` to ANOTHER chat is a follow-up and waits out that chat's
+  whole turn; its description points agents at `send_to_chat` (Cross-session
+  awareness) for "tell that chat now".
+  `schedule_message` now takes an optional `model` (and `reasoning`, which needs
+  `model`), resolved with `lib/model-switch/resolve.ts` against the target
+  chat's catalog; a scheduled item that names a model is switched with
+  `switchChatModel` (scope chat) just before delivery. For a later switch ("back
+  to Sonnet at 1am") the agent schedules a message with `model` set; the
+  `switch_model` description teaches exactly that. `switch_model` itself changes
+  things once, now.
 - **The composer** (`components/SendPill.tsx`, `ScheduleMenu.tsx`,
   `ScheduledBar.tsx`, `hooks/useScheduledMessages.ts`). The Send pill gains a
   joined ▾ zone (+22 px on a desktop, +24 px on a phone, where Send stays an
@@ -2443,7 +2607,23 @@ and nothing repeats (one-off, by design).
   the menu — a popover on a mouse, a bottom sheet with 48 px rows on a touch
   screen. Choosing a row schedules at once and clears the box (the same
   snapshot/restore as a failed send, `restoreComposer`); only "Pick…" asks for a
-  Schedule press. A row that cannot work is OFF with its reason, never hidden:
+  Schedule press. The menu has a **Model** row under the time rows
+  (`components/ScheduleModelPicker.tsx`, state and words in
+  `lib/scheduled/model-ui.ts`, all tested): "Same as chat" (the default —
+  "Currently <name>") or any model of the composer's own catalog (pinned models
+  first, one group per provider, search over everything), and — once a model
+  that has a reasoning ladder is chosen — chips "Default / Low / … / Max" built
+  from the SAME per-model levels the composer's reasoning control reads
+  (`modelThinkingLevels`, passed down from `ChatWindow`). Choosing a model
+  re-validates the level (kept when the new model offers it, else Default).
+  "Send now" and "Pick…" carry the choice too. "When quota resets" there reads
+  the CHOSEN model's quota (`scheduleChosenQuota` in `ChatInput`) and its reason
+  text names that model. The request body carries `model` (the choice) and
+  `chatModel` (what the composer shows, for a quota wait with no choice).
+  Editing a message puts its model back in the menu. The queued-messages bar
+  shows a small model chip (icon + display name, id when the catalog knows no
+  better; tooltip: the full `provider/id` and level) on a row only when a model
+  was chosen (`describeScheduledItem` → `modelLabel`, `modelTitle`). A row that cannot work is OFF with its reason, never hidden:
   an empty box or attachments still preparing, a chat that does not exist yet,
   images attached, a `!` shell line (a scheduled message arrives as a plain
   prompt, so the command would reach the model as text), or no reset time
@@ -2470,7 +2650,12 @@ and nothing repeats (one-off, by design).
   not `disabled`: a disabled button swallows the pointer events the long press
   listens to. The ▾ menu's chips compute from the moment it OPENED, but "In 1
   hour" is resolved when it is CHOSEN. A failed read of the list keeps the rows
-  the page already has rather than blanking them.
+  the page already has rather than blanking them. A stored `model` is an exact provider/id: `lib/scheduled/model-ui.ts` and
+  `store.ts` must not import `@/` (server import graph); the picker's chips must
+  use the composer's `modelThinkingLevels`, never a second ladder; `delivery.ts`
+  imports `lib/model-switch/switch.ts` lazily-safe (it already loads
+  `rpc-manager` in the same module, so no new cycle); do not add a switch call
+  to `service.ts` (create must stay model-free).
 
 ### Machine meters in the top bar (`lib/machines/`, `components/machines/`)
 
@@ -2544,6 +2729,87 @@ gone (tokens stay in the session popover and the button's tooltip).
   "machines"`); its "Manage machines" opens Settings › System with
   `highlight: "machines"`.
 
+### Statistics page (`lib/statistics/`, `components/statistics/`, `app/statistics/`)
+
+`/statistics` shows where the usage went: one ring chart (sunburst) of cost or
+tokens, a per-day timeline, and a few plain findings. It reads every omp
+transcript on the instance, so it covers chats, side chats (btw), subagents, the
+advisor, context compaction and omp's own helper calls (memory extraction,
+auto-thinking, the unexpected-stop judge) as well as Cody's background jobs.
+
+- **Entry points.** The session cost popover in the top bar has a "Usage
+  statistics" row (`components/AppShell.tsx`, a `<Link>`), and Cmd-K has the same
+  item (`components/CommandPalette.tsx`, `onOpenStatistics`). The page's back link
+  returns to the chat the user came from.
+- **The index** (`lib/statistics/store.ts`, `indexer.ts`, `scan.ts`) is derived
+  state in `<agent dir>/cody-statistics/index.json` (0600, atomic): daily
+  aggregates per provider/model/worker inside one transcript file, plus a read
+  offset per file. Rows and offsets share the file on purpose so a crash cannot
+  count bytes twice. The indexer reads only bytes it has not read (a shrunk or
+  rewritten transcript is dropped and re-read as a unit), never follows a
+  symlink, sniffs each line's leading `{"type":"…"` before parsing, and keeps 400
+  days / 400k rows at most. Delete the file and the next request rebuilds it.
+  `lib/statistics/service.ts` is the only place that meets the live install: a
+  request waits ~300 ms for a running pass and otherwise answers with what is on
+  file and `updating: true`; a pass starts when the last one is >10 min old, and
+  `?refresh=1` at most every 20 s. Nothing in it throws.
+- **Background jobs** (chat titles, Distill, plan keeper, the onboarding planner,
+  web research) run `omp -p --no-session`, so no transcript exists. The one
+  hook is `recordOneShotUsage` (`lib/statistics/oneshot.ts`, called from
+  `lib/model-plan/one-shot.ts` with each finished assistant message); it appends
+  to a monthly JSONL log in the same dir (`joblog.ts`) that the indexer folds in.
+- **Honest figures** (`billing.ts`). A subscription login (Claude plan, ChatGPT
+  plan, Copilot, …) shows what the usage WOULD cost on the API and is labelled
+  "Plan · estimate"; pay-as-you-go (API keys, gateways, Claude API credits) is
+  real money; a local runtime has no price; a model with no known price is
+  counted in tokens and flagged "Price unknown", never as 0. Prices are learnt
+  from the transcripts (`rates.ts`: each call records its cost per counter), so
+  there is no catalogue to keep in step; the cache saving and a compaction's cost
+  come from the same learnt prices.
+- **Who sees what** (`access.ts`). Only the viewer's own chats, by the rule the
+  chat list uses (`lib/auth/session-owners.ts`); a chat someone else owns answers
+  404 like one that does not exist. Usage that belongs to no chat is shown only on
+  an open instance or to an admin.
+- **The query layer** (`query.ts`, `sunburst.ts`, `present.ts`, `labels.ts`,
+  `request.ts`) is pure: it turns the index into the ring tree (both cost and
+  tokens on every node, so the Cost/Tokens switch needs no second request), the
+  timeline, the insights (numbers only; the page words them in every locale) and
+  the per-chat deep dive. Days are bucketed in the server's zone
+  (`lib/time-zone.ts`).
+- **Page** (`components/statistics/`). `StatisticsPage.tsx` owns the state and
+  the URL (`?range=today|7d|30d|90d`, or `?from&to` for custom days, plus
+  `?by=provider|project|model|worker` and `?metric=cost|tokens`, written with
+  `replaceState` so Back leaves the page instead of walking through setting
+  changes; `app/statistics/page.tsx` reads them on the server through
+  `statistics-query.ts`, so a reload or shared link opens the same view). The
+  back arrow returns to the chat the user came from (`router.back()` when the
+  Navigation API says the previous entry is `/`; `document.referrer` is useless
+  here because the app sends no referrer). The circle is plain SVG
+  (`Sunburst.tsx`, framed by `ChartSection.tsx`) with a table twin
+  (`StatsTable.tsx`) that carries the same numbers for keyboard and
+  screen-reader use; `ControlsBar.tsx` (period, custom days, Cost/Tokens, ring
+  order), `Summary.tsx`, `Insights.tsx`, `NodeDetail.tsx`, `DeepDive.tsx` (one
+  chat), `Timeline.tsx` (clicking a day focuses the page on it, with a way back)
+  and `StatisticsStates.tsx` (first run, empty, error, skeleton) are the other
+  parts; on touch a tap selects a slice and its detail opens in
+  `BottomSheet.tsx`. `useStatisticsData.ts` fetches `/api/statistics`, keeps the
+  old numbers on screen while a new range loads and asks again every 2.5 s
+  while the server says `updating`. Styling is one string in
+  `statistics-css.ts` over the design tokens.
+  *Layout.* The page never needs sideways scrolling on a desktop. The
+  chart/table split is decided by the width of the page body, not the window
+  (`.stats-body` is a CSS container, `@container stats-body (min-width: 860px)`
+  gives the two columns; narrower stacks the chart above the table). The table
+  is one `<tbody>` per row: from a 641px viewport up it shows name, cost, tokens
+  and the share bar on the main line and the input / output / cache read /
+  cache write / cache hit split as one muted line underneath (the Total row
+  too); on a phone (≤640px) it keeps all nine columns, scrolls sideways inside
+  its frame and pins the name column. A frame narrower than 440px also drops
+  the share bar.
+- **Tests.** `lib/statistics/*.test.mjs` (suite entry in `scripts/test.mjs`).
+  Nothing in them touches the live data dir: the indexer is handed a directory.
+- **Keys.** `statistics.*` in `lib/i18n/locales/{en,ja,zh-CN}.json`.
+
 ### Overnight runs: stalls, crashes and restarts carry on (`lib/run-recovery/`)
 
 Two nights running (2026-10-08, 2026-10-09) a long unattended LumaShow run died
@@ -2611,6 +2877,7 @@ is the part of Cody that notices both.
   exits mid-run logs its last stderr line. Before this nothing recorded why a
   chat lost its engine: the 07:07 stop on 2026-10-09 could not be explained
   afterwards. Each recovery and give-up also writes one `[run-recovery]` line.
+- **Engine exits nobody asked for are also named to the user** (`lib/engine-crash.ts`: out of memory, disk full, too many processes, crashed, or restarted; see "Push notifications", Engine crash alerts).
 - `CODY_RUN_RECOVERY=0` turns off the watchdog, crash recovery and boot
   resume (the journal is still written).
 - **Known gaps.** An ACP agent that exits on its own emits no `engine_exit`
@@ -3373,7 +3640,24 @@ no script, by the owner's choice), so Cody's own janitor is the ONLY cleanup.
   chat still needs its venv or build dir); removed on chat delete unless another
   live engine runs in it, and by the janitor. `engineChildEnv(extra, { timeZone,
   scratchDir })` applies it and always sets `CODY_DISK_AREAS` (what the extension
-  probes). Tests that start real sessions must point `CODY_SCRATCH_ROOT` inside
+  probes). Every main chat's engine also gets `CODY_DATA_SCRATCH=<data root>/<the same 12
+  hex>` (`dataScratchRoot()`: env `CODY_DATA_SCRATCH_ROOT`, else `<agent
+  dir>/cody-data-scratch`; the agent dir is on the data volume). It exists
+  because per-chat `TMPDIR` is on /tmp, a different filesystem from the code
+  checkouts, and some test harnesses need temp space on the SAME disk as the
+  code (agents had been pointing `TMPDIR` at `~/tmp`, which then filled with
+  killed runs' leftovers). `scratchEnv(dir)` makes it (0700, lazily, on every
+  spawn) and refuses a root that is the temp dir, home, agent dir or scratch
+  root. Lifetime = the tmp scratch's: kept across restarts, removed by
+  `removeScratchDir` together with the tmp dir (chat delete, janitor), and a
+  data dir that no index entry and no tmp dir owns is an orphan
+  (`listOrphanDataScratch`) that the janitor removes after `scratchIdleDays`
+  (never a live chat's, never one a process uses, only with a readable process
+  table). A chat whose tmp dir a reboot emptied keeps its data twin until its
+  index entry is forgotten (30 days). The Settings disk card's per-chat size is
+  tmp + data bytes; the janitor's disk budget pass now looks at both disks and
+  only removes a chat's scratch if it holds something on a disk that is over
+  budget. Tests that start real sessions must point `CODY_SCRATCH_ROOT` inside
   their private root. `lib/bash-output.ts` also accepts
   `<scratchRoot>/<12 hex>/pi-bash-*.log`.
 - **The janitor** (`janitor.ts`, `sweep.ts`, `walk.ts`, `transcripts.ts`,
@@ -3383,7 +3667,16 @@ no script, by the owner's choice), so Cody's own janitor is the ONLY cleanup.
   orphan scratch dirs, top-level entries of the temp dir idle `tmpIdleHours` (24)
   and top-level DIRECTORIES of `~/tmp` idle `homeTmpIdleHours` (72; files there
   are helper scripts and tokens and are kept), and checkpoint shadow repos past
-  `checkpointMaxAgeDays`/`checkpointMaxGb` (never a live workspace's). A temp
+  `checkpointMaxAgeDays`/`checkpointMaxGb` (never a live workspace's). Inside `~/tmp` only, top-level directories whose NAME looks like a killed test
+  run's leftover are swept after `testLeftoverIdleHours` (default 6, never
+  longer than `homeTmpIdleHours`) instead of 72 h, under every other check
+  (nothing inside changed, no process names it, no recent transcript names it,
+  not a dot-entry/special/protected). `looksLikeTestLeftover` (`sweep.ts`)
+  matches (a) a stand-alone 3–7 digit number that is not a pid in the process
+  table now (`lumashow-ui-test-123456-abc`; a 4-digit 1970–2100 number is a
+  year, not a pid; no process table → this shape never matches), or (b) a
+  mkdtemp suffix: `-` or `.` then exactly six `[A-Za-z0-9]` with a digit and a
+  letter (`paneldim-a1B2c3`). Everything else in `~/tmp` keeps 72 h. A temp
   entry goes only when ALL hold: nothing inside changed (mtime AND ctime) in the
   window, no process references it (one /proc scan per run: cwd, exe, root, fds,
   maps, cmdline, environ, bound unix sockets — environ matters because a venv's
@@ -3412,7 +3705,10 @@ no script, by the owner's choice), so Cody's own janitor is the ONLY cleanup.
   prompt and an `additionalContext` note on tool results (throttled). Trap: in
   omp ANY extension that registers `tool_call`/`tool_result` vetoes
   `task.speculativeLaunch`, so the `tool_result` handler is registered lazily,
-  only once a disk has been seen low. Constants mirror `status.ts` (tested).
+  only once a disk has been seen low. Constants mirror `status.ts` (tested). When `CODY_DATA_SCRATCH` is set the rule gets one more fixed line: tests that
+  need temp space on the code's disk use `$CODY_DATA_SCRATCH`, never `~/tmp`,
+  `/data/home/tmp` or another fixed folder (text is fixed per process: prompt
+  cache).
 - **Helper-agent memory limit** (`lib/omp/extensions/cody-context-budget.ts`, a
   fifth `--extension` for main omp chats): for SUBAGENTS only, appends one
   system-prompt line saying at what size omp summarises their history and to
@@ -3428,11 +3724,24 @@ no script, by the owner's choice), so Cody's own janitor is the ONLY cleanup.
   reads and replaces the `task.agentCompactionThresholdOverrides` map WHOLE
   (so the client spreads it and unknown agents survive), and toggles
   `compaction.experimentalContextManagement` (all chats, not only helpers).
+- **Helper memory limit: one implementation.** The helper memory limit has ONE
+  implementation: `lib/helper-memory-limit.ts` (`resolveHelperLimit`,
+  `effectiveHelperLimit`, `limitTokens`, `parseOverride`; override for the
+  agent, else root `compaction.thresholdTokens`, else
+  `compaction.thresholdPercent`, applied to the model's context window). The
+  Settings card (`components/settings/engine/helper-memory.ts`), the helper's
+  own prompt line (`lib/omp/extensions/cody-context-budget.ts`, which imports it
+  by relative path — its only Cody import) and the subagent chips/transcript
+  header (`subagentContextGauge` in `lib/subagent-format.ts`, config from
+  `hooks/useHelperLimitConfig.ts` via the cached `/api/omp-settings` route) all
+  use it; never write a second copy. `readNativeSettings` now also returns
+  `compaction.thresholdTokens` / `thresholdPercent` (validated, round-tripped on
+  write).
 - **Settings › System › Disk space** (`components/settings/DiskSection.tsx`,
   `/api/disk`: GET for any signed-in user, POST `{action:"clean"}` and PUT
   settings admin-only): meters against the quotas, the five largest scratch
   folders by chat title, the undo-snapshot total, the last clean, "Clean idle
-  scratch now", and the idle-days setting (the rest under Advanced).
+  scratch now", and the idle-days setting (the rest, including `testLeftoverIdleHours`, under Advanced).
 
 ### Disk exhaustion is a first-class failure (`lib/disk-space.ts`)
 - The instance data dir is finite and often quota-capped (a ZFS dataset on
@@ -3585,6 +3894,49 @@ own last-line check says the agent asked something) by appending a
   hidden extension messages, e.g. the `eager-todo-prelude` nudge) is the
   engine talking to the MODEL, so it renders as the same collapsed "Engine
   note" row, never as a bubble.
+
+### Live plan keeper (`lib/plan-keeper/`)
+
+**Live plan keeper (`lib/plan-keeper/`).** One `PlanKeeper` per live rpc
+session, created by `RpcSession.getPlanKeeper()` and fed from `handleFrame`:
+`tool_execution_start` (args) and `tool_execution_end` (result), assistant
+`message_end`, hidden `custom` messages of type `async-result`,
+`launch-completion` and `rewind-report`, `subagent_lifecycle` terminal states,
+`turn_end`, `agent_start` and `auto_compaction_end` (`notifyListRebuilt`), and
+the terminal `agent_end`. It keeps a numbered activity log (60 entries, 16,000
+characters; a tool entry is `tool (intent · command) => head … tail of the
+result`, engine boilerplate removed) and asks omp's `smol`, then `tiny`, then
+the engine default (through `runOneShotModel` in the isolated one-shot agent
+dir, 45 s limit) which open tasks the log proves finished. Pace: 2 s debounce,
+30 s between model calls during a turn, an immediate pass at turn end, never two
+at once, one retry after a failed call. The model answers
+`{done:[{id,entry,quote}], subtasks, subtasksDone, labels, summaries}`; tasks
+are named by id (`T1`…), and `evidence.ts` decides what is applied: the id or
+one clearly closest rewording, the quote found in the log (the cited entry
+first; a single word only there), and for
+verify/test/gate/publish/release/deploy tasks a pass or a push in that entry
+with no later failure of the same check. Proof must be newer than the task
+(`taskSince`).
+
+A tick is written to the engine with `set_todos` AND recorded in
+`cody-plan/<sessionId>.json` (`autoCompleted`, keyed `phase\0task`). The engine
+keeps `set_todos` in memory only and rebuilds its list from the session file
+after a compaction, restart or rewind, so `syncEngine` runs first in every pass
+and on `notifyListRebuilt` to put ticks back. Rules that must hold: read the
+list fresh immediately before writing; change only the status of the tasks being
+ticked; never reorder; when the agent's own `todo` call lands around a write,
+rebuild on its result (`rebaseOnto`); the agent's `todo` results, read off the
+wire in `noteAgentTodo`, withdraw a tick the agent reopened, removed, re-added
+or re-planned. Every list Cody serves applies the overlay (`applyPlanOverlay` in
+`buildWebState` and `GET /api/sessions/[id]`). `fold.ts` is pure and shared by
+server, browser and keeper: `buildPlanView` lays the list out (phase headings
+with counts, current phase open, finished phases one line, folds of 3+ finished
+tasks once a phase has more than 8 done or the list more than 15 rows, at most 3
+per phase, never an open task) and `planFoldsToSummarise` names the folds that
+still need their line. The overlay also holds `labels` (short text for tasks
+over 60 characters) and `folds` (summary and task count, keyed by the fold's
+first task). The keeper fails soft: any failure applies nothing. Tests:
+`lib/plan-keeper.test.mjs`, `components/TodoList.test.mjs`.
 
 ### Approval prompts: inline, and the agent owns the buttons
 - An ACP engine (`lib/harness/acp-session.ts`) can stop mid-turn and ask
@@ -3935,6 +4287,88 @@ own last-line check says the agent asked something) by appending a
   daemon; the stale guard discards it), then 1–30 ms; a newer request
   supersedes a queued one (answers `null`). `settings-surface.ts` exempts
   `spelling.autocomplete` from the Terminal-only chip; rest of `spelling.` stays.
+- **The Send pill's ▾ menu reuses this catalog.** Its Model row
+  (`components/ScheduleModelPicker.tsx`) lists the models and reasoning levels the
+  composer's own model picker already holds (`ChatInput` builds
+  `scheduleCatalog` from the same pinned/all lists and `modelThinkingLevels`), so a
+  scheduled message can be sent on another model than the chat is on; it never
+  renames or re-routes a model (display names via `formatModelDisplayName`, the
+  stored value is the exact provider/id). See "Scheduled messages".
+
+**Agent-requested model switch (`switch_model`).** An agent can move its own
+chat onto another model — "switch to Opus 4.8 with high reasoning" — through the
+host tool `switch_model` (`lib/model-switch/tool.ts`). `scope` defaults to
+`chat`: ONLY the chat the agent runs in changes (`session` targets another of
+the owner's chats by id or title, ownership-gated by `resolveSessionArgument`
+like the scheduling tools). `scope: "everywhere"` is the explicit, rarer form:
+it rewrites **only** `modelRoles.default` (`provider/id`, plus `:level` when a
+reasoning level was given) through `readModelRoles`/`writeModelRoles` (the
+Settings panel's helpers — every other role and every other setting in
+config.yml is untouched), calls `invalidateModelsCache`, then
+`restartIdleRpcSessions` (a running chat, including the calling one, keeps its
+engine until it next restarts) and answers with what the default was before and
+the exact `switch_model` call that undoes it. `everywhere` needs `model`, cannot
+be combined with `session`, and is refused on engines other than omp (only omp
+has default-model settings).
+
+What a name means is decided against the target chat's OWN live catalog
+(`get_available_models`; ACP: the models inside `get_state`), in
+`lib/model-switch/resolve.ts`, and never by guessing: exact `provider/id` → bare
+id → display name → same letters/digits without punctuation (`4.8` = `4-8`) →
+every word present. A phrase that fits several models answers with the
+candidates and changes nothing; an unknown one answers with the closest names
+(bigram similarity) and, when its last word is a reasoning level ("opus 4.8
+high"), says to pass it as `reasoning`. `reasoning` is validated against that
+model's own ladder (`modelThinkingLevels` =
+`selectableThinkingLevels(thinkingLevelsForMeta(model))`; a model without
+reasoning has only `off`): `none`→`off`, `extra high`/`x-high`→`xhigh` and
+similar spellings are accepted, a level the model lacks is refused with the
+valid ones, never rounded to a neighbour.
+
+`lib/model-switch/switch.ts` (`switchChatModel(sessionId, {provider, modelId,
+thinkingLevel?}, opts)`, free of `@/` imports so later scheduled-send code in
+the custom server can reuse it; `tool.ts` loads it lazily because it imports
+`rpc-manager`, which imports the tool list) decides WHEN the change reaches the
+engine: reasoning alone is applied at once in any state; a model change is
+applied at once for an idle chat (`applies: next-turn`) and for the chat's own
+agent inside a tool call on the rpc dialect (`atStepBoundary`; no provider
+stream is open then — the tool call starts after the assistant message finished
+— so the next request of the turn already uses the new model); any other running
+chat waits for the composer's own boundary frames (assistant `message_end`,
+`tool_execution_start`, `turn_end`, `agent_end`), an ACP engine only for
+`turn_end`/`agent_end` and its reasoning cannot be set (`unsupported`). A newer
+deferred switch replaces an older one for the same chat, a closing chat drops
+it, and a deferred switch the engine then refuses is announced as an info
+`notice` frame on the chat's own stream (its caller has already been answered).
+The commands go in the order omp needs: `set_model` first, then
+`set_thinking_level` (omp re-applies the new model's default level after
+`set_model`); the result carries the engine's own `get_state` afterwards
+(`not_applied` when it still reports the old model, `reasoning_failed` when the
+model moved but the level did not).
+
+The page is told BEFORE the engine switches: `EngineSession.announce?(event)`
+(rpc wrapper: `emit`, no replay to late pages; ACP session: `emit`) puts a
+`cody_agent_model_switch {provider, modelId, name?, thinkingLevel?,
+modelChanges}` frame on the chat's stream. `hooks/agent-model-switch.ts` (a pure
+marker the hook keeps in `agentModelSwitchRef`) lets `useAgentSession`'s
+`model_changed`/`config_update`/`thinking_level_changed` handlers recognise the
+change as the agent's, so the composer shows `agentSession.modelSwitchedByAgent`
+/ `modelSwitchedByAgentWithLevel` / `thinkingLevelSetByAgent` ("Model switched
+to X by the agent, at your request.") instead of the engine-fallback warning,
+and the model leaves Smart mode exactly as a manual pick does.
+
+Registered for omp MAIN chats only (`MODEL_SWITCH_TOOLS` in `SERVER_HOST_TOOLS`
+and `MAIN_SESSION_TOOLS`, like `SCHEDULE_TOOLS`) — NOT the sidebar chat, whose
+schema budget assumes the smallest local model. ACP engines reach it over MCP:
+`bin/cody-display-mcp.js` registers `switch_model` and calls `POST
+/api/internal/model-switch` (capability-token authenticated, on `proxy.ts`'s
+`PUBLIC_EXACT`, env `CODY_MODEL_SWITCH_ENDPOINT` from
+`lib/display/engine-tools.ts`/`capability.ts`); `bin/cody-display-mcp.test.mjs`
+fails when the bridge's copy of the tool definition drifts from
+`lib/model-switch/tool.ts`. Tests: `lib/model-switch/resolve.test.mjs`
+(resolution + level validation), `lib/model-switch/switch.test.mjs` (timing,
+order, refusals, `everywhere` writes only `modelRoles.default` and returns the
+previous value, tool texts), `hooks/agent-model-switch.test.mjs`.
 
 ### Running state SSE + reconciliation
 - The sidebar listens to `/api/agent/running/events`, backed by `subscribeRunningSessions()` in `lib/rpc-manager.ts`, so running badges update without polling.
@@ -4060,6 +4494,14 @@ second Enter was silently ignored while the first was in flight.
   steering), cuts a tool batch short, or reads it at the next step. The 0.41
   hold kept a steer typed while the model was only WRITING until the whole
   reply finished, and then sent it as a brand-new prompt.
+- **Agents use the same two lanes.** `send_to_chat` (`lib/chat-messages/`) maps
+  `urgency` one to one: `next_step` is the steer, `after_turn` the follow-up
+  (`streamingBehaviorOf`, the one place the mapping lives). A steer lands at the
+  engine's next step boundary, so the sender is told "next step", not "now": a
+  tool batch in progress finishes first, and a non-live-steering provider reads
+  it when its reply ends. Measured on 52 agent-sent steers: median 8 s, p90
+  106 s, worst 157 s, against a median of 27 min for the same messages sent as
+  follow-ups through `schedule_message`.
 - **"Steer" is a real interrupt, and only of the model's reply**
   (`steer_now`, `AgentSessionWrapper.steerNow`). The button shows on a held
   follow-up AND on a steer the engine has queued but not read (the agent is
@@ -4760,6 +5202,19 @@ device on the account. Nothing it does ever blocks a send or stops a run.
   `scanSessionInfo` reads a 64 KiB prefix once more when the 4 KiB one holds
   no user message; scans are memoized per (size, mtime), so that is one extra
   read per file version. Regression test: `lib/omp/session-list-window.test.mjs`.
+- - **Chat list ordering ("last active").** Each session in `/api/sessions`
+  carries `lastActiveAt`: the time of the newest user message or assistant
+  reply, read from the file tail (`lastActiveFromTail` in
+  `lib/omp/session-files.ts`: 64 KiB tail, widened to 1 MiB only when that holds
+  no such message; memoized with the rest of the scan on size+mtime). File mtime
+  (`modified`) is only the fallback, because title rewrites bump it. The sidebar
+  has a Recent / Projects switch (`cody:sidebar-view`, default Recent). Recent
+  is one flat list across all visible projects ordered by `sortRecentSessions`
+  (`lib/project-ordering.ts`): not-yet-persisted chats from
+  `retainPendingSessions` first, then `lastActiveAt` desc, ties keep list order.
+  The sort is a memo over the session list, so it re-sorts when the list
+  refreshes and never on running/unread/clock ticks. Per-project trees also sort
+  by `lastActiveAt`; the project order itself is unchanged.
 
 ### Session switching: paint from cache, never wait on the engine
 
@@ -5473,6 +5928,8 @@ palette (`components/CommandPalette.tsx`, ⌘K/Ctrl+K) is built on `cmdk`.
   model button while it is on (17px with its gap, `PHONE_COMPOSER.stateGlyph`,
   taken from the name — no new box). The usage-limit stage is a 7px dot inside
   the quota ring's existing box (`usage-limit-dot`): it adds no width.
+  A signed-out login (no usable account for the selected model's provider)
+  wears the same dot in the warning colour (`signed-out-dot`).
 - The daily-limit circle (`DailyLimitRing`, only while that limit is on) is one
   more 38px box on the row, as tall as Send, with nothing kept to its right: it
   costs 38 + 4px like reasoning (`phoneBudget(…, { timer: true })`). With

@@ -24,13 +24,14 @@ export type CreditsCoverage = "covering" | "standby";
 /**
  * `null` when no key is saved (nothing to describe). Otherwise "covering" only
  * when no plan account can serve and at least one is limited: every account is
- * `limited`, or `disabled` (omp took it out of rotation, so it cannot serve
- * either). Any `in_use`/`standby` account means a plan still works, so the
- * credits wait. No accounts at all is never "covering".
+ * `limited`, or taken out of rotation (`disabled`, or `signed_out` — its login
+ * ended), so it cannot serve either. Any `in_use`/`standby` account means a
+ * plan still works, so the credits wait. No accounts at all is never
+ * "covering".
  */
 export function creditsCoverage(states: readonly string[], keyCount: number): CreditsCoverage | null {
   if (keyCount <= 0) return null;
-  const allBlocked = states.length > 0 && states.every((state) => state === "limited" || state === "disabled");
+  const allBlocked = states.length > 0 && states.every((state) => state === "limited" || state === "disabled" || state === "signed_out");
   return allBlocked && states.includes("limited") ? "covering" : "standby";
 }
 

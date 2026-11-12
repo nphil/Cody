@@ -229,6 +229,9 @@ export function budgetRule(readings: readonly Reading[], env: Record<string, str
     env.CODY_SCRATCH
       ? `- Throwaway files go in your scratch folder, \`$CODY_SCRATCH\` (it is also \`$TMPDIR\`). Cody deletes it once the chat has been idle for a few days. Never put anything bigger than a log file in a bare \`${tmpPath}/<name>\`.`
       : `- Throwaway files go in \`$TMPDIR\`; delete them yourself when you are done. Never put anything bigger than a log file in a bare \`${tmpPath}/<name>\`.`,
+    ...(env.CODY_DATA_SCRATCH
+      ? ["- Tests that need temp space on the same disk as the code use `$CODY_DATA_SCRATCH` (Cody deletes it with the chat), never `~/tmp`, `/data/home/tmp` or another fixed folder."]
+      : []),
     `- The budgets are hard limits shared by every session: ${budgets}. When one is full, every session's builds fail. These figures are current: they override any remembered or older figure about \`/tmp\` or disk sizes.`,
     "- Reuse ONE cargo target directory per repo or worktree. Never create a new `*-target` directory per attempt or per review, and never copy a whole repo or stage tree into `/tmp` more than once.",
     "- When the work is finished, delete build output, staged copies, screenshots, recordings and test temp dirs. Tests must use self-cleaning temp dirs (`tmp_path`, `TempDir`, `mkdtemp` plus cleanup).",

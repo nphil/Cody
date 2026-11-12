@@ -53,37 +53,53 @@ export interface TodoPhase {
 }
 
 /**
- * Cody's own overlay atop omp's TodoPhase (lib/plan-keeper/overlay.ts): the
- * plan keeper's subtasks and which top-level tasks IT (not the model's own
- * `todo` tool) marked completed. omp's TodoPhase has no subtask field, so
- * this is never sent to the engine — it lives beside the phases, keyed by
- * the parent task's exact `content`, and is persisted per session.
+ * Cody's own overlay atop omp's TodoPhase (lib/plan-keeper/overlay.ts): what
+ * the plan keeper knows about a session's list that the engine's own todo
+ * state cannot hold. omp's TodoPhase has no subtask, label or summary field,
+ * and it forgets a check-off it was handed whenever it rebuilds its list from
+ * the session file, so all of it lives beside the phases, persisted per
+ * session.
  */
 export interface PlanOverlaySubtask {
   content: string;
   status: "pending" | "completed";
 }
 
+/** The keeper's one-line summary of a folded run of finished tasks, and how
+ * many tasks it was written for. */
+export interface PlanOverlayFold {
+  summary: string;
+  count: number;
+}
+
 export interface PlanOverlay {
   /** Keyed by the exact content of the parent (top-level) task. */
   subtasks: Record<string, PlanOverlaySubtask[]>;
-  /** Exact content of top-level tasks the KEEPER completed, so the UI can
-   * show an auto-marked glyph the model's own completions never get. */
+  /** The tasks the KEEPER checked off, each as planTaskKey(phase, content)
+   * (lib/plan-keeper/fold.ts). The durable record of those check-offs: it is
+   * what puts them back after the engine loses them, and what gives them the
+   * auto-mark the agent's own completions never get. An entry from before
+   * phases were recorded is a bare task content and only earns the mark. */
   autoCompleted: string[];
+  /** Short display labels, keyed by the exact content of the task. */
+  labels: Record<string, string>;
+  /** Summaries of folded runs of finished tasks, keyed by the planTaskKey of
+   * the run's first task. */
+  folds: Record<string, PlanOverlayFold>;
   updatedAt: number;
 }
 
-/** Emitted by the plan keeper after it applies a cheap-model pass: a full
+/** Emitted by the plan keeper whenever it changes the overlay: a full
  * replacement of the session's overlay, not a merge. */
 export interface PlanOverlayUpdateFrame {
   type: "plan_overlay_update";
   overlay: PlanOverlay;
 }
 
-/** Emitted alongside PlanOverlayUpdateFrame exactly when the keeper's
- * set_todos call changed the engine's phases (a completion or a promotion).
- * Carries no payload of its own — the browser refetches todoPhases the same
- * way it already does on turn_end. */
+/** Emitted exactly when the keeper's set_todos call changed the engine's
+ * phases (a check-off, or one it put back). Carries no payload of its own —
+ * the browser refetches todoPhases the same way it already does on
+ * turn_end. */
 export interface TodoAutoUpdateFrame {
   type: "todo_auto_update";
 }

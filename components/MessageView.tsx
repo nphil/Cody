@@ -1,7 +1,8 @@
 "use client";
 
 import { memo, useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback, useContext, type ComponentProps, type TransitionEvent } from "react";
-import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, Brain, ListChecks, Info } from "lucide-react";
+import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, Brain, ListChecks, Info, TriangleAlert } from "lucide-react";
+import { describeEngineCrash, ENGINE_CRASH_CUSTOM_TYPE, readEngineCrashNotice } from "@/lib/engine-crash";
 import { MarkdownBody } from "./MarkdownBody";
 import { ClickableImage } from "./ImageLightbox";
 import { TranscriptViewportContext } from "./TranscriptViewportContext";
@@ -184,6 +185,7 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
   if (message.role === "custom") {
     // Hidden messages are filtered by isVisibleTranscriptMessage above.
     if ((message as CustomMessage).customType === "compaction") return <CompactionMessageView message={message as CustomMessage} />;
+    if (message.customType === ENGINE_CRASH_CUSTOM_TYPE) return <EngineCrashRow message={message as CustomMessage} />;
     // Hidden messages normally remain slim notes; actionable internal alerts
     // are shown in full so the reader cannot miss a failure or required action.
     if (message.customType === TODO_REMINDER_CUSTOM_TYPE || message.customType === ENGINE_NOTE_CUSTOM_TYPE || (message.display === false && message.attribution !== "user" && !(isInternalBackgroundMessage(message) && isActionableCustomDetails(message.details)))) {
@@ -1853,6 +1855,40 @@ function CompactionMessageView({ message }: { message: CustomMessage }) {
           )}
           <CompactionFileMetadata readFiles={parsedSummary.readFiles} modifiedFiles={parsedSummary.modifiedFiles} />
         </div>
+      </div>
+    </div>
+  );
+}
+
+/** The line an engine that stopped on its own leaves in its chat (lib/engine-crash.ts): what happened, the engine's last error when it left one, and what happens next. It stays in the transcript, unlike the pop-up. */
+function EngineCrashRow({ message }: { message: CustomMessage }) {
+  const { t, locale } = useI18n();
+  const notice = readEngineCrashNotice(message.details);
+  if (!notice) return <EngineReminderRow message={message} />;
+  const words = describeEngineCrash(notice, (key, params) => t(key, params));
+  const time = formatTime(message.timestamp, locale);
+  return (
+    <div className="chat-message" style={{ marginBottom: 14 }} data-testid="engine-crash-row" role="alert">
+      <div
+        style={{
+          display: "flex",
+          alignItems: "flex-start",
+          gap: 8,
+          padding: "8px 11px",
+          borderRadius: "var(--radius-control)",
+          border: "1px solid color-mix(in srgb, var(--status-error) 35%, transparent)",
+          background: "color-mix(in srgb, var(--status-error) 8%, transparent)",
+          fontSize: 12.5,
+          lineHeight: 1.45,
+        }}
+      >
+        <TriangleAlert size={14} strokeWidth={2} aria-hidden="true" style={{ flexShrink: 0, marginTop: 2, color: "var(--status-error)" }} />
+        <div style={{ minWidth: 0, flex: 1, overflowWrap: "anywhere" }}>
+          <div style={{ color: "var(--text)", fontWeight: 600 }}>{words.headline}</div>
+          {words.detail && <div style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 11 }}>{words.detail}</div>}
+          <div style={{ color: "var(--text-muted)" }}>{words.next}</div>
+        </div>
+        {time && <span style={{ color: "var(--text-dim)", fontSize: 10, flexShrink: 0 }}>{time}</span>}
       </div>
     </div>
   );

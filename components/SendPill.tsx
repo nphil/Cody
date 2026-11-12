@@ -6,6 +6,8 @@ import { ChevronDown } from "lucide-react";
 import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
 import { useI18n } from "@/lib/i18n";
 import { createLongPress, type AnchorRect, type QuotaResetSource, type ScheduleBlock } from "@/lib/scheduled/ui";
+import type { ScheduleModelCatalog } from "@/lib/scheduled/model-ui";
+import type { ScheduledModelChoice } from "@/lib/scheduled/types";
 import { ScheduleMenu, type ScheduleChoice } from "./ScheduleMenu";
 
 /**
@@ -30,13 +32,18 @@ export interface SendPillProps {
   sendDisabled: boolean;
   /** Why the schedule rows are off, or null when they work. */
   block: ScheduleBlock | null;
-  /** What the quota ring knows about this chat's own model. */
+  /** What the quota ring knows about the model the message goes out on: the chosen one, else this chat's own. */
   quota: QuotaResetSource | null;
+  /** What the menu's Model row may choose from; null: no Model row. */
+  models: ScheduleModelCatalog | null;
+  /** The model chosen for the next scheduled message; null: whatever the chat is on. */
+  scheduleModel: ScheduledModelChoice | null;
+  onScheduleModelChange: (model: ScheduledModelChoice | null) => void;
   onSend: () => void;
   onSchedule: (choice: ScheduleChoice) => void;
 }
 
-export function SendPill({ isMobile, ready, sendDisabled, block, quota, onSend, onSchedule }: SendPillProps) {
+export function SendPill({ isMobile, ready, sendDisabled, block, quota, models, scheduleModel, onScheduleModelChange, onSend, onSchedule }: SendPillProps) {
   const { t } = useI18n();
   const coarsePointer = useIsCoarsePointer();
   const [anchor, setAnchor] = useState<AnchorRect | null>(null);
@@ -176,6 +183,9 @@ export function SendPill({ isMobile, ready, sendDisabled, block, quota, onSend, 
           anchor={anchor}
           block={block}
           quota={quota}
+          models={models}
+          scheduleModel={scheduleModel}
+          onScheduleModelChange={onScheduleModelChange}
           onSendNow={onSend}
           onSchedule={onSchedule}
           onClose={closeMenu}

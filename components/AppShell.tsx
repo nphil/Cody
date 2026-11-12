@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import dynamic from "next/dynamic";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { SessionSidebar } from "./SessionSidebar";
@@ -14,7 +15,7 @@ import { BranchNavigator } from "./BranchNavigator";
 import { ThemePicker } from "./ThemePicker";
 import { TitleBar } from "./TitleBar";
 import { useDesktopShell } from "@/hooks/useDesktopShell";
-import { AppWindow, Check, Copy, ExternalLink, Files, GitBranch, History, Info, ListTodo, Menu, MessageCircle, PanelLeft, ScrollText, Settings, Terminal, TriangleAlert, Usb } from "lucide-react";
+import { AppWindow, ChartColumn, Check, Copy, ExternalLink, Files, GitBranch, History, Info, ListTodo, Menu, MessageCircle, PanelLeft, ScrollText, Settings, Terminal, TriangleAlert, Usb } from "lucide-react";
 import { formatApiCost, formatCompactNumber, formatPercent, usageToneColor } from "@/lib/format";
 import { translate, useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
@@ -30,7 +31,7 @@ import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { copyText } from "@/lib/clipboard";
 import { getFileName } from "@/lib/file-paths";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
-import { getInitialNavigation } from "@/lib/initial-navigation";
+import { getInitialNavigation, getInitialSettingsTab } from "@/lib/initial-navigation";
 import { comparableProjectPath } from "@/lib/comparable-path";
 import { showCompletionNotification } from "@/lib/browser-notifications";
 import type { GitStatusResponse } from "@/lib/git-types";
@@ -205,6 +206,9 @@ export function AppShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [initialNavigation] = useState(() => getInitialNavigation(searchParams));
+  // `/?settings=providers` (a push notification's link) opens that Settings hub
+  // once, on load.
+  const [initialSettingsTab] = useState(() => getInitialSettingsTab(searchParams));
   const { t, tn, locale } = useI18n();
   const isMobile = useIsMobile();
   const isCoarsePointer = useIsCoarsePointer();
@@ -236,6 +240,9 @@ export function AppShell() {
     setSettingsRequest((current) => ({ section: tab ?? null, sub: opts?.sub, highlight: opts?.highlight, seq: (current?.seq ?? 0) + 1 }));
   }, []);
   const closeSettings = useCallback(() => setSettingsRequest(null), []);
+  useEffect(() => {
+    if (initialSettingsTab) openSettings(initialSettingsTab);
+  }, [initialSettingsTab, openSettings]);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   // The open session's model catalog under a session-scoped (ACP) engine,
   // lifted out of ChatWindow so Settings › Models can list it.
@@ -1177,6 +1184,7 @@ export function AppShell() {
         onNewSession={() => handleNewSession(`palette-${Date.now()}`, activeCwd ?? "")}
         currentModel={null}
         onDuplicateSession={forkAvailable && selectedSession?.path ? () => { void handleDuplicateSession(selectedSession); } : undefined}
+        onOpenStatistics={() => router.push("/statistics")}
       />
       <SessionSidebar
         selectedSessionId={selectedSession?.id ?? null}
@@ -1911,6 +1919,28 @@ export function AppShell() {
                             )}
                           </div>
                         )}
+                        {/* The numbers above are this one chat. The whole
+                            history (every chat, provider and day) has its own
+                            page, offered even before any cost shows here. */}
+                        <Link
+                          href="/statistics"
+                          className="ui-focus-ring"
+                          style={{
+                            marginTop: 12,
+                            paddingTop: 11,
+                            borderTop: "1px solid var(--border)",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 6,
+                            fontSize: 12,
+                            fontWeight: 600,
+                            color: "var(--accent)",
+                            textDecoration: "none",
+                          }}
+                        >
+                          <ChartColumn size={13} aria-hidden="true" />
+                          {t("statistics.open")}
+                        </Link>
                       </>
                     );
                   })() : (

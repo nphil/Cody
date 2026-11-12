@@ -1,6 +1,7 @@
 import { getSessionOwner } from "../auth/session-owners";
 import type { UserRecord } from "../auth/users";
 import { getHarness } from "../harness";
+import { isRecord } from "../type-guards";
 import { ScheduledError } from "./errors";
 import { planQuotaForChat, readModelRef } from "./quota";
 import { fireItem, liveSchedulerDeps, wakeScheduledSender, type SchedulerDeps } from "./scheduler";
@@ -8,9 +9,11 @@ import { findItem, insertItem, isHandedOver, listItemsForSession, mutateItem, ty
 import { parseInstant } from "./time";
 import {
   QUOTA_GIVE_UP_MS,
+  QUOTA_UNKNOWN_RESET_GIVE_UP_MS,
   SCHEDULED_LIMITS,
   scheduledMessageBytes,
   type ScheduledItemView,
+  type ScheduledModelChoice,
   type ScheduledSource,
 } from "./types";
 
@@ -40,7 +43,8 @@ const MESSAGES = {
   time_too_far: `Scheduled times must be within ${SCHEDULED_LIMITS.maxDays} days.`,
   choose_one_time: "Give exactly one of a time and whenQuotaResets.",
   no_model: "Cody cannot tell which model this chat uses, so it cannot follow that model's quota.",
-  no_quota_reset: "Cody cannot see when this model's quota resets: its provider reports no reset time for it.",
+  no_quota_reset: "Cody cannot read this model's quota right now (its provider offers no usage reading), so it cannot wait for the quota to refill.",
+  invalid_model: "That model could not be read. Give its provider and its id (and, optionally, one of its reasoning levels).",
   too_many_for_chat: `This chat already has ${SCHEDULED_LIMITS.perChat} scheduled messages. Cancel one first.`,
   too_many_for_account: `This account already has ${SCHEDULED_LIMITS.perAccount} scheduled messages. Cancel some first.`,
   item_not_found: "That scheduled message does not exist.",
@@ -57,7 +61,8 @@ export function viewOf(item: StoredItem): ScheduledItemView {
     source: item.source,
     status: item.status,
     createdAt: new Date(item.createdAt).toISOString(),
-    ...(item.quota ? { quota: { label: item.quota.label, giveUpAt: new Date(item.quota.giveUpAt).toISOString() } } : {}),
+    ...(item.quota ? { quota: { label: item.quota.label, giveUpAt: new Date(item.quota.giveUpAt).toISOString(), ...(item.quota.unknownReset ? { unknownReset: true as const } : {}) } } : {}),
+    ...(item.model ? { model: item.model } : {}),
     ...(isHandedOver(item) ? { handedOver: true as const } : {}),
     ...(item.error ? { error: item.error } : {}),
   };
@@ -71,8 +76,10 @@ export function listScheduled(sessionId: string): ScheduledItemView[] {
 export interface ScheduleWhen {
   at?: unknown;
   whenQuotaResets?: unknown;
-  /** The chat's model as the composer shows it; absent for an agent, which is asked of the chat itself. */
+  /** The model (and reasoning level) the message is sent on — `{ provider, modelId, thinkingLevel? }`. A quota wait follows it. Absent: whatever the chat is on. */
   model?: unknown;
+  /** The chat's own model as the composer shows it, for a quota wait when no `model` was chosen; absent for an agent, which is asked of the chat itself. */
+  chatModel?: unknown;
 }
 
 /** Where a time with no offset is read, and whether one is allowed at all. */
@@ -112,10 +119,29 @@ function checkTime(value: unknown, reading: TimeReading, now: number): number {
   return Math.max(parsed.at, now);
 }
 
-/** A time, or "when the quota resets", resolved to the fields the store needs. */
+/**
+ * The model (and reasoning level) chosen for a message; null when none was. A
+ * malformed choice is refused here, not discovered when the message is due.
+ */
+function readModelChoice(value: unknown): ScheduledModelChoice | null {
+  if (value === undefined || value === null) return null;
+  const ref = readModelRef(value);
+  if (!ref) throw new ScheduledError("invalid_model", MESSAGES.invalid_model);
+  const level = isRecord(value) ? value.thinkingLevel : undefined;
+  if (level === undefined || level === null || level === "") return ref;
+  if (typeof level !== "string" || level.trim() === "") throw new ScheduledError("invalid_model", MESSAGES.invalid_model);
+  return { ...ref, thinkingLevel: level.trim() };
+}
+
+/**
+ * A time, or "when the quota resets", resolved to the fields the store needs.
+ * The quota that counts is the one of the model the message is SENT on: the
+ * `chosen` one, else the chat's own.
+ */
 async function resolveWhen(
   sessionId: string,
   when: ScheduleWhen,
+  chosen: ScheduledModelChoice | null,
   reading: TimeReading,
   deps: ServiceDeps,
 ): Promise<Pick<StoredItem, "mode" | "dueAt" | "quota">> {
@@ -125,9 +151,18 @@ async function resolveWhen(
   if (quota === timed) throw new ScheduledError("choose_one_time", MESSAGES.choose_one_time);
   if (!quota) return { mode: "at", dueAt: checkTime(when.at, reading, now) };
 
-  const plan = await deps.planQuota(sessionId, deps.engineId(), readModelRef(when.model), now);
+  const model = chosen ? { provider: chosen.provider, modelId: chosen.modelId } : readModelRef(when.chatModel);
+  const plan = await deps.planQuota(sessionId, deps.engineId(), model, now);
   if (!plan.ok) throw new ScheduledError(plan.code, MESSAGES[plan.code]);
   const { target } = plan;
+  if (target.resetsAt === null) {
+    // No reset to count down to (a person with every quota spent is exactly who waits on such a model): it waits for a read that says the model is usable, re-checking every few minutes, and a week at most.
+    return {
+      mode: "quota",
+      dueAt: now,
+      quota: { provider: target.provider, modelId: target.modelId, label: target.label, giveUpAt: now + QUOTA_UNKNOWN_RESET_GIVE_UP_MS, unknownReset: true },
+    };
+  }
   if (target.resetsAt > now + SCHEDULED_LIMITS.maxDays * DAY_MS) throw new ScheduledError("time_too_far", MESSAGES.time_too_far);
   return {
     mode: "quota",
@@ -149,8 +184,9 @@ export async function createScheduled(
   deps: ServiceDeps = DEFAULT_DEPS,
 ): Promise<ScheduledItemView> {
   const message = checkMessage(input.message);
-  const when = await resolveWhen(sessionId, input, reading, deps);
-  const inserted = insertItem({ sessionId, accountKey: accountKeyFor(sessionId, by.user), message, source: by.source, ...when }, deps.now());
+  const chosen = readModelChoice(input.model);
+  const when = await resolveWhen(sessionId, input, chosen, reading, deps);
+  const inserted = insertItem({ sessionId, accountKey: accountKeyFor(sessionId, by.user), message, source: by.source, ...when, ...(chosen ? { model: chosen } : {}) }, deps.now());
   if (!inserted.ok) throw new ScheduledError(inserted.code, MESSAGES[inserted.code], 409);
   wakeScheduledSender();
   return viewOf(inserted.item);
@@ -164,10 +200,11 @@ function ownItem(sessionId: string, itemId: string): StoredItem {
 }
 
 /**
- * Change a message's text and/or its time. A message that failed becomes pending
- * again (it is being given another chance on purpose). A new text, like a
- * second chance, gets a new delivery identity: the old one may have reached the
- * chat, or been refused for good.
+ * Change a message's text, time and/or model. A message that failed becomes
+ * pending again (it is being given another chance on purpose). A new text, like
+ * a second chance, gets a new delivery identity: the old one may have reached
+ * the chat, or been refused for good. A new model re-plans a quota wait, which
+ * follows the model the message is sent on.
  */
 export async function updateScheduled(
   sessionId: string,
@@ -176,9 +213,16 @@ export async function updateScheduled(
   reading: TimeReading,
   deps: ServiceDeps = DEFAULT_DEPS,
 ): Promise<ScheduledItemView> {
-  if (ownItem(sessionId, itemId).status === "sending") throw new ScheduledError("already_sending", MESSAGES.already_sending, 409);
+  const existing = ownItem(sessionId, itemId);
+  if (existing.status === "sending") throw new ScheduledError("already_sending", MESSAGES.already_sending, 409);
   const message = change.message === undefined ? undefined : checkMessage(change.message);
-  const when = change.at !== undefined || change.whenQuotaResets !== undefined ? await resolveWhen(sessionId, change, reading, deps) : null;
+  // undefined: the model stays; null: the choice is taken away; otherwise the new one.
+  const modelChange = change.model === undefined ? undefined : readModelChoice(change.model);
+  const chosen = modelChange === undefined ? existing.model ?? null : modelChange;
+  const retimed = change.at !== undefined || change.whenQuotaResets !== undefined;
+  let when: Pick<StoredItem, "mode" | "dueAt" | "quota"> | null = null;
+  if (retimed) when = await resolveWhen(sessionId, change, chosen, reading, deps);
+  else if (modelChange !== undefined && existing.mode === "quota") when = await resolveWhen(sessionId, { whenQuotaResets: true, chatModel: change.chatModel }, chosen, reading, deps);
 
   let sending = false;
   const updated = mutateItem(itemId, (item) => {
@@ -196,6 +240,8 @@ export async function updateScheduled(
       deliveryNo: textChanged || item.status === "failed" ? item.deliveryNo + 1 : item.deliveryNo,
     };
     if (when && !when.quota) delete next.quota;
+    if (modelChange === null) delete next.model;
+    else if (modelChange) next.model = modelChange;
     delete next.notBefore;
     delete next.firstAttemptAt;
     delete next.error;
@@ -252,7 +298,7 @@ export async function sendScheduledNow(
 
   await fireItem(itemId, armed.rev, deps, { manual: true });
   const after = findItem(itemId);
-  // A chat that only queued it behind a running reply is watched by the timer, which may be asleep with nothing else to do.
-  if (after && isHandedOver(after)) wakeScheduledSender();
+  // A chat that only queued it behind a running reply, or that must finish its reply before it can be switched to the message's model, is watched by the timer, which may be asleep with nothing else to do.
+  if (after && (isHandedOver(after) || after.status === "pending")) wakeScheduledSender();
   return after ? { delivered: false, item: viewOf(after) } : { delivered: true };
 }

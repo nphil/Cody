@@ -12,20 +12,20 @@ const BROWSER_TIME = { zone: "UTC", requireOffset: true } as const;
 
 type Params = { params: Promise<{ id: string; itemId: string }> };
 
-// PATCH /api/sessions/[id]/scheduled/[itemId] — change the text and/or the time; a failed message becomes pending again
+// PATCH /api/sessions/[id]/scheduled/[itemId] — change the text, the time and/or the model (`model: null` takes the choice away); a failed message becomes pending again
 export async function PATCH(request: Request, { params }: Params) {
   const { id, itemId } = await params;
   const chat = await requireScheduledChat(id, request);
   if ("response" in chat) return chat.response;
   try {
     const body: unknown = await parseJsonWithinLimit(request, MAX_SCHEDULED_BODY_BYTES);
-    if (!isRecord(body) || (body.message === undefined && body.at === undefined && body.whenQuotaResets === undefined)) {
-      return jsonError("Send a new message and/or a new time.", 400, "invalid_body");
+    if (!isRecord(body) || (body.message === undefined && body.at === undefined && body.whenQuotaResets === undefined && body.model === undefined)) {
+      return jsonError("Send a new message, a new time and/or a new model.", 400, "invalid_body");
     }
     const item = await updateScheduled(
       id,
       itemId,
-      { message: body.message, at: body.at, whenQuotaResets: body.whenQuotaResets, model: body.model },
+      { message: body.message, at: body.at, whenQuotaResets: body.whenQuotaResets, model: body.model, chatModel: body.chatModel },
       BROWSER_TIME,
     );
     return NextResponse.json({ item }, { headers: NO_STORE });

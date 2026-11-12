@@ -5,7 +5,8 @@ import { Ban, ChevronRight, Info, Loader2, Send } from "lucide-react";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { useI18n } from "@/lib/i18n";
-import { formatCost, formatDuration, formatTokens, shortModel } from "@/lib/subagent-format";
+import { formatCost, formatDuration, formatTokens, shortModel, subagentContextGauge } from "@/lib/subagent-format";
+import { useHelperLimitConfig } from "@/hooks/useHelperLimitConfig";
 import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
 import { MarkdownBody } from "./MarkdownBody";
 import { BLOCK_LABEL_STYLE, SubagentTranscript, TEXT_BUTTON_STYLE } from "./SubagentTranscript";
@@ -557,6 +558,7 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
   onClose: () => void;
 }) {
   const { t } = useI18n();
+  const helperConfig = useHelperLimitConfig(subagent !== null);
   const reducedMotion = usePrefersReducedMotion();
   const cancelUnsupported = useControlUnsupported("cancel");
   const steerUnsupported = useControlUnsupported("steer");
@@ -673,6 +675,11 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
         ...(latestThinkingEvent ? { thinkingLevel: latestThinkingEvent.thinkingLevel ?? progress?.thinkingLevel } : {}),
       }
     : progress;
+  const contextGauge = subagentContextGauge(progress, agent, helperConfig);
+  const contextTitle = contextGauge
+    ? t("chatWindow.contextGauge", { used: contextGauge.used, total: contextGauge.total })
+      + (contextGauge.limit ? ` — ${t("chatWindow.contextLimited", { percent: contextGauge.limit.percent, window: contextGauge.limit.window })}` : "")
+    : "";
   const historyTokens = formatTokens(progress?.tokens);
   const historyMeta = subagent?.source === "history"
     ? [
@@ -757,6 +764,16 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
                       to: shortModel(subagent.modelHandoff.to) ?? subagent.modelHandoff.to,
                       time: new Date(subagent.modelHandoff.at).toLocaleTimeString(),
                     })}
+                  </div>
+                )}
+                {contextGauge && (
+                  <div
+                    data-testid="subagent-context-gauge"
+                    data-subagent-metric-warn={contextGauge.limit ? "true" : undefined}
+                    title={contextTitle}
+                    style={{ fontSize: 10.5, color: contextGauge.limit ? "var(--status-warning)" : "var(--text-dim)", fontFamily: "var(--font-mono)", marginTop: 2 }}
+                  >
+                    {contextGauge.used}/{contextGauge.total}
                   </div>
                 )}
                 {historyMeta && (

@@ -14,8 +14,8 @@ import { INSTANCE_RECIPIENT_KEY, readNotificationPrefs } from "./store";
  *    accounts, so whoever is looking is the administrator), else to every
  *    administrator: an unowned chat is visible to all accounts, so the people
  *    answerable for the instance hear about it.
- *  - Account-wide events (quota) go to everyone who can configure them: the
- *    instance record on an open instance, else every account.
+ *  - Account-wide events (quota, a provider login that ended) go to everyone who
+ *    can configure them: the instance record on an open instance, else every account.
  */
 
 export interface NotificationRecipient {

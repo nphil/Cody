@@ -26,6 +26,10 @@ export interface DiskSettings {
   /** The same for top-level DIRECTORIES of `$HOME/tmp` (files there are kept:
    *  helper scripts and tokens live there). */
   homeTmpIdleHours: number;
+  /** Inside `$HOME/tmp` only: a directory named like a test run's leftover
+   *  (a stale process id in the name, or a mkdtemp suffix) is swept after this
+   *  many hours instead, under the same safety checks. */
+  testLeftoverIdleHours: number;
   /** Above this percentage used on the temp or data filesystem, the janitor
    *  also removes the scratch of the longest-idle sessions first. */
   budgetPercent: number;
@@ -39,6 +43,7 @@ export const DISK_SETTINGS_DEFAULTS: Readonly<DiskSettings> = Object.freeze({
   scratchIdleDays: 3,
   tmpIdleHours: 24,
   homeTmpIdleHours: 72,
+  testLeftoverIdleHours: 6,
   budgetPercent: 70,
   checkpointMaxGb: 5,
   checkpointMaxAgeDays: 14,
@@ -50,6 +55,7 @@ export const DISK_SETTINGS_BOUNDS: Readonly<Record<keyof DiskSettings, readonly 
   scratchIdleDays: [1, 90],
   tmpIdleHours: [6, 720],
   homeTmpIdleHours: [24, 2160],
+  testLeftoverIdleHours: [1, 2160],
   budgetPercent: [40, 95],
   checkpointMaxGb: [1, 500],
   checkpointMaxAgeDays: [1, 365],

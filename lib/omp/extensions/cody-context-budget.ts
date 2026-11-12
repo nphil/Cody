@@ -1,5 +1,6 @@
-// Loaded by omp itself (Bun), not by Cody's bundler: keep this file free of
-// Cody imports so it resolves from any install location.
+// Loaded by omp itself (Bun), not by Cody's bundler: its only Cody import is
+// the shared limit rule (lib/helper-memory-limit.ts, a relative path inside the
+// package that also holds this file), which has no dependencies of its own.
 //
 // Tells every SUBAGENT of a main chat, in one line of its system prompt, that
 // its history is summarised automatically at a known size, so it works in
@@ -18,6 +19,7 @@
 import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { formatLimitTokens, limitTokens, resolveHelperLimit, type HelperLimit } from "../../helper-memory-limit";
 
 export interface Deps {
   /** Changes whenever the config file does (its mtime); a constant when it cannot be told. */
@@ -32,46 +34,6 @@ type OmpApi = {
   on(event: "before_agent_start", handler: (event: { systemPrompt?: unknown }, ctx: Context) => { systemPrompt?: string[] }): void;
 };
 
-/** A limit as written in config.yml: a token count, or a share of the window. */
-export type Limit = { tokens: number } | { percent: number };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/** omp's own rule for an override: a positive integer, or "N%" with N in (0, 100]. Anything else is not a limit. */
-export function parseLimit(value: unknown): Limit | null {
-  if (typeof value === "number") return Number.isInteger(value) && value > 0 ? { tokens: value } : null;
-  if (typeof value !== "string") return null;
-  const match = /^\s*(\d+(?:\.\d+)?)\s*%\s*$/.exec(value);
-  if (!match) return null;
-  const percent = Number(match[1]);
-  return percent > 0 && percent <= 100 ? { percent } : null;
-}
-
-/** The limit omp applies to `agent`: its own override, else the root tokens, else the root percent. */
-export function resolveLimit(config: unknown, agent: string): Limit | null {
-  if (!isRecord(config)) return null;
-  const task = isRecord(config.task) ? config.task : null;
-  const overrides = task && isRecord(task.agentCompactionThresholdOverrides) ? task.agentCompactionThresholdOverrides : null;
-  const own = overrides ? parseLimit(overrides[agent]) : null;
-  if (own) return own;
-  const compaction = isRecord(config.compaction) ? config.compaction : null;
-  if (!compaction) return null;
-  const tokens = compaction.thresholdTokens;
-  if (typeof tokens === "number" && tokens > 0) return { tokens: Math.floor(tokens) };
-  const percent = compaction.thresholdPercent;
-  if (typeof percent === "number" && percent > 0 && percent <= 100) return { percent };
-  return null;
-}
-
-/** 200000 -> "200k", 1000000 -> "1M", 272000 -> "272k". */
-export function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${Math.round(n / 100_000) / 10}M`;
-  if (n >= 1000) return `${Math.round(n / 1000)}k`;
-  return String(n);
-}
-
 /** How the line starts, so a stale one is recognised when the config has changed since. */
 const LINE_PREFIX = "Context budget: your history is summarised automatically";
 
@@ -79,16 +41,16 @@ const ADVICE =
   "Work in steps that each leave a clear result. When the context-window reminder arrives, bring context_notes up to date (task, decisions, changed files, evidence, exact next steps) before continuing, and after a summary check your notes before re-reading files or re-running work.";
 
 /** The one line. `window` is the model's context window in tokens, when known. */
-export function budgetLine(limit: Limit | null, window: number | undefined): string {
+export function budgetLine(limit: HelperLimit | null, window: number | undefined): string {
   const known = typeof window === "number" && Number.isFinite(window) && window > 1 ? Math.floor(window) : null;
+  const tokens = limit && known ? limitTokens(limit, known) : null;
   let clause = "";
-  if (limit && "tokens" in limit) {
-    const tokens = known ? Math.min(limit.tokens, known - 1) : limit.tokens;
-    clause = ` at about ${formatTokens(tokens)} tokens${known ? ` (this model's window is ${formatTokens(known)} tokens)` : ""}`;
+  if (limit?.mode === "tokens") {
+    clause = ` at about ${formatLimitTokens(tokens ?? limit.value)} tokens${known ? ` (this model's window is ${formatLimitTokens(known)} tokens)` : ""}`;
   } else if (limit) {
-    clause = known
-      ? ` at about ${formatTokens(Math.round((known * limit.percent) / 100))} tokens (${limit.percent}% of this model's ${formatTokens(known)}-token window)`
-      : ` at about ${limit.percent}% of this model's context window`;
+    clause = known && tokens !== null
+      ? ` at about ${formatLimitTokens(tokens)} tokens (${limit.value}% of this model's ${formatLimitTokens(known)}-token window)`
+      : ` at about ${limit.value}% of this model's context window`;
   }
   return `${LINE_PREFIX}${clause}. ${ADVICE}`;
 }
@@ -107,7 +69,7 @@ export function createContextBudget(deps: Deps): (pi: OmpApi) => void {
         config = null;
       }
     }
-    return budgetLine(resolveLimit(config, agent), window);
+    return budgetLine(resolveHelperLimit(config, agent), window);
   };
 
   return function codyContextBudget(pi: OmpApi): void {

@@ -30,6 +30,10 @@ import { removeEngineSession, upsertEngineSession, type EngineSessionRow } from 
 import { forgetSessionLocalRouting } from "@/lib/local-model-routing";
 import { forgetSessionPreset } from "@/lib/model-presets/overlay";
 import { removeSessionItems } from "@/lib/scheduled/store";
+import { engineCrashRow, withEngineCrashRows } from "@/lib/engine-crash";
+import { readEngineCrashes } from "@/lib/engine-crash-log";
+import { applyPlanOverlay } from "@/lib/plan-keeper/fold";
+import { readPlanOverlay } from "@/lib/plan-keeper/overlay";
 import type { AgentMessage } from "@/lib/types";
 
 // BranchNavigator still traverses recursively, so keep the response tree shallow.
@@ -202,6 +206,12 @@ async function engineSessionResponse(
   });
 }
 
+/** The persistent lines engine crashes left in this chat (lib/engine-crash-log.ts), laid among the messages by time. */
+function withCrashRows<C extends { messages: AgentMessage[]; entryIds: string[] }>(sessionId: string, context: C): C {
+  const merged = withEngineCrashRows<AgentMessage>(context.messages, context.entryIds, readEngineCrashes(sessionId), engineCrashRow);
+  return merged.messages === context.messages ? context : { ...context, ...merged };
+}
+
 export async function GET(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -286,13 +296,18 @@ export async function GET(
       }
     }
 
+    // The session file never holds a task the plan keeper checked off (the
+    // engine keeps that in memory), so the keeper's own record supplies it —
+    // otherwise every reload would show those tasks unfinished again.
+    const planOverlay = readPlanOverlay(header.id);
     return NextResponse.json({
       sessionId: id,
       filePath,
       info,
       leafId,
       tree,
-      context,
+      context: withCrashRows(id, { ...context, todoPhases: applyPlanOverlay(context.todoPhases, planOverlay) }),
+      ...(planOverlay ? { planOverlay } : {}),
       ...(agent ? { agent } : {}),
     });
   } catch (error) {

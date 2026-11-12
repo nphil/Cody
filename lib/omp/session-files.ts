@@ -631,6 +631,11 @@ export interface OmpSessionInfo {
   parentSessionPath?: string;
   created: Date;
   modified: Date;
+  /** Time of the newest user message or assistant reply, read from the tail
+   *  window. Unlike `modified` (file mtime) it is not bumped by title rewrites
+   *  or other bookkeeping appends. Undefined when the tail holds no such
+   *  message (or the scan skipped the tail); callers fall back to `modified`. */
+  lastActiveAt?: Date;
   messageCount: number;
   size: number;
   firstMessage: string;
@@ -638,7 +643,11 @@ export interface OmpSessionInfo {
 }
 
 const SESSION_LIST_PREFIX_BYTES = 4096;
-const SESSION_LIST_SUFFIX_BYTES = 32_768;
+const SESSION_LIST_SUFFIX_BYTES = 65_536;
+/** Widest tail read when the normal tail holds no user/assistant message (a
+ *  chat ending in huge tool results). Only such files pay for it, once per
+ *  (size, mtime) version. */
+const SESSION_LIST_LAST_ACTIVE_WIDE_BYTES = 1_048_576;
 /**
  * omp 18.7 persists an `xdev-mount-notice` for the host tools Cody registers
  * at spawn — before the first user message, ~3 KB with Cody's roster — which
@@ -791,6 +800,41 @@ function deriveSessionStatus(suffix: string): SessionStatus {
   return "unknown";
 }
 
+const LAST_ACTIVE_HEAD_PATTERN = /^\{"type":"message"[^\n]{0,400}?"timestamp":"([^"]+)","message":\{"role":"(user|assistant)"/;
+
+/**
+ * Timestamp of the newest user message or assistant reply in a tail window.
+ * Message entries lead with type/id/parentId/timestamp/role, so the head of a
+ * line is enough (the dated line may itself be cut off at its end); a line
+ * without that head layout falls back to a full parse.
+ * Tool results, titles and other bookkeeping entries do not count.
+ */
+function lastActiveFromTail(suffix: string): Date | undefined {
+  if (!suffix) return undefined;
+  const lines = suffix.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (line.charCodeAt(0) !== 123) continue;
+    let timestamp: string | undefined;
+    const head = LAST_ACTIVE_HEAD_PATTERN.exec(line);
+    if (head) {
+      timestamp = head[1];
+    } else {
+      try {
+        const entry = JSON.parse(line) as { type?: string; timestamp?: unknown; message?: { role?: string } };
+        if (entry.type === "message" && (entry.message?.role === "user" || entry.message?.role === "assistant")
+          && typeof entry.timestamp === "string") timestamp = entry.timestamp;
+      } catch {
+        continue;
+      }
+    }
+    if (!timestamp) continue;
+    const date = new Date(timestamp);
+    if (!Number.isNaN(date.getTime())) return date;
+  }
+  return undefined;
+}
+
 interface SessionListHeader {
   id: string;
   cwd?: string;
@@ -896,6 +940,10 @@ export function scanSessionInfo(filePath: string, withStatus = true): OmpSession
       SESSION_LIST_PREFIX_BYTES,
       withStatus ? SESSION_LIST_SUFFIX_BYTES : 0,
     );
+    let lastActiveAt = withStatus ? lastActiveFromTail(suffix) : undefined;
+    if (withStatus && !lastActiveAt && size > suffix.length) {
+      lastActiveAt = lastActiveFromTail(readTextSlices(filePath, 0, SESSION_LIST_LAST_ACTIVE_WIDE_BYTES)[1]);
+    }
     let content = prefix;
     let entries = parseJsonlLenient<Record<string, unknown>>(content);
     const header = parseSessionListHeader(content, entries);
@@ -938,6 +986,7 @@ export function scanSessionInfo(filePath: string, withStatus = true): OmpSession
       parentSessionPath: header.parentSession,
       created: new Date(header.timestamp ?? ""),
       modified: mtime,
+      lastActiveAt,
       messageCount,
       size,
       firstMessage: firstMessage || "(no messages)",

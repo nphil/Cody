@@ -24,7 +24,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
   return NextResponse.json(body, { headers: NO_STORE });
 }
 
-// POST /api/sessions/[id]/scheduled — schedule a message: { message, at } or { message, whenQuotaResets: true, model? }
+// POST /api/sessions/[id]/scheduled — schedule a message: { message, at, model? } or { message, whenQuotaResets: true, model?, chatModel? } (`model`: the model it is sent on, whose quota a wait follows; `chatModel`: the chat's own, for a wait when no `model` is chosen)
 export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const chat = await requireScheduledChat(id, request);
@@ -34,7 +34,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     if (!isRecord(body)) return jsonError("Send a JSON object.", 400, "invalid_body");
     const item = await createScheduled(
       id,
-      { message: body.message, at: body.at, whenQuotaResets: body.whenQuotaResets, model: body.model },
+      { message: body.message, at: body.at, whenQuotaResets: body.whenQuotaResets, model: body.model, chatModel: body.chatModel },
       BROWSER_TIME,
       { source: "user", user: chat.user },
     );

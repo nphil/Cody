@@ -74,7 +74,8 @@ export function getNotificationsSecretPath(): string {
 }
 
 /** What the quota watcher has already announced, so a window that stays past
- * its threshold is announced once (lib/notifications/quota-watch.ts). */
+ * its threshold, or a login that stays ended, is announced once
+ * (lib/notifications/quota-watch.ts). */
 export function getNotificationsStatePath(): string {
   return path.join(getAccountsDir(), "notifications-state.json");
 }

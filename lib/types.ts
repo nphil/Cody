@@ -425,6 +425,9 @@ export interface SessionInfo {
   name?: string;
   created: string;
   modified: string;
+  /** ISO time of the newest user message or assistant reply. Absent when the
+   *  server could not read one; order by `modified` then (see lastActiveOf). */
+  lastActiveAt?: string;
   messageCount: number;
   firstMessage: string;
   parentSessionId?: string; // set if this session was forked from another

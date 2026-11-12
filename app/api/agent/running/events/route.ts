@@ -1,3 +1,6 @@
+import { getRequestUser } from "@/lib/auth/guard";
+import { canAccessSession } from "@/lib/auth/session-owners";
+import { subscribeEngineCrashes } from "@/lib/engine-crash-events";
 import { getHarness } from "@/lib/harness";
 import { getRunningRpcSessionSnapshot, subscribeRunningSessions } from "@/lib/rpc-manager";
 
@@ -54,6 +57,16 @@ export async function GET(req: Request) {
           // controller already closed
         }
       });
+      // An engine that stopped on its own: every open page hears it, whichever chat it is showing. Only the chats this account may see.
+      const user = getRequestUser(req);
+      const unsubscribeCrashes = subscribeEngineCrashes(({ sessionId, title, notice }) => {
+        if (!canAccessSession(sessionId, user)) return;
+        try {
+          encode({ type: "engine_crashed", sessionId, title, reason: notice.reason, detail: notice.detail, recovery: notice.recovery, disk: notice.disk, quota: notice.quota, code: notice.code, signal: notice.signal, at: notice.at });
+        } catch {
+          // controller already closed
+        }
+      });
 
       // Initial snapshot so the client renders the correct state immediately.
       // (A duplicate frame here is harmless: the client just sets the same set.)
@@ -77,6 +90,7 @@ export async function GET(req: Request) {
       const cleanup = () => {
         clearInterval(heartbeat);
         unsubscribe();
+        unsubscribeCrashes();
         try { controller.close(); } catch { /* already closed */ }
       };
       streamCleanup = cleanup;

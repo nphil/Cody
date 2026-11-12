@@ -89,6 +89,12 @@ export interface ProviderRow {
   reason?: string;
   /** Switched off in the engine's own config (omp `disabledProviders`). */
   disabled?: boolean;
+  /** At least one stored account lost its login: the provider ended it and
+   * omp disabled the credential (lib/usage/credential-health.ts). Not part of
+   * `connected`, which says the provider is usable right now — with every
+   * account signed out omp reports nothing usable at all, yet the row must
+   * stay in the list so the owner can find it and sign in again. */
+  signedOut?: boolean;
   /** Position in the engine's provider preference order, when listed. */
   order?: number;
   /** A regional / plan variant of another row (collapsed in the picker). */
@@ -240,6 +246,7 @@ function finish(row: ProviderRow, input: BuildProviderDirectoryInput, awaitsLogi
     .sort((a, b) => precedenceOf(a) - precedenceOf(b))[0] ?? row.methods[0];
   for (const method of row.methods) method.winning = method === winner;
   const connected = row.methods.some((method) => method.state === "connected") || (row.modelCount ?? 0) > 0;
+  const signedOut = row.methods.some((method) => method.accounts?.some((account) => account.state === "signed_out"));
   const pending = Boolean(input.pending?.counts && row.modelCount === null) || Boolean(awaitsLogins && input.pending?.logins && input.logins === null);
   return {
     ...row,
@@ -247,6 +254,7 @@ function finish(row: ProviderRow, input: BuildProviderDirectoryInput, awaitsLogi
     ...(pending ? { pending: true } : {}),
     ...(row.modelCount === null && input.countsReason ? { reason: input.countsReason } : {}),
     ...(disabled ? { disabled: true } : {}),
+    ...(signedOut ? { signedOut: true } : {}),
     ...(order !== undefined ? { order } : {}),
     ...(POPULAR_ORDER.includes(row.id) ? { popular: true } : {}),
   };
@@ -380,18 +388,20 @@ export function buildProviderDirectory(input: BuildProviderDirectoryInput): Prov
   return rows.map((row) => finish(row, input, awaitingLogins.has(row.id)));
 }
 
-/** Rows the Connected section shows, status-first: signed in, key saved in
- * Cody, key from the container, then local / custom; popular vendors before
- * the rest within a status, then by name. When the engine keeps a provider
- * order, listed rows come first in that order. */
+/** Rows the Connected section shows, status-first: a signed-out login first
+ * (it needs the owner), then signed in, key saved in Cody, key from the
+ * container, then local / custom; popular vendors before the rest within a
+ * status, then by name. When the engine keeps a provider order, listed rows
+ * come first in that order. A row whose every account lost its login is not
+ * `connected` but is still listed: it is where the owner signs in again. */
 export function sortConnectedRows(rows: readonly ProviderRow[]): ProviderRow[] {
   const rank = (row: ProviderRow): number => {
     const winner = row.methods.find((method) => method.winning);
-    if (!winner || winner.state !== "connected") return METHOD_PRECEDENCE.length;
+    if (!winner || winner.state !== "connected") return row.signedOut ? -1 : METHOD_PRECEDENCE.length;
     return precedenceOf(winner);
   };
   return [...rows]
-    .filter((row) => row.connected)
+    .filter((row) => row.connected || row.signedOut)
     .sort((a, b) => {
       const ao = a.order ?? Number.MAX_SAFE_INTEGER;
       const bo = b.order ?? Number.MAX_SAFE_INTEGER;
@@ -406,10 +416,11 @@ export function sortConnectedRows(rows: readonly ProviderRow[]): ProviderRow[] {
     });
 }
 
-/** The group's rows for the Add picker: not yet connected, variants folded
- * under their card, popular first, then by name. */
+/** The group's rows for the Add picker: not yet connected (a signed-out
+ * provider is already in the Connected list), variants folded under their
+ * card, popular first, then by name. */
 export function pickerRowsForGroup(rows: readonly ProviderRow[], group: ProviderGroup): Array<{ row: ProviderRow; variants: ProviderRow[] }> {
-  const candidates = rows.filter((row) => !row.connected && row.group === group);
+  const candidates = rows.filter((row) => !row.connected && !row.signedOut && row.group === group);
   const cards = candidates.filter((row) => !row.variantOf || !candidates.some((other) => other.id === row.variantOf));
   return cards
     .map((row) => ({ row, variants: candidates.filter((other) => other.variantOf === row.id) }))

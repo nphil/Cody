@@ -57,6 +57,7 @@ import { formatResetTime } from "@/lib/format";
 import { deriveSlowModeState, describeUsageLimit, readUsageLimit, sameUsageLimit, usageLimitStageToAnnounce, type SlowModeState } from "@/lib/slow-mode-state";
 import { describeEngineError, errorDedupeKey, type ErrorKind } from "@/lib/error-text";
 import { shelfItemFor } from "@/lib/devices/operation-notices";
+import { engineCrashRow, readEngineCrashNotice } from "@/lib/engine-crash";
 import { useDeviceTrustRequests } from "@/hooks/useDeviceTrustRequests";
 import { useSideQuestions, type SideQuestions } from "@/hooks/useSideQuestions";
 import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
@@ -80,6 +81,13 @@ import {
   type SmartModelProvenance,
   type ThinkingLevelChangeSource,
 } from "@/hooks/session-model-provenance";
+import {
+  agentSwitchNotice,
+  agentSwitchSettledByLevel,
+  agentSwitchSettledByModel,
+  readAgentModelSwitch,
+  type AgentModelSwitch,
+} from "@/hooks/agent-model-switch";
 import { newSessionSpawnPlan } from "@/hooks/session-preset-state";
 import {
   classifyFallbackReason,
@@ -143,6 +151,10 @@ export interface SessionData {
     /** The goal the session file leaves it in (lib/goal-state.ts), read when no engine is running. */
     goal?: unknown;
   };
+  /** The plan keeper's overlay for this chat (lib/plan-keeper/overlay.ts), so a
+   * chat with no engine running still shows its labels and summaries. Absent
+   * when the keeper never touched it. */
+  planOverlay?: unknown;
 }
 
 interface StreamingState {
@@ -390,7 +402,20 @@ function readPlanOverlay(value: unknown): PlanOverlay | null {
   const autoCompleted = Array.isArray(value.autoCompleted)
     ? value.autoCompleted.filter((entry): entry is string => typeof entry === "string")
     : [];
-  return { subtasks, autoCompleted, updatedAt: asNumber(value.updatedAt) ?? 0 };
+  const labels: PlanOverlay["labels"] = {};
+  if (isRecord(value.labels)) {
+    for (const [content, label] of Object.entries(value.labels)) {
+      if (typeof label === "string" && label.trim()) labels[content] = label;
+    }
+  }
+  const folds: PlanOverlay["folds"] = {};
+  if (isRecord(value.folds)) {
+    for (const [key, fold] of Object.entries(value.folds)) {
+      const count = isRecord(fold) ? asNumber(fold.count) : undefined;
+      if (isRecord(fold) && typeof fold.summary === "string" && fold.summary.trim() && count !== undefined) folds[key] = { summary: fold.summary, count };
+    }
+  }
+  return { subtasks, autoCompleted, labels, folds, updatedAt: asNumber(value.updatedAt) ?? 0 };
 }
 
 export type SessionPromptCapabilities = { imageSupported: boolean };
@@ -1274,6 +1299,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // Recent explicit picks suppress bare model_changed markers for every
   // command still in flight, not just the most recently chosen model.
   const recentUserModelPicksRef = useRef<Array<{ provider: string; modelId: string; at: number }>>([]);
+  // The switch the agent's `switch_model` tool announced (cody_agent_model_switch)
+  // and the engine has not yet reported. It lets the model_changed that follows
+  // read as "switched by the agent, at your request" — not as an engine fallback —
+  // and leave Smart the way a manual pick does. Expires after AGENT_SWITCH_WINDOW_MS.
+  const agentModelSwitchRef = useRef<AgentModelSwitch | null>(null);
   // Previous authoritative model, for naming the "from" side of a bare
   // model_changed that arrives without any fallback attribution.
   const lastAuthoritativeModelRef = useRef<{ provider: string; modelId: string } | null>(null);
@@ -1411,6 +1441,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (next) persistSmartModel(next);
       else clearPersistedSmartModel(sessionId);
     }, []);
+  // The engine has carried out a switch the agent's `switch_model` tool made at
+  // the user's request. Like a manual pick it leaves Smart; unlike an engine
+  // fallback it raises no marker — it says once, in the chat, what happened.
+  const settleAgentModelSwitch = useCallback((sessionId: string, switched: AgentModelSwitch) => {
+    agentModelSwitchRef.current = null;
+    pendingSmartSpawnRef.current = null;
+    clearSmartModelProvenance(sessionId, true);
+    setAutoModelSwitch(null);
+    const notice = agentSwitchNotice(switched, switched.thinkingLevel ? thinkingLevelLabel(switched.thinkingLevel, translate) : "");
+    addNoticeRef.current({ type: "info", message: translate(notice.key, notice.values) });
+  }, [clearSmartModelProvenance]);
   // Guards stale branch/leaf context responses: two rapid navigate clicks must
   // not let the older response overwrite the newer branch's messages.
   const contextRequestSeqRef = useRef(0);
@@ -1852,6 +1893,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       lastAuthoritativeModelRef.current = { provider: model.provider, modelId: model.modelId };
       const resolvedModel = { provider: model.provider, modelId: model.modelId };
       settlePendingModelSwitch(sessionId, resolvedModel);
+      // A switch the agent made at the user's request has now landed: it leaves
+      // Smart (below finds none left to advance) instead of looking engine-made.
+      const agentSwitch = agentSwitchSettledByModel(agentModelSwitchRef.current, sessionId, resolvedModel, Date.now());
+      if (sessionId && agentSwitch) settleAgentModelSwitch(sessionId, agentSwitch);
       if (!assistantProviderCallRef.current) dispatchPendingModelSwitchRef.current?.();
       // A Smart new session's first resolved model is explicit Smart provenance,
       // even when ensure_session sent the configured default as a concrete model.
@@ -1866,7 +1911,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         prev && (prev.provider !== model.provider || prev.modelId !== model.modelId) ? null : prev
       );
       return true;
-    }, [setSmartModelProvenance, settlePendingModelSwitch, updateSessionControlScope]);
+    }, [setSmartModelProvenance, settleAgentModelSwitch, settlePendingModelSwitch, updateSessionControlScope]);
 
   // Lightweight live-state sync after composer commands. A command against an
   // idle-disposed session restarts omp, which re-resolves the model from the
@@ -2098,6 +2143,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setMessages(d.context.messages);
       setEntryIds(d.context.entryIds ?? []);
       setTodoPhases(d.context.todoPhases ?? []);
+      if (d.planOverlay !== undefined) setPlanOverlay(readPlanOverlay(d.planOverlay) ?? null);
       persistedGoal = parseGoalModeState(d.context.goal);
       // Child-transcript usage for the headline. The roster is NOT seeded
       // from history — it is a live view of the current run only.
@@ -3665,6 +3711,30 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (event.imagesDropped === true) addNotice({ type: "warning", message: translate("stopQueue.imagesDropped") });
         break;
       }
+      case "cody_agent_model_switch": {
+        // The agent's `switch_model` tool is about to move this chat onto another
+        // model and/or reasoning level, because the user asked it to. The server
+        // sends this just BEFORE it tells the engine, so the model_changed /
+        // thinking_level_changed that follow are read as what they are: the
+        // composer's own kind of switch (an echo, leaving Smart, no fallback
+        // marker), not the engine acting on its own.
+        const now = Date.now();
+        const announced = readAgentModelSwitch(event, sessionIdRef.current, now);
+        if (!announced) break;
+        agentModelSwitchRef.current = announced;
+        if (announced.modelChanges) {
+          recentUserModelPicksRef.current = [
+            ...recentUserModelPicksRef.current.filter((recent) => now - recent.at < 15_000),
+            { provider: announced.provider, modelId: announced.modelId, at: now },
+          ].slice(-4);
+        }
+        // Snapshots read before the switch must not win over what it brings.
+        beginAuthoritativeModelSync();
+        // The engine's echo of an explicit level carries no `configured` field,
+        // so the selector asked for is recorded up front (as the composer does).
+        if (announced.thinkingLevel) thinkingConfiguredAutoRef.current = announced.thinkingLevel === "auto";
+        break;
+      }
       case "cody_session_moved": {
         // omp moved this live session to a NEW file under a NEW id (another
         // process had the original open for writing) and the server has
@@ -3826,6 +3896,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // omp moved this live session to a new file (cody_session_moved
           // adopts the new id): worth saying, but not an engine failure.
           addNotice({ type: "info", message });
+        } else if (event.reason === "engine_exit" && readEngineCrashNotice(event.crash)) {
+          // The engine stopped on its own. The words (why, and what happens next) are a line that stays in the chat, like the one a reload brings back, not a notice on the shelf that goes away.
+          const crash = readEngineCrashNotice(event.crash);
+          if (crash) {
+            const row = engineCrashRow(crash);
+            setMessages((prev) => (prev.some((m) => m.role === "custom" && m.customType === row.customType && m.timestamp === row.timestamp) ? prev : [...prev, row]));
+          }
         } else if (level === "error" || level === "warning") {
           // This is the one choke point every ACP engine's raw notice text
           // (`lib/harness/acp-session.ts`, e.g. "Claude Code: Error: 429
@@ -3873,9 +3950,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         else if (text) addNotice({ type: "info", message: text });
         break;
       }
-      case "thinking_level_changed":
+      case "thinking_level_changed": {
         adoptThinkingLevel(event.thinkingLevel as string | undefined, event.configured as string | undefined);
+        // The agent changed only this chat's reasoning level, at the user's request:
+        // no model report will follow, so the level echo is what lands it.
+        const levelSid = sessionIdRef.current;
+        const levelSwitch = agentSwitchSettledByLevel(agentModelSwitchRef.current, levelSid, Date.now());
+        if (levelSid && levelSwitch) settleAgentModelSwitch(levelSid, levelSwitch);
         break;
+      }
       case "mode_changed": {
         // The agent moved itself (a command typed at it, an escalation after a
         // refusal) or echoed our own set_mode — the picker follows either way.
@@ -4383,7 +4466,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as unknown as IncomingExtensionUiRequest);
         break;
     }
-  }, [addNotice, addEngineErrorNotice, announceClaudeCreditsReturn, announceFallbackApplied, announceFallbackSucceeded, applyAuthoritativeModel, adoptFastModeState, adoptGoalState, adoptThinkingLevel, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities, applyOutboxDelivery, beginAuthoritativeModelSync, cancelHeldPlanLimitNotice, dispatchPendingModelSwitch, dropRetryBanner, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, holdPlanLimitNotice, holdRetryBanner, holdTailForReader, loadSession, maybeAutoNameSession, mergeSubagents, noteModelUnrestorable, onAgentEnd, onPreviewUrlsSeen, onSessionForked, opts.chatInputRef, publishRewoundDraft, reconcileAgentState, refreshTodoState, resetSubagentActivityState]);
+  }, [addNotice, addEngineErrorNotice, announceClaudeCreditsReturn, announceFallbackApplied, announceFallbackSucceeded, applyAuthoritativeModel, adoptFastModeState, adoptGoalState, adoptThinkingLevel, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities, applyOutboxDelivery, beginAuthoritativeModelSync, cancelHeldPlanLimitNotice, dispatchPendingModelSwitch, dropRetryBanner, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, holdPlanLimitNotice, holdRetryBanner, holdTailForReader, loadSession, maybeAutoNameSession, mergeSubagents, noteModelUnrestorable, onAgentEnd, onPreviewUrlsSeen, onSessionForked, opts.chatInputRef, publishRewoundDraft, reconcileAgentState, refreshTodoState, resetSubagentActivityState, settleAgentModelSwitch]);
   handleAgentEventRef.current = handleAgentEvent;
 
   /** Shared recovery for a send that never actually started a run: undo the

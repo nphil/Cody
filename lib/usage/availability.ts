@@ -121,7 +121,7 @@ export function resolveModelAvailability(
 		// difference between "rotate" and "this provider is gone until reset".
 		const ranked = rankProviderAccounts(accounts, provider, modelId);
 		availability.allAccountsExhausted = ranked.length > 0
-			&& ranked.every((rank) => rank.state === "limited" || rank.state === "disabled");
+			&& ranked.every((rank) => rank.state === "limited" || rank.state === "signed_out" || rank.state === "disabled");
 	}
 	return availability;
 }

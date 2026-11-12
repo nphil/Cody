@@ -326,6 +326,11 @@ export async function removeScratchDir(dir: string): Promise<boolean> {
   } catch {
     // An index that cannot be written leaves a stale entry for a dir that is gone: harmless.
   }
+  // The chat's data-disk twin goes with it. A failure here is not the chat's
+  // failure: with the index entry gone the twin is an orphan, which the
+  // janitor removes on its own.
+  const twin = dataScratchDirFor(target);
+  if (twin) await removeTree(twin).catch(() => undefined);
   if (!exists) return true;
   try {
     await removeTree(target);
@@ -344,7 +349,91 @@ export async function removeSessionScratch(sessionId: string): Promise<boolean> 
   return entry ? removeScratchDir(path.join(root, entry.id)) : false;
 }
 
-/** The variables that point an engine's temp files at `dir`. */
+/**
+ * The data-disk counterpart of the scratch root: `<agent dir>/cody-data-scratch`
+ * (the agent dir is on the data volume), or `CODY_DATA_SCRATCH_ROOT`. Each
+ * chat's engine gets `CODY_DATA_SCRATCH=<root>/<the same 12 hex as its tmp
+ * scratch>` for work that needs temp space on the SAME disk as the code (the
+ * per-chat `TMPDIR` lives on /tmp, a different filesystem). Same lifetime as
+ * the tmp scratch: made when an engine starts, kept across restarts, removed
+ * with the chat (`removeScratchDir`) or by the janitor.
+ */
+export function dataScratchRoot(): string {
+  const configured = readEnv("DATA_SCRATCH_ROOT")?.trim();
+  return path.resolve(configured || path.join(getAgentDir(), "cody-data-scratch"));
+}
+
+/** Like `usableRoot`: a root that would make unrelated directories look like scratch is refused. */
+function usableDataRoot(): string | null {
+  const root = dataScratchRoot();
+  const unrelated = [os.tmpdir(), os.homedir(), getAgentDir(), scratchRoot(), path.parse(root).root];
+  return unrelated.some((dir) => path.resolve(dir) === root) ? null : root;
+}
+
+/** The data-disk dir that belongs to a tmp scratch dir (same 12-hex name); null for any other dir. */
+export function dataScratchDirFor(scratchDir: string): string | null {
+  const name = path.basename(scratchDir);
+  const root = usableDataRoot();
+  return root && SCRATCH_DIR_NAME.test(name) ? path.join(root, name) : null;
+}
+
+/** Make the data-disk dir of a tmp scratch dir (0700) if it is not there; null when it cannot be had. */
+export function ensureDataScratch(scratchDir: string): string | null {
+  const dir = dataScratchDirFor(scratchDir);
+  if (!dir) return null;
+  try {
+    prepareRoot(path.dirname(dir));
+    return restoreDir(dir) ? dir : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Data-disk dirs no chat owns any more: not an index entry's, not a live
+ *  twin of a tmp dir that exists. Their names are the only thing they have, so
+ *  the janitor judges them by their own contents' age. */
+export function listOrphanDataScratch(): string[] {
+  const root = usableDataRoot();
+  const tmpRoot = usableRoot();
+  if (!root || !tmpRoot) return [];
+  let children: fs.Dirent[];
+  try {
+    children = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const owned = new Set(readIndex().map((entry) => entry.id));
+  return children
+    .filter((child) => child.isDirectory() && SCRATCH_DIR_NAME.test(child.name) && !owned.has(child.name) && !isRealDirectory(path.join(tmpRoot, child.name)))
+    .map((child) => path.join(root, child.name));
+}
+
+/** Delete one orphan data-disk dir (see `listOrphanDataScratch`). Refuses
+ *  anything but a real directory directly under the data root with a scratch
+ *  name. True when it is gone afterwards. */
+export async function removeDataScratchDir(dir: string): Promise<boolean> {
+  const root = usableDataRoot();
+  if (!root || typeof dir !== "string" || dir === "") return false;
+  const target = path.resolve(dir);
+  if (path.dirname(target) !== root || !SCRATCH_DIR_NAME.test(path.basename(target))) return false;
+  try {
+    if (!(await fs.promises.lstat(target)).isDirectory()) return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT";
+  }
+  try {
+    await removeTree(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The variables that point an engine's temp files at `dir`, and (when one can
+ *  be made) `CODY_DATA_SCRATCH` at its same-disk twin on the data volume. */
 export function scratchEnv(dir: string): Record<string, string> {
-  return { TMPDIR: dir, TMP: dir, TEMP: dir, CODY_SCRATCH: dir };
+  const env: Record<string, string> = { TMPDIR: dir, TMP: dir, TEMP: dir, CODY_SCRATCH: dir };
+  const data = ensureDataScratch(dir);
+  if (data) env.CODY_DATA_SCRATCH = data;
+  return env;
 }

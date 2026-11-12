@@ -27,9 +27,12 @@ test("creditsCoverage covers only when every plan is limited", () => {
   assert.equal(creditsCoverage(["in_use", "standby"], 1), "standby");
 });
 
-test("creditsCoverage treats a disabled account as unable to serve, but needs a real limit", () => {
+test("creditsCoverage treats a disabled or signed-out account as unable to serve, but needs a real limit", () => {
   assert.equal(creditsCoverage(["limited", "disabled"], 1), "covering");
   assert.equal(creditsCoverage(["disabled", "disabled"], 1), "standby");
+  assert.equal(creditsCoverage(["limited", "signed_out"], 1), "covering", "the other login ended, so a spent plan has nothing to fall back on");
+  assert.equal(creditsCoverage(["signed_out", "in_use"], 1), "standby", "a working plan still serves");
+  assert.equal(creditsCoverage(["signed_out"], 1), "standby", "signed out is not a quota limit");
   assert.equal(creditsCoverage([], 1), "standby");
 });
 

@@ -226,6 +226,7 @@ export async function generateSessionName(firstMessage: string | undefined, sess
     // lib/omp/isolated-agent-dir.ts — a real agent dir's user-scope MCP
     // servers otherwise make every naming call connect to them first.
     extraEnv: { PI_CODING_AGENT_DIR: getOneShotAgentDir() },
+    usage: { purpose: "title", sessionId },
   });
   if (!answer.text) return null;
   return normalizeSessionName(answer.text);

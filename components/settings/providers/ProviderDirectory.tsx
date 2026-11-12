@@ -12,8 +12,8 @@
  * A change anywhere ends in `invalidateProviderReads()`, and this list
  * re-reads through the settings route cache.
  */
-import { AlertCircle, Check, Copy, Cpu, Loader2, Plus, RefreshCw, Server } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState, type KeyboardEvent, type MouseEvent } from "react";
+import { AlertCircle, AlertTriangle, Check, Copy, Cpu, Loader2, Plus, RefreshCw, Server } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { useConfigWriter } from "@/hooks/useConfigWriter";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { runtimeEndpointUrl, runtimeLabel, runtimeProviderName, useLocalAiScan, type LocalAiScanResult } from "@/hooks/useLocalAiScan";
@@ -62,7 +62,7 @@ function CopyUrlButton({ url }: { url: string }) {
 }
 
 export function ProviderDirectory() {
-  const { capabilities, engine, isMobile, platform, harnessLabel } = useSettingsShell();
+  const { capabilities, engine, isMobile, platform, harnessLabel, highlight } = useSettingsShell();
   const providers = useSettingsRoute<ProvidersResponse>(PROVIDERS_ROUTE);
   const scan = useLocalAiScan(true);
   // Only fetches while this panel is mounted (the panel unmounts with the
@@ -108,6 +108,20 @@ export function ProviderDirectory() {
     const match = rows.find((row) => row.id === provider || row.catalogIds.includes(provider));
     if (match) setDetail({ id: match.id });
   }, [rows]);
+
+  // A link that says "sign in again" (the composer's quota popover) opens
+  // Settings with a `provider-<id>` highlight: open that provider's drawer
+  // once its row has been read, instead of leaving the owner to find it.
+  const openedHighlight = useRef<string | null>(null);
+  useEffect(() => {
+    if (highlight === null || !highlight.startsWith("provider-")) {
+      openedHighlight.current = null;
+      return;
+    }
+    if (!response || openedHighlight.current === highlight) return;
+    openedHighlight.current = highlight;
+    openAccountProvider(highlight.slice("provider-".length));
+  }, [highlight, response, openAccountProvider]);
   const [retryingAccountId, setRetryingAccountId] = useState<string | null>(null);
   const [retryMessage, setRetryMessage] = useState<{ tone: "ok" | "error"; text: string } | null>(null);
   // "Retry now" for an account nothing measures (a block set from one
@@ -181,14 +195,19 @@ export function ProviderDirectory() {
       title: <span data-search-id={`provider-${row.id}`}>{row.name}</span>,
       status: { tone: status.tone, text: status.text },
       subtitle: parts.length > 0 ? parts.join(" · ") : row.reason ?? undefined,
-      trailing: (
+      trailing: row.signedOut || (row.disabled && canEdit) ? (
         <>
+          {row.signedOut && (
+            <span title={t("providerSignedOut.badgeTitle")} style={{ ...chipStyle, color: "var(--status-warning)", display: "inline-flex", alignItems: "center", gap: 4 }}>
+              <AlertTriangle size={10} aria-hidden="true" />
+              {t("providerSignedOut.badge")}
+            </span>
+          )}
           {row.disabled && canEdit && (
             <button type="button" className="ui-focus-ring" onClick={(event) => { stopRow(event); void enable(row); }} onKeyDown={stopRow} disabled={readOnly} style={rowButton}>Enable</button>
           )}
-
         </>
-      ),
+      ) : undefined,
       onOpen: () => setDetail({ id: row.id }),
     };
   });

@@ -63,3 +63,11 @@ export function devicesInternalEndpoint(): string {
 export function scheduledInternalEndpoint(): string {
   return internalEndpoint("/api/internal/scheduled");
 }
+
+export function messagingInternalEndpoint(): string {
+  return internalEndpoint("/api/internal/messaging");
+}
+
+export function modelSwitchInternalEndpoint(): string {
+  return internalEndpoint("/api/internal/model-switch");
+}

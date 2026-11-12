@@ -1,6 +1,8 @@
 import { createCheckpoint } from "../checkpoints";
 import { checkDiskForNewTurn } from "../disk/gate";
 import { EngineCommandError } from "../harness/errors";
+import type { EngineSession } from "../harness/types";
+import { openChat, switchChatModel } from "../model-switch/switch";
 import { getRpcSession, unrestorableModelOf, WebRpcError } from "../rpc-manager";
 import { acquireSession, isSessionUnavailableError } from "../session-acquire";
 import { getSessionEntries, resolveSessionPath } from "../session-reader";
@@ -8,7 +10,7 @@ import { ownerTimeZone } from "../time-zone-prefs";
 import { isRecord } from "../type-guards";
 import { ScheduledDeliveryError } from "./errors";
 import { clientMessageIdFor, type StoredItem } from "./store";
-import type { HandedOverCheck, ScheduledHandOver } from "./types";
+import type { HandedOverCheck, ScheduledDeliveryResult, ScheduledHandOver, ScheduledModelChoice } from "./types";
 
 /**
  * Handing one scheduled message to its chat — the same path the composer's own
@@ -25,6 +27,15 @@ import type { HandedOverCheck, ScheduledHandOver } from "./types";
  * Ownership is not re-checked here: it was checked when the message was
  * scheduled, by the route or tool that did it, and a chat's owner does not
  * change.
+ *
+ * A message scheduled with a model of its own is sent on it: the chat is
+ * switched first, by the same `switchChatModel` the composer's and the agent's
+ * switches use (lib/model-switch), and the prompt follows. The model switch
+ * is never approximated — one the engine refuses (the model is gone, its
+ * credentials are) fails the message with the engine's reason and nothing is
+ * sent. A chat that is running a reply is not switched out from under it: the
+ * message waits (`busy`) until the reply is over. A message with no model of
+ * its own never touches the chat's model.
  */
 
 function userText(content: unknown): string {
@@ -128,6 +139,42 @@ function handOverOf(session: object, clientMessageId: string, ack: unknown): Sch
   return "queued";
 }
 
+/** Engine refusals another try could change (the chat was restarting, its child died, a turn was running); the rest — no such model, no credentials, no such level — would only be repeated. */
+const RETRYABLE_SWITCH_CODES = new Set(["busy", "session_busy", "session_dead", "session_restarting", "engine_error"]);
+
+/**
+ * Put the chat on the message's model (and level) before it is sent. `ready`:
+ * it is on it. `busy`: it is not, and the chat is running a reply that a switch
+ * would cut short (a model change waits for a boundary inside it, a level
+ * change applies to its very next step), so nothing was touched. A switch the
+ * engine refuses throws: a message scheduled for one model never goes out on
+ * another.
+ */
+async function putChatOnModel(sessionId: string, model: ScheduledModelChoice, session: EngineSession, timeZone: string): Promise<"ready" | "busy"> {
+  const refusal = (message: string, code: string | undefined) => new ScheduledDeliveryError(
+    `Could not switch this chat to ${model.provider}/${model.modelId}: ${message.trim().replace(/[.!?]*$/, ".")} The message was not sent.`,
+    code !== undefined && RETRYABLE_SWITCH_CODES.has(code),
+  );
+  const opened = await openChat(sessionId, { session, timeZone });
+  if (!opened.ok) throw refusal(opened.result.message, opened.result.code);
+  const { catalog } = opened.chat;
+  const current = catalog.current;
+  const onModel = current?.provider === model.provider && current.modelId === model.modelId;
+  const onLevel = model.thinkingLevel === undefined || model.thinkingLevel === current?.thinkingLevel;
+  if (onModel && onLevel) return "ready";
+  if (session.isRunning()) return "busy";
+  const target = { provider: model.provider, modelId: model.modelId, ...(model.thinkingLevel ? { thinkingLevel: model.thinkingLevel } : {}) };
+  const result = await switchChatModel(sessionId, target, { session, catalog, timeZone });
+  if (result.status === "unchanged") return "ready";
+  if (result.status === "deferred") return "busy";
+  if (result.status === "applied") {
+    // The model is on; only the level was refused. Another try can set it, and the message is not sent at a level the person did not choose.
+    if (result.code === "reasoning_failed") throw refusal(result.message, "engine_error");
+    return "ready";
+  }
+  throw refusal(result.message, result.code);
+}
+
 /**
  * Deliver one message. Resolves once the chat has taken it, saying whether it
  * started (or is in the conversation) or is only queued behind a running turn;
@@ -141,13 +188,14 @@ function handOverOf(session: object, clientMessageId: string, ack: unknown): Sch
  * message as the reason. A copy that already reached the chat is still found
  * first: finding it writes nothing.
  */
-export async function deliverScheduledMessage(item: StoredItem): Promise<ScheduledHandOver> {
+export async function deliverScheduledMessage(item: StoredItem): Promise<ScheduledDeliveryResult> {
   try {
     if (item.attempts > 0 && await alreadyDelivered(item)) return "delivered";
     const refusal = checkDiskForNewTurn();
     if (refusal) throw new ScheduledDeliveryError(refusal.message, true);
     const timeZone = ownerTimeZone(item.sessionId);
     const session = await acquireSession(item.sessionId, timeZone);
+    if (item.model && await putChatOnModel(item.sessionId, item.model, session, timeZone) === "busy") return "busy";
     // The same safety net the composer's own prompt gets: a snapshot to restore to. Never allowed to hold the message back.
     await createCheckpoint(session.cwd, item.message).catch(() => null);
     const clientMessageId = clientMessageIdFor(item);

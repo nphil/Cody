@@ -11,6 +11,7 @@
  */
 import { SCHEDULED_LIMITS, isScheduledErrorCode } from "./types";
 import type { ScheduledItemView, ScheduledStatus } from "./types";
+import { scheduleModelText } from "./model-ui";
 
 /** `useI18n().t` / `translate`. */
 export type Translate = (key: string, vars?: Record<string, string | number>) => string;
@@ -176,26 +177,39 @@ export interface ScheduledRowText {
   byAgent: boolean;
   /** "Claude · Secondary" on a quota row; never an email. */
   quotaLabel: string | null;
+  /** The model it is sent on, as the bar's chip says it ("Opus 4.8 · High"); null when it goes out on whatever the chat is on. */
+  modelLabel: string | null;
+  /** The chip's tooltip: "Sent on Opus 4.8, reasoning High". Null with no `modelLabel`. */
+  modelTitle: string | null;
   preview: string;
   /** For the row's `title`: the start of the full message, not all 64 KB of it. */
   title: string;
 }
 
-/** Words for one scheduled row. `now` is passed in so the same rows render the same way twice. */
-export function describeScheduledItem(item: ScheduledItemView, now: number, locale: string, t: Translate): ScheduledRowText {
+/** A model's display name, from the composer's catalog; null when the catalog does not know it (the id is shown then). */
+export type ModelNameLookup = (provider: string, modelId: string) => string | null | undefined;
+
+/**
+ * Words for one scheduled row. `now` is passed in so the same rows render the
+ * same way twice. `modelName` spells the chosen model the way the picker does.
+ */
+export function describeScheduledItem(item: ScheduledItemView, now: number, locale: string, t: Translate, modelName?: ModelNameLookup): ScheduledRowText {
   const at = Date.parse(item.at);
   const known = Number.isFinite(at);
   const due = known ? formatScheduledWhen(at, now, locale, t) : "";
-  const state: ScheduledRowState = item.mode === "quota" && item.status === "pending" && known && at <= now ? "checking"
+  // A quota message whose provider names no reset has no time to count down to: its `at` is only when waiting began, so it is never "checking" — it is waiting to be usable.
+  const unknownReset = item.mode === "quota" && item.quota?.unknownReset === true;
+  const state: ScheduledRowState = item.mode === "quota" && item.status === "pending" && known && !unknownReset && at <= now ? "checking"
     : item.status === "sending" && item.handedOver ? "waiting"
     : item.status;
   let when: string;
   if (state === "waiting") when = t("schedule.rowWaiting");
   else if (state === "sending") when = t("schedule.rowSending");
   else if (state === "checking") when = t("schedule.rowQuotaChecking");
-  else if (item.mode === "quota") when = t("schedule.rowQuota", { time: due });
+  else if (item.mode === "quota") when = unknownReset ? t("schedule.rowQuotaUnknown") : t("schedule.rowQuota", { time: due });
   else when = known && localDayOffset(at, now) === 0 ? t("schedule.rowAt", { time: due }) : due;
   const whenShort = state === "pending" && item.mode === "at" && known ? due : when;
+  const chosen = item.model ? scheduleModelText(item.model, modelName?.(item.model.provider, item.model.modelId), t) : null;
   return {
     state,
     when,
@@ -203,6 +217,8 @@ export function describeScheduledItem(item: ScheduledItemView, now: number, loca
     note: item.error?.trim() || null,
     byAgent: item.source === "agent",
     quotaLabel: item.mode === "quota" ? item.quota?.label ?? null : null,
+    modelLabel: chosen?.text ?? null,
+    modelTitle: chosen ? (chosen.level ? t("schedule.rowModelLevelTitle", { model: chosen.name, level: chosen.level }) : t("schedule.rowModelTitle", { model: chosen.name })) : null,
     preview: previewMessage(item.message),
     title: previewMessage(item.message, 600),
   };
@@ -291,9 +307,10 @@ export function scheduleBlock(input: { hasSession: boolean; hasImages: boolean; 
 /* ─────────────────────────── "When quota resets" row ─────────────────────────── */
 
 /**
- * What the quota ring already knows about THIS chat's own model (the
- * `QuotaView` of `buildQuotaView`), narrowed to what this row reads. Typed
- * structurally so a ring that knows nothing (`known: false`) fits too.
+ * What the quota ring already knows about the model a message goes out on —
+ * the chat's own, or the one chosen for the message (the `QuotaView` of
+ * `buildQuotaView`) — narrowed to what this row reads. Typed structurally so a
+ * ring that knows nothing (`known: false`) fits too.
  */
 export interface QuotaResetSource {
   known: boolean;
@@ -305,14 +322,18 @@ export interface QuotaResetSource {
   accounts?: readonly { label: string }[];
 }
 
+/** `at` is null when the provider names no reset time: the message waits for the model to be usable again and is re-checked every few minutes. */
 export type QuotaRowModel =
-  | { available: true; at: number; line: string }
+  | { available: true; at: number | null; line: string }
   | { available: false; reasonKey: string };
 
 /**
- * The row's second line — "Claude · Secondary refills at 11:40 PM" — or the
- * plain reason it is off. The account position appears only when the provider
- * has more than one account, the same rule the quota popover follows.
+ * The row's second line — "Claude · Secondary refills at 11:40 PM", or, when
+ * the provider says nothing about a reset, "Claude · Secondary — sent once it
+ * can be used again" — or the plain reason it is off: only a model whose quota
+ * Cody cannot read at all has nothing to wait on. The account position appears
+ * only when the provider has more than one account, the same rule the quota
+ * popover follows.
  */
 export function quotaRowModel(
   source: QuotaResetSource | null,
@@ -325,17 +346,22 @@ export function quotaRowModel(
     formatTime: (iso: string) => string | null;
   },
 ): QuotaRowModel {
-  const unavailable: QuotaRowModel = { available: false, reasonKey: "schedule.quotaUnavailable" };
-  if (!source?.known || !source.resetsAt) return unavailable;
-  const at = Date.parse(source.resetsAt);
-  const time = context.formatTime(source.resetsAt);
-  // A reset already behind us is a stale reading, not something to wait for.
-  if (!Number.isFinite(at) || at <= context.now || !time) return unavailable;
+  if (!source?.known) return { available: false, reasonKey: "schedule.quotaUnavailable" };
   const who = [source.provider ? context.brandName(source.provider) : "", source.accounts?.[0]?.label ?? ""].filter(Boolean).join(" · ");
+  const at = source.resetsAt ? Date.parse(source.resetsAt) : Number.NaN;
+  // A reset already behind us is a stale reading, not something to count down to: it reads as no reset time at all.
+  const time = Number.isFinite(at) && at > context.now ? context.formatTime(source.resetsAt as string) : null;
+  if (time) {
+    return {
+      available: true,
+      at,
+      line: who ? context.t("schedule.quotaRefills", { account: who, time }) : context.t("schedule.quotaRefillsAt", { time }),
+    };
+  }
   return {
     available: true,
-    at,
-    line: who ? context.t("schedule.quotaRefills", { account: who, time }) : context.t("schedule.quotaRefillsAt", { time }),
+    at: null,
+    line: who ? context.t("schedule.quotaRefillsUnknown", { account: who }) : context.t("schedule.quotaRefillsUnknownBare"),
   };
 }
 

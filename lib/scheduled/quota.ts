@@ -30,12 +30,23 @@ export interface QuotaTarget {
   /** The usage provider id that meters the model. */
   provider: string;
   modelId: string;
-  /** Epoch ms of the binding window's reset. */
-  resetsAt: number;
+  /**
+   * Epoch ms of the binding window's reset. Null when the provider names none
+   * (or the reading predates its own reset, which is no longer true): there is
+   * nothing to count down to, so the message waits for a fresh read to say the
+   * model is usable and checks again every few minutes until it is.
+   */
+  resetsAt: number | null;
   /** "Claude · Secondary": the provider's name plus the account's position when it has several. */
   label: string;
 }
 
+/**
+ * Refused only when there is nothing to watch at all: an engine whose provider
+ * has no usage reader, or a usage read that did not happen. A model whose
+ * reset time is merely unknown is NOT refused — it is exactly the model a
+ * person with every quota spent wants to wait on.
+ */
 export type QuotaPlan = { ok: true; target: QuotaTarget } | { ok: false; code: "no_quota_reset" };
 
 function titleCase(provider: string): string {
@@ -68,13 +79,12 @@ export function planQuotaTarget(
   const ranks = rankProviderAccounts(snapshot.accounts, usageProvider, modelId, evidenceFromSessionAccount(sessionAccounts[usageProvider]));
   const top = ranks[0];
   const binding = top?.windows[0];
-  if (!top || !binding?.resetsAt) return { ok: false, code: "no_quota_reset" };
-  const resetsAt = Date.parse(binding.resetsAt);
-  // A reading that predates its own reset is no longer true: nothing to wait for.
-  if (!Number.isFinite(resetsAt) || resetsAt <= now) return { ok: false, code: "no_quota_reset" };
+  const reading = binding?.resetsAt ? Date.parse(binding.resetsAt) : Number.NaN;
+  // A reading that predates its own reset is no longer true: it counts as no reset time.
+  const resetsAt = Number.isFinite(reading) && reading > now ? reading : null;
   const siblings = snapshot.accounts.filter((account) => account.provider === usageProvider);
   const brand = providerBrand(usageProvider)?.name ?? (titleCase(usageProvider) || usageProvider);
-  const label = siblings.length > 1 ? `${brand} · ${positionName(siblings.indexOf(top.account))}` : brand;
+  const label = top && siblings.length > 1 ? `${brand} · ${positionName(siblings.indexOf(top.account))}` : brand;
   return { ok: true, target: { provider: usageProvider, modelId, resetsAt, label } };
 }
 
@@ -160,9 +170,9 @@ export async function resolveChatModel(sessionId: string): Promise<ChatModel | n
 }
 
 /**
- * Everything a quota-mode message needs, read now: the model (the composer's
- * own when it sent one, else the chat's), the account the chat is on, and the
- * window that binds it.
+ * Everything a quota-mode message needs, read now: the model (the one chosen
+ * for the message, else the composer's view of the chat's, else the chat's
+ * own), the account the chat is on, and the window that binds it.
  */
 export async function planQuotaForChat(
   sessionId: string,

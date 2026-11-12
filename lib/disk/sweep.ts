@@ -40,6 +40,9 @@ export interface SweepRoot {
   reason: "tmp-idle" | "home-tmp-idle";
   /** Files are left alone (`$HOME/tmp` holds helper scripts and tokens). */
   directoriesOnly: boolean;
+  /** Directories here whose names look like a test run's leftovers are swept
+   *  after `leftover.idleMs` instead of `idleMs` (only when it is shorter). */
+  leftover?: { idleMs: number; livePids: ReadonlySet<number> | null };
 }
 
 export interface SweepCandidate {
@@ -47,6 +50,55 @@ export interface SweepCandidate {
   name: string;
   path: string;
   stat: fs.Stats;
+  /** The idle window this entry is judged by: its root's, or the shorter
+   *  leftover one when its name has the shape of a test run's temp dir. */
+  idleMs: number;
+}
+
+/** Year-like numbers (`notes-2026`) are not process ids. */
+const FIRST_YEAR = 1970;
+const LAST_YEAR = 2100;
+const NUMERIC_TOKEN = /(?<![A-Za-z0-9])\d{3,7}(?![A-Za-z0-9])/g;
+const MKDTEMP_SUFFIX = /^.+[-.]([A-Za-z0-9]{6})$/;
+
+/**
+ * Does this directory name look like what a killed test run leaves behind?
+ * Two shapes, both seen in `$HOME/tmp` (about 16 GB a day):
+ *
+ * - a stand-alone number of 3 to 7 digits (the test process's pid) that is not
+ *   a process running now: `lumashow-ui-test-123456-abc`. A four-digit number
+ *   that reads as a year (1970-2100) is not a pid. With no process list
+ *   (`livePids` null) this shape never matches.
+ * - a `mkdtemp` suffix: `-` or `.` then exactly six letters/digits with at
+ *   least one of each: `paneldim-a1B2c3`.
+ *
+ * Only a name test: the sweep's other checks (idle, no process or recent chat
+ * naming it) still apply.
+ */
+export function looksLikeTestLeftover(name: string, livePids: ReadonlySet<number> | null): boolean {
+  const suffix = MKDTEMP_SUFFIX.exec(name)?.[1];
+  if (suffix !== undefined && /\d/.test(suffix) && /[A-Za-z]/.test(suffix)) return true;
+  if (livePids === null) return false;
+  for (const [token] of name.matchAll(NUMERIC_TOKEN)) {
+    const value = Number(token);
+    if (token.length === 4 && value >= FIRST_YEAR && value <= LAST_YEAR) continue;
+    if (!livePids.has(value)) return true;
+  }
+  return false;
+}
+
+/** The process ids in a process table (`/proc`); null when it cannot be read. */
+export async function readLivePids(procRoot: string | null): Promise<Set<number> | null> {
+  if (procRoot === null) return null;
+  try {
+    const pids = new Set<number>();
+    for (const name of await fs.promises.readdir(procRoot)) {
+      if (/^\d+$/.test(name)) pids.add(Number(name));
+    }
+    return pids;
+  } catch {
+    return null;
+  }
 }
 
 /** What the cheap listing found: the entries old enough to examine, and the
@@ -117,8 +169,12 @@ export async function collectSweepCandidates(
         return;
       }
       if (stat.dev !== rootDev) return;
-      if (options.now - Math.max(stat.mtimeMs, stat.ctimeMs) < root.idleMs) return;
-      candidates.push({ root, name: child.name, path: full, stat });
+      const idleMs =
+        root.leftover && root.leftover.idleMs < root.idleMs && child.isDirectory() && looksLikeTestLeftover(child.name, root.leftover.livePids)
+          ? root.leftover.idleMs
+          : root.idleMs;
+      if (options.now - Math.max(stat.mtimeMs, stat.ctimeMs) < idleMs) return;
+      candidates.push({ root, name: child.name, path: full, stat, idleMs });
     });
   }
   candidates.sort((a, b) => Math.max(a.stat.mtimeMs, a.stat.ctimeMs) - Math.max(b.stat.mtimeMs, b.stat.ctimeMs));
@@ -150,7 +206,7 @@ export async function sweepCandidates(
     if (Date.now() > context.deadline) return;
     if (context.processes.has(candidate.path) || context.transcripts.has(candidate.path)) return;
     try {
-      const since = context.now - candidate.root.idleMs;
+      const since = context.now - candidate.idleMs;
       const quick = await findRecentChange(candidate.path, since);
       if (quick === "recent" || quick === "unknown") return;
       // The walk certifies what `find` only suggested, and sizes what goes.

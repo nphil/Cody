@@ -24,7 +24,7 @@ function area(id, usedGb, totalGb, level, extra = {}) {
 function payload(overrides = {}) {
   return {
     areas: [area("tmp", 120, 150, "ok"), area("data", 195, 200, "critical")],
-    settings: { scratchIdleDays: 3, tmpIdleHours: 24, homeTmpIdleHours: 72, budgetPercent: 70, checkpointMaxGb: 5, checkpointMaxAgeDays: 14 },
+    settings: { scratchIdleDays: 3, tmpIdleHours: 24, homeTmpIdleHours: 72, testLeftoverIdleHours: 6, budgetPercent: 70, checkpointMaxGb: 5, checkpointMaxAgeDays: 14 },
     lastRun: { trigger: "hourly", startedAt: Date.now() - 7_200_000, finishedAt: Date.now() - 7_199_000, freedBytes: 3 * GB, removedCount: 4, removed: [], errorCount: 0 },
     largestScratch: [
       { title: "Fix the login page", bytes: 5 * GB, lastUsedAt: Date.now() - 3 * 86_400_000, live: false },

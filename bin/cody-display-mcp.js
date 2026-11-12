@@ -11,6 +11,8 @@ async function main() {
   const sessionsEndpoint = process.env.CODY_SESSIONS_ENDPOINT;
   const devicesEndpoint = process.env.CODY_DEVICES_ENDPOINT;
   const scheduledEndpoint = process.env.CODY_SCHEDULED_ENDPOINT;
+  const messagingEndpoint = process.env.CODY_MESSAGING_ENDPOINT;
+  const modelSwitchEndpoint = process.env.CODY_MODEL_SWITCH_ENDPOINT;
   const capability = process.env.CODY_DISPLAY_CAPABILITY;
   const sessionId = process.env.CODY_DISPLAY_SESSION_ID;
   if (!endpoint || !capability) throw new Error("Cody display capability is unavailable");
@@ -39,6 +41,34 @@ async function main() {
   async function callScheduledTool(tool, toolArgs) {
     if (!scheduledEndpoint || !sessionId) throw new Error("Cody scheduling capability is unavailable");
     const response = await fetch(scheduledEndpoint, {
+      method: "POST",
+      headers: { Authorization: "Bearer " + capability, "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId, tool, arguments: toolArgs }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : "HTTP " + response.status);
+    return typeof body.text === "string" ? body.text : "";
+  }
+
+  /** Same envelope as callSessionTool, for messaging another chat. The wait outlasts the server's own 15s bound on that chat's engine taking the message (a chat with no live engine is started for it). */
+  async function callMessagingTool(tool, toolArgs) {
+    if (!messagingEndpoint || !sessionId) throw new Error("Cody messaging capability is unavailable");
+    const response = await fetch(messagingEndpoint, {
+      method: "POST",
+      headers: { Authorization: "Bearer " + capability, "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId, tool, arguments: toolArgs }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : "HTTP " + response.status);
+    return typeof body.text === "string" ? body.text : "";
+  }
+
+  /** Same envelope as callSessionTool, for switching a chat's model. The wait outlasts a chat with no live engine being started to read its catalog, and the engine commands that follow. */
+  async function callModelSwitchTool(tool, toolArgs) {
+    if (!modelSwitchEndpoint || !sessionId) throw new Error("Cody model switching capability is unavailable");
+    const response = await fetch(modelSwitchEndpoint, {
       method: "POST",
       headers: { Authorization: "Bearer " + capability, "Content-Type": "application/json" },
       body: JSON.stringify({ sessionId, tool, arguments: toolArgs }),
@@ -162,11 +192,13 @@ async function main() {
   });
   // Scheduling. Written once in lib/scheduled/tools.ts; bin/cody-display-mcp.test.mjs fails when these copies drift.
   server.registerTool("schedule_message", {
-    description: "Send a message into a chat LATER — at a time you choose, or when this chat's model quota refills. Use it to carry on unfinished work after a usage limit resets, to run something at a set time (\"at 9 AM run the full suite and report\"), or to check back on CI or a long job instead of waiting or asking the user to return. The message arrives as an ordinary user message in that chat (this one unless `session` names another; if that chat is mid-turn it waits as a follow-up behind the turn), so write it as a complete instruction: whoever reads it — possibly you — may remember nothing but the transcript. It is sent once and never repeats. A chat holds at most 20 pending messages and a time must be within 30 days. Give `at` or `whenQuotaResets`, not both. Returns an id; cancel_scheduled withdraws it.",
+    description: "Send a message into a chat LATER — at a time you choose, or when this chat's model quota refills. Use it to carry on unfinished work after a usage limit resets, to run something at a set time (\"at 9 AM run the full suite and report\"), or to check back on CI or a long job instead of waiting or asking the user to return. The message arrives as an ordinary user message in that chat (this one unless `session` names another; if that chat is mid-turn it waits as a follow-up behind the turn), so write it as a complete instruction: whoever reads it — possibly you — may remember nothing but the transcript. It is sent once and never repeats. A chat holds at most 20 pending messages and a time must be within 30 days. Give `at` or `whenQuotaResets`, not both. Pass `model` (and `reasoning`) to send it on a model you choose: the chat is switched to it just before the message goes, and `whenQuotaResets` then waits for THAT model's quota — so work carries on later on another model, even when every quota is spent now. Returns an id; cancel_scheduled withdraws it. To reach ANOTHER chat's agent right away, even mid-turn, use send_to_chat: this waits out the turn it arrives in.",
     inputSchema: {
       message: z.string().describe("What the chat will receive, written as the user would."),
       at: z.string().optional().describe("When to send: an ISO 8601 date and time such as 2026-10-06T09:00, read in the user's time zone unless it carries an offset (Z, +02:00)."),
-      whenQuotaResets: z.boolean().optional().describe("true: send once this chat's model quota refills. Cody waits for the reset, confirms the model is usable again, and gives up 24 hours after the reset."),
+      whenQuotaResets: z.boolean().optional().describe("true: send once the quota refills — `model`'s when you pass one, else this chat's model. Cody waits for the reset (re-checking every few minutes when the provider names none), confirms the model is usable again, and gives up 24 hours after the reset (7 days after scheduling when no reset time is known)."),
+      model: z.string().optional().describe("The model to send it on: an exact provider/id (anthropic/claude-opus-4-8) or a name or part of one (\"opus 4.8\"). If it fits several models nothing is scheduled and the candidates come back. Omit to use whatever model the chat is on when the message is sent."),
+      reasoning: z.string().optional().describe("The reasoning level on that model, one it offers: off, minimal, low, medium, high, xhigh, max or auto. Needs `model`."),
       session: z.string().optional().describe("Another chat's id or title; omit for this chat."),
     },
   }, async (input) => {
@@ -178,7 +210,7 @@ async function main() {
     }
   });
   server.registerTool("list_scheduled", {
-    description: "List the messages scheduled for this chat (or `session`): id, when, who scheduled it (the user or an agent), status and a preview.",
+    description: "List the messages scheduled for this chat (or `session`): id, when, the model it is sent on (when one was chosen), who scheduled it (the user or an agent), status and a preview.",
     inputSchema: {
       session: z.string().optional().describe("Another chat's id or title; omit for this chat."),
     },
@@ -201,6 +233,52 @@ async function main() {
       return { content: [{ type: "text", text }] };
     } catch (error) {
       return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to cancel the scheduled message" }] };
+    }
+  });
+  // Chats messaging each other. Written once in lib/chat-messages/tools.ts; bin/cody-display-mcp.test.mjs fails when these copies drift.
+  server.registerTool("send_to_chat", {
+    description: "Message ANOTHER chat's agent now, without waiting for the turn it is in. urgency \"next_step\" (default) puts the message into that chat's running turn at its very next step (an idle chat starts a turn on it); \"after_turn\" waits until the turn it is in is over. It arrives as a user message under a header naming this chat's title and id and saying an agent sent it with no user authority, so add no such disclaimer and write the message complete: its reader may remember nothing but its own transcript. The reader answers with send_to_chat to this chat's id. At most 32 KB (longer material goes in a file, send the path) and 20 messages per 10 minutes. Returns a delivery id at once and never waits for the other chat to read or answer; message_status shows whether it was read and answered. To message this chat later use schedule_message.",
+    inputSchema: {
+      session: z.string().describe("The other chat's id or title (several matches list the candidates to pick from); list_sessions shows the chats."),
+      message: z.string().describe("What the other chat should read, written by you; Cody adds the sender header above it."),
+      urgency: z.enum(["next_step", "after_turn"]).optional().describe("next_step (default): read at the chat's next step, even mid-turn. after_turn: read once its current turn is over."),
+    },
+  }, async (input) => {
+    try {
+      const text = await callMessagingTool("send_to_chat", input);
+      return { content: [{ type: "text", text }] };
+    } catch (error) {
+      return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to send the message" }] };
+    }
+  });
+  server.registerTool("message_status", {
+    description: "Where a message sent with send_to_chat stands: still being handed over, held until a turn ends, queued, started, delivered or failed, and whether the other chat has answered with send_to_chat.",
+    inputSchema: {
+      id: z.string().describe("The delivery id send_to_chat returned (msg_…)."),
+    },
+  }, async (input) => {
+    try {
+      const text = await callMessagingTool("message_status", input);
+      return { content: [{ type: "text", text }] };
+    } catch (error) {
+      return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to read the message status" }] };
+    }
+  });
+  // Switching the model. Written once in lib/model-switch/tool.ts; bin/cody-display-mcp.test.mjs fails when this copy drifts.
+  server.registerTool("switch_model", {
+    description: "Switch the model — and optionally the reasoning level — a chat runs on. By default this changes ONLY this chat, the one you are running in, and nothing else. Use it when the user asks you to move to another model (\"switch to Opus 4.8 with high reasoning\", \"use a cheaper model for this part\"). `model` is matched against the models this chat can really use: pass an exact `provider/id`, or a name or part of one (\"opus 4.8\"). If it fits more than one model, nothing changes and the candidates come back — ask the user which; never guess. `reasoning` must be a level that model really offers (off, minimal, low, medium, high, xhigh, max or auto, as it lists them); a level it lacks is refused with the valid ones. Leave `model` out to change only the reasoning of the current model. Call with neither to see the current model and what is available. The result states what is set now, whether it applies from your next step or the next turn, and what it was before. A different chat that is mid-turn gets the switch at its next step boundary. `session` targets another chat by id or title. scope \"everywhere\" instead changes the default model new chats and helper agents start on (omp only; needs `model`, and `reasoning` becomes part of that default). Use it ONLY when the user explicitly asks to change the default for everything: chats that are already open keep their model. This changes things now, once. For a switch at a later time (\"back to Sonnet at 1am\"), use schedule_message with `model` (and `reasoning`): the chat is switched to it just before that message is sent.",
+    inputSchema: {
+      model: z.string().optional().describe("The model: an exact provider/id (anthropic/claude-opus-4-8) or a name or part of one (\"opus 4.8\"). Omit to keep the current model."),
+      reasoning: z.string().optional().describe("The reasoning level for that model, one it offers: off, minimal, low, medium, high, xhigh, max or auto."),
+      scope: z.enum(["chat", "everywhere"]).optional().describe("chat (default): this chat only. everywhere: the default for new chats and helpers — only when the user explicitly asked for that."),
+      session: z.string().optional().describe("Another chat's id or title; omit for this chat. Not with scope everywhere."),
+    },
+  }, async (input) => {
+    try {
+      const text = await callModelSwitchTool("switch_model", input);
+      return { content: [{ type: "text", text }] };
+    } catch (error) {
+      return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to switch the model" }] };
     }
   });
   server.registerTool("device_list", {

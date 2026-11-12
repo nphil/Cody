@@ -114,3 +114,58 @@ export function retainPendingSessions(
   }
   return next.length === pending.length && next.every((session, i) => session === pending[i]) ? pending : next;
 }
+
+// ============================================================================
+// "Last active" ordering (the sidebar's Recent view and per-project lists).
+//
+// lastActiveAt is the time of the newest user message or assistant reply, so
+// renames and other file rewrites do not move a chat. Servers that cannot
+// read it (older list, non-omp engines) leave it unset and `modified` stands
+// in. The sort only ever runs when the session list itself changes — never
+// per frame — so rows do not shuffle while the user is looking at them.
+// ============================================================================
+
+export type SidebarView = "recent" | "projects";
+
+export const DEFAULT_SIDEBAR_VIEW: SidebarView = "recent";
+
+export function parseSidebarView(raw: string | null | undefined): SidebarView {
+  return raw === "projects" || raw === "recent" ? raw : DEFAULT_SIDEBAR_VIEW;
+}
+
+/** Epoch ms of the chat's last activity: lastActiveAt, else modified, else 0. */
+export function lastActiveMs(session: Pick<SessionInfo, "lastActiveAt" | "modified">): number {
+  for (const value of [session.lastActiveAt, session.modified]) {
+    if (!value) continue;
+    const ms = Date.parse(value);
+    if (!Number.isNaN(ms)) return ms;
+  }
+  return 0;
+}
+
+/** Newest activity first. Equal times compare equal so Array#sort (stable)
+ *  keeps the incoming order. */
+export function compareByLastActive(
+  a: Pick<SessionInfo, "lastActiveAt" | "modified">,
+  b: Pick<SessionInfo, "lastActiveAt" | "modified">,
+): number {
+  return lastActiveMs(b) - lastActiveMs(a);
+}
+
+/** One combined list for the Recent view: not-yet-persisted (pending) chats
+ *  first, in the order given, then every other chat by last activity, newest
+ *  first. A pending chat is the one the user just started; it must stay at
+ *  the top until the server reports it and its real activity time takes over.
+ *  A pending id that the server list already reports is treated as an
+ *  ordinary chat. Neither input is mutated. */
+export function sortRecentSessions(
+  sessions: readonly SessionInfo[],
+  pending: readonly SessionInfo[] = [],
+): SessionInfo[] {
+  const known = new Set<string>();
+  for (const session of sessions) known.add(session.id);
+  const pendingOnly = pending.filter((session) => !known.has(session.id));
+  const pendingIds = new Set(pendingOnly.map((session) => session.id));
+  const rest = sessions.filter((session) => !pendingIds.has(session.id));
+  return [...pendingOnly, ...rest.sort(compareByLastActive)];
+}

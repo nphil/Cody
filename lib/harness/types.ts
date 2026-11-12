@@ -408,6 +408,14 @@ export interface EngineSession {
    */
   observeEvents?(observer: (event: EngineEvent) => void): () => void;
   /**
+   * Put a frame on this session's own event stream, as if the engine had sent
+   * it: every attached page and observer receives it, nothing reaches the
+   * engine. For a server-side action that must explain itself to the page
+   * (an agent-requested model switch, a notice) — optional, because an engine
+   * that lacks it simply cannot announce.
+   */
+  announce?(event: EngineEvent): void;
+  /**
    * The dialog (omp `extension_ui_request`) still waiting on this id, or null
    * once it was answered, cancelled or timed out. For an answer that arrives
    * from outside the browser, which must not answer a request that is gone.

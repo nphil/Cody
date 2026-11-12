@@ -2,10 +2,12 @@
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
-import { Clock, Gauge, SendHorizontal } from "lucide-react";
+import { ChevronRight, Clock, Cpu, Gauge, SendHorizontal } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
 import { providerBrand } from "@/lib/provider-brand";
-import { SCHEDULED_LIMITS } from "@/lib/scheduled/types";
+import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
+import { findScheduleModel, scheduleModelText, scheduleReasoningLevels, withScheduleReasoning, type ScheduleModelCatalog } from "@/lib/scheduled/model-ui";
+import { SCHEDULED_LIMITS, type ScheduledModelChoice } from "@/lib/scheduled/types";
 import {
   SCHEDULE_BLOCK_KEYS,
   checkPickedTime,
@@ -22,15 +24,19 @@ import {
   type ScheduleChip,
 } from "@/lib/scheduled/ui";
 import { formatResetTime } from "@/lib/format";
+import { ModelIcon } from "./ProviderIcon";
+import { ScheduleModelPicker } from "./ScheduleModelPicker";
 
 /**
- * The menu behind the Send pill's ▾: Send now, When quota resets, and Send at…
- * with its quick times. A popover above the pill on a mouse; a bottom sheet
- * with taller rows on a touch screen.
+ * The menu behind the Send pill's ▾: Send now, a Model row, When quota
+ * resets, and Send at… with its quick times. A popover above the pill on a
+ * mouse; a bottom sheet with taller rows on a touch screen.
  *
  * Choosing a row does everything at once (there is no confirm step) except
- * "Pick…", whose native date-time field needs an explicit Schedule. A row that
- * cannot work right now stays on screen, switched off, with the reason.
+ * "Pick…", whose native date-time field needs an explicit Schedule, and
+ * "Model", which opens the model list in place of the rows and comes back to
+ * them. A row that cannot work right now stays on screen, switched off, with
+ * the reason.
  */
 
 export type MenuPresentation = "popover" | "sheet";
@@ -49,8 +55,12 @@ export interface ScheduleMenuBodyProps {
   now: number;
   /** Why scheduling is off, or null. */
   block: ScheduleBlock | null;
-  /** What the quota ring knows about this chat's own model; null when it knows nothing. */
+  /** What the quota ring knows about the model the message goes out on (the chosen one, else the chat's own); null when it knows nothing. */
   quota: QuotaResetSource | null;
+  /** What the Model row may choose from; null when this chat's model cannot be changed: there is no row then. */
+  models: ScheduleModelCatalog | null;
+  /** The model chosen for the message, or null: it goes out on whatever the chat is on. Its reasoning selector offers the levels in `models.levels` (none: no selector). */
+  scheduleModel: ScheduledModelChoice | null;
   picking: boolean;
   pickValue: string;
   pickProblem: "empty" | "past" | "far" | null;
@@ -59,6 +69,10 @@ export interface ScheduleMenuBodyProps {
   onQuota: () => void;
   onChip: (chip: ScheduleChip) => void;
   onTogglePick: () => void;
+  /** Open the model list. */
+  onModel: () => void;
+  /** A reasoning level for the chosen model; null is Default. */
+  onReasoning: (level: string | null) => void;
   onConfirmPick: () => void;
 }
 
@@ -115,8 +129,8 @@ function MenuRow({ icon, title, hint, disabled, testId, trailing, presentation, 
  * a prop, so the same markup renders in a test, in the popover and in the sheet.
  */
 export function ScheduleMenuBody({
-  presentation, now, block, quota, picking, pickValue, pickProblem,
-  onPickValueChange, onSendNow, onQuota, onChip, onTogglePick, onConfirmPick,
+  presentation, now, block, quota, models, scheduleModel, picking, pickValue, pickProblem,
+  onPickValueChange, onSendNow, onQuota, onChip, onTogglePick, onModel, onReasoning, onConfirmPick,
 }: ScheduleMenuBodyProps) {
   const { t, locale } = useI18n();
   const sendAtId = useId();
@@ -130,6 +144,9 @@ export function ScheduleMenuBody({
     brandName: (provider) => providerBrand(provider)?.name ?? provider,
     formatTime: (iso) => formatResetTime(iso, locale, now),
   });
+  // The chosen model as the picker spells it, and the reasoning levels it offers (none: the selector stays out of the way).
+  const chosen = models && scheduleModel ? scheduleModelText(scheduleModel, findScheduleModel(models, scheduleModel)?.name, t) : null;
+  const reasoningLevels = models ? scheduleReasoningLevels(models, scheduleModel) : [];
   // Nothing to send now only when the composer is empty or still preparing; the other reasons are about scheduling alone.
   const sendNowOff = block === "preparing" || block === "empty";
   const scheduleOff = block !== null;
@@ -153,6 +170,7 @@ export function ScheduleMenuBody({
       <MenuRow
         icon={<SendHorizontal size={sheet ? 18 : 16} strokeWidth={2} />}
         title={t("schedule.sendNow")}
+        hint={chosen ? t("schedule.modelSendNowHint") : undefined}
         disabled={sendNowOff}
         testId="schedule-send-now"
         presentation={presentation}
@@ -166,6 +184,50 @@ export function ScheduleMenuBody({
         <div role="status" data-testid="schedule-reason" style={{ padding: "6px 12px 8px", fontSize: 12, lineHeight: 1.4, color: "var(--text-muted)" }}>
           {t(SCHEDULE_BLOCK_KEYS[block])}
         </div>
+      )}
+      {models && (
+        <>
+          <MenuRow
+            icon={scheduleModel ? <ModelIcon provider={scheduleModel.provider} modelId={scheduleModel.modelId} size={sheet ? 18 : 16} /> : <Cpu size={sheet ? 18 : 16} strokeWidth={2} />}
+            title={t("schedule.modelTitle")}
+            hint={chosen ? chosen.text : t("schedule.modelSame")}
+            disabled={scheduleOff}
+            testId="schedule-model"
+            presentation={presentation}
+            onClick={onModel}
+            trailing={<ChevronRight size={sheet ? 18 : 16} strokeWidth={2} aria-hidden="true" style={{ flexShrink: 0, color: "var(--text-dim)" }} />}
+          />
+          {scheduleModel && reasoningLevels.length > 0 && (
+            <div
+              role="group"
+              aria-label={t("schedule.reasoningTitle")}
+              data-testid="schedule-reasoning"
+              style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 6, padding: sheet ? "2px 12px 10px 40px" : "2px 10px 8px 36px" }}
+            >
+              <span aria-hidden="true" style={{ fontSize: 11, color: "var(--text-dim)", marginRight: 2 }}>{t("schedule.reasoningTitle")}</span>
+              {[null, ...reasoningLevels].map((level) => {
+                const checked = (scheduleModel.thinkingLevel ?? null) === level;
+                return (
+                  <button
+                    key={level ?? "default"}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={checked}
+                    tabIndex={-1}
+                    disabled={scheduleOff}
+                    onClick={() => onReasoning(level)}
+                    data-testid={`schedule-reasoning-${level ?? "default"}`}
+                    data-selected={checked || undefined}
+                    className={scheduleOff ? undefined : "dropdown-item"}
+                    style={chipStyle}
+                  >
+                    {level === null ? t("schedule.reasoningDefault") : thinkingLevelLabel(level, t)}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </>
       )}
       <MenuRow
         icon={<Gauge size={sheet ? 18 : 16} strokeWidth={2} />}
@@ -282,7 +344,13 @@ export interface ScheduleMenuProps {
   /** The Send pill's rectangle: the popover sits above it, right edges aligned. */
   anchor: AnchorRect;
   block: ScheduleBlock | null;
+  /** What the quota ring knows about the model the message goes out on (the chosen one, else the chat's own). */
   quota: QuotaResetSource | null;
+  /** What the Model row may choose from; null: no Model row (this chat's model cannot be changed). */
+  models: ScheduleModelCatalog | null;
+  /** The model chosen for the message (null: whatever the chat is on). The composer keeps it, so it outlives the menu. */
+  scheduleModel: ScheduledModelChoice | null;
+  onScheduleModelChange: (model: ScheduledModelChoice | null) => void;
   onSendNow: () => void;
   onSchedule: (choice: ScheduleChoice) => void;
   /** `returnFocus`: put focus back on the ▾ button (a keyboard close, or a choice made). */
@@ -299,12 +367,14 @@ function viewportSize(): { width: number; height: number } {
  * "Pick…" field and where the popover sits. Outside clicks are the Send pill's
  * to handle (it knows which clicks are its own).
  */
-export function ScheduleMenu({ presentation, anchor, block, quota, onSendNow, onSchedule, onClose }: ScheduleMenuProps) {
+export function ScheduleMenu({ presentation, anchor, block, quota, models, scheduleModel, onScheduleModelChange, onSendNow, onSchedule, onClose }: ScheduleMenuProps) {
   const { t } = useI18n();
   const [now] = useState(() => Date.now());
   const [picking, setPicking] = useState(false);
   const [pickValue, setPickValue] = useState(() => pickBounds(now).initial);
   const [pickProblem, setPickProblem] = useState<"empty" | "past" | "far" | null>(null);
+  const [view, setView] = useState<"main" | "model">("main");
+  const refocusModelRow = useRef(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const sheet = presentation === "sheet";
   const placement = useMemo(() => placeScheduleMenu(anchor, viewportSize()), [anchor]);
@@ -314,11 +384,16 @@ export function ScheduleMenu({ presentation, anchor, block, quota, onSendNow, on
   }, []);
 
   // Fixed to the viewport, so a resize (a rotated phone, a shrunk window) would leave it where the pill no longer is.
+  // The sheet sits on the bottom edge whatever the size, and the on-screen keyboard the model search brings up only changes the height: it stays until the width changes.
   useEffect(() => {
-    const close = () => onClose(false);
+    const startWidth = window.innerWidth;
+    const close = () => {
+      if (sheet && window.innerWidth === startWidth) return;
+      onClose(false);
+    };
     window.addEventListener("resize", close);
     return () => window.removeEventListener("resize", close);
-  }, [onClose]);
+  }, [onClose, sheet]);
 
   /** Close, then do what was chosen: the menu never lingers over the thing it just changed. */
   const choose = useCallback((action: () => void) => {
@@ -353,39 +428,78 @@ export function ScheduleMenu({ presentation, anchor, block, quota, onSendNow, on
     choose(() => onSchedule({ kind: "at", at: check.at }));
   }, [pickValue, choose, onSchedule]);
 
+  const openModels = useCallback(() => setView("model"), []);
+  const closeModels = useCallback(() => {
+    refocusModelRow.current = true;
+    setView("main");
+  }, []);
+  const chooseModel = useCallback((choice: ScheduledModelChoice | null) => {
+    onScheduleModelChange(choice);
+    closeModels();
+  }, [onScheduleModelChange, closeModels]);
+  const chooseReasoning = useCallback((level: string | null) => {
+    if (scheduleModel) onScheduleModelChange(withScheduleReasoning(scheduleModel, level));
+  }, [scheduleModel, onScheduleModelChange]);
+
+  // Back from the model list: focus returns to the Model row it was opened from, so keyboard use carries on where it left off (that row is gone while the list is open).
+  useEffect(() => {
+    if (view !== "main" || !refocusModelRow.current) return;
+    refocusModelRow.current = false;
+    menuRef.current?.querySelector<HTMLElement>('[data-testid="schedule-model"]')?.focus({ preventScroll: true });
+  }, [view]);
+
   const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
-      onClose(true);
+      // In the model list Escape steps back to the rows; in the rows it closes the menu.
+      if (view === "model") closeModels();
+      else onClose(true);
       return;
     }
     if (event.target instanceof HTMLInputElement) {
-      // The date field keeps its own arrows; Enter inside it is "Schedule".
-      if (event.key === "Enter") {
-        event.preventDefault();
-        confirmPick();
+      if (view === "model") {
+        // The model search keeps its own keys (the list handles them); Tab leaves the menu as it does from any row.
+        if (event.key !== "Tab") return;
+      } else {
+        // The date field keeps its own arrows and Tab (they move between its parts); Enter inside it is "Schedule".
+        if (event.key === "Enter") {
+          event.preventDefault();
+          confirmPick();
+        }
+        return;
       }
-      return;
     }
     if (event.key === "Tab") {
       event.preventDefault();
       onClose(true);
       return;
     }
-    const items = Array.from(menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)') ?? []);
+    // The model search joins the rows an arrow key steps through, so the list reads top to bottom: Back, search, rows.
+    const items = Array.from(menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled), [role="menuitemradio"]:not(:disabled), [data-menu-nav]') ?? []);
     const next = nextMenuIndex(items.indexOf(document.activeElement as HTMLElement), event.key, items.length);
     if (next === null) return;
     event.preventDefault();
     items[next]?.focus();
   };
 
-  const body = (
+  const body = view === "model" && models ? (
+    <ScheduleModelPicker
+      presentation={presentation}
+      rowHeight={ROW_MIN_HEIGHT[presentation]}
+      catalog={models}
+      value={scheduleModel}
+      onChoose={chooseModel}
+      onBack={closeModels}
+    />
+  ) : (
     <ScheduleMenuBody
       presentation={presentation}
       now={now}
       block={block}
       quota={quota}
+      models={models}
+      scheduleModel={scheduleModel}
       picking={picking}
       pickValue={pickValue}
       pickProblem={pickProblem}
@@ -397,6 +511,8 @@ export function ScheduleMenu({ presentation, anchor, block, quota, onSendNow, on
       onQuota={() => choose(() => onSchedule({ kind: "quota" }))}
       onChip={(chip) => choose(() => onSchedule({ kind: "at", at: resolveChipAt(chip, Date.now()) }))}
       onTogglePick={togglePick}
+      onModel={openModels}
+      onReasoning={chooseReasoning}
       onConfirmPick={confirmPick}
     />
   );

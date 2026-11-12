@@ -33,7 +33,9 @@ export type NativeSettings = {
     fallbackRevertPolicy?: "cooldown-expiry" | "never";
     fallbackChains?: Record<string, string[]>;
   };
-  compaction?: { enabled?: boolean; experimentalContextManagement?: boolean; midTurnEnabled?: boolean; methodOrder?: CompactionMethod[]; autoContinue?: boolean; keepRecentTokens?: number };
+  compaction?: { enabled?: boolean; experimentalContextManagement?: boolean; midTurnEnabled?: boolean; methodOrder?: CompactionMethod[]; autoContinue?: boolean; keepRecentTokens?: number;
+    /** The root size (tokens, else percent of the window) at which any chat's history is summarised; a helper without its own `task.agentCompactionThresholdOverrides` entry follows it. */
+    thresholdTokens?: number; thresholdPercent?: number };
   memory?: { backend?: "off" | "local" | "mnemopi" | "hindsight" | "sharpshooter" };
   autolearn?: { enabled?: boolean; autoContinue?: boolean; minToolCalls?: number };
   mnemopi?: { scoping?: "global" | "per-project" | "per-project-tagged"; autoRecall?: boolean; autoRetain?: boolean; noEmbeddings?: boolean };
@@ -250,6 +252,8 @@ export function readNativeSettings(): { path: string; settings: NativeSettings }
         ...(typeof compaction.autoContinue === "boolean" ? { autoContinue: compaction.autoContinue } : {}),
         ...(typeof compaction.experimentalContextManagement === "boolean" ? { experimentalContextManagement: compaction.experimentalContextManagement } : {}),
         ...(typeof compaction.keepRecentTokens === "number" && Number.isInteger(compaction.keepRecentTokens) ? { keepRecentTokens: compaction.keepRecentTokens } : {}),
+        ...(typeof compaction.thresholdTokens === "number" && compaction.thresholdTokens > 0 ? { thresholdTokens: compaction.thresholdTokens } : {}),
+        ...(typeof compaction.thresholdPercent === "number" && compaction.thresholdPercent > 0 && compaction.thresholdPercent <= 100 ? { thresholdPercent: compaction.thresholdPercent } : {}),
       } } : {}),
       ...(Object.keys(memory).length ? { memory: { ...(MEMORY_BACKENDS.has(memory.backend as string) ? { backend: memory.backend as NonNullable<NativeSettings["memory"]>["backend"] } : {}) } } : {}),
       ...(Object.keys(autolearn).length ? { autolearn: {
@@ -337,6 +341,8 @@ export function writeNativeSettings(settings: NativeSettings): void {
     }
   }
   if (settings.compaction?.methodOrder !== undefined && (!Array.isArray(settings.compaction.methodOrder) || settings.compaction.methodOrder.some((method) => !COMPACTION_METHOD_SET.has(method)))) throw new Error("Invalid compaction method order");
+  if (settings.compaction?.thresholdTokens !== undefined && !(typeof settings.compaction.thresholdTokens === "number" && settings.compaction.thresholdTokens > 0)) throw new Error("Compaction threshold tokens must be a positive number");
+  if (settings.compaction?.thresholdPercent !== undefined && !(typeof settings.compaction.thresholdPercent === "number" && settings.compaction.thresholdPercent > 0 && settings.compaction.thresholdPercent <= 100)) throw new Error("Compaction threshold percent must be between 0 and 100");
   if (settings.compaction?.keepRecentTokens !== undefined && (!Number.isInteger(settings.compaction.keepRecentTokens) || settings.compaction.keepRecentTokens < 1_000 || settings.compaction.keepRecentTokens > 1_000_000)) throw new Error("Compaction retained tokens must be an integer between 1,000 and 1,000,000");
   if (settings.memory?.backend !== undefined && !MEMORY_BACKENDS.has(settings.memory.backend)) throw new Error("Invalid memory backend");
   if (settings.autolearn?.minToolCalls !== undefined && (!Number.isInteger(settings.autolearn.minToolCalls) || settings.autolearn.minToolCalls < 0 || settings.autolearn.minToolCalls > 100)) throw new Error("Auto-learn minimum tool calls must be an integer between 0 and 100");

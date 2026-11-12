@@ -1382,6 +1382,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, cap
       onSlowModeChange={fastModeCapable && session ? handleSlowModeChange : undefined}
       onAbortRetry={session ? handleAbortRetry : undefined}
       availableThinkingLevels={availableThinkingLevels}
+      modelThinkingLevels={modelThinkingLevels}
       modelNameOverride={liveModelMeta?.name ?? null}
       retryInfo={retryInfo}
       activePlan={activePlan}

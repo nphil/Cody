@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import * as path from "path";
 import { readPermissionOptions, describeToolCall } from "../permission-request";
+import { providerBrand } from "../provider-brand";
 import { replyAsksUser } from "../reply-question";
 import { asString, isRecord } from "../type-guards";
 import type { NotificationEventId } from "./catalog";
@@ -26,6 +27,7 @@ export const EVENT_TITLES: Record<NotificationEventId, string> = {
   fallback: "Model fallback",
   quotaLow: "Quota running low",
   quotaOut: "Quota used up",
+  accountSignedOut: "Signed out",
 };
 
 /** ntfy turns a tag that is an emoji short code into that emoji in front of the title. */
@@ -40,6 +42,7 @@ export const EVENT_TAGS: Record<NotificationEventId, string> = {
   fallback: "twisted_rightwards_arrows",
   quotaLow: "warning",
   quotaOut: "no_entry",
+  accountSignedOut: "key",
 };
 
 export const TITLE_MAX_CHARS = 120;
@@ -111,6 +114,16 @@ export function projectTag(cwd: string | undefined): string | null {
   if (!cwd) return null;
   const name = singleLine(path.basename(cwd)).replace(/[^\w .-]/g, "-").slice(0, TAG_MAX_CHARS).trim();
   return name === "" ? null : name;
+}
+
+/** A provider as the owner knows it ("Claude", "Codex"), or a tidy version of its engine id ("my-custom_provider" -> "My Custom Provider"). */
+export function providerDisplayName(provider: string): string {
+  const tidy = provider
+    .split(/[-_]/g)
+    .filter(Boolean)
+    .map((part) => part[0]!.toUpperCase() + part.slice(1))
+    .join(" ");
+  return providerBrand(provider)?.name ?? (tidy || provider);
 }
 
 /** ntfy's sequence id for a pending request: charset-safe and short, and stable across the notification's life. */

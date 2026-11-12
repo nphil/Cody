@@ -81,7 +81,7 @@ export const SEARCH_ENTRIES: readonly SearchEntry[] = [
     tab: "notifications",
     label: event.label,
     description: event.description,
-    keywords: ["notify", "push", "ntfy", "priority", ...(event.id === "finished" ? ["duration", "long"] : []), ...(event.id === "quotaLow" ? ["usage", "limit", "percent", "threshold"] : [])],
+    keywords: ["notify", "push", "ntfy", "priority", ...(event.id === "finished" ? ["duration", "long"] : []), ...(event.id === "quotaLow" ? ["usage", "limit", "percent", "threshold"] : []), ...(event.id === "accountSignedOut" ? ["login", "expired", "sign in", "provider", "account"] : [])],
     breadcrumb: [...TRAIL, NOTIFICATION_GROUPS.find((group) => group.id === event.group)?.label ?? "What to send"],
     scope: "Cody only",
     action: "jump",

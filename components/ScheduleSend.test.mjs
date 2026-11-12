@@ -11,6 +11,7 @@ const jiti = createJiti(import.meta.url, {
 const { SendPill } = await jiti.import("./SendPill.tsx");
 const { ScheduleMenu, ScheduleMenuBody } = await jiti.import("./ScheduleMenu.tsx");
 const { ScheduledBar } = await jiti.import("./ScheduledBar.tsx");
+const { ScheduleModelPicker } = await jiti.import("./ScheduleModelPicker.tsx");
 const { pickBounds } = await jiti.import("../lib/scheduled/ui.ts");
 
 const render = (type, props) => renderToStaticMarkup(React.createElement(type, props));
@@ -35,6 +36,9 @@ const pill = {
   sendDisabled: false,
   block: null,
   quota: null,
+  models: null,
+  scheduleModel: null,
+  onScheduleModelChange() {},
   onSend() {},
   onSchedule() {},
 };
@@ -97,6 +101,8 @@ const bodyProps = (overrides = {}) => ({
   now: MORNING,
   block: null,
   quota: null,
+  models: null,
+  scheduleModel: null,
   picking: false,
   pickValue: "2026-10-06T11:00",
   pickProblem: null,
@@ -105,6 +111,8 @@ const bodyProps = (overrides = {}) => ({
   onQuota() {},
   onChip() {},
   onTogglePick() {},
+  onModel() {},
+  onReasoning() {},
   onConfirmPick() {},
   ...overrides,
 });
@@ -138,14 +146,24 @@ test("the quota row names whose quota and when it refills, and needs no email", 
   assert.doesNotMatch(html, /@/);
 });
 
-test("with no reset time to wait for, the quota row is switched off and says why", () => {
-  for (const quota of [null, { known: false }, quotaSource({ resetsAt: null }), quotaSource({ resetsAt: new Date(MORNING - 1000).toISOString() })]) {
+test("a model whose quota Cody cannot read at all switches the quota row off and says why", () => {
+  for (const quota of [null, { known: false }]) {
     const html = render(ScheduleMenuBody, bodyProps({ quota }));
     assert.equal(isDisabled(tagOf(html, "schedule-quota")), true, JSON.stringify(quota));
-    assert.match(html, /Cody can&#x27;t see when this model&#x27;s quota resets\./);
+    assert.match(html, /Cody can&#x27;t read this model&#x27;s quota, so it can&#x27;t wait for it to refill\./);
     // The rest of the menu is unaffected.
     assert.equal(isDisabled(tagOf(html, "schedule-chip-in-1h")), false);
   }
+});
+
+test("with no reset time the quota row stays on: the message goes once the model can be used again", () => {
+  for (const quota of [quotaSource({ resetsAt: null }), quotaSource({ resetsAt: new Date(MORNING - 1000).toISOString() })]) {
+    const html = render(ScheduleMenuBody, bodyProps({ quota }));
+    assert.equal(isDisabled(tagOf(html, "schedule-quota")), false, JSON.stringify(quota));
+    assert.match(html, /Claude · Primary — sent once it can be used again/);
+    assert.doesNotMatch(html, /refills at/);
+  }
+  assert.match(render(ScheduleMenuBody, bodyProps({ quota: { known: true } })), /Sent once it can be used again/);
 });
 
 test("'Tonight 11 PM' is not offered once 11 PM has passed", () => {
@@ -419,4 +437,168 @@ test("a row's text is cut for the line but whole in its tooltip, and a huge one 
   assert.ok(title.startsWith("start xxx"));
   assert.ok(title.length <= 600, `title is ${title.length} characters`);
   assert.ok(html.length < 14_000, "the page does not carry the whole message three times");
+});
+
+/* ───────────────────────────────────── the Model row ───────────────────────────────────── */
+
+const OPUS = { provider: "anthropic", modelId: "claude-opus-4-8", name: "Opus 4.8" };
+const SONNET = { provider: "anthropic", modelId: "claude-sonnet-5-5", name: "Sonnet 5.5" };
+const GPT = { provider: "openai-codex", modelId: "gpt-5.2-codex", name: "GPT-5.2 Codex" };
+const OPUS_CHOICE = { provider: "anthropic", modelId: "claude-opus-4-8" };
+
+const catalog = (overrides = {}) => ({
+  current: SONNET,
+  groups: [
+    { id: "provider:anthropic", provider: "anthropic", options: [OPUS, SONNET] },
+    { id: "provider:openai-codex", provider: "openai-codex", options: [GPT] },
+  ],
+  all: [OPUS, SONNET, GPT],
+  levels: {
+    "anthropic:claude-opus-4-8": ["off", "low", "medium", "high"],
+    "anthropic:claude-sonnet-5-5": ["off"],
+  },
+  duplicateNames: new Set(),
+  ...overrides,
+});
+
+test("a chat whose model cannot be changed has no Model row", () => {
+  const html = render(ScheduleMenuBody, bodyProps({ quota: quotaSource() }));
+  assert.equal(has(html, "schedule-model"), false);
+  assert.equal(has(html, "schedule-reasoning"), false);
+});
+
+test("the Model row defaults to 'Same as chat', sits above the quota row, and offers no reasoning without a model", () => {
+  const html = render(ScheduleMenuBody, bodyProps({ quota: quotaSource(), models: catalog() }));
+  assert.equal(isDisabled(tagOf(html, "schedule-model")), false);
+  assert.match(html, /Model<\/span><span[^>]*>Same as chat</);
+  assert.equal(has(html, "schedule-reasoning"), false);
+  assert.ok(html.indexOf('data-testid="schedule-send-now"') < html.indexOf('data-testid="schedule-model"'));
+  assert.ok(html.indexOf('data-testid="schedule-model"') < html.indexOf('data-testid="schedule-quota"'));
+  assert.doesNotMatch(html, /On the chat&#x27;s current model/, "Send now needs no explaining while nothing is chosen");
+});
+
+test("a chosen model shows under its picker name, and Send now says it still goes on the chat's own model", () => {
+  const html = render(ScheduleMenuBody, bodyProps({ quota: quotaSource(), models: catalog(), scheduleModel: OPUS_CHOICE }));
+  assert.match(html, /Model<\/span><span[^>]*>Opus 4\.8</);
+  assert.doesNotMatch(html, /Same as chat/);
+  assert.match(html, /On the chat&#x27;s current model/);
+});
+
+test("the reasoning selector lists Default and the chosen model's own levels, and marks the one in force", () => {
+  const html = render(ScheduleMenuBody, bodyProps({ models: catalog(), scheduleModel: { ...OPUS_CHOICE, thinkingLevel: "high" } }));
+  assert.match(tagOf(html, "schedule-reasoning"), /role="group"/);
+  for (const level of ["default", "auto", "off", "low", "medium", "high"]) {
+    assert.match(tagOf(html, `schedule-reasoning-${level}`), /role="menuitemradio"/, level);
+  }
+  assert.match(tagOf(html, "schedule-reasoning-high"), /aria-checked="true"/);
+  assert.match(tagOf(html, "schedule-reasoning-default"), /aria-checked="false"/);
+  assert.equal(has(html, "schedule-reasoning-xhigh"), false, "only the levels this model has");
+  assert.match(html, /Model<\/span><span[^>]*>Opus 4\.8 · High</);
+  const unset = render(ScheduleMenuBody, bodyProps({ models: catalog(), scheduleModel: OPUS_CHOICE }));
+  assert.match(tagOf(unset, "schedule-reasoning-default"), /aria-checked="true"/);
+  assert.match(tagOf(unset, "schedule-reasoning-high"), /aria-checked="false"/);
+});
+
+test("a model with no reasoning choice, or one the catalog does not know, shows no selector", () => {
+  const sonnet = render(ScheduleMenuBody, bodyProps({ models: catalog(), scheduleModel: { provider: "anthropic", modelId: "claude-sonnet-5-5" } }));
+  assert.equal(has(sonnet, "schedule-reasoning"), false);
+  const unknown = render(ScheduleMenuBody, bodyProps({ models: catalog(), scheduleModel: { provider: "x", modelId: "model-id" } }));
+  assert.equal(has(unknown, "schedule-reasoning"), false);
+  assert.match(unknown, /Model<\/span><span[^>]*>model-id</, "a model the catalog dropped is still named, by its id");
+});
+
+test("the Model row and its reasoning chips go off with the other schedule rows when nothing can be scheduled", () => {
+  const html = render(ScheduleMenuBody, bodyProps({ block: "empty", models: catalog(), scheduleModel: OPUS_CHOICE }));
+  assert.equal(isDisabled(tagOf(html, "schedule-model")), true);
+  assert.equal(isDisabled(tagOf(html, "schedule-reasoning-high")), true);
+});
+
+test("a sheet's Model row and chips keep the touch sizes of the rows around them", () => {
+  const html = render(ScheduleMenuBody, bodyProps({ presentation: "sheet", models: catalog(), scheduleModel: OPUS_CHOICE }));
+  const rowHeight = Number(tagOf(html, "schedule-send-now").match(/min-height:(\d+)px/)?.[1]);
+  assert.ok(rowHeight >= 44 && rowHeight <= 48, `rows are ${rowHeight}px`);
+  assert.match(tagOf(html, "schedule-model"), new RegExp(`min-height:${rowHeight}px`));
+  assert.equal(tagOf(html, "schedule-reasoning-high").match(/min-height:(\d+)px/)?.[1], tagOf(html, "schedule-chip-in-1h").match(/min-height:(\d+)px/)?.[1], "the chips are the size of the time chips");
+});
+
+const picker = (overrides = {}) => render(ScheduleModelPicker, {
+  presentation: "popover",
+  rowHeight: 40,
+  catalog: catalog(),
+  value: null,
+  onChoose() {},
+  onBack() {},
+  ...overrides,
+});
+const optionTags = (html) => html.match(/<button[^>]*data-testid="schedule-model-option"[^>]*>/g) ?? [];
+
+test("the model list opens on the composer's pinned models with 'Same as chat' first, a way back and a search box", () => {
+  const html = picker();
+  assert.equal(has(html, "schedule-model-back"), true);
+  assert.match(tagOf(html, "schedule-model-search"), /type="search"/);
+  assert.match(html, /Send on model/);
+  assert.ok(html.indexOf('data-testid="schedule-model-same"') < html.indexOf('data-testid="schedule-model-option"'));
+  assert.match(html, /Same as chat/);
+  assert.match(html, /Currently Sonnet 5\.5/);
+  assert.deepEqual(optionTags(html).map((tag) => tag.match(/data-model="([^"]*)"/)?.[1]), [
+    "anthropic/claude-opus-4-8",
+    "anthropic/claude-sonnet-5-5",
+    "openai-codex/gpt-5.2-codex",
+  ]);
+});
+
+test("the list marks 'Same as chat' while nothing is chosen, and the chosen model once one is", () => {
+  assert.match(tagOf(picker(), "schedule-model-same"), /aria-checked="true"/);
+  assert.ok(optionTags(picker()).every((tag) => /aria-checked="false"/.test(tag)));
+  const chosen = picker({ value: { provider: "openai-codex", modelId: "gpt-5.2-codex" } });
+  assert.match(tagOf(chosen, "schedule-model-same"), /aria-checked="false"/);
+  const marked = optionTags(chosen).filter((tag) => /aria-checked="true"/.test(tag));
+  assert.equal(marked.length, 1);
+  assert.match(marked[0], /data-model="openai-codex\/gpt-5\.2-codex"/);
+});
+
+test("a choice the pinned list would not show is listed first, so what is chosen is always visible", () => {
+  const html = picker({ value: { provider: "x", modelId: "model-id" } });
+  const tags = optionTags(html);
+  assert.equal(tags.length, 4);
+  assert.match(tags[0], /data-model="x\/model-id"/);
+  assert.match(tags[0], /aria-checked="true"/);
+});
+
+test("a model whose quota is spent stays choosable and says so; two providers' same-named models are told apart", () => {
+  const limited = picker({ catalog: catalog({ limitText: (option) => (option.modelId === "claude-opus-4-8" ? "Limit reached · resets 11:40 PM" : null) }) });
+  assert.match(limited, /Limit reached · resets 11:40 PM/);
+  assert.ok(optionTags(limited).every((tag) => !isDisabled(tag)), "choosing it is the point");
+  const single = { current: SONNET, groups: [{ id: "provider:anthropic", provider: "anthropic", options: [OPUS] }], all: [OPUS], levels: {}, duplicateNames: new Set(["Opus 4.8"]) };
+  assert.match(picker({ catalog: single }), /Opus 4\.8<\/span><span[^>]*>anthropic</);
+});
+
+test("with nothing pinned the list says so and points at the search", () => {
+  const html = picker({ catalog: catalog({ groups: [] }) });
+  assert.match(tagOf(html, "schedule-model-empty"), /role="status"/);
+  assert.match(html, /No pinned models yet\. Type to search all of them\./);
+  assert.equal(optionTags(html).length, 0);
+});
+
+test("a message with a chosen model shows it as a short chip in the bar; one without shows none", () => {
+  const names = (provider, modelId) => (modelId === "claude-opus-4-8" ? "Opus 4.8" : null);
+  const html = open(
+    [entry("m", { model: { ...OPUS_CHOICE, thinkingLevel: "high" } }), entry("p", { at: iso(NOON + 7_200_000) })],
+    { modelName: names },
+  );
+  const chips = html.match(/<span[^>]*data-testid="scheduled-row-model"[^>]*>/g) ?? [];
+  assert.equal(chips.length, 1, "only the row that chose a model");
+  assert.match(chips[0], /title="Sent on Opus 4\.8, reasoning High"/);
+  assert.match(html, /data-testid="scheduled-row-model"[^>]*>.*?Opus 4\.8 · High/s);
+  // A catalog that does not know the model still names it, by its id.
+  const unnamed = open([entry("m", { model: { provider: "x", modelId: "model-id" } })]);
+  assert.match(unnamed, /data-testid="scheduled-row-model"[^>]*>.*?model-id/s);
+  assert.equal((open([entry("n")]).match(/scheduled-row-model/g) ?? []).length, 0);
+});
+
+test("a quota message whose provider names no reset reads 'when it can be used again', not a countdown or a check", () => {
+  const html = open([entry("q", { mode: "quota", at: iso(NOON - 3_600_000), quota: { label: "Claude", giveUpAt: iso(NOON + 90_000_000), unknownReset: true } })]);
+  assert.match(html, /when it can be used again/);
+  assert.match(rowTags(html)[0], /data-scheduled-status="pending"/);
+  assert.doesNotMatch(html, /checking quota/);
 });

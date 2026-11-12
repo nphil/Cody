@@ -1,3 +1,4 @@
+import { isSignedOutCause } from "./credential-health";
 import type { UsageAccount, UsageAccountService, UsageInUseBasis, UsageSessionAccount, UsageWindow } from "./types";
 
 /**
@@ -74,7 +75,7 @@ export function evidenceFromSessionAccount(entry: UsageSessionAccount | null | u
  * Every account serving one provider, in the order a person should read them:
  * the one **in use**, then healthy **standby** siblings (by headroom — the
  * order omp would rotate to), then **limited** (earliest reset first), then
- * **disabled**.
+ * **signed out** (the login ended), then any other **disabled**.
  *
  * Which account is in use is the ENGINE's fact, not something to infer from
  * utilization. omp keeps a conversation on the account that served it (it is
@@ -84,9 +85,9 @@ export function evidenceFromSessionAccount(entry: UsageSessionAccount | null | u
  * (see `AccountEvidence`), and headroom only decides it when there is none —
  * which is also how omp itself routes a conversation's first request.
  *
- * Evidence naming a limited or disabled account is overruled: omp will not
- * send the next request there, so it is shown as what it is and the in-use
- * slot goes to the account omp will actually rotate onto.
+ * Evidence naming a limited, signed-out or disabled account is overruled: omp
+ * will not send the next request there, so it is shown as what it is and the
+ * in-use slot goes to the account omp will actually rotate onto.
  *
  * `modelId` scopes which windows count as each account's binding window;
  * omit it (or pass `""`) to rank by provider-level (untiered) windows only.
@@ -112,9 +113,13 @@ export function rankProviderAccounts(
       return { account, windows, binding: windows[0] ?? null, index };
     });
 
-  // Disabled always sorts last, whatever it reports; a live rank never has
-  // windows to weigh it against anyway (omp-usage.ts gives it windows: []).
-  const disabled = entries.filter((entry) => Boolean(entry.account.disabled));
+  // Unusable accounts always sort last, whatever they report; a live rank
+  // never has windows to weigh them against anyway (omp-usage.ts gives them
+  // windows: []). One whose login ended reads before the plain disabled ones:
+  // it is the only kind the owner can bring back by signing in again.
+  const unusable = entries.filter((entry) => Boolean(entry.account.disabled));
+  const signedOut = unusable.filter((entry) => isSignedOutCause(entry.account.disabled?.cause));
+  const disabled = unusable.filter((entry) => !signedOut.includes(entry));
   const live = entries.filter((entry) => !entry.account.disabled);
   const limited = live.filter((entry) => entry.binding?.state === "exhausted");
   const measured = live.filter((entry) => entry.binding !== null && entry.binding.state !== "exhausted");
@@ -161,6 +166,7 @@ export function rankProviderAccounts(
     if (entry !== inUse) ranked.push({ account: entry.account, windows: entry.windows, binding: entry.binding, state: "standby" });
   }
   for (const { account, windows, binding } of limited) ranked.push({ account, windows, binding, state: "limited" });
+  for (const { account, windows, binding } of signedOut) ranked.push({ account, windows, binding, state: "signed_out" });
   for (const { account, windows, binding } of disabled) ranked.push({ account, windows, binding, state: "disabled" });
   return ranked;
 }

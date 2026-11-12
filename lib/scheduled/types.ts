@@ -23,6 +23,13 @@ export const SCHEDULED_LIMITS = {
 /** How long a quota-mode message keeps trying after the reset it waited for. */
 export const QUOTA_GIVE_UP_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * How long a quota-mode message keeps waiting when its provider names no reset
+ * time at all: there is no reset to count 24 hours from, so it counts from the
+ * moment the message was scheduled. Long enough to outlast a weekly window.
+ */
+export const QUOTA_UNKNOWN_RESET_GIVE_UP_MS = 7 * 24 * 60 * 60 * 1000;
+
 export type ScheduledMode = "at" | "quota";
 export type ScheduledSource = "user" | "agent";
 
@@ -44,6 +51,13 @@ export type ScheduledStatus = "pending" | "sending" | "failed";
 export type ScheduledHandOver = "delivered" | "queued";
 
 /**
+ * What a delivery answers: how the chat took the message — or `busy`: nothing
+ * was sent, because the message goes out on another model than the chat's and
+ * the chat has to finish the reply it is running before it can be switched.
+ */
+export type ScheduledDeliveryResult = ScheduledHandOver | "busy";
+
+/**
  * Where a message that was handed over (queued) stands, read from the chat's own
  * ledger on every scheduler round. `lost` means the chat no longer has it (the
  * engine stopped, the child was replaced, the server restarted): it goes back to
@@ -61,8 +75,22 @@ export type HandedOverCheck =
 export interface ScheduledQuotaView {
   /** "Claude · Secondary": the provider's name plus the account's position when it has several. */
   label: string;
-  /** ISO — after this the message is given up on (24 h past the reset). */
+  /** ISO — after this the message is given up on (24 h past the reset; 7 days from scheduling when no reset is known). */
   giveUpAt: string;
+  /** The provider reports no reset time for it: `at` is only when waiting began, and the message is sent the moment the model is usable again. */
+  unknownReset?: true;
+}
+
+/**
+ * The model (and reasoning level) a message is to be sent on, as the composer
+ * and the engine name them. Absent on a message: whatever the chat is on when
+ * the message is sent.
+ */
+export interface ScheduledModelChoice {
+  provider: string;
+  modelId: string;
+  /** One of that model's own levels (`off`, `low`, `high` …); absent: the engine decides (the model's default after a switch). */
+  thinkingLevel?: string;
 }
 
 /** One scheduled message, as the API and the agent's tools describe it. */
@@ -77,13 +105,15 @@ export interface ScheduledItemView {
   status: ScheduledStatus;
   createdAt: string;
   quota?: ScheduledQuotaView;
+  /** The model (and reasoning level) it is sent on; absent: whatever the chat is on when it goes. */
+  model?: ScheduledModelChoice;
   /** Sending only: the chat has the message queued behind a reply that is still running. It waits there, possibly for hours. */
   handedOver?: true;
   /** Failed: why, in a sentence. Pending after a failed attempt: what the retry is for. */
   error?: string;
 }
 
-/** The model a quota-mode message is about: the chat's own, as the composer shows it. */
+/** A model as the composer shows it for the chat: what a quota-mode message follows when no other model was chosen for it. */
 export interface ScheduledModelRef {
   provider: string;
   modelId: string;
@@ -94,10 +124,12 @@ export interface CreateScheduledBody {
   message: string;
   /** An ISO 8601 instant with an offset or `Z` ("2026-10-05T23:40:00-04:00"). */
   at?: string;
-  /** Send when the chat's model's quota refills. Needs a reset time Cody can see. */
+  /** Send when the model's quota refills — the chosen `model`'s, else the chat's. Waits for it, whether or not a reset time is known. */
   whenQuotaResets?: boolean;
-  /** The chat's current model as the composer shows it; the server derives it when absent. */
-  model?: ScheduledModelRef;
+  /** The model (and reasoning level) the message is sent on: the chat is switched to it first, and a quota wait follows it. Absent: whatever the chat is on. */
+  model?: ScheduledModelChoice;
+  /** The chat's current model as the composer shows it, for a quota wait with no `model` chosen; the server derives it when absent. */
+  chatModel?: ScheduledModelRef;
 }
 
 /** PATCH /api/sessions/<id>/scheduled/<itemId>. Any subset; a failed item becomes pending again. */
@@ -105,7 +137,9 @@ export interface UpdateScheduledBody {
   message?: string;
   at?: string;
   whenQuotaResets?: boolean;
-  model?: ScheduledModelRef;
+  /** A new model for the message; `null` takes the choice away (the chat's own model again). */
+  model?: ScheduledModelChoice | null;
+  chatModel?: ScheduledModelRef;
 }
 
 export interface ScheduledListResponse {
@@ -133,6 +167,7 @@ export const SCHEDULED_ERROR_CODES = [
   "time_too_far",
   "choose_one_time",
   "no_model",
+  "invalid_model",
   "no_quota_reset",
   "too_many_for_chat",
   "too_many_for_account",

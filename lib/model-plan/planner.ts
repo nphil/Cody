@@ -154,6 +154,7 @@ export async function planWithModel(model: string, roster: Roster): Promise<Plan
     prompt: buildUserPrompt(roster),
     timeoutMs: PLANNER_TIMEOUT_MS,
     timeZone: effectiveTimeZone(null).zone,
+    usage: { purpose: "planner" },
   });
   if (!answer.text) return { ok: false, reason: answer.error ?? "the planner returned no answer" };
 

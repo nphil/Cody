@@ -9,11 +9,12 @@ import { formatApiError } from "@/lib/i18n/api-error";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import { Tooltip } from "./ui/primitives";
+import { showEngineCrashToast } from "./engine-crash-toast";
 import { toast } from "./ui/toast";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { useForkAvailable } from "@/hooks/useForkChat";
 import { clearLastOpenSession, setLastOpenSession, workspaceKeyOf } from "@/lib/workspace-memory";
-import { groupSessionsByProject, projectActivityCounts, retainPendingSessions, sortManagedProjects } from "@/lib/project-ordering";
+import { compareByLastActive, DEFAULT_SIDEBAR_VIEW, groupSessionsByProject, lastActiveMs, parseSidebarView, projectActivityCounts, retainPendingSessions, sortManagedProjects, sortRecentSessions, type SidebarView } from "@/lib/project-ordering";
 import { comparableProjectPath } from "@/lib/comparable-path";
 import { Check, ChevronDown, ChevronRight, CircleHelp, FilePlus, FileUp, Folder, FolderPlus, GitBranch, MoreHorizontal, Plus, RefreshCw, Search, SlidersHorizontal, Trash2, Upload } from "lucide-react";
 import { engineScopedKey, STORAGE_KEYS } from "@/lib/storage-keys";
@@ -172,6 +173,25 @@ function saveExpandedProjects(paths: Set<string>): void {
   if (typeof window === "undefined") return;
   try {
     window.localStorage.setItem(EXPANDED_PROJECTS_STORAGE_KEY, JSON.stringify([...paths]));
+  } catch {
+    // ignore storage quota / privacy-mode errors
+  }
+}
+
+/** Persisted list view; Recent until the user picks Projects. */
+function loadSidebarView(): SidebarView {
+  if (typeof window === "undefined") return DEFAULT_SIDEBAR_VIEW;
+  try {
+    return parseSidebarView(window.localStorage.getItem(STORAGE_KEYS.sidebarView));
+  } catch {
+    return DEFAULT_SIDEBAR_VIEW;
+  }
+}
+
+function saveSidebarView(view: SidebarView): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(STORAGE_KEYS.sidebarView, view);
   } catch {
     // ignore storage quota / privacy-mode errors
   }
@@ -436,9 +456,9 @@ function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
     }
   }
 
-  // Sort each level by modified desc
+  // Sort each level by last activity (newest message), newest first
   const sort = (nodes: SessionTreeNode[]) => {
-    nodes.sort((a, b) => b.session.modified.localeCompare(a.session.modified));
+    nodes.sort((a, b) => compareByLastActive(a.session, b.session));
     nodes.forEach((n) => sort(n.children));
   };
   sort(roots);
@@ -605,6 +625,16 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [runningOnly, setRunningOnly] = useState(false);
+  // Recent (one list across projects) or Projects. Starts at the default and
+  // takes the stored choice after mount so the first client render matches the
+  // server's; the list is still loading then, so nothing visibly switches.
+  const [sidebarView, setSidebarView] = useState<SidebarView>(DEFAULT_SIDEBAR_VIEW);
+  const [showAllRecent, setShowAllRecent] = useState(false);
+  useEffect(() => { setSidebarView(loadSidebarView()); }, []);
+  const chooseSidebarView = useCallback((view: SidebarView) => {
+    setSidebarView(view);
+    saveSidebarView(view);
+  }, []);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   // Once the SSE stream has delivered a frame it is the source of truth for
@@ -696,6 +726,8 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
     saveUnreadSessionIds(engineId, unreadSessionIds);
   }, [engineId, unreadSessionIds]);
 
+  const crashToastRef = useRef<{ sessions: SessionInfo[]; open: (session: SessionInfo) => void }>({ sessions: [], open: () => {} });
+
   useEffect(() => {
     // Live running status and session-list invalidations arrive via SSE; the
     // sidebar never has to poll while an agent is working.
@@ -709,6 +741,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
           runningSessionIds?: string[];
           runningSessions?: Array<{ id: string; awaitingInput: boolean }>;
           refreshSessionList?: boolean;
+          sessionId?: string;
         };
         // An engine switch is instance-wide, but only the browser that clicked
         // Switch reloads. Every other surface — a tablet, a phone over
@@ -727,6 +760,14 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
           // of the engine this page was showing, which the new one will not
           // have.
           window.location.assign("/");
+          return;
+        }
+        if (data.type === "engine_crashed") {
+          // An engine stopped on its own: this page says so whichever chat it is showing, and a click opens that chat.
+          const { sessions, open } = crashToastRef.current;
+          const chat = sessions.find((session) => session.id === data.sessionId);
+          const chatTitle = chat ? (chat.name?.trim() || chat.firstMessage.trim()).slice(0, 80) : undefined;
+          showEngineCrashToast(data, chatTitle, chat ? () => open(chat) : null);
           return;
         }
         if (data.type === "running") {
@@ -979,6 +1020,38 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   // While a filter is active, workspaces with no matching sessions are hidden
   // so the list reads as a genuine result set; at rest every workspace stays.
   const filtersActive = searchOpen || runningOnly || searchQuery.trim().length > 0;
+  // Recent view: every chat of every visible project in one list. Ordered
+  // from sessionsByProject / extraSessions only, so it re-sorts when the
+  // session list refreshes — never on running/unread/clock ticks — and a chat
+  // the user is looking at stays put between refreshes. Chats the server does
+  // not list yet (just created) stay on top.
+  const recentSessions = useMemo(() => {
+    const all: SessionInfo[] = [];
+    for (const list of sessionsByProject.values()) all.push(...list);
+    const allIds = new Set(all.map((session) => session.id));
+    const pendingIds = new Set(extraSessions.map((session) => session.id));
+    return sortRecentSessions(
+      all.filter((session) => !pendingIds.has(session.id)),
+      extraSessions.filter((session) => allIds.has(session.id)),
+    );
+  }, [sessionsByProject, extraSessions]);
+  const visibleRecentSessions = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!runningOnly && !q) return recentSessions;
+    return recentSessions.filter((session) => {
+      if (runningOnly && !runningSessionIds.has(session.id)) return false;
+      if (!q) return true;
+      return (session.name ?? "").toLowerCase().includes(q)
+        || session.firstMessage.toLowerCase().includes(q)
+        || projectLabel(session.projectRoot ?? session.cwd).toLowerCase().includes(q);
+    });
+  }, [recentSessions, runningOnly, searchQuery, runningSessionIds]);
+  const recentNodes = useMemo<SessionTreeNode[]>(() => {
+    const limit = filtersActive || showAllRecent ? visibleRecentSessions.length : MAX_RECENT_SESSIONS;
+    return visibleRecentSessions.slice(0, limit).map((session) => ({ session, children: [] }));
+  }, [visibleRecentSessions, filtersActive, showAllRecent]);
+  const recentHiddenCount = filtersActive ? 0 : Math.max(0, visibleRecentSessions.length - MAX_RECENT_SESSIONS);
+
   const visibleProjectEntries = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     const entries: { project: ManagedProject; sessions: SessionInfo[] }[] = [];
@@ -1244,6 +1317,11 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
     expandProject(workspaceKeyOf(s));
     onSelectSession(s);
   }, [onSelectSession, expandProject]);
+
+  // What the crash pop-up (an SSE frame, read in an effect that must not resubscribe on every change) needs to find a chat and open it.
+  useEffect(() => {
+    crashToastRef.current = { sessions: allSessions, open: handleSelectSessionFromList };
+  }, [allSessions, handleSelectSessionFromList]);
 
   const handleNewSession = useCallback(() => {
     if (!selectedCwd) return;
@@ -1523,6 +1601,39 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
           <Plus size={15} strokeWidth={1.9} aria-hidden="true" />
         </SidebarIconButton>
       </div>
+      <div
+        role="group"
+        aria-label={t("sessionSidebar.viewLabel")}
+        style={{ flexShrink: 0, padding: "2px 10px 6px", display: "flex", gap: 2 }}
+      >
+        {(["recent", "projects"] as const).map((view) => {
+          const active = sidebarView === view;
+          return (
+            <button
+              key={view}
+              type="button"
+              aria-pressed={active}
+              title={t(view === "recent" ? "sessionSidebar.viewRecentTitle" : "sessionSidebar.viewProjectsTitle")}
+              onClick={() => chooseSidebarView(view)}
+              style={{
+                flex: 1,
+                height: 24,
+                padding: "0 8px",
+                border: "1px solid " + (active ? "color-mix(in srgb, var(--accent) 30%, transparent)" : "var(--border)"),
+                borderRadius: "var(--radius-control)",
+                background: active ? "var(--bg-selected)" : "transparent",
+                color: active ? "var(--text)" : "var(--text-dim)",
+                cursor: "pointer",
+                fontSize: 11,
+                fontWeight: 600,
+                transition: SIDEBAR_BUTTON_TRANSITION,
+              }}
+            >
+              {t(view === "recent" ? "sessionSidebar.viewRecent" : "sessionSidebar.viewProjects")}
+            </button>
+          );
+        })}
+      </div>
       {searchOpen && (
         <div style={{ padding: "0 10px 6px", flexShrink: 0 }}>
           <input
@@ -1581,13 +1692,69 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
               {t("projects.noProjects")}
             </div>
           )}
-          {!loading && !projectsError && !error && sortedProjects.length > 0 && visibleProjectEntries.length === 0 && (
+          {sidebarView === "recent" && !loading && !projectsError && !error && sortedProjects.length > 0 && (
+            visibleRecentSessions.length === 0 ? (
+              <div style={{ padding: "14px 4px", color: "var(--text-dim)", fontSize: 11.5, lineHeight: 1.5 }}>
+                {filtersActive ? t("sessionSidebar.noMatches") : t("sessionSidebar.recentEmpty")}
+              </div>
+            ) : (
+              <div className="sidebar-recent-sessions">
+                {recentNodes.map((node) => (
+                  <SessionTreeItem
+                    key={node.session.id}
+                    node={node}
+                    selectedSessionId={selectedSessionId}
+                    runningSessionIds={runningSessionIds}
+                    unreadSessionIds={unreadSessionIds}
+                    awaitingInputTreeIds={awaitingInputSessionIds}
+                    relativeTimeNow={relativeTimeNow}
+                    onSelectSession={handleSelectSessionFromList}
+                    onRenamed={loadSessions}
+                    onSessionDeleted={handleSessionDeleted}
+                    depth={0}
+                    showProject
+                  />
+                ))}
+                {recentHiddenCount > 0 && (
+                  <button
+                    onClick={() => setShowAllRecent((v) => !v)}
+                    aria-expanded={showAllRecent}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 5,
+                      width: "100%",
+                      margin: "2px 0 0",
+                      padding: "5px 8px 5px 12px",
+                      background: "none",
+                      border: "none",
+                      color: "var(--text-dim)",
+                      cursor: "pointer",
+                      textAlign: "left",
+                      fontSize: 11,
+                      fontWeight: 600,
+                      borderRadius: "var(--radius-control)",
+                      transition: SIDEBAR_BUTTON_TRANSITION,
+                    }}
+                    onMouseEnter={(e) => { e.currentTarget.style.color = "var(--accent)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-dim)"; e.currentTarget.style.background = "none"; }}
+                  >
+                    <ChevronDown size={11} strokeWidth={1.8} style={{ flexShrink: 0, transform: showAllRecent ? "rotate(180deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }} aria-hidden="true" />
+                    {showAllRecent
+                      ? t("projects.showLess")
+                      : t("projects.showMoreSessions", { count: recentHiddenCount })}
+                  </button>
+                )}
+              </div>
+            )
+          )}
+          {sidebarView === "projects" && !loading && !projectsError && !error && sortedProjects.length > 0 && visibleProjectEntries.length === 0 && (
             <div style={{ padding: "14px 4px", color: "var(--text-dim)", fontSize: 11.5, lineHeight: 1.5 }}>
               {t("sessionSidebar.noMatches")}
             </div>
           )}
 
-          {visibleProjectEntries.map(({ project, sessions }) => {
+          {sidebarView === "projects" && visibleProjectEntries.map(({ project, sessions }) => {
             const tree = buildSessionTree(sessions);
             // Sessions group under a project through the case-folded comparable
             // form (see groupSessionsByProject), so the active highlight must
@@ -1715,6 +1882,8 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
 }
 
 const MAX_PROJECT_SESSIONS = 5;
+/** Rows shown in the Recent view before "Show more" (all while filtering). */
+const MAX_RECENT_SESSIONS = 40;
 
 interface ProjectRowProps {
   project: ManagedProject;
@@ -2305,6 +2474,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
   onRenamed,
   onSessionDeleted,
   depth,
+  showProject = false,
 }: {
   node: SessionTreeNode;
   selectedSessionId: string | null;
@@ -2316,6 +2486,8 @@ const SessionTreeItem = memo(function SessionTreeItem({
   onRenamed?: () => void;
   onSessionDeleted?: (id: string) => void;
   depth: number;
+  /** Recent view: label the row with its project's name. */
+  showProject?: boolean;
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const hasChildren = node.children.length > 0;
@@ -2364,6 +2536,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
           onRenamed={onRenamed}
           onDeleted={handleDeleted}
           depth={depth}
+          projectName={showProject ? projectLabel(node.session.projectRoot ?? node.session.cwd) : undefined}
           hasChildren={hasChildren}
           collapsed={collapsed}
           onToggleCollapse={handleToggleCollapse}
@@ -2411,6 +2584,7 @@ const SessionTreeItem = memo(function SessionTreeItem({
     if (prev.awaitingInputTreeIds.has(id) !== next.awaitingInputTreeIds.has(id)) return false;
   }
   if (prev.relativeTimeNow !== next.relativeTimeNow) return false;
+  if (prev.showProject !== next.showProject) return false;
   if (prev.onSelectSession !== next.onSelectSession
     || prev.onRenamed !== next.onRenamed
     || prev.onSessionDeleted !== next.onSessionDeleted) return false;
@@ -2510,6 +2684,7 @@ const SessionItem = memo(function SessionItem({
   onRenamed,
   onDeleted,
   depth = 0,
+  projectName,
   hasChildren = false,
   collapsed = false,
   relativeTimeNow,
@@ -2524,6 +2699,8 @@ const SessionItem = memo(function SessionItem({
   onRenamed?: () => void;
   onDeleted?: (id: string) => void;
   depth?: number;
+  /** Small project label under the title (Recent view only). */
+  projectName?: string;
   hasChildren?: boolean;
   relativeTimeNow: number;
   collapsed?: boolean;
@@ -2549,7 +2726,11 @@ const SessionItem = memo(function SessionItem({
   const contentButtonRef = useRef<HTMLButtonElement>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const title = session.name || session.firstMessage.slice(0, 50) || session.id.slice(0, 12);
-  const relativeTime = formatRelativeTime(session.modified, locale, relativeTimeNow);
+  // Last activity (newest message), not the file's mtime: a rename or other
+  // bookkeeping write must not make an idle chat read as "just now".
+  const lastActiveMsValue = lastActiveMs(session);
+  const lastActive = lastActiveMsValue ? new Date(lastActiveMsValue).toISOString() : session.modified;
+  const relativeTime = formatRelativeTime(lastActive, locale, relativeTimeNow);
   const confirming = confirmArchive || confirmDelete;
   // Active session: an extremely subtle warm-gray wash — the selection is
   // carried by the orange indicator and timestamp, not a card-like fill.
@@ -2632,7 +2813,7 @@ const SessionItem = memo(function SessionItem({
         }
       }}
       style={{
-        height: confirming ? 34 : 30,
+        height: confirming ? 34 : projectName ? 38 : 30,
         display: "flex",
         alignItems: "center",
         gap: 6,
@@ -2686,15 +2867,22 @@ const SessionItem = memo(function SessionItem({
           {/* Flexible title — always ellipsized; the fixed-width right rail
               (timestamp + menu) can never be pushed off-screen. */}
           <button ref={contentButtonRef} type="button" className="session-item-button" aria-current={isSelected ? "true" : undefined} onKeyDown={(event) => { if (event.key === "Delete") { event.preventDefault(); setConfirmDelete(true); } }} style={{ display: "flex", alignItems: "center", flex: 1, minWidth: 0 }}>
-            <span title={title} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)", fontSize: 12.5, fontWeight: isSelected ? 600 : 500, lineHeight: 1.35, letterSpacing: "-0.005em" }}>
-              {title}
+            <span style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", minWidth: 0, flex: 1 }}>
+              <span title={title} style={{ maxWidth: "100%", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)", fontSize: 12.5, fontWeight: isSelected ? 600 : 500, lineHeight: 1.35, letterSpacing: "-0.005em" }}>
+                {title}
+              </span>
+              {projectName && (
+                <span title={session.projectRoot ?? session.cwd} style={{ maxWidth: "100%", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-dim)", fontSize: 10, lineHeight: 1.3 }}>
+                  {projectName}
+                </span>
+              )}
             </span>
           </button>
           {session.worktreeBranch && <span title={t("sessionSidebar.worktreeTitle", { path: session.cwd })} style={{ display: "flex", alignItems: "center", gap: 3, maxWidth: 56, minWidth: 0, overflow: "hidden", color: "var(--text-dim)", fontSize: 10, flexShrink: 1 }}><GitBranch size={10} strokeWidth={2.4} aria-hidden="true" /><span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{session.worktreeBranch}</span></span>}
           {isAwaitingInput && <NeedsYouSessionIndicator size={13} />}
           {!isAwaitingInput && isRunning && <RunningSessionIndicator size={12} />}
           {!isAwaitingInput && !isRunning && isUnread && <UnreadSessionIndicator size={11} />}
-          {relativeTime && <span title={new Date(session.modified).toLocaleString(locale)} style={{ flexShrink: 0, minWidth: 30, textAlign: "right", color: isSelected ? "var(--accent)" : "var(--text-dim)", fontSize: 10, fontVariantNumeric: "tabular-nums" }}>{relativeTime}</span>}
+          {relativeTime && <span title={new Date(lastActive).toLocaleString(locale)} style={{ flexShrink: 0, minWidth: 30, textAlign: "right", color: isSelected ? "var(--accent)" : "var(--text-dim)", fontSize: 10, fontVariantNumeric: "tabular-nums" }}>{relativeTime}</span>}
           {hasChildren && <button className="session-item-icon-button" onClick={(event) => { event.stopPropagation(); onToggleCollapse?.(); }} title={collapsed ? t("sessionSidebar.expandForks") : t("sessionSidebar.collapseForks")} aria-label={collapsed ? t("sessionSidebar.expandForks") : t("sessionSidebar.collapseForks")} aria-expanded={!collapsed} style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 20, height: 20, padding: 0, flexShrink: 0, border: "none", background: "none", color: "var(--text-dim)", cursor: "pointer", transform: collapsed ? "rotate(-90deg)" : "none", transition: "transform var(--dur-fast) var(--ease-out-warm)" }}><ChevronDown size={12} strokeWidth={1.8} aria-hidden="true" /></button>}
           {/* Reserved overflow-menu slot: invisible (but space-preserving) until
               hover/focus, so rows never reflow and titles never shift. */}

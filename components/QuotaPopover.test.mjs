@@ -973,3 +973,51 @@ test("a saved reset for an unrelated provider stays inside the collapsed disclos
   assert.ok(hiddenIndex !== -1 && codexIndex !== -1, "expected both a collapsed panel and the unrelated credit's row");
   assert.ok(hiddenIndex < codexIndex, "the unrelated credit must live inside the collapsed panel");
 });
+
+/* ──────────────────────────── A login that expired ──────────────────────────── */
+
+// The 2026-11 incident: Anthropic refused to renew a login, omp disabled the
+// account, and Cody showed a plain red "disabled" that read like a spent quota.
+const SIGNED_OUT_CAUSE = 'oauth refresh failed: OAuthError: anthropic token refresh failed: 400 {"type":"error","error":{"type":"invalid_grant","message":"Refresh token expired"}}';
+const opus = { provider: "anthropic", modelId: "claude-opus-5-5" };
+
+test("a provider whose every login ended asks for a sign-in instead of reading as unmetered", () => {
+  const quota = buildQuotaView(usageSnapshot({
+    accounts: [usageAccount({ id: "only", disabled: { cause: SIGNED_OUT_CAUSE } })],
+  }), false, false, opus);
+
+  assert.equal(quota.known, false);
+  assert.deepEqual(quota.signedOut, { provider: "anthropic" });
+  assert.equal(quota.color, "var(--status-warning)");
+
+  // Two accounts, both signed out: still one call to action, on the provider.
+  const both = buildQuotaView(usageSnapshot({
+    accounts: [
+      usageAccount({ id: "a", disabled: { cause: SIGNED_OUT_CAUSE } }),
+      usageAccount({ id: "b", disabled: { cause: SIGNED_OUT_CAUSE } }),
+    ],
+  }), false, false, opus);
+  assert.deepEqual(both.signedOut, { provider: "anthropic" });
+});
+
+test("a signed-out sibling is listed as such and never mistaken for the account in use", () => {
+  const quota = buildQuotaView(usageSnapshot({
+    accounts: [
+      usageAccount({ id: "primary", disabled: { cause: SIGNED_OUT_CAUSE } }),
+      usageAccount({ id: "secondary", windows: [usageWindow({ utilization: 12 })] }),
+    ],
+  }), false, false, opus);
+
+  assert.equal(quota.known, true);
+  assert.equal(quota.percent, 12);
+  assert.deepEqual(quota.accounts.map((account) => [account.label, account.state]), [["Secondary", "in_use"], ["Primary", "signed_out"]]);
+});
+
+test("a credential disabled for another reason is not offered a sign-in", () => {
+  const quota = buildQuotaView(usageSnapshot({
+    accounts: [usageAccount({ id: "only", disabled: { cause: "disabled by an operator" } })],
+  }), false, false, opus);
+
+  assert.equal(quota.known, false);
+  assert.equal(quota.signedOut, undefined);
+});

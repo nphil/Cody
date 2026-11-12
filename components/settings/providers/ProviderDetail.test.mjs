@@ -196,6 +196,28 @@ test("the not-stored note appears for a connected sign-in with an empty account 
   assert.doesNotMatch(withAccount, /Not stored in/);
 });
 
+test("a signed-out account says so and offers to sign in again, to an editor only", () => {
+  const lone = { state: "available", accounts: [account({ state: "signed_out", label: "lost@example.com" })] };
+  const html = decoded(renderCard({ method: lone }));
+  assert.ok(html.includes(t("providerSignedOut.chip")));
+  assert.match(html, /data-testid="account-sign-in-again"/);
+  // Nothing is signed in: the card's own button is "Sign in", never a second
+  // account next to a "primary" that cannot be used.
+  assert.match(html, /Sign in/);
+  assert.doesNotMatch(html, /Add secondary account|Add account/);
+
+  const readOnly = decoded(renderCard({ method: lone }, { canEdit: false }));
+  assert.ok(readOnly.includes(t("providerSignedOut.chip")));
+  assert.doesNotMatch(readOnly, /data-testid="account-sign-in-again"/);
+
+  // Beside a working account the card is still signed in and still adds one.
+  const mixed = decoded(renderCard({
+    method: { accounts: [account({ id: "1" }), account({ id: "2", position: 1, state: "signed_out", label: "lost@example.com" })] },
+  }));
+  assert.match(mixed, /data-testid="account-sign-in-again"/);
+  assert.match(mixed, /Add account/);
+});
+
 function keyRow(variable) {
   return {
     kind: "key",

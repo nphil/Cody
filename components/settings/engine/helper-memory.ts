@@ -8,6 +8,9 @@
  * it whole: an entry for an agent this file has never heard of is carried
  * through untouched.
  */
+import { formatLimitTokens, parseOverride, type HelperLimit } from "@/lib/helper-memory-limit";
+
+export { parseOverride, type HelperLimit };
 
 export const HELPER_MEMORY_LABEL = "Helper agents' memory limit";
 export const HELPER_MEMORY_DESCRIPTION = "Helper agents summarise their history once it reaches this size, and save notes first so they can pick up where they left off.";
@@ -25,33 +28,15 @@ export const DEFAULT_TOKENS = 200_000;
 
 export type Overrides = Record<string, number | string | null>;
 export type HelperMode = "percent" | "tokens" | "inherit";
-/** One limit: a share of the model's window, or a fixed token count. */
-export type HelperLimit = { mode: "percent" | "tokens"; value: number };
-
-const PERCENT_ENTRY = /^(\d+(?:\.\d+)?)%$/;
-
-/** omp's rule for one entry: a positive integer, or "N%" with N in (0, 100]. Anything else is not a limit. */
-export function parseOverride(entry: unknown): HelperLimit | null {
-  if (typeof entry === "number") return Number.isSafeInteger(entry) && entry > 0 ? { mode: "tokens", value: entry } : null;
-  if (typeof entry !== "string") return null;
-  const match = PERCENT_ENTRY.exec(entry.trim());
-  const percent = match ? Number(match[1]) : Number.NaN;
-  return percent > 0 && percent <= 100 ? { mode: "percent", value: percent } : null;
-}
 
 /** The value as config.yml stores it: "20%" or 200000. */
 export function toOverride(limit: HelperLimit): string | number {
   return limit.mode === "percent" ? `${limit.value}%` : limit.value;
 }
 
-function formatTokens(tokens: number): string {
-  if (tokens >= 1_000_000) return `${Math.round(tokens / 100_000) / 10}M`;
-  return tokens >= 1000 ? `${Math.round(tokens / 1000)}k` : String(tokens);
-}
-
 /** "20%" or "200k tokens", for a person. */
 export function describeLimit(limit: HelperLimit): string {
-  return limit.mode === "percent" ? `${limit.value}%` : `${formatTokens(limit.value)} tokens`;
+  return limit.mode === "percent" ? `${limit.value}%` : `${formatLimitTokens(limit.value)} tokens`;
 }
 
 function sameLimit(a: HelperLimit | null, b: HelperLimit | null): boolean {
