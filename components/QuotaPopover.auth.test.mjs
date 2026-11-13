@@ -16,6 +16,7 @@ const { QuotaPopover, buildQuotaView, modelLimitReached } = await jiti.import(".
 const { AutoSpendControls } = await jiti.import("./QuotaAutoSpend.tsx");
 const { parseOmpUsageOutput } = await jiti.import("../lib/usage/omp-usage.ts");
 const { buildAutoRedeemGroups } = await jiti.import("../hooks/auto-redeem-controls.ts");
+const { withOutdatedReadings } = await jiti.import("../lib/usage/reading-age.ts");
 
 const fixture = (name) => parseOmpUsageOutput(readFileSync(new URL(`../lib/usage/fixtures/${name}.json`, import.meta.url), "utf8"));
 const NEW_ENGINE_KEYS = new Set(JSON.parse(readFileSync(new URL("../lib/harness/fixtures/omp-schema-keys.json", import.meta.url), "utf8")).keys);
@@ -362,4 +363,107 @@ test("the popover shows no switches before the settings schema has loaded", () =
   const quota = buildQuotaView(usageSnapshot(), false, false, FABLE);
   const html = render({ quota, resetCredits: resetCredits([{ id: "c1", expiresAt: "2026-12-30T12:00:00.000Z" }]) });
   assert.doesNotMatch(html, /data-testid="auto-spend"/);
+});
+
+/* ───────── a reading omp measured long ago (real 18.8.3 and 18.19.0 reads of one agent directory) ───────── */
+
+// Both fixtures are the same agent directory read by the two engines. The
+// Primary Claude login's usage fetch was answered with HTTP 429 and its saved
+// report was five days old; 18.8.3 kept printing it, with its own old
+// `fetchedAt`. 18.19.0 read the Primary live and the Secondary from headers.
+const STALE_READ = "omp-18.8.3-usage-stale-primary";
+const LIVE_READ = "omp-18.19.0-usage-primary-fresh";
+const PRIMARY_ID = "00000000-0000-4000-8000-0000000000a1";
+const SECONDARY_ID = "00000000-0000-4000-8000-0000000000b1";
+const readAt = (name) => JSON.parse(readFileSync(new URL(`../lib/usage/fixtures/${name}.json`, import.meta.url), "utf8")).generatedAt;
+/** What the server hands the browser: the parsed read, aged at `now`. */
+const aged = (name, now = readAt(name)) => withOutdatedReadings(fixture(name), now);
+const loginOnly = (snapshot, id) => ({ ...snapshot, accounts: snapshot.accounts.filter((account) => account.id === id) });
+
+test("18.8.3: a login whose saved report is five days old shows no number, only when it was measured", () => {
+  const now = readAt(STALE_READ);
+  const quota = buildQuotaView(aged(STALE_READ), false, false, FABLE);
+  // The ring follows the login that has a current reading: the Secondary's weekly window.
+  assert.equal(quota.known, true);
+  assert.equal(quota.label, "Claude · Secondary · weekly");
+  assert.equal(quota.percent, 22);
+  const primary = quota.accounts.find((account) => account.key === PRIMARY_ID);
+  assert.deepEqual(
+    { noReading: primary.noReading, outdated: primary.outdated, measuredAt: primary.measuredAt, percent: primary.percent, resetsAt: primary.resetsAt, state: primary.state },
+    { noReading: true, outdated: true, measuredAt: "2026-11-07T10:20:47.993Z", percent: 0, resetsAt: null, state: "standby" },
+  );
+
+  const text = readable(render({ quota, now }));
+  assert.match(text, /Primary·Standby·—·Out of date · measured 5d ago/);
+  assert.match(text, /Secondary·In use·22%/);
+  // The numbers of the five-day-old report (5-hour 1%, weekly 55%) appear nowhere.
+  assert.doesNotMatch(text, /\b55%|Primary·Standby·1%/);
+  assert.deepEqual(testIds(render({ quota, now })).filter((id) => id === "quota-reading-outdated"), ["quota-reading-outdated"]);
+});
+
+test("18.8.3: when that login is the only one, the ring is blank and says the reading is out of date", () => {
+  const now = readAt(STALE_READ);
+  const quota = buildQuotaView(loginOnly(aged(STALE_READ), PRIMARY_ID), false, false, FABLE);
+  assert.equal(quota.known, false);
+  assert.equal(quota.titleKey, "usage.outdatedTitle");
+  assert.equal(quota.outdatedSince, "2026-11-07T10:20:47.993Z");
+  assert.equal(quota.signedOut, undefined);
+
+  const text = readable(render({ quota, now }));
+  assert.match(text, /too old to show as current/);
+  assert.match(text, /Out of date · measured 5d ago/);
+  // A blank ring is not "0%" and not "unmetered".
+  assert.doesNotMatch(text, /\d+% Used|\b55%|unmetered|does not report plan limits/i);
+});
+
+test("a reading still inside half an hour carries no out-of-date mark, whichever engine printed it", () => {
+  for (const name of [LIVE_READ, "omp-18.19.0-usage-plan", "omp-18.8.3-usage-plan"]) {
+    const snapshot = aged(name);
+    assert.equal(snapshot.accounts.some((account) => account.outdated), false, name);
+    const html = render({ quota: buildQuotaView(snapshot, false, false, FABLE), now: readAt(name) });
+    assert.doesNotMatch(html, /quota-reading-outdated|Out of date/, name);
+  }
+});
+
+test("18.19.0: a report built from the last response's headers is marked once it is half an hour old, and the live one is not", () => {
+  const now = Date.parse("2026-11-12T16:20:00.000Z");
+  const quota = buildQuotaView(aged(LIVE_READ, now), false, false, FABLE);
+  const secondary = quota.accounts.find((account) => account.key === SECONDARY_ID);
+  const primary = quota.accounts.find((account) => account.key === PRIMARY_ID);
+  assert.equal(secondary.outdated, true);
+  assert.equal(secondary.measuredAt, "2026-11-12T15:45:41.358Z");
+  assert.equal(secondary.percent, 21, "its windows have not reset, so the last known number stays, marked");
+  assert.equal(primary.outdated, undefined, "measured 20 minutes before this moment: still current");
+
+  const text = readable(render({ quota, now }));
+  assert.match(text, /Secondary·Standby·21%·Out of date · measured 34m ago/);
+});
+
+test("an out-of-date number that still binds stays on the hero, dimmed, with its age on its own line", () => {
+  const now = Date.parse("2026-11-12T16:20:00.000Z");
+  const quota = buildQuotaView(loginOnly(aged(LIVE_READ, now), SECONDARY_ID), false, false, FABLE);
+  assert.equal(quota.known, true);
+  assert.equal(quota.outdated, true);
+  assert.equal(quota.measuredAt, "2026-11-12T15:45:41.358Z");
+  assert.equal(quota.percent, 21);
+
+  const html = render({ quota, now });
+  assert.match(readable(html), /Fable·21% Used·Weekly · Out of date · Resets /);
+  assert.match(html, /data-testid="quota-reading-outdated"[^>]*title="omp could not refresh this account&#x27;s usage/);
+  assert.match(readable(html), /Out of date · measured 34m ago/);
+  assert.match(html, /opacity:0\.6/);
+});
+
+test("both engines' Fable weekly window keeps its own scope, reset time and percentage next to the weekly one", () => {
+  const fableWindows = (name, id) => fixture(name).accounts.find((account) => account.id === id).windows.filter((window) => window.tier === "fable");
+  assert.deepEqual(fableWindows(LIVE_READ, PRIMARY_ID).map((window) => [window.utilization, window.resetsAt]), [[70, "2026-11-17T13:00:00.420Z"]]);
+  assert.deepEqual(fableWindows(STALE_READ, SECONDARY_ID).map((window) => [window.utilization, window.resetsAt]), [[8, "2026-11-19T04:00:00.354Z"]]);
+  // The Fable model is gauged against the Fable meter as well as the plan windows; Opus is not.
+  const live = aged(LIVE_READ);
+  const fable = buildQuotaView(live, false, false, FABLE);
+  assert.deepEqual(fable.windows.map((window) => window.percent).sort((a, b) => b - a), [95, 70, 3], "weekly, Fable weekly and 5-hour of the login in use");
+  const text = readable(render({ quota: fable, now: readAt(LIVE_READ) }));
+  assert.match(text, /Claude · Primary · Fable · Weekly·70%· Resets /);
+  const opus = buildQuotaView(live, false, false, { provider: "anthropic", modelId: "claude-opus-5" });
+  assert.equal(opus.windows.some((window) => /fable/i.test(window.label)), false, "a Fable meter does not bind an Opus model");
 });

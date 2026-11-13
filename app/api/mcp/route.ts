@@ -4,6 +4,10 @@ import { requireCapability } from "@/lib/engine-guard";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
 import { maskMcpSecrets } from "@/lib/mcp-secrets";
 import { deleteMcpServer, parseMcpListOutput, readDiscoveredMcpServers, readMcpConfig, readUserMcpConfig, setUserServerDisabled, type McpLiveServer, type McpScope, validateMcpServer, writeMcpServer } from "@/lib/omp/mcp-config";
+import { computerIsOnDemand } from "@/lib/omp/on-demand-chats";
+import { deleteOnDemandServer, getOnDemandRegistryPath, readOnDemandServers, setServerOnDemand, writeOnDemandServer } from "@/lib/omp/on-demand-mcp";
+import { getOmpSettingsSchema } from "@/lib/omp/settings-schema";
+import { writeSchemaSettings } from "@/lib/omp/settings-values";
 import { readSessionHeader, resolveSessionPath } from "@/lib/session-reader";
 import { AgentSessionWrapper, getRpcSession, resolveSpawnCwd, startRpcSession } from "@/lib/rpc-manager";
 
@@ -17,6 +21,18 @@ function mergeMcpServers(primary: McpLiveServer[], secondary: McpLiveServer[]): 
     if (!seen.has(key)) result.push(server);
   }
   return result;
+}
+
+/** What a server definition is and whether it can run: the same reading for a
+ * user-level row and a registry row. */
+function serverKind(config: Record<string, unknown>): { type: string; valid: boolean } {
+  const type = typeof config.type === "string" && config.type !== "stdio" ? config.type
+    : typeof config.url === "string" ? "http" : "stdio";
+  const command = typeof config.command === "string" ? config.command.trim() : "";
+  const url = typeof config.url === "string" ? config.url.trim() : "";
+  const hasCommand = command.length > 0;
+  const hasUrl = url.length > 0;
+  return { type, valid: (hasCommand || hasUrl) && !(hasCommand && hasUrl) && (type === "http" || type === "sse" ? hasUrl : hasCommand) };
 }
 
 async function allowedCwd(cwd: unknown): Promise<string> {
@@ -92,13 +108,7 @@ export async function GET(request: Request) {
       disabledServers: user.disabledServers,
       error: user.error,
       servers: user.servers.map(({ name, config }) => {
-        const type = typeof config.type === "string" && config.type !== "stdio" ? config.type
-          : typeof config.url === "string" ? "http" : "stdio";
-        const command = typeof config.command === "string" ? config.command.trim() : "";
-        const url = typeof config.url === "string" ? config.url.trim() : "";
-        const hasCommand = command.length > 0;
-        const hasUrl = url.length > 0;
-        const valid = (hasCommand || hasUrl) && !(hasCommand && hasUrl) && (type === "http" || type === "sse" ? hasUrl : hasCommand);
+        const { type, valid } = serverKind(config);
         const disabled = denied.has(name);
         return {
           name,
@@ -110,6 +120,23 @@ export async function GET(request: Request) {
           ...(canManageUser ? { config: maskMcpSecrets(config) } : {}),
         };
       }),
+    };
+    // The "Load on demand" registry follows the same masking rule as the user
+    // file above: names, type and purpose for everyone, the (masked) config
+    // only for an admin. A registry entry the extension cannot use is reported
+    // in `problems` and stays in the file.
+    const registry = readOnDemandServers();
+    const onDemand = {
+      path: registry.path,
+      servers: registry.servers.map(({ name, config, purpose }) => ({
+        name,
+        ...serverKind(config),
+        purpose,
+        ...(canManageUser ? { config: maskMcpSecrets(config) } : {}),
+      })),
+      problems: registry.problems,
+      // Desktop control is an omp setting (`computer.enabled`), not a server: only an engine whose settings schema declares it can switch it.
+      computer: { onDemand: computerIsOnDemand(), supported: getOmpSettingsSchema()?.settings.some((setting) => setting.key === "computer.enabled") ?? false },
     };
     const sessionId = params.get("sessionId");
     let liveServers: ReturnType<typeof parseMcpListOutput> | undefined;
@@ -133,7 +160,7 @@ export async function GET(request: Request) {
         liveError = error instanceof Error ? error.message : String(error);
       }
     }
-    return NextResponse.json({ root: file?.root ?? null, path: file?.path ?? null, exists: file?.exists ?? false, servers: Object.entries(file?.config.mcpServers ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([name, config]) => ({ name, config })), user: safeUser, canManageUser, inventory, liveServers, liveError });
+    return NextResponse.json({ root: file?.root ?? null, path: file?.path ?? null, exists: file?.exists ?? false, servers: Object.entries(file?.config.mcpServers ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([name, config]) => ({ name, config })), user: safeUser, onDemand, canManageUser, inventory, liveServers, liveError });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 });
   }
@@ -147,8 +174,10 @@ export async function POST(request: Request) {
     // config behind another engine.
     const gate = requireCapability("mcp", "MCP server management");
     if ("response" in gate) return gate.response;
-    const body = await request.json() as { cwd?: unknown; scope?: unknown; name?: unknown; previousName?: unknown; server?: unknown };
+    const body = await request.json() as { cwd?: unknown; scope?: unknown; name?: unknown; previousName?: unknown; server?: unknown; onDemand?: unknown; purpose?: unknown };
     const scope = requestedScope(body.scope);
+    if (body.onDemand !== undefined && typeof body.onDemand !== "boolean") throw new Error("onDemand must be true or false");
+    if (body.onDemand === true && scope !== "user") throw new Error("Load on demand applies to user-level servers");
     if (scope === "user") {
       const denied = userScopeDenied(request);
       if (denied) return denied;
@@ -158,6 +187,11 @@ export async function POST(request: Request) {
     const cwd = scope === "project" ? await allowedCwd(body.cwd) : undefined;
     validateMcpServer(body.name, body.server);
     if (body.previousName !== undefined && typeof body.previousName !== "string") throw new Error("previousName must be a string");
+    if (body.onDemand === true) {
+      if (body.purpose !== undefined && typeof body.purpose !== "string") throw new Error("purpose must be a string");
+      writeOnDemandServer(body.name as string, body.server, body.purpose, body.previousName);
+      return NextResponse.json({ success: true, scope, onDemand: true, path: getOnDemandRegistryPath() });
+    }
     return NextResponse.json({ success: true, ...writeMcpServer({ scope, cwd }, body.name as string, body.server, body.previousName) });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 });
@@ -172,15 +206,32 @@ export async function PUT(request: Request) {
     // config behind another engine.
     const gate = requireCapability("mcp", "MCP server management");
     if ("response" in gate) return gate.response;
-    const body = await request.json() as { action?: unknown; scope?: unknown; name?: unknown; server?: unknown };
-    // With an action this is the enable/disable toggle; without one it stays
-    // the validate-only check the editor's "Check" button calls.
+    const body = await request.json() as { action?: unknown; scope?: unknown; name?: unknown; server?: unknown; onDemand?: unknown; purpose?: unknown };
+    // With an action this changes how a server (or desktop control) loads;
+    // without one it stays the validate-only check the editor's "Check"
+    // button calls.
     if (body.action !== undefined) {
-      if (body.action !== "enable" && body.action !== "disable") throw new Error('action must be "enable" or "disable"');
-      if (requestedScope(body.scope) !== "user") throw new Error("Enabling and disabling applies to user-level servers");
+      if (body.action === "computer") {
+        // An instance setting (config.yml), so an administrator's call.
+        const denied = userScopeDenied(request);
+        if (denied) return denied;
+        if (typeof body.onDemand !== "boolean") throw new Error("onDemand must be true or false");
+        if (!getOmpSettingsSchema()?.settings.some((setting) => setting.key === "computer.enabled")) throw new Error("This engine has no desktop control, so there is nothing to load on demand");
+        // On demand means "not on for every chat": `computer.enabled` false.
+        writeSchemaSettings({ "computer.enabled": !body.onDemand });
+        return NextResponse.json({ success: true, computer: { onDemand: computerIsOnDemand() } });
+      }
+      if (body.action !== "enable" && body.action !== "disable" && body.action !== "ondemand") throw new Error('action must be "enable", "disable", "ondemand" or "computer"');
+      if (requestedScope(body.scope) !== "user") throw new Error("Enabling, disabling and loading on demand apply to user-level servers");
       const denied = userScopeDenied(request);
       if (denied) return denied;
       if (typeof body.name !== "string") throw new Error("name is required");
+      if (body.action === "ondemand") {
+        if (typeof body.onDemand !== "boolean") throw new Error("onDemand must be true or false");
+        if (body.purpose !== undefined && typeof body.purpose !== "string") throw new Error("purpose must be a string");
+        setServerOnDemand(body.name, body.onDemand, body.purpose);
+        return NextResponse.json({ success: true, onDemand: body.onDemand, path: getOnDemandRegistryPath() });
+      }
       return NextResponse.json({ success: true, ...setUserServerDisabled(body.name, body.action === "disable") });
     }
     validateMcpServer(body.name, body.server);
@@ -198,14 +249,20 @@ export async function DELETE(request: Request) {
     // config behind another engine.
     const gate = requireCapability("mcp", "MCP server management");
     if ("response" in gate) return gate.response;
-    const body = await request.json() as { cwd?: unknown; scope?: unknown; name?: unknown };
+    const body = await request.json() as { cwd?: unknown; scope?: unknown; name?: unknown; onDemand?: unknown };
     const scope = requestedScope(body.scope);
+    if (body.onDemand !== undefined && typeof body.onDemand !== "boolean") throw new Error("onDemand must be true or false");
+    if (body.onDemand === true && scope !== "user") throw new Error("Load on demand applies to user-level servers");
     if (scope === "user") {
       const denied = userScopeDenied(request);
       if (denied) return denied;
     }
     const cwd = scope === "project" ? await allowedCwd(body.cwd) : undefined;
     if (typeof body.name !== "string") throw new Error("name is required");
+    if (body.onDemand === true) {
+      deleteOnDemandServer(body.name);
+      return NextResponse.json({ success: true, scope, onDemand: true, path: getOnDemandRegistryPath() });
+    }
     return NextResponse.json({ success: true, ...deleteMcpServer({ scope, cwd }, body.name) });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 });

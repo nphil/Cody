@@ -3,6 +3,7 @@ import { applyCredentialBlocks, applyCredentialOrder } from "./credential-order"
 import { fetchOmpUsageSnapshot, unavailableUsageSnapshot } from "./omp-usage";
 import { ALIBABA_TOKEN_PLAN_PROVIDER, fetchAlibabaTokenPlanUsage, type AlibabaUsageResult } from "./alibaba-usage";
 import { carryForwardMissingAccounts, reserveLastGood, type GoodReading } from "./last-good";
+import { withOutdatedReadings } from "./reading-age";
 import type { UsageSnapshot } from "./types";
 
 /**
@@ -239,9 +240,16 @@ function startUsageLoad(state: UsageCacheState, load: UsageLoader): Promise<Usag
       // the last good reading, flagged stale, and backs off like any failure.
       // A read that succeeded but skipped an account the last one had keeps
       // that account (briefly, and labelled) rather than letting it blink out.
-      const effective = snapshot.available
-        ? carryForwardMissingAccounts(previous, snapshot, now)
-        : reserveLastGood(previous, snapshot, now);
+      // Whatever is served, a reading omp measured long ago is a photograph of
+      // the past, whatever moment Cody happened to read it: it is marked (and
+      // loses the windows that have since reset) so nothing downstream, ring
+      // or router, presents it as current.
+      const effective = withOutdatedReadings(
+        snapshot.available
+          ? carryForwardMissingAccounts(previous, snapshot, now)
+          : reserveLastGood(previous, snapshot, now),
+        now,
+      );
       if (snapshot.available) state.lastGood = { snapshot: effective, readAt: now };
       state.entry = {
         snapshot: effective,

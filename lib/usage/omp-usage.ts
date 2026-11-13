@@ -257,6 +257,10 @@ function buildAccount(
   }
 
   if (windows.length === 0 && !unlimited) return null;
+  // omp's own time for this report: the age of these numbers. It can be days
+  // old — omp re-serves the report it last saved when a live fetch fails —
+  // which is why it, not the moment Cody read omp, is what the UI ages by.
+  const measuredAt = toIsoString(readNumber(report.fetchedAt));
 
   return {
     provider,
@@ -272,6 +276,7 @@ function buildAccount(
     ...(resetCredits ? { resetCredits } : {}),
     ...(policy ? { policy } : {}),
     ...(inactiveGates.length > 0 ? { inactiveGates } : {}),
+    ...(measuredAt ? { measuredAt } : {}),
     // Set only when a live response refreshed these windows: that is omp's
     // record of the account actually serving traffic, not merely polled.
     lastServedAt: toIsoString(readNumber(metadata.headersUpdatedAt)) ?? null,

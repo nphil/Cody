@@ -1,3 +1,4 @@
+import { isUsageWarning } from "../format";
 import { isSignedOutCause } from "./credential-health";
 import { constrainingWindows, modelMatchesTier } from "./quota-tiers";
 import type { UsageAccount, UsageAccountService, UsageInUseBasis, UsageSessionAccount, UsageWindow } from "./types";
@@ -10,26 +11,22 @@ export { modelMatchesTier };
 /**
  * Picking the binding constraint.
  *
- * An account can report half a dozen overlapping windows and the user only
- * cares about the one that will actually stop them next. Exhaustion first — a
+ * An account can report half a dozen overlapping windows and ranking has to
+ * name the one that will actually stop the next request. Exhaustion first — a
  * refused window stops the model now, whatever its term — then the shortest
  * span: the current 5 hours are what this turn spends against, and a fuller
- * week is context, not the gauge. Only then the fullest window, then the one
- * that clears soonest — a window with no known reset is the least useful
- * answer, so it loses every tie.
+ * week is context. Only then the fullest window, then the one that clears
+ * soonest — a window with no known reset is the least useful answer, so it
+ * loses every tie.
+ *
+ * This is the order of RANKING and ROUTING (`rankProviderAccounts`,
+ * availability, blackouts, a scheduled message's wait). Which window a gauge
+ * shows is a different question: see `selectRingWindow`.
  */
-
 export function selectBindingWindow(
   accounts: UsageAccount[],
 ): { account: UsageAccount; window: UsageWindow } | null {
-  let best: { account: UsageAccount; window: UsageWindow } | null = null;
-  for (const account of accounts ?? []) {
-    for (const window of account?.windows ?? []) {
-      if (!window) continue;
-      if (best === null || isMoreBinding(window, best.window)) best = { account, window };
-    }
-  }
-  return best;
+  return selectBest(accounts, compareBinding);
 }
 
 /** One model the user can have selected, in the shape the model list reports. */
@@ -215,15 +212,81 @@ export function selectBindingWindowForModel(
   return match && window ? { account: match.account, window } : null;
 }
 
-function isMoreBinding(candidate: UsageWindow, incumbent: UsageWindow): boolean {
-  return compareBinding(candidate, incumbent) < 0;
+/**
+ * Picking the window the RING shows: the one that most threatens the model.
+ *
+ * The binding order above answers "what clears first, what does the next
+ * request spend against" — right for ranking and routing, wrong for a gauge. A
+ * calm 5-hour window at 3% must not hide a week at 95%, so the ring reads:
+ *
+ *   1. a refused window (exhausted), whatever its term;
+ *   2. otherwise any window painted at the warning colour or worse — the very
+ *      test `usageToneColor` applies (`isUsageWarning`: engine state `warning`,
+ *      or 70% and up) — the fullest first;
+ *   3. otherwise nothing is worrying, and the binding order stands: the short
+ *      window this turn spends against.
+ *
+ * Ties inside a step fall to the binding order, so one snapshot always names
+ * one window. Display only: never decide where a request goes with this.
+ */
+export function selectRingWindow(
+  accounts: UsageAccount[],
+): { account: UsageAccount; window: UsageWindow } | null {
+  return selectBest(accounts, compareRingChoice);
 }
 
-/** Sort comparator for the ranking above: most binding first, ties left in the
- * order encountered so the ring and the popover always name the same window. */
+/** One account's windows in the order the ring reads them: the window it shows
+ * first, then the rest, most worrying first. A new array; the input is untouched. */
+export function rankWindowsForRing(windows: readonly UsageWindow[]): UsageWindow[] {
+  return windows.filter(Boolean).sort(compareRingChoice);
+}
+
+function selectBest(
+  accounts: UsageAccount[],
+  compare: (a: UsageWindow, b: UsageWindow) => number,
+): { account: UsageAccount; window: UsageWindow } | null {
+  let best: { account: UsageAccount; window: UsageWindow } | null = null;
+  for (const account of accounts ?? []) {
+    for (const window of account?.windows ?? []) {
+      if (!window) continue;
+      if (best === null || compare(window, best.window) < 0) best = { account, window };
+    }
+  }
+  return best;
+}
+
+/** How much a window worries the ring, most first. */
+const RING_REFUSED = 2;
+const RING_WORRYING = 1;
+const RING_CALM = 0;
+
+function ringWorry(window: UsageWindow): number {
+  if (window.state === "exhausted") return RING_REFUSED;
+  return isUsageWarning(toPercent(window.utilization), window.state) ? RING_WORRYING : RING_CALM;
+}
+
+/** Sort comparator for the ring's pick: see `selectRingWindow`. */
+function compareRingChoice(a: UsageWindow, b: UsageWindow): number {
+  const worryA = ringWorry(a);
+  const worryB = ringWorry(b);
+  if (worryA !== worryB) return worryB - worryA;
+  // Two worrying windows go by how full they are, the number the ring draws;
+  // two refused ones and two calm ones keep the binding order.
+  if (worryA === RING_WORRYING) {
+    const fullA = toPercent(a.utilization);
+    const fullB = toPercent(b.utilization);
+    if (fullA !== fullB) return fullB - fullA;
+  }
+  return compareBinding(a, b);
+}
+
+/** Sort comparator for the binding order (see `selectBindingWindow`): most
+ * binding first, ties left in the order encountered so a snapshot always names
+ * the same window. */
 function compareBinding(a: UsageWindow, b: UsageWindow): number {
-  // Only exhaustion outranks the term. A warning refuses nothing, so it must
-  // not drag the gauge off the short window the turn is actually spending.
+  // Only exhaustion outranks the term. A warning refuses nothing, so ranking
+  // and routing must not drag off the short window the turn is actually
+  // spending (the ring's own pick does weigh it: `selectRingWindow`).
   const refusedA = a.state === "exhausted" ? 1 : 0;
   const refusedB = b.state === "exhausted" ? 1 : 0;
   if (refusedA !== refusedB) return refusedB - refusedA;
@@ -255,6 +318,11 @@ function toWindowSpan(value: number | null | undefined): number {
 
 function toUtilization(value: number): number {
   return Number.isFinite(value) ? value : 0;
+}
+
+/** The percentage a bar draws: finite and within 0-100, like `clampQuotaPercent`. */
+function toPercent(value: number): number {
+  return Math.max(0, Math.min(100, toUtilization(value)));
 }
 
 /** Missing or unparseable resets sort last. */

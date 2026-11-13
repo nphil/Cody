@@ -202,6 +202,8 @@ drops every non-MCP line. Never toast the message `content`.
 - `useAgentSession` still treats per-session SSE as primary for chat events, but while a run is active it periodically calls `GET /api/agent/[id]` and also reconciles on `visibilitychange`/`online`. This fixes missed `agent_end` events from background tabs or half-open connections.
 - Prompt runs use a monotonic run id; late SSE or slow reconciliation responses from an old run must be ignored so they cannot resurrect stale streaming bubbles.
 
+After the page was away (hidden >= 5 s, offline, bfcache restore, OS resume, clock jump) `usePageWake` (`lib/page-wake.ts`) fires ONE debounced event (800 ms) and every live surface refetches or reconnects from it: `useAgentSession` runs `refreshChatAfterWake` (reconcile if a run was active, reload the session, re-attach the live engine, reset the reconnect budget); the sidebar reloads sessions, projects and worktrees; usage, scheduled messages, statistics and display requests refresh. The sidebar's `/api/agent/running/events` is opened by `openLiveStream` (`lib/live-stream.ts`): it opens again after a refusal (2/5/15/30 s backoff) and when the server's 30 s heartbeat is silent for 75 s; a wake calls `reopen()` at once. A bare `EventSource` reads OPEN through a dead network and never reopens after a 502, which is why pages left on a phone went stale. New live surfaces use `usePageWake`, never a private `visibilitychange`/`focus`/`online` listener.
+
 ### A viewed session stays warm, and a closed one never leaves a deaf stream
 - **Idle disposal skips a session with an attached event stream**
   (`resetIdleTimer`). A cold child costs a spawn (~2.7 s) plus omp's first-

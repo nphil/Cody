@@ -63,6 +63,7 @@ import { useDeviceTrustRequests } from "@/hooks/useDeviceTrustRequests";
 import { useSideQuestions, type SideQuestions } from "@/hooks/useSideQuestions";
 import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
+import { usePageWake } from "@/hooks/usePageWake";
 import { createMessageUpdateCoalescer, type MessageUpdateCoalescer } from "@/lib/message-update-coalescer";
 import {
   evaluateStreamHealth,
@@ -319,6 +320,9 @@ type AgentStateResponse = {
   imageSupported?: boolean;
   steeringSupported?: boolean;
 };
+
+/** What the server answers about a session's engine: whether one is alive and, when it could be read, its snapshot. */
+type LiveAgentState = { running: boolean; state?: AgentStateResponse; stale?: boolean };
 
 type RestoredRefusalDraft = {
   decisionId: string;
@@ -2246,7 +2250,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const modeSeq = modeSyncSeqRef.current;
       const stateRes = await stateFetch;
       if (!stateRes.ok) throw new Error(`HTTP ${stateRes.status}`);
-      const agentState = await stateRes.json() as { running: boolean; state?: AgentStateResponse; stale?: boolean };
+      const agentState = await stateRes.json() as LiveAgentState;
       if (sessionIdRef.current !== sid) return null;
       if (fenceRunId !== undefined && promptRunIdRef.current !== fenceRunId) return null;
 
@@ -3524,8 +3528,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [onSessionNamed, session?.name]);
 
   // Recovery net for missed SSE events: while the agent is running, verify
-  // against the server periodically and whenever the tab returns to the
-  // foreground or the network comes back.
+  // against the server periodically. A tab returning to the foreground or the
+  // network coming back is the page-wake signal further down: it re-checks the
+  // run too, and also re-reads the transcript and attaches the stream again.
   useEffect(() => {
     if (!agentRunning) return;
     const reconcile = () => {
@@ -3534,17 +3539,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const sid = sessionIdRef.current;
       if (sid) void reconcileAgentState(sid);
     };
-    const onVisible = () => {
-      if (document.visibilityState === "visible") reconcile();
-    };
     const interval = setInterval(reconcile, AGENT_STATE_RECONCILE_MS);
-    document.addEventListener("visibilitychange", onVisible);
-    window.addEventListener("online", reconcile);
-    return () => {
-      clearInterval(interval);
-      document.removeEventListener("visibilitychange", onVisible);
-      window.removeEventListener("online", reconcile);
-    };
+    return () => clearInterval(interval);
   }, [agentRunning, reconcileAgentState]);
 
   // Reconnect by hand after the automatic attempts were exhausted (the
@@ -6041,6 +6037,85 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, []);
 
+  // What a live engine needs from this page: the run it is in the middle of,
+  // an event stream, the host-tool bridges and the subagent roster. The load on
+  // mount and a wake both end here (a page that slept may have missed any of
+  // it). `alreadyRunning`: this page was tracking that run before, so it needs
+  // no second settlement poller.
+  const adoptLiveEngine = (sid: string, agentState: LiveAgentState | null, alreadyRunning: boolean) => {
+    if (agentState?.running) {
+      const knownActive = agentState.state?.isStreaming === true || agentState.state?.isPromptRunning === true;
+      // A stale/unconfirmed read (the wrapper's bounded get_state timed
+      // out behind a slow serial command, or a brand-new child has no
+      // snapshot yet) proves nothing either way, but the child IS
+      // alive. Treating it as idle would leave the stream unconnected
+      // and silently drop every live frame from a genuinely active
+      // turn until the next 15s reconcile poll — connecting
+      // defensively costs nothing when the guess is wrong (the
+      // reconcile-while-running effect below settles it on the next
+      // read, and now safely no-ops on a stale one instead of
+      // finishing a turn that never actually ended).
+      const maybeActive = knownActive || (agentState.stale === true && !agentState.state);
+      if (maybeActive) {
+        agentRunningRef.current = true;
+        assistantProviderCallRef.current = agentState.state?.isStreaming === true;
+        if (knownActive) {
+          // The server itself reported this run in flight, so it counts
+          // as acknowledged: if the engine dies later, the reconnect's
+          // `connected` frame is allowed to declare the turn lost.
+          runConfirmedRef.current = true;
+        }
+        setAgentRunning(true);
+        setAgentPhase(agentState.state?.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
+        dispatch({ type: "start" });
+        if (!alreadyRunning && knownActive && !agentState.state?.isStreaming && agentState.state?.isPromptRunning) {
+          void waitForPromptSettlement(sid);
+        }
+      }
+      // Any live engine gets the event stream and a roster read, even
+      // when its main agent is idle: background (async) subagents keep
+      // working after the main turn ends, and their frames only reach a
+      // page that is listening. Attaching to a live child spawns nothing
+      // (only `running: false` means there is none), and an attached
+      // stream is also what keeps a viewed session warm.
+      void connectEvents(sid);
+      // Register the host-tool + URI bridges so the agent can call
+      // open_url/notify/open_file and resolve pi-web://clipboard.
+      void registerHostTools(sid);
+      void registerHostUriSchemes(sid);
+      // Rehydrate the live roster (missed lifecycle/progress frames).
+      // Tracked + session-guarded: a session switch during the delay must
+      // not issue a stale get_subagents against the old session.
+      if (rosterRefreshTimerRef.current) {
+        clearTimeout(rosterRefreshTimerRef.current);
+        rosterRefreshTimerRef.current = null;
+      }
+      rosterRefreshTimerRef.current = setTimeout(() => {
+        rosterRefreshTimerRef.current = null;
+        if (sessionIdRef.current !== sid) return;
+        void refreshSubagentRoster(sid);
+      }, 600);
+      if (agentState.state?.isBashRunning) {
+        bashRunningRef.current = true;
+        setBashRunning(true);
+        void waitForBashSettlement(sid);
+      }
+    }
+    if (agentState?.state) {
+      // Model + thinking level are owned by loadSession (token-guarded);
+      // re-applying this same snapshot here would mint a fresh token and
+      // bypass the stale-response guard.
+      if (agentState.state.isCompacting !== undefined) {
+        setIsCompacting(agentState.state.isCompacting);
+        dispatchCompactionStatus({ type: "reconcile", sessionId: sid, active: agentState.state.isCompacting, now: Date.now() });
+      }
+      if (agentState.state.contextUsage !== undefined) setLiveContextUsage(readLiveContextUsage(agentState.state.contextUsage));
+      if (agentState.state.systemPrompt !== undefined) setSystemPrompt(agentState.state.systemPrompt || null);
+      if (agentState.state.extensionStatuses !== undefined) setExtensionStatuses(agentState.state.extensionStatuses ?? []);
+      if (agentState.state.extensionWidgets !== undefined) setExtensionWidgets(agentState.state.extensionWidgets ?? []);
+    }
+  };
+
   // Load session on mount
   useEffect(() => {
     let controller: AbortController | null = null;
@@ -6064,78 +6139,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // render (see initialCachedData above) — do not flash the spinner
       // back on top of it just to revalidate in the background.
       loadSession(session.id, !initialCachedData, true, undefined, controller.signal).then((agentState) => {
-        if (agentState?.running) {
-          const knownActive = agentState.state?.isStreaming === true || agentState.state?.isPromptRunning === true;
-          // A stale/unconfirmed read (the wrapper's bounded get_state timed
-          // out behind a slow serial command, or a brand-new child has no
-          // snapshot yet) proves nothing either way, but the child IS
-          // alive. Treating it as idle would leave the stream unconnected
-          // and silently drop every live frame from a genuinely active
-          // turn until the next 15s reconcile poll — connecting
-          // defensively costs nothing when the guess is wrong (the
-          // reconcile-while-running effect below settles it on the next
-          // read, and now safely no-ops on a stale one instead of
-          // finishing a turn that never actually ended).
-          const maybeActive = knownActive || (agentState.stale === true && !agentState.state);
-          if (maybeActive) {
-            agentRunningRef.current = true;
-            assistantProviderCallRef.current = agentState.state?.isStreaming === true;
-            if (knownActive) {
-              // The server itself reported this run in flight, so it counts
-              // as acknowledged: if the engine dies later, the reconnect's
-              // `connected` frame is allowed to declare the turn lost.
-              runConfirmedRef.current = true;
-            }
-            setAgentRunning(true);
-            setAgentPhase(agentState.state?.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
-            dispatch({ type: "start" });
-            if (knownActive && !agentState.state?.isStreaming && agentState.state?.isPromptRunning) {
-              void waitForPromptSettlement(session.id);
-            }
-          }
-          // Any live engine gets the event stream and a roster read, even
-          // when its main agent is idle: background (async) subagents keep
-          // working after the main turn ends, and their frames only reach a
-          // page that is listening. Attaching to a live child spawns nothing
-          // (only `running: false` means there is none), and an attached
-          // stream is also what keeps a viewed session warm.
-          void connectEvents(session.id);
-          // Register the host-tool + URI bridges so the agent can call
-          // open_url/notify/open_file and resolve pi-web://clipboard.
-          void registerHostTools(session.id);
-          void registerHostUriSchemes(session.id);
-          // Rehydrate the live roster (missed lifecycle/progress frames).
-          // Tracked + session-guarded: a session switch during the delay must
-          // not issue a stale get_subagents against the old session.
-          if (rosterRefreshTimerRef.current) {
-            clearTimeout(rosterRefreshTimerRef.current);
-            rosterRefreshTimerRef.current = null;
-          }
-          const rosterTimerSid = session.id;
-          rosterRefreshTimerRef.current = setTimeout(() => {
-            rosterRefreshTimerRef.current = null;
-            if (sessionIdRef.current !== rosterTimerSid) return;
-            void refreshSubagentRoster(rosterTimerSid);
-          }, 600);
-          if (agentState.state?.isBashRunning) {
-            bashRunningRef.current = true;
-            setBashRunning(true);
-            void waitForBashSettlement(session.id);
-          }
-        }
-        if (agentState?.state) {
-          // Model + thinking level are owned by loadSession (token-guarded);
-          // re-applying this same snapshot here would mint a fresh token and
-          // bypass the stale-response guard.
-          if (agentState.state.isCompacting !== undefined) {
-                      setIsCompacting(agentState.state.isCompacting);
-                      dispatchCompactionStatus({ type: "reconcile", sessionId: session.id, active: agentState.state.isCompacting, now: Date.now() });
-                    }
-          if (agentState.state.contextUsage !== undefined) setLiveContextUsage(readLiveContextUsage(agentState.state.contextUsage));
-          if (agentState.state.systemPrompt !== undefined) setSystemPrompt(agentState.state.systemPrompt || null);
-          if (agentState.state.extensionStatuses !== undefined) setExtensionStatuses(agentState.state.extensionStatuses ?? []);
-          if (agentState.state.extensionWidgets !== undefined) setExtensionWidgets(agentState.state.extensionWidgets ?? []);
-        }
+        adoptLiveEngine(session.id, agentState, false);
       });
     } else {
       updateSessionControlScope(null, null);
@@ -6162,6 +6166,47 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshSubagentRoster, registerHostTools, registerHostUriSchemes, updateSessionControlScope]);
+
+  // The page woke up: the tab came back, the device slept with it open, or the
+  // network returned. A phone freezes the page when the screen goes off and the
+  // event stream's socket dies without a word (the browser still calls it
+  // OPEN); the server replays nothing on a new connection, so a chat left open
+  // shows the transcript and run state of the moment the device fell asleep.
+  // Do what a manual refresh does for this chat, in place: settle a turn this
+  // page was tracking that has ended meanwhile, re-read the transcript, and
+  // attach again to a live engine — which also picks up a turn that was
+  // started from another device while this one slept.
+  const refreshChatAfterWake = async () => {
+    const sid = sessionIdRef.current;
+    if (!sid || !hookAliveRef.current) return;
+    // Woke without a network: the `online` signal wakes the page again.
+    if (typeof navigator !== "undefined" && navigator.onLine === false) return;
+    const gone = () => !hookAliveRef.current || sessionIdRef.current !== sid;
+    const wasRunning = agentRunningRef.current;
+    if (wasRunning) {
+      await reconcileAgentState(sid);
+      // The turn ended while the page slept; settling it re-read the transcript.
+      if (gone() || !agentRunningRef.current) return;
+      // A send the server has not acknowledged yet owns its own state and stream.
+      if (!runConfirmedRef.current) return;
+    }
+    // A command this page is waiting on settles itself.
+    if (bashRunningRef.current) return;
+    const runId = promptRunIdRef.current;
+    const agentState = await loadSession(sid, false, true, runId);
+    // A send or a session switch overtook the read: its own flow owns the view now.
+    if (gone() || promptRunIdRef.current !== runId) return;
+    if (agentState?.running) {
+      // Whatever the sleep did to the reconnect budget, this is a fresh start.
+      reconnectAttemptRef.current = 0;
+      reconnectFailingSinceRef.current = null;
+      setStreamAlert((current) => (current?.kind === "stream_lost" ? null : current));
+    }
+    adoptLiveEngine(sid, agentState, wasRunning);
+  };
+  usePageWake(() => {
+    void refreshChatAfterWake();
+  });
 
   // The server ledger is authoritative after a reload or session switch.
   // Transcript matching is reserved for IDs the ledger does not know.
@@ -6378,9 +6423,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     });
   }, [messages, scrollToBottom]);
 
-  useEffect(() => () => {
-    hookAliveRef.current = false;
-    if (followScrollFrameRef.current !== null) cancelAnimationFrame(followScrollFrameRef.current);
+  useEffect(() => {
+    // Armed again on every mount: StrictMode runs this effect's cleanup once
+    // before the real mount, and a ref left false would silence every guard.
+    hookAliveRef.current = true;
+    return () => {
+      hookAliveRef.current = false;
+      if (followScrollFrameRef.current !== null) cancelAnimationFrame(followScrollFrameRef.current);
+    };
   }, []);
 
   useEffect(() => {

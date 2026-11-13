@@ -41,8 +41,9 @@ function creditFor(provider, value) {
   // ("available", "unavailable", "cooldown"…) and only spent or lapsed grants go.
   if (provider.id === "openai-codex" ? status && status !== "available" : status === "redeemed" || status === "expired") return null;
   const title = typeof credit.title === "string" && credit.title.trim() ? credit.title.trim() : null;
-  // `clears` names the limit windows this reset heals (`anthropic:5h`, `anthropic:7d`, and since
-  // 18.19.0 `anthropic:7d:fable` for a Fable launch reset), so the UI can say what it covers.
+  // `clears` names the limit windows this reset heals (`anthropic:5h`, `anthropic:7d`, and for a Fable
+  // launch reset `anthropic:7d:fable` on 18.19.0 or `anthropic:reset:seven_day_overage_included` on 18.8.3,
+  // which lib/usage/quota-copy.ts reads as the same limit), so the UI can say what it covers.
   const clears = Array.isArray(credit.clears) ? credit.clears.filter((limit) => typeof limit === "string" && limit) : [];
   return { id: credit.id, expiresAt: date(credit.expiresAt ?? credit.expires_at ?? credit.expiry), ...(title ? { title } : {}), ...(typeof credit.usable === "boolean" ? { usable: credit.usable } : {}), ...(clears.length > 0 ? { clears } : {}) };
 }

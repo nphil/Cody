@@ -272,6 +272,70 @@ test("the notice reducer deduplicates repeats and caps visible errors at two", (
 });
 
 // ---------------------------------------------------------------------------
+// A page that slept. The wake signal itself (debounce, clock jump, bfcache) is
+// tested with a fake clock in lib/page-wake.test.mjs; this is the chat's
+// reaction to it.
+// ---------------------------------------------------------------------------
+
+test("a page wake re-reads the open chat and attaches its stream again", () => {
+  assert.match(hook, /import \{ usePageWake \} from "@\/hooks\/usePageWake";/);
+  const wake = hook.slice(hook.indexOf("const refreshChatAfterWake = async () => {"), hook.indexOf("usePageWake(() => {"));
+  assert.ok(wake.length > 0, "the wake handler exists");
+  // Nothing to refresh without a chat, after unmount, or with no network (the
+  // `online` signal wakes the page again when it returns).
+  assert.match(wake, /if \(!sid \|\| !hookAliveRef\.current\) return;/);
+  assert.match(wake, /navigator\.onLine === false/);
+  // A turn this page tracked is settled first; one the server has not
+  // acknowledged, or a command this page waits on, owns its own state.
+  assert.match(wake, /await reconcileAgentState\(sid\);/);
+  assert.match(wake, /if \(!runConfirmedRef\.current\) return;/);
+  assert.match(wake, /if \(bashRunningRef\.current\) return;/);
+  // The transcript is read again, fenced against a send or a session switch
+  // that overtakes the read, and the live engine is adopted exactly as on mount.
+  assert.match(wake, /await loadSession\(sid, false, true, runId\);/);
+  assert.match(wake, /promptRunIdRef\.current !== runId/);
+  assert.match(wake, /sessionIdRef\.current !== sid/);
+  assert.match(wake, /adoptLiveEngine\(sid, agentState, wasRunning\);/);
+  // A fresh start for the reconnect budget — and the lost-stream banner, only.
+  assert.match(wake, /reconnectAttemptRef\.current = 0;/);
+  assert.match(wake, /reconnectFailingSinceRef\.current = null;/);
+  assert.match(wake, /current\?\.kind === "stream_lost" \? null : current/);
+});
+
+test("mounting and waking adopt a live engine through the same function, which re-attaches the stream", () => {
+  const adopt = hook.slice(hook.indexOf("const adoptLiveEngine = ("), hook.indexOf("// Load session on mount"));
+  assert.match(adopt, /void connectEvents\(sid\);/);
+  assert.match(adopt, /void registerHostTools\(sid\);/);
+  assert.match(adopt, /void registerHostUriSchemes\(sid\);/);
+  assert.match(adopt, /void refreshSubagentRoster\(sid\);/);
+  // A page already tracking the run needs no second settlement poller.
+  assert.match(adopt, /!alreadyRunning && knownActive/);
+  const mount = hook.slice(hook.indexOf("// Load session on mount"), hook.indexOf("// The page woke up"));
+  assert.match(mount, /adoptLiveEngine\(session\.id, agentState, false\);/);
+  // The connect replaces whatever socket the browser still calls open.
+  const connect = hook.slice(hook.indexOf("const connectEvents = useCallback"), hook.indexOf("return new Promise", hook.indexOf("const connectEvents = useCallback")));
+  assert.match(connect, /eventSourceRef\.current\.close\(\);/);
+});
+
+test("the running-run reconcile keeps its interval; coming back to the tab is the wake signal's job", () => {
+  const effect = hook.slice(
+    hook.indexOf("// Recovery net for missed SSE events"),
+    hook.indexOf("// Reconnect by hand after the automatic attempts were exhausted"),
+  );
+  assert.match(effect, /setInterval\(reconcile, AGENT_STATE_RECONCILE_MS\)/);
+  assert.doesNotMatch(effect, /addEventListener/);
+  assert.doesNotMatch(effect, /visibilitychange/);
+  // …and the hook has no private listeners of that kind left anywhere.
+  assert.doesNotMatch(hook, /addEventListener\("visibilitychange"/);
+  assert.doesNotMatch(hook, /addEventListener\("online"/);
+});
+
+test("an unmount marks the hook dead and a (StrictMode) remount marks it alive again", () => {
+  const effect = hook.slice(hook.indexOf("hookAliveRef.current = true;\n    return () => {"));
+  assert.match(effect, /hookAliveRef\.current = false;/);
+});
+
+// ---------------------------------------------------------------------------
 // The send outbox. Delivery states, the server ledger and resume are tested
 // behaviourally in lib/outbox.test.mjs and lib/rpc-manager.test.mjs; what
 // stays here is the one wiring invariant the dedupe depends on.

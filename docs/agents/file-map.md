@@ -304,7 +304,8 @@ lib/
                        usage), query.ts (totals, ring tree, timeline, insights), days.ts (day buckets),
                        sunburst.ts (ring geometry), workers.ts (id to kind), test-helpers.mjs
   usage/               client-merge.ts (what the browser keeps after a poll), credential-health.ts (ended
-                       logins), last-good.ts (server keeps the last good read), quota-copy.ts (plain words)
+                       logins), last-good.ts (server keeps the last good read), quota-copy.ts (plain words),
+                       reading-age.ts (how old a reading is, when it is out of date)
   model-switch/        agent-requested model switch: resolve.ts (pure), switch.ts, tool.ts
   engine-crash*.ts     engine-crash.ts (why an engine stopped), -events.ts (who hears it), -host.ts (cgroup
                        facts), -log.ts (the chat's crash line)

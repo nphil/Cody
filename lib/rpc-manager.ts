@@ -3,7 +3,6 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import path from "path";
 import { getSessionOwner, renameSessionOwner, setSessionOwner } from "./auth/session-owners";
-import { DISK_LOW_CUSTOM_TYPE } from "./disk/gate";
 import { ensureSessionScratch, listSessionScratch, noteScratchAlias, removeScratchDir, removeSessionScratch, touchSessionScratch } from "./disk/scratch";
 import { aliasDisplaySession, publishDisplayRequest } from "./display/bus";
 import { startSharedBrowser } from "./display/shared-browser";
@@ -17,6 +16,7 @@ import { validateAgentImages } from "./image-attachments";
 import { inSendOrder, matchRestoredQueue, parseQueueRestore, readRestoredImages, type QueueRestore, type QueueRow, type ReturnedMessage, type StopRestoreOutcome } from "./queue-restore";
 import { APP_LOG_SHADOW_NOTE, DEFAULT_LIMIT, MAX_LIMIT, appLogNotice, formatAppLogDigest, markAppLogsRead, parseSince, readAppLogs } from "./logs/ring";
 import { APP_LOG_LEVELS, type AppLogQuery } from "./logs/types";
+import { isModelOnlyNote } from "./message-display";
 import { invalidateModelsCache } from "./models-cache";
 import { MAX_RPC_FRAME_BYTES } from "./omp/rpc-frame";
 import { ModelUnrestorableError, RpcCommandError, RpcCommandTimeoutError, RpcProcess, type RpcFrame, type RpcProcessLaunch } from "./omp/rpc-process";
@@ -43,12 +43,14 @@ import { copySessionLocalRouting, materializeLocalRoutingOverlay, readLocalRouti
 import { copySessionPreset, renameSessionPreset, sessionPresetOverlay } from "./model-presets/overlay";
 import { materializeClaudeCreditsOverlay } from "./omp/claude-credits-overlay";
 import { codyLaunchDefaultsEnv } from "./omp/cody-launch-defaults";
+import { copySessionToolsets, onDemandLaunch, renameSessionToolsets, setSessionToolset } from "./omp/on-demand-chats";
+import { COMPUTER_SERVER, onDemandSignalFromEvent } from "./on-demand-mcp/registry";
 import { selectPromptProfileId, type PromptProfileId } from "./local-model-profile";
 import { PRESET_FULL } from "./tool-presets";
 import { isRecord } from "./type-guards";
 import { displaySessionTitle } from "./session-title";
 import { goalAgeMs, parseGoalModeState, validateGoalRequest } from "./goal-state";
-import { LOCAL_TIME_CUSTOM_TYPE, normalizeTimeZone, serverTimeZone } from "./time-zone";
+import { normalizeTimeZone, serverTimeZone } from "./time-zone";
 import { ownerTimeZone } from "./time-zone-prefs";
 import { SIDEBAR_CONTEXT_TOOLS } from "./sidebar-context-tools";
 import { SESSION_AWARENESS_TOOLS, type SessionLivePhase, type SessionToolContext } from "./session-tools";
@@ -809,6 +811,7 @@ export function buildEngineRpcLaunch(
     args.push("--extension", path.join(extensions, "cody-homelabber-gate.ts"));
     args.push("--extension", path.join(extensions, "cody-disk-budget.ts"));
     args.push("--extension", path.join(extensions, "cody-context-budget.ts"));
+    args.push("--extension", path.join(extensions, "cody-on-demand-mcp.ts"));
     defaultsEnv = codyLaunchDefaultsEnv(opts.profile?.env?.PI_CONFIG_FILES ?? process.env.PI_CONFIG_FILES, packageRoot);
   }
   // A sidebar child gets its own agent dir, whose `mcp.json` is empty, so the
@@ -991,12 +994,32 @@ function withClaudeCreditsOverlay(profile: LocalModelProfileLaunch | undefined):
   };
 }
 
+/** This chat's on-demand tools (lib/omp/on-demand-chats.ts): where the extension finds its registry,
+ * whether desktop control is offered here, and — AFTER every other layer, so it wins over the launch
+ * default that keeps `computer` off and over a config.yml that says false — the chat's own
+ * `computer.enabled: true` once it asked for it. A relaunch starts from a profile that already carries
+ * the last launch's layer, so that layer is dropped first and put back only while the chat still wants it. */
+function withOnDemandOverlay(profile: LocalModelProfileLaunch | undefined, sessionId: string): LocalModelProfileLaunch {
+  const launch = onDemandLaunch(sessionId, process.env.CODY_PACKAGE_DIR || process.cwd());
+  const env: Record<string, string> = { ...profile?.env, ...launch.env };
+  const inherited = profile?.env?.PI_CONFIG_FILES ?? process.env.PI_CONFIG_FILES;
+  const layers = (inherited ?? "").split(path.delimiter).filter((layer) => layer.length > 0);
+  const carried = layers.includes(launch.computerLayer);
+  if (carried || launch.layer) {
+    const next = layers.filter((layer) => layer !== launch.computerLayer);
+    if (launch.layer) next.push(launch.layer);
+    if (next.length > 0) env.PI_CONFIG_FILES = next.join(path.delimiter);
+    else delete env.PI_CONFIG_FILES;
+  }
+  return { ...(profile ?? { profileId: "full" as const }), env };
+}
+
 /** Every per-conversation overlay, in precedence order: the launch profile,
- * then the chat's model preset, then the Claude API credits, then Local-only.
- * Relaunches rebuild this from the persisted state, so a restart always picks
- * up the chat's current preset. */
-export function launchWithSessionOverlays(profile: LocalModelProfileLaunch | undefined, sessionId: string): LocalModelProfileLaunch | undefined {
-  return launchWithLocalRouting(withClaudeCreditsOverlay(withPresetOverlay(profile, sessionId)), sessionId);
+ * then the chat's model preset, then the Claude API credits, then Local-only,
+ * then its on-demand tools. Relaunches rebuild this from the persisted state,
+ * so a restart always picks up the chat's current preset. */
+export function launchWithSessionOverlays(profile: LocalModelProfileLaunch | undefined, sessionId: string): LocalModelProfileLaunch {
+  return withOnDemandOverlay(launchWithLocalRouting(withClaudeCreditsOverlay(withPresetOverlay(profile, sessionId)), sessionId), sessionId);
 }
 
 /** Append a session-owned Local-only overlay after the prompt overlay. The
@@ -1095,13 +1118,14 @@ export interface WrapperEngineContext {
  * What the app files under a chat's id, carried to the id the same chat now
  * answers to: its owner (a session with no owner is visible to every account,
  * and so is its usage in Statistics), its pinned preset, its frozen Local-only
- * snapshot and the crash notices filed in it. `fromId` stays valid — a fork's
- * parent, or the untouched file a session move leaves behind — so these are
- * copied, never moved.
+ * snapshot, the desktop control it switched on and the crash notices filed in
+ * it. `fromId` stays valid — a fork's parent, or the untouched file a session
+ * move leaves behind — so these are copied, never moved.
  */
 function carrySessionState(fromId: string, toId: string): void {
   copySessionLocalRouting(fromId, toId);
   copySessionPreset(fromId, toId);
+  copySessionToolsets(fromId, toId);
   const owner = getSessionOwner(fromId);
   if (owner) setSessionOwner(toId, owner);
   copyEngineCrashes(fromId, toId);
@@ -1664,6 +1688,24 @@ export class AgentSessionWrapper {
     return { restarted: await this.restartForRouting(), active: false };
   }
 
+  /** A finished `load_tools` call that asked for desktop control. omp reads `computer.enabled` once, when the
+   * engine starts, and the `eval` tool's description (which carries the whole desktop guide) is fixed from then
+   * on: only a relaunch can switch it. So the request is filed under this chat (lib/omp/on-demand-chats.ts) and
+   * the engine is relaunched as soon as the turn that asked has ended; the chat's next message finds it on. */
+  private applyOnDemandSignal(event: Record<string, unknown>): void {
+    const signal = onDemandSignalFromEvent(event);
+    if (!signal || signal.server !== COMPUTER_SERVER) return;
+    try {
+      if (!setSessionToolset(this._sessionId, COMPUTER_SERVER, signal.action === "load")) return;
+    } catch (error) {
+      console.warn("[rpc-manager] could not file the on-demand toolset under this chat:", error);
+      return;
+    }
+    void this.restartForRoutingWhenIdle().catch((error: unknown) => {
+      console.warn("[rpc-manager] could not relaunch the engine for on-demand tools:", error);
+    });
+  }
+
   /** Apply a persisted routing-overlay change only when this wrapper is idle.
    *  Serialized per wrapper: see routingRestartInFlight above. */
   async restartForRouting(): Promise<boolean> {
@@ -1946,13 +1988,13 @@ export class AgentSessionWrapper {
     } else if (event.type === "permission_resolved" && typeof event.requestId === "string") {
       this.pendingPermissionRequests.delete(event.requestId);
     }
-    // The hidden per-prompt lines (the clock, lib/omp/extensions/cody-local-time.ts,
-    // and the low-disk notice, cody-disk-budget.ts) are for the model only.
-    // Dropped here, before any listener or the sidebar sees them, so a live
-    // transcript never flashes a row the reloaded one lacks.
-    if ((event.type === "message_start" || event.type === "message_end") && isRecord(event.message)
-      && event.message.role === "custom"
-      && (event.message.customType === LOCAL_TIME_CUSTOM_TYPE || event.message.customType === DISK_LOW_CUSTOM_TYPE)) {
+    // The hidden notes the Cody extensions (lib/omp/extensions) give the model
+    // alone (the clock, the low-disk line, the disk rule, the HomeLabber gate
+    // procedure, the context budget, the on-demand restore note) are dropped
+    // here, before any listener or the sidebar sees them, so a live transcript
+    // never flashes a row the reloaded one lacks. isModelOnlyNote
+    // (lib/message-display.ts) is the list.
+    if ((event.type === "message_start" || event.type === "message_end") && isRecord(event.message) && isModelOnlyNote(event.message)) {
       return;
     }
 
@@ -2085,6 +2127,7 @@ export class AgentSessionWrapper {
       case "tool_execution_end": {
         if (typeof event.toolCallId === "string") this.runningToolCalls.delete(event.toolCallId);
         this.getPlanKeeper()?.notifyToolExecutionEnd(event);
+        this.applyOnDemandSignal(event);
         break;
       }
       case "subagent_lifecycle": {
@@ -5039,6 +5082,7 @@ export async function startRpcSession(
         renameSessionOwner(sessionId, realSessionId);
         renameSessionLocalRouting(sessionId, realSessionId);
         renameSessionPreset(sessionId, realSessionId);
+        renameSessionToolsets(sessionId, realSessionId);
         aliasDisplaySession(sessionId, realSessionId);
         noteScratchAlias(sessionId, realSessionId);
       }

@@ -114,7 +114,9 @@ Sections in this file:
   transcript has its own provider, scoped to its own rows; the sidebar has none.
 - **Agent procedure:** `lib/omp/extensions/cody-homelabber-gate.ts` is loaded by
   Cody on main omp launches and inherited by delegated omp sessions. Its
-  `before_agent_start` appends the same gate procedure to their runtime prompts.
+  `before_agent_start` gives each agent the same gate procedure as one hidden
+  message (`cody-gate-guidance`, added once per live context, never a
+  system-prompt change: docs/agents/disk.md "Model-only notes").
   Caller tokens may be shared; listing a grant is not proof of agent ownership.
   Guidance grants no authority and does not override Principle 0.
 - **The row** (`ApprovalStatusRow`, under the header, outside the collapsible

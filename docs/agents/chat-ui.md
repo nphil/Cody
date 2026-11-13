@@ -157,3 +157,4 @@ session:
 - `hooks/useAudio.ts` stores the toggle in `localStorage` and reuses one `AudioContext`.
 - Browser autoplay policy means sound must be unlocked from a user gesture; `ChatInput` calls the unlock hook from interactive controls, and `ChatWindow` plays the tone from `onAgentEnd`.
 
+Sidebar choices persist in this browser (`lib/sidebar-prefs.ts`, `hooks/useStoredPref.ts`, keys `cody:sidebar-*` in `lib/storage-keys.ts`): view, width, docked-open, running-only filter, Recent show-all, Explorer open, expanded project lists, collapsed forks (engine-scoped). The search box is not stored. A page wake re-reads the session list, projects and worktrees once.

@@ -367,4 +367,28 @@ test("an idle composer sends through the Send pill with its menu zone; a running
   assert.match(running, />Stop</);
 });
 
+test("the ring never presents a reading omp could not refresh as current: the tooltip says how old it is and the circle dims", () => {
+  const ring = composerSource.slice(
+    composerSource.indexOf("const quotaPercentText"),
+    composerSource.indexOf("const usageLimitText"),
+  );
+  // The age is the measurement's own: a reading with a number carries `measuredAt`, a blank one `outdatedSince`.
+  assert.match(ring, /quota\.known \? \(quota\.outdated \? quota\.measuredAt : undefined\) : quota\.outdatedSince/);
+  // Only a number still drawn is dimmed; a blank ring has nothing to dim.
+  assert.match(ring, /quotaRingDimmed = quota\.known && quota\.outdated === true/);
+  // One sentence for each of: a number or none, with or without a model name.
+  const sentences = ["usage.ringModelOutdated", "usage.ringOutdated", "usage.ringModelOutdatedUnknown", "usage.ringOutdatedUnknown"];
+  for (const key of sentences) assert.match(ring, new RegExp(`t\\("${key}"`), key);
+  // The spoken label follows the tooltip instead of restating the bare percentage.
+  assert.match(ring, /quotaRingLabel = quota\.known && !quotaOutdatedAgo/);
+  assert.match(composerSource, /<svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true" style=\{quotaRingDimmed \? \{ opacity: 0\.5 \} : undefined\}>/);
+  // Every language says how old the numbers are, and the number-bearing ones keep the percentage.
+  for (const [name, strings] of Object.entries(locales)) {
+    for (const key of sentences) {
+      assert.match(strings[key] ?? "", /\{ago\}/, `${name} ${key}`);
+      if (!key.endsWith("Unknown")) assert.match(strings[key], /\{percent\}/, `${name} ${key}`);
+    }
+  }
+});
+
 ;

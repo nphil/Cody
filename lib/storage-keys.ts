@@ -15,6 +15,21 @@ export const STORAGE_KEYS = {
   /** Session list view: "recent" (one list across projects, newest activity
    *  first) or "projects" (grouped under each project). */
   sidebarView: "cody:sidebar-view",
+  /** Whether the desktop sidebar is docked open. Written only by an explicit
+   *  toggle, so an automatic close (a narrow window under the right panel)
+   *  never becomes the stored choice. Phones use an overlay drawer instead and
+   *  always start with it closed. */
+  sidebarOpen: "cody:sidebar-open",
+  /** The "running sessions only" filter in the sidebar header. */
+  sidebarRunningOnly: "cody:sidebar-running-only",
+  /** Recent view: whether the full list is shown instead of the newest few. */
+  sidebarShowAllRecent: "cody:sidebar-show-all-recent",
+  /** Whether the Explorer section under the session list is open. */
+  sidebarExplorerOpen: "cody:sidebar-explorer-open",
+  /** Project paths whose session list is expanded past the first few. */
+  sidebarFullProjectLists: "cody:sidebar-full-project-lists",
+  /** Session ids whose fork branches are collapsed in the tree. */
+  sidebarCollapsedForks: "cody:sidebar-collapsed-forks",
   /** Whether tool-call cards render collapsed by default. */
   /** Browser-local baseline used by reset-credit balance UI. */
   resetCreditBalancePrefix: "cody:reset-credit-balance",
@@ -98,6 +113,8 @@ export const ENGINE_SCOPED_KEYS = [
   STORAGE_KEYS.composerHiddenModels,
   STORAGE_KEYS.composerPinnedModels,
   STORAGE_KEYS.recentModels,
+  // Fork branches belong to session ids, which are the engine's own.
+  STORAGE_KEYS.sidebarCollapsedForks,
 ] as const;
 
 /** Address one of ENGINE_SCOPED_KEYS for a given engine. Null while the

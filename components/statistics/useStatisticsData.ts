@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { usePageWake } from "@/hooks/usePageWake";
 import type { GroupBy, StatisticsResponse } from "@/lib/statistics/types";
 import { statisticsApiQuery, type PeriodSpec } from "./statistics-query";
 
@@ -87,6 +88,13 @@ export function useStatisticsData(period: PeriodSpec, groupBy: GroupBy): Statist
     setAttempt((count) => count + 1);
   }, []);
   const retry = useCallback(() => setAttempt((count) => count + 1), []);
+
+  // The page woke up after sitting open (a sleeping phone, a tab left behind):
+  // the figures on screen are old and a read that was out may never answer, so
+  // read again — the effect drops the old request. Not `refresh()`: an ordinary
+  // read already starts a new pass when the server's index is over ten minutes
+  // old, and a wake must not force a re-scan on top of that.
+  usePageWake(retry);
 
   return { data, loading, failure, refresh, retry };
 }

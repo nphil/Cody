@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { usePageWake } from "@/hooks/usePageWake";
 import {
   cancelScheduled as cancelScheduledRequest,
   createScheduled as createScheduledRequest,
@@ -38,10 +39,11 @@ export interface UseScheduledMessages {
  * The composer's scheduled messages for one chat.
  *
  * The list is read when the chat opens, when the tab comes back, when the
- * network returns, when a run ends (the agent may have scheduled something
- * during it) and at the moment the next pending message is due — never on a
- * fixed cadence (lib/scheduled/sync.ts holds the rules and their tests). A
- * chat that has no id yet reads nothing and shows nothing.
+ * page wakes from sleep or the network returns, when a run ends (the agent may
+ * have scheduled something during it) and at the moment the next pending
+ * message is due — never on a fixed cadence (lib/scheduled/sync.ts holds the
+ * rules and their tests). A chat that has no id yet reads nothing and shows
+ * nothing.
  */
 export function useScheduledMessages(sessionId: string | null | undefined, options: { isStreaming?: boolean } = {}): UseScheduledMessages {
   const [state, setState] = useState<ScheduledSyncState | null>(null);
@@ -56,18 +58,13 @@ export function useScheduledMessages(sessionId: string | null | undefined, optio
       isVisible: () => document.visibilityState === "visible",
     });
     syncRef.current = sync;
+    // A tab flipped away and back has to stop and re-arm its timer, whatever
+    // the length of the absence. Waking from sleep is the shared signal's job.
     const onVisibility = () => sync.visibilityChanged();
-    const onWake = () => {
-      if (document.visibilityState === "visible") sync.refresh();
-    };
     document.addEventListener("visibilitychange", onVisibility);
-    window.addEventListener("focus", onWake);
-    window.addEventListener("online", onWake);
     sync.setSession(sessionRef.current);
     return () => {
       document.removeEventListener("visibilitychange", onVisibility);
-      window.removeEventListener("focus", onWake);
-      window.removeEventListener("online", onWake);
       sync.dispose();
       syncRef.current = null;
     };
@@ -76,6 +73,10 @@ export function useScheduledMessages(sessionId: string | null | undefined, optio
   useEffect(() => {
     syncRef.current?.setSession(sessionId ?? null);
   }, [sessionId]);
+
+  // The page woke up: a read that was out when the device slept may never
+  // answer, so drop it and read again (once, even if the tab just came back).
+  usePageWake(() => syncRef.current?.restart());
 
   // A run ending is the one moment an agent's own `schedule_message` call is known to be over.
   const wasStreamingRef = useRef(false);

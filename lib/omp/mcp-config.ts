@@ -271,7 +271,7 @@ function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(sab), 0, 0, ms);
 }
 
-function withMcpConfigLock<T>(configPath: string, fn: () => T): T {
+export function withMcpConfigLock<T>(configPath: string, fn: () => T): T {
   const lockPath = `${configPath}.lock`;
   const deadline = Date.now() + MCP_LOCK_TIMEOUT_MS;
   // The config file may not exist yet (first write) — the lockfile needs its

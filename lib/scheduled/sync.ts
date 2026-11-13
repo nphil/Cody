@@ -44,6 +44,13 @@ export interface ScheduledSync {
   setSession(sessionId: string | null): void;
   /** Read now. Reads asked for while one is out are folded into ONE more read after it. */
   refresh(): void;
+  /**
+   * The page woke up (a phone's screen on again, a laptop's lid opened). A
+   * read that was out when the device slept may never answer, and while one is
+   * out `refresh` only queues behind it, so this drops it and reads again —
+   * unless a read answered a moment ago, which is as fresh as a new one.
+   */
+  restart(): void;
   /** The tab became visible (read) or hidden (stop waiting). */
   visibilityChanged(): void;
   /** A change the person just made came back from the server: show it without another read. */
@@ -68,6 +75,9 @@ function sameItems(a: readonly ScheduledItemView[], b: readonly ScheduledItemVie
   });
 }
 
+/** A read that answered, or went out, within this long is as good as a new one for a `restart`. */
+const RESTART_FRESH_MS = 2_000;
+
 export function createScheduledSync(options: ScheduledSyncOptions): ScheduledSync {
   const list = options.list ?? ((sessionId, { signal }) => listScheduled(sessionId, { signal }));
   const isVisible = options.isVisible ?? (() => true);
@@ -76,6 +86,10 @@ export function createScheduledSync(options: ScheduledSyncOptions): ScheduledSyn
   let state = EMPTY;
   let inFlight: AbortController | null = null;
   let readAgain = false;
+  /** When the latest read answered (the clock `now` reads); a restart right after one is not needed. */
+  let answeredAt = Number.NEGATIVE_INFINITY;
+  /** When the read now out went out. */
+  let startedAt = Number.NEGATIVE_INFINITY;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let followUps = 0;
   let disposed = false;
@@ -111,9 +125,11 @@ export function createScheduledSync(options: ScheduledSyncOptions): ScheduledSyn
     }
     const mine = new AbortController();
     inFlight = mine;
+    startedAt = now();
     try {
       const answer = await list(sessionId, { signal: mine.signal });
       if (!mine.signal.aborted) {
+        answeredAt = now();
         const items = [...answer.items].sort(byDue);
         publish(state.loaded && !state.failed && sameItems(state.items, items)
           ? state
@@ -139,6 +155,16 @@ export function createScheduledSync(options: ScheduledSyncOptions): ScheduledSyn
     void read();
   };
 
+  const restart = () => {
+    if (disposed || state.sessionId === null) return;
+    // A read that answered, or one that only just went out, is as good as a new one.
+    if ((inFlight === null ? answeredAt : startedAt) > now() - RESTART_FRESH_MS) return;
+    inFlight?.abort();
+    inFlight = null;
+    readAgain = false;
+    refresh();
+  };
+
   return {
     getState: () => state,
     setSession(sessionId) {
@@ -146,12 +172,14 @@ export function createScheduledSync(options: ScheduledSyncOptions): ScheduledSyn
       inFlight?.abort();
       inFlight = null;
       readAgain = false;
+      answeredAt = Number.NEGATIVE_INFINITY;
       followUps = 0;
       stopWaiting();
       publish({ ...EMPTY, sessionId });
       void read();
     },
     refresh,
+    restart,
     visibilityChanged() {
       if (isVisible()) refresh();
       else stopWaiting();

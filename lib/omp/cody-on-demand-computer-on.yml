@@ -1,0 +1,8 @@
+# Cody per-chat layer (lib/omp/on-demand-chats.ts): desktop control switched ON for
+# ONE conversation that asked for it through `load_tools`. It rides that chat's
+# PI_CONFIG_FILES after every other layer, so it wins over the launch default that
+# keeps `computer` off (cody-launch-defaults-computer.yml) and over a config.yml
+# that says false. The user's own config.yml is never written for it.
+
+computer:
+  enabled: true

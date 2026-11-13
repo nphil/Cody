@@ -169,6 +169,21 @@ export interface UsageAccount {
    * this account. Absent on a window set the newest read measured.
    */
   windowsStaleSince?: string;
+  /**
+   * ISO time omp MEASURED these windows: the report's own `fetchedAt`, not the
+   * time Cody read omp. omp re-serves its last saved report for a login whose
+   * live fetch keeps failing (Claude's usage endpoint answers HTTP 429 to
+   * bursts), so this is the only honest age of the numbers. Absent when the
+   * engine printed no `fetchedAt`; such a reading is never called out of date.
+   */
+  measuredAt?: string | null;
+  /**
+   * Set (by `withOutdatedReadings`, lib/usage/reading-age.ts) when the reading
+   * is older than `READING_OUTDATED_AFTER_MS`: these windows are a photograph
+   * of the past, not the present. Windows whose reset has already passed are
+   * dropped from such an account, so what is left is only what was last known.
+   */
+  outdated?: true;
 }
 
 /** `omp usage --json`'s per-account `policy` object, with every field optional

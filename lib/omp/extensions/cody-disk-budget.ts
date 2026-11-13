@@ -1,17 +1,24 @@
 // Loaded by omp itself (Bun), not by Cody's bundler: keep this file free of
 // Cody imports so it resolves from any install location. The few constants it
 // shares with lib/disk/status.ts (the two free-space lines) and lib/disk/gate.ts
-// (the type of the hidden line) are repeated here on purpose, and
+// (the type of the low-disk line) are repeated here on purpose, and
 // lib/omp/cody-disk-budget.test.mjs pins each pair equal.
 //
 // What it does, for every agent of a main chat (the main one and its
 // subagents):
-//  - gives it ONE static rule about scratch space and the disk budget, in the
-//    system prompt. The sizes in it are read once per process, so the text never
-//    changes under the provider's prompt cache;
+//  - gives it ONE static rule about scratch space and the disk budget, as one
+//    hidden message. The sizes in it are read once per process, so the text
+//    never changes under the provider's prompt cache;
 //  - tells it when a disk it writes to runs low: one hidden line with a prompt
 //    (the main agent only), and a note after a tool call, so an agent in the
 //    middle of a long turn hears about it too.
+//
+// The rule is a message and never a system-prompt line: omp reads ANY
+// `before_agent_start` result that carries a `systemPrompt` as a replaced
+// prompt, and answers by re-announcing its whole tool list (the xd:// catalog,
+// thousands of tokens) as a user message. The message is added once per live
+// context: a conversation that already holds it, back to its last compaction
+// or `/clear`, gets nothing, and one that lost it gets it with the next prompt.
 //
 // The note after a tool call needs a `tool_result` handler, and omp turns off
 // `task.speculativeLaunch` (batch subagents starting while the call is still
@@ -28,6 +35,8 @@ export const DISK_LOW_FREE_FRACTION = 0.15;
 export const DISK_CRITICAL_FREE_FRACTION = 0.05;
 /** lib/disk/gate.ts DISK_LOW_CUSTOM_TYPE: the type of the hidden line, which the transcript never shows. */
 export const DISK_LOW_CUSTOM_TYPE = "cody-disk-low";
+/** The type of the hidden message that holds the rule; lib/message-display.ts HIDDEN_CUSTOM_TYPES keeps it out of the transcript, and the test pins the two together. */
+export const DISK_RULE_CUSTOM_TYPE = "cody-disk-rule";
 
 /** A disk is looked at no more often than this, however many prompts and tool calls there are. */
 export const PROBE_EVERY_MS = 60_000;
@@ -76,23 +85,50 @@ export interface Deps {
   measure: (dir: string) => FolderSize;
 }
 
-type Context = { agent?: { kind?: string } };
+type Context = { agent?: { kind?: string }; sessionManager?: { getBranch?: () => unknown } };
 
 type HiddenMessage = {
   customType: string;
   content: string;
   display: false;
-  details: { level: DiskLevel; areas: Array<{ id: string; freeFraction: number }> };
+  details?: { level: DiskLevel; areas: Array<{ id: string; freeFraction: number }> };
   attribution: "agent";
 };
 
-type BeforeAgentStartResult = { systemPrompt?: string[]; message?: HiddenMessage };
+type BeforeAgentStartResult = { message?: HiddenMessage };
 
 type OmpApi = {
-  on(event: "before_agent_start", handler: (event: { systemPrompt?: unknown }, ctx: Context) => BeforeAgentStartResult): void;
+  on(event: "before_agent_start", handler: (event: unknown, ctx: Context) => BeforeAgentStartResult): void;
   on(event: "turn_start", handler: (event: unknown, ctx: Context) => void): void;
   on(event: "tool_result", handler: (event: unknown, ctx: Context) => { additionalContext: string } | undefined): void;
 };
+
+/**
+ * Whether the conversation the model will read already holds `content` as its
+ * newest `customType` note. omp keeps a note from `before_agent_start` as a
+ * `custom_message` entry, so the answer is in the branch. A compaction folds the
+ * messages before it into a summary and `/clear` drops them, so a note before
+ * either is gone. A branch that cannot be read counts as "not there": a repeated
+ * note costs a few hundred tokens, a missing rule costs more. The same function,
+ * word for word, is in cody-homelabber-gate.ts and cody-context-budget.ts; the
+ * test pins them to one another.
+ */
+export function noteIsLive(ctx: Context, customType: string, content: string): boolean {
+  let branch: unknown;
+  try {
+    branch = ctx.sessionManager?.getBranch?.();
+  } catch {
+    return false;
+  }
+  if (!Array.isArray(branch)) return false;
+  for (let index = branch.length - 1; index >= 0; index -= 1) {
+    const entry: unknown = branch[index];
+    if (typeof entry !== "object" || entry === null || !("type" in entry)) continue;
+    if (entry.type === "compaction" || entry.type === "reset_boundary") return false;
+    if (entry.type === "custom_message" && "customType" in entry && entry.customType === customType) return "content" in entry && entry.content === content;
+  }
+  return false;
+}
 
 /** lib/disk/status.ts levelForFreeFraction. */
 export function levelFor(freeFraction: number): DiskLevel {
@@ -213,9 +249,9 @@ function shellWord(path: string): string {
 }
 
 /**
- * THE rule. Appended to the system prompt of every agent of a main chat, once.
- * `readings` are the disks as they were when this process loaded the
- * extension, so the figures it states are this process's and never change
+ * THE rule. Given to every agent of a main chat as one hidden message, once per
+ * live context. `readings` are the disks as they were when this process loaded
+ * the extension, so the figures it states are this process's and never change
  * under the prompt cache.
  */
 export function budgetRule(readings: readonly Reading[], env: Record<string, string | undefined>): string {
@@ -237,6 +273,7 @@ export function budgetRule(readings: readonly Reading[], env: Record<string, str
     "- When the work is finished, delete build output, staged copies, screenshots, recordings and test temp dirs. Tests must use self-cleaning temp dirs (`tmp_path`, `TempDir`, `mkdtemp` plus cleanup).",
     `- Before a big build or copy, run \`df -h ${areas.map((area) => shellWord(area.path)).join(" ")}\`. If free space is under ${Math.round(DISK_LOW_FREE_FRACTION * 100)}%, clean up first.`,
     "- Toolchains, SDKs and shared virtualenvs go under `$HOME/.cache` or `$HOME/toolchains`, never in scratch.",
+    "- Never open, read, search or copy the engine's own data files (`agent.db` and the files beside it in the engine's data folder) with your read, search or eval tools: that can damage the saved logins. Inspect a copy made by a separate `sqlite3` process, or ask the user to use Settings.",
   ].join("\n");
 }
 
@@ -304,29 +341,31 @@ export function createDiskBudget(deps: Deps): (pi: OmpApi) => void {
       });
     };
 
-    pi.on("before_agent_start", (event, ctx) => {
-      const result: BeforeAgentStartResult = {};
-      // Never replace a prompt this file cannot read: the result REPLACES the system prompt.
-      if (Array.isArray(event?.systemPrompt)) {
-        const current: string[] = event.systemPrompt;
-        rule ??= budgetRule(readAreas(parseAreas(deps.env.CODY_DISK_AREAS), deps.statfs), deps.env);
-        result.systemPrompt = current.includes(rule) ? current : [...current, rule];
-      }
+    // The rule: one hidden message per live context, for every agent. The
+    // low-disk line is a second handler because omp takes one message from each
+    // handler, and the two follow different clocks.
+    pi.on("before_agent_start", (_event, ctx) => {
+      rule ??= budgetRule(readAreas(parseAreas(deps.env.CODY_DISK_AREAS), deps.statfs), deps.env);
+      if (noteIsLive(ctx, DISK_RULE_CUSTOM_TYPE, rule)) return {};
+      return { message: { customType: DISK_RULE_CUSTOM_TYPE, content: rule, display: false, attribution: "agent" } };
+    });
+
+    // The low-disk line, on the same clock the tool-result note shares.
+    pi.on("before_agent_start", (_event, ctx) => {
       const low = lowNow();
-      if (low.length > 0) {
-        hookToolResults();
-        // Subagents are briefed by the agent that spawns them, and a subagent's transcript is rendered separately.
-        if (ctx.agent?.kind === "main" && noticeDue(low[0].level)) {
-          result.message = {
-            customType: DISK_LOW_CUSTOM_TYPE,
-            content: noteFor(low),
-            display: false,
-            details: { level: low[0].level, areas: low.map((area) => ({ id: area.id, freeFraction: area.freeFraction })) },
-            attribution: "agent",
-          };
-        }
-      }
-      return result;
+      if (low.length === 0) return {};
+      hookToolResults();
+      // Subagents are briefed by the agent that spawns them, and a subagent's transcript is rendered separately.
+      if (ctx.agent?.kind !== "main" || !noticeDue(low[0].level)) return {};
+      return {
+        message: {
+          customType: DISK_LOW_CUSTOM_TYPE,
+          content: noteFor(low),
+          display: false,
+          details: { level: low[0].level, areas: low.map((area) => ({ id: area.id, freeFraction: area.freeFraction })) },
+          attribution: "agent",
+        },
+      };
     });
 
     // A turn that runs for hours sees no new prompt: this is where a disk that

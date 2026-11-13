@@ -25,7 +25,7 @@ import { QuotaBar, clampQuotaPercent } from "@/components/QuotaBar";
 import { OpenRouterCredits } from "./OpenRouterCredits";
 import type { UseResetCreditsResult, ResetCredit, ResetCreditAccount } from "@/hooks/useUsage";
 import type { UseOpenRouterAccountResult } from "@/hooks/useOpenRouterAccount";
-import { evidenceFromSessionAccount, rankProviderAccounts, selectBindingWindow, selectWindowsForModel, type AccountEvidence, type ModelRef } from "@/lib/usage/select";
+import { evidenceFromSessionAccount, rankProviderAccounts, rankWindowsForRing, selectBindingWindow, selectRingWindow, selectWindowsForModel, type AccountEvidence, type ModelRef } from "@/lib/usage/select";
 import { resolveModelAvailability } from "@/lib/usage/availability";
 import { usageProviderFor } from "@/lib/usage/provider-map";
 import type { UsageAccount, UsageAccountPolicy, UsageAccountService, UsageInUseBasis, UsageSnapshot, UsageWindow, UsageWindowAmount, UsageWindowState } from "@/lib/usage/types";
@@ -40,6 +40,7 @@ import type { UsageLimitState } from "@/lib/pi-types";
 import { describeUsageLimit } from "@/lib/slow-mode-state";
 import { credentialProviderName } from "@/hooks/credential-notices";
 import { isSignedOutCause } from "@/lib/usage/credential-health";
+import { newestReadingTime, readingTimeOf } from "@/lib/usage/reading-age";
 import { creditExpiryState, describeAccountPolicy, describeCreditClears, describeWindowAmount, formatCreditDate, isFiveHourIdle, providerUsesPriority, type CopyTranslate } from "@/lib/usage/quota-copy";
 import { AutoSpendSection } from "./QuotaAutoSpend";
 
@@ -103,6 +104,12 @@ export interface QuotaAccountFacts {
   /** ISO time of the earlier read these numbers are carried over from; set
    *  only when the newest read left this account out. */
   windowsStaleSince?: string;
+  /** The reading is too old to present as current: omp could not refresh this
+   *  account, and whatever numbers remain are only what was last known. */
+  outdated?: boolean;
+  /** ISO time omp measured those numbers (its own report time, not when Cody
+   *  read omp); set with `outdated` so the age can be told. */
+  measuredAt?: string;
 }
 
 /** Facts about the whole read, present on every view so the footer never has
@@ -135,6 +142,9 @@ export interface QuotaAccountRowView extends QuotaAccountFacts {
    *  "Use reset" action on a limited row without guessing from `label`. */
   position: number;
   blocked: boolean;
+  /** An out-of-date account with no window left to show: its percentage is
+   *  unknown, which must not read as 0%. */
+  noReading?: boolean;
 }
 
 export interface QuotaKnownView extends QuotaAccountFacts, QuotaReadFacts {
@@ -146,6 +156,12 @@ export interface QuotaKnownView extends QuotaAccountFacts, QuotaReadFacts {
   state: UsageWindowState;
   label: string;
   resetsAt: string | null;
+  /** When the window that binds the model by TERM — the one ranking and the
+   *  server's own "When quota resets" plan go by: exhausted, then shortest —
+   *  clears. The ring's own window (`resetsAt`) can be a longer, fuller one; the
+   *  Send menu's quota row keeps waiting on this one, so it never promises a
+   *  time the server will not use. */
+  bindingResetsAt: string | null;
   blocked: boolean;
   amount?: UsageWindowAmount;
   windows: QuotaWindowView[];
@@ -185,6 +201,15 @@ export interface QuotaAbsentView extends QuotaReadFacts {
    *  The ring wears the warning dot and the popover links to Settings ›
    *  Providers on `provider` (a usage-provider id). */
   signedOut?: { provider: string };
+  /** ISO time of the newest reading behind an out-of-date view
+   *  (QUOTA_OUTDATED); the age the ring and the popover quote. */
+  outdatedSince?: string;
+  /** Set only on the out-of-date view: the selected model's provider and its
+   *  accounts, so the logins that still have a reading are not hidden behind
+   *  the one that does not. */
+  provider?: string;
+  accounts?: QuotaAccountRowView[];
+  accountsBasis?: UsageInUseBasis | null;
 }
 
 /** What the ring and the popover's quota half should say. A missing signal is
@@ -261,6 +286,22 @@ const QUOTA_DISABLED: QuotaAbsentView = {
   titleKey: "usage.disabledTitle",
   noteKey: "usage.disabledNote",
   scopeKey: "usage.disabledScope",
+  reason: null,
+  inUse: [],
+  others: [],
+};
+
+/** The account serving the selected model has no reading recent enough to
+ *  show: omp could not refresh it (Claude's usage endpoint rate-limits bursts,
+ *  a damaged saved cache cannot keep a new report) and what it last measured
+ *  has since reset. The plan is metered — its CURRENT state is just unknown,
+ *  which is neither "0%" nor "unmetered", so the ring stays blank and says so. */
+const QUOTA_OUTDATED: QuotaAbsentView = {
+  known: false,
+  color: "var(--status-warning)",
+  titleKey: "usage.outdatedTitle",
+  noteKey: "usage.outdatedNote",
+  scopeKey: "usage.outdatedScope",
   reason: null,
   inUse: [],
   others: [],
@@ -439,8 +480,17 @@ function accountFacts(accounts: readonly UsageAccount[], account: UsageAccount):
     facts.policy = account.policy;
     if (showPriority) facts.showPriority = true;
   }
-  if (isFiveHourIdle(account)) facts.fiveHourIdle = true;
-  if (typeof account.windowsStaleSince === "string") facts.windowsStaleSince = account.windowsStaleSince;
+  // An old reading cannot say whether the 5-hour window has started, nor is
+  // "carried over from an earlier read" the whole story: it says it is out of
+  // date, with the age of the numbers, instead.
+  if (account.outdated) {
+    facts.outdated = true;
+    const measured = readingTimeOf(account);
+    if (measured !== null) facts.measuredAt = new Date(measured).toISOString();
+  } else {
+    if (isFiveHourIdle(account)) facts.fiveHourIdle = true;
+    if (typeof account.windowsStaleSince === "string") facts.windowsStaleSince = account.windowsStaleSince;
+  }
   return facts;
 }
 
@@ -546,21 +596,21 @@ function buildOtherWindows(
       && !primaryKeys.has(accountWindowKey(index, account, window))
       && !inUseKeys.has(accountWindowKey(index, account, window))
     ));
-    // Same comparator as the ring's own pick, so the row a user reads first is
-    // the one that would stop them first on that account.
-    const binding = selectBindingWindow([{ ...account, windows: leftover }]);
-    if (!binding) return;
+    // Same pick as the ring's own, so the row a user reads first is the one
+    // that threatens them most on that account.
+    const pick = selectRingWindow([{ ...account, windows: leftover }]);
+    if (!pick) return;
     rows.push({
-      key: accountWindowKey(index, account, binding.window),
+      key: accountWindowKey(index, account, pick.window),
       provider: account.provider,
       account: brandedAccountLabel(accounts, account),
-      label: binding.window.label,
-      percent: clampQuotaPercent(binding.window.utilization),
-      state: binding.window.state,
-      exhausted: binding.window.state === "exhausted",
-      resetsAt: binding.window.resetsAt,
-      blocked: binding.window.source === "block",
-      ...amountOf(binding.window),
+      label: pick.window.label,
+      percent: clampQuotaPercent(pick.window.utilization),
+      state: pick.window.state,
+      exhausted: pick.window.state === "exhausted",
+      resetsAt: pick.window.resetsAt,
+      blocked: pick.window.source === "block",
+      ...amountOf(pick.window),
     });
   });
   return rows.sort((a, b) => (
@@ -643,26 +693,34 @@ function buildQuotaViewCore(
     // The ring reads the account in use (ranks[0]); taking it from the same
     // ranking the list below renders guarantees they name the same account.
     const match = ranks[0] ? { account: ranks[0].account, windows: ranks[0].windows } : null;
-    // windows[0] is the pick selectBindingWindowForModel makes — taking it here
-    // selects once over the snapshot instead of twice, and guarantees the ring
-    // and the list below it name the same window.
-    const modelBinding = match?.windows[0] ?? null;
+    // The ring shows the window that most threatens the model (see
+    // `selectRingWindow`), not the one that binds it by term. Ranked once here,
+    // the ring, the hero and the list below it name the same window.
+    const ringWindows = match ? rankWindowsForRing(match.windows) : [];
+    const modelBinding = ringWindows[0] ?? null;
     const inUse = buildInUseWindows(accounts, match, activeModels, model, nameWindow, evidenceFor);
     // Only worth listing when more than one account can actually serve this
     // model — a single-account provider has nothing to disambiguate.
     const providerAccounts = accounts.filter((account) => account.provider === model.provider);
     const accountRows: QuotaAccountRowView[] = providerAccounts.length > 1
-      ? ranks.map((rank) => ({
-          key: rank.account.id,
-          label: accountPositionLabel(providerAccounts.indexOf(rank.account)),
-          state: rank.state,
-          percent: clampQuotaPercent(rank.binding?.utilization ?? 0),
-          resetsAt: rank.binding?.resetsAt ?? null,
-          planType: rank.account.planType,
-          position: providerAccounts.indexOf(rank.account),
-          blocked: rank.binding?.source === "block",
-          ...accountFacts(accounts, rank.account),
-        }))
+      ? ranks.map((rank) => {
+          // Each row reads its account the way the ring reads the serving one
+          // (the window that most threatens it), so the row in use always
+          // agrees with the hero. The ORDER of the rows stays omp's rotation.
+          const shown = rankWindowsForRing(rank.windows)[0] ?? null;
+          return {
+            key: rank.account.id,
+            label: accountPositionLabel(providerAccounts.indexOf(rank.account)),
+            state: rank.state,
+            percent: clampQuotaPercent(shown?.utilization ?? 0),
+            resetsAt: shown?.resetsAt ?? null,
+            planType: rank.account.planType,
+            position: providerAccounts.indexOf(rank.account),
+            blocked: shown?.source === "block",
+            ...(rank.account.outdated && !shown ? { noReading: true } : {}),
+            ...accountFacts(accounts, rank.account),
+          };
+        })
       : [];
     const accountsBasis = accountRows.length > 0 ? (ranks.find((rank) => rank.state === "in_use")?.basis ?? null) : null;
     const others = buildOtherWindows(
@@ -691,6 +749,22 @@ function buildQuotaViewCore(
       if (lead?.state === "disabled") {
         return { ...QUOTA_DISABLED, inUse, others };
       }
+      // The account that would serve this model has an old reading with
+      // nothing left that still applies: its quota exists but its current
+      // state is unknown. Said as that — never "unmetered", never 0%.
+      if (match?.account.outdated) {
+        const since = accountFacts(accounts, match.account).measuredAt;
+        return {
+          ...QUOTA_OUTDATED,
+          ...(since ? { outdatedSince: since } : {}),
+          reason,
+          provider: match.account.provider,
+          accounts: accountRows,
+          accountsBasis,
+          inUse,
+          others,
+        };
+      }
       // Three different silences, and the copy has to tell them apart: no
       // account serves this provider / the account is unmetered / the account
       // reports quota that all belongs to other models.
@@ -712,12 +786,16 @@ function buildQuotaViewCore(
       state: modelBinding.state,
       label: nameWindow(match.account, modelBinding.label),
       resetsAt: modelBinding.resetsAt,
+      // What a scheduled message waits on is the window that clears first (the
+      // order ranking and the server's own plan use), which can be a shorter
+      // one than the window the ring is showing.
+      bindingResetsAt: match.windows[0]?.resetsAt ?? null,
       blocked: modelBinding.source === "block",
       ...amountOf(modelBinding),
       ...accountFacts(accounts, match.account),
-      // Already most-binding-first from the selector, and left in that order:
-      // the row a user reads first is the one that stops them first.
-      windows: match.windows.map((quotaWindow) => {
+      // Most worrying first, the ring's own window leading: the row a user
+      // reads first is the one that threatens them most.
+      windows: ringWindows.map((quotaWindow) => {
         const percent = clampQuotaPercent(quotaWindow.utilization);
         return {
           key: `${accountIndex}:${match.account.provider}:${quotaWindow.id}`,
@@ -742,14 +820,27 @@ function buildQuotaViewCore(
     };
   }
 
-  const binding = selectBindingWindow(accounts);
-  if (!binding) {
+  // The ring shows the window that most threatens the accounts (see
+  // `selectRingWindow`); the list below still carries every window.
+  const shown = selectRingWindow(accounts);
+  if (!shown) {
     // Nothing to gauge because no login can be used is not the engine having
     // reported no limits: say what is wrong, and where it is fixed.
     const unusable = accounts.filter((account) => account.disabled);
     if (unusable.length > 0 && unusable.length === accounts.length) {
       const endedLogin = unusable.find((account) => isSignedOutCause(account.disabled?.cause));
       return endedLogin ? { ...QUOTA_SIGNED_OUT, signedOut: { provider: endedLogin.provider } } : QUOTA_DISABLED;
+    }
+    // Every reading is too old to gauge and nothing of it is left: the
+    // engine did report limits — it is the numbers that stopped being current.
+    const outdatedAccounts = accounts.filter((account) => account.outdated);
+    if (outdatedAccounts.length > 0) {
+      const newest = newestReadingTime({ accounts: outdatedAccounts });
+      return {
+        ...QUOTA_OUTDATED,
+        ...(newest !== null ? { outdatedSince: new Date(newest).toISOString() } : {}),
+        reason: readableReason(snapshot.reason),
+      };
     }
     return { ...QUOTA_UNREPORTED, reason: readableReason(snapshot.reason) };
   }
@@ -775,18 +866,19 @@ function buildQuotaViewCore(
     }))
     .sort((a, b) => b.percent - a.percent);
 
-  const percent = clampQuotaPercent(binding.window.utilization);
+  const percent = clampQuotaPercent(shown.window.utilization);
   return {
     known: true,
-    provider: binding.account.provider,
+    provider: shown.account.provider,
     percent,
-    color: usageToneColor(percent, binding.window.state),
-    state: binding.window.state,
-    label: nameWindow(binding.account, binding.window.label),
-    resetsAt: binding.window.resetsAt,
-    blocked: binding.window.source === "block",
-    ...amountOf(binding.window),
-    ...accountFacts(accounts, binding.account),
+    color: usageToneColor(percent, shown.window.state),
+    state: shown.window.state,
+    label: nameWindow(shown.account, shown.window.label),
+    resetsAt: shown.window.resetsAt,
+    bindingResetsAt: selectBindingWindow(accounts)?.window.resetsAt ?? null,
+    blocked: shown.window.source === "block",
+    ...amountOf(shown.window),
+    ...accountFacts(accounts, shown.account),
     windows,
     // The account-wide list above already shows every window there is.
     inUse: [],
@@ -795,8 +887,8 @@ function buildQuotaViewCore(
     accountsBasis: null,
     fetchedAt: snapshot.fetchedAt ?? null,
     stale: snapshot.stale === true,
-    planType: binding.account.planType,
-    resetCredits: binding.account.resetCredits,
+    planType: shown.account.planType,
+    resetCredits: shown.account.resetCredits,
   };
 }
 
@@ -914,11 +1006,17 @@ function AccountFactLines({
 }) {
   const policy = describeAccountPolicy(facts.policy, t, { showPriority: facts.showPriority });
   const asOf = facts.windowsStaleSince ? formatResetTime(facts.windowsStaleSince, locale, now) : null;
-  if (!policy && !facts.fiveHourIdle && !asOf) return null;
+  const outdatedAgo = facts.outdated && facts.measuredAt ? formatRelativeTime(facts.measuredAt, locale, now) : null;
+  if (!policy && !facts.fiveHourIdle && !asOf && !facts.outdated) return null;
   const line: React.CSSProperties = { fontSize: 11, lineHeight: 1.35, color: "var(--text-dim)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 1, paddingLeft: inset, marginTop, minWidth: 0 }}>
       {policy && <div data-testid="quota-account-policy" title={policy.detail} style={line}>{policy.line}</div>}
+      {facts.outdated && (
+        <div data-testid="quota-reading-outdated" title={t("usage.outdatedReadingDetail")} style={{ ...line, color: "var(--status-warning)" }}>
+          {outdatedAgo ? t("usage.outdatedReading", { ago: outdatedAgo }) : t("usage.outdatedTag")}
+        </div>
+      )}
       {facts.fiveHourIdle && (
         <div data-testid="quota-five-hour-idle" title={t("usage.fiveHourIdleDetail")} style={line}>{t("usage.fiveHourIdle")}</div>
       )}
@@ -957,7 +1055,11 @@ function AccountRow({
     ? (resetTime ? t("usage.accountLimited", { time: resetTime }) : t("usage.accountLimitedNoTime"))
     : account.state === "disabled"
       ? t(ACCOUNT_STATE_LABEL_KEYS.disabled)
-      : null;
+      // An old reading with nothing left in it: an unknown amount must not
+      // read as 0%.
+      : account.noReading
+        ? "—"
+        : null;
   // The limited state's own text has a "{time}" slot to fill, so a hover title
   // says what the state MEANS instead: omp stays on a fallback until the reset.
   const stateTitle = account.state === "limited" ? t("usage.accountLimitedTooltip") : t(ACCOUNT_STATE_LABEL_KEYS[account.state]);
@@ -1002,8 +1104,8 @@ function AccountRow({
           </button>
         ) : (
           <span
-            title={account.blocked ? t("usage.blockedTag") : account.state === "limited" ? stateTitle : undefined}
-            style={{ flexShrink: 0, fontSize: 11, fontWeight: 700, color: tone, fontVariantNumeric: "tabular-nums" }}
+            title={account.blocked ? t("usage.blockedTag") : account.state === "limited" ? stateTitle : account.noReading ? t("usage.accountNoReading") : undefined}
+            style={{ flexShrink: 0, fontSize: 11, fontWeight: 700, color: tone, fontVariantNumeric: "tabular-nums", opacity: account.outdated ? 0.6 : undefined }}
           >
             {rightText ?? `${Math.round(account.percent)}%`}
           </span>
@@ -1287,6 +1389,12 @@ export function QuotaPopover({
   const percentText = quota.known ? t("usage.percentUsed", { percent: Math.round(quota.percent) }) : null;
   const headlineReset = quota.known ? formatResetTime(quota.resetsAt, locale, now) : null;
   const age = quota.known && quota.fetchedAt ? formatRelativeTime(quota.fetchedAt, locale, now) : null;
+  // How old the NUMBERS are: omp's own report time, not the moment Cody read
+  // omp. An account omp could not refresh keeps serving its old report, so a
+  // fresh "Updated 1m ago" can sit beside a week-old percentage.
+  const outdatedSince = quota.known ? (quota.outdated ? quota.measuredAt : undefined) : quota.outdatedSince;
+  const outdatedAgo = outdatedSince ? formatRelativeTime(outdatedSince, locale, now) : null;
+  const heroOutdated = quota.known && quota.outdated === true;
   // Three different things, and the footer must not conflate them: a read
   // that just landed, a snapshot the server itself flagged as possibly out of
   // date, and a read that FAILED — where the numbers on screen are the last
@@ -1319,6 +1427,7 @@ export function QuotaPopover({
   const heroMetaLine = quota.known
     ? [
         formatQuotaLabel(quota.label, locale),
+        quota.outdated ? t("usage.outdatedTag") : null,
         describeWindowAmount(quota.amount, locale, t),
         quota.blocked ? t("usage.blockedTag") : null,
         headlineReset ? t("usage.resetsAt", { time: headlineReset }) : null,
@@ -1330,6 +1439,10 @@ export function QuotaPopover({
   // Set only when no account is left that Cody can use because its login
   // ended (see QUOTA_SIGNED_OUT): the hero then links to Settings.
   const signedOutProvider = quota.known ? null : quota.signedOut?.provider ?? null;
+  // The Accounts list: the known view always carries it; the out-of-date view
+  // does too, so the logins that still have a reading stay visible.
+  const accountRows = quota.accounts ?? [];
+  const accountsProvider = quota.provider ?? null;
 
   const anchor = anchorTop != null && anchorRight != null ? { top: anchorTop, right: anchorRight } : null;
   const innerMaxHeight = anchor ? `min(70vh, 560px, ${Math.max(0, anchor.top - 14)}px)` : "min(70vh, 560px)";
@@ -1369,7 +1482,7 @@ export function QuotaPopover({
             {modelName ?? t("usage.title")}
           </div>
           {percentText && (
-            <div style={{ flexShrink: 0, fontSize: 13, fontWeight: 700, color: quota.color, fontVariantNumeric: "tabular-nums" }}>
+            <div style={{ flexShrink: 0, fontSize: 13, fontWeight: 700, color: quota.color, fontVariantNumeric: "tabular-nums", opacity: heroOutdated ? 0.6 : undefined }}>
               {percentText}
             </div>
           )}
@@ -1398,7 +1511,7 @@ export function QuotaPopover({
               {heroMetaLine}
             </div>
             <div style={{ marginTop: 6 }}>
-              <QuotaBar percent={quota.percent} color={quota.color} height={6} />
+              <QuotaBar percent={quota.percent} color={quota.color} height={6} dimmed={heroOutdated} />
             </div>
             {secondaryWindows.length > 0 && (
               <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
@@ -1434,6 +1547,11 @@ export function QuotaPopover({
             {quota.reason && (
               <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-dim)" }}>{quota.reason}</div>
             )}
+            {outdatedAgo && (
+              <div data-testid="quota-reading-outdated" title={t("usage.outdatedReadingDetail")} style={{ marginTop: 4, fontSize: 11, color: "var(--status-warning)" }}>
+                {t("usage.outdatedReading", { ago: outdatedAgo })}
+              </div>
+            )}
             {signedOutProvider !== null && (
               <button
                 type="button"
@@ -1455,7 +1573,7 @@ export function QuotaPopover({
 
         {/* ACCOUNTS — only when this provider has more than one, since a
             single-account provider has nothing to disambiguate. */}
-        {quota.known && quota.accounts.length > 1 && (
+        {accountsProvider !== null && accountRows.length > 1 && (
           <section style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
               <span style={{ fontSize: 12, fontWeight: 600, color: "var(--text-muted)" }}>{t("usage.accountsHeading")}</span>
@@ -1472,18 +1590,18 @@ export function QuotaPopover({
               )}
             </div>
             <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 7 }}>
-              {quota.accounts.map((account) => (
+              {accountRows.map((account) => (
                 <AccountRow
                   key={account.key}
                   account={account}
-                  reset={findResetFor(quota.provider, account.position)}
+                  reset={findResetFor(accountsProvider, account.position)}
                   now={now}
                   locale={locale}
                   t={t}
                   onUseReset={(reset, label) => setResetSelection({
                     accountId: reset.id, creditId: reset.credits[0]!.id, account: label,
                   })}
-                  onSignIn={() => openSignIn(quota.provider)}
+                  onSignIn={() => openSignIn(accountsProvider)}
                 />
               ))}
             </div>

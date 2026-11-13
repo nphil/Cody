@@ -92,27 +92,52 @@ no script, by the owner's choice), so Cody's own janitor is the ONLY cleanup.
   person can tell an agent to clean up. The outbox treats it as a final failure
   (Retry/Edit stay); scheduled sends and run recovery postpone and retry without
   using up an attempt. `describeEngineError` names ENOSPC/EDQUOT in plain words.
+- **Model-only notes are hidden messages, never a `systemPrompt`.** The HomeLabber
+  gate procedure (`cody-gate-guidance`, `cody-homelabber-gate.ts`), the disk rule
+  (`cody-disk-rule`), the helper memory line (`cody-context-budget`) and the
+  on-demand restore note (`cody-on-demand-restore`) reach an agent as ONE hidden
+  custom message, `{ customType, content, display: false, attribution: "agent" }`,
+  returned from `before_agent_start` (the clock, `cody-local-time`, does the same
+  on every prompt). Why: omp treats ANY `before_agent_start` result that carries a
+  `systemPrompt` as a replaced prompt (its `baseXdevCatalogDelivered` goes false)
+  and then re-announces every xd:// and MCP tool as a user message ("device
+  inventory changed": about 6.6k tokens with the usual roster, 19k in the lgtv
+  chat) on 18.8.3 and 18.19.0 alike, so each such prompt carried the whole tool
+  list a second time. A handler therefore returns a `message` and nothing else,
+  and only when the note is not live: `noteIsLive(ctx, customType, content)`
+  reads `ctx.sessionManager.getBranch()` from the end, and the note is live when
+  the newest `custom_message` of that type has equal content with no
+  `compaction`/`reset_boundary` entry after it (those drop what came before from
+  the model's view); a branch it cannot read means "inject". The helper is copied
+  into each extension (omp loads them with no Cody imports) and the tests pin the
+  copies together. Costs: a note kept verbatim past a compaction is given once
+  more, and a one-prompt subagent that compacts mid-run gets it again with its
+  next prompt. Every type is in `HIDDEN_CUSTOM_TYPES` and `isModelOnlyNote`
+  (`lib/message-display.ts`): the reloaded transcript hides it and
+  `AgentSessionWrapper` drops its live `message_start`/`message_end`
+  (`lib/rpc-manager.test.mjs` feeds each extension's own constant). A new note
+  type goes in both lists.
 - **The agent rule** (`lib/omp/extensions/cody-disk-budget.ts`, a fourth
-  `--extension` for main omp chats, inherited by subagents): appends the
-  "Scratch and disk budget" rule to the system prompt (sizes read once per
-  process, so the prompt cache holds; it says those figures override any
-  remembered one), and below 15 % free adds a hidden `cody-disk-low` line per
+  `--extension` for main omp chats, inherited by subagents): gives the
+  "Scratch and disk budget" rule as ONE hidden message (`cody-disk-rule`, see
+  "Model-only notes" above; sizes read once per process, so the text is fixed;
+  it says those figures override any remembered one), and below 15 % free adds
+  a hidden `cody-disk-low` line per
   prompt and an `additionalContext` note on tool results (throttled). Trap: in
   omp ANY extension that registers `tool_call`/`tool_result` vetoes
   `task.speculativeLaunch`, so the `tool_result` handler is registered lazily,
   only once a disk has been seen low. Constants mirror `status.ts` (tested). When `CODY_DATA_SCRATCH` is set the rule gets one more fixed line: tests that
   need temp space on the code's disk use `$CODY_DATA_SCRATCH`, never `~/tmp`,
-  `/data/home/tmp` or another fixed folder (text is fixed per process: prompt
-  cache).
+  `/data/home/tmp` or another fixed folder (text is fixed per process, so a
+  live note is not repeated).
 - **Helper-agent memory limit** (`lib/omp/extensions/cody-context-budget.ts`, a
-  fifth `--extension` for main omp chats): for SUBAGENTS only, appends one
-  system-prompt line saying at what size omp summarises their history and to
+  fifth `--extension` for main omp chats): for SUBAGENTS only, gives one hidden
+  message (`cody-context-budget`) saying at what size omp summarises their history and to
   keep `context_notes` current. The size is what omp itself applies to that helper's model, read from
   `<agent dir>/config.yml` (re-read when its mtime changes: one `statSync` per
   helper start) by `resolveHelperLimit` in `lib/helper-memory-limit.ts`; the
   extension passes the live `ctx.model` (provider, id, contextWindow) so the
-  per-model thresholds apply (Bun-only, no config → a generic line). The text is fixed per agent+model window+config (prompt
-  cache) and it registers no `tool_call`/`tool_result` handler (see the disk
+  per-model thresholds apply (Bun-only, no config → a generic line). The text is fixed per agent+model window+config (a changed line is added again, newest last) and it registers no `tool_call`/`tool_result` handler (see the disk
   note: that vetoes `task.speculativeLaunch`). The Behavior › Context card
   "Helper agents' memory limit" (`components/settings/engine/HelperMemoryCard.tsx`,
   logic in `helper-memory.ts`) edits that map through `/api/omp-settings`, which
@@ -191,6 +216,15 @@ no script, by the owner's choice), so Cody's own janitor is the ONLY cleanup.
   `fs` into the browser bundle and fails the build with "Can't resolve 'fs'".
   Typecheck and unit tests both pass — only `next build` (or loading the page)
   catches it.
+
+### Engine database health (`bin/cody-engine-db.mjs`, `lib/omp/engine-db.ts`, `/api/engine-db`, `components/settings/EngineDbSection.tsx`)
+- **Why.** omp keeps saved logins, credential blocks, settings, caches and usage history in one SQLite file, `<agent dir>/agent.db`. On 2026-11-07 the indexes of its `cache` and `usage_history` tables were damaged (84 `integrity_check` problems). omp could no longer save a fresh usage report for one login, kept serving a five-day-old one, and nothing said so. Likely cause: omp before 18.16.0 used process-wide POSIX locks, so any second open of the file inside the engine process (its read/search tools, eval, `cp`) released the engine's own locks (omp issue #15586; 18.16.0 moved to OFD locks).
+- **The check.** `bin/cody-engine-db.mjs check <db>` runs the full `PRAGMA integrity_check` on a read-only connection in ITS OWN process (never in the server: it would stall every request; never in an engine: see above). `classifyIntegrity` maps each line to a table through the tree's root page or the index name: `ok`; `derived` when every blamed table is in `DERIVED_TABLES` (`cache`, `usage_history`, `client_usage`, `notice_claims`: data the engine refills) and nothing is unattributed except unused pages; `critical` for any other table, a tree or index the schema does not know, a line it does not recognise, or a check SQLite itself gave up on ("check stopped early"); `unreadable`; `absent`.
+- **The repair** (`repair <db> <backup dir>`), only for `derived`: a page-level backup first (`node:sqlite` `backup`, newest `KEEP_BACKUPS` = 3 kept in `<agent dir>/cody-engine-db-backups/`), then ONE `BEGIN IMMEDIATE` transaction: for each damaged table read every row that still reads, remove the table's and its indexes' rows from `sqlite_master` with `writable_schema` (NOT `DROP`: DROP walks the damaged trees to free their pages and fails on a page two indexes both claim), recreate the table and indexes from their own SQL, reinsert. It commits only when `integrity_check` then blames no table and a SHA-256 over every row of every other table equals the one taken before; anything else is `ROLLBACK` and the file is as it was. The abandoned pages are reclaimed by a `VACUUM` after the commit. No file is renamed, so engines holding the store open keep working and SQLite's locking orders them behind the transaction. Proven on a copy of the damaged live file: `repaired`, 96,407 cache rows and 1,351 usage rows kept, logins and settings identical, about one second.
+- **When.** `lib/omp/engine-db.ts` `checkEngineDbIfDue` runs from `lib/harness/housekeeping.ts` (first pass a minute after boot, then when the last check is older than 6 h) with automatic repair; `watchEngineCrashesForDbCheck` runs one 30 s after an engine crash (once per burst). One run at a time (`globalThis.__codyEngineDb`). The last check and repair are stored in `<agent dir>/cody-engine-db.json` (0600, atomic).
+- **What the owner sees.** `critical`/`unreadable`, or a repair that failed, pushes notification kind `engineDbDamaged` once per distinct fault (`describeEngineDbFault`; remembered only when someone was actually told). Settings › System › "Engine database" shows the verdict in plain words, last check, last repair with rows kept, backups, a warning when the installed omp is older than 18.16.0 (`ENGINE_DB_SAFE_OMP`), "Check now", and "Repair now" only when the damage is `derived`. Cody never repairs damage that reaches logins or settings; that needs the owner (offline rebuild or signing in again).
+- **Prevention.** The disk rule every agent gets (`cody-disk-budget.ts` `budgetRule`) now says never to open, read, search or copy the engine's data files with the agent's own tools. Cody's own readers of `agent.db` (`lib/openrouter/key.ts`, the `bin/cody-omp-*.mjs` helpers, this checker) all run outside the engine process through SQLite.
+- **Traps.** The helper must stay plain `.mjs` with Node built-ins only (it is spawned with `process.execPath`). Node's bundled SQLite words tree problems `Tree <root> page <n>`; a build that words them differently lands in `critical`, the safe side. Tests corrupt real temp databases (`bin/cody-engine-db.test.mjs`).
 
 ### Checkpoints must never snapshot a home directory or Cody's own state
 - Shadow repos live under the AGENT dir, keyed by a hash of the workspace

@@ -166,6 +166,7 @@ app/api/
   statistics/route.ts  GET usage stats / ?session=
   ../statistics/page.tsx  Statistics page
   disk/route.ts  GET disk meters; POST clean, PUT (admin)
+  engine-db/route.ts  GET status / POST check|repair of omp's agent.db (admin, omp only)
   claude-credits/route.ts  GET/PUT/DELETE Claude backup keys (omp, admin)
 lib/
   omp/  shared omp foundations: paths, CLI probe, RpcProcess, marketplace.ts, plugin-cli.ts, isolated-agent-dir.ts, homelabber-base.ts, cody-launch-defaults.ts (+ .yml layers), gc-strip.ts (omp gc --strip), services.ts (omp ps)
@@ -231,6 +232,14 @@ lib/
   preview-autoopen.ts  when a mentioned URL auto-opens Preview
   preview-screenshot.ts  server-side Chromium capture of loopback apps
   project-ordering.ts  pure project sort/group/activity helpers
+  page-wake.ts  one debounced "page woke up" event (visible/focus/pageshow/online/resume/clock jump)
+  live-stream.ts  EventSource that reopens after refusal/silence; reopen() on wake
+  sidebar-prefs.ts  sidebar prefs parse/serialize + PrefStore
+  on-demand-mcp/  load-on-demand registry + small MCP client (extension-side, Node built-ins only)
+  omp/on-demand-mcp.ts, omp/on-demand-chats.ts  on-demand registry store; per-chat computer flag
+  omp/extensions/cody-on-demand-mcp.ts  `load_tools` extension
+  omp/engine-db.ts  engine database health service (check, guarded repair, push)
+  usage/reading-age.ts  age of a usage reading from omp's own fetchedAt
   project-registry.ts  managed-project registry (projects.json)
   provider-brand.ts  provider id → brand/mark; modelBrand()
   provider-directory.ts / provider-directory-server.ts  Providers hub rows; composeProviderDirectory is server-only
@@ -275,7 +284,7 @@ lib/
   normalize.ts  normalizeToolCalls() field-name fix
   worktree.ts  project/worktree resolution, git worktree ops
   statistics/  Statistics page server half; scan.ts, indexer.ts, joblog.ts, oneshot.ts, query.ts, days.ts, sunburst.ts, workers.ts, test-helpers.mjs (plus access/billing/labels/paths/present/rates/request/service/store/types)
-  usage/  quota readers; client-merge.ts (browser keeps last good), credential-health.ts (ended logins), last-good.ts (server keeps last good), quota-copy.ts (plain words)
+  usage/  quota readers; client-merge.ts (browser keeps last good), credential-health.ts (ended logins), last-good.ts (server keeps last good), quota-copy.ts (plain words), reading-age.ts (how old a reading is, when it is out of date)
   model-switch/  agent-requested model switch: resolve.ts (pure), switch.ts, tool.ts
   engine-crash.ts / engine-crash-events.ts / engine-crash-host.ts / engine-crash-log.ts  why an engine stopped on its own; who hears it; cgroup facts; the chat's crash line
   model-presets/roster-check.ts  exact-id check against omp's live roster
@@ -339,6 +348,7 @@ components/
   TabBar.tsx  Chat + file tabs
   SettingsTabs.tsx  shared types/constants only
   SettingsConfig.tsx  entry to settings/SettingsShell
+  settings/EngineDbSection.tsx  System "Engine database" card (/api/engine-db)
   settings/  Settings dialog ("Settings shell")
     registry.ts  SETTINGS_SECTIONS hub table
     shell-context.tsx  useSettingsShell/useSettingsOpener
@@ -387,6 +397,8 @@ hooks/
   useAudio.ts  completion sound, AudioContext unlock
   useDragDrop.ts  shared drag/drop state
   useDisplayRequests.ts  display-request SSE to request state
+  usePageWake.ts  run a callback when the page wakes
+  useStoredPref.ts  stored flags / id sets over sidebar-prefs
   useMachineMeters.ts  machines SSE page-wide store
   useDailyLimit.ts  daily limit store; useDailyLimitTracker
   useNotificationPresence.ts  POST /api/notifications/presence
@@ -406,6 +418,7 @@ hooks/
   useHelperLimitConfig.ts  config.yml slice for helper history size
 bin/
   cody-server.js  custom server; /api/display/socket WS upgrade
+  cody-engine-db.mjs  check/repair omp's agent.db in its own process
   cody-display-mcp.js  stdio MCP server for Claude/Codex engines (incl. run_on_worker → /api/internal/workers)
   cody-pi-login.mjs  pi sign-in helper for lib/harness/pi-login.ts
   cody-omp-credentials.mjs  omp credential list/remove under Bun; never a token
@@ -585,12 +598,19 @@ Details: docs/agents/disk.md
 - Janitor (`janitor.ts`) is the ONLY cleanup (no host cron); removes a temp entry only if unchanged and unreferenced by process/chat; doubt keeps; never `<tmp>/jiti`.
 - Gate (`gate.ts`, `status.ts`): below 5 % free, new work gets 507 `disk_full`; steer/abort still pass so agents can be told to clean up.
 - Trap: in omp any extension `tool_call`/`tool_result` handler vetoes `task.speculativeLaunch`; `cody-disk-budget.ts` registers `tool_result` lazily.
+- Trap: an extension's `before_agent_start` must NEVER return `systemPrompt` (omp then re-announces the whole xd:// tool catalog as a user message, ~6.6k tokens, every time): return ONE hidden `message`, only when `noteIsLive` says the note is gone (gate, disk rule, context budget, on-demand restore); a new type goes in `HIDDEN_CUSTOM_TYPES` AND `isModelOnlyNote` (`lib/message-display.ts`).
 Details: docs/agents/disk.md
 
 ### Disk exhaustion is a first-class failure (`lib/disk-space.ts`)
 - Full disk = npm `errno -122` (EDQUOT); `describeDiskError()` matches the number. Preflight checks tools prefix AND npm cache; unknown space never blocks.
 - `requiredFreeBytes()` = installed size +256 MB; `cleanStaleInstallDirs()` unblocks updates; probe `--version` (npm exit 0 ≠ working).
 - Trap: `formatBytes` is in `lib/format-bytes.ts`; client import of `disk-space.ts` pulls `fs`, breaking only `next build`.
+Details: docs/agents/disk.md
+
+### Engine database health (`bin/cody-engine-db.mjs`, `lib/omp/engine-db.ts`)
+- omp's `agent.db` (logins, settings, caches) is checked by a SEPARATE process a minute after boot, every 6 h (housekeeping) and 30 s after an engine crash; never open it inside the server or an engine (omp < 18.16.0 drops its locks: the 2026-11 damage).
+- Damage only in `DERIVED_TABLES` is repaired in place in ONE transaction: abandon the table's schema rows (never DROP: it walks the damaged trees), recreate, reinsert readable rows; commit only if `integrity_check` is clean and every other table hashes the same, else roll back.
+- Damage touching logins/settings, an unknown tree or an aborted check is `critical`: never auto-repaired; push `engineDbDamaged` once + Settings › System › Engine database.
 Details: docs/agents/disk.md
 
 ### Checkpoints must never snapshot a home directory or Cody's own state
@@ -653,7 +673,9 @@ Details: docs/agents/session-runtime.md
 Details: docs/agents/composer.md
 
 ### Running state SSE + reconciliation
-- Sidebar uses `/api/agent/running/events`; `useAgentSession` also polls `GET /api/agent/[id]` while running and on `visibilitychange`/`online` — catches missed `agent_end`.
+- Sidebar uses `/api/agent/running/events` through `openLiveStream` (`lib/live-stream.ts`: reopens after a refusal, watchdog on the 30 s heartbeat); `useAgentSession` also polls `GET /api/agent/[id]` while running — catches missed `agent_end`.
+- A sleeping phone/tablet is handled by ONE signal: `usePageWake` (`lib/page-wake.ts`) folds visible/focus/pageshow/online/resume/clock-jump into one debounced event; every live surface refetches or reconnects from it. New live surfaces use `usePageWake`, never a private `visibilitychange`/`focus`/`online` listener.
+- Sidebar choices persist per browser (`lib/sidebar-prefs.ts`, `cody:sidebar-*` keys); search text is not stored.
 - Monotonic run id: ignore late SSE/reconcile replies from an old run — no stale streaming bubbles.
 Details: docs/agents/session-runtime.md
 
@@ -758,6 +780,12 @@ Details: docs/agents/chat-ui.md
 - Enable/disable = user `disabledServers` (`setUserServerDisabled`), not `enabled`; delete must remove entry.
 Details: docs/agents/mcp-plugins.md
 
+### Load on demand (heavy MCP servers + desktop control)
+- Settings > Extensions > MCP "Load on demand": the server leaves omp's `mcp.json` for Cody's registry `<agent dir>/cody-on-demand-mcp.json` and costs nothing per request; every omp chat gets ONE small tool `load_tools {server, unload?}` (extension `lib/omp/extensions/cody-on-demand-mcp.ts`, desc ~100 tokens) that starts the server and registers its tools as normal `mcp__<server>_<tool>` tools for the rest of THAT chat (session entries `cody-on-demand-mcp`; resume/restart remounts).
+- Built-in `computer` (omp desktop control, `computer.enabled`): a per-key launch default keeps it off; `load_tools {computer}` flags the chat (`lib/omp/on-demand-chats.ts`), Cody restarts that chat's engine when idle with a per-chat layer; the user re-sends. Explicit `computer.enabled: true` in config.yml wins (layer dropped, no saving).
+- ACP engines: unsupported by design (they read MCP from their own config; no extension). A `computer` load from inside a subagent never reaches the host chat.
+Details: docs/agents/mcp-plugins.md
+
 ### Plugins and skills
 - `/api/plugins` shells out to `omp plugin` (`runOmpCli`), never the Bun-only SDK; `parsePluginId` keeps bare names from omp 18.3.x; marketplace browse is pure-Node.
 - `lib/skills-service.ts` scans ONE level deep (else vendored `SKILL.md` listed); toggle edits only `disable-model-invocation`.
@@ -773,6 +801,7 @@ Details: docs/agents/mcp-plugins.md
 - Per usage poll: observe → remember → bind roles → bind agents; WRITING is opt-in (`autoBindEnabled()`, `CODY_ROUTE_AUTOBIND=1`) so an update never rewrites user roles.
 - `lib/usage/availability.ts` is the single verdict (unknown is usable); `quota-tiers.ts` says which windows bind which model — use `isAccountWideWindow`, never `!window.tier`.
 - Blackouts persist in `cody-route-memory.json`, provider's reset = expiry (prepaid `credits` has none); a failed read never lifts one.
+- A usage reading carries its own age (`lib/usage/reading-age.ts`): omp re-serves a login's last saved report when its live fetch fails (Claude's usage endpoint 429s bursts), so every bound counts from the report's own `fetchedAt` (`UsageAccount.measuredAt`), never from Cody's read time. After 30 minutes an account is `outdated`: ring dimmed, "out of date · measured 5 days ago", no number when no window is left; a login's numbers never go back in time.
 - A credential block (`applyCredentialBlocks`) outranks a usage percentage: an account at 4% used was blocked for 5 hours.
 - Subagents resolve via `@alias` roles (`agent-roles.ts`); a concrete model pin has no fallback chain.
 Details: docs/agents/routing.md

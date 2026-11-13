@@ -30,6 +30,7 @@ import { getHarness } from "@/lib/harness";
 import { removeEngineSession, upsertEngineSession, type EngineSessionRow } from "@/lib/harness/engine-sessions";
 import { forgetSessionLocalRouting } from "@/lib/local-model-routing";
 import { forgetSessionPreset } from "@/lib/model-presets/overlay";
+import { forgetSessionToolsets } from "@/lib/omp/on-demand-chats";
 import { removeSessionItems } from "@/lib/scheduled/store";
 import { engineCrashRow, withEngineCrashRows } from "@/lib/engine-crash";
 import { readEngineCrashes } from "@/lib/engine-crash-log";
@@ -400,6 +401,7 @@ export async function DELETE(
       forgetSession(id);
       forgetSessionLocalRouting(id);
       forgetSessionPreset(id);
+      forgetSessionToolsets(id);
       removeSessionItems(id);
       await removeDeletedSessionScratch(id);
       return NextResponse.json({ ok: true });
@@ -548,6 +550,7 @@ async function deleteSessionAndRelink(id: string, filePath: string): Promise<Arr
   forgetSession(deletedSessionId);
   forgetSessionLocalRouting(deletedSessionId);
   forgetSessionPreset(deletedSessionId);
+  forgetSessionToolsets(deletedSessionId);
   removeSessionItems(deletedSessionId);
   // Last, once the engine that was writing there is gone.
   for (const alias of new Set([id, deletedSessionId])) await removeDeletedSessionScratch(alias);

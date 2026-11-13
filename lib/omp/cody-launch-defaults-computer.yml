@@ -1,0 +1,10 @@
+# Cody launch default (see cody-launch-defaults.ts): one layer per setting.
+
+computer:
+  # omp's desktop control puts its whole scripting guide (about 22,000 characters
+  # on 18.19) into the `eval` tool's description, and that description is part of
+  # EVERY request of the chat. Cody offers it on demand instead: the agent calls
+  # `load_tools {server: "computer"}` and only that chat starts with it on
+  # (lib/omp/on-demand-chats.ts). A config.yml that explicitly turns it on keeps
+  # it on for every chat and drops this layer.
+  enabled: false

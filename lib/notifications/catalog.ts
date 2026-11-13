@@ -21,6 +21,7 @@ export const NOTIFICATION_EVENT_IDS = [
   "quotaLow",
   "quotaOut",
   "accountSignedOut",
+  "engineDbDamaged",
 ] as const;
 
 export type NotificationEventId = (typeof NOTIFICATION_EVENT_IDS)[number];
@@ -138,6 +139,15 @@ export const NOTIFICATION_EVENTS: readonly NotificationEventSpec[] = [
     group: "problems",
     label: "Account signed out",
     description: "A provider login expired, so that account cannot be used until you sign in again.",
+    scope: "account",
+    defaultEnabled: true,
+    defaultPriority: 4,
+  },
+  {
+    id: "engineDbDamaged",
+    group: "problems",
+    label: "Engine database damaged",
+    description: "The engine's database is damaged in a way Cody will not repair by itself, or its automatic repair failed.",
     scope: "account",
     defaultEnabled: true,
     defaultPriority: 4,

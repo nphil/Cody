@@ -73,6 +73,21 @@ export function formatResetTime(iso: string | null, locale: string, now: number)
     : at.toLocaleString(locale, { weekday: "short", hour: "2-digit", minute: "2-digit" });
 }
 
+/** Fullness at which a reading starts to warn, and at which it is an error. */
+export const USAGE_WARNING_PERCENT = 70;
+export const USAGE_ERROR_PERCENT = 90;
+
+/**
+ * Whether `usageToneColor` paints this reading at the warning colour or worse:
+ * an engine state of `warning` or `exhausted`, or {@link USAGE_WARNING_PERCENT}
+ * and up. It is the same test the colour runs, kept as one function so a
+ * surface that RANKS readings by worry (the quota ring choosing which window to
+ * show) can never disagree with the colour that surface then paints.
+ */
+export function isUsageWarning(percent: number, state?: UsageWindowState): boolean {
+  return state === "exhausted" || state === "warning" || percent >= USAGE_WARNING_PERCENT;
+}
+
 /**
  * Shipped fullness thresholds, shared by the composer ring, the quota bars, the
  * context ring and the top-bar context chip: under 70 is the accent, 70–89
@@ -89,7 +104,7 @@ export function formatResetTime(iso: string | null, locale: string, now: number)
  */
 export function usageToneColor(percent: number, state?: UsageWindowState): string {
   if (state === "exhausted") return "var(--status-error)";
-  if (percent >= 90) return "var(--status-error)";
-  if (state === "warning" || percent >= 70) return "var(--status-warning)";
+  if (percent >= USAGE_ERROR_PERCENT) return "var(--status-error)";
+  if (isUsageWarning(percent, state)) return "var(--status-warning)";
   return "var(--accent)";
 }

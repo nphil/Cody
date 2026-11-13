@@ -75,8 +75,10 @@ message, read when it was sent** — not the server's, not a saved setting.
   tools are still in the right zone).
 - **Hidden on every path.** `isHiddenFromTranscript` (`lib/message-display.ts`)
   is the one predicate: `entryToUiMessage` drops the entry on reload, the
-  wrapper drops the live `message_start`/`message_end` frames (only this type —
-  the MCP mount notice still drives its toast), `isVisibleTranscriptMessage`,
+  wrapper drops the live `message_start`/`message_end` frames of the model-only
+  notes (`isModelOnlyNote`: this line and the other hidden notes written for the
+  model alone, listed in docs/agents/disk.md; the MCP mount notice still drives
+  its toast), `isVisibleTranscriptMessage`,
   `MessageView` and the turn grouping in `ChatWindow` never make a row or a gap.
   A new reader of session entries must go through `entryToUiMessage`.
 - **Cody's tools speak local time.** Every host tool that prints a time takes

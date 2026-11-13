@@ -13,7 +13,7 @@ import { formatSmartTriggerLabel, type ComposerPresetOption, type PendingPresetP
 import type { ParsedPresetSelector } from "@/lib/model-presets/selector";
 import type { ActivePlan } from "@/lib/web-mode-state";
 import { toast } from "@/components/ui/toast";
-import { formatCompactNumber, formatResetTime } from "@/lib/format";
+import { formatCompactNumber, formatRelativeTime, formatResetTime } from "@/lib/format";
 import { describeUsageLimit, type SlowModeState } from "@/lib/slow-mode-state";
 import type { UsageLimitState } from "@/lib/pi-types";
 import { clearDraft, getDraft, setDraft, type ChatDraftFile, type ChatDraftImage } from "@/lib/draft-store";
@@ -2402,16 +2402,31 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const openRouterActive = openRouterSelected || activeModels.some((active) => isPrepaidProvider(active.provider));
   const openRouterAccount = useOpenRouterAccount(openRouterActive);
   const quotaPercentText = quota.known ? `${Math.round(quota.percent)}%` : "—";
+  // How old the numbers behind the ring are, when they are too old to call
+  // current (omp could not refresh the account; lib/usage/reading-age.ts). The
+  // tooltip says so and the ring is dimmed, rather than the ring presenting a
+  // measurement from the past as the present.
+  const quotaOutdatedSince = quota.known ? (quota.outdated ? quota.measuredAt : undefined) : quota.outdatedSince;
+  const quotaOutdatedAgo = quotaOutdatedSince ? formatRelativeTime(quotaOutdatedSince, locale, Date.now()) : null;
+  const quotaRingDimmed = quota.known && quota.outdated === true;
   // The tooltip names the window AND the model it is about, so a ring read at a
   // glance can never be attributed to the wrong conversation.
   const quotaRingTitle = quota.known
-    ? (displayModelName
-        ? t("usage.ringModel", { model: displayModelName, label: quota.label, percent: Math.round(quota.percent) })
-        : `${quota.label} ${quotaPercentText}`)
-    : (displayModelName
-        ? t("usage.ringModelUnknown", { model: displayModelName, reason: t(quota.titleKey) })
-        : t("usage.ringUnknown", { reason: t(quota.titleKey) }));
-  const quotaRingLabel = quota.known
+    ? (quotaOutdatedAgo
+        ? (displayModelName
+            ? t("usage.ringModelOutdated", { model: displayModelName, label: quota.label, percent: Math.round(quota.percent), ago: quotaOutdatedAgo })
+            : t("usage.ringOutdated", { label: quota.label, percent: Math.round(quota.percent), ago: quotaOutdatedAgo }))
+        : displayModelName
+          ? t("usage.ringModel", { model: displayModelName, label: quota.label, percent: Math.round(quota.percent) })
+          : `${quota.label} ${quotaPercentText}`)
+    : quotaOutdatedAgo
+      ? (displayModelName
+          ? t("usage.ringModelOutdatedUnknown", { model: displayModelName, ago: quotaOutdatedAgo })
+          : t("usage.ringOutdatedUnknown", { ago: quotaOutdatedAgo }))
+      : (displayModelName
+          ? t("usage.ringModelUnknown", { model: displayModelName, reason: t(quota.titleKey) })
+          : t("usage.ringUnknown", { reason: t(quota.titleKey) }));
+  const quotaRingLabel = quota.known && !quotaOutdatedAgo
     ? (displayModelName
         ? t("usage.ringDetailsModel", { model: displayModelName, label: quota.label, percent: Math.round(quota.percent) })
         : t("usage.ringDetails", { label: quota.label, percent: Math.round(quota.percent) }))
@@ -2540,7 +2555,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   }, [scheduleModel, engineId, usageSnapshot, usageLoading, usageFailed, activeModels]);
   const scheduleQuotaView = scheduleModel ? scheduleChosenQuota : quota;
   const scheduleQuotaSource: QuotaResetSource | null = scheduleQuotaView?.known
-    ? { known: true, provider: scheduleQuotaView.provider, resetsAt: scheduleQuotaView.resetsAt, accounts: scheduleQuotaView.accounts }
+    ? { known: true, provider: scheduleQuotaView.provider, resetsAt: scheduleQuotaView.bindingResetsAt, accounts: scheduleQuotaView.accounts }
     : null;
   // What the Send menu's Model row lists: the composer's own catalog (the same pinned groups, the full list behind a search, the same names), so a model offered there is one the chat can be switched to. No row without a way to switch models at all.
   const scheduleCatalog: ScheduleModelCatalog | null = React.useMemo(() => {
@@ -3975,7 +3990,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
                   }}
                 >
-                  <svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true">
+                  <svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true" style={quotaRingDimmed ? { opacity: 0.5 } : undefined}>
                     <circle
                       cx="13" cy="13" r="9.5" fill="none" stroke="var(--border)" strokeWidth="2.5"
                       strokeDasharray={quota.known ? undefined : RING_ABSENT_DASH}

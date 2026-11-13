@@ -20,6 +20,7 @@ import { formatApiCost, formatCompactNumber, formatPercent, usageToneColor } fro
 import { translate, useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useStoredFlag } from "@/hooks/useStoredPref";
 import { useSetupStatus } from "@/hooks/useSetupStatus";
 import { useVisualViewportHeight } from "@/hooks/useVisualViewportHeight";
 import { useDeviceTimeZone } from "@/hooks/useDeviceTimeZone";
@@ -249,6 +250,15 @@ export function AppShell() {
   // lifted out of ChatWindow so Settings › Models can list it.
   const [sessionModels, setSessionModels] = useState<{ provider: string; id: string; name: string }[] | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  // Desktop only: whether the docked sidebar is open is this browser's choice
+  // and outlives a reload. Only the toolbar toggle writes it — the automatic
+  // closes (a window too narrow for sidebar and right panel) are not choices.
+  // The phone drawer is never stored; it always starts closed.
+  const [desktopSidebarOpen, setDesktopSidebarOpen] = useStoredFlag(STORAGE_KEYS.sidebarOpen, true);
+  // The stored state lands after hydration; the width transition stays off
+  // until it has, so a sidebar kept closed does not visibly slide shut on
+  // every page load.
+  const [sidebarSettled, setSidebarSettled] = useState(false);
   const [hasAwaitingInput, setHasAwaitingInput] = useState(false);
   const [mobileSidebarReady, setMobileSidebarReady] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState<number>(SIDEBAR_DEFAULT_WIDTH);
@@ -374,6 +384,13 @@ export function AppShell() {
     setMobileSidebarReady(true);
   }, []);
   useEffect(() => {
+    if (!isMobile) setSidebarOpen(desktopSidebarOpen);
+  }, [isMobile, desktopSidebarOpen]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSidebarSettled(true), 150);
+    return () => window.clearTimeout(timer);
+  }, []);
+  useEffect(() => {
     // The runtime-update probe is omp's; wait until the engine is known so a
     // Claude/Codex instance never opens with an "OMP update available" toast.
     if (!capabilitiesLoaded || !capabilities.updates) return;
@@ -496,8 +513,11 @@ export function AppShell() {
 
   const handleSidebarToggle = useCallback(() => {
     if (isMobile) setActiveTopPanel(null);
-    setSidebarOpen((open) => !open);
-  }, [isMobile]);
+    const next = !sidebarOpen;
+    setSidebarOpen(next);
+    // On desktop this click is the choice that outlives a reload.
+    if (!isMobile) setDesktopSidebarOpen(next);
+  }, [isMobile, sidebarOpen, setDesktopSidebarOpen]);
 
   const resetSidebarWidth = useCallback(() => {
     setSidebarWidth(SIDEBAR_DEFAULT_WIDTH);
@@ -1294,7 +1314,7 @@ export function AppShell() {
       {/* Left sidebar */}
       <div
         ref={sidebarContainerRef}
-        className={`sidebar-container${sidebarOpen ? " sidebar-open" : " sidebar-closed"}${mobileSidebarReady ? "" : " sidebar-mobile-pending"}${sidebarResizing ? " sidebar-resizing" : ""}`}
+        className={`sidebar-container${sidebarOpen ? " sidebar-open" : " sidebar-closed"}${mobileSidebarReady ? "" : " sidebar-mobile-pending"}${sidebarResizing || !sidebarSettled ? " sidebar-resizing" : ""}`}
         aria-hidden={mobileSidebarReady && !sidebarOpen ? true : undefined}
         inert={mobileSidebarReady && !sidebarOpen ? true : undefined}
         style={{

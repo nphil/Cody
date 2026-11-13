@@ -72,12 +72,21 @@ export function groupHasThinking(
  * composer is where a goal is read. The last four are omp 18.19's hidden
  * model-only notes: the auto-parallel delegation hint, the skill list
  * announce/withdraw notice, the recalled-memory delta and the streaming-edit
- * recovery nudge. A person never needs to read them, and each would otherwise
- * add an "Engine note" row to the chat. */
+ * recovery nudge. The "cody-" ones are Cody's own, written by its omp
+ * extensions: the clock line, the low-disk line, and the notes every agent is
+ * given as a message and never as a system-prompt change (the HomeLabber gate
+ * procedure, the disk budget, the context budget, the on-demand toolset
+ * restore note). A person
+ * never needs to read any of them, and each would otherwise add an "Engine
+ * note" row to the chat. */
 const HIDDEN_CUSTOM_TYPES: Record<string, true> = {
   "xdev-mount-notice": true,
   "cody-local-time": true,
   "cody-disk-low": true,
+  "cody-disk-rule": true,
+  "cody-gate-guidance": true,
+  "cody-context-budget": true,
+  "cody-on-demand-restore": true,
   "goal-mode-context": true,
   "goal-continuation": true,
   "goal-budget-limit": true,
@@ -96,10 +105,37 @@ const HIDDEN_CUSTOM_TYPES: Record<string, true> = {
  * "cody-disk-low" is DISK_LOW_CUSTOM_TYPE (lib/disk/gate.ts), repeated here
  * because this module is also loaded without a bundler, where an extensionless
  * import does not resolve; lib/time-zone.test.mjs and
- * lib/omp/cody-disk-budget.test.mjs pin the literals together.
+ * lib/omp/cody-disk-budget.test.mjs pin the literals together. The other
+ * "cody-" note types are defined by the omp extensions that write them
+ * (GATE_CUSTOM_TYPE, DISK_RULE_CUSTOM_TYPE, CONTEXT_BUDGET_CUSTOM_TYPE and the
+ * on-demand restore note in lib/omp/extensions), and each extension's test
+ * pins its literal here.
  */
 export function isHiddenFromTranscript(message: { role?: string; customType?: string }): boolean {
   return message.role === "custom" && message.customType !== undefined && Object.hasOwn(HIDDEN_CUSTOM_TYPES, message.customType);
+}
+
+/**
+ * The hidden notes that are for the model and nobody else. lib/rpc-manager.ts
+ * drops their live `message_start` / `message_end` before any listener or the
+ * sidebar sees them, so a live transcript never flashes a row the reloaded one
+ * lacks. Written out one by one, never "everything HIDDEN_CUSTOM_TYPES hides":
+ * the MCP mount notice drives a live "MCP tools updated" toast and has to keep
+ * arriving. Every type here is also in HIDDEN_CUSTOM_TYPES (the reloaded
+ * transcript hides it); lib/rpc-manager.test.mjs feeds each extension's own
+ * constant through the live path, so a renamed type fails there.
+ */
+const MODEL_ONLY_CUSTOM_TYPES: Record<string, true> = {
+  "cody-local-time": true,
+  "cody-disk-low": true,
+  "cody-disk-rule": true,
+  "cody-gate-guidance": true,
+  "cody-context-budget": true,
+  "cody-on-demand-restore": true,
+};
+
+export function isModelOnlyNote(message: { role?: unknown; customType?: unknown }): boolean {
+  return message.role === "custom" && typeof message.customType === "string" && Object.hasOwn(MODEL_ONLY_CUSTOM_TYPES, message.customType);
 }
 
 export function isActionableCustomDetails(value: unknown): boolean {

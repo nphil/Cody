@@ -1,6 +1,7 @@
 import { runDiskJanitor, type JanitorReport, type JanitorTrigger } from "../disk/janitor";
 import type { DiskAreaId } from "../disk/status";
 import { formatBytes } from "../format-bytes";
+import { checkEngineDbIfDue, watchEngineCrashesForDbCheck } from "../omp/engine-db";
 import { sweepOmpTempFiles } from "../omp/temp-files";
 
 /**
@@ -24,11 +25,14 @@ const INTERVAL_MS = 60 * 60 * 1000;
 export interface HousekeepingJobs {
   janitor: (trigger: JanitorTrigger) => Promise<JanitorReport>;
   ompTemp: () => Promise<{ removed: number; bytes: number }>;
+  /** Health check (and safe repair) of omp's own database; does nothing until six hours have passed since the last one. */
+  engineDb?: () => Promise<void>;
 }
 
 const DEFAULT_JOBS: HousekeepingJobs = {
   janitor: (trigger) => runDiskJanitor({ trigger }),
   ompTemp: () => sweepOmpTempFiles(),
+  engineDb: () => checkEngineDbIfDue(),
 };
 
 const AREA_LABELS: Record<DiskAreaId, string> = { tmp: "temp disk", data: "data disk" };
@@ -78,6 +82,11 @@ async function runOnce(trigger: JanitorTrigger, jobs: HousekeepingJobs): Promise
   } catch (error) {
     console.warn(`[Cody] housekeeping failed: ${error instanceof Error ? error.message : String(error)}`);
   }
+  try {
+    await jobs.engineDb?.();
+  } catch (error) {
+    console.warn(`[Cody] engine database check failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 let started: { first: ReturnType<typeof setTimeout>; every: ReturnType<typeof setInterval> } | null = null;
@@ -89,6 +98,7 @@ export function startEngineHousekeeping(jobs: HousekeepingJobs = DEFAULT_JOBS): 
   first.unref?.();
   every.unref?.();
   started = { first, every };
+  if (jobs === DEFAULT_JOBS) watchEngineCrashesForDbCheck();
 }
 
 export function stopEngineHousekeeping(): void {

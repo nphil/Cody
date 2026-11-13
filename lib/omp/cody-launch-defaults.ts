@@ -6,7 +6,8 @@ import { readPersistedBoolean } from "./settings-values";
  * The config layers carrying Cody's own launch defaults (cody-launch-defaults*.yml
  * beside this file): omp settings whose default is right for its terminal UI but
  * wrong for an engine Cody drives over a pipe (`display.shellVisualization`,
- * `async.widgets`).
+ * `async.widgets`), plus desktop control, which Cody offers on demand per chat
+ * (`computer.enabled`, see on-demand-chats.ts).
  *
  * They ride `PI_CONFIG_FILES`, which omp layers ABOVE config.yml, so the user's
  * file is never written. That ordering is also why a value the user set there
@@ -22,6 +23,7 @@ import { readPersistedBoolean } from "./settings-values";
 export const CODY_LAUNCH_DEFAULTS_LAYERS: ReadonlyArray<{ file: string; key: string }> = [
   { file: "cody-launch-defaults.yml", key: "display.shellVisualization" },
   { file: "cody-launch-defaults-async-widgets.yml", key: "async.widgets" },
+  { file: "cody-launch-defaults-computer.yml", key: "computer.enabled" },
 ];
 
 /** The layers' paths for a chat started from `packageRoot`: each file that exists

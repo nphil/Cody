@@ -13,11 +13,15 @@ import { showEngineCrashToast } from "./engine-crash-toast";
 import { toast } from "./ui/toast";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { useForkAvailable } from "@/hooks/useForkChat";
+import { usePageWake } from "@/hooks/usePageWake";
+import { useStoredFlag, useStoredIdSet } from "@/hooks/useStoredPref";
 import { clearLastOpenSession, setLastOpenSession, workspaceKeyOf } from "@/lib/workspace-memory";
 import { compareByLastActive, DEFAULT_SIDEBAR_VIEW, groupSessionsByProject, lastActiveMs, parseSidebarView, projectActivityCounts, retainPendingSessions, sortManagedProjects, sortRecentSessions, type SidebarView } from "@/lib/project-ordering";
 import { comparableProjectPath } from "@/lib/comparable-path";
 import { Check, ChevronDown, ChevronRight, CircleHelp, FilePlus, FileUp, Folder, FolderPlus, GitBranch, MoreHorizontal, Plus, RefreshCw, Search, SlidersHorizontal, Trash2, Upload } from "lucide-react";
 import { engineScopedKey, STORAGE_KEYS } from "@/lib/storage-keys";
+import { EMPTY_ID_SET } from "@/lib/sidebar-prefs";
+import { openLiveStream, type LiveStream } from "@/lib/live-stream";
 import { OMP_ENGINE_ID, type ActiveEngineInfo } from "./SettingsTabs";
 
 declare global {
@@ -45,6 +49,25 @@ const ActiveEngineContext = createContext<ActiveEngineInfo | null>(null);
  * reason as the engine above. Null: no handler, no menu item.
  */
 const DuplicateSessionContext = createContext<((session: SessionInfo) => void) | null>(null);
+
+/**
+ * Which fork branches are collapsed and which project lists are open past the
+ * first few rows. Both are view preferences, so they live in stored state
+ * (lib/sidebar-prefs) and a reload restores them; they reach the rows through
+ * context for the same reason as the engine above.
+ */
+interface SidebarViewPrefs {
+  collapsedForkIds: ReadonlySet<string>;
+  setForkCollapsed: (sessionId: string, collapsed: boolean) => void;
+  fullProjectLists: ReadonlySet<string>;
+  setProjectListFull: (projectPath: string, full: boolean) => void;
+}
+const SidebarViewPrefsContext = createContext<SidebarViewPrefs>({
+  collapsedForkIds: EMPTY_ID_SET,
+  setForkCollapsed: () => {},
+  fullProjectLists: EMPTY_ID_SET,
+  setProjectListFull: () => {},
+});
 
 interface Props {
   selectedSessionId: string | null;
@@ -111,6 +134,11 @@ function normalizeProjectKey(value: string): string {
 // first prompt, so 8 × 1s covers it without hanging a dead link forever).
 const INITIAL_RESTORE_RETRY_MS = 1000;
 const INITIAL_RESTORE_MAX_ATTEMPTS = 8;
+
+/** The running-sessions stream carries a data frame (`heartbeat`) every 30 s
+ * (app/api/agent/running/events/route.ts), so two missed beats plus slack
+ * means the connection is dead even if the browser still reads it as open. */
+const RUNNING_STREAM_SILENCE_MS = 75_000;
 
 /** Unread badges are keyed by SESSION id, and session ids belong to the
  * engine that minted them — after a switch the stored set is a list of ids
@@ -606,7 +634,9 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   const [wtConfirmRemove, setWtConfirmRemove] = useState<string | null>(null);
   const wtToggleRef = useRef<HTMLButtonElement>(null);
   const wtNewInputRef = useRef<HTMLInputElement>(null);
-  const [explorerOpen, setExplorerOpen] = useState(true);
+  // The Explorer section under the list: open or folded away is a layout
+  // preference of this browser, so it is stored (lib/sidebar-prefs).
+  const [explorerOpen, setExplorerOpen] = useStoredFlag(STORAGE_KEYS.sidebarExplorerOpen, true);
   const [explorerKey, setExplorerKey] = useState(0);
   const [explorerUploadBusy, setExplorerUploadBusy] = useState(false);
   const [sessionRefreshDone, setSessionRefreshDone] = useState(false);
@@ -621,15 +651,26 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   // Relative session times must age while the sidebar stays open; one shared
   // minute clock avoids a timer per session row.
   const [relativeTimeNow, setRelativeTimeNow] = useState(() => Date.now());
-  // Client-side workspace/session filtering (Workspaces header controls).
+  // Client-side workspace/session filtering (Workspaces header controls). The
+  // search text is transient — it is what you are looking for right now, and
+  // restoring it would hide sessions behind a box that starts closed. The
+  // running-only filter is a view preference and is stored.
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const [runningOnly, setRunningOnly] = useState(false);
+  const [runningOnly, setRunningOnly] = useStoredFlag(STORAGE_KEYS.sidebarRunningOnly, false);
   // Recent (one list across projects) or Projects. Starts at the default and
   // takes the stored choice after mount so the first client render matches the
   // server's; the list is still loading then, so nothing visibly switches.
   const [sidebarView, setSidebarView] = useState<SidebarView>(DEFAULT_SIDEBAR_VIEW);
-  const [showAllRecent, setShowAllRecent] = useState(false);
+  const [showAllRecent, setShowAllRecent] = useStoredFlag(STORAGE_KEYS.sidebarShowAllRecent, false);
+  // Collapsed fork branches (session ids, so scoped by engine; memory-only
+  // until the engine is known) and project lists opened past the first few.
+  const [collapsedForkIds, setForkCollapsed] = useStoredIdSet(engineScopedKey(STORAGE_KEYS.sidebarCollapsedForks, engineId));
+  const [fullProjectLists, setProjectListFull] = useStoredIdSet(STORAGE_KEYS.sidebarFullProjectLists);
+  const viewPrefs = useMemo<SidebarViewPrefs>(
+    () => ({ collapsedForkIds, setForkCollapsed, fullProjectLists, setProjectListFull }),
+    [collapsedForkIds, setForkCollapsed, fullProjectLists, setProjectListFull],
+  );
   useEffect(() => { setSidebarView(loadSidebarView()); }, []);
   const chooseSidebarView = useCallback((view: SidebarView) => {
     setSidebarView(view);
@@ -728,12 +769,18 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
 
   const crashToastRef = useRef<{ sessions: SessionInfo[]; open: (session: SessionInfo) => void }>({ sessions: [], open: () => {} });
 
+  // The stream is kept in a ref so a page that has woken up can replace its
+  // connection: after a sleep the socket may still read as open while nothing
+  // will ever arrive on it.
+  const runningStreamRef = useRef<LiveStream | null>(null);
+
   useEffect(() => {
     // Live running status and session-list invalidations arrive via SSE; the
-    // sidebar never has to poll while an agent is working.
-    const source = new EventSource("/api/agent/running/events");
-
-    source.onmessage = (e) => {
+    // sidebar never has to poll while an agent is working. openLiveStream also
+    // opens the stream again after a refusal (a proxy 502 while the server
+    // restarts closes a bare EventSource for good) and when the server's 30 s
+    // heartbeat stops arriving.
+    const handleMessage = (e: MessageEvent<string>) => {
       try {
         const data = JSON.parse(e.data) as {
           type?: string;
@@ -781,8 +828,16 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
       }
     };
 
-    // On error EventSource auto-reconnects; keep the last known state meanwhile.
-    return () => source.close();
+    const stream = openLiveStream({
+      url: "/api/agent/running/events",
+      silenceLimitMs: RUNNING_STREAM_SILENCE_MS,
+      onMessage: handleMessage,
+    });
+    runningStreamRef.current = stream;
+    return () => {
+      stream.close();
+      if (runningStreamRef.current === stream) runningStreamRef.current = null;
+    };
   }, [loadSessions, engineId]);
 
   useEffect(() => {
@@ -967,6 +1022,18 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
     return () => { cancelled = true; };
   }, [selectedCwd, wtRefreshKey, refreshKey]);
 
+  // The page woke up — the tab came back, the device slept, the network
+  // returned. Everything above is a snapshot as old as the sleep: ask the
+  // running stream for a fresh one (a new connection is greeted with it), and
+  // read the session list, project list and worktrees again. One round per
+  // wake: usePageWake already folds a burst of signals into a single call.
+  usePageWake(() => {
+    runningStreamRef.current?.reopen();
+    void loadSessions(false);
+    void loadProjects();
+    setWtRefreshKey((k) => k + 1);
+  });
+
   // Keep every just-created session and its project visible while the engine
   // is still flushing its JSONL file. The server list stays authoritative:
   // an entry is dropped as soon as the list reports the same id. See
@@ -1020,6 +1087,8 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   // While a filter is active, workspaces with no matching sessions are hidden
   // so the list reads as a genuine result set; at rest every workspace stays.
   const filtersActive = searchOpen || runningOnly || searchQuery.trim().length > 0;
+  // A restored running-only filter can leave the list empty on load; say why.
+  const noMatchesMessage = runningOnly && searchQuery.trim().length === 0 ? t("sessionSidebar.noRunning") : t("sessionSidebar.noMatches");
   // Recent view: every chat of every visible project in one list. Ordered
   // from sessionsByProject / extraSessions only, so it re-sorts when the
   // session list refreshes — never on running/unread/clock ticks — and a chat
@@ -1444,6 +1513,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
   return (
     <ActiveEngineContext.Provider value={engine}>
     <DuplicateSessionContext.Provider value={onDuplicateSession ?? null}>
+    <SidebarViewPrefsContext.Provider value={viewPrefs}>
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
       {addProjectOpen && (
         <DirectoryPicker
@@ -1695,7 +1765,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
           {sidebarView === "recent" && !loading && !projectsError && !error && sortedProjects.length > 0 && (
             visibleRecentSessions.length === 0 ? (
               <div style={{ padding: "14px 4px", color: "var(--text-dim)", fontSize: 11.5, lineHeight: 1.5 }}>
-                {filtersActive ? t("sessionSidebar.noMatches") : t("sessionSidebar.recentEmpty")}
+                {filtersActive ? noMatchesMessage : t("sessionSidebar.recentEmpty")}
               </div>
             ) : (
               <div className="sidebar-recent-sessions">
@@ -1750,7 +1820,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
           )}
           {sidebarView === "projects" && !loading && !projectsError && !error && sortedProjects.length > 0 && visibleProjectEntries.length === 0 && (
             <div style={{ padding: "14px 4px", color: "var(--text-dim)", fontSize: 11.5, lineHeight: 1.5 }}>
-              {t("sessionSidebar.noMatches")}
+              {noMatchesMessage}
             </div>
           )}
 
@@ -1876,6 +1946,7 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
       )}
 
     </div>
+    </SidebarViewPrefsContext.Provider>
     </DuplicateSessionContext.Provider>
     </ActiveEngineContext.Provider>
   );
@@ -1946,7 +2017,10 @@ function ProjectRow({
   const { t } = useI18n();
   const [hovered, setHovered] = useState(false);
   const [focusWithin, setFocusWithin] = useState(false);
-  const [showAllSessions, setShowAllSessions] = useState(false);
+  // Whether this project lists every session instead of the newest few is a
+  // view preference; it is stored by project path.
+  const { fullProjectLists, setProjectListFull } = useContext(SidebarViewPrefsContext);
+  const showAllSessions = fullProjectLists.has(project.path);
   const [actionMenuOpen, setActionMenuOpen] = useState(false);
   const actionButtonRef = useRef<HTMLButtonElement>(null);
   const label = projectLabel(project.path);
@@ -2173,7 +2247,7 @@ function ProjectRow({
               ))}
               {hiddenCount > 0 && (
                 <button
-                  onClick={() => setShowAllSessions((v) => !v)}
+                  onClick={() => setProjectListFull(project.path, !showAllSessions)}
                   aria-expanded={showAllSessions}
                   style={{
                     display: "flex",
@@ -2489,9 +2563,11 @@ const SessionTreeItem = memo(function SessionTreeItem({
   /** Recent view: label the row with its project's name. */
   showProject?: boolean;
 }) {
-  const [collapsed, setCollapsed] = useState(false);
+  // Collapsed fork branches are a view preference: stored, not row state.
+  const { collapsedForkIds, setForkCollapsed } = useContext(SidebarViewPrefsContext);
   const hasChildren = node.children.length > 0;
   const sessionId = node.session.id;
+  const collapsed = collapsedForkIds.has(sessionId);
 
   // Pre-compute the booleans so SessionItem only sees primitives — its memo
   // check then never re-renders unless this row's flags actually changed.
@@ -2508,8 +2584,8 @@ const SessionTreeItem = memo(function SessionTreeItem({
     onSessionDeleted?.(id);
   }, [onSessionDeleted]);
   const handleToggleCollapse = useCallback(() => {
-    setCollapsed((v) => !v);
-  }, []);
+    setForkCollapsed(sessionId, !collapsed);
+  }, [setForkCollapsed, sessionId, collapsed]);
 
   return (
     <div>

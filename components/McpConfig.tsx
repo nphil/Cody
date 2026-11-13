@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { Check, Plus, Power, PowerOff, RefreshCw, Trash2 } from "lucide-react";
+import { Check, Pencil, Plus, Power, PowerOff, RefreshCw, Trash2 } from "lucide-react";
 import { ConfirmDialog } from "@/components/ui/field";
 import { toast } from "@/components/ui/toast";
 import { fetchSettingsRoute, useSettingsRoute } from "@/hooks/useSettingsData";
@@ -11,7 +11,7 @@ import { Directory, type DirectoryRow, type DirectorySection, type DirectoryStat
 import { Drawer } from "./settings/Drawer";
 import { SegmentedControl } from "./settings/SegmentedControl";
 import { smallButtonStyle, primaryButtonStyle, dangerButtonStyle } from "./settings/account-controls";
-import { chipStyle, nativeInputStyle, SettingsHighlightContext } from "./settings/primitives";
+import { chipStyle, nativeInputStyle, SettingsHighlightContext, ToggleSwitch } from "./settings/primitives";
 
 /**
  * Settings › Extensions › MCP: every MCP server the active engine loads, on
@@ -42,12 +42,23 @@ type McpServer = { name: string; config: Record<string, unknown> };
 // `disabledServers` denylist, which omp honours over any `enabled` flag).
 type McpUserServer = { name: string; status: string; type: string; enabled: boolean; disabled?: boolean; valid: boolean; config?: Record<string, unknown> };
 type McpUserConfig = { path: string; servers: McpUserServer[]; disabledServers: string[]; error?: string };
+// "Load on demand": servers kept out of the start of every chat. A member gets
+// no `config` (same rule as the user-level rows above).
+type McpOnDemandServer = { name: string; type: string; purpose: string; valid: boolean; config?: Record<string, unknown> };
+type McpOnDemand = {
+  path: string;
+  servers: McpOnDemandServer[];
+  problems: string[];
+  /** Desktop control is a setting of the engine, not a server: `supported` is false when this engine has no such setting. */
+  computer: { onDemand: boolean; supported: boolean };
+};
 type McpLiveStatus = "connected" | "connecting" | "not_connected" | "inactive" | "disabled" | "configured";
 type McpLiveServer = { name: string; source: string; status: McpLiveStatus; type?: string };
 
 export interface McpRouteBody {
   servers?: McpServer[];
   user?: McpUserConfig;
+  onDemand?: McpOnDemand;
   /** False for a signed-in member: user-level servers are instance state, so
    * only an administrator may read their configs or edit them. */
   canManageUser?: boolean;
@@ -153,9 +164,24 @@ function SearchSection({ id, children }: { id: string; children: React.ReactNode
   );
 }
 
+/** The "Load on demand" switch every row shares (a user-level server, an
+ * on-demand server, desktop control): ON means "not loaded at the start of a
+ * chat; the agent loads it when a task needs it". */
+function LoadOnDemandSwitch({ checked, name, disabled, onChange }: { checked: boolean; name: string; disabled: boolean; onChange: (checked: boolean) => void }) {
+  const { t } = useI18n();
+  return (
+    <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 11, color: "var(--text-muted)", cursor: disabled ? "default" : "pointer" }}>
+      <ToggleSwitch checked={checked} onChange={onChange} disabled={disabled} label={t("mcpConfig.onDemandSwitchAria", { name })} />
+      {t("mcpConfig.onDemandSwitch")}
+    </label>
+  );
+}
+
 interface ServerForm {
   /** Which config this form writes. */
   scope: McpScope;
+  /** The server lives in the "Load on demand" list (user level only), not in mcp.json. */
+  onDemand: boolean;
   /** The name the server had when the form opened; null for a new one. */
   previousName: string | null;
   name: string;
@@ -164,6 +190,9 @@ interface ServerForm {
   initialSource: string;
   /** The opened config carried a masked credential. */
   masked: boolean;
+  /** One line telling the agent when to load an on-demand server. */
+  purpose: string;
+  initialPurpose: string;
 }
 
 export function McpConfig({ cwd, sessionId, initial }: {
@@ -181,7 +210,7 @@ export function McpConfig({ cwd, sessionId, initial }: {
   const loading = !body && !loadError;
   const [scope, setScope] = useState<McpScope>(cwd ? "project" : "user");
   const [form, setForm] = useState<ServerForm | null>(null);
-  const [confirmRemove, setConfirmRemove] = useState<{ scope: McpScope; name: string } | null>(null);
+  const [confirmRemove, setConfirmRemove] = useState<{ scope: McpScope; name: string; onDemand: boolean } | null>(null);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -205,17 +234,22 @@ export function McpConfig({ cwd, sessionId, initial }: {
   const userServers = useMemo(() => userConfig?.servers ?? [], [userConfig]);
   const displayed = useMemo(() => body ? mcpInventoryOf(body) : null, [body]);
   const activePath = (scope === "project" ? body?.path : userConfig?.path) ?? null;
+  const onDemand = body?.onDemand ?? null;
 
-  const openEditor = (target: McpScope, server: McpServer | null) => {
+  /** `registry` opens a server of the "Load on demand" list; its purpose line travels with the form. */
+  const openEditor = (target: McpScope, server: McpServer | null, registry?: { purpose: string }) => {
     setMessage(null);
     const source = server ? JSON.stringify(swapSecretMarkers(server.config, MCP_SECRET_SENTINEL, SECRET_MASK), null, 2) : newServer();
     setForm({
       scope: target,
+      onDemand: registry !== undefined,
       previousName: server?.name ?? null,
       name: server?.name ?? "",
       source,
       initialSource: source,
       masked: server ? hasMaskedSecret(server.config) : false,
+      purpose: registry?.purpose ?? "",
+      initialPurpose: registry?.purpose ?? "",
     });
   };
 
@@ -261,7 +295,7 @@ export function McpConfig({ cwd, sessionId, initial }: {
       const response = await fetch("/api/mcp", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ scope: form.scope, cwd: form.scope === "project" ? cwd : undefined, name: form.name, previousName: form.previousName ?? undefined, server }),
+        body: JSON.stringify({ scope: form.scope, cwd: form.scope === "project" ? cwd : undefined, name: form.name, previousName: form.previousName ?? undefined, server, onDemand: form.onDemand || undefined, purpose: form.onDemand ? form.purpose : undefined }),
       });
       const result = (await response.json()) as { error?: string; path?: string };
       if (!response.ok || result.error) throw new Error(result.error || `HTTP ${response.status}`);
@@ -277,13 +311,13 @@ export function McpConfig({ cwd, sessionId, initial }: {
     }
   };
 
-  const remove = async (target: { scope: McpScope; name: string }) => {
+  const remove = async (target: { scope: McpScope; name: string; onDemand: boolean }) => {
     setSaving(true);
     try {
       const response = await fetch("/api/mcp", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ scope: target.scope, cwd: target.scope === "project" ? cwd : undefined, name: target.name }),
+        body: JSON.stringify({ scope: target.scope, cwd: target.scope === "project" ? cwd : undefined, name: target.name, onDemand: target.onDemand || undefined }),
       });
       const result = (await response.json()) as { error?: string; path?: string };
       if (!response.ok || result.error) throw new Error(result.error || `HTTP ${response.status}`);
@@ -323,6 +357,34 @@ export function McpConfig({ cwd, sessionId, initial }: {
       setSaving(false);
     }
   };
+
+  /** The two "Load on demand" switches: one PUT, the same refresh as every other action. A disabled server cannot be moved (the route refuses and says why), so a failure shows the route's own message. */
+  const changeLoading = async (payload: Record<string, unknown>, successTitle: string, failureTitle: string) => {
+    setSaving(true);
+    try {
+      const response = await fetch("/api/mcp", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      const result = (await response.json()) as { error?: string; path?: string };
+      if (!response.ok || result.error) throw new Error(result.error || `HTTP ${response.status}`);
+      toast.success(successTitle, result.path);
+      await reload();
+    } catch (changeError) {
+      toast.error(failureTitle, changeError instanceof Error ? changeError.message : String(changeError));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const setOnDemand = (name: string, next: boolean) => changeLoading(
+    { action: "ondemand", scope: "user", name, onDemand: next },
+    t(next ? "mcpConfig.onDemandOnTitle" : "mcpConfig.onDemandOffTitle", { name }),
+    t("mcpConfig.onDemandFailed"),
+  );
+
+  const setComputerOnDemand = (next: boolean) => changeLoading(
+    { action: "computer", onDemand: next },
+    t(next ? "mcpConfig.computerOnDemandTitle" : "mcpConfig.computerAlwaysTitle"),
+    t("mcpConfig.computerFailed"),
+  );
 
   const liveStatus = useCallback((status: McpLiveStatus): DirectoryStatus => ({
     tone: status === "connected" ? "ok" : "muted",
@@ -374,8 +436,12 @@ export function McpConfig({ cwd, sessionId, initial }: {
     };
   });
 
+  // The route refuses a member's user-level write; don't offer the button.
+  const canManageUser = body?.canManageUser !== false;
+
   const userRows: DirectoryRow[] = userServers.map((server) => {
     const summary = server.config ? serverSummary(server.config) : null;
+    const config = server.config;
     return {
       id: `user:${server.name}`,
       title: <ServerTitle name={server.name} />,
@@ -384,20 +450,52 @@ export function McpConfig({ cwd, sessionId, initial }: {
         : server.enabled ? { tone: "ok", text: server.type }
         : { tone: "muted", text: `${server.type} · ${t("mcpConfig.statusDisabled")}` },
       // A row without a config came from a route that predates user-level
-      // editing; list it rather than open a form on nothing.
-      onOpen: server.config ? () => openEditor("user", { name: server.name, config: server.config as Record<string, unknown> }) : undefined,
+      // editing (or belongs to a member); list it rather than open a form on
+      // nothing. An administrator's row carries its own switch, so it cannot
+      // also be one big button: Edit opens the form.
+      actions: config && canManageUser ? (
+        <>
+          <LoadOnDemandSwitch checked={false} name={server.name} disabled={saving} onChange={(next) => void setOnDemand(server.name, next)} />
+          <button type="button" aria-label={t("mcpConfig.editTitle", { name: server.name })} onClick={() => openEditor("user", { name: server.name, config })} style={smallButtonStyle}><Pencil size={13} aria-hidden="true" /> {t("mcpConfig.edit")}</button>
+        </>
+      ) : undefined,
     };
   });
+
+  // Desktop control first (a built-in, not a server), then the registry.
+  const onDemandRows: DirectoryRow[] = onDemand ? [
+    ...(onDemand.computer.supported ? [{
+      id: "computer",
+      title: t("mcpConfig.computerTitle"),
+      status: onDemand.computer.onDemand ? { tone: "ok" as const, text: t("mcpConfig.computerOnDemandStatus") } : { tone: "muted" as const, text: t("mcpConfig.computerAlwaysStatus") },
+      subtitle: t("mcpConfig.computerNote"),
+      actions: canManageUser ? <LoadOnDemandSwitch checked={onDemand.computer.onDemand} name={t("mcpConfig.computerTitle")} disabled={saving} onChange={(next) => void setComputerOnDemand(next)} /> : undefined,
+    }] : []),
+    ...onDemand.servers.map((server): DirectoryRow => {
+      const config = server.config;
+      return {
+        id: `on-demand:${server.name}`,
+        title: <ServerTitle name={server.name} />,
+        status: server.valid ? { tone: "ok", text: server.type } : { tone: "warn", text: t("mcpConfig.statusInvalid") },
+        subtitle: server.purpose || (canManageUser ? t("mcpConfig.onDemandNoPurpose") : undefined),
+        actions: config && canManageUser ? (
+          <>
+            <LoadOnDemandSwitch checked name={server.name} disabled={saving} onChange={(next) => void setOnDemand(server.name, next)} />
+            <button type="button" aria-label={t("mcpConfig.editTitle", { name: server.name })} onClick={() => openEditor("user", { name: server.name, config }, { purpose: server.purpose })} style={smallButtonStyle}><Pencil size={13} aria-hidden="true" /> {t("mcpConfig.edit")}</button>
+            <button type="button" aria-label={t("mcpConfig.removeAria", { name: server.name })} title={t("mcpConfig.remove")} onClick={() => setConfirmRemove({ scope: "user", name: server.name, onDemand: true })} disabled={saving} style={dangerButtonStyle}><Trash2 size={13} aria-hidden="true" /></button>
+          </>
+        ) : undefined,
+      };
+    }),
+  ] : [];
 
   const editable = scope === "project" ? servers.map((server) => serverSummary(server.config)) : userServers.map((server) => ({ enabled: server.enabled, valid: server.valid }));
   const enabledCount = editable.filter((server) => server.enabled && server.valid).length;
   const invalidCount = editable.filter((server) => !server.valid).length;
-  // The route refuses a member's user-level write; don't offer the button.
-  const canManageUser = body?.canManageUser !== false;
   const canAdd = scope === "user" ? canManageUser : cwd !== null;
 
-  const editedUser = form?.previousName && form.scope === "user" ? userServers.find((server) => server.name === form.previousName) ?? null : null;
-  const dirty = form !== null && (form.name !== (form.previousName ?? "") || form.source !== form.initialSource);
+  const editedUser = form?.previousName && form.scope === "user" && !form.onDemand ? userServers.find((server) => server.name === form.previousName) ?? null : null;
+  const dirty = form !== null && (form.name !== (form.previousName ?? "") || form.source !== form.initialSource || form.purpose !== form.initialPurpose);
 
   return (
     <>
@@ -454,6 +552,26 @@ export function McpConfig({ cwd, sessionId, initial }: {
         </section>
       </SearchSection>
 
+      {onDemand && (
+        <SearchSection id="mcp-on-demand">
+          <section style={{ border: "1px solid var(--border)", borderRadius: "var(--radius-card)", overflow: "hidden", background: "var(--bg-panel)" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderBottom: "1px solid var(--border)" }}>
+              <strong style={{ fontSize: 12, color: "var(--text)", flexShrink: 0 }}>{t("mcpConfig.onDemandTitle")}</strong>
+            </div>
+            <div style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+              <p style={{ margin: 0, fontSize: 11, color: "var(--text-dim)", lineHeight: 1.45 }}>{t("mcpConfig.onDemandIntro")}</p>
+              <Directory sections={[{ id: "on-demand", rows: onDemandRows, empty: t("mcpConfig.onDemandEmpty") }]} ariaLabel={t("mcpConfig.onDemandTitle")} />
+              {onDemand.problems.length > 0 && (
+                <div role="status" style={{ fontSize: 11, color: "var(--status-warning)", lineHeight: 1.45 }}>
+                  <strong>{t("mcpConfig.onDemandProblems")}</strong>
+                  {onDemand.problems.map((problem) => <div key={problem}>{problem}</div>)}
+                </div>
+              )}
+            </div>
+          </section>
+        </SearchSection>
+      )}
+
       <Drawer
         open={form !== null}
         title={form?.previousName ? t("mcpConfig.editTitle", { name: form.previousName }) : t("mcpConfig.addTitle")}
@@ -463,11 +581,11 @@ export function McpConfig({ cwd, sessionId, initial }: {
         footer={form && (
           <>
             {form.previousName && (
-              <button type="button" onClick={() => setConfirmRemove({ scope: form.scope, name: form.previousName as string })} disabled={saving} style={{ ...dangerButtonStyle, marginRight: "auto" }}>
+              <button type="button" onClick={() => setConfirmRemove({ scope: form.scope, name: form.previousName as string, onDemand: form.onDemand })} disabled={saving} style={{ ...dangerButtonStyle, marginRight: "auto" }}>
                 <Trash2 size={13} aria-hidden="true" /> {t("mcpConfig.remove")}
               </button>
             )}
-            {editedUser && (
+            {editedUser && !form.onDemand && (
               <button type="button" onClick={() => void setDisabled(editedUser.name, !editedUser.disabled)} disabled={saving} style={smallButtonStyle}>
                 {editedUser.disabled ? <Power size={13} aria-hidden="true" /> : <PowerOff size={13} aria-hidden="true" />} {t(editedUser.disabled ? "mcpConfig.enable" : "mcpConfig.disable")}
               </button>
@@ -488,9 +606,17 @@ export function McpConfig({ cwd, sessionId, initial }: {
               {t("mcpConfig.json")}
               <textarea value={form.source} onChange={(event) => setForm({ ...form, source: event.target.value })} spellCheck={false} style={{ ...inputStyle, minHeight: 200, marginTop: 4, resize: "vertical", lineHeight: 1.45 }} />
             </label>
+            {form.onDemand && (
+              <label style={{ display: "block", color: "var(--text-muted)", fontSize: 11 }}>
+                {t("mcpConfig.purpose")}
+                <input value={form.purpose} onChange={(event) => setForm({ ...form, purpose: event.target.value })} placeholder={t("mcpConfig.purposePlaceholder")} spellCheck={false} style={{ ...inputStyle, marginTop: 4 }} />
+              </label>
+            )}
             {form.masked && <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.45 }}>{t("mcpConfig.secretMaskNote", { mask: SECRET_MASK })}</div>}
             <div style={{ fontSize: 11, color: "var(--text-dim)", lineHeight: 1.45 }}>
-              {t(form.scope === "user" ? "mcpConfig.writesToUser" : "mcpConfig.writesToProject", { path: (form.scope === "user" ? userConfig?.path : body?.path) ?? "mcp.json" })}
+              {form.onDemand
+                ? t("mcpConfig.writesToOnDemand", { path: onDemand?.path ?? "cody-on-demand-mcp.json" })
+                : t(form.scope === "user" ? "mcpConfig.writesToUser" : "mcpConfig.writesToProject", { path: (form.scope === "user" ? userConfig?.path : body?.path) ?? "mcp.json" })}
             </div>
             {message && <div role="status" style={{ color: "var(--text-muted)", fontSize: 11, lineHeight: 1.4 }}>{message}</div>}
           </>
@@ -501,7 +627,7 @@ export function McpConfig({ cwd, sessionId, initial }: {
         open={confirmRemove !== null}
         onOpenChange={(open) => { if (!open && !saving) setConfirmRemove(null); }}
         title={confirmRemove ? t("mcpConfig.removeTitle", { name: confirmRemove.name }) : t("mcpConfig.removeTitleFallback")}
-        description={t(confirmRemove?.scope === "user" ? "mcpConfig.removeUserBody" : "mcpConfig.removeProjectBody")}
+        description={t(confirmRemove?.onDemand ? "mcpConfig.removeOnDemandBody" : confirmRemove?.scope === "user" ? "mcpConfig.removeUserBody" : "mcpConfig.removeProjectBody")}
         confirmLabel={saving ? t("mcpConfig.removing") : t("mcpConfig.removeConfirm")}
         danger
         busy={saving}

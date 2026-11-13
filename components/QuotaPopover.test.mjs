@@ -498,25 +498,38 @@ test("the model-scoped ring keeps the shipped 70/90 thresholds and the exhausted
   assert.equal(rejected.color, "var(--status-error)");
 });
 
-test("the ring gauges the shortest healthy window; an exhausted longer one still binds", () => {
+test("the ring shows the most urgent window: a warning week outranks a calm 5-hour window; calm ones keep the short window", () => {
   const fiveHour = () => usageWindow({ id: "5h", label: "5-hour window", utilization: 14, windowMs: 18_000_000, resetsAt: "2026-08-18T17:00:00.000Z" });
-  const healthy = buildQuotaView(usageSnapshot({
+  const model = { provider: "anthropic", modelId: "claude-fable-5" };
+  const worrying = buildQuotaView(usageSnapshot({
     accounts: [usageAccount({
       windows: [
         usageWindow({ id: "7d", label: "weekly", utilization: 73, state: "warning", windowMs: 604_800_000 }),
         fiveHour(),
       ],
     })],
-  }), false, false, { provider: "anthropic", modelId: "claude-fable-5" });
+  }), false, false, model);
 
-  // The fuller week is context; the current five hours are what this turn
-  // spends against, so they take the ring and the first row.
-  assert.equal(healthy.percent, 14);
-  assert.equal(healthy.label, "5-hour window");
-  assert.deepEqual(healthy.windows.map((w) => [w.label, w.percent]), [
-    ["5-hour window", 14],
+  // A week at warning level is what will stop the work, so it takes the ring
+  // and the first row; the calm five hours follow.
+  assert.equal(worrying.percent, 73);
+  assert.equal(worrying.label, "weekly");
+  assert.deepEqual(worrying.windows.map((w) => [w.label, w.percent]), [
     ["weekly", 73],
+    ["5-hour window", 14],
   ]);
+
+  // Nothing worrying: the short window this turn spends against stays on the ring.
+  const calm = buildQuotaView(usageSnapshot({
+    accounts: [usageAccount({
+      windows: [
+        usageWindow({ id: "7d", label: "weekly", utilization: 40, windowMs: 604_800_000 }),
+        fiveHour(),
+      ],
+    })],
+  }), false, false, model);
+  assert.equal(calm.percent, 14);
+  assert.equal(calm.label, "5-hour window");
 
   // …but a refused week stops the model whatever the 5h window says.
   const spent = buildQuotaView(usageSnapshot({

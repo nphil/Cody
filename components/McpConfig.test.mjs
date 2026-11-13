@@ -97,3 +97,93 @@ test("route keys and inventory helpers are stable", () => {
   assert.equal(serverSummary({ type: "http" }).valid, false);
   assert.equal(serverSummary({ command: "npx", url: "http://x" }).valid, false, "a server cannot be both stdio and http");
 });
+
+// "Load on demand": a server (or desktop control) kept out of the start of every
+// chat. The route sends the registry with every credential masked, and a member
+// gets names and purpose with no config at all.
+const onDemandBody = (overrides = {}) => ({
+  path: null,
+  user: {
+    path: "/data/agent/mcp.json",
+    servers: [{ name: "github", status: "configured", type: "http", enabled: true, disabled: false, valid: true, config: { type: "http", url: "https://api.github.test/mcp" } }],
+    disabledServers: [],
+  },
+  onDemand: {
+    path: "/data/agent/cody-on-demand-mcp.json",
+    servers: [
+      { name: "rea", type: "stdio", valid: true, purpose: "Take apart apps and programs", config: { type: "stdio", command: "rea", env: { TOKEN: "__cody_secret__" } } },
+      { name: "quiet", type: "http", valid: true, purpose: "", config: { type: "http", url: "https://quiet.test/mcp" } },
+    ],
+    problems: ["broken: needs a command"],
+    computer: { onDemand: true, supported: true },
+  },
+  inventory: [{ name: "github", source: "User level", status: "configured", type: "http" }],
+  ...overrides,
+});
+
+test("an administrator gets Load on demand switches, the on-demand list and the Desktop control row", () => {
+  resetSettingsRouteCache();
+  const html = renderToStaticMarkup(React.createElement(McpConfig, { cwd: null, initial: onDemandBody() }));
+
+  assert.match(html, /data-search-id="mcp-on-demand"/);
+  assert.match(html, /not loaded when a chat starts/i, "the section says what the switch does in plain words");
+  assert.match(html, /saves tokens/);
+  assert.match(html, /data-search-id="mcp-rea"/);
+  assert.match(html, /Take apart apps and programs/, "the purpose line is shown");
+  assert.match(html, /No description yet/, "a server with no purpose says how to add one");
+  assert.match(html, /Desktop control/);
+  assert.match(html, /turns it on in a chat only when it needs it/);
+  assert.match(html, /broken: needs a command/, "a broken registry entry is explained");
+  // One switch for the user-level server (off), one per registry server and one for desktop control (all on).
+  const switches = [...html.matchAll(/role="switch"[^>]*aria-checked="(true|false)"/g)].map((match) => match[1]);
+  assert.equal(switches.filter((value) => value === "false").length, 1, "github can be moved to on demand");
+  assert.equal(switches.filter((value) => value === "true").length, 3, "rea, quiet and desktop control are on demand");
+  assert.match(html, /aria-label="Load github on demand"/);
+  // The user-level row opens through its own Edit button now, not as one big row button.
+  assert.match(html, /aria-label="Edit github"/);
+  assert.match(html, /aria-label="Edit rea"/);
+  assert.match(html, /aria-label="Remove rea"/);
+  assert.doesNotMatch(html, /__cody_secret__/);
+  assert.doesNotMatch(html, /role="dialog"/);
+  resetSettingsRouteCache();
+});
+
+test("desktop control reads off when it is loaded in every chat, and is hidden on an engine without it", () => {
+  resetSettingsRouteCache();
+  const always = renderToStaticMarkup(React.createElement(McpConfig, { cwd: null, initial: onDemandBody({ onDemand: { ...onDemandBody().onDemand, computer: { onDemand: false, supported: true } } }) }));
+  assert.match(always, /loaded in every chat/);
+  assert.match(always, /aria-label="Load Desktop control on demand"[^>]*>/);
+  assert.equal([...always.matchAll(/role="switch"[^>]*aria-checked="true"/g)].length, 2, "only the two registry servers are on demand");
+
+  const unsupported = renderToStaticMarkup(React.createElement(McpConfig, { cwd: null, initial: onDemandBody({ onDemand: { ...onDemandBody().onDemand, computer: { onDemand: true, supported: false } } }) }));
+  assert.doesNotMatch(unsupported, /Desktop control/);
+  assert.match(unsupported, /data-search-id="mcp-rea"/);
+  resetSettingsRouteCache();
+});
+
+test("a member sees on-demand names and purpose read-only, with no switches, edit or config", () => {
+  resetSettingsRouteCache();
+  const member = onDemandBody({ canManageUser: false });
+  member.user.servers[0] = { name: "github", status: "configured", type: "http", enabled: true, disabled: false, valid: true };
+  member.onDemand.servers = member.onDemand.servers.map(({ config: _config, ...visible }) => visible);
+  const html = renderToStaticMarkup(React.createElement(McpConfig, { cwd: null, initial: member }));
+
+  assert.match(html, /data-search-id="mcp-rea"/);
+  assert.match(html, /Take apart apps and programs/);
+  assert.match(html, /Desktop control/);
+  assert.doesNotMatch(html, /role="switch"/);
+  assert.doesNotMatch(html, /aria-label="(Edit|Remove) /);
+  assert.doesNotMatch(html, /No description yet/, "only an administrator can add the missing line");
+  assert.match(html, /managed by an administrator/);
+  resetSettingsRouteCache();
+});
+
+test("a route that predates Load on demand shows no on-demand section", () => {
+  resetSettingsRouteCache();
+  const body = onDemandBody();
+  delete body.onDemand;
+  const html = renderToStaticMarkup(React.createElement(McpConfig, { cwd: null, initial: body }));
+  assert.doesNotMatch(html, /data-search-id="mcp-on-demand"/);
+  assert.doesNotMatch(html, /Desktop control/);
+  resetSettingsRouteCache();
+});

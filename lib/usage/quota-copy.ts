@@ -212,6 +212,17 @@ const CLEARED_WINDOW_KEYS: Record<string, string> = {
   secondary: "usage.clearsWindowWeekly",
 };
 
+/**
+ * Limit ids a saved reset can list under another name. Claude's API calls the
+ * Fable weekly cap `seven_day_overage_included` in the reset program; omp
+ * 18.19.0 maps it to `anthropic:7d:fable` (src/usage/claude-reset.ts), omp
+ * 18.8.3 prints it as `anthropic:reset:seven_day_overage_included`. Both mean
+ * the same limit, so a Fable launch reset reads the same on either engine.
+ */
+const CLEARED_LIMIT_ALIASES: Record<string, string> = {
+  "anthropic:reset:seven_day_overage_included": "anthropic:7d:fable",
+};
+
 /** `anthropic:7d:fable` -> "Fable weekly"; null for an id this build does not know. */
 function clearedLimitPhrase(limitId: string, t: CopyTranslate): string | null {
   const parts = limitId.trim().toLowerCase().split(":").slice(1).filter(Boolean);
@@ -232,7 +243,7 @@ export function describeCreditClears(clears: readonly string[] | null | undefine
   const phrases: string[] = [];
   for (const id of clears) {
     if (typeof id !== "string") continue;
-    const phrase = clearedLimitPhrase(id, t);
+    const phrase = clearedLimitPhrase(CLEARED_LIMIT_ALIASES[id.trim().toLowerCase()] ?? id, t);
     if (phrase && !phrases.includes(phrase)) phrases.push(phrase);
   }
   if (phrases.length === 0) return null;

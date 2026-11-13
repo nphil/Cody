@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { usePageWake } from "@/hooks/usePageWake";
 import { mergeUsageRead } from "@/lib/usage/client-merge";
 import type { UsageSnapshot } from "@/lib/usage/types";
 import type { ResetCreditOutcome, ResetCreditsSnapshot } from "@/lib/harness/reset-credits";
@@ -122,6 +123,10 @@ export function useUsage(enabled = true, sessionId: string | null = null): UseUs
           setSnapshot((current) => mergeUsageRead(current, next));
           setFailed(false);
         } else {
+          // A failed poll still moves the clock: the reading on screen keeps
+          // ageing, so it is marked out of date once it is old enough rather
+          // than standing as "current" until a poll finally lands.
+          setSnapshot((current) => mergeUsageRead(current, null));
           setFailed(true);
         }
       })
@@ -129,6 +134,7 @@ export function useUsage(enabled = true, sessionId: string | null = null): UseUs
         // An abort is our own doing (unmount, or a refresh superseding this
         // read), not a failure worth reporting; anything else is.
         if (!mountedRef.current || controller.signal.aborted) return;
+        setSnapshot((current) => mergeUsageRead(current, null));
         setFailed(true);
       })
       .finally(() => {
@@ -148,6 +154,15 @@ export function useUsage(enabled = true, sessionId: string | null = null): UseUs
     clearTimer();
     loadRef.current();
   }, [clearTimer]);
+
+  // The page woke up (screen on again, tab back, network back). A read that was
+  // out when the device slept may never answer, and while one counts as in
+  // flight every poll is skipped — so a hung read would freeze the meter until
+  // a reload. Let it go and read again now (the timer restarts with the answer).
+  usePageWake(() => {
+    inFlightRef.current = false;
+    refresh();
+  }, enabled);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -243,15 +258,10 @@ export function useResetCredits(enabled = true): UseResetCreditsResult {
         }
       }
     };
-    const refreshOnFocus = () => { void load(); };
     void load();
-    window.addEventListener("focus", refreshOnFocus);
-    document.addEventListener("visibilitychange", refreshOnFocus);
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
-      window.removeEventListener("focus", refreshOnFocus);
-      document.removeEventListener("visibilitychange", refreshOnFocus);
     };
   }, [enabled, refreshVersion]);
   const redeem = useCallback(async (accountId: string, creditId: string): Promise<ResetCreditOutcome> => {
@@ -264,5 +274,8 @@ export function useResetCredits(enabled = true): UseResetCreditsResult {
     } catch { return { outcome: "error", accountId, creditId, code: "http_0", message: "The redemption result is inconclusive; refresh before trying again." }; }
     finally { redeemingRef.current = false; setRedeeming(false); refresh(); }
   }, [refresh]);
+  // Coming back (tab visible, window focused, network back, device woke): read
+  // again now. A new effect run drops a read the sleep left hanging.
+  usePageWake(() => refresh(), enabled);
   return { snapshot, loading, failed, redeeming, refresh, redeem };
 }
