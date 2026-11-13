@@ -2438,6 +2438,7 @@
   "usage.useOneReset": "使用 1 次重置",
   "usage.useReset": "使用重置",
   "usage.resetCount": "{count} 次",
+  "usage.resetCountUnusable": "已保存 {count} 次（现在用不上）",
   "usage.savedResets": "已保存的速率限制重置 · {count}",
   "usage.savedResetsEmpty": "没有可用的已保存重置。",
   "usage.savedResetsNote": "使用已保存的重置可清除符合条件的速率限制。",

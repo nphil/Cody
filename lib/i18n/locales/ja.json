@@ -2438,6 +2438,7 @@
   "usage.useOneReset": "リセットを1回使用",
   "usage.useReset": "リセットを使用",
   "usage.resetCount": "{count} 件",
+  "usage.resetCountUnusable": "{count} 件保存済み（今は役に立ちません）",
   "usage.savedResets": "保存済みレート制限リセット · {count}",
   "usage.savedResetsEmpty": "利用可能な保存済みリセットはありません。",
   "usage.savedResetsNote": "保存済みのリセットで、対象のレート制限を解除できます。",

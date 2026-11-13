@@ -47,6 +47,19 @@ function creditFor(provider, value) {
   const clears = Array.isArray(credit.clears) ? credit.clears.filter((limit) => typeof limit === "string" && limit) : [];
   return { id: credit.id, expiresAt: date(credit.expiresAt ?? credit.expires_at ?? credit.expiry), ...(title ? { title } : {}), ...(typeof credit.usable === "boolean" ? { usable: credit.usable } : {}), ...(clears.length > 0 ? { clears } : {}) };
 }
+/** Why spending this Claude grant now would change nothing, or null. Reads the grant's own
+ *  `usedFractions` (Claude's view of every limit on the account) against its `clears`. */
+function uselessNow(account, selected) {
+  const raw = Array.isArray(account.credits) ? account.credits.map(asRecord).find((credit) => credit && credit.id === selected.id) : null;
+  const used = raw && asRecord(raw.usedFractions);
+  const clears = selected.clears ?? [];
+  if (!used || clears.length === 0) return null;
+  const fraction = (limit) => (typeof used[limit] === "number" && Number.isFinite(used[limit]) ? used[limit] : null);
+  if (Object.keys(used).some((limit) => !clears.includes(limit) && (fraction(limit) ?? 0) >= 1)) return "Can't help right now: a limit this reset doesn't clear is used up.";
+  const cleared = clears.map(fraction);
+  if (cleared.every((value) => value === 0)) return "Nothing to reset yet: the limits it clears haven't been used.";
+  return null;
+}
 function normalizeAccounts(provider, raw) {
   if (!Array.isArray(raw)) return [];
   return raw.flatMap((entry, index) => {
@@ -67,6 +80,11 @@ function normalizeAccounts(provider, raw) {
       const redeemable = typeof account.redeemableCount === "number" ? account.redeemableCount : availableCount;
       canRedeem = !error && Boolean(selected) && account.eligible !== false && selected.usable !== false && redeemable >= 1;
       if (!canRedeem && !error && !reason && availableCount > 0) reason = next ? "Not usable right now." : "Claude did not name a reset that can be spent safely.";
+      // Claude happily spends a grant that changes nothing (a Fable-only reset on an account
+      // whose all-models weekly limit is used up, or one whose limits are still unused), so a
+      // grant is only offered when it would lift a limit that is actually in the way.
+      const useless = canRedeem ? uselessNow(account, selected) : null;
+      if (useless) { canRedeem = false; reason = useless; }
     } else if (credits.some((credit) => credit.usable === false) && !credits.some((credit) => credit.usable !== false)) {
       canRedeem = false;
     }

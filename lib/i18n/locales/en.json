@@ -2438,6 +2438,7 @@
   "usage.useOneReset": "Use one reset",
   "usage.useReset": "Use reset",
   "usage.resetCount": "{count} available",
+  "usage.resetCountUnusable": "{count} saved, can't help right now",
   "usage.savedResets": "Saved resets · {count}",
   "usage.savedResetsEmpty": "No saved resets available.",
   "usage.savedResetsNote": "Use a saved reset to clear an eligible rate limit.",

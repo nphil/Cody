@@ -1207,7 +1207,9 @@ function SavedResetRow({
     ? t("usage.resetCreditRetrying")
     : account.error
       ? account.error
-      : t("usage.resetCount", { count: account.availableCount });
+      : account.canRedeem || account.availableCount === 0
+        ? t("usage.resetCount", { count: account.availableCount })
+        : t("usage.resetCountUnusable", { count: account.availableCount });
   const tooltip = [
     credit?.title,
     checked ? t("usage.resetCreditAsOf", { time: checked }) : null,
