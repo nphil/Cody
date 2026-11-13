@@ -214,6 +214,7 @@ updates.
 | `PI_CODING_AGENT_DIR` | The instance data dir (default `~/.omp/agent`; `/data/agent` in the container) |
 | `CODY_NO_OPEN` | Set to `1`/`true` to skip auto-opening the browser |
 | `CODY_RUN_RECOVERY` | Set `0` to stop Cody restarting a chat's engine when a run stalls, crashes or is cut off by a server restart (on by default; at most 3 times per chat in 12 hours) |
+| `CODY_BURN_GUARD` | Set `0` to stop Cody watching for a chat or helper that suddenly uses tokens far faster than normal (memory cleanups that repeat without freeing anything, or the whole context paid at full price again and again). On by default: it stops the helper or the run, puts a line in the chat and sends a push |
 | `CODY_SCRATCH_ROOT` | Where each chat's own temp folder lives (default `<temp dir>/cs`). Must be a folder only Cody uses: the janitor treats every folder in it as a chat's scratch |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | Standard proxy variables for server-side requests |
 

@@ -19,18 +19,22 @@
  *     `pids.events max` counter moved while it died.
  *  4. crashed — anything else, with its last error line, sanitized.
  * `server_restarted` is never classified from an exit: boot resume says it.
+ * Nor is `token_burn`, where nothing died: the burn guard
+ * (lib/run-recovery/burn-guard.ts) stopped a run, or one helper of it
+ * (`recovery: "automatic"`, the rest of the chat carries on), for spending
+ * tokens far faster than work does.
  */
 
 import { isRecord } from "./type-guards";
 
-export type EngineCrashReason = "out_of_memory" | "disk_full" | "too_many_processes" | "crashed" | "server_restarted";
+export type EngineCrashReason = "out_of_memory" | "disk_full" | "too_many_processes" | "crashed" | "server_restarted" | "token_burn";
 
 /** What Cody does next: restart the chat by itself, stopped trying, or waits for the person. */
 export type EngineCrashRecovery = "automatic" | "gave_up" | "manual";
 
 export type EngineCrashDisk = "tmp" | "data";
 
-export const ENGINE_CRASH_REASONS: readonly EngineCrashReason[] = ["out_of_memory", "disk_full", "too_many_processes", "crashed", "server_restarted"];
+export const ENGINE_CRASH_REASONS: readonly EngineCrashReason[] = ["out_of_memory", "disk_full", "too_many_processes", "crashed", "server_restarted", "token_burn"];
 export const ENGINE_CRASH_RECOVERIES: readonly EngineCrashRecovery[] = ["automatic", "gave_up", "manual"];
 
 /** `customType` of the persistent line a crash leaves in a chat's transcript. */
@@ -202,12 +206,18 @@ export const ENGINE_CRASH_TEXT = {
   "engineCrash.crashedCode": "The engine crashed on its own (exit code {code}).",
   "engineCrash.crashedSignal": "The engine crashed on its own (stopped by {signal}).",
   "engineCrash.server_restarted": "Cody's server restarted, which stopped this chat's engine.",
+  "engineCrash.token_burn.chat": "Cody stopped this chat's run because it was using tokens far faster than normal.",
+  "engineCrash.token_burn.helper": "Cody stopped a helper in this chat because it was using tokens far faster than normal.",
+  "engineCrash.token_burn.unstopped": "A helper in this chat is using tokens far faster than normal, and Cody could not stop it.",
+  "engineCrash.token_burn.detail": "What Cody saw: {detail}.",
   "engineCrash.detail": "Last error: {detail}",
   "engineCrash.next.automatic": "Cody is restarting this chat automatically.",
   "engineCrash.next.automaticDisk": "Cody will restart this chat automatically once there is room on the disk.",
   "engineCrash.next.serverRestarted": "Cody is picking this chat back up.",
   "engineCrash.next.gaveUp": "Cody already restarted this chat several times, so it stopped trying. Send a message to continue.",
   "engineCrash.next.manual": "Send a message to continue.",
+  "engineCrash.next.tokenBurnHelper": "The rest of the chat carries on without it.",
+  "engineCrash.next.tokenBurnUnstopped": "Open the chat and press Stop.",
 } as const;
 
 export type EngineCrashTextKey = keyof typeof ENGINE_CRASH_TEXT;
@@ -228,7 +238,7 @@ export interface EngineCrashNotice extends EngineCrashInfo {
 
 export interface EngineCrashWords {
   headline: string;
-  /** "Last error: …", when the engine left one. */
+  /** "Last error: …", when the engine left one; for `token_burn`, what the guard saw. */
   detail: string | null;
   next: string;
 }
@@ -254,11 +264,21 @@ export function describeEngineCrash(notice: EngineCrashInfo & { recovery: Engine
     case "server_restarted":
       headline = tr("engineCrash.server_restarted");
       break;
+    case "token_burn":
+      headline = tr(notice.recovery === "automatic" ? "engineCrash.token_burn.helper" : notice.recovery === "gave_up" ? "engineCrash.token_burn.unstopped" : "engineCrash.token_burn.chat");
+      break;
   }
-  const next = notice.recovery === "automatic"
-    ? tr(notice.reason === "server_restarted" ? "engineCrash.next.serverRestarted" : notice.reason === "disk_full" ? "engineCrash.next.automaticDisk" : "engineCrash.next.automatic")
-    : notice.recovery === "gave_up" ? tr("engineCrash.next.gaveUp") : tr("engineCrash.next.manual");
-  return { headline, detail: notice.detail !== null ? tr("engineCrash.detail", { detail: notice.detail }) : null, next };
+  let next: string;
+  if (notice.reason === "token_burn") {
+    // Nothing is restarted: a helper is gone and the chat goes on, or the run is stopped until the person says otherwise.
+    next = tr(notice.recovery === "automatic" ? "engineCrash.next.tokenBurnHelper" : notice.recovery === "gave_up" ? "engineCrash.next.tokenBurnUnstopped" : "engineCrash.next.manual");
+  } else if (notice.recovery === "automatic") {
+    next = tr(notice.reason === "server_restarted" ? "engineCrash.next.serverRestarted" : notice.reason === "disk_full" ? "engineCrash.next.automaticDisk" : "engineCrash.next.automatic");
+  } else {
+    next = notice.recovery === "gave_up" ? tr("engineCrash.next.gaveUp") : tr("engineCrash.next.manual");
+  }
+  const detail = notice.detail === null ? null : tr(notice.reason === "token_burn" ? "engineCrash.token_burn.detail" : "engineCrash.detail", { detail: notice.detail });
+  return { headline, detail, next };
 }
 
 /** The whole notice as one line of English: the notice's `message`, the push body and the log line. */

@@ -258,7 +258,7 @@ lib/
   rpc-manager.ts  session registry, host tools, startRpcSession; isolated sidebar chats
   session-tools.ts  cross-session tools: list_sessions, session_status, read_session
   session-acquire.ts  live engine session for unattended work; SessionUnavailableError
-  run-recovery/  unattended-run recovery: supervisor.ts journal.ts judge.ts limits.ts text.ts notify.ts shutdown.ts
+  run-recovery/  unattended-run recovery: supervisor.ts journal.ts judge.ts limits.ts text.ts notify.ts shutdown.ts; token-burn guard: burn-detect.ts burn-trail.ts burn-guard.ts
   scheduled/  scheduled send; browser-safe: types.ts client.ts ui.ts sync.ts; server: store.ts service.ts scheduler.ts delivery.ts quota.ts tools.ts notify.ts access.ts
   chat-messages/  chat-to-chat messaging: types.ts registry.ts header.ts delivery.ts tools.ts
   sidebar-context-tools.ts  sidebar workspace tools + session tools
@@ -577,6 +577,14 @@ Details: docs/agents/usage-monitoring.md
 - Journal entry kept on close only for server shutdown, engine crash or supervisor recycle; max 3 recoveries per chat in 12 h.
 - Verdicts: overdue tool (omp only), no frame 10 min + `get_state` unanswered 10 more, no progress 60 min; `tool_execution_update` must never create a tracker entry.
 - `CODY_RUN_RECOVERY=0` disables; wedged tools: Docker pids limit — check `/sys/fs/cgroup/pids.events` first.
+Details: docs/agents/automation.md
+
+### Token burn: loops and cache storms are stopped (`lib/run-recovery/burn-*.ts`)
+- `watchForTokenBurn` (beside `superviseRun`, omp main chats only) observes only; state on `globalThis.__codyBurnGuard`; frames are its clock (one look per 20 s), no timer.
+- It reads transcripts, not frames: the chat's `.jsonl` and every helper `.jsonl` under `<session>/`; last 8 MB, re-read when size/mtime/inode changed (omp rewrites the file to stamp a compaction).
+- Verdicts (`BURN_LIMITS`): `stuck` 5 useless compactions in a row within 60 requests, `churn` 6 within 12, `rate` 8 requests paying full price for 100k+ tokens in 10 min; evidence under 3 min old, newer than the watch and the last Stop.
+- Helper: `cancel_subagent` + steer note; main: `abort` (stays stopped); 3 helpers in 60 min or an uncancellable one still burning stops the run. Chat line = engine-crash row, reason `token_burn` (never `engine_exit`); push = `error`.
+- `CODY_BURN_GUARD=0` disables. The numbers were fitted on every transcript on the server (20 of 2,493 stopped): replay before changing one. Helper compaction limits are token counts (200000; deep-task 300000), never percentages; `compaction.experimentalContextManagement` stays off.
 Details: docs/agents/automation.md
 
 ### Browser-hosted hardware (`lib/devices/`)

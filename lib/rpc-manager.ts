@@ -30,6 +30,7 @@ import { readRefusalPolicyConfig, writeRefusalPolicyConfig } from "./refusal/con
 import { PlanKeeper } from "./plan-keeper/keeper";
 import { autoApprovalReply } from "./notifications/compose";
 import { observeSessionForNotifications } from "./notifications/observer";
+import { watchForTokenBurn } from "./run-recovery/burn-guard";
 import { markServerShuttingDown } from "./run-recovery/shutdown";
 import { crashRecoveryOutlook, superviseRun } from "./run-recovery/supervisor";
 import { cgroupDeltas, classifyEngineExit, engineCrashSentence, type CgroupCounters, type EngineCrashNotice } from "./engine-crash";
@@ -5104,6 +5105,8 @@ export async function startRpcSession(
     observeSessionForNotifications(created, { kind });
     // Only omp's tool deadlines are known (lib/run-recovery/judge.ts); another engine's tools of the same name are not held to them.
     superviseRun(created, { kind, judgesTools: harness.id === "omp" });
+    // Only omp writes the transcripts the burn guard reads (lib/run-recovery/burn-trail.ts).
+    if (harness.id === "omp") watchForTokenBurn(created, { kind });
     return { session: created, realSessionId };
   })().finally(() => locks.delete(sessionId));
 

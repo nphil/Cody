@@ -350,3 +350,81 @@ is the part of Cody that notices both.
 
 - **Run recovery: `tool_execution_update` for unknown tool ids.** `lib/run-recovery/supervisor.ts` `toolUpdated` now only refreshes a call that is already in flight. Since omp 18.10.2 the engine no longer drops a tool's late progress frames (a background job that keeps reporting after the call or the run ended); the old code created a tracker entry from such a frame, and since that call never gets an end the entry outlived the run as a ghost: `insideOwnDeadline` excused real silence from a `bash` call and `findOverdueTool` called a healthy run stalled. A call enters the table only through its `tool_execution_start`.
 
+### Token burn: loops and cache storms are stopped (`lib/run-recovery/burn-*.ts`)
+
+On 2026-11-12 four helpers compacted before every step for four hours: about
+7,600 loop requests, each sending ~152,000 tokens at full price, 1,487 million
+input-equivalents, as much as six days of all other helper work. Nothing in
+Cody looked. omp 18.8.3 had the bug (#17205; 18.13.3 fixed it, and 18.20.0
+refuses to compact when the always-sent prompt and tools exceed the recovery
+band), but a milder dead end is still there in 18.20.0: when what is left
+after a compaction lands between 80% and 100% of the limit, it compacts again
+every few steps, flags each one, and never stops. The burn guard is the part
+of Cody that notices.
+
+- **It reads transcripts, because the frames do not say.** A helper runs
+  inside the omp child. `subagent_progress` carries its token total and its
+  current tool, never a compaction. So `burn-trail.ts` reads the chat's own
+  `.jsonl` and every helper `.jsonl` under `<session file minus .jsonl>/`
+  (three folders deep; `local/`, dot and `__` entries skipped) and keeps two
+  kinds of line: an assistant message with usage (a request: what it paid in
+  full = `input + cacheWrite`, and whether `cacheRead > 0`) and a `compaction`
+  entry (`tokensBefore`, `details.tokensAfter`, `warning`). A line is tested
+  for its type before it is parsed, so a megabyte tool result costs nothing.
+- **A stateless tail, not an offset.** omp rewrites a transcript atomically to
+  stamp `tokensAfter` and `warning` onto a compaction it already wrote
+  (`#rewriteAtomically`), so a remembered byte offset would point into a
+  different file. Each look re-reads the last 8 MB of a file whose size,
+  mtime or inode changed (30 to 42 ms on a 115 MB transcript) and nothing of
+  one that did not. A file untouched for the whole 30-minute window is not
+  opened.
+- **An observer with no timer** (`watchForTokenBurn`, called beside
+  `superviseRun` in `startRpcSession`, omp only, never a sidebar chat). Frames
+  are its clock: at most one look per chat every 20 s, and Cody asks omp for
+  helper frames at the `progress` level, so they keep arriving while only
+  helpers work. State is on `globalThis.__codyBurnGuard`. It never throws into
+  the session.
+- **Three rules** (`burn-detect.ts`, `BURN_LIMITS`), all on evidence under
+  3 minutes old inside 30 minutes, and only on what happened while the chat
+  was watched and since its last Stop:
+  - `stuck`: the last 5 compactions each freed too little (kept 90%+, or
+    flagged by omp and kept 70%+) with at most 60 requests since the first.
+    Healthy compactions keep 27% (median of 1,013; 59% at the 95th
+    percentile).
+  - `churn`: the last 6 compactions with at most 12 requests since the first.
+    The regular path never came closer than 5, once.
+  - `rate`: 8 requests within 10 minutes each paying full price for 100,000+
+    tokens, in an agent whose cache works at all. Ordinary runs peak at 5.
+  `stuck` and `churn` need two readable requests among the compactions.
+- **What a verdict does.** A helper: `cancel_subagent` (the helper, else the
+  top-level helper it runs under), then a steer `prompt` telling the main
+  agent not to resume it (re-waking helpers with their full history is what
+  kept the incident going), a chat line, a push. The main agent: `abort`,
+  which is the person's Stop, so the stop latch holds and run recovery does
+  not resume it. A third helper stopped in one chat within 60 minutes, or a
+  helper that could not be cancelled and is still burning at the next verdict,
+  stops the run as well. When nothing can be stopped the line asks the person
+  to press Stop, once.
+- **The chat line is an engine-crash row** with reason `token_burn`
+  (`lib/engine-crash.ts`, filed through `recordEngineCrash` so a reload keeps
+  it). The live frame is `{ type: "notice", level: "warning", reason:
+  "token_burn", crash }`. It must never be `engine_exit`: the run supervisor
+  and the notification observer both take that for a dead engine.
+  `publishEngineCrash` is raised only when a run was stopped. The push is an
+  `error` event.
+- **`CODY_BURN_GUARD=0`** turns it off.
+- **Limits.** It stops and does not repair. It can cancel only what omp will
+  cancel (roster ids that are running or pending). It does not see a helper
+  that omp has stopped compacting altogether (always-sent part above 80% of
+  its limit): that helper grows to its window without looping.
+- **Changing a number.** They were fitted on every transcript on this server:
+  20 of 2,493 are stopped, all real (19 compaction loops, one cache storm),
+  each of the four incident helpers 19 to 25 s after its loop began. Replay
+  `parseTrailLine` + `detectBurn` over `/data/agent/sessions` before changing
+  one.
+- **Config that goes with it.** Helper limits are token counts, not
+  percentages (`task.agentCompactionThresholdOverrides`: 200000, `deep-task`
+  300000). A percentage shrinks with the model's window; nine of the twenty
+  burning transcripts compacted at 78,000 to 107,000 tokens for that reason.
+  `compaction.experimentalContextManagement` stays off.
+
