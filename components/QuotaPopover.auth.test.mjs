@@ -164,7 +164,8 @@ test("a failed refresh names the time of the numbers and the time it failed, nev
   assert.deepEqual(quota.refreshFailed, { at: "2026-11-12T08:25:00.000Z", reason: "omp usage timed out", readAt: "2026-11-12T07:00:00.000Z" });
 
   const text = readable(render({ quota }));
-  assert.match(text, /Numbers from \d{1,2}:\d{2} [AP]M · refresh failed at \d{1,2}:\d{2} [AP]M/);
+  // The fixture times are fixed, so once the real clock passes their day the label gains a weekday.
+  assert.match(text, /Numbers from (?:\w{3} )?\d{1,2}:\d{2} [AP]M · refresh failed at (?:\w{3} )?\d{1,2}:\d{2} [AP]M/);
   assert.doesNotMatch(text, /Updated /);
   // While a new read is in flight the footer says so instead.
   assert.match(readable(render({ quota, refreshing: true })), /Reading…/);
@@ -182,7 +183,7 @@ test("an account carried over from an earlier read says when its numbers are fro
   const quota = buildQuotaView(snapshot, false, false, FABLE);
   assert.equal(quota.windowsStaleSince, "2026-11-12T06:00:00.000Z");
   const html = render({ quota });
-  assert.match(readable(html), /Quota as of \d{1,2}:\d{2} [AP]M/);
+  assert.match(readable(html), /Quota as of (?:\w{3} )?\d{1,2}:\d{2} [AP]M/);
   assert.match(html, /data-testid="quota-windows-as-of"[^>]*title="The newest read did not include this account/);
 });
 
