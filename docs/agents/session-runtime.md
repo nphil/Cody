@@ -165,9 +165,10 @@ custom message whose `content` is a model prompt (`<system-notice>` plus every
 tool's description) and whose `details` is `{added, removed}`. A fresh child
 mounts every Cody host and browser tool, and from omp 18.7 the persisted one
 is written for that spawn-time roster too, before the first user message.
-Only an MCP server's tools (`mcp__*`) changing is news: `describeMcpMountChange`
-(lib/mount-notice.ts) words the toast from `details`, and the `notice` path
-drops every non-MCP line. Never toast the message `content`.
+Neither is ever a pop-up: tools mount all the time (Cody's host tools at every
+start, `load_tools` toolsets on demand and again on resume), and one toast per
+mount buried the phone screen (2026-11-13). The chat already shows the
+`load_tools` call. Never toast the message `content`.
 
 - **Manual compaction frames.** omp 18.13.3+ emits `manual_compaction_start` / `manual_compaction_end` for every manual compaction (typed `/compact`, extension, another tab). `hooks/useAgentSession.ts` shows the "compacting" banner from `manual_compaction_start` and settles from `manual_compaction_end` ONLY when this page has no `compact` request in flight (`compactRpcInFlightRef`); the page's own request still settles from its command response. Older engines send neither frame, so the page's own button behaves exactly as before.
 - **Edit rejections (stale-tag edit failures).** omp 18.19 marks a rejected `edit` tool result with `details.errorKind` (e.g. `stale tag`). `lib/session-reader.ts` keeps `errorKind` on tool-result details; `MessageView.getEditRejectionReason()` shows it as an "error · stale tag" chip on the tool card; `countEditRejections()` in the hook totals them into `SessionStatsInfo.editRejections` (`lib/pi-types.ts`) which the Session stats list in `AppShell.tsx` renders as "Edit rejections". Absent on 18.8.3 → nothing shown.

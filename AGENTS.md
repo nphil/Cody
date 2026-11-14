@@ -640,7 +640,7 @@ Details: docs/agents/session-runtime.md
 ### Event protocol differences vs pi
 - omp has no `prompt_done`/`prompt_error`/`compaction_start`/`compaction_end`; completion is `agent_end`, errors are failed RPC responses plus `notice`. Handle or ignore unknown frames.
 - `agent_end` rewrite in `rpc-manager.handleFrame` only when `isTerminal !== false` (false = continuation: steer, auto-retry); never simplify.
-- Mount notices are for the model: only `mcp__*` changes are news (`describeMcpMountChange`); never toast message `content`.
+- Mount notices are for the model: never a toast (on-demand `load_tools` mounts made them spam); never show message `content`.
 Details: docs/agents/session-runtime.md
 
 ### Todo reminder: quiet, and never over a question

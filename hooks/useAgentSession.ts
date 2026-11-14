@@ -1,7 +1,6 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useReducer } from "react";
-import { describeMcpMountChange } from "@/lib/mount-notice";
 import type {
   AgentMessage,
   CustomMessage,
@@ -1083,11 +1082,6 @@ function extractMessageText(message: Partial<AgentMessage>): string {
         : "")
     .filter(Boolean)
     .join("\n");
-}
-
-/** Toast text for an engine mount notice, or null when it is not about MCP tools (see lib/mount-notice.ts). */
-function describeMcpMountNotice(message: CustomMessage): string | null {
-  return describeMcpMountChange(message.details, extractMessageText(message));
 }
 
 function imageSignature(block: unknown): string {
@@ -3987,10 +3981,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const level = event.level as string | undefined;
         const message = (event.message as string | undefined)?.trim() ?? "";
         if (event.source === "xdev" || /^xd:\/\/:\s*(un)?mounted\s/i.test(message)) {
-          // omp's own `xd://: mounted …; unmounted …` line. A fresh child mounts
-          // Cody's host and browser tools (open_url, notify, device_list, …)
-          // every time it starts; only an MCP server's tools changing is news.
-          if (/\bmcp__/i.test(message)) toast.info("MCP tools updated", message, { clamp: true });
+          // omp's own `xd://: mounted …; unmounted …` line is for the model. Tools now mount all the
+          // time (Cody's host tools at every start, `load_tools` toolsets on demand, again on resume),
+          // and the chat already shows the `load_tools` call, so a pop-up per mount was only spam.
         } else if (event.source === "device") {
           // Hardware pop-ups are decided on the server (lib/devices/operation-notices.ts), so the few that arrive are
           // worth showing, in plain words. Run through the engine-error describer they would read as provider faults.
@@ -4075,8 +4068,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       case "command_output": {
         const text = (event.text as string | undefined)?.trim() ?? "";
-        if (/^xd:\/\/:\s*mounted\s+mcp__/i.test(text)) toast.info("MCP tools updated", text, { clamp: true });
-        else if (text) addNotice({ type: "info", message: text });
+        if (/^xd:\/\/:\s*(un)?mounted\s/i.test(text)) break; // a mount line is for the model (see "notice" above)
+        if (text) addNotice({ type: "info", message: text });
         break;
       }
       case "thinking_level_changed": {
@@ -4214,8 +4207,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // appending it again would duplicate it.
           if (!agentRunningRef.current) break;
           if (completed?.role === "custom" && (completed as CustomMessage).customType === "xdev-mount-notice") {
-            const summary = describeMcpMountNotice(completed as CustomMessage);
-            if (summary) toast.info("MCP tools updated", summary, { clamp: true });
+            // For the model only, and never a pop-up (see the "notice" case): skip it.
           } else if (completed?.role === "assistant" && completed.stopReason === "error") {
             // The engine could not produce a reply at all — no credentials, an
             // invalid key, a provider outage. Both rpc-dialect engines report it
