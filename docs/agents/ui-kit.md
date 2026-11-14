@@ -162,4 +162,9 @@ palette (`components/CommandPalette.tsx`, ⌘K/Ctrl+K) is built on `cmdk`.
   button too and a 360px row spills, as it already did.
 - ChatInput's own 16px sides ARE the chat column's gutter. Neither dock may
   wrap it in a second one.
+- The question dock (InputDock) on a phone is ONE scroll area: no nested
+  scrollers, Cancel/Done pinned inside it (sticky, see approvals.md), no second
+  gutter (its 4px scroller padding only gives focus rings room). Checked at
+  390x844, 390x480 (keyboard-up height; about 1.5 rows show above the buttons
+  and the rest scrolls) and 1280x800.
 

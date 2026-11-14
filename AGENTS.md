@@ -293,7 +293,7 @@ lib/
   notifications/signed-out.ts  notice for an ended provider login
   ask-result.ts  `ask` call/result normalised for the transcript card
   bash-output-meta.ts  omp's meta for cut-down shell output
-  extension-title.ts  one-line dock header from a multi-line engine prompt
+  extension-title.ts  dock header + body text from a multi-line engine prompt (`extensionPrompt`)
   helper-memory-limit.ts  how big a helper's history may grow (browser- and Bun-safe)
   irc-display.ts  parent-to-subagent IRC messages shown plainly
   task-call-preview.ts  counted phrases for the task-call preview
@@ -333,7 +333,7 @@ components/
   InfoPanel.tsx  right-panel Info tool
   ChatMinimap.tsx  scroll minimap
   MarkdownBody.tsx  markdown renderer
-  InputDock.tsx  non-modal question panel (`ask` walk)
+  InputDock.tsx  non-modal question panel (`ask` walk; one scroll area, sticky buttons)
   ExtensionDialog.tsx  extension select/input requests; lib/ask-walk.ts
   PermissionRequestCard.tsx  ACP approval card in InputDock
   ProviderIcon.tsx  vendored brand marks; never hotlinked
@@ -658,6 +658,7 @@ Details: docs/agents/turn-flow.md
 - ACP turn truly blocks on the card; `permission_resolved` is the single removal path; `get_state.pendingPermissions` is the reload path — adopt in `loadSession` and in `reconcileAgentState` BEFORE busy return.
 - Render agent's options in its order; `kind` is styling only, `optionId` is identity (two share `allow_always`) — never dedupe/reorder by kind.
 - Double-click latch is a ref, not `disabled` state (3 answers measured); read `toolCall` fields defensively.
+- omp 18.20 `ask` selects carry the form text before the last title line plus `initialIndex` / `selectionMarker` / `checkedIndices` / `markableCount`; `lib/ask-walk.ts` reads them (ticks come from `checkedIndices`, never guessed). The dock is ONE scroll area with sticky Cancel/Done. The ask is `write xd://ask` on engines that mount it there: test `isAskToolCall` (live) / `askCallInput` (transcript card), never `toolName === "ask"` alone.
 Details: docs/agents/approvals.md
 
 ### HomeLabber approvals in the chat (`lib/homelabber-approval.ts`, `components/HomelabberApproval.tsx`, `/api/homelabber`)

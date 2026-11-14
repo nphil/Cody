@@ -25,7 +25,7 @@ import { normalizeToolCalls } from "./normalize";
 import { isRecord } from "./type-guards";
 import { goalFromPersistedMode } from "./goal-state";
 import { taskResultRetryFailure, taskResultStructuredOutput, taskResultUsageCost } from "./task-result-details";
-import { keepAskToolResultDetails } from "./ask-result";
+import { isAskXdevDetails, keepAskToolResultDetails } from "./ask-result";
 import type { TodoPhase } from "./pi-types";
 import { sessionPathKey } from "./session-path";
 import { foldSystemReminder } from "./system-reminder";
@@ -778,7 +778,9 @@ function base64ImageInfo(block: unknown): { bytes: number; mime?: string } | nul
  * Ask toolResults keep a BOUNDED projection (lib/ask-result.ts
  * keepAskToolResultDetails: answers/notes/timedOut, plus the omp 18.8
  * question/selectedOptions/customInput/note/results) that AskResultPanel
- * renders.
+ * renders. An ask that ran as `write xd://ask` (omp 18.19+) is a `write`
+ * result; its details say so (`xdev.tool === "ask"`) and keep the same bounded
+ * subset under `xdev.inner`.
  * Task toolResults additionally keep a SIZE-BOUNDED subset of their
  * results/progress (telemetry, no full output) so the message flow can render
  * a per-subagent summary. On-disk parsing (loadSessionFile/getSessionEntries)
@@ -889,7 +891,7 @@ function stripToolResultDetails(message: AgentMessage): AgentMessage {
       const taskDetails = keepTaskToolResultDetails(details);
       if (taskDetails) Object.assign(kept, taskDetails);
     }
-    if (message.toolName === "ask") {
+    if (message.toolName === "ask" || isAskXdevDetails(details)) {
       const askDetails = keepAskToolResultDetails(details);
       if (askDetails) Object.assign(kept, askDetails);
     }

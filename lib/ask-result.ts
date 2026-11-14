@@ -1,4 +1,5 @@
 import { isRecord } from "./type-guards";
+import { isAskToolCall } from "./ask-walk";
 
 /**
  * The `ask` tool's call and result, normalised for the transcript card.
@@ -8,6 +9,11 @@ import { isRecord } from "./type-guards";
  * omp 18.8 asks with `args.questions[]` and answers with either one question's
  * details (`{ question, selectedOptions, customInput?, note?, timedOut? }`) or
  * `{ results: [...] }` for several. Both shapes end up as the same rows here.
+ *
+ * omp 18.19 and 18.20 mount `ask` under `xd://`, so the model calls it as `write xd://ask`: the call's `content` is
+ * the ask's arguments as JSON text, and the result's details nest the ask's own details as
+ * `{ xdev: { tool: "ask", mode, args, tier, inner } }`. `askCallInput` and the `xdev.inner` unwrap below turn that
+ * back into the shapes above, so one card serves every way the model reached the tool.
  */
 
 export interface AskRow {
@@ -54,10 +60,47 @@ function legacyRow(entry: unknown, rows: AskRow[], notes: AskNote[]): boolean {
   return entry.timedOut === true;
 }
 
-/** Rows, notes and the timed-out flag out of a settled `ask` result's details;
- * malformed entries are skipped, never thrown on. */
-export function askAnswersFromDetails(details: unknown): AskAnswers {
+/**
+ * The ask's own arguments out of a tool call, however the model reached it; null when the call is not an ask. A plain
+ * `ask` call is its arguments. For `write xd://ask` they are the JSON text in `content`, and the harness's own `i`
+ * (the call's intent, beside `path`) stands in when the content carries none. A `content` that is not valid JSON yet
+ * (the call is still streaming in) gives no arguments.
+ */
+export function askCallInput(toolName: unknown, input: unknown): Record<string, unknown> | null {
+  if (!isAskToolCall(toolName, input)) return null;
+  if (!isRecord(input)) return {};
+  if (toolName === "ask") return input;
+  const args = jsonRecord(input.content);
+  return typeof input.i === "string" && input.i.trim() && !("i" in args) ? { ...args, i: input.i } : args;
+}
+
+function jsonRecord(text: unknown): Record<string, unknown> {
+  if (typeof text !== "string") return {};
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return isRecord(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+/** The ask's own details out of a `write xd://ask` result's details; null for any other shape. */
+function xdevAskInner(details: unknown): Record<string, unknown> | null {
+  if (!isRecord(details) || !isRecord(details.xdev)) return null;
+  const { tool, inner } = details.xdev;
+  return tool === "ask" && isRecord(inner) ? inner : null;
+}
+
+/** Whether a result's details are those of a `write xd://ask` call that ran (not a help read or a failed dispatch). */
+export function isAskXdevDetails(details: unknown): boolean {
+  return xdevAskInner(details) !== null;
+}
+
+/** Rows, notes and the timed-out flag out of a settled `ask` result's details (the ask's own, or those of a
+ * `write xd://ask` result with the ask's nested under `xdev.inner`); malformed entries are skipped, never thrown on. */
+export function askAnswersFromDetails(settled: unknown): AskAnswers {
   const out: AskAnswers = { rows: [], notes: [], timedOut: false };
+  const details = xdevAskInner(settled) ?? settled;
   if (!isRecord(details)) return out;
 
   if (Array.isArray(details.answers)) {
@@ -211,9 +254,18 @@ function legacyEntry(entry: Record<string, unknown>): Record<string, unknown> | 
 /**
  * The bounded, whitelisted subset of an `ask` result's details that the
  * transcript card reads (answers, notes, timedOut; 18.8 question/results).
+ * A `write xd://ask` result keeps that subset under `xdev.inner` and nothing
+ * else of its `xdev` envelope (its `args` repeat the whole form).
  * Nothing else rides the history payload. Null when nothing is left.
  */
 export function keepAskToolResultDetails(details: Record<string, unknown>): Record<string, unknown> | null {
+  const inner = xdevAskInner(details);
+  if (!inner) return keepAskDetails(details);
+  const kept = keepAskDetails(inner);
+  return kept ? { xdev: { tool: "ask", inner: kept } } : null;
+}
+
+function keepAskDetails(details: Record<string, unknown>): Record<string, unknown> | null {
   const kept: Record<string, unknown> = {};
 
   const answers = boundList(details.answers, (entry) => {

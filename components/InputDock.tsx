@@ -10,7 +10,7 @@ import { ExtensionInputCard } from "./ExtensionDialog";
 import { AskDialogForm } from "./AskDialogForm";
 import type { ExtensionDialogRequest, PendingInput, PendingInputResponse, RefusalDecision } from "@/lib/pending-input";
 import { askWithdrawnByMessage } from "@/lib/ask-walk";
-import { splitExtensionTitle } from "@/lib/extension-title";
+import { extensionPrompt } from "@/lib/extension-title";
 
 export interface InputDockProps {
   pendingInputs: PendingInput[];
@@ -20,11 +20,11 @@ export interface InputDockProps {
 
 /**
  * What one extension dialog is known by. omp's `ask` tool asks a checkbox field again after every tick, each time as
- * a new request; the field stays one card (it keeps its focus and its place), so a step of that walk is known by its
- * question instead of its request id.
+ * a new request; the field stays one card (it keeps its focus and its place), so a step of that walk is known by the
+ * text around its question and the question instead of its request id.
  */
 function extensionKey(request: ExtensionDialogRequest): string {
-  return request.method === "select" && request.walk ? `walk:${request.walk.question}` : request.id;
+  return request.method === "select" && request.walk ? `walk:${request.walk.context}\n${request.walk.question}` : request.id;
 }
 
 function inputKey(item: PendingInput): string {
@@ -40,8 +40,7 @@ function requestTitle(item: PendingInput, t: Translate): string {
   switch (item.kind) {
     case "extension": {
       const request = item.request;
-      if (request.method === "select" && request.walk) return splitExtensionTitle(request.walk.question).headline;
-      if (request.method !== "ask") return splitExtensionTitle(request.title).headline;
+      if (request.method !== "ask") return extensionPrompt(request, item.fromAsk === true).headline;
       const first = request.questions[0];
       return first ? first.header || first.question : "";
     }
@@ -50,6 +49,14 @@ function requestTitle(item: PendingInput, t: Translate): string {
     case "device-trust": return t("deviceTrust.dockTitle", { device: item.request.label });
   }
 }
+
+/**
+ * How tall the dock's answer area may grow before it scrolls. The model's own question brings its own explanation, so
+ * it gets over half the screen; any other prompt keeps 40vh. The ask cap also leaves room for the top bar, the composer
+ * and the dock's header while a phone's keyboard shrinks the app (`--app-height`, hooks/useVisualViewportHeight.ts).
+ */
+const ASK_SCROLL_MAX = "max(120px, min(calc(var(--app-height, 100dvh) * 0.58 - 56px), calc(var(--app-height, 100dvh) - 340px)))";
+const PLAIN_SCROLL_MAX = "calc(40vh - 56px)";
 
 /** The one-line warning under the model's question: on current engines a message sent now withdraws it. */
 export function AskWithdrawNote() {
@@ -125,6 +132,7 @@ export function InputDock({ pendingInputs, onRespond, composerRef }: InputDockPr
   const { t } = useI18n();
   const engineVersion = useEngineVersion();
   const rootRef = useRef<HTMLElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
   const focusTargetRef = useRef<HTMLButtonElement>(null);
   const previousKeyRef = useRef<string | null>(null);
   const [minimized, setMinimized] = useState(false);
@@ -140,8 +148,16 @@ export function InputDock({ pendingInputs, onRespond, composerRef }: InputDockPr
     if (activeIndex !== safeIndex) setActiveIndex(safeIndex);
   }, [activeIndex, safeIndex]);
 
+  // The row a select starts on: where omp's own cursor is (a radio group's chosen row), the first row otherwise.
+  const initialCursor = item?.kind === "extension" && item.request.method === "select" ? item.request.initialIndex ?? 0 : 0;
+
   useEffect(() => {
-    setSelectedOptionIndex(0);
+    setSelectedOptionIndex(initialCursor);
+  }, [itemIdentity, initialCursor]);
+
+  // A new question starts at its top: reading a long explanation to the end must not leave the next question scrolled away.
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: 0 });
   }, [itemIdentity]);
 
   useEffect(() => {
@@ -155,13 +171,20 @@ export function InputDock({ pendingInputs, onRespond, composerRef }: InputDockPr
     if (minimized || !composer || composer.value !== "" || document.activeElement === composer) return;
     requestAnimationFrame(() => {
       if (document.activeElement === composer || composer.value !== "") return;
-      // A text field is the thing to type into; the Submit button after it is not.
-      const target = rootRef.current?.querySelector<HTMLElement>('[data-input-autofocus="true"], [data-input-choice="true"]') ?? focusTargetRef.current;
+      // A text field is the thing to type into; the Submit button after it is not. A select starts on omp's cursor row.
+      const root = rootRef.current;
+      const target = root?.querySelector<HTMLElement>('[data-input-autofocus="true"]')
+        ?? root?.querySelectorAll<HTMLElement>('[data-input-choice="true"]')[initialCursor]
+        ?? root?.querySelector<HTMLElement>('[data-input-choice="true"]')
+        ?? focusTargetRef.current;
       target?.focus({ preventScroll: true });
     });
-  }, [composerRef, itemIdentity, minimized]);
+  }, [composerRef, initialCursor, itemIdentity, minimized]);
 
   if (!item) return null;
+
+  // The model's own question: its explanation gets the taller answer area and its question may wrap in the header.
+  const fromAsk = item.kind === "extension" && item.fromAsk === true;
 
   const respond = (response: PendingInputResponse) => {
     void onRespond(item, response);
@@ -195,6 +218,8 @@ export function InputDock({ pendingInputs, onRespond, composerRef }: InputDockPr
       const current = choices.indexOf(document.activeElement as HTMLButtonElement);
       const next = (current + (event.key === "ArrowDown" ? 1 : -1) + choices.length) % choices.length;
       choices[next]?.focus({ preventScroll: true });
+      // Bring the row into view inside the answer area only, and clear of the buttons that stay at its foot.
+      choices[next]?.scrollIntoView({ block: "nearest" });
       if (item.kind === "extension" && item.request.method === "select") setSelectedOptionIndex(next);
       return;
     }
@@ -269,7 +294,18 @@ export function InputDock({ pendingInputs, onRespond, composerRef }: InputDockPr
             <CircleHelp size={17} color="var(--accent)" aria-hidden="true" style={{ flexShrink: 0, marginLeft: 4 }} />
             <span style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", justifyContent: "center", gap: 2 }}>
               <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.04em", color: "var(--accent)", textTransform: "uppercase" }}>{t("inputDock.heading")}</span>
-              <span title={requestTitle(item, t)} style={{ color: "var(--text-muted)", fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <span
+                title={requestTitle(item, t)}
+                style={{
+                  color: "var(--text-muted)",
+                  fontSize: 12,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  ...(fromAsk
+                    ? { display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflowWrap: "anywhere" }
+                    : { whiteSpace: "nowrap" }),
+                }}
+              >
                 {requestTitle(item, t)}
               </span>
             </span>
@@ -288,8 +324,18 @@ export function InputDock({ pendingInputs, onRespond, composerRef }: InputDockPr
               <ChevronDown size={16} aria-hidden="true" />
             </button>
           </div>
-          {item.kind === "extension" && item.fromAsk === true && askWithdrawnByMessage(engineVersion) && <AskWithdrawNote />}
-          <div style={{ maxHeight: "calc(40vh - 56px)", overflowY: "auto", overscrollBehavior: "contain", padding: "0 4px 2px", minWidth: 0 }}>
+          {fromAsk && askWithdrawnByMessage(engineVersion) && <AskWithdrawNote />}
+          <div
+            ref={scrollRef}
+            style={{
+              maxHeight: fromAsk ? ASK_SCROLL_MAX : PLAIN_SCROLL_MAX,
+              overflowY: "auto",
+              overscrollBehavior: "contain",
+              scrollPaddingBottom: 64,
+              padding: "0 4px 2px",
+              minWidth: 0,
+            }}
+          >
             {item.kind === "extension" && item.request.method === "ask" && (
               <AskDialogForm
                 key={item.request.id}
@@ -304,6 +350,7 @@ export function InputDock({ pendingInputs, onRespond, composerRef }: InputDockPr
                 selectedOptionIndex={selectedOptionIndex}
                 onSelectOption={setSelectedOptionIndex}
                 onRespond={(response) => respond({ kind: "extension", response })}
+                fromAsk={fromAsk}
               />
             )}
             {item.kind === "permission" && (

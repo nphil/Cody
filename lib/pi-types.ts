@@ -330,13 +330,28 @@ export interface OmpSelectOptionDetail {
 }
 
 /**
+ * What omp >= 18.20 adds to a `select` frame so a host without a form dialog can draw the field the way omp's own
+ * screen does (modes/rpc/rpc-types.ts). Older engines send none of these.
+ * - `initialIndex`: the row to start on (a radio group's chosen row, a checkbox group's last-touched row).
+ * - `selectionMarker`: the rows are a radio group or a checkbox group.
+ * - `checkedIndices`: the ticked rows of a checkbox group, in full, on every frame.
+ * - `markableCount`: only the leading rows carry a marker; the rest are actions (a checkbox group's Done row).
+ */
+export interface OmpSelectMarkers {
+  initialIndex?: number;
+  selectionMarker?: "radio" | "checkbox";
+  checkedIndices?: number[];
+  markableCount?: number;
+}
+
+/**
  * omp's rpc-ui extension UI request frames, including the methods missing from
  * the browser-facing union in lib/types.ts (`open_url`, `cancel`). The wrapper
  * adds `expiresAt` when a timeout is present so reconnecting clients can
  * expire stale dialogs.
  */
 export type OmpExtensionUiRequest =
-  | { type: "extension_ui_request"; id: string; method: "select"; title: string; options: string[]; optionDetails?: OmpSelectOptionDetail[]; timeout?: number; expiresAt?: number }
+  | ({ type: "extension_ui_request"; id: string; method: "select"; title: string; options: string[]; optionDetails?: OmpSelectOptionDetail[]; timeout?: number; expiresAt?: number } & OmpSelectMarkers)
   | { type: "extension_ui_request"; id: string; method: "confirm"; title: string; message: string; timeout?: number; expiresAt?: number }
   | { type: "extension_ui_request"; id: string; method: "input"; title: string; placeholder?: string; secret?: boolean; timeout?: number; expiresAt?: number }
   | { type: "extension_ui_request"; id: string; method: "editor"; title: string; prefill?: string; promptStyle?: boolean; timeout?: number; expiresAt?: number }

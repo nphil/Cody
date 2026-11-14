@@ -1,0 +1,107 @@
+[
+  {
+    "type": "message",
+    "id": "6e9bf38c",
+    "parentId": "b42046af",
+    "timestamp": "2026-11-14T04:44:17.834Z",
+    "runtime": {
+      "version": "18.20.0"
+    },
+    "message": {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "toolCall",
+          "id": "toolu_1",
+          "name": "write",
+          "arguments": {
+            "path": "xd://ask",
+            "content": "{\"html\":\"<form>\\n  <h3>Project setup</h3>\\n  <p>Plans differ in how many projects you may keep and who can see them. Read this carefully before you choose,\\n  because the plan can only be changed once a month and a downgrade removes the extra projects at the end of the billing period.</p>\\n  <ul>\\n    <li>Free: one private project, community support only.</li>\\n    <li>Pro: unlimited projects, priority support, and a shared team calendar for every member of the workspace.</li>\\n    <li>Team: everything in Pro plus single sign-on and audit logs kept for a full year.</li>\\n  </ul>\\n  <fieldset>\\n    <legend>Which plan do you want?</legend>\\n    <label><input type=\\\"radio\\\" name=\\\"plan\\\" value=\\\"free\\\"> Free</label>\\n    <label><input type=\\\"radio\\\" name=\\\"plan\\\" value=\\\"pro\\\" checked> Pro</label>\\n    <label><input type=\\\"radio\\\" name=\\\"plan\\\" value=\\\"team\\\"> Team</label>\\n  </fieldset>\\n  <fieldset>\\n    <legend>Which extras should be switched on?</legend>\\n    <p>Every extra below can be combined with every other one, and each one is billed separately at the end of the month,\\n    so tick only what you really need. Extras you leave unticked can be added later from the settings page without losing data.</p>\\n    <ol>\\n      <li>Search indexes every file and refreshes itself whenever a file changes.</li>\\n      <li>Export writes a nightly archive of the whole workspace to your storage bucket.</li>\\n      <li>Alerts sends an email whenever a build fails or a deploy is rolled back.</li>\\n    </ol>\\n    <pre>npm run build\\nnpm test -- --watch=false\\necho \\\"ready to ship\\\"</pre>\\n    <table>\\n      <tr><th>Extra</th><th>Monthly cost</th><th>Needs plan</th></tr>\\n      <tr><td>Search</td><td>4 USD</td><td>Pro</td></tr>\\n      <tr><td>Export</td><td>9 USD</td><td>Team</td></tr>\\n      <tr><td>Alerts</td><td>2 USD</td><td>Free</td></tr>\\n    </table>\\n    <label><input type=\\\"checkbox\\\" name=\\\"extras\\\" value=\\\"search\\\"> Search</label>\\n    <label><input type=\\\"checkbox\\\" name=\\\"extras\\\" value=\\\"export\\\"> Export</label>\\n    <label><input type=\\\"checkbox\\\" name=\\\"extras\\\" value=\\\"alerts\\\"> Alerts</label>\\n  </fieldset>\\n  <label>Anything else we should know? <textarea name=\\\"notes\\\"></textarea></label>\\n</form>\"}",
+            "i": "Asking the owner"
+          },
+          "intent": "Asking the owner"
+        }
+      ],
+      "api": "anthropic-messages",
+      "provider": "mock",
+      "model": "claude-opus-5-5",
+      "usage": {
+        "input": 1,
+        "output": 5,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 6,
+        "cost": {
+          "input": 0.000004,
+          "output": 0.0001,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 0.00010400000000000001
+        }
+      },
+      "stopReason": "toolUse",
+      "timestamp": 1794631457811,
+      "responseId": "msg_1",
+      "duration": 15.976646000000073,
+      "ttft": 14.021840999999995,
+      "completedAt": 1794631457833,
+      "contextSnapshot": {
+        "promptTokens": 1,
+        "nonMessageTokens": 10497,
+        "toolSchemaTokens": 7393,
+        "compactionEpoch": 0
+      }
+    }
+  },
+  {
+    "type": "message",
+    "id": "86e69bd5",
+    "parentId": "a06893c0",
+    "timestamp": "2026-11-14T04:44:17.856Z",
+    "runtime": {
+      "version": "18.20.0"
+    },
+    "message": {
+      "role": "toolResult",
+      "toolCallId": "toolu_1",
+      "toolName": "write",
+      "content": [
+        {
+          "type": "text",
+          "text": "User answers:\n{\n  \"plan\": \"team\",\n  \"extras\": [\n    \"export\",\n    \"alerts\",\n    \"Weekly digest\"\n  ],\n  \"notes\": \"Please keep it quiet.\\nThanks.\"\n}"
+        }
+      ],
+      "details": {
+        "xdev": {
+          "tool": "ask",
+          "mode": "execute",
+          "args": {
+            "html": "<form>\n  <h3>Project setup</h3>\n  <p>Plans differ in how many projects you may keep and who can see them. Read this carefully before you choose,\n  because the plan can only be changed once a month and a downgrade removes the extra projects at the end of the billing period.</p>\n  <ul>\n    <li>Free: one private project, community support only.</li>\n    <li>Pro: unlimited projects, priority support, and a shared team calendar for every member of the workspace.</li>\n    <li>Team: everything in Pro plus single sign-on and audit logs kept for a full year.</li>\n  </ul>\n  <fieldset>\n    <legend>Which plan do you want?</legend>\n    <label><input type=\"radio\" name=\"plan\" value=\"free\"> Free</label>\n    <label><input type=\"radio\" name=\"plan\" value=\"pro\" checked> Pro</label>\n    <label><input type=\"radio\" name=\"plan\" value=\"team\"> Team</label>\n  </fieldset>\n  <fieldset>\n    <legend>Which extras should be switched on?</legend>\n    <p>Every extra below can be combined with every other one, and each one is billed separately at the end of the month,\n    so tick only what you really need. Extras you leave unticked can be added later from the settings page without losing data.</p>\n    <ol>\n      <li>Search indexes every file and refreshes itself whenever a file changes.</li>\n      <li>Export writes a nightly archive of the whole workspace to your storage bucket.</li>\n      <li>Alerts sends an email whenever a build fails or a deploy is rolled back.</li>\n    </ol>\n    <pre>npm run build\nnpm test -- --watch=false\necho \"ready to ship\"</pre>\n    <table>\n      <tr><th>Extra</th><th>Monthly cost</th><th>Needs plan</th></tr>\n      <tr><td>Search</td><td>4 USD</td><td>Pro</td></tr>\n      <tr><td>Export</td><td>9 USD</td><td>Team</td></tr>\n      <tr><td>Alerts</td><td>2 USD</td><td>Free</td></tr>\n    </table>\n    <label><input type=\"checkbox\" name=\"extras\" value=\"search\"> Search</label>\n    <label><input type=\"checkbox\" name=\"extras\" value=\"export\"> Export</label>\n    <label><input type=\"checkbox\" name=\"extras\" value=\"alerts\"> Alerts</label>\n  </fieldset>\n  <label>Anything else we should know? <textarea name=\"notes\"></textarea></label>\n</form>"
+          },
+          "tier": "read",
+          "inner": {
+            "answers": [
+              {
+                "name": "plan",
+                "question": "Which plan do you want?",
+                "answer": "Team"
+              },
+              {
+                "name": "extras",
+                "question": "Which extras should be switched on?",
+                "answer": "Export, Alerts, Other: Weekly digest"
+              },
+              {
+                "name": "notes",
+                "question": "Anything else we should know?",
+                "answer": "Please keep it quiet.\nThanks."
+              }
+            ]
+          }
+        }
+      },
+      "isError": false,
+      "timestamp": 1794631457856
+    }
+  }
+]

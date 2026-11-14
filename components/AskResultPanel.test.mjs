@@ -8,10 +8,12 @@ import { createJiti } from "jiti";
 /**
  * The `ask` answers card: the same rows for omp 18.19 and 18.8 results, a
  * timed-out badge, password answers masked, and nothing injected as markup.
- * MessageView's wiring is pinned at the source (house style).
+ * An ask that ran as `write xd://ask` (omp 18.19+, recorded in lib/fixtures/)
+ * draws the same card. MessageView's wiring is pinned at the source (house style).
  */
 const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
 const { AskResultPanel } = await jiti.import("./AskResultPanel.tsx");
+const { askCallInput } = await jiti.import("../lib/ask-result.ts");
 
 const render = (props) => renderToStaticMarkup(React.createElement(AskResultPanel, props));
 
@@ -82,10 +84,36 @@ test("nothing understood renders nothing", () => {
   }
 });
 
-test("MessageView uses the panel and the preview for the ask tool", async () => {
+test("a recorded `write xd://ask` result draws the same card, its call read out of the write's JSON content", async () => {
+  for (const version of ["18.20.0", "18.19.0"]) {
+    const [call, answered] = JSON.parse(await readFile(new URL(`../lib/fixtures/omp-${version}-ask-xdev-entries.json`, import.meta.url), "utf8"));
+    const block = call.message.content.find((b) => b.type === "toolCall");
+    const html = render({ details: answered.message.details, input: askCallInput(block.name, block.arguments) });
+    assert.match(html, /Which plan do you want\?/, version);
+    assert.match(html, />Team</, version);
+    assert.match(html, /Export, Alerts, Other: Weekly digest/, version);
+    assert.match(html, /Please keep it quiet\.\nThanks\./, version);
+    assert.doesNotMatch(html, /Timed out/, version);
+  }
+  const masked = render({
+    details: { xdev: { tool: "ask", inner: { answers: [{ name: "pw", question: "Password?", answer: "hunter2" }] } } },
+    input: askCallInput("write", { path: "xd://ask", content: JSON.stringify({ html: '<form><input type="password" name="pw"></form>' }) }),
+  });
+  assert.doesNotMatch(masked, /hunter2/);
+  assert.match(masked, /•••••••/);
+});
+
+test("MessageView shows a `write xd://ask` call as an ask: label, header preview, answer rows", async () => {
   const source = await readFile(new URL("./MessageView.tsx", import.meta.url), "utf8");
   assert.match(source, /import \{ AskResultPanel \} from "\.\/AskResultPanel"/);
-  assert.match(source, /block\.toolName === "ask"[^;]*askAnswersFromDetails\(result\.details\)\.rows\.length > 0/s);
-  assert.match(source, /<AskResultPanel details=\{result\.details\} input=\{block\.input\} \/>/);
-  assert.match(source, /block\.toolName === "ask"\)\s*\{\s*const preview = askCallPreview\(/);
+  assert.match(source, /import \{ askAnswersFromDetails, askCallInput, askCallPreview \} from "@\/lib\/ask-result"/);
+  // one decision, made from the call's name AND input: the write's path says which tool it runs
+  assert.match(source, /const askInput = useMemo\(\(\) => askCallInput\(block\.toolName, block\.input\), \[block\.toolName, block\.input\]\)/);
+  assert.match(source, /const askAnswered = askInput !== null && !!result && !result\.isError\s*&& askAnswersFromDetails\(result\.details\)\.rows\.length > 0/s);
+  assert.match(source, /<AskResultPanel details=\{result\.details\} input=\{askInput\} \/>/);
+  assert.match(source, /\{askInput \? "ask" : block\.toolName\}/);
+  assert.match(source, /function getToolPreview\(block: ToolCallContent, askInput: Record<string, unknown> \| null\)/);
+  assert.match(source, /if \(askInput\) \{\s*const preview = askCallPreview\(askInput, /);
+  assert.match(source, /JSON\.stringify\(askInput \?\? block\.input, null, 2\)/);
+  assert.doesNotMatch(source, /block\.toolName === "ask"/);
 });

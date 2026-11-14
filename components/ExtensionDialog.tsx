@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { Check } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
-import { splitExtensionTitle } from "@/lib/extension-title";
+import { extensionPrompt } from "@/lib/extension-title";
 import type { ExtensionDialogRequest, ExtensionDialogResponse } from "@/lib/pending-input";
 
 export type { ExtensionDialogRequest, ExtensionDialogResponse } from "@/lib/pending-input";
@@ -14,6 +14,11 @@ type SelectRequest = Extract<ExtensionDialogRequest, { method: "select" }>;
 interface Choice {
   /** Exactly what omp sent; an answer sends it back unchanged. */
   label: string;
+  /**
+   * How a row of the `ask` walk is marked: a box (`ticked` says whether it is ticked) or a radio dot (the cursor row is
+   * the chosen one). Unset on every plain row, and on the rows after the marked ones, which are actions.
+   */
+  mark?: "box" | "radio";
   /** Set on a checkbox row of the `ask` walk: whether it is ticked. Unset on every other row. */
   ticked?: boolean;
   /** The answer typed behind a ticked "Other" row. */
@@ -37,9 +42,36 @@ function choicesOf(request: SelectRequest): Choice[] {
   const choices: Choice[] = [];
   walk.rows.forEach((row, index) => {
     if (row.kind === "done") return;
-    choices.push({ label: row.label, ticked: row.ticked, typed: row.typed, other: row.kind === "other", description: describe(index) });
+    const mark = row.kind === "action" ? undefined : walk.radio ? "radio" : row.ticked !== undefined ? "box" : undefined;
+    choices.push({ label: row.label, mark, ticked: row.ticked, typed: row.typed, other: row.kind === "other", description: describe(index) });
   });
   return choices;
+}
+
+/** The box or dot in front of a row of an `ask` step. */
+function RowMark({ shape, on }: { shape: "box" | "radio"; on: boolean }) {
+  return (
+    <span
+      aria-hidden="true"
+      style={{
+        flexShrink: 0,
+        width: 18,
+        height: 18,
+        marginTop: 1,
+        boxSizing: "border-box",
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        borderRadius: shape === "box" ? 4 : "50%",
+        border: `1px solid ${on ? "var(--accent)" : "var(--border)"}`,
+        background: shape === "box" && on ? "var(--accent)" : "transparent",
+        color: "var(--on-accent)",
+      }}
+    >
+      {shape === "box" && on && <Check size={13} strokeWidth={3} />}
+      {shape === "radio" && on && <span style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--accent)" }} />}
+    </span>
+  );
 }
 
 /** An extension request rendered inside the composer-attached InputDock. */
@@ -48,11 +80,14 @@ export function ExtensionInputCard({
   selectedOptionIndex,
   onSelectOption,
   onRespond,
+  fromAsk = false,
 }: {
   request: Exclude<ExtensionDialogRequest, { method: "ask" }>;
   selectedOptionIndex: number;
   onSelectOption: (index: number) => void;
   onRespond: (response: ExtensionDialogResponse) => void;
+  /** The model's own question: its prompt carries the text around the field first and the question last. */
+  fromAsk?: boolean;
 }) {
   const { t, tn } = useI18n();
   const editorPrefill = request.method === "editor" ? request.prefill ?? "" : "";
@@ -73,7 +108,7 @@ export function ExtensionInputCard({
     ? respond({ confirmed: true })
     : respond({ value });
 
-  // A step of the `ask` tool's walk shows its own question, its checkboxes and a Done button.
+  // A step of the `ask` tool's walk shows the text around its field, its own question, its boxes or dots and a Done button.
   const select = request.method === "select" ? request : null;
   const walk = select?.walk;
   // The pick was sent and omp's next question has not come yet: the rows hold still, so a second tap cannot land on a stale list.
@@ -87,7 +122,7 @@ export function ExtensionInputCard({
         doneRow ? null : t("askWalk.pickOne"),
       ].filter((part): part is string => part !== null).join(" · ")
     : null;
-  const title = splitExtensionTitle(walk ? walk.question : request.title);
+  const prompt = extensionPrompt(request, fromAsk);
   // An extension asked for a secret (a token, a password): mask what is typed and keep the browser and password managers out of it.
   const secret = request.method === "input" && request.secret === true;
 
@@ -119,12 +154,40 @@ export function ExtensionInputCard({
     whiteSpace: "pre-wrap",
     overflowWrap: "anywhere",
   };
+  // What the model wrote around its question is the thing to read before answering, so it gets the larger type.
+  const contextStyle: CSSProperties = {
+    color: "var(--text-muted)",
+    fontSize: prompt.ask ? 13 : 12,
+    lineHeight: 1.55,
+    whiteSpace: "pre-wrap",
+    overflowWrap: "anywhere",
+    ...(prompt.ask ? { paddingLeft: 10, borderLeft: "2px solid var(--border)" } : null),
+  };
+  // The buttons stay at the foot of the dock's scroll area: a long explanation or list never pushes them out of reach.
+  // They cover the area's whole width and its bottom padding, so a row that has scrolled under them leaves no edge showing.
+  const footerStyle: CSSProperties = {
+    position: "sticky",
+    bottom: -3,
+    zIndex: 1,
+    display: "flex",
+    justifyContent: "flex-end",
+    gap: 8,
+    flexWrap: "wrap",
+    margin: "-4px -4px 0",
+    padding: "10px 4px 2px",
+    background: "linear-gradient(to bottom, transparent, var(--bg) 8px)",
+  };
 
   return (
-    <div role="group" aria-label={walk ? walk.question : request.title} style={{ display: "grid", gap: 8, minWidth: 0 }}>
-      {title.details !== "" && (
-        <div style={{ color: "var(--text-muted)", fontSize: 12, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
-          {title.details}
+    <div role="group" aria-label={prompt.ask ? prompt.headline : request.title} style={{ display: "grid", gap: 8, minWidth: 0 }}>
+      {prompt.details !== "" && (
+        <div data-testid={prompt.ask ? "ask-context" : undefined} style={contextStyle}>
+          {prompt.details}
+        </div>
+      )}
+      {prompt.inBody && (
+        <div data-testid="ask-question" style={{ color: "var(--text)", fontSize: 13, fontWeight: 600, lineHeight: 1.45, overflowWrap: "anywhere" }}>
+          {prompt.headline}
         </div>
       )}
       {request.method === "confirm" && (
@@ -139,55 +202,37 @@ export function ExtensionInputCard({
       )}
       {select && (
         <div
-          role="group"
+          role={walk?.radio ? "radiogroup" : "group"}
           aria-label={walk ? walk.question : select.title}
           aria-busy={settling || undefined}
-          style={{ display: "grid", gap: 6, maxHeight: "32vh", overflowY: "auto", overscrollBehavior: "contain" }}
+          style={{ display: "grid", gap: 6 }}
         >
           {choices.map((choice, index) => {
-            const checkbox = choice.ticked !== undefined;
+            const box = choice.mark === "box";
+            const radio = choice.mark === "radio";
             const ticked = choice.ticked === true;
-            const emphasised = checkbox ? ticked : selectedOptionIndex === index;
+            const chosen = selectedOptionIndex === index;
+            const emphasised = box ? ticked : chosen;
             return (
               <button
                 key={choice.label}
                 type="button"
                 data-input-choice="true"
-                role={checkbox ? "checkbox" : undefined}
-                aria-checked={checkbox ? ticked : undefined}
-                aria-pressed={checkbox ? undefined : selectedOptionIndex === index}
+                role={box ? "checkbox" : radio ? "radio" : undefined}
+                aria-checked={box ? ticked : radio ? chosen : undefined}
+                aria-pressed={box || radio ? undefined : chosen}
                 aria-disabled={settling || undefined}
                 onFocus={() => onSelectOption(index)}
                 onClick={() => respond({ value: choice.label })}
                 style={{
                   ...buttonStyle,
-                  ...(checkbox ? { display: "flex", alignItems: "flex-start", gap: 10 } : null),
+                  ...(box || radio ? { display: "flex", alignItems: "flex-start", gap: 10 } : null),
                   cursor: settling ? "progress" : "pointer",
                   borderColor: emphasised ? "var(--accent)" : "var(--border)",
                   background: emphasised ? "var(--bg-hover)" : "var(--bg-panel)",
                 }}
               >
-                {checkbox && (
-                  <span
-                    aria-hidden="true"
-                    style={{
-                      flexShrink: 0,
-                      width: 18,
-                      height: 18,
-                      marginTop: 1,
-                      boxSizing: "border-box",
-                      display: "inline-flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      borderRadius: 4,
-                      border: `1px solid ${ticked ? "var(--accent)" : "var(--border)"}`,
-                      background: ticked ? "var(--accent)" : "transparent",
-                      color: "var(--on-accent)",
-                    }}
-                  >
-                    {ticked && <Check size={13} strokeWidth={3} />}
-                  </span>
-                )}
+                {(box || radio) && <RowMark shape={box ? "box" : "radio"} on={box ? ticked : chosen} />}
                 <span style={{ minWidth: 0, flex: 1 }}>
                   {choice.other ? t("askWalk.other") : choice.label}
                   {choice.typed !== undefined && <span style={detailStyle}>{choice.typed}</span>}
@@ -263,7 +308,7 @@ export function ExtensionInputCard({
           }}
         />
       )}
-      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, flexWrap: "wrap" }}>
+      <div style={footerStyle}>
         <button type="button" onClick={() => respond({ cancelled: true })} style={{ ...buttonStyle, textAlign: "center", color: "var(--text-muted)" }}>
           {t("chatWindow.cancel")}
         </button>

@@ -1,5 +1,5 @@
 // Types mirrored from oh-my-pi coding-agent session-entries (v3 format).
-import type { TodoPhase } from "./pi-types";
+import type { OmpSelectMarkers, TodoPhase } from "./pi-types";
 import type { GoalModeState } from "./goal-state";
 
 // Cody cannot import the Bun-only @oh-my-pi packages, so the on-disk
@@ -212,7 +212,7 @@ export type AgentMessage =
   | FileMentionMessage;
 
 export type ExtensionUiRequest =
-  | {
+  | ({
       type: "extension_ui_request";
       id: string;
       method: "select";
@@ -220,7 +220,7 @@ export type ExtensionUiRequest =
       options: string[];
       timeout?: number;
       expiresAt?: number;
-    }
+    } & OmpSelectMarkers)
   | {
       type: "extension_ui_request";
       id: string;

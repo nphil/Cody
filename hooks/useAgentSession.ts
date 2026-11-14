@@ -21,7 +21,7 @@ import {
 } from "@/lib/permission-request";
 import type { RefusalDecision } from "@/lib/pending-input";
 import type { ExtensionDialogRequest, ExtensionDialogResponse, PendingInput, PendingInputResponse, RewoundDraft } from "@/lib/pending-input";
-import { createAskWalkTracker, dialogBelongsToAsk } from "@/lib/ask-walk";
+import { askCallPending, createAskWalkTracker, dialogBelongsToAsk, isAskToolCall } from "@/lib/ask-walk";
 import { extractLoopbackUrls, normalizePreviewUrl } from "@/lib/preview-url";
 import { derivePersistedContextUsage, type ContextUsageValue } from "@/lib/context-usage";
 import type { ThinkingModelMeta } from "@/lib/thinking-levels";
@@ -577,6 +577,8 @@ export interface RunningToolInfo {
   name: string;
   startedAt: number;
   statusText?: string;
+  /** The model's own `ask` question: omp 18.20 runs it as `write xd://ask`, so the name alone is just `write`. */
+  ask?: boolean;
 }
 
 /** An engine-initiated model switch (retry fallback, usage-aware routing,
@@ -2699,8 +2701,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // hub, keyed by the same session id the Devices panel opens its bridge with (AppShell's selectedSession).
   const { requests: deviceTrustRequests, respond: respondToDeviceTrust } = useDeviceTrustRequests(session?.id ?? null);
 
-  // The model's own `ask` tool is what is waiting when it runs: its plain dialogs look like any extension's.
-  const askToolRunning = agentPhase?.kind === "running_tools" && agentPhase.tools.some((tool) => tool.name === "ask");
+  // The model's own `ask` tool is what is waiting when it runs: its plain dialogs look like any extension's. The live
+  // tool start says so; after a page reload only the loaded transcript does (its last call has no result yet), and only
+  // while the agent is running: a run that was cut off leaves the same call behind with nobody waiting on it.
+  const askToolRunning = useMemo(
+    () => (agentPhase?.kind === "running_tools" && agentPhase.tools.some((tool) => tool.ask === true)) || (agentRunning && askCallPending(messages)),
+    [agentPhase, agentRunning, messages],
+  );
 
   // Collect user-response prompts for the shared, non-modal composer panel.
   const pendingInputs = useMemo<PendingInput[]>(() => {
@@ -4261,9 +4268,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         void dispatchPendingModelSwitch();
         const id = event.toolCallId as string;
         const name = event.toolName as string;
+        const ask = isAskToolCall(name, event.args);
         setAgentPhase((prev) => {
           const tools = prev?.kind === "running_tools" ? [...prev.tools] : [];
-          if (!tools.some((t) => t.id === id)) tools.push({ id, name, startedAt: Date.now() });
+          if (!tools.some((t) => t.id === id)) tools.push({ id, name, startedAt: Date.now(), ask });
           return { kind: "running_tools", tools };
         });
         break;

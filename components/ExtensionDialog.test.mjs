@@ -75,9 +75,9 @@ const buttonStartingWith = (tree, label) => buttons(tree).find((node) => textOf(
 const OTHER = "Other (type your own)";
 const DONE = "✔ Done selecting";
 
-/** A `select` request as the hook hands it to the card: the tracker's view attached when it is a walk step. */
-function step(walk, id, title, options) {
-  const request = { type: "extension_ui_request", id, method: "select", title, options };
+/** A `select` request as the hook hands it to the card: the tracker's view attached when it is a walk step. `fields` are what omp 18.20 adds to a select (its markers). */
+function step(walk, id, title, options, fields = {}) {
+  const request = { type: "extension_ui_request", id, method: "select", title, options, ...fields };
   const view = walk.observe(request);
   return view ? { ...request, walk: view } : request;
 }
@@ -91,9 +91,9 @@ function card(request, answers = []) {
   }));
 }
 
-const html = (request) => renderToStaticMarkup(React.createElement(ExtensionInputCard, {
+const html = (request, selectedOptionIndex = 0) => renderToStaticMarkup(React.createElement(ExtensionInputCard, {
   request,
-  selectedOptionIndex: 0,
+  selectedOptionIndex,
   onSelectOption: () => {},
   onRespond: () => {},
 }));
@@ -244,18 +244,163 @@ test("the withdraw warning says what sending a message now does", () => {
   assert.match(out, /Sending a message while this question is open withdraws it/);
 });
 
-test("the dock wiring: one card per field, the note only on engines that withdraw, text fields focused", () => {
+// What a real omp 18.20.0 child sends for `ask` (the prose shortened): the text around the field leads the title, and a
+// select names its markers, its chosen row and (for a checkbox group) its ticked rows.
+const CONTEXT = "Plans differ in how many projects you may keep.\n\n- Free: one private project.\n- Pro: unlimited projects.\n\nnpm run build\n\nPlan | Cost\nPro | 9 USD";
+const withContext = (question, selected = 0) => `${CONTEXT}\n\n${selected > 0 ? `(${selected} selected) ` : ""}${question}`;
+const EXTRAS = ["Search", "Export", "Alerts", OTHER, DONE];
+const extras = (walk, id, checkedIndices, initialIndex = 0) =>
+  step(walk, id, withContext("Which extras?", checkedIndices.length), EXTRAS, { selectionMarker: "checkbox", initialIndex, checkedIndices, markableCount: 4 });
+const ticked = (out) => (out.match(/aria-checked="true"/g) ?? []).length;
+
+test("omp 18.20 radio group: the explanation shows whole, the chosen row has its dot, each row answers with its own text", () => {
+  const walk = createAskWalkTracker();
+  const request = step(walk, "1", withContext("Which plan?"), ["Free", "Pro", "Team", OTHER], { selectionMarker: "radio", initialIndex: 1 });
+  const out = html(request, 1);
+  assert.match(out, /role="radiogroup"/);
+  assert.equal((out.match(/role="radio"/g) ?? []).length, 4);
+  assert.equal(ticked(out), 1, "only the chosen row has its dot");
+  assert.doesNotMatch(out, /role="checkbox"|Select all that apply|Pick at least one|>Done</);
+  for (const line of ["Plans differ in how many projects you may keep.", "- Free: one private project.", "npm run build", "Plan | Cost"]) {
+    assert.ok(out.includes(line), `the explanation lost "${line}"`);
+  }
+  assert.match(out, /data-testid="ask-question"[^>]*>Which plan\?</, "the question sits under the explanation");
+
+  const answers = [];
+  buttonStartingWith(card(request, answers), "Team").props.onClick();
+  assert.deepEqual(answers, [{ value: "Team" }]);
+});
+
+test("the explanation is plain wrapping text: nothing clips it or cuts it to a few lines", () => {
+  const walk = createAskWalkTracker();
+  const out = html(extras(walk, "1", []));
+  const style = /<div data-testid="ask-context" style="([^"]*)"/.exec(out)?.[1] ?? "";
+  assert.match(style, /white-space:pre-wrap/);
+  assert.match(style, /overflow-wrap:anywhere/);
+  assert.doesNotMatch(style, /(^|;)(overflow|max-height|height|text-overflow):|line-clamp/);
+});
+
+test("omp 18.20 checkbox group: the boxes show the ticks omp lists, the hint counts them and Done is the primary button", () => {
+  const walk = createAskWalkTracker();
+  const request = extras(walk, "1", [0, 3], 3);
+  const out = html(request);
+  assert.equal((out.match(/role="checkbox"/g) ?? []).length, 4, "Search, Export, Alerts and the Other row are boxes; Done is not");
+  assert.equal(ticked(out), 2);
+  assert.match(out, /2 selected/);
+  assert.match(out, />Done</);
+  assert.doesNotMatch(out, /Done selecting/);
+  assert.match(out, /position:sticky;bottom:-3px/, "the buttons stay in reach while a long explanation scrolls");
+  const tree = card(request);
+  assert.equal(buttonStartingWith(tree, "Search").props["aria-checked"], true);
+  assert.equal(buttonStartingWith(tree, "Export").props["aria-checked"], false);
+});
+
+test("omp 18.20 checkbox group: ticking and unticking stick across omp's re-sent requests", () => {
+  const walk = createAskWalkTracker();
+  const first = extras(walk, "1", []);
+  assert.equal(ticked(html(first)), 0);
+
+  // The tap shows its box while omp's next request is on its way, the rows holding still ...
+  const staying = walk.reply(first, { value: "Export" });
+  const waiting = html({ ...first, walk: staying, settling: true });
+  assert.equal(ticked(waiting), 1);
+  assert.match(waiting, /aria-busy="true"/);
+
+  // ... and omp's own list takes over: the same field under a new id, "(1 selected) " on its question.
+  const second = extras(walk, "2", [1], 1);
+  const settled = html(second);
+  assert.equal(ticked(settled), 1);
+  assert.doesNotMatch(settled, /aria-busy/);
+  assert.match(settled, /aria-label="Which extras\?"/, "the count prefix is not part of the heading");
+
+  // Unticking it empties the box again, and the next request agrees.
+  const unticking = walk.reply(second, { value: "Export" });
+  assert.equal(ticked(html({ ...second, walk: unticking, settling: true })), 0);
+  assert.equal(ticked(html(extras(walk, "3", [], 1))), 0);
+});
+
+test("omp 18.20: a row past markableCount is a plain button, not a box", () => {
+  const walk = createAskWalkTracker();
+  const request = step(walk, "1", withContext("Which?"), ["A", "B", "Skip these", DONE], { selectionMarker: "checkbox", checkedIndices: [0], markableCount: 2 });
+  const tree = card(request);
+  const skip = buttonStartingWith(tree, "Skip these");
+  assert.equal(skip.props.role, undefined);
+  assert.equal(skip.props["aria-checked"], undefined);
+  assert.equal(buttonStartingWith(tree, "A").props.role, "checkbox");
+  assert.equal(ticked(html(request)), 1);
+  const answers = [];
+  buttonStartingWith(card(request, answers), "Skip these").props.onClick();
+  assert.deepEqual(answers, [{ value: "Skip these" }], "an action is answered with its own text");
+});
+
+test("omp 18.20: the words typed behind Other show on its ticked row", () => {
+  const walk = createAskWalkTracker();
+  const first = extras(walk, "1", [1], 1);
+  walk.reply(first, { value: OTHER });
+  const typed = { type: "extension_ui_request", id: "i1", method: "input", title: withContext("Which extras?") };
+  walk.observe(typed);
+  walk.reply(typed, { value: "Weekly digest" });
+  const out = html(extras(walk, "2", [1, 3], 3));
+  assert.match(out, /Weekly digest/);
+  assert.equal(ticked(out), 2);
+});
+
+test("a text field of the ask shows the explanation above it and the question under it", () => {
+  const request = { type: "extension_ui_request", id: "i1", method: "input", title: withContext("Your name?"), placeholder: "Ada" };
+  const out = renderToStaticMarkup(React.createElement(ExtensionInputCard, {
+    request,
+    selectedOptionIndex: 0,
+    onSelectOption: () => {},
+    onRespond: () => {},
+    fromAsk: true,
+  }));
+  assert.match(out, /data-testid="ask-context"/);
+  assert.ok(out.includes("Plans differ in how many projects you may keep."));
+  assert.match(out, /data-testid="ask-question"[^>]*>Your name\?</);
+  assert.match(out, /placeholder="Ada"/);
+
+  // Any other extension's prompt keeps its question on line 1 and shows the rest as details.
+  const other = html({ type: "extension_ui_request", id: "i2", method: "input", title: "Token?\nPaste it from the console." });
+  assert.doesNotMatch(other, /data-testid="ask-context"|data-testid="ask-question"/);
+  assert.match(other, /Paste it from the console\./);
+});
+
+test("the dock lets an ask be read: its question wraps in the header and one scroll area holds the text, the rows and the buttons", () => {
+  const walk = createAskWalkTracker();
+  const question = "Which of the following extras should be switched on for this whole workspace?";
+  const request = step(walk, "1", withContext(question), EXTRAS, { selectionMarker: "checkbox", initialIndex: 0, checkedIndices: [], markableCount: 4 });
+  const dockOf = (item) => renderToStaticMarkup(React.createElement(InputDock, { pendingInputs: [item], onRespond: () => {}, composerRef: { current: null } }));
+  const out = dockOf({ kind: "extension", request, fromAsk: true });
+  assert.match(out, /-webkit-line-clamp:2/);
+  assert.match(out, /max-height:max\(120px,/);
+  assert.equal((out.match(/overflow-y:auto/g) ?? []).length, 1, "text, rows and buttons share one scroll area");
+  assert.match(out, /title="Which of the following extras/);
+
+  // Any other extension dialog keeps the shorter area and the one-line header.
+  const plain = dockOf({ kind: "extension", request: { type: "extension_ui_request", id: "p", method: "select", title: "Pick one", options: ["A", "B"] } });
+  assert.match(plain, /max-height:calc\(40vh - 56px\)/);
+  assert.doesNotMatch(plain, /-webkit-line-clamp/);
+});
+
+test("the dock wiring: one card per field, the note only on engines that withdraw, focus and scroll start in the right place", () => {
   // One card for a whole checkbox field: omp asks it again after every tick under a new id.
   assert.match(dock, /function extensionKey\(request: ExtensionDialogRequest\): string \{/);
-  assert.match(dock, /`walk:\$\{request\.walk\.question\}`/);
+  assert.match(dock, /`walk:\$\{request\.walk\.context\}\\n\$\{request\.walk\.question\}`/);
   assert.match(dock, /case "extension": return "extension:" \+ extensionKey\(item\.request\);/);
   assert.match(dock, /key=\{extensionKey\(item\.request\)\}/);
   // The warning needs a dialog of the model's own and an engine that withdraws it.
-  assert.match(dock, /item\.fromAsk === true && askWithdrawnByMessage\(engineVersion\) && <AskWithdrawNote \/>/);
+  assert.match(dock, /const fromAsk = item\.kind === "extension" && item\.fromAsk === true;/);
+  assert.match(dock, /fromAsk && askWithdrawnByMessage\(engineVersion\) && <AskWithdrawNote \/>/);
   assert.match(dock, /import \{ useEngineVersion \} from "@\/hooks\/useEngineVersion";/);
   assert.match(dock, /const engineVersion = useEngineVersion\(\);/);
-  // A text field takes the focus, not the Submit button behind it.
-  assert.match(dock, /\[data-input-autofocus="true"\], \[data-input-choice="true"\]/);
+  // A text field takes the focus, a select the row omp's own cursor is on; a new question starts at the top of its text.
+  assert.match(dock, /querySelector<HTMLElement>\('\[data-input-autofocus="true"\]'\)/);
+  assert.match(dock, /querySelectorAll<HTMLElement>\('\[data-input-choice="true"\]'\)\[initialCursor\]/);
+  assert.match(dock, /item\.request\.initialIndex \?\? 0/);
+  assert.match(dock, /scrollRef\.current\?\.scrollTo\(\{ top: 0 \}\)/);
+  // Arrow keys bring the row into view, clear of the buttons that stay at the foot of the area.
+  assert.match(dock, /choices\[next\]\?\.scrollIntoView\(\{ block: "nearest" \}\);/);
+  assert.match(dock, /scrollPaddingBottom: 64,/);
 });
 
 test("the hook feeds the walk tracker: observe, reply, withdraw, and which dialogs are the model's", () => {
@@ -268,8 +413,12 @@ test("the hook feeds the walk tracker: observe, reply, withdraw, and which dialo
   assert.match(hook, /ASK_WALK_SETTLE_MS/);
   // A withdrawn dialog ends the walk.
   assert.match(hook, /askWalk\.withdrawn\(request\.targetId\);/);
-  // The model's `ask` tool is what is waiting while it runs.
-  assert.match(hook, /agentPhase\?\.kind === "running_tools" && agentPhase\.tools\.some\(\(tool\) => tool\.name === "ask"\)/);
+  // The model's `ask` tool is what is waiting while it runs, whatever it is called (omp 18.20 mounts it as `write xd://ask`);
+  // after a reload the transcript says so, while the agent runs.
+  assert.match(hook, /const ask = isAskToolCall\(name, event\.args\);/);
+  assert.match(hook, /tools\.push\(\{ id, name, startedAt: Date\.now\(\), ask \}\)/);
+  assert.match(hook, /agentPhase\?\.kind === "running_tools" && agentPhase\.tools\.some\(\(tool\) => tool\.ask === true\)/);
+  assert.match(hook, /\(agentRunning && askCallPending\(messages\)\)/);
   assert.match(hook, /fromAsk: walkStep \|\| dialogBelongsToAsk\(extensionDialog, askToolRunning\)/);
 });
 

@@ -610,11 +610,14 @@ components/
   MarkdownBody.tsx    markdown renderer
   InputDock.tsx       non-modal composer panel for extension, permission, and
                       refusal questions; keeps the transcript visible
-                      Also draws the model's `ask` walk (one card per field) and the
-                      one-line "a message withdraws this question" warning.
-  ExtensionDialog.tsx select / input / editor requests, including the checkbox view of
-                      an `ask` multi-choice step and masked (`secret`) inputs.
-                      `lib/ask-walk.ts` is the pure logic behind both (tested).
+                      Also draws the model's `ask` walk (one card per field), the
+                      one-line "a message withdraws this question" warning and the
+                      ONE scroll area (sticky Cancel/Done) that holds a whole prompt.
+  ExtensionDialog.tsx select / input / editor requests, including the radio / checkbox
+                      view of an `ask` step (ticks from omp's `checkedIndices`, action rows
+                      past `markableCount`) and masked (`secret`) inputs.
+                      `lib/ask-walk.ts` is the pure logic behind both (tested);
+                      `lib/extension-title.ts` splits the header from the body text.
   PermissionRequestCard.tsx one approval an ACP engine is blocked on, shown
                       inside InputDock with the transcript still in view
   ProviderIcon.tsx    vendored brand marks (models.dev logo set + simple-icons for

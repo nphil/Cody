@@ -9,7 +9,7 @@ import { TranscriptViewportContext } from "./TranscriptViewportContext";
 import { anchorIsInsideOpenBlock } from "@/lib/transcript-anchor";
 import { translate, translatePlural, useI18n, type Locale } from "@/lib/i18n";
 import { taskCallPreview } from "@/lib/task-call-preview";
-import { askAnswersFromDetails, askCallPreview } from "@/lib/ask-result";
+import { askAnswersFromDetails, askCallInput, askCallPreview } from "@/lib/ask-result";
 import { ircSender, ircTags, parentIrcAsCustomMessage } from "@/lib/irc-display";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { isActionableCustomDetails, isEmptyThinkingBlock, isInternalBackgroundMessage, isVisibleTranscriptMessage } from "@/lib/message-display";
@@ -1245,15 +1245,18 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
     else if (activityDisplayMode === "compact") setExpanded(false);
   }, [activityDisplayMode, isError]);
   const { animating, beginToggle, onPanelTransitionEnd } = useCollapseMotion();
-  const inputJson = useMemo(() => JSON.stringify(block.input, null, 2) ?? "", [block.input]);
+  // The model's own `ask`, however it reached the tool: `ask`, or `write xd://ask` (omp 18.19+) with the ask's
+  // arguments in the write's JSON `content`. Null for every other call.
+  const askInput = useMemo(() => askCallInput(block.toolName, block.input), [block.toolName, block.input]);
+  const inputJson = useMemo(() => JSON.stringify(askInput ?? block.input, null, 2) ?? "", [askInput, block.input]);
   const displayedJson = inputJson;
-  const displayedPreview = getToolPreview(block);
+  const displayedPreview = getToolPreview(block, askInput);
   const isEditTool = isEditToolName(block.toolName);
   const resultDiff = result && !result.isError ? getResultDiff(result) : null;
   // A settled `ask` shows its answers as rows instead of the raw HTML form /
   // question JSON plus omp's JSON-ish result text; an error or cancelled ask
   // keeps the plain args + result text.
-  const askAnswered = block.toolName === "ask" && !!result && !result.isError
+  const askAnswered = askInput !== null && !!result && !result.isError
     && askAnswersFromDetails(result.details).rows.length > 0;
   const activityStatus = getStructuredActivityStatus(result);
   const editRejection = activityStatus === "error" ? getEditRejectionReason(result) : null;
@@ -1311,7 +1314,7 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
           }}
         >
           <span style={{ color: TONE_COLOR[tone], fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 11, flexShrink: 0 }}>
-            {block.toolName}
+            {askInput ? "ask" : block.toolName}
           </span>
           <span style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0, maxWidth: "64ch", marginRight: "auto" }}>
             {displayedPreview}
@@ -1367,7 +1370,7 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
               ) : (
                 <>
                   {askAnswered ? (
-                    <AskResultPanel details={result.details} input={block.input} />
+                    <AskResultPanel details={result.details} input={askInput} />
                   ) : (
                     <>
                       <TaskResultPanel details={result.details} />
@@ -2283,7 +2286,7 @@ function previewText(text: string): string {
 }
 
 
-function getToolPreview(block: ToolCallContent): string {
+function getToolPreview(block: ToolCallContent, askInput: Record<string, unknown> | null): string {
   const input = block.input;
   if (!input || typeof input !== "object") return "";
   const keys = Object.keys(input);
@@ -2297,8 +2300,8 @@ function getToolPreview(block: ToolCallContent): string {
     if (preview) return preview;
   }
 
-  if (block.toolName === "ask") {
-    const preview = askCallPreview(input, {
+  if (askInput) {
+    const preview = askCallPreview(askInput, {
       more: (count) => translatePlural("askResult.moreQuestions", count),
     });
     if (preview) return preview;

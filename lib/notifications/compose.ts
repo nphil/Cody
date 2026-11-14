@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import * as path from "path";
-import { isAskDoneRow, isAskOtherRow, isAskSelectedTitle, isToolApprovalTitle } from "../ask-walk";
+import { isAskDoneRow, isAskMultiStep, isAskOtherRow, isToolApprovalTitle } from "../ask-walk";
 import { readPermissionOptions, describeToolCall } from "../permission-request";
 import { providerBrand } from "../provider-brand";
 import { replyAsksUser } from "../reply-question";
@@ -320,7 +320,7 @@ export function answerOfferForUiRequest(event: Record<string, unknown>): AnswerO
             { label: "Deny", answer: { value: approval.deny } },
           ];
         }
-      } else if (!isAskSelectedTitle(event.title) && !options.some(isAskDoneRow)) {
+      } else if (!isAskMultiStep({ title: event.title, options, selectionMarker: event.selectionMarker })) {
         choices = choicesFromLabels(options.filter((option) => !isAskOtherRow(option)), (value) => ({ value }));
       }
     }
@@ -389,7 +389,7 @@ export function summarizeUiRequest(event: Record<string, unknown>): UiRequestSum
         const more = !approval || approval.broader ? "Open the chat to choose how long to allow it." : "";
         return { event: "approval", body: [tool ? `Tool: ${tool}` : "A tool wants to run.", details, more].filter(Boolean).join("\n") };
       }
-      if (isAskSelectedTitle(title) || options.some(isAskDoneRow)) {
+      if (isAskMultiStep({ title, options, selectionMarker: event.selectionMarker })) {
         // A multi-choice field of omp's `ask`: ticking is a chat job, so say so rather than list its control rows.
         return { event: "question", body: [title, optionList(options.filter((option) => !isAskDoneRow(option))), "Open the chat to continue."].filter(Boolean).join("\n") };
       }
