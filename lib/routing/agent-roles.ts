@@ -48,7 +48,10 @@ export const DEFAULT_AGENT_ROLES: Record<string, string> = {
 	scout: "@smol",
 	reviewer: "@slow",
 	"security-reviewer": "@slow",
-	// Reads one saved chat and answers a question: a light, read-only job like scout.
+	// omp 18.12-18.20.2 only (removed in 18.20.3; see RETIRED_BUNDLED_AGENTS in
+	// request.ts): reads one saved chat and answers a question, a light
+	// read-only job like scout. Kept for engines that still have it, and for a
+	// user agent of that name.
 	seance: "@smol",
 };
 

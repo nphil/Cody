@@ -15,6 +15,7 @@ import path from "path";
 import { getHarness } from "../harness";
 import { peekCatalogCache } from "../models-cache";
 import { readClaudeCreditsRouting } from "../omp/claude-credits";
+import { getOmpVersion, versionBelow } from "../omp/omp-cli";
 import { getAgentDir } from "../omp/paths";
 import { readNativeSettings } from "../omp/settings-config";
 import { getOpenRouterAccount } from "../openrouter/account";
@@ -24,10 +25,20 @@ import { DEFAULT_AGENT_ROLES } from "./agent-roles";
 import type { ClaudeCreditsCover } from "./credits-cover";
 import { reconcileRouting, type RoutingReconciliation } from "./reconcile";
 
-/** Agents omp embeds in the binary. `seance` (omp 18.12+, reads a saved chat
- * read-only) has no `model:` of its own, so it is listed to get a role like
- * `scout`; an override for an agent an older engine lacks is never read. */
-const BUNDLED_AGENTS = ["task", "sonic", "scout", "reviewer", "security-reviewer", "seance"] as const;
+/** Agents every omp Cody supports embeds in the binary. */
+const BUNDLED_AGENTS = ["task", "sonic", "scout", "reviewer", "security-reviewer"] as const;
+
+/**
+ * Agents only an older omp embeds, each with the first release that no longer
+ * does. `seance` (omp 18.12+, reads a saved chat read-only, no `model:` of its
+ * own) went in 18.20.3, together with the task tool's `sourceSession`. It is
+ * listed, to get a role like `scout`, only for an engine KNOWN to be older: an
+ * override for an agent an engine lacks is never read, and an unreadable
+ * version counts as current so a new engine is never given a stale pin.
+ */
+const RETIRED_BUNDLED_AGENTS: Readonly<Record<string, readonly [number, number, number]>> = {
+	seance: [18, 20, 3],
+};
 
 function agentNamesIn(directory: string): string[] {
 	try {
@@ -40,13 +51,17 @@ function agentNamesIn(directory: string): string[] {
 }
 
 /**
- * Agent names this installation can spawn. Both roots are read: omp 18.18.8
+ * Agent names this installation can spawn on the engine at `engineVersion`
+ * (bare semver, or null when unreadable). Both roots are read: omp 18.18.8
  * and newer resolve user-level agents from `$PI_CODING_AGENT_DIR/agents`,
  * while older engines (18.8.3) read `~/.omp/agent/agents` even when the
  * instance data dir is elsewhere, so a `luna.md` may live in either.
  */
-export function discoverAgentNames(): string[] {
+export function discoverAgentNames(engineVersion: string | null = null): string[] {
 	const names = new Set<string>(BUNDLED_AGENTS);
+	for (const [name, removedIn] of Object.entries(RETIRED_BUNDLED_AGENTS)) {
+		if (versionBelow(engineVersion, removedIn)) names.add(name);
+	}
 	for (const root of [path.join(getAgentDir(), "agents"), path.join(homedir(), ".omp", "agent", "agents")]) {
 		for (const name of agentNamesIn(root)) names.add(name);
 	}
@@ -94,8 +109,9 @@ export async function reconcileRoutingForRequest(snapshot: UsageSnapshot): Promi
 	// A prepaid balance decides an OpenRouter blackout, but only from cache:
 	// `refresh` is the top-up flow's business, not a background poll's.
 	const openRouter = await getOpenRouterAccount().catch(() => null);
+	const engineVersion = getHarness().id === "omp" ? await getOmpVersion().catch(() => null) : null;
 	const routing = reconcileRouting(snapshot, {
-		agents: discoverAgentNames(),
+		agents: discoverAgentNames(engineVersion),
 		catalog: cachedCatalogKeys(),
 		openRouter,
 		disabledProviders: disabledProviders(),

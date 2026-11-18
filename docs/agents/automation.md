@@ -302,17 +302,31 @@ is the part of Cody that notices both.
 - **Three verdicts**, one look a minute; every number is in `limits.ts`.
   (1) A main-agent tool is overdue (`judge.ts`, omp only): a tool with its own
   timeout — bash 300 s, eval 30, browser 30, computer 120, ssh 60, fetch 20,
-  lsp 20, debug 30, ida 120, or its `timeout` argument; `0` means none — is
+  lsp 20, debug 30, ida 120 (the tool of omp 18.21 and older; from 18.22.0 that
+  work is the `dsm` namespace inside `eval`, judged as the `eval` call it runs
+  in), or its `timeout` argument; `0` means none — is
   overdue 15 min past it; a known-quick tool (read, edit, write, grep, …)
   after 20 min with no `tool_execution_update` (a `write xd://github`
   run_watch streams one per poll); `wait`, `ask`, `task`, `yield`, `goal`
   and any other tool name never. (2) No frame for 10 min, then a `get_state`
   left unanswered for 10 more (omp is known to freeze 3–5 min on its own
   databases after a turn, so the bound stays above that). (3) No progress at
-  all for 60 min, unless a tool is still inside its own deadline. The clocks
+  all for 60 min (6 h while the run is paused on background work, `awaitingWorkMs`:
+  see "A run paused on background work" below), unless a tool is still inside
+  its own deadline. The clocks
   stand still while the chat waits on the person or compacts; cache-warming
   frames are not activity, and a /btw answer proves the engine is alive but
   not that the run is moving.
+- **A run paused on background work** (omp 18.21+). The run can stop with
+  `agent_end {isTerminal:false, awaitingAsyncWork:true}` while a background
+  job or child agent may still wake it; the real end is `isTerminal:true`
+  (18.20.1 sends the same frames, so nothing here is version-gated beyond the
+  flag). `rpc-manager` keeps `pausedOnWork` for that state and the supervisor
+  sets `RunTracker.awaitingWork`: the quiet verdict then waits `awaitingWorkMs`
+  (6 h) instead of `silenceMs`. Follow-ups are not held while paused (they go
+  in as queued messages at once); `isRunning()` stays true. On 18.22.2
+  `abort()` ends a paused run with a terminal `agent_end`; on 18.20.1 it does
+  not, so `settleAfterStop` clears the flag as well.
 - **Recovery** (`recoverRun`): `destroyAndWait("stalled: …")`, then
   `acquireSession` (the retiring-child guard keeps the old and new engines
   from overlapping), then ONE user turn, `streamingBehavior: "steer"`,

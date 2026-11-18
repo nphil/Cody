@@ -104,6 +104,7 @@ app/api/
   agent/[id]/route.ts  GET state / POST RPC command
   agent/[id]/events/route.ts  GET SSE stream
   agent/[id]/recover-model/route.ts  POST reopen chat, model gone
+  agent/[id]/switch-helper/route.ts  POST move a running helper to another model (omp only)
   agent/running/events/route.ts  GET SSE running session ids
   agent/[id]/display/route.ts  POST/GET display request (auth-gated)
   agent/[id]/display/events/route.ts  GET SSE display requests
@@ -133,6 +134,7 @@ app/api/
   models-config/route.ts  GET/PUT models.yml (omp only; settleProviderChange)
   models-config/test/route.ts  POST test model (omp only)
   omp-settings/route.ts  GET/PUT omp config.yml (configEditor)
+  omp-agents/route.ts  GET helper-agent roster; PUT one agent's model override (omp only)
   omp-settings/schema/route.ts  GET/PUT engine-neutral settings schema
   settings-seen/route.ts  GET/POST new engine settings
   mcp/route.ts  GET/POST/PUT/DELETE MCP servers
@@ -238,6 +240,8 @@ lib/
   on-demand-mcp/  load-on-demand registry + small MCP client (extension-side, Node built-ins only)
   omp/on-demand-mcp.ts, omp/on-demand-chats.ts  on-demand registry store; per-chat computer flag
   omp/extensions/cody-on-demand-mcp.ts  `load_tools` extension
+  omp/agent-roster.ts  which helper agents exist (built-in unpacked from the binary + agent files); omp/agent-model-overrides.ts  `task.agentModelOverrides` read/write; omp/agent-switch.ts  move one running helper
+  omp/extensions/cody-agent-switch.ts  one-shot model for the next helper start (`before_subagent_spawn`, omp 18.19+)
   omp/engine-db.ts  engine database health service (check, guarded repair, push)
   usage/reading-age.ts  age of a usage reading from omp's own fetchedAt
   project-registry.ts  managed-project registry (projects.json)
@@ -295,6 +299,7 @@ lib/
   bash-output-meta.ts  omp's meta for cut-down shell output
   extension-title.ts  dock header + body text from a multi-line engine prompt (`extensionPrompt`)
   helper-memory-limit.ts  how big a helper's history may grow (browser- and Bun-safe)
+  helper-agents.ts  Helper agents rows + dropdown choices + status words (browser-safe); agent-model-selector.ts  role/model/custom selector parse
   irc-display.ts  parent-to-subagent IRC messages shown plainly
   task-call-preview.ts  counted phrases for the task-call preview
 components/
@@ -313,6 +318,7 @@ components/
   GoalPanel.tsx  Goal row of ComposerPanels
   TodoList.tsx  todo phase grid
   SubagentTranscriptDialog.tsx  subagent dialog + steer footer
+  SubagentModelSwitch.tsx  "Change model" control in the helper window
   SubagentTranscript.tsx  transcript section of that dialog
   MessageView.tsx  one message
   HomelabberApproval.tsx  approval index, useApprovalCard
@@ -369,7 +375,7 @@ components/
     ProviderLoginFlow.tsx  sign-in state machine (SSE)
     panels/  one file per hub, exports SEARCH_ENTRIES
     providers/  Providers hub: ProviderDetail, ClaudeCreditsSection
-    models/  Models hub: ModelCatalog, DistillAssignment
+    models/  Models hub: ModelCatalog, DistillAssignment, HelperAgents (per-agent model + memory limit)
     engine/  Behavior hub: RecommendedSettings, SchemaSettingsList
     DiskSection.tsx  System Disk card (/api/disk)
     MachinesSection.tsx  System Machines card (/api/machines); "Use as worker" switch + Check worker
@@ -393,6 +399,7 @@ hooks/
   useLocalAiScan.ts  client for /api/local-ai
   useSettingsHistory.ts  phone settings stack in browser history
   useAgentSession.ts  messages, streaming, SSE, fork
+  useHelperChoices.ts  models + roles for the Helper agents dropdowns
   claude-credits-notices.ts  pure plan-limit to API-credits notices
   useAudio.ts  completion sound, AudioContext unlock
   useDragDrop.ts  shared drag/drop state
@@ -463,6 +470,7 @@ Details: docs/agents/settings.md
 - Never hand-list keys; pi is parsed from its `docs/settings.md`; writes are read→mutate→write the WHOLE file.
 - `package-source.ts` reads omp source via jiti: stub must return `undefined` for `then` (else hangs); keep `jiti` in `serverExternalPackages`.
 - Schema tests MUST run on a REAL omp (`CODY_OMP_BIN`) — they once all skipped.
+- A list of rule OBJECTS (`bash.patterns`: the engine declares `pathScoped.itemType: "object"`) is `readOnly` with a reason: shown as JSON lines, `writeSchemaSettings` refuses any write — saving it as lines used to flatten the rules to text. Engines ≤ 18.19 do not declare it (no guard there).
 Details: docs/agents/settings.md
 
 ## Key Design Decisions & Traps
@@ -496,6 +504,7 @@ Details: docs/agents/session-runtime.md
 - Every awaited ack bounded (`PROMPT_ACK_TIMEOUT_MS`); on timeout recycle child, answer `session_unresponsive` — else `session_busy` forever.
 - Never forward a client `sessionId` to a fresh spawn (`/api/agent/new` strips it).
 - Live session can MOVE to a new id/file (`notice` `session-persistence`): copy owner/preset state, never rename; re-key once (`noteIdentityChange`).
+- Paused on background work (omp 18.21+): a non-terminal `agent_end` with `awaitingAsyncWork:true` sets `pausedOnWork` — follow-ups go in at once (not held), `isRunning()` stays true; cleared by `agent_start`, a terminal end, `settleAfterStop`, restart.
 Details: docs/agents/session-runtime.md
 
 ### Push notifications (`lib/notifications/`)
@@ -575,7 +584,7 @@ Details: docs/agents/usage-monitoring.md
 ### Overnight runs: stalls, crashes and restarts carry on (`lib/run-recovery/`)
 - `superviseRun` observes only (`observeEvents`/`onClose`) — `onDestroy`/`onIdentityChange` are the registry's; state on `globalThis.__codyRunRecovery`.
 - Journal entry kept on close only for server shutdown, engine crash or supervisor recycle; max 3 recoveries per chat in 12 h.
-- Verdicts: overdue tool (omp only), no frame 10 min + `get_state` unanswered 10 more, no progress 60 min; `tool_execution_update` must never create a tracker entry.
+- Verdicts: overdue tool (omp only), no frame 10 min + `get_state` unanswered 10 more, no progress 60 min (6 h while paused on background work: `awaitingWorkMs`); `tool_execution_update` must never create a tracker entry.
 - `CODY_RUN_RECOVERY=0` disables; wedged tools: Docker pids limit — check `/sys/fs/cgroup/pids.events` first.
 Details: docs/agents/automation.md
 
@@ -640,6 +649,7 @@ Details: docs/agents/session-runtime.md
 ### Event protocol differences vs pi
 - omp has no `prompt_done`/`prompt_error`/`compaction_start`/`compaction_end`; completion is `agent_end`, errors are failed RPC responses plus `notice`. Handle or ignore unknown frames.
 - `agent_end` rewrite in `rpc-manager.handleFrame` only when `isTerminal !== false` (false = continuation: steer, auto-retry); never simplify.
+- 18.22.x emits a non-terminal `agent_end` after EACH failed auto-retry (429 loop), then one terminal end; 18.22 `abort()` also ends a paused run (18.20.1 does not).
 - Mount notices are for the model: never a toast (on-demand `load_tools` mounts made them spam); never show message `content`.
 Details: docs/agents/session-runtime.md
 
@@ -693,6 +703,7 @@ Details: docs/agents/session-runtime.md
 - Every send has `clientMessageId` and a ledger; never prune unsettled rows (reads `unknown`, gets resent); Resume/Retry check the ledger first, lookup failure never resends.
 - Outbox (`lib/outbox.ts`): a row always stays visible; settle by `cody_delivery` ID, never text.
 - Steers go at once; only follow-ups wait in `heldQueue`; Stop uses `abortRestoringQueue` (plain abort runs every queued message).
+- While `pausedOnWork` a follow-up is sent as queued at once; `heldQueue` only holds across a live run.
 - Acks are bounded (202 `pending`); steer/follow-up ack timeout never recycles the child; GET routes bound `get_state` (`stale`) because omp serializes RPC commands.
 Details: docs/agents/turn-flow.md
 
@@ -800,6 +811,13 @@ Details: docs/agents/mcp-plugins.md
 - `lib/skills-service.ts` scans ONE level deep (else vendored `SKILL.md` listed); toggle edits only `disable-model-invocation`.
 - Gate composer skill lookup on `capabilities.skills` — else Claude Code/Codex scan per `/` keystroke.
 Details: docs/agents/mcp-plugins.md
+
+### Helper agents (Settings > Models > Helper agents, "Change model" in the helper window)
+- Settings > Models > Helper agents (omp only, English-only copy): one row per agent kind (omp's built-ins unpacked from the binary by `lib/omp/agent-roster.ts`, plus `<agent dir>/agents` and the nearest `.omp/agents` of each registered project). A row shows the model it runs on and why (set here / agent file / follows the chat) and edits `task.agentModelOverrides` (surgical, prunes empties) plus the memory limit (`agentCompactionThresholdOverrides`). A role keeps the role's fallback chain; an exact `provider/model` has none (the row warns). NEVER write `model:` into an agent file.
+- Roster rules from omp's own discovery: precedence project `.omp/agents` > user dir > extension/plugin > bundled; `.claude/agents` is NOT read for task agents; files need `name` + `description`; plain `model: @slow` is invalid YAML (the file is skipped; real files quote it). Agents are rediscovered every spawn, so edits apply to helpers started after saving.
+- "Change model" (`SubagentModelSwitch`, omp chats only): no RPC changes a running helper's model, so `lib/omp/agent-switch.ts` does cancel_subagent, then a steer `prompt` (the note tells the main agent to start the job again), then a `helper_switched` chat line (calm style, not the red crash row). The restart's model comes from the setting (checkbox on) or, with the checkbox off, a 30-minute one-shot entry in `<scratch>/cody-agent-switch.json` read by `cody-agent-switch.ts` on `before_subagent_spawn` (omp 18.19+; chats launched before this release do not load it, so use the setting there). The extension registers NO `tool_call`/`tool_result` handlers (they would disable speculative launch).
+- Limits: the one-shot keeps the original role's fallback chain; with several helpers of one kind starting at once the first gets it; a helper already finished answers `already_finished`.
+Details: docs/agents/subagents.md
 
 ### Update notifications (`/api/omp-update`, `/api/app-update`)
 - No in-app self-updating: only notifications plus copyable terminal commands (`SystemUpdates.tsx`).

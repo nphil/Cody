@@ -334,7 +334,7 @@ export function ProviderLoginFlow({ provider, onChanged, autoStart = false, comp
         )}
         {(loginState.phase === "auth" || loginState.phase === "prompt") && (
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            <p style={{ margin: 0, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
+            <p style={{ margin: 0, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
               {loginState.phase === "auth"
                 ? t("modelsConfig.completeSignIn")
                 : loginState.message}

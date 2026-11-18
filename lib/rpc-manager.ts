@@ -798,8 +798,8 @@ export function buildEngineRpcLaunch(
   }
   if (opts.profile?.systemPromptPath) args.push("--system-prompt", opts.profile.systemPromptPath);
   // Main omp sessions load Cody's extensions: the refusal guard, local-time
-  // context, the HomeLabber gate procedure, the scratch/disk-budget rule and
-  // the helper-agent context budget line (all also inherited by subagents).
+  // context, the HomeLabber gate procedure, the scratch/disk-budget rule, the
+  // helper-agent context budget line and the one-time helper model switch (all also inherited by subagents).
   // Resolve them from the package directory, never the launch cwd. The same
   // sessions get Cody's launch defaults (lib/omp/cody-launch-defaults.yml) as
   // the FIRST config layer, so every overlay keeps its place after it.
@@ -813,6 +813,7 @@ export function buildEngineRpcLaunch(
     args.push("--extension", path.join(extensions, "cody-disk-budget.ts"));
     args.push("--extension", path.join(extensions, "cody-context-budget.ts"));
     args.push("--extension", path.join(extensions, "cody-on-demand-mcp.ts"));
+    args.push("--extension", path.join(extensions, "cody-agent-switch.ts"));
     defaultsEnv = codyLaunchDefaultsEnv(opts.profile?.env?.PI_CONFIG_FILES ?? process.env.PI_CONFIG_FILES, packageRoot);
   }
   // A sidebar child gets its own agent dir, whose `mcp.json` is empty, so the
@@ -1200,7 +1201,8 @@ export class AgentSessionWrapper {
    * message already handed over; older builds answer `Unknown command` and
    * keep the old rule: handed over means final.)
    * They go to the engine when the run is over, in the order sent — exactly
-   * when omp would have read them anyway.
+   * when omp would have read them anyway — or when it pauses on background
+   * work (pausedOnWork), when omp reads one at once.
    *
    * Steers are never held. A steer is an interruption: omp delivers it into
    * the reply it is streaming (live steering), cuts a running tool batch
@@ -1238,6 +1240,16 @@ export class AgentSessionWrapper {
   private promptRunning = false;
   private bashRunning = false;
   private streaming = false;
+  /**
+   * The engine ended its turn but a background job or a helper agent can still
+   * wake the run (`agent_end {isTerminal:false, awaitingAsyncWork:true}`, until
+   * the run's next `agent_start` or its terminal end). The run is open — still
+   * running for every restart, disposal and hand-off check — but nothing is
+   * being read or written, so a follow-up has nothing to wait behind: the hold
+   * goes out at the pause and new ones skip it. Absent from an engine that
+   * sends no such flag, which then holds exactly as before.
+   */
+  private pausedOnWork = false;
   /** Text of the newest assistant reply in the current run: what omp's todo
    * reminder would auto-continue past. Cleared at run boundaries. */
   private lastReplyText: string | null = null;
@@ -2016,6 +2028,7 @@ export class AgentSessionWrapper {
       case "agent_start":
         this.scratchActivity?.();
         this.streaming = true;
+        this.pausedOnWork = false;
         this.lastReplyText = null;
         // The continuation a "Steer now" was waiting for has begun.
         this.clearSteerInterrupt();
@@ -2070,6 +2083,7 @@ export class AgentSessionWrapper {
           }
           this.streaming = false;
           this.promptRunning = false;
+          this.pausedOnWork = false;
           this.lastReplyText = null;
           invalidateSessionListCache();
           void this.getPlanKeeper()?.notifyTerminalAgentEnd();
@@ -2087,6 +2101,9 @@ export class AgentSessionWrapper {
               });
             }, 0);
           }
+        } else if (event.awaitingAsyncWork === true) {
+          this.pausedOnWork = true;
+          setTimeout(() => this.flushHeld(), 0);
         }
         break;
       case "message_end": {
@@ -2466,6 +2483,7 @@ export class AgentSessionWrapper {
     const believedRunning = this.streaming || this.promptRunning;
     this.streaming = false;
     this.promptRunning = false;
+    this.pausedOnWork = false;
     if (this.retryAnnounced) {
       this.retryAnnounced = false;
       this.emit({ type: "auto_retry_end", success: false, attempt: 0, finalError: "Stopped" });
@@ -3408,6 +3426,7 @@ export class AgentSessionWrapper {
       this.promptRunning = false;
       this.bashRunning = false;
       this.streaming = false;
+      this.pausedOnWork = false;
       this.compacting = false;
 
       // The same scratch dir as before (found by the id it was made under),
@@ -3588,7 +3607,7 @@ export class AgentSessionWrapper {
           this.heldGuard = null;
           return;
         }
-        if (!this.streaming && !this.promptRunning) this.flushHeld();
+        if ((!this.streaming && !this.promptRunning) || this.pausedOnWork) this.flushHeld();
       }, 1_000);
       this.heldGuard.unref?.();
     }
@@ -4000,11 +4019,13 @@ export class AgentSessionWrapper {
           if (prior && !this.clientMessageOutcomes.has(clientMessageId)) return prior;
         }
         return this.dedupeByClientMessageId(clientMessageId, async () => {
+          // Held follow-ups are being handed over (a pause just opened the hold): this one goes out behind them, in the order sent.
+          if (this.pausedOnWork) await this.handOverChain;
           // A follow-up sent while a run is live is held here, editable, until
           // the run ends (heldQueue) — as is one sent behind follow-ups still
           // held, so the order Enter was pressed survives. A steer always goes
           // straight to the engine: it is meant to interrupt.
-          if (streamingBehavior === "followUp" && clientMessageId
+          if (streamingBehavior === "followUp" && clientMessageId && !this.pausedOnWork
             && (this.streaming || this.promptRunning || this.heldQueue.length > 0)) {
             return this.holdMessage(clientMessageId, command);
           }

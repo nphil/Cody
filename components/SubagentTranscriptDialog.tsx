@@ -10,6 +10,7 @@ import { useHelperLimitConfig } from "@/hooks/useHelperLimitConfig";
 import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
 import { MarkdownBody } from "./MarkdownBody";
 import { BLOCK_LABEL_STYLE, SubagentTranscript, TEXT_BUTTON_STYLE } from "./SubagentTranscript";
+import { SubagentModelSwitch } from "./SubagentModelSwitch";
 import { Dialog, DialogContent, DialogTitle } from "./ui/primitives";
 import { toast } from "./ui/toast";
 import type { SubagentInfo } from "@/hooks/useAgentSession";
@@ -788,6 +789,9 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
                 )}
               </div>
             </div>
+            {subagentActive && sessionId !== null && !cancelUnsupported && (
+              <SubagentModelSwitch sessionId={sessionId} subagentId={subagent.id} agent={agent} transcriptPath={currentDetail?.sessionFile ?? subagent.sessionFile} />
+            )}
             {/* The ONE scroll container. Native scroll anchoring is off: the
                 transcript holds the reader's row itself (lib/transcript-scroll),
                 the same way in every browser. `scroll-behavior: auto` keeps

@@ -228,6 +228,14 @@ setting added upstream appears without a Cody change.
   render them, but their values still change what OMP does, and Cody has to
   mirror those decisions (`skills.enableClaudeUser` / `skills.enableCodexUser`
   gate which foreign user-level skill roots `lib/skills-service.ts` lists).
+  **A list of rule objects is read-only.** `bash.patterns` holds `{match,
+  approval}` / `{path, patterns}` objects (engine declares `pathScoped.itemType:
+  "object"`), which a list of lines cannot hold; the panel used to show it
+  empty and a save replaced the rules with plain strings. `settings-schema.ts`
+  (`holdsObjects`) now marks such rows `readOnly` with a config.yml reason,
+  `coerce` shows the items as JSON lines, and `writeSchemaSettings` refuses a
+  write to any `readOnly` key (HTTP 400). Engines ≤ 18.19 do not declare the
+  item type, so they stay unguarded; the test is gated to ≥ 18.20.1.
 - `lib/omp/settings-conditions.ts` — restates OMP's value-derived `ui.condition`
   predicates so Cody hides the same rows OMP hides.
 - `lib/omp/settings-surface.ts` — **the one hand-maintained list in this

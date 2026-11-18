@@ -133,9 +133,15 @@ config").
   out). A working concrete pin, an alias the user wrote, and an `on`/`off`
   value are left untouched; with no cached catalog no pin is ever judged
   unresolvable.
-  `seance` (omp's bundled read-only "consult a saved chat" agent, 18.12+) is in
-  `BUNDLED_AGENTS` and maps to `@smol` in `DEFAULT_AGENT_ROLES` because it has no
-  `model:` of its own.
+  `seance` (omp's bundled read-only "consult a saved chat" agent, 18.12 to
+  18.20.2) maps to `@smol` in `DEFAULT_AGENT_ROLES` because it has no `model:`
+  of its own. omp 18.20.3 removed it (and the task tool's `sourceSession`), so
+  `discoverAgentNames(engineVersion)` lists it only for an engine KNOWN to be
+  older (`RETIRED_BUNDLED_AGENTS` in `request.ts`, compared with
+  `versionBelow` from `omp-cli.ts`); an unreadable version counts as current.
+  A stale `seance` pin already in `task.agentModelOverrides` is harmless (an
+  override for an agent that does not exist is never read) and Cody never
+  removes an override it did not write.
 - **`retry.usageAwareFallback` is the same-provider-first switch.** With it
   on, omp checks usage health before each request (auth-storage
   `getModelUsageHealth`): the provider is healthy while ANY account is, and

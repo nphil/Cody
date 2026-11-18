@@ -61,6 +61,12 @@ const TERMINAL_ONLY_KEYS = new Set([
   "recap.idleSeconds",
   // Voice input is a terminal-session feature.
   "stt.enabled",
+  // omp 18.22.1: the live voice conversation (`/live`) is a terminal-session
+  // feature; over rpc-ui it needs a host that brings its own WebRTC client
+  // (`live_connect`), which Cody does not. These two only configure it;
+  // `live.apiKey` is a credential setting, which the schema skips anyway.
+  "live.voice",
+  "live.endpoint",
   // omp 18.2.4: the TUI working row's own smoothed tokens-per-second readout.
   // Cody measures its own from the engine's per-message numbers and draws it
   // on the message (lib/message-rate.ts), so this one reaches nothing here.

@@ -20,6 +20,7 @@ app/api/
   agent/[id]/route.ts             GET state | POST any RPC command
   agent/[id]/events/route.ts      GET SSE stream
   agent/[id]/recover-model/route.ts POST {provider, modelId} reopen a chat whose saved model is gone
+  agent/[id]/switch-helper/route.ts POST {subagentId, agent, model, alsoFuture, transcriptPath?} move a running helper to another model (omp only; cancel_subagent + steer note + chat line)
   agent/running/events/route.ts   GET SSE stream of currently-running session ids
   agent/[id]/display/route.ts     POST publish a display request | GET latest (auth-gated)
   agent/[id]/display/events/route.ts GET SSE stream of display requests (snapshot + live)
@@ -76,6 +77,7 @@ app/api/
                                    a PUT that drops a provider the file had is a
                                    REMOVAL: idle engines restart (settleProviderChange)
   models-config/test/route.ts     POST test a configured model/provider (omp only)
+  omp-agents/route.ts             GET the helper-agent roster (+ `canSwitchOnce`, `bundledError`); PUT {agent, model|null} one agent's `task.agentModelOverrides` entry (omp only)
   omp-settings/route.ts           GET/PUT omp's OWN config.yml — `configEditor`,
                                    not `nativeSettings`: pi declares the latter for
                                    its OWN schema panel and must not land here. A PUT
@@ -578,6 +580,7 @@ components/
   GoalPanel.tsx      the Goal row of ComposerPanels: the engine's goal (objective, status, tokens vs budget, live time, Pause/Resume/Drop with a two-tap Drop, "Keep working automatically") or the fallback note
   TodoList.tsx        todo phase grid with preview/show-all (used by ComposerPanels)
   SubagentTranscriptDialog.tsx  header + Result → Task → Transcript in ONE scroll container + steer footer (wide, fixed height)
+  SubagentModelSwitch.tsx  "Change model" panel in that dialog (role or exact model, "also use for future helpers of this kind"); omp chats with a running helper only
   SubagentTranscript.tsx the transcript section of that dialog: rows drawn by
                       MessageView, the one "Show earlier" control, "Jump to
                       latest", loading / error / empty states
@@ -759,6 +762,7 @@ hooks/
   useSettingsHistory.ts    mirrors the phone stack's depth into browser history
                            so a back gesture pops exactly one level
   useAgentSession.ts       messages + streaming + SSE + fork/navigate/reconciliation logic
+  useHelperChoices.ts      models + roles feeding the Helper agents dropdowns (Settings and the helper window)
   claude-credits-notices.ts  the pure decisions behind the "plan limit -> API credits"
                            chat notices: which event is the switch, what silences the
                            plan's own warning, when the plan is back

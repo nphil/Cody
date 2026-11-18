@@ -23,18 +23,20 @@
  * (lib/run-recovery/burn-guard.ts) stopped a run, or one helper of it
  * (`recovery: "automatic"`, the rest of the chat carries on), for spending
  * tokens far faster than work does.
+ * `helper_switched` is no engine trouble either: the person moved a running
+ * helper to another model (lib/omp/agent-switch.ts) and the chat says so.
  */
 
 import { isRecord } from "./type-guards";
 
-export type EngineCrashReason = "out_of_memory" | "disk_full" | "too_many_processes" | "crashed" | "server_restarted" | "token_burn";
+export type EngineCrashReason = "out_of_memory" | "disk_full" | "too_many_processes" | "crashed" | "server_restarted" | "token_burn" | "helper_switched";
 
 /** What Cody does next: restart the chat by itself, stopped trying, or waits for the person. */
 export type EngineCrashRecovery = "automatic" | "gave_up" | "manual";
 
 export type EngineCrashDisk = "tmp" | "data";
 
-export const ENGINE_CRASH_REASONS: readonly EngineCrashReason[] = ["out_of_memory", "disk_full", "too_many_processes", "crashed", "server_restarted", "token_burn"];
+export const ENGINE_CRASH_REASONS: readonly EngineCrashReason[] = ["out_of_memory", "disk_full", "too_many_processes", "crashed", "server_restarted", "token_burn", "helper_switched"];
 export const ENGINE_CRASH_RECOVERIES: readonly EngineCrashRecovery[] = ["automatic", "gave_up", "manual"];
 
 /** `customType` of the persistent line a crash leaves in a chat's transcript. */
@@ -210,6 +212,8 @@ export const ENGINE_CRASH_TEXT = {
   "engineCrash.token_burn.helper": "Cody stopped a helper in this chat because it was using tokens far faster than normal.",
   "engineCrash.token_burn.unstopped": "A helper in this chat is using tokens far faster than normal, and Cody could not stop it.",
   "engineCrash.token_burn.detail": "What Cody saw: {detail}.",
+  "engineCrash.helper_switched": "You moved a helper in this chat to another model.",
+  "engineCrash.helper_switched.detail": "Moved: {detail}.",
   "engineCrash.detail": "Last error: {detail}",
   "engineCrash.next.automatic": "Cody is restarting this chat automatically.",
   "engineCrash.next.automaticDisk": "Cody will restart this chat automatically once there is room on the disk.",
@@ -218,6 +222,7 @@ export const ENGINE_CRASH_TEXT = {
   "engineCrash.next.manual": "Send a message to continue.",
   "engineCrash.next.tokenBurnHelper": "The rest of the chat carries on without it.",
   "engineCrash.next.tokenBurnUnstopped": "Open the chat and press Stop.",
+  "engineCrash.next.helperSwitched": "Cody told the chat to start that helper again on the new model.",
 } as const;
 
 export type EngineCrashTextKey = keyof typeof ENGINE_CRASH_TEXT;
@@ -267,17 +272,22 @@ export function describeEngineCrash(notice: EngineCrashInfo & { recovery: Engine
     case "token_burn":
       headline = tr(notice.recovery === "automatic" ? "engineCrash.token_burn.helper" : notice.recovery === "gave_up" ? "engineCrash.token_burn.unstopped" : "engineCrash.token_burn.chat");
       break;
+    case "helper_switched":
+      headline = tr("engineCrash.helper_switched");
+      break;
   }
   let next: string;
   if (notice.reason === "token_burn") {
     // Nothing is restarted: a helper is gone and the chat goes on, or the run is stopped until the person says otherwise.
     next = tr(notice.recovery === "automatic" ? "engineCrash.next.tokenBurnHelper" : notice.recovery === "gave_up" ? "engineCrash.next.tokenBurnUnstopped" : "engineCrash.next.manual");
+  } else if (notice.reason === "helper_switched") {
+    next = tr("engineCrash.next.helperSwitched");
   } else if (notice.recovery === "automatic") {
     next = tr(notice.reason === "server_restarted" ? "engineCrash.next.serverRestarted" : notice.reason === "disk_full" ? "engineCrash.next.automaticDisk" : "engineCrash.next.automatic");
   } else {
     next = notice.recovery === "gave_up" ? tr("engineCrash.next.gaveUp") : tr("engineCrash.next.manual");
   }
-  const detail = notice.detail === null ? null : tr(notice.reason === "token_burn" ? "engineCrash.token_burn.detail" : "engineCrash.detail", { detail: notice.detail });
+  const detail = notice.detail === null ? null : tr(notice.reason === "token_burn" ? "engineCrash.token_burn.detail" : notice.reason === "helper_switched" ? "engineCrash.helper_switched.detail" : "engineCrash.detail", { detail: notice.detail });
   return { headline, detail, next };
 }
 

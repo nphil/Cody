@@ -218,6 +218,11 @@ second Enter was silently ignored while the first was in flight.
   steering), cuts a tool batch short, or reads it at the next step. The 0.41
   hold kept a steer typed while the model was only WRITING until the whole
   reply finished, and then sent it as a brand-new prompt.
+  **Not while the run is only paused on background work** (omp 18.21+: a
+  non-terminal `agent_end` with `awaitingAsyncWork:true`): `pausedOnWork` makes
+  the wrapper send the follow-up as queued at once and flush any held ones. On
+  18.22.2 holding it waited ~6.4 s for nothing; a real end is still
+  `isTerminal:true`.
 - **Agents use the same two lanes.** `send_to_chat` (`lib/chat-messages/`) maps
   `urgency` one to one: `next_step` is the steer, `after_turn` the follow-up
   (`streamingBehaviorOf`, the one place the mapping lives). A steer lands at the

@@ -135,3 +135,29 @@ export async function getOmpVersion(): Promise<string | null> {
   versionMissAt = Date.now();
   return null;
 }
+
+/** `version` as [major, minor, patch], or null when it holds no semver. */
+function semverParts(version: string | null | undefined): [number, number, number] | null {
+  const match = /(\d+)\.(\d+)\.(\d+)/.exec(version ?? "");
+  return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+}
+
+/**
+ * Whether `version` (bare semver, or null when unreadable) is at least `min`.
+ * An unreadable version is NOT at least anything, so a gate that asks "does
+ * this engine have it?" stays closed; one that asks "does it lack it?" uses
+ * `versionBelow`, which is just as false for an unreadable version.
+ */
+export function versionAtLeast(version: string | null | undefined, min: readonly [number, number, number]): boolean {
+  const parts = semverParts(version);
+  if (!parts) return false;
+  for (let index = 0; index < 3; index += 1) {
+    if (parts[index] !== min[index]) return parts[index] > min[index];
+  }
+  return true;
+}
+
+/** Whether `version` is a readable release OLDER than `release`; false when it cannot be read. */
+export function versionBelow(version: string | null | undefined, release: readonly [number, number, number]): boolean {
+  return semverParts(version) !== null && !versionAtLeast(version, release);
+}

@@ -1912,9 +1912,11 @@ function EngineCrashRow({ message }: { message: CustomMessage }) {
   const notice = readEngineCrashNotice(message.details);
   if (!notice) return <EngineReminderRow message={message} />;
   const words = describeEngineCrash(notice, (key, params) => t(key, params));
+  // Moving a helper is the person's own choice, not a failure: a quiet line, not the red alert.
+  const calm = notice.reason === "helper_switched";
   const time = formatTime(message.timestamp, locale);
   return (
-    <div className="chat-message" style={{ marginBottom: 14 }} data-testid="engine-crash-row" role="alert">
+    <div className="chat-message" style={{ marginBottom: 14 }} data-testid="engine-crash-row" role={calm ? "status" : "alert"}>
       <div
         style={{
           display: "flex",
@@ -1922,13 +1924,17 @@ function EngineCrashRow({ message }: { message: CustomMessage }) {
           gap: 8,
           padding: "8px 11px",
           borderRadius: "var(--radius-control)",
-          border: "1px solid color-mix(in srgb, var(--status-error) 35%, transparent)",
-          background: "color-mix(in srgb, var(--status-error) 8%, transparent)",
+          border: calm ? "1px solid var(--border)" : "1px solid color-mix(in srgb, var(--status-error) 35%, transparent)",
+          background: calm ? "var(--bg-subtle)" : "color-mix(in srgb, var(--status-error) 8%, transparent)",
           fontSize: 12.5,
           lineHeight: 1.45,
         }}
       >
-        <TriangleAlert size={14} strokeWidth={2} aria-hidden="true" style={{ flexShrink: 0, marginTop: 2, color: "var(--status-error)" }} />
+        {calm ? (
+          <Info size={14} strokeWidth={2} aria-hidden="true" style={{ flexShrink: 0, marginTop: 2, color: "var(--text-muted)" }} />
+        ) : (
+          <TriangleAlert size={14} strokeWidth={2} aria-hidden="true" style={{ flexShrink: 0, marginTop: 2, color: "var(--status-error)" }} />
+        )}
         <div style={{ minWidth: 0, flex: 1, overflowWrap: "anywhere" }}>
           <div style={{ color: "var(--text)", fontWeight: 600 }}>{words.headline}</div>
           {words.detail && <div style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 11 }}>{words.detail}</div>}

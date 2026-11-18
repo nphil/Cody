@@ -206,6 +206,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     subViews: [
       { id: "catalog", label: "Catalog" },
       { id: "assignments", label: "Assignments" },
+      { id: "agents", label: "Helper agents", needsCapability: "subagents" },
     ],
     // Both reads are cache-only: `/api/models/new?cached=1` peeks the
     // catalog cache (`pending: true` when cold, never a spawn) and carries

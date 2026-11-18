@@ -249,6 +249,8 @@ class RunTracker {
   closed = false;
   /** A run is in flight: agent_start seen, no terminal agent_end, no Stop. */
   runActive = false;
+  /** The run's turn ended with background work (a job, a helper agent) still going: it is waiting for it, which may take hours. */
+  awaitingWork = false;
   /** Cody itself is closing this session to start it again, so its close keeps the journal entry. */
   recycling = false;
   /** A verdict was acted on: this session is about to be replaced. */
@@ -313,8 +315,10 @@ class RunTracker {
           this.startRun(now);
           break;
         case "agent_end":
-          // A pause inside a run (omp hands a "Steer now" over this way) is not the end.
+          // A pause inside a run is not the end. omp hands a "Steer now" over this way, and a turn that
+          // ended with a job or a helper agent still working (`awaitingAsyncWork`) leaves the run waiting for it.
           if (event.isTerminal !== false) this.endRun();
+          else this.awaitingWork = event.awaitingAsyncWork === true;
           break;
         case "notice":
           // The wrapper's own report that the child died. Its terminal agent_end follows, and must not read as the run finishing.
@@ -348,6 +352,7 @@ class RunTracker {
 
   private startRun(now: number): void {
     this.runActive = true;
+    this.awaitingWork = false;
     this.stopped = false;
     this.gaveUp = false;
     this.crashedAt = null;
@@ -374,6 +379,7 @@ class RunTracker {
   /** The run is over, however it ended: its entry goes with it. */
   private endRun(): void {
     this.tools.clear();
+    this.awaitingWork = false;
     this.probeStartedAt = null;
     // The engine died, not the run: the entry stays for the recovery that follows the close.
     if (this.crashedAt !== null) return;
@@ -386,6 +392,7 @@ class RunTracker {
     if (!this.runActive) return;
     this.stopped = true;
     this.runActive = false;
+    this.awaitingWork = false;
     this.tools.clear();
     this.probeStartedAt = null;
     this.forgetEntry();
@@ -536,7 +543,9 @@ class RunTracker {
       return { kind: "engine_silent", quietSince: this.lastAliveAt, sinceMs: now - this.lastAliveAt };
     }
     const quiet = now - this.lastProgressAt;
-    if (quiet >= limits.silenceMs && !(this.judgesTools && insideOwnDeadline(this.tools.values(), now, limits))) {
+    // A run waiting on background work gets the longer bound: only the engine's silence to the question below, not the work's, is a stall.
+    const silenceMs = this.awaitingWork ? limits.awaitingWorkMs : limits.silenceMs;
+    if (quiet >= silenceMs && !(this.judgesTools && insideOwnDeadline(this.tools.values(), now, limits))) {
       return { kind: "quiet", quietSince: this.lastProgressAt, sinceMs: quiet };
     }
     if (now - Math.max(this.lastAliveAt, this.probeAnsweredAt) >= limits.probeAfterMs) {

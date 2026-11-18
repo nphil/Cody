@@ -4025,8 +4025,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           } else {
             addNotice({ type: level === "warning" || level === "error" ? "warning" : "info", message });
           }
-        } else if ((event.reason === "engine_exit" || event.reason === "token_burn") && readEngineCrashNotice(event.crash)) {
-          // The engine stopped on its own, or the burn guard stopped a run or a helper (lib/run-recovery/burn-guard.ts). The words (why, and what happens next) are a line that stays in the chat, like the one a reload brings back, not a notice on the shelf that goes away.
+        } else if ((event.reason === "engine_exit" || event.reason === "token_burn" || event.reason === "helper_switched") && readEngineCrashNotice(event.crash)) {
+          // The engine stopped on its own, the burn guard stopped a run or a helper (lib/run-recovery/burn-guard.ts), or the person moved a helper to another model (lib/omp/agent-switch.ts). The words (why, and what happens next) are a line that stays in the chat, like the one a reload brings back, not a notice on the shelf that goes away.
           const crash = readEngineCrashNotice(event.crash);
           if (crash) {
             const row = engineCrashRow(crash);

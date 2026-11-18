@@ -2,8 +2,8 @@
 
 /**
  * Settings › Models: the catalog (every engine) and, on an engine with a
- * roles surface or Cody's own Distill, the assignments. Two segments under
- * one hub:
+ * roles surface or Cody's own Distill, the assignments; on omp, the helper
+ * agents too. Three segments under one hub:
  *
  *   - Catalog — `ModelCatalog` over `useModelCatalog`: hide (instance or
  *     personal), pin, curation per provider, what is new since the user
@@ -12,14 +12,17 @@
  *   - Assignments — roles, retry & fallback, plan (`capabilities.models`)
  *     and Distill (Cody's own chain, gated on `/api/distill/config`
  *     answering `supported`, so pi gets the segment with Distill alone).
+ *   - Helper agents — the model and memory limit of each helper agent
+ *     (`capabilities.subagents`, omp only).
  *
  * `openSettings("models", {sub: "assignments"})` lands on the second
- * segment; the default is the catalog.
+ * segment, `{sub: "agents"}` on the third; the default is the catalog.
  */
 import { Cpu } from "lucide-react";
 import { useMemo } from "react";
 import { useModelCatalog } from "@/hooks/useModelCatalog";
 import { useDistillConfig } from "../models/DistillAssignment";
+import { HelperAgents } from "../models/HelperAgents";
 import { ModelAssignments } from "../models/ModelAssignments";
 import { ModelCatalog } from "../models/ModelCatalog";
 import { subViewKey, useSettingsNewBadges } from "../new-badges";
@@ -31,7 +34,7 @@ import { useSettingsShell } from "../shell-context";
 
 export const MODELS_PANEL_ID = "models";
 
-type Segment = "catalog" | "assignments";
+type Segment = "catalog" | "assignments" | "agents";
 
 /** What the dialog-wide search can jump to inside this hub. Assignments
  * entries carry the `models` gate so search never offers a role picker to
@@ -46,6 +49,7 @@ export const SEARCH_ENTRIES: readonly SearchEntry[] = [
   { id: "retry-transient-errors", tab: "models", sub: "assignments", label: "Retry & fallback", description: "Retries, fallback chains and usage-aware fallback.", keywords: ["retry", "fallback", "chains", "usage"], breadcrumb: ["Models", "Assignments"], needsCapability: "models", action: "jump" },
   { id: "model-presets-list", tab: "models", sub: "assignments", label: "Model presets", description: "Named role + fallback-chain overlays you switch between from the composer.", keywords: ["preset", "presets", "tier", "max", "high", "medium", "low", "smart"], breadcrumb: ["Models", "Assignments"], needsCapability: "models", action: "jump" },
   { id: "model-presets-research", tab: "models", sub: "assignments", label: "Research model presets", description: "A strong model researches the web and proposes roles and fallback chains for your presets.", keywords: ["research", "planner", "propose", "benchmark"], breadcrumb: ["Models", "Assignments"], needsCapability: "models", action: "jump" },
+  { id: "helper-agents", tab: "models", sub: "agents", label: "Helper agents", description: "The model and memory limit of each helper agent: task, scout, reviewer, your own.", keywords: ["helper", "helpers", "subagent", "subagents", "agent", "agents", "task", "scout", "reviewer", "deep-task", "heavy-task", "override", "agentModelOverrides", "model"], breadcrumb: ["Models", "Helper agents"], needsCapability: "subagents", action: "jump" },
 ];
 
 /** The Distill row, only on an engine that can actually distill. Search
@@ -71,7 +75,13 @@ export function ModelsPanel() {
   // Derived from `sub`, not local state: a repeated jump to the same
   // section (e.g. search landing on "assignments" twice) must still select
   // it even though the shell's `sub` does not change on the second jump.
-  const segment: Segment = sub === "assignments" && hasAssignments ? "assignments" : "catalog";
+  const hasAgents = capabilities.subagents;
+  const segment: Segment = sub === "assignments" && hasAssignments ? "assignments" : sub === "agents" && hasAgents ? "agents" : "catalog";
+  const segmentOptions = [
+    { id: "catalog", label: "Catalog" },
+    ...(hasAssignments ? [{ id: "assignments", label: "Assignments", badge: subsWithNew.has(subViewKey("models", "assignments")) ? <NewDot /> : undefined }] : []),
+    ...(hasAgents ? [{ id: "agents", label: "Helpers" }] : []),
+  ];
 
   const sessionCount = catalog.catalogSource === "session" ? (sessionModels?.length ?? 0) : null;
   const visibleCount = catalog.rows.filter((row) => row.source !== "placeholder" && row.state !== "instanceHidden" && row.state !== "myHidden").length;
@@ -95,11 +105,11 @@ export function ModelsPanel() {
             {summary ? <span style={{ color: "var(--text-dim)" }}> · {summary}</span> : null}
           </p>
         </div>
-        {hasAssignments && (
+        {segmentOptions.length > 1 && (
           <SegmentedControl
             label="Models sections"
             value={segment}
-            options={[{ id: "catalog", label: "Catalog" }, { id: "assignments", label: "Assignments", badge: subsWithNew.has(subViewKey("models", "assignments")) ? <NewDot /> : undefined }]}
+            options={segmentOptions}
             onChange={(id) => callbacks.selectSection("models", id)}
           />
         )}
@@ -108,8 +118,12 @@ export function ModelsPanel() {
         <div role="tabpanel" id="settings-subpanel-assignments" aria-labelledby="settings-subtab-assignments" style={{ display: "flex", flexDirection: "column", gap: 16, minWidth: 0 }}>
           <ModelAssignments catalog={catalog} panelId={MODELS_PANEL_ID} engineViews={capabilities.models} distillView={distill.available} />
         </div>
+      ) : segment === "agents" && hasAgents ? (
+        <div role="tabpanel" id="settings-subpanel-agents" aria-labelledby="settings-subtab-agents" style={{ display: "flex", flexDirection: "column", gap: 16, minWidth: 0 }}>
+          <HelperAgents panelId={MODELS_PANEL_ID} />
+        </div>
       ) : (
-        <div role="tabpanel" id="settings-subpanel-catalog" aria-labelledby={hasAssignments ? "settings-subtab-catalog" : undefined} style={{ display: "flex", flexDirection: "column", gap: 16, minWidth: 0 }}>
+        <div role="tabpanel" id="settings-subpanel-catalog" aria-labelledby={segmentOptions.length > 1 ? "settings-subtab-catalog" : undefined} style={{ display: "flex", flexDirection: "column", gap: 16, minWidth: 0 }}>
           <ModelCatalog catalog={catalog} panelId={MODELS_PANEL_ID} />
         </div>
       )}

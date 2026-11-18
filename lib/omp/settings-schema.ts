@@ -118,6 +118,19 @@ const CODY_DEFAULT_OVERRIDES: Record<string, boolean | number | string> = {
   "display.shellVisualization": false,
 };
 
+/** Why a list of rule objects is shown but cannot be edited from the panel. */
+const RULE_LIST_READ_ONLY_REASON =
+  "Each rule is an object (match, approval, optional path and env), which a list of lines cannot hold; saving here would replace the rules with plain text. Edit it in config.yml.";
+
+/** An array setting whose items are objects, not text. omp marks them
+ * `pathScoped: { itemType: "object" }` (`bash.patterns`, 18.20 and later). The
+ * panel's one-line-per-entry editor cannot read such a list, so the rules
+ * would show as empty and the first edit would overwrite them. */
+function holdsObjects(definition: Record<string, unknown>): boolean {
+  const scoped = definition.pathScoped;
+  return typeof scoped === "object" && scoped !== null && "itemType" in scoped && scoped.itemType === "object";
+}
+
 /** Options survive only when they are real literals; anything derived from a
  * stubbed import is dropped rather than rendered as garbage. A NUMBER setting
  * may offer a word choice meaning "use the built-in default" (omp 18.3's
@@ -205,6 +218,7 @@ function normalize(schemaModule: Record<string, unknown>, source: OmpSettingsSch
         : isSettingDefault(definition.default) ? { default: definition.default } : {}),
       ...(uiMeta.options === "runtime" ? { runtimeOptions: true } : {}),
       ...(uiMeta.ordered === true ? { ordered: true } : {}),
+      ...(type === "array" && holdsObjects(definition) ? { readOnly: true, readOnlyReason: RULE_LIST_READ_ONLY_REASON } : {}),
       ...(typeof uiMeta.condition === "string" ? { condition: uiMeta.condition } : {}),
       ...(isTerminalOnlySetting(key) ? { terminalOnly: true } : {}),
       ...(settingNoteFor(key) ? { codyNote: settingNoteFor(key) } : {}),

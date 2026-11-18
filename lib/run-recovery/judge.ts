@@ -43,6 +43,11 @@ export interface OverdueTool {
  * larger request to are NOT copied here on purpose: they only ever make the
  * real deadline sooner, and a wrong guess at them would kill a call that is
  * honestly still inside its time.
+ *
+ * `ida` is the binary-analysis tool of omp 18.21 and older. From 18.22.0 that
+ * work is the `dsm` namespace (its table key there) inside `eval`: a prelude
+ * call whose default budget is the cell's own `timeout`, so it is judged as the
+ * `eval` call it runs in and no tool of that name reaches this table.
  */
 const OWN_TIMEOUT_SECONDS: Record<string, number> = {
   bash: 300,

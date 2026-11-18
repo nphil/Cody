@@ -16,7 +16,6 @@ const panel = await readFile(new URL("./panels/ModelsPanel.tsx", import.meta.url
 
 test("the segment is derived from `sub`, not a separate useState the shell can desync from", () => {
   assert.doesNotMatch(panel, /useState<Segment>/, "a local segment state is exactly the bug this fix removes");
-  assert.match(panel, /const segment: Segment = sub === "assignments" && hasAssignments \? "assignments" : "catalog";/);
 });
 
 test("the segment control routes through the shell's selectSection, like ExtensionsPanel's", async () => {

@@ -137,3 +137,62 @@ shows them as small tags. `AgentProgress.stage`/`watch` (omp 18.19) come only
 from the completion probe, which omp never runs under RPC, so Cody does not
 read them.
 
+### Helper agents: which model each kind runs on, and moving a running one
+
+Settings > Models > Helper agents (`components/settings/models/HelperAgents.tsx`,
+omp only, English-only like the rest of Settings) lists every agent kind and
+edits `task.agentModelOverrides` (and `task.agentCompactionThresholdOverrides`
+through `lib/helper-memory-limit.ts`). `GET /api/omp-agents` builds the roster:
+
+- Built-ins come from the omp binary itself (`unpackBundledAgents`, cached per
+  binary), never from a frozen list: 18.22 ships `reviewer scout
+  security-reviewer sonic task`; 18.19 also has `seance`. `lib/routing/request.ts`
+  `BUNDLED_AGENTS` and `lib/routing/agent-roles.ts` `DEFAULT_AGENT_ROLES` stay the
+  routing-side facts (a row's `codyDefault` is read from the latter).
+- Custom agents are the files omp itself would find: the nearest `.omp/agents`
+  above a project, `<PI_CODING_AGENT_DIR>/agents` (`~/.omp/agent/agents` before
+  18.18.8). Precedence project > user > extension/plugin > bundled, first wins.
+  `.claude/agents` is NOT read for task agents. A file needs string `name` AND
+  `description`; `main`/`sub` are reserved; unquoted `model: @slow` is invalid YAML
+  and omp skips the file (real files quote it). Agents shipped by omp extensions
+  or Claude plugins are not listed.
+- A row's "why": the setting here > the agent file's own `model:` > the model of the
+  chat that starts it. A file `model` of `default`/`@default`/`*`/`pi/default`
+  follows the chat, while an override `@default` PINS the configured Default role's
+  model (the LumaGame `heavy-task` case: `task: {agentModelOverrides: {heavy-task: "@default"}}`).
+- Rows named in `DEFAULT_AGENT_ROLES` reset to that default role explicitly; other
+  rows reset by deleting the override. A role keeps its fallback chain; an exact
+  `provider/model` has none (the row warns). Cody never writes `model:` into an
+  agent file. Writes go through `useConfigWriter().enqueue("settings", …)` so they
+  never interleave with the Behavior/Assignments editors.
+
+"Change model" in the helper window (`components/SubagentModelSwitch.tsx`, shown
+while the helper runs, omp chats only, hidden when `cancel_subagent` is
+unsupported). No omp RPC changes a running helper's model, so
+`POST /api/agent/[id]/switch-helper` (`lib/omp/agent-switch.ts`, `switchHelper`):
+
+1. leaves the model choice first: checkbox on -> `setAgentModelOverride` (config
+   override, works on every omp with `agentModelOverrides`, no restart);
+   checkbox off -> a one-shot entry in `<CODY_SCRATCH>/cody-agent-switch.json`
+   (30-minute expiry, 20 entries max);
+2. `cancel_subagent` (answer `{cancelled:false}` -> `already_finished`; the entry
+   is taken back, a setting already saved stays);
+3. a steer `prompt` telling the main agent the user moved the helper and to start
+   the job again with the same agent (with the helper's transcript path);
+4. a `helper_switched` chat line (`lib/engine-crash.ts`, rendered as a calm status
+   row, not the red crash alert) and a live `notice`.
+
+The one-shot is read by `lib/omp/extensions/cody-agent-switch.ts` on
+`before_subagent_spawn` (omp 18.19.0+; `SPAWN_HOOK_SINCE`). Older engines answer
+`needs_setting` and the dialog forces the checkbox on. The extension is added to
+every omp chat launch (`buildEngineRpcLaunch`), so a chat started before this
+release does not have it. Limits: the one-shot keeps the ORIGINAL role's fallback
+chain; if several helpers of one kind start together the first takes the entry; the
+file is per chat; the extension registers no `tool_call`/`tool_result` handler
+(those disable `task.speculativeLaunch`).
+
+Proof: `lib/omp/agent-roster.test.mjs` (real engine when `CODY_OMP_BIN` is set),
+`agent-model-overrides.test.mjs`, `agent-switch.test.mjs`, `lib/helper-agents.test.mjs`;
+end to end, a real omp child plus a mock Anthropic server held the helper's model
+request open, then the switch showed the aborted request, the note in the main
+agent's next request and the new helper naming the chosen model.

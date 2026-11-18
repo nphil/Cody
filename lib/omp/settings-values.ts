@@ -49,7 +49,10 @@ function coerce(setting: OmpSetting, raw: unknown): OmpSettingValue | undefined 
     case "string":
       return typeof raw === "string" ? raw : undefined;
     case "array":
-      return Array.isArray(raw) && raw.every((item) => typeof item === "string") ? raw : undefined;
+      if (!Array.isArray(raw)) return undefined;
+      if (raw.every((item) => typeof item === "string")) return raw;
+      // A read-only list of rule objects (bash.patterns) is shown as one JSON line per rule; any other mixed list is not a value.
+      return setting.readOnly ? raw.map((item) => (typeof item === "string" ? item : JSON.stringify(item))) : undefined;
   }
 }
 
@@ -294,6 +297,7 @@ export function writeSchemaSettings(patch: Record<string, unknown>): string[] {
   for (const [key, value] of Object.entries(patch)) {
     const setting = byKey.get(key);
     if (!setting) throw new Error(`Unknown setting: ${key}`);
+    if (setting.readOnly) throw new Error(`${key} cannot be changed from here: ${setting.readOnlyReason ?? "the engine will not take a write for it"}`);
     resolved.push([key, validate(setting, value)]);
   }
   if (resolved.length === 0) return [];

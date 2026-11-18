@@ -25,7 +25,7 @@ import { isSignedOutCause } from "../usage/credential-health";
 import { rankProviderAccounts } from "../usage/select";
 import type { UsageAccount, UsageAccountService } from "../usage/types";
 import { enableProvider } from "./model-roles";
-import { getOmpVersion } from "./omp-cli";
+import { getOmpVersion, versionAtLeast } from "./omp-cli";
 import { RpcProcess, type RpcFrame } from "./rpc-process";
 import { disposeUtilityRpc, type OmpLoginProvider, runUtilityCommand } from "./rpc-utility";
 
@@ -34,38 +34,34 @@ const READY_TIMEOUT_MS = 60_000;
 const LOGIN_TIMEOUT_MS = 15 * 60_000;
 
 /**
- * Sign-ins omp's RPC mode cannot complete, keyed by the FIRST omp release that
- * refuses them. omp's roster does not flag these (it lists id, name, available
- * and authenticated only), and the refusal is a failed `login` command, so
- * the version is what lets the Providers list say so BEFORE a click.
+ * Sign-ins omp's RPC mode cannot complete, keyed by provider: `since` is the
+ * FIRST omp release that refuses them, `fixedIn` the first that no longer does
+ * (null: none yet). omp's roster does not flag these (it lists id, name,
+ * available and authenticated only), and the refusal is a failed `login`
+ * command, so the version is what lets the Providers list say so BEFORE a click.
  *
- * google-antigravity: from 18.18.7 omp makes the user type "yes" to a risk
- * warning first; that is a prompt asked before any URL, which RPC mode
- * rejects at once. 18.8.3 opened the browser, so older engines are untouched.
+ * Every one is a provider with an at-your-own-risk warning: omp makes the user
+ * type "yes" first, a prompt asked before any URL, which RPC mode rejected at
+ * once. omp 18.22.1 passes that warning on as an ordinary `input` request
+ * (`riskAcknowledgement`), which the prompt flow below shows and answers; it
+ * does NOT make these sign-ins finish. Checked on 18.22.2: antigravity-cli
+ * shows the Google link and then asks for the pasted code as a SECRET prompt,
+ * which RPC mode still refuses, and the provider reports that as a bare
+ * "sign-in failed". So neither entry has a `fixedIn` yet.
+ * - google-antigravity: from 18.18.7 (18.8.3 opened the browser). omp has
+ *   paused it since 18.20.1, so only an older engine lists it.
+ * - antigravity-cli: new in 18.20.2, warned from the start.
  */
-export const TERMINAL_ONLY_SINCE: Readonly<Record<string, readonly [number, number, number]>> = {
-  "google-antigravity": [18, 18, 7],
+export const TERMINAL_ONLY_LOGINS: Readonly<Record<string, { since: readonly [number, number, number]; fixedIn: readonly [number, number, number] | null }>> = {
+  "google-antigravity": { since: [18, 18, 7], fixedIn: null },
+  "antigravity-cli": { since: [18, 20, 2], fixedIn: null },
 };
 
-/**
- * Whether `version` (bare semver, or null when unreadable) is at least `min`.
- * An unreadable version is NOT at least anything: the sign-in stays offered and
- * the engine's own refusal (see `explainLoginError`) decides.
- */
-export function versionAtLeast(version: string | null | undefined, min: readonly [number, number, number]): boolean {
-  const match = /(\d+)\.(\d+)\.(\d+)/.exec(version ?? "");
-  if (!match) return false;
-  for (let index = 0; index < 3; index += 1) {
-    const part = Number(match[index + 1]);
-    if (part !== min[index]) return part > min[index];
-  }
-  return true;
-}
-
-/** Whether this omp refuses to sign `providerId` in over RPC. */
+/** Whether this omp refuses to sign `providerId` in over RPC. An unreadable version flags nothing: the sign-in stays offered and the engine's own refusal (see `explainLoginError`) decides. */
 export function isTerminalOnlyLogin(providerId: string, version: string | null | undefined): boolean {
-  const since = TERMINAL_ONLY_SINCE[providerId];
-  return since !== undefined && versionAtLeast(version, since);
+  const refused = TERMINAL_ONLY_LOGINS[providerId];
+  if (refused === undefined || !versionAtLeast(version, refused.since)) return false;
+  return refused.fixedIn === null || !versionAtLeast(version, refused.fixedIn);
 }
 
 /** The sign-in error code the route forwards so the panel can show its own words. */

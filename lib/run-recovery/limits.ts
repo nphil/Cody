@@ -17,6 +17,14 @@ export interface RunRecoveryLimits {
   probeBoundMs: number;
   /** No frame at all for this long while running: stalled, unless a tool is inside its own deadline. */
   silenceMs: number;
+  /**
+   * The same, for a run that ended its turn with a background job or a helper
+   * agent still working (`agent_end {isTerminal:false, awaitingAsyncWork:true}`).
+   * That run is waiting, and a build or a long review can be quiet for hours;
+   * restarting the engine would kill the very work being waited for. An engine
+   * that has died is still caught by the question to it (`probeBoundMs`).
+   */
+  awaitingWorkMs: number;
   /** The journal's "last activity" is refreshed at most this often while frames arrive. */
   heartbeatMs: number;
   /** After an engine crash: how long before Cody restarts it. */
@@ -46,6 +54,7 @@ export const RUN_RECOVERY_LIMITS: Readonly<RunRecoveryLimits> = {
   probeAfterMs: 10 * MINUTE,
   probeBoundMs: 10 * MINUTE,
   silenceMs: 60 * MINUTE,
+  awaitingWorkMs: 6 * HOUR,
   heartbeatMs: MINUTE,
   crashDelayMs: 30_000,
   sendBoundMs: 90_000,
