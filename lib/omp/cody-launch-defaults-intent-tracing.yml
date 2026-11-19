@@ -1,0 +1,13 @@
+# Cody launch default (see cody-launch-defaults.ts): one layer per setting.
+
+tools:
+  # Intent tracing makes the model write a short "what I am doing" line (the `i`
+  # argument) with every tool call. omp 18 asked for it in every mode; omp 19 asks
+  # only in its own terminal UI, so a chat driven over a pipe quietly lost it. Cody
+  # shows what it feeds: a helper's activity chip reads "→ bash: Checking disk space"
+  # instead of "→ bash", and the plan keeper labels each step it saw. It costs about
+  # 180 prompt tokens per request (the tool list carries the extra field, and the
+  # prompt cache holds it) and about a dozen output tokens per tool call. UNLIKE
+  # the other layers this one turns a setting ON, so it is dropped when config.yml
+  # explicitly sets `tools.intentTracing: false` (lib/omp/cody-launch-defaults.ts).
+  intentTracing: true

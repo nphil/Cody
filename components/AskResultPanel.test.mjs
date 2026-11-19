@@ -85,7 +85,7 @@ test("nothing understood renders nothing", () => {
 });
 
 test("a recorded `write xd://ask` result draws the same card, its call read out of the write's JSON content", async () => {
-  for (const version of ["18.20.0", "18.19.0"]) {
+  for (const version of ["19.0.0", "18.20.0", "18.19.0"]) {
     const [call, answered] = JSON.parse(await readFile(new URL(`../lib/fixtures/omp-${version}-ask-xdev-entries.json`, import.meta.url), "utf8"));
     const block = call.message.content.find((b) => b.type === "toolCall");
     const html = render({ details: answered.message.details, input: askCallInput(block.name, block.arguments) });

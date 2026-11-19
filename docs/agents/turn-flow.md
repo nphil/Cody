@@ -223,6 +223,15 @@ second Enter was silently ignored while the first was in flight.
   the wrapper send the follow-up as queued at once and flush any held ones. On
   18.22.2 holding it waited ~6.4 s for nothing; a real end is still
   `isTerminal:true`.
+  omp 19.0.0 behaves the same (checked on the real binary: a follow-up and a
+  steer sent to a paused run both start the reply at once, with the same
+  frames as 18.20.1). Two things differ for the queue: Stop on a paused run now
+  ends it with a terminal `agent_end` (the run is over, not paused, and the
+  job's later result is not delivered), and a `bash` `notify` match wakes
+  an idle or paused chat as a new engine-started turn (`async-notify`), which
+  arrives like any other unsolicited run and needs no outbox entry. A steer
+  sent while a question dialog is open cancels the dialog; a follow-up leaves
+  it open (see approvals.md).
 - **Agents use the same two lanes.** `send_to_chat` (`lib/chat-messages/`) maps
   `urgency` one to one: `next_step` is the steer, `after_turn` the follow-up
   (`streamingBehaviorOf`, the one place the mapping lives). A steer lands at the

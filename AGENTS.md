@@ -172,6 +172,7 @@ app/api/
   claude-credits/route.ts  GET/PUT/DELETE Claude backup keys (omp, admin)
 lib/
   omp/  shared omp foundations: paths, CLI probe, RpcProcess, marketplace.ts, plugin-cli.ts, isolated-agent-dir.ts, homelabber-base.ts, cody-launch-defaults.ts (+ .yml layers), gc-strip.ts (omp gc --strip), services.ts (omp ps)
+  fixtures/  real engine entries recorded from omp runs that parser tests replay (ask results 18.19 / 18.20 / 19.0.0, a 19.0.0 burn-guard transcript); record a new one from the real binary, never hand-write it
   claude-credits.ts  browser-safe Claude API credits types/selectors; server half omp/claude-credits.ts, omp/claude-credits-store.ts, omp/claude-credits-overlay.ts, routing/credits-cover.ts
   agent-client.ts  typed fetch helper for /api/agent
   time-zone.ts  pure zone rules: resolveTimeZone, formatLocalTime, describeLocalNow
@@ -379,7 +380,7 @@ components/
     engine/  Behavior hub: RecommendedSettings, SchemaSettingsList
     DiskSection.tsx  System Disk card (/api/disk)
     MachinesSection.tsx  System Machines card (/api/machines); "Use as worker" switch + Check worker
-    ServicesSection.tsx  System Services card (omp ps background processes)
+    ServicesSection.tsx  System Services card (omp ps background processes; after an engine update, a "Stop old services" notice for omp ≤ 18 managers)
     ReplayDataRow.tsx  System Disk "Old chat data" row (omp gc --strip)
     engine/list-draft.ts  list-setting text box to saved list, no React
   machines/  top-bar meters: MachineMeters.tsx, MachinesPanel.tsx (running jobs per worker); machineDisplayName (lib/machines/present.ts)
@@ -455,6 +456,7 @@ Details: docs/agents/accounts-auth.md
 - Cody state lives in the instance `getAgentDir()`, never the adapter's; engine-named browser keys use `engineScopedKey()`.
 - Two-package engines (ACP adapter + CLI): show `engineOwnVersion()`, check both registries, revert pins both. After login/key removal call `settleProviderChange`.
 - `undefined` launch means omp only (`utilityRpcLaunchFor` throws for non-rpc engines) — else omp's models showed as Claude Code's. ACP models/modes are session state.
+- `verifiedVersion` (`lib/harness/omp.ts`) is the newest engine version audited end to end; npm `latest` moves first (19.0.0 did), so the roster says "Ahead of Cody" until someone runs the real binary and bumps it.
 Details: docs/agents/engines.md
 
 ## Settings shell (`components/settings/`)
@@ -471,6 +473,7 @@ Details: docs/agents/settings.md
 - `package-source.ts` reads omp source via jiti: stub must return `undefined` for `then` (else hangs); keep `jiti` in `serverExternalPackages`.
 - Schema tests MUST run on a REAL omp (`CODY_OMP_BIN`) — they once all skipped.
 - A list of rule OBJECTS (`bash.patterns`: the engine declares `pathScoped.itemType: "object"`) is `readOnly` with a reason: shown as JSON lines, `writeSchemaSettings` refuses any write — saving it as lines used to flatten the rules to text. Engines ≤ 18.19 do not declare it (no guard there).
+- A key the engine REMOVED (omp 19: `ida.enabled`/`maxOpen`/`idleCloseSec`) must appear in no hand-listed file; the one allowed mention is the 18.19.0 floor fixture `lib/harness/fixtures/omp-schema-keys.json`.
 Details: docs/agents/settings.md
 
 ## Key Design Decisions & Traps
@@ -505,6 +508,7 @@ Details: docs/agents/session-runtime.md
 - Never forward a client `sessionId` to a fresh spawn (`/api/agent/new` strips it).
 - Live session can MOVE to a new id/file (`notice` `session-persistence`): copy owner/preset state, never rename; re-key once (`noteIdentityChange`).
 - Paused on background work (omp 18.21+): a non-terminal `agent_end` with `awaitingAsyncWork:true` sets `pausedOnWork` — follow-ups go in at once (not held), `isRunning()` stays true; cleared by `agent_start`, a terminal end, `settleAfterStop`, restart.
+- omp 19.0.0, proved on the real binary (docs/agents/session-runtime.md "Notes for maintainers (omp 19.0.0…)"): Stop on a paused run ends it with a terminal `agent_end` and the job's later result is dropped (18.20.1 sent no frame and the result still woke the model); `bash notify` wakes an idle or paused chat as an ordinary run (`async-notify`, shown as Background activity); `/handoff` is background compaction; `set_model` keeps the chat's thinking level; `tools.intentTracing` is OFF in RPC, so `cody-launch-defaults-intent-tracing.yml` turns it back on (helper chips, plan keeper, ask labels).
 Details: docs/agents/session-runtime.md
 
 ### Push notifications (`lib/notifications/`)
@@ -669,6 +673,7 @@ Details: docs/agents/turn-flow.md
 - Render agent's options in its order; `kind` is styling only, `optionId` is identity (two share `allow_always`) — never dedupe/reorder by kind.
 - Double-click latch is a ref, not `disabled` state (3 answers measured); read `toolCall` fields defensively.
 - omp 18.20 `ask` selects carry the form text before the last title line plus `initialIndex` / `selectionMarker` / `checkedIndices` / `markableCount`; `lib/ask-walk.ts` reads them (ticks come from `checkedIndices`, never guessed). The dock is ONE scroll area with sticky Cancel/Done. The ask is `write xd://ask` on engines that mount it there: test `isAskToolCall` (live) / `askCallInput` (transcript card), never `toolName === "ask"` alone.
+- omp 19.0.0 `ask`: same frames and entries as 18.20 (no `formDialog` in the RPC host, so the walk is unchanged). A steer sent while a dialog is open cancels it ("Ask interrupted by message"); a follow-up does not.
 Details: docs/agents/approvals.md
 
 ### HomeLabber approvals in the chat (`lib/homelabber-approval.ts`, `components/HomelabberApproval.tsx`, `/api/homelabber`)
@@ -798,6 +803,7 @@ Details: docs/agents/chat-ui.md
 - User secrets never reach browser (`lib/mcp-secrets.ts`): `MCP_SECRET_SENTINEL`; write REFUSES if no stored value backs a sentinel.
 - User scope admin-only (`userScopeDenied`): stdio runs in everyone's sessions.
 - Enable/disable = user `disabledServers` (`setUserServerDisabled`), not `enabled`; delete must remove entry.
+- omp 19 drops a stdio server by COMMAND (`node_repl`, setting `mcp.builtinTransforms`) and can expose servers as eval namespaces (`mcp.evalNamespaces`: no `xd://mcp__…` path); the on-demand `load_tools` result names the eval call.
 Details: docs/agents/mcp-plugins.md
 
 ### Load on demand (heavy MCP servers + desktop control)
@@ -830,6 +836,7 @@ Details: docs/agents/mcp-plugins.md
 - Blackouts persist in `cody-route-memory.json`, provider's reset = expiry (prepaid `credits` has none); a failed read never lifts one.
 - A usage reading carries its own age (`lib/usage/reading-age.ts`): omp re-serves a login's last saved report when its live fetch fails (Claude's usage endpoint 429s bursts), so every bound counts from the report's own `fetchedAt` (`UsageAccount.measuredAt`), never from Cody's read time. After 30 minutes an account is `outdated`: ring dimmed, "out of date · measured 5 days ago", no number when no window is left; a login's numbers never go back in time.
 - A credential block (`applyCredentialBlocks`) outranks a usage percentage: an account at 4% used was blocked for 5 hours.
+- The plan name (`UsageAccount.planType`) is `metadata.subscriptionPlan` (omp 19) else `metadata.planType`; omp 19's policy `state`/`scopedExhausted` only restate account-wide windows, so routing keeps reading `windows`.
 - Subagents resolve via `@alias` roles (`agent-roles.ts`); a concrete model pin has no fallback chain.
 Details: docs/agents/routing.md
 

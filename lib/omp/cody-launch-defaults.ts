@@ -7,31 +7,37 @@ import { readPersistedBoolean } from "./settings-values";
  * beside this file): omp settings whose default is right for its terminal UI but
  * wrong for an engine Cody drives over a pipe (`display.shellVisualization`,
  * `async.widgets`), plus desktop control, which Cody offers on demand per chat
- * (`computer.enabled`, see on-demand-chats.ts).
+ * (`computer.enabled`, see on-demand-chats.ts), plus the one setting Cody turns
+ * back ON: omp 19 stopped asking the model for a tool-call intent line outside
+ * its terminal UI (`tools.intentTracing`), and Cody shows what that line feeds.
  *
  * They ride `PI_CONFIG_FILES`, which omp layers ABOVE config.yml, so the user's
  * file is never written. That ordering is also why a value the user set there
  * themselves needs care: the layer would override it. Each setting therefore has
- * its own layer file, dropped when config.yml explicitly turns THAT key ON —
- * someone who asked for the feature gets it, everyone else gets the smaller bill.
+ * its own layer file, dropped when config.yml explicitly sets THAT key the other
+ * way from the layer (a layer that turns a feature off yields to an explicit On,
+ * the intent-tracing layer that turns it on yields to an explicit Off) — someone
+ * who made the choice themselves gets it, everyone else gets Cody's default.
  *
  * Static on purpose: nothing is written at launch, and a missing file (a
  * stripped-down tree) just means the engine's own defaults apply.
  */
 
-/** One layer file per setting, so a user who explicitly turned ONE on loses only that layer. */
-export const CODY_LAUNCH_DEFAULTS_LAYERS: ReadonlyArray<{ file: string; key: string }> = [
-  { file: "cody-launch-defaults.yml", key: "display.shellVisualization" },
-  { file: "cody-launch-defaults-async-widgets.yml", key: "async.widgets" },
-  { file: "cody-launch-defaults-computer.yml", key: "computer.enabled" },
+/** One layer file per setting, so a user who explicitly chose ONE the other way loses only that layer.
+ *  `value` is what the layer file sets (lib/omp/cody-launch-defaults.test.mjs pins it to the file). */
+export const CODY_LAUNCH_DEFAULTS_LAYERS: ReadonlyArray<{ file: string; key: string; value: boolean }> = [
+  { file: "cody-launch-defaults.yml", key: "display.shellVisualization", value: false },
+  { file: "cody-launch-defaults-async-widgets.yml", key: "async.widgets", value: false },
+  { file: "cody-launch-defaults-computer.yml", key: "computer.enabled", value: false },
+  { file: "cody-launch-defaults-intent-tracing.yml", key: "tools.intentTracing", value: true },
 ];
 
 /** The layers' paths for a chat started from `packageRoot`: each file that exists
- *  and whose setting the user has not explicitly turned ON in config.yml. */
+ *  and whose setting the user has not explicitly set the other way in config.yml. */
 export function codyLaunchDefaultsLayers(packageRoot: string): string[] {
   const layers: string[] = [];
-  for (const { file, key } of CODY_LAUNCH_DEFAULTS_LAYERS) {
-    if (readPersistedBoolean(key) === true) continue;
+  for (const { file, key, value } of CODY_LAUNCH_DEFAULTS_LAYERS) {
+    if (readPersistedBoolean(key) === !value) continue;
     const full = path.join(packageRoot, "lib", "omp", file);
     if (existsSync(full)) layers.push(full);
   }

@@ -327,6 +327,23 @@ is the part of Cody that notices both.
   in as queued messages at once); `isRunning()` stays true. On 18.22.2
   `abort()` ends a paused run with a terminal `agent_end`; on 18.20.1 it does
   not, so `settleAfterStop` clears the flag as well.
+- **omp 19.0.0 on a paused run (proved on the real binary, 2026-11).** The
+  pause, the wake (`agent_start`, an `async-result` message) and the end are
+  the same frames as on 18.20.1. Three differences, none needing code: (1) Stop
+  on a paused run ends it at once with a terminal `agent_end` plus
+  `session_settled`, and the job's later result is NOT delivered as a wake
+  (18.20.1: no frame, the result still wakes the model), so no run is left
+  waiting; (2) `bash` `notify` wakes an idle or paused chat when a background
+  job prints a matching line (`async-notify` message, rate-limited by the
+  engine): to the supervisor that is an ordinary `agent_start` ... terminal
+  `agent_end` run, with the normal clocks; (3) waits are standardized (a 5 s
+  first idle wait, then back-to-back 4-minute ones; a reply or parent wait
+  stretches to the session's prompt-cache lifetime less a minute, at most 30
+  minutes, per omp 19's `tools/wait.ts`): they are `wait` calls, which
+  `WAITS_BY_DESIGN` never judges, and 30 minutes of quiet stays under the
+  60-minute silence verdict. The `cache_warming_*` frames gained fields
+  (`phase`, `method`, `outcome`, `usage`, ...) and stay "not activity" in both the
+  supervisor and the burn guard.
 - **Recovery** (`recoverRun`): `destroyAndWait("stalled: …")`, then
   `acquireSession` (the retiring-child guard keeps the old and new engines
   from overlapping), then ONE user turn, `streamingBehavior: "steer"`,

@@ -517,7 +517,7 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
   every binary, because a cache HIT never expires and the companion CLI's bin
   name is not something the installer models.
 - **HarnessAdapter.verifiedVersion** is the exact engine version this Cody
-  build was last audited against — every adapter carries one (omp: 18.19.0,
+  build was last audited against — every adapter carries one (omp: 19.0.0,
   claude-agent-acp: 0.73.0, codex-acp: 1.8.0, pi: 0.73.1).
   It is shown verbatim on the System hub's engine roster card (Settings ›
   System › Engines) ("Built to vX.Y.Z", served through /api/engines), and
@@ -550,4 +550,9 @@ architecture: `docs/harnesses.md`. The load-bearing rules:
 - Sidebar chats keep a bare cwd (`sidebarBareCwd`): `--no-context-files` does not exist on 18.8.3 and the sidebar has no tools/subagents.
 - `luna.md`/`agents/` live under `$PI_CODING_AGENT_DIR/agents` on omp 18.18.8+ (`~/.omp/agent/agents` before); `lib/routing/request.ts` reads both roots.
 - Checked and left alone: joined `--flag=value` forms (both engines accept the spaced form too, joined works everywhere); `omp-uploads-*` is swept by omp itself, `yt-*`/`omp-dump-anon-*` fall under the hourly disk janitor's temp sweep.
+
+**Notes for maintainers (omp 19.0.0: services, usage, settings, MCP, install).** Proved against the real 19.0.0 binary in an isolated HOME / agent dir / `OMP_DAEMON_DIR` and again on 18.20.1; 18.8.3 / 18.19 / 18.20 / 18.22 keep working because every new reading goes by DATA SHAPE or `versionAtLeast`, never a hard-coded major. The run-time half (frames, ask, lifecycle) is in docs/agents/session-runtime.md.
+- **Install and update.** npm `latest` is 19.0.0, so every 18.x install is offered it (the roster shows "Ahead of Cody" until `verifiedVersion` moves). `engines.bun` is `>=1.4.4`, the same as 18.13.3+ and the Bun in the image (`oven/bun:1`); no node floor. 19.0.0 adds the deps `@oh-my-pi/pi-wire` and `@oh-my-pi/snapcompact`; the installed tree is ~298 MB (18.20.1: ~284 MB), so `MIN_FREE_BYTES` and the measured-tree threshold hold. Cody's own `installEngine` installed `@oh-my-pi/pi-coding-agent@19.0.0` into a scratch prefix in 8 s: Bun gate and health probe passed, `install-history.json` recorded `previousVersion`, so Revert pins the 18.x build. `omp update --check` keeps its wording ("Current version:", "New version available:"; 19 prints "Already up to date" when current), so `parseOmpUpdateStatus` is unchanged; a binary a package manager owns makes `omp update` print a "kept up to date by <manager>" line instead, and `checkOmpUpdate` then falls back to the registry comparison (read from 19's source, not exercised).
+- **Daemons and brokers.** Cody starts and stops neither. omp ≤ 18 runs one service manager per project (`__omp_worker_daemon_broker`); omp 19 runs ONE per-user daemon (`__omp_worker_daemon`, state under `~/.omp/run/daemon/`) that the engine starts on demand, and `omp ps` reads its store offline (it never spawns it). The two do not see each other, which is why Settings › System › Services shows a "Stop old services" notice after an in-place update (docs/agents/disk.md). `omp auth-broker serve` is optional and user-run; Cody never launches it and its credential readers (`bin/cody-omp-*.mjs`) load `@oh-my-pi/pi-ai/auth-storage.js` through `require.resolve` exactly as before.
+- **Rollback.** Going back from 19 to 18.x lists `ida.enabled` / `ida.maxOpen` / `ida.idleCloseSec` again and the "New" diff marks those three once (19's snapshot lacks them): harmless. Nothing in Cody names them except the 18.19.0 floor fixture.
 

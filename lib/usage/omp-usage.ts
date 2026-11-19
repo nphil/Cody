@@ -270,7 +270,9 @@ function buildAccount(
     // the credential store (lib/usage/credential-order.ts).
     credentialId: null,
     label: buildAccountLabel(provider, metadata, index, disambiguate),
-    planType: readString(metadata.planType) ?? null,
+    // omp 19 names a Claude subscription in `subscriptionPlan` ("Max 20x", "Pro"); other providers
+    // keep `planType`. Same order omp's own `omp usage` text uses.
+    planType: readString(metadata.subscriptionPlan) ?? readString(metadata.planType) ?? null,
     unlimited,
     windows,
     ...(resetCredits ? { resetCredits } : {}),

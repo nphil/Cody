@@ -187,6 +187,19 @@ Sections in this file:
 - `POST /api/agent/[id]` answers `{suffix:null}` / success for these two
   commands when no session is live and NEVER spawns (`getRpcSession`, not
   `startRpcSession`) — the composer fires them at typing rate.
+- **omp 19.0.0 "composer predictions" are a different feature.** omp 19 turns
+  `composer.predictions` (and `composer.predictionAlternatives`) on by default,
+  but only its OWN terminal editor reads them (the next-message ghost text of
+  `modes/controllers/composer-prediction-controller.ts`). The RPC host never
+  reads either setting and made no extra model request after `agent_end` in
+  any real-binary run, so a Cody chat pays nothing for them and there is
+  nothing to switch off; the Settings panel lists both as terminal-only.
+  `predict_word` / `predict_word_feedback` (the ghost text above) is a separate
+  engine feature that did not change between 18.19 and 19.0.0: the real
+  18.20.1 and 19.0.0 binaries both answered `predict_word` for "Please open the
+  config fi" with `{suffix: "le"}`, so `lib/word-completion.ts`,
+  `hooks/useWordCompletion.ts`, the `PASSTHROUGH_COMMANDS` entry and the route
+  are untouched.
 - `Unknown command` (omp 18.3) / `unsupported` turns the feature off for the
   page, silently (`isUnsupportedCommandError`); other errors back off 30 s.
 - Engine facts (18.4.9, measured): first call after spawn ≈ 9 s (cold
@@ -247,8 +260,10 @@ deferred switch replaces an older one for the same chat, a closing chat drops
 it, and a deferred switch the engine then refuses is announced as an info
 `notice` frame on the chat's own stream (its caller has already been answered).
 The commands go in the order omp needs: `set_model` first, then
-`set_thinking_level` (omp re-applies the new model's default level after
-`set_model`); the result carries the engine's own `get_state` afterwards
+`set_thinking_level` (omp 18.x re-applied the new model's default level after
+`set_model`; 19.0.0 keeps the chat's level and only clamps it to what the new
+model supports, announcing a clamp with `thinking_level_changed`, so the
+explicit level still goes second on both); the result carries the engine's own `get_state` afterwards
 (`not_applied` when it still reports the old model, `reasoning_failed` when the
 model moved but the level did not).
 

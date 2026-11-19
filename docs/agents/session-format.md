@@ -55,8 +55,17 @@ Location: `~/.omp/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`
   reader never turns into a row. Custom MESSAGE types that are bookkeeping are
   listed in `HIDDEN_CUSTOM_TYPES` (`lib/message-display.ts`): now also
   `auto-parallel-plan`, `skill-notice`, `memory-recall-changes`,
-  `streaming-edit-recovery`. `session-transfer` (omp 18.10 `session pack/unpack`)
-  stays visible, titled by `messageView.sessionTransferLabel`.
+  `streaming-edit-recovery` and, from omp 19.0.0, `eval-prelude-guide` (the
+  model-only note about the eval prelude). `session-transfer` (omp 18.10
+  `session pack/unpack`) stays visible, titled by
+  `messageView.sessionTransferLabel`. omp 19's `async-notify` (a `bash`
+  `notify` match that woke the chat, `details.reports[]`) is not hidden: it
+  folds into "Background activity" as kind `notification`, never needing
+  review (`backgroundActivityKind`, `backgroundMessageIdentity` in the same
+  file). Other 19.0.0 shapes the readers already handle: `model_usage`
+  entries (skipped), `compaction` entries with `method: "handoff" | "soft"`,
+  assistant `contextSnapshot` / `duration` fields (ignored), spilled output at
+  `<session>/local/N.log` instead of `<session>/N.bash.log`.
 
 `entryIds[]` in `SessionContext` is a parallel array to `messages[]` — maps each displayed message back to its `.jsonl` entry id, used for fork and navigate_tree calls.
 

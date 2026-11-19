@@ -436,11 +436,13 @@ export function createOnDemandMcp(deps: Deps): (pi: OmpApi) => void {
         pi.appendEntry(ON_DEMAND_ENTRY_TYPE, { server, action: "load" });
         restoreFailures.delete(server);
         const prefix = onDemandToolName(server, "x").slice(0, -1);
+        const namespace = prefix.slice("mcp__".length, -1);
         const lines = [
           `Loaded "${server}": ${result.names.length} tools are mounted now, for the rest of this chat.` +
             (result.missing.length > 0 ? ` ${result.missing.length} of them are still being activated; retry in a moment if one is reported missing.` : "") +
             (result.clashes.length > 0 ? ` ${result.clashes.length} more are already provided by an MCP connection of the same name and were left alone.` : ""),
-          `Run one by writing a JSON arguments object to xd://${prefix}<tool> (read the path first for its schema).`,
+          // omp 19 `mcp.evalNamespaces` moves every MCP tool (these included: they carry mcpServerName/mcpToolName) off xd:// and into an eval global named after the sanitized server; the extension cannot read settings, so the result names both routes.
+          `Run one by writing a JSON arguments object to xd://${prefix}<tool> (read the path first for its schema). If this chat exposes MCP servers as eval namespaces (the mcp.evalNamespaces setting) there is no xd:// path: call ${namespace}.<tool>({...}) from eval instead, and read xd://eval/${namespace} for the arguments.`,
           `Tools: ${result.names.map((name) => (name.startsWith(prefix) ? name.slice(prefix.length) : name)).join(", ")}`,
         ];
         if (result.instructions) lines.push(`Server notes: ${result.instructions.slice(0, MAX_INSTRUCTIONS_CHARS)}`);

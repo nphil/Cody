@@ -69,10 +69,11 @@ export function groupHasThinking(
  * `goal-budget-limit` tells the model to wrap up. They arrive as `display:false`
  * custom messages, which would otherwise each draw an "Engine note" row — two
  * of them per turn of a goal that runs by itself. The Goal panel above the
- * composer is where a goal is read. The last four are omp 18.19's hidden
+ * composer is where a goal is read. The last five are omp's hidden
  * model-only notes: the auto-parallel delegation hint, the skill list
  * announce/withdraw notice, the recalled-memory delta and the streaming-edit
- * recovery nudge. The "cody-" ones are Cody's own, written by its omp
+ * recovery nudge (omp 18.19), and the one-time guide to the eval tool's
+ * preludes (omp 19). The "cody-" ones are Cody's own, written by its omp
  * extensions: the clock line, the low-disk line, and the notes every agent is
  * given as a message and never as a system-prompt change (the HomeLabber gate
  * procedure, the disk budget, the context budget, the on-demand toolset
@@ -94,6 +95,7 @@ const HIDDEN_CUSTOM_TYPES: Record<string, true> = {
   "skill-notice": true,
   "memory-recall-changes": true,
   "streaming-edit-recovery": true,
+  "eval-prelude-guide": true,
 };
 
 /**
@@ -164,6 +166,7 @@ export function isInternalBackgroundMessage(message: AgentMessage): boolean {
   switch (message.customType) {
     case "async-result":
     case "async_result":
+    case "async-notify":
     case "irc:incoming":
     case "irc:autoreply":
     case "irc:relay":
@@ -174,12 +177,14 @@ export function isInternalBackgroundMessage(message: AgentMessage): boolean {
   }
 }
 
-/** Classify only engine-identified background messages, never their text. */
-export function backgroundActivityKind(message: AgentMessage): "completion" | "coordination" | null {
+/** Classify only engine-identified background messages, never their text. "notification" is omp 19's
+ * `bash notify`: lines a still-running job printed that matched what the agent asked to be told about. */
+export function backgroundActivityKind(message: AgentMessage): "completion" | "coordination" | "notification" | null {
   if (message.role !== "custom" || message.attribution === "user" || isActionableCustomDetails(message.details)) return null;
   // Schema validity describes the output format, not whether the job succeeded.
   // Missing status is common in older deliveries; keep them grouped and inspectable.
   if (message.customType === "async-result" || message.customType === "async_result") return "completion";
+  if (message.customType === "async-notify") return "notification";
   switch (message.customType) {
     case "irc:incoming":
     case "irc:autoreply":
@@ -207,6 +212,12 @@ export function backgroundMessageIdentity(message: AgentMessage): string | null 
   const details = message.details as Record<string, unknown>;
   if (message.customType === "irc:incoming") {
     return typeof details.id === "string" && details.id !== "" ? JSON.stringify(["irc:incoming", details.id]) : null;
+  }
+  if (message.customType === "async-notify") {
+    const reports: unknown[] = Array.isArray(details.reports) ? details.reports : [];
+    const ids = reports.map((report: unknown) => report && typeof report === "object" ? (report as Record<string, unknown>).id : undefined);
+    if (typeof message.timestamp !== "number" || !Number.isFinite(message.timestamp) || ids.length === 0 || !ids.every((id: unknown) => typeof id === "string" && id !== "")) return null;
+    return JSON.stringify(["async-notify", message.timestamp, ids]);
   }
   if ((message.customType !== "async-result" && message.customType !== "async_result")
     || typeof message.timestamp !== "number" || !Number.isFinite(message.timestamp)

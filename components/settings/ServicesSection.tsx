@@ -25,9 +25,12 @@ const RING_STYLE = { boxShadow: "0 0 0 2px var(--accent)", borderColor: "var(--a
 
 interface ServicesPayload {
   services: ServiceRow[];
+  /** Service managers of an older engine still running; their services are not in `services`. */
+  oldManagers?: number;
 }
 
-const rowKey = (row: ServiceRow) => `${row.scope ?? row.projectDir ?? ""}\u0000${row.name}`;
+const OLD_MANAGERS_KEY = "\u0000old-managers";
+const rowKey = (row: ServiceRow) => row.id ?? `${row.scope ?? row.projectDir ?? ""}\u0000${row.name}`;
 
 const commandStyle: CSSProperties = {
   fontFamily: "var(--font-mono, monospace)",
@@ -65,7 +68,7 @@ export function ServicesSection({ initial }: { initial?: ServicesPayload } = {})
     void requestJson<ServicesPayload>(SERVICES_ROUTE, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action, name: row.name, projectDir: row.projectDir, scope: row.scope }),
+      body: JSON.stringify({ action, id: row.id, name: row.name, projectDir: row.projectDir, scope: row.scope }),
     })
       .then((next) => {
         setSettingsRouteData<ServicesPayload>(SERVICES_ROUTE, next);
@@ -79,7 +82,28 @@ export function ServicesSection({ initial }: { initial?: ServicesPayload } = {})
       .finally(() => setBusyKey(null));
   };
 
+  const stopOld = () => {
+    setBusyKey(OLD_MANAGERS_KEY);
+    setError(null);
+    void requestJson<ServicesPayload>(SERVICES_ROUTE, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "stopOld" }),
+    })
+      .then((next) => {
+        setSettingsRouteData<ServicesPayload>(SERVICES_ROUTE, next);
+        toast.success("Stopped the old service managers");
+      })
+      .catch((failure: unknown) => {
+        const message = failure instanceof Error ? failure.message : String(failure);
+        setError(message);
+        toast.error("Could not stop the old service managers", message);
+      })
+      .finally(() => setBusyKey(null));
+  };
+
   const services = payload?.services ?? [];
+  const oldManagers = payload?.oldManagers ?? 0;
 
   return (
     <section
@@ -95,12 +119,31 @@ export function ServicesSection({ initial }: { initial?: ServicesPayload } = {})
       <div style={mutedLineStyle}>
         Dev servers and watchers the agent started. They keep running after the chat ends, so stop the ones you no longer need.
       </div>
+      {oldManagers > 0 && (
+        <div role="status" style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-start", fontSize: 12, color: "var(--text)" }}>
+          <span>
+            {oldManagers === 1 ? "1 background service manager" : `${oldManagers} background service managers`} from an earlier engine version
+            {oldManagers === 1 ? " is" : " are"} still running. This engine cannot list the services they hold. Stopping them also stops those services.
+          </span>
+          <button
+            type="button"
+            className="ui-focus-ring"
+            onClick={stopOld}
+            disabled={busyKey === OLD_MANAGERS_KEY}
+            aria-busy={busyKey === OLD_MANAGERS_KEY}
+            style={{ ...smallButtonStyle, opacity: busyKey === OLD_MANAGERS_KEY ? 0.6 : 1 }}
+          >
+            {busyKey === OLD_MANAGERS_KEY ? <Loader2 size={13} className="icon-spin" aria-hidden="true" /> : <Square size={13} aria-hidden="true" />}
+            Stop old services
+          </button>
+        </div>
+      )}
 
       {route.loading && !payload && <LoadingLine label="Reading running services…" />}
       {route.error && !payload && <ErrorNote message={route.error} />}
 
       {payload && (services.length === 0
-        ? <div style={dimLineStyle}>No background services are running.</div>
+        ? <div style={dimLineStyle}>{oldManagers > 0 ? "This engine lists no background services of its own." : "No background services are running."}</div>
         : (
           <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 8 }}>
             {services.map((row) => {
@@ -138,7 +181,7 @@ export function ServicesSection({ initial }: { initial?: ServicesPayload } = {})
                     </span>
                   </div>
                   <span style={dimLineStyle}>
-                    {row.scope ? `Machine-wide service “${row.scope}”` : row.projectDir}
+                    {row.scope ? (row.scope === "global" ? "Machine-wide service" : `Machine-wide service “${row.scope}”`) : row.projectDir}
                     {row.internal ? " · run by the engine itself" : ""}
                   </span>
                   {row.command && <span style={commandStyle}>{row.command}</span>}

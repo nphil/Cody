@@ -93,7 +93,9 @@ const TERMINAL_ONLY_KEYS = new Set([
   //  - `session.worktreeScope`: scopes the TUI's resume picker (Cody lists
   //    sessions itself);
   //  - `composer.predictions` / `composer.predictionAlternatives`: the TUI
-  //    composer's ghost-text prompt predictions;
+  //    composer's ghost-text prompt predictions (omp 19.0.0 turned
+  //    `composer.predictions` on by default; the RPC host never reads it, and
+  //    Cody's composer completes words from `spelling.autocomplete`);
   //  - `terminal.programStatus`: the OSC 7501 status the TUI writes to the
   //    terminal it runs in;
   //  - `worktree.onStart` / `worktree.onExit`: only `maybeAutoCreateWorktree`
@@ -125,6 +127,12 @@ const TERMINAL_ONLY_KEYS = new Set([
   // and never replaces. (`title.refreshOnReplan` is NOT listed: the todo replan
   // path can still title an unnamed Cody session.)
   "title.refreshAfterPrompts",
+  // omp 19.0.0 `task.crossInstance`: the agent mesh other omp instances are
+  // found through is joined by bindAgentMesh, which main.ts calls only for an
+  // interactive launch (no --print, no --mode), never for `--mode rpc-ui`. A
+  // Cody chat therefore has no peer to read or message whatever this is set
+  // to; turned on it only adds one sentence about agent://peers to the prompt.
+  "task.crossInstance",
 ]);
 
 /** Dotted-path prefixes (matched at a segment boundary) that are terminal-only
@@ -197,20 +205,34 @@ const SETTING_NOTES: Record<string, string> = {
   "mnemopi.proactiveLinking":
     "Still compares each new memory with every live stored memory while the whole session (subagents included) waits, so the delay grows with the number of memories. omp 18.9 made it much cheaper; before that a store of about 10,000 memories froze every reply for over 3 minutes and grew the memory database to 5 GB. Leave this off unless you have measured it on your own memories.",
   // omp 18.3.5 session/cache-warmer.ts + sdk.ts (refresh cost counted in session
-  // usage since 18.4.5): the main agent loop replays
-  // its last request (1-token output budget) just before the prompt-cache
-  // entry expires. Default "idle" (no `protocolDefault`, so `--mode rpc-ui` is
-  // NOT pinned off). Only models whose catalog entry declares a `promptCache`
-  // lifetime are warmed, and each refresh must clear an expected-savings
-  // floor of $0.05 (0.15 continuation probability × miss cost − warm cost), so
-  // small prompts are never warmed. Idle warming stops 30 min after the real
-  // request (streaming 60 min); a 1h cache entry is only warmed during a run.
-  // Refreshes are real provider calls counted in session usage. Cody keeps an
-  // engine alive while any tab is attached (rpc-manager resetIdleTimer), so
-  // the 30-minute window runs to its end while the tab stays open; a session
-  // nobody has open is closed after 10 minutes, which also ends warming.
+  // usage since 18.4.5): the main agent loop re-sends its last request just
+  // before the prompt-cache entry expires (a one-token replay; omp 19.0.0 sends
+  // `max_tokens: 0` instead where the catalog says the provider's own endpoint
+  // takes it, and replays when that answers 400). Default "idle" (no
+  // `protocolDefault`, so `--mode rpc-ui` is NOT pinned off). Only models whose
+  // catalog entry declares a `promptCache` lifetime are warmed, and each idle
+  // refresh must clear an expected-savings floor of $0.05 (0.15 continuation
+  // probability × miss cost − warm cost), so small prompts are never warmed.
+  // Idle warming stops 30 min after the real request; 18.x also stops a
+  // running request's refreshes at 60 min, while 19.0.0 drops that cap for ski
+  // rental (it refreshes only while the spend so far stays within the cost of
+  // letting the entry expire or of compacting, see providers.cacheWarmingStrategy).
+  // A 1h cache entry is only warmed during a run. Refreshes are real provider
+  // calls counted in session usage. Cody keeps an engine alive while any tab is
+  // attached (rpc-manager resetIdleTimer), so the 30-minute window runs to its
+  // end while the tab stays open; a session nobody has open is closed after 10
+  // minutes, which also ends warming.
   "providers.cacheWarming":
-    "Default \"Idle\". After a reply the engine re-sends the whole conversation to the provider just before its prompt cache would expire, to keep it cheap to continue. That is a real provider request each time and it spends quota or money. It only happens for models with a known cache lifetime, only when the saving beats the cost (about $0.05, so long conversations), and for at most 30 minutes after the last reply (60 while a run is active). Cody keeps a session you have open alive, so warming keeps running while its tab is open; a session nobody has open is closed after 10 minutes and warming ends with it. Set to Off to never spend on this.",
+    "Default \"Idle\". After a reply the engine re-sends the whole conversation to the provider just before its prompt cache would expire, to keep it cheap to continue. That is a real provider request each time and it spends quota or money. It only happens for models with a known cache lifetime, only when the saving beats the cost (about $0.05, so long conversations), and for at most 30 minutes after the last reply. While a long task is running, omp 19 keeps refreshing only until that would cost more than letting the cache expire; older engines stop after 60 minutes. Cody keeps a session you have open alive, so warming keeps running while its tab is open; a session nobody has open is closed after 10 minutes and warming ends with it. Set to Off to never spend on this.",
+  // omp 19.0.0 session/cache-warmer.ts #compactCost/#act: while a run is
+  // streaming and refreshing stops paying, "auto" prices re-writing the cache
+  // after it expires against compacting the history before it expires (one
+  // summarising call, then re-writing only the compacted context) and takes the
+  // cheaper; "compact" compacts at the first decision; "keepalive" never
+  // compacts. A bridge is only considered once the prompt reaches the lower of
+  // cacheWarmingCompactPercent of the window and cacheWarmingCompactTokens.
+  "providers.cacheWarmingStrategy":
+    "Only matters while a long tool call runs on a big conversation (150,000 tokens or 60% of the model's window by default, whichever is lower). \"Auto\" may then summarise the older history before the cache expires instead of paying to refresh it again, and the chat continues from the summary; that costs one extra model request. \"Keepalive\" never summarises on its own and lets the cache expire once refreshing stops paying. Nothing happens while Cache Warming is Off.",
   // omp 18.4.3 speculation/host.ts + task/index.ts: with `task.batch` the
   // task tool starts each tasks[] item's subagent while the call is still
   // streaming. Vetoed (falls back to the normal launch) when the task tool's
@@ -319,6 +341,14 @@ const SETTING_NOTES: Record<string, string> = {
   // CODY_DEFAULT_OVERRIDES makes the row read Off while nothing configures it.
   "display.shellVisualization":
     "Cody starts every chat with this off. omp's terminal UI is the only thing that draws the visualization, and with it on each bash progress update carries about 40 times more data. Turn it on only if you also resume these chats in the omp terminal and want the visualization there; it applies to chats started afterwards.",
+  // omp 19.0.0 sdk.ts intentTracingActive: a configured `tools.intentTracing`
+  // (any layer) or PI_INTENT_TRACING wins; unset, the `i` intent field is asked
+  // for only in the interactive terminal UI, not under `--mode rpc-ui` (omp
+  // 18 asked in every mode). Cody launches every chat with it ON
+  // (lib/omp/cody-launch-defaults-intent-tracing.yml, dropped when config.yml
+  // explicitly turns it Off), so the declared default (On) is what a chat runs.
+  "tools.intentTracing":
+    "omp 19 asks for this only in its own terminal; Cody starts every chat with it on, because a helper's activity line (\"bash: Checking disk space\") and the plan keeper's step labels are built from it. It costs about 180 prompt tokens per request and a dozen output tokens per tool call. Turn it off to save that, at the price of bare tool names there; it applies to chats started afterwards. omp 18 asks by default.",
   // omp 18.18.7 split Claude's single `autoRedeem` per window. Its in-memory
   // migration copies the old value into 5h and weekly only; the Fable window
   // is new and stays unset (src/config/settings.ts, "Fable window is new").
