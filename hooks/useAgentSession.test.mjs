@@ -309,14 +309,17 @@ test("a page wake re-reads the open chat and attaches its stream again", () => {
 
 test("mounting and waking adopt a live engine through the same function, which re-attaches the stream", () => {
   const adopt = hook.slice(hook.indexOf("const adoptLiveEngine = ("), hook.indexOf("// Load session on mount"));
-  assert.match(adopt, /void connectEvents\(sid\);/);
+  // A fresh attach connects the stream; a slow full state arriving on an already attached page reuses it.
+  assert.match(adopt, /if \(!reuseStream\) \{\s*const attached = connectEvents\(sid\);/);
   assert.match(adopt, /void registerHostTools\(sid\);/);
   assert.match(adopt, /void registerHostUriSchemes\(sid\);/);
   assert.match(adopt, /void refreshSubagentRoster\(sid\);/);
   // A page already tracking the run needs no second settlement poller.
   assert.match(adopt, /!alreadyRunning && knownActive/);
   const mount = hook.slice(hook.indexOf("// Load session on mount"), hook.indexOf("// The page woke up"));
-  assert.match(mount, /adoptLiveEngine\(session\.id, agentState, false\);/);
+  // Mount attaches first from the fast server-side state, then the full state reuses that stream.
+  assert.match(mount, /adoptLiveEngine\(sid, fast, false\);/);
+  assert.match(mount, /adoptLiveEngine\(sid, agentState, reuse, reuse\);/);
   // The connect replaces whatever socket the browser still calls open.
   const connect = hook.slice(hook.indexOf("const connectEvents = useCallback"), hook.indexOf("return new Promise", hook.indexOf("const connectEvents = useCallback")));
   assert.match(connect, /eventSourceRef\.current\.close\(\);/);

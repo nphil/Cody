@@ -111,7 +111,8 @@ test("MessageView shows a `write xd://ask` call as an ask: label, header preview
   assert.match(source, /const askInput = useMemo\(\(\) => askCallInput\(block\.toolName, block\.input\), \[block\.toolName, block\.input\]\)/);
   assert.match(source, /const askAnswered = askInput !== null && !!result && !result\.isError\s*&& askAnswersFromDetails\(result\.details\)\.rows\.length > 0/s);
   assert.match(source, /<AskResultPanel details=\{result\.details\} input=\{askInput\} \/>/);
-  assert.match(source, /\{askInput \? "ask" : block\.toolName\}/);
+  // the header names the ask, whichever way the call arrived (omp 19.1 tool commands relabel other tools beside it)
+  assert.match(source, /const shownToolName = askInput \? "ask" : toolCommand\?\.tool \?\? block\.toolName/);
   assert.match(source, /function getToolPreview\(block: ToolCallContent, askInput: Record<string, unknown> \| null\)/);
   assert.match(source, /if \(askInput\) \{\s*const preview = askCallPreview\(askInput, /);
   assert.match(source, /JSON\.stringify\(askInput \?\? block\.input, null, 2\)/);

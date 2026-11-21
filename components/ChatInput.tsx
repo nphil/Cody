@@ -3345,7 +3345,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           <div style={{
             display: "flex",
             alignItems: "center",
-            gap: isMobile ? 4 : 2,
+            columnGap: isMobile ? 4 : 2,
             marginTop: 8,
             paddingTop: 8,
             borderTop: "1px solid color-mix(in srgb, var(--border) 62%, transparent)",

@@ -1,0 +1,1287 @@
+{
+  "note": "Recorded from a real omp 19.1.0 rpc-ui child against a mock model server (approvalMode always-ask). allow = Approve chosen; deny = Deny chosen.",
+  "allow": {
+    "engine": "19.1",
+    "scenario": "approval",
+    "state": {
+      "sessionId": "01a1fec9-bd90-7382-a9fa-7a0a0dda58c4",
+      "isStreaming": false
+    },
+    "probes": [
+      {
+        "at": 3117,
+        "phase": "while-waiting",
+        "approvalEntries": [
+          {
+            "type": "custom",
+            "customType": "tool_approval_requested",
+            "data": {
+              "toolCallId": "toolu_0",
+              "toolName": "bash",
+              "approvalMode": "always-ask",
+              "requestedAt": "2026-11-21T15:46:37.196Z"
+            },
+            "id": "4b221034",
+            "parentId": "b83d5bbc",
+            "timestamp": "2026-11-21T15:46:37.196Z",
+            "runtime": {
+              "version": "19.1.0"
+            }
+          }
+        ],
+        "entryTypes": [
+          "title",
+          "session",
+          "model_change",
+          "thinking_level_change",
+          "custom:date-cwd-reminder",
+          "message:user",
+          "custom:system-prompt-digest",
+          "message:assistant",
+          "custom:tool_execution_start",
+          "custom:tool_approval_requested"
+        ],
+        "lease": "{\"held\":[\"01a1fec9-bd90-7382-a9fa-7a0a0dda58c4\"],\"unknown\":[]}",
+        "state": {
+          "isStreaming": true
+        }
+      },
+      {
+        "phase": "after-exit",
+        "lease": "{\"held\":[],\"unknown\":[]}"
+      }
+    ],
+    "frames": [
+      {
+        "type": "ready",
+        "protocolVersion": 1,
+        "supportedProtocolVersions": [
+          1,
+          2
+        ],
+        "maxFrameBytes": 1048576,
+        "maxReassembledFrameBytes": 67108864,
+        "supportsBashExcludeFromContext": true,
+        "__t": 1420
+      },
+      {
+        "type": "agent_start",
+        "__t": 1840
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "LC-INTENT run the check"
+            }
+          ],
+          "attribution": "user",
+          "timestamp": 1795275997110
+        },
+        "messageId": "msg-1",
+        "__t": 1879
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "toolCall",
+              "id": "toolu_0",
+              "name": "bash",
+              "arguments": {
+                "command": "echo INTENT-OK",
+                "i": "Checking the intent"
+              }
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 5,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 6,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.0001,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.00010400000000000001
+            }
+          },
+          "stopReason": "toolUse",
+          "timestamp": 1795275997157,
+          "responseId": "msg_0",
+          "duration": 24.369363999999905,
+          "ttft": 22.611124000000018,
+          "completedAt": 1795275997187
+        },
+        "messageId": "msg-2",
+        "__t": 1901
+      },
+      {
+        "type": "tool_execution_start",
+        "toolCallId": "toolu_0",
+        "toolName": "bash",
+        "args": {
+          "command": "echo INTENT-OK",
+          "i": "Checking the intent"
+        },
+        "__t": 1909
+      },
+      {
+        "type": "extension_ui_request",
+        "id": "15d6ffc403b6ade3",
+        "method": "select",
+        "title": "Allow tool: bash\nCommand: echo INTENT-OK",
+        "options": [
+          "Approve",
+          "Approve bash for this session",
+          "Deny"
+        ],
+        "__t": 1911
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_0",
+        "toolName": "bash",
+        "args": {
+          "command": "echo INTENT-OK",
+          "i": "Checking the intent"
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": "INTENT-OK\n"
+            }
+          ],
+          "details": {}
+        },
+        "__t": 3990
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_0",
+        "toolName": "bash",
+        "args": {
+          "command": "echo INTENT-OK",
+          "i": "Checking the intent"
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": "INTENT-OK\n"
+            }
+          ],
+          "details": {}
+        },
+        "__t": 3991
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_0",
+        "toolName": "bash",
+        "args": {
+          "command": "echo INTENT-OK",
+          "i": "Checking the intent"
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": "INTENT-OK\n"
+            }
+          ],
+          "details": {
+            "wallTimeNoticeEmitted": false,
+            "timeoutSeconds": 300,
+            "wallTimeMs": 33.09313800000018
+          }
+        },
+        "__t": 3993
+      },
+      {
+        "type": "tool_execution_end",
+        "toolCallId": "toolu_0",
+        "toolName": "bash",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "INTENT-OK\n"
+            }
+          ],
+          "details": {
+            "wallTimeNoticeEmitted": false,
+            "timeoutSeconds": 300,
+            "wallTimeMs": 33.09313800000018
+          }
+        },
+        "isError": false,
+        "__t": 3994
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "toolResult",
+          "toolCallId": "toolu_0",
+          "toolName": "bash",
+          "content": [
+            {
+              "type": "text",
+              "text": "INTENT-OK\n"
+            }
+          ],
+          "details": {
+            "wallTimeNoticeEmitted": false,
+            "timeoutSeconds": 300,
+            "wallTimeMs": 33.09313800000018
+          },
+          "isError": false,
+          "timestamp": 1795275999281
+        },
+        "messageId": "msg-3",
+        "__t": 3994
+      },
+      {
+        "type": "turn_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "toolCall",
+              "id": "toolu_0",
+              "name": "bash",
+              "arguments": {
+                "command": "echo INTENT-OK",
+                "i": "Checking the intent"
+              }
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 5,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 6,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.0001,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.00010400000000000001
+            }
+          },
+          "stopReason": "toolUse",
+          "timestamp": 1795275997157,
+          "responseId": "msg_0",
+          "duration": 24.369363999999905,
+          "ttft": 22.611124000000018
+        },
+        "toolResults": [
+          {
+            "role": "toolResult",
+            "toolCallId": "toolu_0",
+            "toolName": "bash",
+            "content": [
+              {
+                "type": "text",
+                "text": "INTENT-OK\n"
+              }
+            ],
+            "details": {
+              "wallTimeNoticeEmitted": false,
+              "timeoutSeconds": 300,
+              "wallTimeMs": 33.09313800000018
+            },
+            "isError": false,
+            "timestamp": 1795275999281
+          }
+        ],
+        "__t": 3997
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "AFTER-TOOL"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 2,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 3,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.00004,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.000044000000000000006
+            }
+          },
+          "stopReason": "stop",
+          "timestamp": 1795275999289,
+          "responseId": "msg_1",
+          "duration": 3.1838800000000447,
+          "ttft": 2.475485999999819,
+          "completedAt": 1795275999293
+        },
+        "messageId": "msg-4",
+        "__t": 4006
+      },
+      {
+        "type": "turn_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "AFTER-TOOL"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 2,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 3,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.00004,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.000044000000000000006
+            }
+          },
+          "stopReason": "stop",
+          "timestamp": 1795275999289,
+          "responseId": "msg_1",
+          "duration": 3.1838800000000447,
+          "ttft": 2.475485999999819
+        },
+        "toolResults": [],
+        "__t": 4006
+      },
+      {
+        "type": "agent_end",
+        "messages": 4,
+        "isTerminal": true,
+        "yielded": true,
+        "__t": 4014
+      },
+      {
+        "type": "prompt_result",
+        "id": "prompt-5",
+        "agentInvoked": true,
+        "status": "completed",
+        "sessionSettled": true,
+        "__t": 4014
+      },
+      {
+        "type": "session_settled",
+        "__t": 4015
+      }
+    ],
+    "entries": [
+      {
+        "type": "title",
+        "v": 1,
+        "title": "",
+        "updatedAt": "2026-11-21T15:46:36.560Z",
+        "pad": "                                                                                                                                                                              "
+      },
+      {
+        "type": "session",
+        "version": 3,
+        "id": "01a1fec9-bd90-7382-a9fa-7a0a0dda58c4",
+        "timestamp": "2026-11-21T15:46:36.560Z",
+        "cwd": "/scratch/lab191/19_1-approval/work"
+      },
+      {
+        "type": "model_change",
+        "id": "9875ca62",
+        "parentId": null,
+        "timestamp": "2026-11-21T15:46:36.665Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "model": "mock/claude-opus-5-5",
+        "resolvedModelIsFallback": false
+      },
+      {
+        "type": "thinking_level_change",
+        "id": "9cc8477c",
+        "parentId": "9875ca62",
+        "timestamp": "2026-11-21T15:46:36.666Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "thinkingLevel": "high",
+        "configured": null
+      },
+      {
+        "type": "custom",
+        "customType": "date-cwd-reminder",
+        "data": {
+          "conversation": "user:1795275997110:user",
+          "turn": "user:1795275997110:user",
+          "reminder": "<system-reminder>\nToday: 2026-11-21; current working directory: '/scratch/lab191/19_1-approval/work'. Do not repeat this information in your reply.\n</system-reminder>",
+          "placement": "prefix",
+          "firstTurn": "3c8e5141bdc29b26"
+        },
+        "id": "cc1e0f4b",
+        "parentId": "9cc8477c",
+        "timestamp": "2026-11-21T15:46:37.136Z",
+        "runtime": {
+          "version": "19.1.0"
+        }
+      },
+      {
+        "type": "message",
+        "id": "4f09cea2",
+        "parentId": "cc1e0f4b",
+        "timestamp": "2026-11-21T15:46:37.166Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "LC-INTENT run the check"
+            }
+          ],
+          "attribution": "user",
+          "timestamp": 1795275997110
+        }
+      },
+      {
+        "type": "custom",
+        "customType": "system-prompt-digest",
+        "data": "cdf7046303f980ed",
+        "id": "3fe0995a",
+        "parentId": "4f09cea2",
+        "timestamp": "2026-11-21T15:46:37.188Z",
+        "runtime": {
+          "version": "19.1.0"
+        }
+      },
+      {
+        "type": "message",
+        "id": "38aff537",
+        "parentId": "3fe0995a",
+        "timestamp": "2026-11-21T15:46:37.188Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "toolCall",
+              "id": "toolu_0",
+              "name": "bash",
+              "arguments": {
+                "command": "echo INTENT-OK",
+                "i": "Checking the intent"
+              }
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 5,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 6,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.0001,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.00010400000000000001
+            }
+          },
+          "stopReason": "toolUse",
+          "timestamp": 1795275997157,
+          "responseId": "msg_0",
+          "duration": 24.369363999999905,
+          "ttft": 22.611124000000018,
+          "completedAt": 1795275997187,
+          "contextSnapshot": {
+            "promptTokens": 1,
+            "nonMessageTokens": 11578,
+            "toolSchemaTokens": 7785,
+            "compactionEpoch": 0
+          }
+        }
+      },
+      {
+        "type": "custom",
+        "customType": "tool_execution_start",
+        "data": {
+          "toolCallId": "toolu_0",
+          "toolName": "bash",
+          "startedAt": "2026-11-21T15:46:37.195Z",
+          "args": {
+            "command": "echo INTENT-OK"
+          }
+        },
+        "id": "b83d5bbc",
+        "parentId": "38aff537",
+        "timestamp": "2026-11-21T15:46:37.195Z",
+        "runtime": {
+          "version": "19.1.0"
+        }
+      },
+      {
+        "type": "custom",
+        "customType": "tool_approval_requested",
+        "data": {
+          "toolCallId": "toolu_0",
+          "toolName": "bash",
+          "approvalMode": "always-ask",
+          "requestedAt": "2026-11-21T15:46:37.196Z"
+        },
+        "id": "4b221034",
+        "parentId": "b83d5bbc",
+        "timestamp": "2026-11-21T15:46:37.196Z",
+        "runtime": {
+          "version": "19.1.0"
+        }
+      },
+      {
+        "type": "custom",
+        "customType": "tool_approval_resolved",
+        "data": {
+          "toolCallId": "toolu_0",
+          "toolName": "bash",
+          "approved": true,
+          "resolvedAt": "2026-11-21T15:46:39.241Z"
+        },
+        "id": "85fef2c1",
+        "parentId": "4b221034",
+        "timestamp": "2026-11-21T15:46:39.241Z",
+        "runtime": {
+          "version": "19.1.0"
+        }
+      },
+      {
+        "type": "message",
+        "id": "99701eba",
+        "parentId": "85fef2c1",
+        "timestamp": "2026-11-21T15:46:39.281Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "message": {
+          "role": "toolResult",
+          "toolCallId": "toolu_0",
+          "toolName": "bash",
+          "content": [
+            {
+              "type": "text",
+              "text": "INTENT-OK\n"
+            }
+          ],
+          "details": {
+            "wallTimeNoticeEmitted": false,
+            "timeoutSeconds": 300,
+            "wallTimeMs": 33.09313800000018
+          },
+          "isError": false,
+          "timestamp": 1795275999281
+        }
+      },
+      {
+        "type": "message",
+        "id": "32a9102d",
+        "parentId": "99701eba",
+        "timestamp": "2026-11-21T15:46:39.293Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "AFTER-TOOL"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 2,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 3,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.00004,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.000044000000000000006
+            }
+          },
+          "stopReason": "stop",
+          "timestamp": 1795275999289,
+          "responseId": "msg_1",
+          "duration": 3.1838800000000447,
+          "ttft": 2.475485999999819,
+          "completedAt": 1795275999293,
+          "contextSnapshot": {
+            "promptTokens": 1,
+            "nonMessageTokens": 11578,
+            "toolSchemaTokens": 7785,
+            "compactionEpoch": 0
+          }
+        }
+      }
+    ],
+    "mockLog": [
+      {
+        "kind": "main",
+        "reply": "tool:_bash",
+        "t": 1795275997169
+      },
+      {
+        "kind": "main",
+        "reply": "AFTER-TOOL",
+        "t": 1795275999291
+      }
+    ]
+  },
+  "deny": {
+    "engine": "19.1",
+    "scenario": "approval-deny",
+    "state": {
+      "sessionId": "01a1fec9-f261-7755-9e46-6882768b9a89",
+      "isStreaming": false
+    },
+    "probes": [
+      {
+        "at": 3461,
+        "phase": "while-waiting",
+        "approvalEntries": [
+          {
+            "type": "custom",
+            "customType": "tool_approval_requested",
+            "data": {
+              "toolCallId": "toolu_0",
+              "toolName": "bash",
+              "approvalMode": "always-ask",
+              "requestedAt": "2026-11-21T15:46:50.527Z"
+            },
+            "id": "f498a30b",
+            "parentId": "9f03a95b",
+            "timestamp": "2026-11-21T15:46:50.527Z",
+            "runtime": {
+              "version": "19.1.0"
+            }
+          }
+        ],
+        "entryTypes": [
+          "title",
+          "session",
+          "model_change",
+          "thinking_level_change",
+          "custom:date-cwd-reminder",
+          "message:user",
+          "custom:system-prompt-digest",
+          "message:assistant",
+          "custom:tool_execution_start",
+          "custom:tool_approval_requested"
+        ],
+        "lease": "{\"held\":[\"01a1fec9-f261-7755-9e46-6882768b9a89\"],\"unknown\":[]}",
+        "state": {
+          "isStreaming": true
+        }
+      },
+      {
+        "phase": "after-exit",
+        "lease": "{\"held\":[],\"unknown\":[]}"
+      }
+    ],
+    "frames": [
+      {
+        "type": "ready",
+        "protocolVersion": 1,
+        "supportedProtocolVersions": [
+          1,
+          2
+        ],
+        "maxFrameBytes": 1048576,
+        "maxReassembledFrameBytes": 67108864,
+        "supportsBashExcludeFromContext": true,
+        "__t": 1870
+      },
+      {
+        "type": "agent_start",
+        "__t": 2060
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "LC-INTENT run the check"
+            }
+          ],
+          "attribution": "user",
+          "timestamp": 1795276010420
+        },
+        "messageId": "msg-1",
+        "__t": 2113
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "toolCall",
+              "id": "toolu_0",
+              "name": "bash",
+              "arguments": {
+                "command": "echo INTENT-OK",
+                "i": "Checking the intent"
+              }
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 5,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 6,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.0001,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.00010400000000000001
+            }
+          },
+          "stopReason": "toolUse",
+          "timestamp": 1795276010491,
+          "responseId": "msg_0",
+          "duration": 17.794214999999895,
+          "ttft": 15.494740999999976,
+          "completedAt": 1795276010516
+        },
+        "messageId": "msg-2",
+        "__t": 2130
+      },
+      {
+        "type": "tool_execution_start",
+        "toolCallId": "toolu_0",
+        "toolName": "bash",
+        "args": {
+          "command": "echo INTENT-OK",
+          "i": "Checking the intent"
+        },
+        "__t": 2141
+      },
+      {
+        "type": "extension_ui_request",
+        "id": "15d6ffd1087705cb",
+        "method": "select",
+        "title": "Allow tool: bash\nCommand: echo INTENT-OK",
+        "options": [
+          "Approve",
+          "Approve bash for this session",
+          "Deny"
+        ],
+        "__t": 2143
+      },
+      {
+        "type": "tool_execution_end",
+        "toolCallId": "toolu_0",
+        "toolName": "bash",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "Tool call denied by user: bash"
+            }
+          ],
+          "details": {}
+        },
+        "isError": true,
+        "__t": 4962
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "toolResult",
+          "toolCallId": "toolu_0",
+          "toolName": "bash",
+          "content": [
+            {
+              "type": "text",
+              "text": "Tool call denied by user: bash"
+            }
+          ],
+          "details": {},
+          "isError": true,
+          "timestamp": 1795276013347
+        },
+        "messageId": "msg-3",
+        "__t": 4963
+      },
+      {
+        "type": "turn_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "toolCall",
+              "id": "toolu_0",
+              "name": "bash",
+              "arguments": {
+                "command": "echo INTENT-OK",
+                "i": "Checking the intent"
+              }
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 5,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 6,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.0001,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.00010400000000000001
+            }
+          },
+          "stopReason": "toolUse",
+          "timestamp": 1795276010491,
+          "responseId": "msg_0",
+          "duration": 17.794214999999895,
+          "ttft": 15.494740999999976
+        },
+        "toolResults": [
+          {
+            "role": "toolResult",
+            "toolCallId": "toolu_0",
+            "toolName": "bash",
+            "content": [
+              {
+                "type": "text",
+                "text": "Tool call denied by user: bash"
+              }
+            ],
+            "details": {},
+            "isError": true,
+            "timestamp": 1795276013347
+          }
+        ],
+        "__t": 4971
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "AFTER-TOOL"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 2,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 3,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.00004,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.000044000000000000006
+            }
+          },
+          "stopReason": "stop",
+          "timestamp": 1795276013367,
+          "responseId": "msg_1",
+          "duration": 3.522171999999955,
+          "ttft": 2.7222170000004553,
+          "completedAt": 1795276013371
+        },
+        "messageId": "msg-4",
+        "__t": 4985
+      },
+      {
+        "type": "turn_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "AFTER-TOOL"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 2,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 3,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.00004,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.000044000000000000006
+            }
+          },
+          "stopReason": "stop",
+          "timestamp": 1795276013367,
+          "responseId": "msg_1",
+          "duration": 3.522171999999955,
+          "ttft": 2.7222170000004553
+        },
+        "toolResults": [],
+        "__t": 4986
+      },
+      {
+        "type": "agent_end",
+        "messages": 4,
+        "isTerminal": true,
+        "yielded": true,
+        "__t": 4994
+      },
+      {
+        "type": "prompt_result",
+        "id": "prompt-5",
+        "agentInvoked": true,
+        "status": "completed",
+        "sessionSettled": true,
+        "__t": 4995
+      },
+      {
+        "type": "session_settled",
+        "__t": 4995
+      }
+    ],
+    "entries": [
+      {
+        "type": "title",
+        "v": 1,
+        "title": "",
+        "updatedAt": "2026-11-21T15:46:50.081Z",
+        "pad": "                                                                                                                                                                              "
+      },
+      {
+        "type": "session",
+        "version": 3,
+        "id": "01a1fec9-f261-7755-9e46-6882768b9a89",
+        "timestamp": "2026-11-21T15:46:50.081Z",
+        "cwd": "/scratch/lab191/19_1-approval-deny/work"
+      },
+      {
+        "type": "model_change",
+        "id": "6dd867a7",
+        "parentId": null,
+        "timestamp": "2026-11-21T15:46:50.206Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "model": "mock/claude-opus-5-5",
+        "resolvedModelIsFallback": false
+      },
+      {
+        "type": "thinking_level_change",
+        "id": "e64b388d",
+        "parentId": "6dd867a7",
+        "timestamp": "2026-11-21T15:46:50.207Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "thinkingLevel": "high",
+        "configured": null
+      },
+      {
+        "type": "custom",
+        "customType": "date-cwd-reminder",
+        "data": {
+          "conversation": "user:1795276010420:user",
+          "turn": "user:1795276010420:user",
+          "reminder": "<system-reminder>\nToday: 2026-11-21; current working directory: '/scratch/lab191/19_1-approval-deny/work'. Do not repeat this information in your reply.\n</system-reminder>",
+          "placement": "prefix",
+          "firstTurn": "3c8e5141bdc29b26"
+        },
+        "id": "e5401bdc",
+        "parentId": "e64b388d",
+        "timestamp": "2026-11-21T15:46:50.468Z",
+        "runtime": {
+          "version": "19.1.0"
+        }
+      },
+      {
+        "type": "message",
+        "id": "d9d56e69",
+        "parentId": "e5401bdc",
+        "timestamp": "2026-11-21T15:46:50.499Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "LC-INTENT run the check"
+            }
+          ],
+          "attribution": "user",
+          "timestamp": 1795276010420
+        }
+      },
+      {
+        "type": "custom",
+        "customType": "system-prompt-digest",
+        "data": "cdf7046303f980ed",
+        "id": "dcbe9270",
+        "parentId": "d9d56e69",
+        "timestamp": "2026-11-21T15:46:50.517Z",
+        "runtime": {
+          "version": "19.1.0"
+        }
+      },
+      {
+        "type": "message",
+        "id": "a42832ec",
+        "parentId": "dcbe9270",
+        "timestamp": "2026-11-21T15:46:50.517Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "toolCall",
+              "id": "toolu_0",
+              "name": "bash",
+              "arguments": {
+                "command": "echo INTENT-OK",
+                "i": "Checking the intent"
+              }
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 5,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 6,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.0001,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.00010400000000000001
+            }
+          },
+          "stopReason": "toolUse",
+          "timestamp": 1795276010491,
+          "responseId": "msg_0",
+          "duration": 17.794214999999895,
+          "ttft": 15.494740999999976,
+          "completedAt": 1795276010516,
+          "contextSnapshot": {
+            "promptTokens": 1,
+            "nonMessageTokens": 11578,
+            "toolSchemaTokens": 7785,
+            "compactionEpoch": 0
+          }
+        }
+      },
+      {
+        "type": "custom",
+        "customType": "tool_execution_start",
+        "data": {
+          "toolCallId": "toolu_0",
+          "toolName": "bash",
+          "startedAt": "2026-11-21T15:46:50.526Z",
+          "args": {
+            "command": "echo INTENT-OK"
+          }
+        },
+        "id": "9f03a95b",
+        "parentId": "a42832ec",
+        "timestamp": "2026-11-21T15:46:50.526Z",
+        "runtime": {
+          "version": "19.1.0"
+        }
+      },
+      {
+        "type": "custom",
+        "customType": "tool_approval_requested",
+        "data": {
+          "toolCallId": "toolu_0",
+          "toolName": "bash",
+          "approvalMode": "always-ask",
+          "requestedAt": "2026-11-21T15:46:50.527Z"
+        },
+        "id": "f498a30b",
+        "parentId": "9f03a95b",
+        "timestamp": "2026-11-21T15:46:50.527Z",
+        "runtime": {
+          "version": "19.1.0"
+        }
+      },
+      {
+        "type": "custom",
+        "customType": "tool_approval_resolved",
+        "data": {
+          "toolCallId": "toolu_0",
+          "toolName": "bash",
+          "approved": false,
+          "reason": "denied by user",
+          "resolvedAt": "2026-11-21T15:46:53.345Z"
+        },
+        "id": "bca549c8",
+        "parentId": "f498a30b",
+        "timestamp": "2026-11-21T15:46:53.345Z",
+        "runtime": {
+          "version": "19.1.0"
+        }
+      },
+      {
+        "type": "message",
+        "id": "4ec77d40",
+        "parentId": "bca549c8",
+        "timestamp": "2026-11-21T15:46:53.349Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "message": {
+          "role": "toolResult",
+          "toolCallId": "toolu_0",
+          "toolName": "bash",
+          "content": [
+            {
+              "type": "text",
+              "text": "Tool call denied by user: bash"
+            }
+          ],
+          "details": {},
+          "isError": true,
+          "timestamp": 1795276013347
+        }
+      },
+      {
+        "type": "message",
+        "id": "4e816a87",
+        "parentId": "4ec77d40",
+        "timestamp": "2026-11-21T15:46:53.371Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "AFTER-TOOL"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 2,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 3,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.00004,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.000044000000000000006
+            }
+          },
+          "stopReason": "stop",
+          "timestamp": 1795276013367,
+          "responseId": "msg_1",
+          "duration": 3.522171999999955,
+          "ttft": 2.7222170000004553,
+          "completedAt": 1795276013371,
+          "contextSnapshot": {
+            "promptTokens": 1,
+            "nonMessageTokens": 11578,
+            "toolSchemaTokens": 7785,
+            "compactionEpoch": 0
+          }
+        }
+      }
+    ],
+    "mockLog": [
+      {
+        "kind": "main",
+        "reply": "tool:_bash",
+        "t": 1795276010503
+      },
+      {
+        "kind": "main",
+        "reply": "AFTER-TOOL",
+        "t": 1795276013369
+      }
+    ]
+  }
+}

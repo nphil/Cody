@@ -66,6 +66,7 @@ Location: `~/.omp/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`
   entries (skipped), `compaction` entries with `method: "handoff" | "soft"`,
   assistant `contextSnapshot` / `duration` fields (ignored), spilled output at
   `<session>/local/N.log` instead of `<session>/N.bash.log`.
+- omp 19.1.0 adds `custom` entries `tool_approval_requested` / `tool_approval_resolved` (`data` has `toolCallId`, `toolName`, `approved`, `reason`, timestamps) and stamps an assistant message that a retry saga replaced with `retryRecovery {kind:"auto-retry", status:"recovered"|"superseded", ...}` (19.0 wrote the stamp too). The reader ignores the first pair; `entryToUiMessage` hides a stamped message only when its `usage` is zero, so the cost total (which sums the rebuilt messages) stays whole. Fixtures: `lib/fixtures/omp-19.1.0-{approval-records,retry}.json`.
 
 `entryIds[]` in `SessionContext` is a parallel array to `messages[]` — maps each displayed message back to its `.jsonl` entry id, used for fork and navigate_tree calls.
 

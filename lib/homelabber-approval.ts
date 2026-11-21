@@ -24,7 +24,9 @@
  *     the whole structuredContent as a fenced ```json block;
  *   - omp's session reader keeps no `details`, so the TEXT alone must be enough;
  *   - a live frame may still carry `details.structuredContent` (also nested
- *     under `details.xdev.inner` for a `write xd://…` device call);
+ *     under `details.xdev.inner` for a `write xd://…` device call on omp 19.0
+ *     and older, and under `details.toolCommands[].inner` for a tool command
+ *     omp 19.1 ran inside `bash`; its text then ends "Command exited with code 1");
  *   - a plain-text result still names the request in prose.
  *
  * A result that is not recognisably one of these is `null`, and the caller
@@ -33,6 +35,7 @@
  */
 import type { AgentMessage, AssistantMessage, ToolCallContent, ToolResultMessage } from "./types";
 import { asNumber, isRecord } from "./type-guards";
+import { toolCommandCall } from "./tool-command";
 
 /** Where HomeLabber's web UI lives when Cody cannot learn it from its own MCP
  *  config (see `homelabberBaseFromMcpUrl`). */
@@ -147,12 +150,17 @@ function jsonObject(text: unknown): Record<string, unknown> {
   }
 }
 
-/** The HomeLabber tool a call goes to, or null for any other call. Both
- *  spellings of an MCP tool are recognised: the direct tool name, and omp's
- *  `write xd://mcp__homelabber_<tool>` device call. */
-export function homelabberCall(toolName: string, input: unknown): HomelabberCall | null {
+/** The HomeLabber tool a call goes to, or null for any other call. Every
+ *  spelling of an MCP tool is recognised: the direct tool name, omp 19.0's
+ *  `write xd://mcp__homelabber_<tool>` device call, and omp 19.1's tool command
+ *  `bash` `mcp__homelabber_<tool> -j '<json>'`. `details` is the result's, when it
+ *  has one: omp's own record of the command, which names the arguments it ran. */
+export function homelabberCall(toolName: string, input: unknown, details?: unknown): HomelabberCall | null {
   const direct = DIRECT_TOOL.exec(toolName);
   if (direct) return { tool: direct[1], args: isRecord(input) ? input : {} };
+  const command = toolCommandCall(toolName, input, details);
+  const viaCommand = command ? DIRECT_TOOL.exec(command.tool) : null;
+  if (command && viaCommand) return { tool: viaCommand[1], args: command.args ?? {} };
   if (toolName !== "write" || !isRecord(input) || typeof input.path !== "string") return null;
   const device = DEVICE_PATH.exec(input.path.trim());
   return device ? { tool: device[1], args: jsonObject(input.content) } : null;
@@ -231,12 +239,16 @@ function jsonObjectsIn(text: string): Record<string, unknown>[] {
 }
 
 /** `structuredContent` wherever the engine put it: omp's MCP bridge puts it on
- *  `details`, and a `write xd://…` device call nests that under `xdev.inner`. */
+ *  `details`, a `write xd://…` device call (omp 19.0) nests that under `xdev.inner`,
+ *  and a tool command in `bash` (omp 19.1) under `toolCommands[i].inner`. */
 function structuredIn(details: unknown, depth = 0): Record<string, unknown>[] {
   if (!isRecord(details) || depth > 3) return [];
   const found: Record<string, unknown>[] = [];
   if (isRecord(details.structuredContent)) found.push(details.structuredContent);
   for (const key of ["xdev", "inner", "details"]) found.push(...structuredIn(details[key], depth + 1));
+  if (Array.isArray(details.toolCommands)) {
+    for (const record of details.toolCommands.slice(0, 8)) found.push(...structuredIn(record, depth + 1));
+  }
   return found;
 }
 
@@ -313,7 +325,7 @@ const observations = new WeakMap<object, { key: string; observation: ApprovalObs
  */
 export function parseHomelabberApproval(call: ApprovalCallLike, result?: ApprovalResultLike | null): ApprovalObservation | null {
   if (!result) return null;
-  const ref = homelabberCall(call.toolName, call.input);
+  const ref = homelabberCall(call.toolName, call.input, result.details);
   if (!ref) return null;
   const key = `${ref.tool}|${typeof ref.args.id === "string" ? ref.args.id : ""}|${Array.isArray(ref.args.steps) ? ref.args.steps.length : ""}`;
   const cached = observations.get(result);

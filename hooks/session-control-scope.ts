@@ -34,8 +34,10 @@ export function isFastModeUnavailableError(error: unknown): boolean {
 /** What the reasoning selector shows after the engine reports a level.
  *
  *  omp represents Auto as the EFFECTIVE level it resolved ("high") plus
- *  `configured: "auto"` on the `thinking_level_changed` event only; a
- *  `get_state` snapshot carries the effective level alone. So the selector the
+ *  `configured: "auto"` on the `thinking_level_changed` event, and from omp
+ *  19.1 also as `configuredThinkingLevel` on every `get_state` snapshot, so
+ *  there `configured` is always given and nothing is guessed. An older
+ *  engine's snapshot carries the effective level alone, so the selector the
  *  user chose has to be remembered between events: a snapshot must not repaint
  *  Auto as an explicit High, and an explicit pick (whose echo carries no
  *  `configured`) must stop it reading as Auto. Returns the remembered flag

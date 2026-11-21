@@ -99,7 +99,7 @@ export const ompHarness: HarnessAdapter = {
   // update, and the RPC run lifecycle were run against 19.0.0 and 18.20.1;
   // earlier audits covered 18.19.0 and 18.22.2). 18.8.3 still works: every
   // 18.9+ feature Cody uses is feature-detected, never assumed.
-  verifiedVersion: "19.0.0",
+  verifiedVersion: "19.1.0",
   capabilities: {
     liveSessions: true,
     models: true,

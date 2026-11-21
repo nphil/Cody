@@ -13,7 +13,7 @@ import type {
 } from "@/lib/types";
 import { normalizeToolCalls } from "@/lib/normalize";
 import { foldSystemReminder } from "@/lib/system-reminder";
-import { appendBackgroundMessage, isInternalBackgroundMessage } from "@/lib/message-display";
+import { appendBackgroundMessage, isInternalBackgroundMessage, isToolMountNotice } from "@/lib/message-display";
 import {
   readPermissionRequest,
   readPermissionRequests,
@@ -64,6 +64,7 @@ import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { usePageWake } from "@/hooks/usePageWake";
 import { createMessageUpdateCoalescer, type MessageUpdateCoalescer } from "@/lib/message-update-coalescer";
+import { holdsMessage, messageReplayKey, withDeliveredTail } from "@/lib/attach-replay";
 import {
   evaluateStreamHealth,
   reconnectDelayMs,
@@ -263,6 +264,9 @@ type AgentStateResponse = {
   contextUsage?: ContextUsageValue | null;
   systemPrompt?: string;
   thinkingLevel?: string;
+  // omp 19.1+: the chosen selector (Auto, or the level) and the model's ladder.
+  configuredThinkingLevel?: string;
+  thinkingLevels?: string[];
   fastModeEnabled?: boolean;
   fastModeActive?: boolean;
   slowModeSupported?: boolean;
@@ -523,19 +527,19 @@ function carrySessionClientState(fromId: string, toId: string): void {
   }
 }
 
-/** Narrow the live state's model (OmpModel: id-based) to the composer's shape. */
-function toThinkingModelMeta(model: { provider?: string; id?: string; name?: string; reasoning?: boolean; thinking?: { efforts?: string[]; unverified?: boolean } } | null | undefined): ThinkingModelMeta | null {
+/** Narrow the live state's model (OmpModel: id-based) to the composer's shape; `engineLevels` is omp 19.1+'s `get_state.thinkingLevels` for that model. */
+function toThinkingModelMeta(model: { provider?: string; id?: string; name?: string; reasoning?: boolean; thinking?: { efforts?: string[]; unverified?: boolean } } | null | undefined, engineLevels?: string[]): ThinkingModelMeta | null {
   if (!model?.provider || !model.id) return null;
-  return { provider: model.provider, modelId: model.id, name: model.name, reasoning: model.reasoning, thinking: model.thinking };
+  return { provider: model.provider, modelId: model.id, name: model.name, reasoning: model.reasoning, thinking: model.thinking, ...(engineLevels ? { engineLevels } : {}) };
 }
 
 type ExtensionUiDialogRequest = ExtensionDialogRequest;
 type ExtensionUiCustomRequest = Extract<ExtensionUiRequest, { method: "custom" }>;
 // omp's rpc-ui frames add open_url (OAuth) and cancel on top of lib/types' union.
-// omp 18.4 adds `ask` (after set_ask_dialog) — carried inside ExtensionDialogRequest.
+// omp 18.4 adds `ask` (after set_ask_dialog), omp 19.1 `form` (its ask as one HTML form) — carried inside ExtensionDialogRequest.
 type IncomingExtensionUiRequest =
   | ExtensionUiRequest
-  | Extract<ExtensionDialogRequest, { method: "ask" }>
+  | Extract<ExtensionDialogRequest, { method: "ask" | "form" }>
   | { type: "extension_ui_request"; id: string; method: "open_url"; url: string; launchUrl?: string; instructions?: string }
   | { type: "extension_ui_request"; id: string; method: "cancel"; targetId: string };
 /** How long a ticked `ask` step waits for omp's next question before the dialog is dropped as finished. */
@@ -1251,6 +1255,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // churn that precedes it).
   const messagesRef = useRef<AgentMessage[]>(messages);
   messagesRef.current = messages;
+  // What the stream delivered between a switch's fast attach and its
+  // transcript landing (keys, lib/attach-replay.ts): that landing keeps it.
+  const fastTailRef = useRef<{ sid: string; delivered: Set<string> } | null>(null);
   const [entryIds, setEntryIds] = useState<string[]>(initialCachedData?.context.entryIds ?? []);
   const [streamState, dispatch] = useReducer(streamReducer, { isStreaming: false, streamingMessage: null });
   const [agentRunning, setAgentRunning] = useState(false);
@@ -2116,11 +2123,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       adoptSessionModels(agentState.state);
       adoptSessionModes(agentState.state, sid, modeSeq);
       adoptSessionPromptCapabilities(agentState.state);
-      const applied = applyAuthoritativeModel(toThinkingModelMeta(agentState.state?.model), token);
+      const applied = applyAuthoritativeModel(toThinkingModelMeta(agentState.state?.model, agentState.state?.thinkingLevels), token);
       if (!applied) return false; // stale snapshot — drop its derived state too
       if (agentState.state) setPendingRefusalDecision(readRefusalDecision(agentState.state.pendingRefusalDecision));
       if (agentState.state?.thinkingLevel !== undefined) {
-        adoptThinkingLevel(agentState.state.thinkingLevel);
+        adoptThinkingLevel(agentState.state.thinkingLevel, agentState.state.configuredThinkingLevel);
       }
       adoptFastModeState(agentState.state, sid);
       if (agentState.state?.autoRetryEnabled !== undefined) setAutoRetryEnabled(agentState.state.autoRetryEnabled);
@@ -2228,7 +2235,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       loadedTranscriptSessionIdRef.current = sid;
       setData(d);
       setActiveLeafId(d.leafId);
-      setMessages(d.context.messages);
+      // Messages a switch's fast attach already received that this
+      // transcript, read before they were written, lacks stay.
+      const fastTail = fastTailRef.current;
+      if (fastTail?.sid === sid) {
+        fastTailRef.current = null;
+        setMessages((previous) => withDeliveredTail(d.context.messages, previous, fastTail.delivered));
+      } else {
+        setMessages(d.context.messages);
+      }
       setEntryIds(d.context.entryIds ?? []);
       setTodoPhases(d.context.todoPhases ?? []);
       if (d.planOverlay !== undefined) setPlanOverlay(readPlanOverlay(d.planOverlay) ?? null);
@@ -2280,12 +2295,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       adoptSessionModels(liveState);
       adoptSessionModes(liveState, sid, modeSeq);
       adoptSessionPromptCapabilities(liveState);
-      const modelApplied = applyAuthoritativeModel(toThinkingModelMeta(liveState?.model), token);
+      const modelApplied = applyAuthoritativeModel(toThinkingModelMeta(liveState?.model, liveState?.thinkingLevels), token);
       if (liveState) {
         setPendingRefusalDecision(readRefusalDecision(liveState.pendingRefusalDecision));
         if (liveState.contextUsage !== undefined) setLiveContextUsage(readLiveContextUsage(liveState.contextUsage));
         if (liveState.systemPrompt !== undefined) setSystemPrompt(liveState.systemPrompt || null);
-        if (modelApplied && liveState.thinkingLevel !== undefined) adoptThinkingLevel(liveState.thinkingLevel);
+        if (modelApplied && liveState.thinkingLevel !== undefined) adoptThinkingLevel(liveState.thinkingLevel, liveState.configuredThinkingLevel);
         if (modelApplied) adoptFastModeState(liveState, sid);
         if (liveState.autoRetryEnabled !== undefined) setAutoRetryEnabled(liveState.autoRetryEnabled);
         if (liveState.interruptMode !== undefined) setInterruptMode(liveState.interruptMode);
@@ -2509,7 +2524,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     streamFramesRef.current = 0;
     streamUnhealthySinceRef.current = null;
     streamAttachedRef.current = true;
-    const es = new EventSource(`/api/agent/${encodeURIComponent(sid)}/events`);
+    const es = new EventSource(`/api/agent/${encodeURIComponent(sid)}/events?replay=1`);
     eventSourceRef.current = es;
 
     return new Promise((resolve) => {
@@ -3260,6 +3275,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "input":
       case "editor":
       case "ask":
+      case "form":
         askWalk.observe(request);
         setExtensionDialog(request);
         break;
@@ -3954,7 +3970,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               adoptSessionModels(d.state);
               adoptSessionModes(d.state, endedSid, endModeSeq);
               adoptSessionPromptCapabilities(d.state);
-              const applied = applyAuthoritativeModel(toThinkingModelMeta(d.state.model), endToken);
+              const applied = applyAuthoritativeModel(toThinkingModelMeta(d.state.model, d.state.thinkingLevels), endToken);
               if (!applied) return; // stale snapshot — drop everything derived from it
               if (d.state?.contextUsage !== undefined) setLiveContextUsage(readLiveContextUsage(d.state.contextUsage));
               if (d.state?.systemPrompt !== undefined) setSystemPrompt(d.state.systemPrompt || null);
@@ -4012,10 +4028,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "notice": {
         const level = event.level as string | undefined;
         const message = (event.message as string | undefined)?.trim() ?? "";
-        if (event.source === "xdev" || /^xd:\/\/:\s*(un)?mounted\s/i.test(message)) {
-          // omp's own `xd://: mounted …; unmounted …` line is for the model. Tools now mount all the
-          // time (Cody's host tools at every start, `load_tools` toolsets on demand, again on resume),
-          // and the chat already shows the `load_tools` call, so a pop-up per mount was only spam.
+        if (isToolMountNotice(event.source, message)) {
+          // omp's own tool-inventory line (`xd://: mounted …` through 19.0, `Tool commands: added …` from 19.1) is
+          // for the model. Tools now mount all the time (Cody's host tools at every start, `load_tools` toolsets
+          // on demand, again on resume), and the chat already shows the `load_tools` call, so a pop-up per mount was only spam.
         } else if (event.source === "device") {
           // Hardware pop-ups are decided on the server (lib/devices/operation-notices.ts), so the few that arrive are
           // worth showing, in plain words. Run through the engine-error describer they would read as provider faults.
@@ -4100,7 +4116,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       case "command_output": {
         const text = (event.text as string | undefined)?.trim() ?? "";
-        if (/^xd:\/\/:\s*(un)?mounted\s/i.test(text)) break; // a mount line is for the model (see "notice" above)
+        if (isToolMountNotice(undefined, text)) break; // a mount line is for the model (see "notice" above)
         if (text) addNotice({ type: "info", message: text });
         break;
       }
@@ -4139,7 +4155,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             if (!d?.state?.model) return;
             if (sessionIdRef.current !== sid) return;
             const previous = lastAuthoritativeModelRef.current;
-            const applied = applyAuthoritativeModel(toThinkingModelMeta(d.state.model), token);
+            const applied = applyAuthoritativeModel(toThinkingModelMeta(d.state.model, d.state.thinkingLevels), token);
             if (!applied) return; // stale snapshot — drop its thinking level too
             // A switch with no fallback attribution and no matching recent
             // user pick is still the engine acting on its own — mark it, so
@@ -4169,7 +4185,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
                 current && current.provider === next.provider && current.modelId === next.modelId ? current : null
               ));
             }
-            if (d.state.thinkingLevel !== undefined) adoptThinkingLevel(d.state.thinkingLevel);
+            if (d.state.thinkingLevel !== undefined) adoptThinkingLevel(d.state.thinkingLevel, d.state.configuredThinkingLevel);
             adoptFastModeState(d.state, sid);
             if (d.state.autoRetryEnabled !== undefined) setAutoRetryEnabled(d.state.autoRetryEnabled);
             if (d.state.interruptMode !== undefined) setInterruptMode(d.state.interruptMode);
@@ -4213,6 +4229,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       case "message_end": {
         const completed = event.message as AgentMessage | undefined;
+        const fastTail = fastTailRef.current;
+        if (completed && fastTail && fastTail.sid === sessionIdRef.current) {
+          const key = messageReplayKey(completed);
+          if (key !== null) fastTail.delivered.add(key);
+        }
+        if (event.replayed === true) {
+          // Finished before this stream attached and re-sent on attach
+          // (`?replay=1`; replies and tool results only): the gap between
+          // the transcript read and the subscription. Add only what the list lacks.
+          if (completed && agentRunningRef.current) {
+            const replayedMessage = normalizeToolCalls(completed);
+            setMessages((prev) => (holdsMessage(prev, completed) ? prev : [...prev, replayedMessage]));
+          }
+          break;
+        }
         if (completed && isInternalBackgroundMessage(completed)) {
           setMessages((previous) => appendBackgroundMessage(previous, completed));
           break;
@@ -4238,7 +4269,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // loadSession already loaded this message from the session file —
           // appending it again would duplicate it.
           if (!agentRunningRef.current) break;
-          if (completed?.role === "custom" && (completed as CustomMessage).customType === "xdev-mount-notice") {
+          if (completed?.role === "custom" && ((completed as CustomMessage).customType === "xdev-mount-notice" || (completed as CustomMessage).customType === "tool-command-mount-notice")) {
             // For the model only, and never a pop-up (see the "notice" case): skip it.
           } else if (completed?.role === "assistant" && completed.stopReason === "error") {
             // The engine could not produce a reply at all — no credentials, an
@@ -6077,7 +6108,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // mount and a wake both end here (a page that slept may have missed any of
   // it). `alreadyRunning`: this page was tracking that run before, so it needs
   // no second settlement poller.
-  const adoptLiveEngine = (sid: string, agentState: LiveAgentState | null, alreadyRunning: boolean) => {
+  // `reuseStream`: the mount's fast phase read (`/state?fast=1`) already
+  // attached this page to the live engine and applied its run phase. The full
+  // state that lands later must not reconnect (frames could fall into the gap)
+  // or restart the turn's bubble; it only adds what get_state alone knows.
+  const adoptLiveEngine = (sid: string, agentState: LiveAgentState | null, alreadyRunning: boolean, reuseStream = false) => {
     if (agentState?.running) {
       const knownActive = agentState.state?.isStreaming === true || agentState.state?.isPromptRunning === true;
       // A stale/unconfirmed read (the wrapper's bounded get_state timed
@@ -6091,7 +6126,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // read, and now safely no-ops on a stale one instead of
       // finishing a turn that never actually ended).
       const maybeActive = knownActive || (agentState.stale === true && !agentState.state);
-      if (maybeActive) {
+      if (maybeActive && !reuseStream) {
         agentRunningRef.current = true;
         assistantProviderCallRef.current = agentState.state?.isStreaming === true;
         if (knownActive) {
@@ -6112,25 +6147,42 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // working after the main turn ends, and their frames only reach a
       // page that is listening. Attaching to a live child spawns nothing
       // (only `running: false` means there is none), and an attached
-      // stream is also what keeps a viewed session warm.
-      void connectEvents(sid);
-      // Register the host-tool + URI bridges so the agent can call
-      // open_url/notify/open_file and resolve pi-web://clipboard.
-      void registerHostTools(sid);
-      void registerHostUriSchemes(sid);
-      // Rehydrate the live roster (missed lifecycle/progress frames).
-      // Tracked + session-guarded: a session switch during the delay must
-      // not issue a stale get_subagents against the old session.
-      if (rosterRefreshTimerRef.current) {
-        clearTimeout(rosterRefreshTimerRef.current);
-        rosterRefreshTimerRef.current = null;
+      // stream is also what keeps a viewed session warm. The server replays
+      // the helpers already running as soon as the stream opens; the roster
+      // read below reconciles finished ones.
+      if (!reuseStream) {
+        const attached = connectEvents(sid);
+        // Register the host-tool + URI bridges so the agent can call
+        // open_url/notify/open_file and resolve pi-web://clipboard.
+        void registerHostTools(sid);
+        void registerHostUriSchemes(sid);
+        // Rehydrate the live roster (missed lifecycle/progress frames) as soon
+        // as the stream is open: the server subscribes a live session's stream
+        // before it answers, so from then on no lifecycle frame can fall between
+        // the snapshot and the stream. The timer only covers a stream slow to
+        // open. Tracked + session-guarded: a session switch in between must not
+        // issue a stale get_subagents against the old session.
+        if (rosterRefreshTimerRef.current) {
+          clearTimeout(rosterRefreshTimerRef.current);
+          rosterRefreshTimerRef.current = null;
+        }
+        const rosterTimer = setTimeout(() => {
+          rosterRefreshTimerRef.current = null;
+          if (sessionIdRef.current !== sid) return;
+          void refreshSubagentRoster(sid);
+        }, 600);
+        rosterRefreshTimerRef.current = rosterTimer;
+        void attached.then(() => {
+          // Fired already, or cancelled by a switch, unmount or a newer attach.
+          if (rosterRefreshTimerRef.current !== rosterTimer) return;
+          clearTimeout(rosterTimer);
+          rosterRefreshTimerRef.current = null;
+          if (sessionIdRef.current !== sid) return;
+          void refreshSubagentRoster(sid);
+        });
       }
-      rosterRefreshTimerRef.current = setTimeout(() => {
-        rosterRefreshTimerRef.current = null;
-        if (sessionIdRef.current !== sid) return;
-        void refreshSubagentRoster(sid);
-      }, 600);
-      if (agentState.state?.isBashRunning) {
+      // One settlement poller per command, whichever read saw it first.
+      if (agentState.state?.isBashRunning && !bashRunningRef.current) {
         bashRunningRef.current = true;
         setBashRunning(true);
         void waitForBashSettlement(sid);
@@ -6170,11 +6222,35 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // this is also what stops a page-load's StrictMode double-invoke from
       // paying for two full loads.
       controller = new AbortController();
+      const sid = session.id;
+      const signal = controller.signal;
+      // Live picture first. `/state?fast=1` answers from the run phase this
+      // server already holds (no get_state round trip), so a running chat is
+      // attached (stream, replayed helper roster, run state) while the
+      // transcript and the full state are still loading: a busy engine can
+      // hold get_state for the whole 3 s wait. The full state then adds only
+      // what get_state knows (model, context use, statuses), on the same stream.
+      let fastStream: EventSource | null = null;
+      let fastTail: { sid: string; delivered: Set<string> } | null = null;
+      let fullAdopted = false;
+      void fetch(`/api/sessions/${encodeURIComponent(sid)}/state?fast=1`, { signal })
+        .then((response) => (response.ok ? response.json() as Promise<LiveAgentState> : null))
+        .then((fast) => {
+          if (!fast?.running || fullAdopted || signal.aborted || sessionIdRef.current !== sid) return;
+          fastTail = { sid, delivered: new Set() };
+          fastTailRef.current = fastTail;
+          adoptLiveEngine(sid, fast, false);
+          fastStream = eventSourceRef.current;
+        })
+        .catch(() => {});
       // A cache hit already painted this session synchronously on first
       // render (see initialCachedData above) — do not flash the spinner
       // back on top of it just to revalidate in the background.
-      loadSession(session.id, !initialCachedData, true, undefined, controller.signal).then((agentState) => {
-        adoptLiveEngine(session.id, agentState, false);
+      loadSession(sid, !initialCachedData, true, undefined, signal).then((agentState) => {
+        fullAdopted = true;
+        if (fastTail !== null && fastTailRef.current === fastTail) fastTailRef.current = null;
+        const reuse = fastStream !== null && eventSourceRef.current === fastStream && fastStream.readyState !== EventSource.CLOSED;
+        adoptLiveEngine(sid, agentState, reuse, reuse);
       });
     } else {
       updateSessionControlScope(null, null);
@@ -6185,6 +6261,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       eventCoalescerRef.current?.reset();
       eventSourceRef.current?.close();
       eventSourceRef.current = null;
+      fastTailRef.current = null;
       if (reconnectTimerRef.current) {
         clearTimeout(reconnectTimerRef.current);
         reconnectTimerRef.current = null;

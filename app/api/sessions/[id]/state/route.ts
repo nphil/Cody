@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getRpcSession } from "@/lib/rpc-manager";
-import { agentCommandErrorResponse, getStateBounded, resolveEngineSessionOr404, resolveSessionPathOr404 } from "@/lib/api-utils";
+import { agentCommandErrorResponse, getStateBounded, livePhaseState, resolveEngineSessionOr404, resolveSessionPathOr404 } from "@/lib/api-utils";
 import { getHarness } from "@/lib/harness";
 
 export async function GET(
@@ -14,7 +14,10 @@ export async function GET(
     // below would 404 a brand-new running session.
     const rpc = getRpcSession(id);
     if (rpc?.isAlive()) {
-      return NextResponse.json(await getStateBounded(rpc));
+      // `?fast=1`: the run phase this server already holds, for a page that
+      // attaches to a live chat without waiting behind a busy engine's queue.
+      const quick = new URL(req.url).searchParams.get("fast") === "1" ? livePhaseState(rpc) : null;
+      return NextResponse.json(quick ?? await getStateBounded(rpc));
     }
 
     // A non-omp engine has no session file to fall back on: its index row is

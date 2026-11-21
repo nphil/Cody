@@ -1,0 +1,32 @@
+{
+ "engine": "19.1",
+ "ready": {
+  "type": "ready",
+  "protocolVersion": 1,
+  "supportedProtocolVersions": [
+   1,
+   2
+  ],
+  "maxFrameBytes": 1048576,
+  "maxReassembledFrameBytes": 67108864,
+  "supportsBashExcludeFromContext": true
+ },
+ "uiFrames": [
+  {
+   "type": "extension_ui_request",
+   "id": "15d6fe127db14fb8",
+   "method": "form",
+   "html": "<form>\n  <fieldset><legend>Which colour should the logo be?</legend>\n    <label><input type=\"radio\" name=\"colour\" value=\"red\"> Red</label>\n    <label><input type=\"radio\" name=\"colour\" value=\"green\" checked> Green</label>\n    <label><input type=\"radio\" name=\"colour\" value=\"blue\"> Blue</label>\n  </fieldset>\n  <fieldset><legend>Which toppings?</legend>\n    <label><input type=\"checkbox\" name=\"toppings\" value=\"cheese\"> Cheese</label>\n    <label><input type=\"checkbox\" name=\"toppings\" value=\"olives\"> Olives</label>\n    <label><input type=\"checkbox\" name=\"toppings\" value=\"mushrooms\"> Mushrooms</label>\n  </fieldset>\n  <label>Anything else? <textarea name=\"notes\"></textarea></label>\n</form>"
+  }
+ ],
+ "toolStart": [
+  {
+   "type": "tool_execution_start",
+   "toolCallId": "toolu_0",
+   "toolName": "ask",
+   "args": {
+    "html": "<form>\n  <fieldset><legend>Which colour should the logo be?</legend>\n    <label><input type=\"radio\" name=\"colour\" value=\"red\"> Red</label>\n    <label><input type=\"radio\" name=\"colour\" value=\"green\" checked> Green</label>\n    <label><input type=\"radio\" name=\"colour\" value=\"blue\"> Blue</label>\n  </fieldset>\n  <fieldset><legend>Which toppings?</legend>\n    <label><input type=\"checkbox\" name=\"toppings\" value=\"cheese\"> Cheese</label>\n    <label><input type=\"checkbox\" name=\"toppings\" value=\"olives\"> Olives</label>\n    <label><input type=\"checkbox\" name=\"toppings\" value=\"mushrooms\"> Mushrooms</label>\n  </fieldset>\n  <label>Anything else? <textarea name=\"notes\"></textarea></label>\n</form>"
+   }
+  }
+ ]
+}

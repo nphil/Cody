@@ -82,10 +82,31 @@ session:
   TRANSCRIPT settles. Gating it on the state fetch is what kept a session
   blank: state rides omp's serialized RPC queue, so it can sit behind a
   running turn's command for the whole turn.
-- **Server: parse once per file version.** `loadSessionFileCached`
-  (lib/session-reader.ts) memoizes the parse by path, size, mtime and load
-  options. The ownership check runs before any hit. Repeat GETs went from
-  0.9–1.6 s to 0.04–0.19 s.
+- **Server: parse once per file version, and only what was appended.**
+  `loadSessionFileCached` / `getSessionEntries` (lib/session-reader.ts) keep
+  a parse cursor per file (inode, size, end offset, the 4 KB before it). An
+  unchanged file costs one stat; a grown file parses only its new lines
+  (`extendLoadedSession`); a replaced, shrunk or rewritten file is parsed
+  again in full. A running chat's file grows every few seconds, so before
+  this every switch re-parsed it whole and blocked the server's one thread:
+  185 MB LumaTV copy, 2.0–2.2 s per transcript GET → 0.2–0.44 s. The context
+  and media routes read the same cache (media resolves only the one image
+  asked for). The ownership check runs before any read.
+- **Live state is not gated on the engine.** At mount the page asks
+  `/state?fast=1` (the run phase this server already holds, no `get_state`
+  round trip) in parallel with the transcript, and a live chat attaches its
+  event stream at once. That stream asks for `?replay=1`: the events route
+  replays the helpers already running, so the panel paints as the stream
+  opens (`get_subagents` still runs then and reconciles; the 600 ms timer is
+  only a fallback), then the run's last 8 finished replies and tool results,
+  of which the page adds only those it lacks (lib/attach-replay.ts). The full
+  `/state` (`get_state`, up to a 3 s wait behind a busy engine) lands later
+  and adds only model, context use and statuses, on the same stream
+  (`adoptLiveEngine(…, reuseStream)`). When the transcript lands it keeps the
+  messages the stream delivered after the transcript was read
+  (`withDeliveredTail`); before, it replaced them, and 2 of 5 measured
+  switches into a running chat lost a message until the next reload. The
+  `/subagents` usage route no longer parses the parent file.
 - **Client: stale-while-revalidate across switches.**
   `lib/session-transcript-cache.ts` (12 sessions, 15 min) lives above the
   per-switch remount, so a revisited session paints before any request

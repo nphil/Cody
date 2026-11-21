@@ -468,6 +468,19 @@ export interface EngineSession {
    * is a pure local read (ACP) can never go stale, so it needs no cache.
    */
   lastKnownState?(): unknown;
+  /**
+   * The latest lifecycle + progress frame of every subagent still running,
+   * replayed by the events route to a page that attaches mid-run
+   * (lib/subagent-live-frames.ts). Optional: an engine without subagent
+   * frames has nothing to replay.
+   */
+  liveSubagentFrames?(): EngineEvent[];
+  /**
+   * The current run's latest finished replies and tool results, replayed
+   * after the subagent frames: they fill the gap between an attaching page's
+   * transcript read and its subscription (lib/attach-replay.ts). Optional.
+   */
+  liveMessageFrames?(): EngineEvent[];
 }
 
 /**

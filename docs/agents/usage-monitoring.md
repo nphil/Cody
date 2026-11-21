@@ -64,6 +64,37 @@ gone (tokens stay in the session popover and the button's tooltip).
   bundler: two module copies, one sampler. Nothing under `lib/machines/` may use
   `@/` (`lib/server-import-graph.test.mjs`). Timers and the ssh pipes are
   `unref`'d, so a stuck connection can never hold the server open.
+- **Cody's own share vs the whole machine.** Inside Docker (this server on
+  Unraid) and inside a Proxmox container (the worker) `/proc/stat` is the WHOLE
+  host's CPU; `/proc/meminfo` is the host's on Docker and the container's (lxcfs)
+  on LXC. So every reading carries two sets of numbers: the whole machine's
+  (`MachineMetrics.cpuPercent`/`mem*`, unchanged so an older page still reads
+  them) and Cody's own container's (`MachineMetrics.own`, from its control group).
+  - Cgroup CPU is `usage_usec` (v2) or `cpuacct.usage` ns (v1); its rate is
+    Δusage / (Δwall × cores), where wall is the machine's `/proc/uptime` (the
+    ssh loop prints `up <s>`; `cgroup.ts` uses `os.uptime()`) and cores are the
+    `cpu.max` quota, else what `nproc` sees. Memory is `memory.current` minus
+    `inactive_file` (what `docker stats` does), on the MACHINE's memory scale so
+    the two bars compare; a `memory.max` below the machine's total is reported
+    as `memLimitBytes` and shown as "limit". The wire lines are `cg2 <name>
+    <value>` / `cg1 <name> <value>` (names in `parseOwn`, `lib/machines/proc.ts`);
+    the local reader (`cgroup.ts`) prints the same lines so one parser serves both.
+  - Feature-detected: no cgroup files means `own` is null and everything falls
+    back to the whole machine's numbers, with a note in the panel ("Cody can't see
+    its own share…"). `SAMPLE_COMMAND` stays one constant (no quote, backslash,
+    `!` or backtick). Do not use the `up` or `cg*` lines for the load average:
+    the parser takes the first line that starts with a digit.
+  - The top-bar bars and the severity colour use `barFigures(metrics)` (Cody's
+    when known). The Machines panel (tap on a phone or tablet, hover tooltip on a
+    desktop) draws ONE layered bar per meter: whole machine in a muted colour
+    (`color-mix` of `--text-muted` into `--bg-selected`), Cody's share on top in
+    `--accent`, never longer than the machine's (`machineMemoryUsedBytes` keeps
+    the machine's memory from reading smaller than Cody's: lxcfs counts caches
+    differently). Headline "Cody x% · machine y%", detail "Cody 9.2 GB (limit
+    24.0 GB) · machine 39.5 of 62.6 GB". Contrast in the default themes: accent
+    vs track 3.5 (light) / 5.0 (dark), muted layer vs track 1.7 / 2.1.
+  - Limit: if a container is capped to fewer cores than the machine has, Cody's
+    % is of its own cores (quota), not of the machine's.
 - **Top bar layout** (`MachineMeters.tsx`). The component owns a `flex: 1 1 0`
   slot between the left controls and the session button and measures it with a
   ResizeObserver; `pickMeterDensity` picks the richest of `full` (name, labelled

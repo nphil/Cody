@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import * as path from "path";
 import { isAskDoneRow, isAskMultiStep, isAskOtherRow, isToolApprovalTitle } from "../ask-walk";
+import { formHeadline, parseFormCached, simpleChoice } from "../ask-form-view";
 import { readPermissionOptions, describeToolCall } from "../permission-request";
 import { providerBrand } from "../provider-brand";
 import { replyAsksUser } from "../reply-question";
@@ -260,6 +261,7 @@ export function uiRequestDigest(event: Record<string, unknown>): string {
     method: asString(event.method) ?? null,
     title: asString(event.title) ?? null,
     message: asString(event.message) ?? null,
+    html: asString(event.html) ?? null,
     options: strings(event.options),
     questions: askQuestions(event).map((q) => ({ id: q.id, question: q.question, multi: q.multi, options: q.options })),
   });
@@ -332,6 +334,15 @@ export function answerOfferForUiRequest(event: Record<string, unknown>): AnswerO
     const readable = only !== null && isRecord(raw) && Array.isArray(raw.options) && raw.options.length === only.options.length;
     if (only && readable && !only.multi) {
       choices = choicesFromLabels(only.options, (label) => ({ answers: [{ id: only.id, selectedOptions: [label] }] }));
+    }
+  } else if (event.method === "form") {
+    // omp 19.1 sends ONE form per `ask`. A notification can only answer a lone single-pick question; any other shape
+    // (several fields, ticking, typing, a required text) is a job for the chat, so it gets no buttons.
+    const html = asString(event.html);
+    const only = html ? simpleChoice(parseFormCached(html)) : null;
+    const shown = only ? only.options.map((option) => buttonLabel(option.label)) : [];
+    if (only && only.options.length <= MAX_ANSWER_BUTTONS && shown.every((label) => label !== "")) {
+      choices = only.options.map((option, index) => ({ label: shown[index]!, answer: { data: { [only.name]: option.value } } }));
     }
   }
   if (choices.length === 0) return null;
@@ -408,6 +419,18 @@ export function summarizeUiRequest(event: Record<string, unknown>): UiRequestSum
         return [`${heading}${q.header ? `${q.header}: ` : ""}${q.question}`, ...q.options.map((option) => `   - ${singleLine(option)}`)];
       });
       return { event: "question", body: lines.join("\n") || "The agent asked you some questions." };
+    }
+    case "form": {
+      const html = asString(event.html);
+      if (!html) return { event: "question", body: "The agent asked you some questions. Open the chat to answer." };
+      const form = parseFormCached(html);
+      const only = simpleChoice(form);
+      const headline = formHeadline(form);
+      if (only) {
+        const intro = headline && headline !== only.question ? headline : "";
+        return { event: "question", body: [intro, only.question, optionList(only.options.map((option) => option.label))].filter(Boolean).join("\n") };
+      }
+      return { event: "question", body: [headline || "The agent asked you some questions.", "Open the chat to answer."].join("\n") };
     }
     default:
       return null;

@@ -103,12 +103,12 @@ export function isToolApprovalTitle(title: unknown): title is string {
 }
 
 /**
- * Whether a dialog is the model's own question. The structured `ask` request
- * always is. A plain select, input or editor is one while the `ask` tool runs
- * (it runs alone in its batch, so nothing else is asking), except an approval.
+ * Whether a dialog is the model's own question. The structured `ask` request (omp 18.4+) and the `form` request
+ * (omp 19.1+) always are. A plain select, input or editor is one while the `ask` tool runs (it runs alone in its
+ * batch, so nothing else is asking), except an approval.
  */
 export function dialogBelongsToAsk(request: { method: string; title?: string }, askToolRunning: boolean): boolean {
-  if (request.method === "ask") return true;
+  if (request.method === "ask" || request.method === "form") return true;
   if (!askToolRunning) return false;
   if (request.method !== "select" && request.method !== "input" && request.method !== "editor") return false;
   return !isToolApprovalTitle(request.title);
@@ -212,7 +212,7 @@ interface WalkRequest {
   markableCount?: number;
 }
 
-type WalkResponse = { value: string } | { confirmed: boolean } | { cancelled: true } | { answers: unknown };
+type WalkResponse = { value: string } | { confirmed: boolean } | { cancelled: true } | { answers: unknown } | { data: unknown };
 
 /** The state of the multi-choice field being walked. */
 interface Slot {

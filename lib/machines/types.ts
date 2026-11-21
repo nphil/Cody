@@ -66,7 +66,29 @@ export const MACHINE_REASONS = [
 ] as const;
 export type MachineReason = (typeof MACHINE_REASONS)[number];
 
+/** Cody's own share of a machine: the control group (container) it runs in.
+ * Absent when the machine shows no group; the bar then falls back to the whole
+ * machine's numbers. */
+export interface OwnMetrics {
+  /** 0–100 of the cores Cody may use; null until a second reading exists. */
+  cpuPercent: number | null;
+  /** The cores that 100% means (a quota can be fractional). */
+  cores: number;
+  memUsedBytes: number;
+  /** The machine's memory: the scale `memPercent` is on, the same as the
+   * whole-machine bar's, so the two compare. */
+  memTotalBytes: number;
+  /** 0–100 of the machine's memory. */
+  memPercent: number;
+  /** The container's memory limit when it is smaller than the machine's memory. */
+  memLimitBytes: number | null;
+}
+
 export interface MachineMetrics {
+  /** Cody's own share; the top bar draws this one when it is there. The fields
+   * below are the WHOLE machine's (`/proc/stat` is the host's even inside a
+   * container) and stay as they were, so an older page still reads them. */
+  own?: OwnMetrics | null;
   /** 0–100 over the last interval; null until a second reading exists. */
   cpuPercent: number | null;
   /** Logical CPUs, null when the machine did not say. */

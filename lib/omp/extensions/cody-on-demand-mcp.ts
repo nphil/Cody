@@ -84,6 +84,8 @@ export interface OmpApi {
   registerTool(tool: ToolDefinition): void;
   getActiveTools(): string[];
   appendEntry(customType: string, data?: unknown): void;
+  /** The omp package the engine runs (`VERSION` is its own version; read as 19.1.0 and 19.0.0 from the real engines). Older engines may lack it. */
+  pi?: { VERSION?: unknown };
 }
 
 export interface Deps {
@@ -259,6 +261,23 @@ const COMPUTER_LOADED_TEXT =
   "Desktop control (computer) is switched on for this chat. Cody restarts the engine as soon as this turn ends, so the desktop tools exist from the user's next message, not in this turn. End your reply by telling the user to send their request again (or just \"continue\").";
 const COMPUTER_UNLOADED_TEXT =
   "Desktop control (computer) is switched off for this chat. Cody restarts the engine as soon as this turn ends, so the desktop tools are gone from the user's next message.";
+
+/**
+ * omp 19.1 runs a mounted tool as a bash command (`tools.commands`); 19.0 and older write its JSON arguments to
+ * `xd://<tool>`. An engine that does not report its version gets the older wording.
+ */
+export function toolsRunAsCommands(version: unknown): boolean {
+  const match = typeof version === "string" ? /^(\d+)\.(\d+)/.exec(version) : null;
+  return match !== null && (Number(match[1]) > 19 || (Number(match[1]) === 19 && Number(match[2]) >= 1));
+}
+
+/** What the model is told about running a freshly mounted tool. Both routes also name the eval-namespace one (`mcp.evalNamespaces`, omp 19): the extension cannot read settings. */
+export function runToolText(commands: boolean, prefix: string, namespace: string): string {
+  if (commands) {
+    return `Run one as a bash command: \`${prefix}<tool> --help\` shows its arguments, then \`${prefix}<tool> -j '<JSON arguments>'\` runs it (if this chat lists them as ordinary tools instead, call them like any tool). If this chat exposes MCP servers as eval namespaces (the mcp.evalNamespaces setting) there is no such command: call ${namespace}.<tool>({...}) from eval instead, and read help://eval/${namespace} for the arguments.`;
+  }
+  return `Run one by writing a JSON arguments object to xd://${prefix}<tool> (read the path first for its schema). If this chat exposes MCP servers as eval namespaces (the mcp.evalNamespaces setting) there is no xd:// path: call ${namespace}.<tool>({...}) from eval instead, and read xd://eval/${namespace} for the arguments.`;
+}
 
 /** The extension, over its collaborators (a test hands in a fake MCP connection and a fake omp). */
 export function createOnDemandMcp(deps: Deps): (pi: OmpApi) => void {
@@ -441,8 +460,7 @@ export function createOnDemandMcp(deps: Deps): (pi: OmpApi) => void {
           `Loaded "${server}": ${result.names.length} tools are mounted now, for the rest of this chat.` +
             (result.missing.length > 0 ? ` ${result.missing.length} of them are still being activated; retry in a moment if one is reported missing.` : "") +
             (result.clashes.length > 0 ? ` ${result.clashes.length} more are already provided by an MCP connection of the same name and were left alone.` : ""),
-          // omp 19 `mcp.evalNamespaces` moves every MCP tool (these included: they carry mcpServerName/mcpToolName) off xd:// and into an eval global named after the sanitized server; the extension cannot read settings, so the result names both routes.
-          `Run one by writing a JSON arguments object to xd://${prefix}<tool> (read the path first for its schema). If this chat exposes MCP servers as eval namespaces (the mcp.evalNamespaces setting) there is no xd:// path: call ${namespace}.<tool>({...}) from eval instead, and read xd://eval/${namespace} for the arguments.`,
+          runToolText(toolsRunAsCommands(pi.pi?.VERSION), prefix, namespace),
           `Tools: ${result.names.map((name) => (name.startsWith(prefix) ? name.slice(prefix.length) : name)).join(", ")}`,
         ];
         if (result.instructions) lines.push(`Server notes: ${result.instructions.slice(0, MAX_INSTRUCTIONS_CHARS)}`);

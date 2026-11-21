@@ -315,11 +315,13 @@ const SETTING_NOTES: Record<string, string> = {
   // added the switch.
   "providers.openai-codex.daybreak":
     "On by default, and omp already behaved this way before the switch existed: requests from a ChatGPT account that OpenAI has made eligible ask for the Daybreak Blue cyber access program. OpenAI may use the content of Daybreak Blue sessions to improve its models. Turn this off to opt out. Models named gpt-daybreak-blue-* are separate and may still run as Daybreak sessions.",
-  // omp 18.13.3: off stops the `xd://: mounted …` notices. Cody hides them in
-  // the transcript and only turns an MCP mount into an "MCP tools updated" toast
-  // (hooks/useAgentSession.ts notice / xdev-mount-notice), so off removes that.
+  // omp 18.13.3, renamed `tools.commandNotices` in 19.1: off stops omp's own tool-inventory notice
+  // (`xd://: mounted …` through 19.0, `Tool commands: added …` from 19.1). Cody hides that notice
+  // everywhere (isToolMountNotice in lib/message-display.ts), so off removes nothing the user sees.
   "tools.xdevNotices":
-    "Cody never shows these notices in the chat; it only turns the one for newly connected MCP tools into a short \"MCP tools updated\" toast. Turning this off removes that toast too, and the assistant still learns of the change with its next prompt.",
+    "Cody never shows these notices in the chat, so turning this off changes nothing you can see. The assistant still learns of a change with its next prompt.",
+  "tools.commandNotices":
+    "Cody never shows these notices in the chat, so turning this off changes nothing you can see. The assistant still learns of a change with its next prompt.",
   // omp 18.16.0 hindsight backend: `retain` / `learn` may pass `scope: "global"`
   // only when this is on, and the memory scoping mode must be global or
   // per-project-tagged for it to take effect.

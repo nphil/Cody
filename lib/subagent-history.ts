@@ -1,23 +1,19 @@
-// On-disk subagent history + transcript reading for Cody.
+// Subagent transcript reading for Cody.
 //
 // omp writes each subagent's session transcript to the PARENT session's
 // sibling artifacts directory: `<session-dir>/<subagent-id>.jsonl` (plus
-// `<id>.md` outputs and `<id>.<tool>.log` artifact spills). The parent's task
-// toolResult `details` persist `progress: AgentProgress[]` and
-// `results: SingleResult[]` snapshots, so the roster can be recovered after a
+// `<id>.md` outputs and `<id>.<tool>.log` artifact spills), readable after a
 // page reload without the live RPC registry (get_subagent_messages is
 // registry-gated and rejects unknown session files).
 
-import { closeSync, existsSync, fstatSync, openSync, readdirSync, readSync, realpathSync, statSync } from "fs";
+import { closeSync, fstatSync, openSync, readdirSync, readSync, realpathSync, statSync } from "fs";
 import type { Dirent, Stats } from "fs";
 import { basename, dirname, join } from "path";
-import { getSessionEntries, entryToUiMessage } from "./session-reader";
-import { parseJsonlLenient } from "./omp/session-files";
-import { parseSubagentProgress } from "./subagent-types";
-import type { SubagentHistoryEntry, SubagentHistoryResult, SubagentAgentSource, SubagentTranscriptPage } from "./subagent-types";
+import { entryToUiMessage, isDeferrableToolResultImage } from "./session-reader";
+import { parseJsonlLenient, readBlobRefSync } from "./omp/session-files";
+import type { SubagentTranscriptPage } from "./subagent-types";
 import type { AgentMessage, SessionEntry } from "./types";
-import { asNumber, asString, isRecord } from "./type-guards";
-import { taskResultStructuredOutput, taskResultUsageCost } from "./task-result-details";
+import { isRecord } from "./type-guards";
 import { addUsageTotals, aggregateMessageUsage, aggregateModelUsage, emptyUsageTotals, type UsageTotals } from "./session-usage";
 
 /** Sibling artifacts directory for a parent session file. */
@@ -78,189 +74,6 @@ export function resolveSubagentArtifact(
     return null;
   }
   return realCandidate;
-}
-
-function asAgentSource(value: unknown): SubagentAgentSource | undefined {
-  return value === "bundled" || value === "user" || value === "project" ? value : undefined;
-}
-
-function progressStatusToRoster(status: string | undefined): SubagentHistoryEntry["status"] {
-  if (status === "completed") return "completed";
-  if (status === "failed") return "failed";
-  if (status === "aborted") return "aborted";
-  return "started";
-}
-
-function resultStatus(value: Record<string, unknown>): SubagentHistoryEntry["status"] {
-  if (value.aborted === true) return "aborted";
-  if (typeof value.error === "string" && value.error) return "failed";
-  if (typeof value.exitCode === "number") return value.exitCode === 0 ? "completed" : "failed";
-  return "started";
-}
-
-/**
- * Recover the subagent roster from a parent session file. Walks task
- * toolResults, merging `progress` (live-snapshot fields) with `results`
- * (settled per-subagent telemetry), then resolves sibling transcript files.
- */
-export function extractSubagentHistory(sessionFilePath: string): SubagentHistoryEntry[] {
-  let entries: SessionEntry[];
-  try {
-    entries = getSessionEntries(sessionFilePath);
-  } catch {
-    return [];
-  }
-
-  const byId = new Map<string, SubagentHistoryEntry>();
-  const upsert = (entry: SubagentHistoryEntry) => {
-    const existing = byId.get(entry.id);
-    if (!existing) {
-      byId.set(entry.id, entry);
-      return;
-    }
-    byId.set(entry.id, { ...existing, ...entry, result: entry.result ?? existing.result });
-  };
-
-  for (const entry of entries) {
-    if (entry.type !== "message" || entry.message?.role !== "toolResult") continue;
-    const message = entry.message as { toolName?: unknown; details?: unknown };
-    if (message.toolName !== "task") continue;
-    const details = isRecord(message.details) ? message.details : {};
-    const progressArr = Array.isArray(details.progress) ? details.progress : [];
-    const resultsArr = Array.isArray(details.results) ? details.results : [];
-    const asyncInfo = isRecord(details.async) ? details.async : undefined;
-
-    for (const raw of progressArr) {
-      const progress = parseSubagentProgress(raw);
-      if (!progress?.id) continue;
-      upsert({
-        id: progress.id,
-        agent: progress.agent ?? "subagent",
-        agentSource: progress.agentSource,
-        status: progressStatusToRoster(progress.status),
-        task: progress.task,
-        assignment: progress.assignment,
-        description: progress.description,
-        index: progress.index ?? 0,
-        lastIntent: progress.lastIntent,
-        toolCount: progress.toolCount,
-        requests: progress.requests,
-        tokens: progress.tokens,
-        contextTokens: progress.contextTokens,
-        contextWindow: progress.contextWindow,
-        cost: progress.cost,
-        durationMs: progress.durationMs,
-        modelOverride: progress.modelOverride,
-        modelRole: progress.modelRole,
-        resolvedModel: progress.resolvedModel,
-        resolvedModelIsFallback: progress.resolvedModelIsFallback,
-        retryFailure: progress.retryFailure,
-        transcriptAvailable: false,
-      });
-    }
-
-    for (const raw of resultsArr) {
-      if (!isRecord(raw)) continue;
-      const id = asString(raw.id);
-      if (!id) continue;
-      const prior = byId.get(id);
-      const result: SubagentHistoryResult = {};
-      const exitCode = asNumber(raw.exitCode);
-      if (exitCode !== undefined) result.exitCode = exitCode;
-      // NOTE: `output`/`stderr` are deliberately NOT copied — the roster route
-      // must stay telemetry-only (task outputs can be ~500KB per agent).
-      if (raw.truncated === true) result.truncated = true;
-      const cost = asNumber(raw.cost) ?? taskResultUsageCost(raw.usage);
-      if (cost !== undefined) result.cost = cost;
-      const structured = taskResultStructuredOutput(raw.structuredOutput);
-      if (structured !== undefined) result.structuredOutput = structured;
-      const error = asString(raw.error);
-      if (error !== undefined) result.error = error;
-      if (raw.aborted === true) result.aborted = true;
-      const abortReason = asString(raw.abortReason);
-      if (abortReason !== undefined) result.abortReason = abortReason;
-      const outputPath = asString(raw.outputPath);
-      if (outputPath !== undefined) result.outputPath = outputPath;
-      const patchPath = asString(raw.patchPath);
-      if (patchPath !== undefined) result.patchPath = patchPath;
-      const branchName = asString(raw.branchName);
-      if (branchName !== undefined) result.branchName = branchName;
-      const retryFailure = isRecord(raw.retryFailure)
-        ? {
-            attempt: asNumber(raw.retryFailure.attempt) ?? 0,
-            errorMessage: asString(raw.retryFailure.errorMessage) ?? "",
-          }
-        : prior?.retryFailure;
-      upsert({
-        id,
-        agent: asString(raw.agent) ?? prior?.agent ?? "subagent",
-        agentSource: asAgentSource(raw.agentSource) ?? prior?.agentSource,
-        status: resultStatus(raw),
-        task: asString(raw.task) ?? prior?.task,
-        assignment: asString(raw.assignment) ?? prior?.assignment,
-        description: asString(raw.description) ?? prior?.description,
-        index: asNumber(raw.index) ?? prior?.index ?? 0,
-        lastIntent: asString(raw.lastIntent) ?? prior?.lastIntent,
-        toolCount: asNumber(raw.toolCount) ?? prior?.toolCount,
-        requests: asNumber(raw.requests) ?? prior?.requests,
-        tokens: asNumber(raw.tokens) ?? prior?.tokens,
-        contextTokens: asNumber(raw.contextTokens) ?? prior?.contextTokens,
-        contextWindow: asNumber(raw.contextWindow) ?? prior?.contextWindow,
-        cost: asNumber(raw.cost) ?? taskResultUsageCost(raw.usage) ?? prior?.cost,
-        durationMs: asNumber(raw.durationMs) ?? prior?.durationMs,
-        modelOverride: typeof raw.modelOverride === "string" || Array.isArray(raw.modelOverride) ? raw.modelOverride : prior?.modelOverride,
-        modelRole: asString(raw.modelRole) ?? prior?.modelRole,
-        resolvedModel: asString(raw.resolvedModel) ?? prior?.resolvedModel,
-        resolvedModelIsFallback: typeof raw.resolvedModelIsFallback === "boolean" ? raw.resolvedModelIsFallback : prior?.resolvedModelIsFallback,
-        retryFailure,
-        transcriptAvailable: false,
-        result: Object.keys(result).length > 0 ? result : undefined,
-      });
-    }
-
-    // Detached async spawns can persist with an empty results[] while still
-    // running — async.jobId still names the agent.
-    if (asyncInfo) {
-      const jobId = asString(asyncInfo.jobId);
-      if (jobId && !byId.has(jobId)) {
-        upsert({
-          id: jobId,
-          agent: "task",
-          status: asyncInfo.state === "completed" ? "completed" : asyncInfo.state === "failed" ? "failed" : "started",
-          index: byId.size,
-          transcriptAvailable: false,
-        });
-      }
-    }
-  }
-
-  // Resolve sibling transcript files and async/detached markers.
-  const dir = siblingDirForSession(sessionFilePath);
-  const detachedIds = new Set<string>();
-  for (const entry of entries) {
-    if (entry.type !== "message" || entry.message?.role !== "toolResult") continue;
-    const message = entry.message as { toolName?: unknown; details?: unknown };
-    if (message.toolName !== "task") continue;
-    const details = isRecord(message.details) ? message.details : {};
-    const asyncInfo = isRecord(details.async) ? details.async : undefined;
-    const jobId = asyncInfo ? asString(asyncInfo.jobId) : undefined;
-    if (jobId) detachedIds.add(jobId);
-  }
-  const roster = [...byId.values()];
-  for (const entry of roster) {
-    if (detachedIds.has(entry.id)) entry.detached = true;
-    const candidate = join(dir, `${entry.id}.jsonl`);
-    const available = existsSync(candidate);
-    if (available) {
-      entry.sessionFile = candidate;
-      entry.transcriptAvailable = true;
-    }
-  }
-  // File-walk order IS chronological: task toolResults land in the parent
-  // session in completion order, and within one call progress[] is already
-  // index-ordered. Sorting by `index` here would interleave turns (the index
-  // restarts at 0 for every task call), scrambling "most recent" downstream.
-  return roster;
 }
 
 /** Bytes of whole lines per page. A page is never padded past this, except to
@@ -560,7 +373,14 @@ function formatLineSize(bytes: number): string {
   return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb.toFixed(1)} MB`;
 }
 
-function lineToMessage(line: TranscriptLine): AgentMessage | null {
+/** Mints the URL one deferred tool-result image is fetched from: the byte
+ *  `offset` of the line it sits on, that line's entry id, and its index among
+ *  the entry's images. */
+export type SubagentImageUrl = (offset: number, entryId: string, index: number) => string;
+
+const SAFE_ENTRY_ID = /^[A-Za-z0-9_-]{1,64}$/;
+
+function lineToMessage(line: TranscriptLine, imageUrl?: SubagentImageUrl): AgentMessage | null {
   if (line.text === null) {
     return {
       role: "custom",
@@ -573,7 +393,17 @@ function lineToMessage(line: TranscriptLine): AgentMessage | null {
   try {
     const entry: unknown = JSON.parse(line.text);
     if (!isRecord(entry)) return null;
-    const message = entryToUiMessage(entry as unknown as SessionEntry, {});
+    // Tool-result images are deferred exactly like the main chat's (blob refs
+    // and big inline base64 never ride in the page): each becomes a url-source
+    // block the media route resolves. An entry without a usable id cannot be
+    // addressed, so it keeps the default shape.
+    const entryId = typeof entry.id === "string" && SAFE_ENTRY_ID.test(entry.id) ? entry.id : null;
+    const message = entryToUiMessage(
+      entry as unknown as SessionEntry,
+      imageUrl && entryId
+        ? { deferToolResultImages: true, toolResultImageUrl: (id, index) => imageUrl(line.offset, id, index) }
+        : {},
+    );
     return message ? slimSubagentMessage(message) : null;
   } catch {
     // A corrupt or torn line is skipped, never fatal.
@@ -591,13 +421,15 @@ function lineToMessage(line: TranscriptLine): AgentMessage | null {
  * - `before`: the page that ENDS at `fromByte` (aligned down to a line start).
  * - `tail`: the newest page, ending at the last complete line; `fromByte` is ignored.
  *
+ * `imageUrl` defers tool-result images (see `lineToMessage`); without it they stay as the file has them.
+ *
  * A trailing line without its `\n` is still being written and is never
  * returned. Never throws: an unreadable file yields an empty page.
  */
 export function readSubagentTranscriptPage(
   sessionFilePath: string,
   fromByte = 0,
-  options: { tail?: boolean; before?: boolean } = {},
+  options: { tail?: boolean; before?: boolean; imageUrl?: SubagentImageUrl } = {},
 ): SubagentTranscriptPage {
   const normalized = typeof fromByte === "number" && Number.isFinite(fromByte) ? Math.max(0, Math.trunc(fromByte)) : 0;
   const empty: SubagentTranscriptPage = {
@@ -634,7 +466,7 @@ export function readSubagentTranscriptPage(
     const messages: AgentMessage[] = [];
     const offsets: number[] = [];
     for (const line of lines) {
-      const message = lineToMessage(line);
+      const message = lineToMessage(line, options.imageUrl);
       if (!message) continue;
       messages.push(message);
       offsets.push(line.offset);
@@ -652,6 +484,64 @@ export function readSubagentTranscriptPage(
     };
   } catch {
     return empty;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+/** The one tool-result image a deferred url points at. */
+export interface SubagentTranscriptImage {
+  bytes: Buffer;
+  mime: string;
+}
+
+/**
+ * Bytes of tool-result image `index` of the entry `entryId` on the line that
+ * starts at byte `offset` — what the deferred url minted by
+ * `readSubagentTranscriptPage({ imageUrl })` addresses. Reads ONLY that line
+ * (a few KB when the image is a blob ref), never the file. `index` counts with
+ * `isDeferrableToolResultImage`, the predicate the deferral used. Null when
+ * anything does not line up: offset not a line start or past the last complete
+ * line, a different entry id, a line over the line cap, no such image, or a
+ * blob that is gone. Never throws.
+ */
+export function readSubagentTranscriptImage(
+  sessionFilePath: string,
+  offset: number,
+  entryId: string,
+  index: number,
+): SubagentTranscriptImage | null {
+  if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(index) || index < 0 || !SAFE_ENTRY_ID.test(entryId)) return null;
+  let fd: number | undefined;
+  try {
+    fd = openSync(sessionFilePath, "r");
+    const totalBytes = fstatSync(fd).size;
+    if (offset >= totalBytes) return null;
+    if (offset > 0) {
+      // The cursor must name a line start, or the bytes after it are no entry.
+      const previous = (scanBuffer ??= Buffer.allocUnsafe(LINE_SCAN_CHUNK_BYTES));
+      readExact(fd, previous, 1, offset - 1);
+      if (previous[0] !== 0x0a) return null;
+    }
+    const newline = firstNewlineFrom(fd, offset, totalBytes);
+    if (newline < 0) return null; // still being written
+    const line = readSingleLine(fd, offset, newline + 1);
+    if (line.text === null) return null;
+    const entry: unknown = JSON.parse(line.text);
+    if (!isRecord(entry) || entry.type !== "message" || entry.id !== entryId || !isRecord(entry.message)) return null;
+    const content = entry.message.content;
+    if (entry.message.role !== "toolResult" || !Array.isArray(content)) return null;
+    const block = content.filter(isDeferrableToolResultImage)[index] as
+      | { data?: unknown; mimeType?: unknown; source?: { data?: unknown; media_type?: unknown } }
+      | undefined;
+    const data = typeof block?.data === "string" ? block.data : block?.source?.data;
+    if (typeof data !== "string" || data.length === 0) return null;
+    const mime = block?.mimeType ?? block?.source?.media_type;
+    const bytes = data.startsWith("blob:sha256:") ? readBlobRefSync(data) : Buffer.from(data, "base64");
+    if (!bytes || bytes.length === 0) return null;
+    return { bytes, mime: typeof mime === "string" ? mime : "image/png" };
+  } catch {
+    return null;
   } finally {
     if (fd !== undefined) closeSync(fd);
   }

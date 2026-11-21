@@ -82,6 +82,7 @@ export function groupHasThinking(
  * note" row to the chat. */
 const HIDDEN_CUSTOM_TYPES: Record<string, true> = {
   "xdev-mount-notice": true,
+  "tool-command-mount-notice": true,
   "cody-local-time": true,
   "cody-disk-low": true,
   "cody-disk-rule": true,
@@ -118,12 +119,23 @@ export function isHiddenFromTranscript(message: { role?: string; customType?: st
 }
 
 /**
+ * The engine's own tool-inventory notice, which is for the model and never a pop-up. omp 19.0 and older
+ * send `source: "xdev"` with `xd://: mounted …; unmounted …`; omp 19.1 sends `source: "toolCommands"`
+ * with `Tool commands: added …; removed …`. Cody mounts tools all the time (its host tools at every
+ * start, `load_tools` toolsets on demand, again on resume), so a notice per mount would be spam.
+ */
+export function isToolMountNotice(source: unknown, message: string): boolean {
+  return source === "xdev" || source === "toolCommands" || /^(?:xd:\/\/:\s*(?:un)?mounted|Tool commands:\s*(?:added|removed))\s/i.test(message);
+}
+
+/**
  * The hidden notes that are for the model and nobody else. lib/rpc-manager.ts
  * drops their live `message_start` / `message_end` before any listener or the
  * sidebar sees them, so a live transcript never flashes a row the reloaded one
  * lacks. Written out one by one, never "everything HIDDEN_CUSTOM_TYPES hides":
- * the MCP mount notice drives a live "MCP tools updated" toast and has to keep
- * arriving. Every type here is also in HIDDEN_CUSTOM_TYPES (the reloaded
+ * the engine's tool-mount notice is hidden from the transcript too, but still
+ * arrives live (the chat hook skips it). Every type here is also in
+ * HIDDEN_CUSTOM_TYPES (the reloaded
  * transcript hides it); lib/rpc-manager.test.mjs feeds each extension's own
  * constant through the live path, so a renamed type fails there.
  */

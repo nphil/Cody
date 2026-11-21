@@ -1,4 +1,4 @@
-import type { MachineMetrics } from "./types";
+import type { MachineMetrics, OwnMetrics } from "./types";
 
 /**
  * Reading CPU and memory the way Linux reports them: `/proc/stat`,
@@ -21,6 +21,24 @@ export interface RawSample {
   memTotalKb: number;
   memAvailableKb: number;
   load1: number | null;
+  /** Cody's own container (its cgroup); null when the machine does not show one. */
+  own: OwnRaw | null;
+}
+
+/** One reading of the control group Cody runs in. On a Docker host or a
+ * Proxmox container `/proc/stat` is the WHOLE machine's CPU, so Cody's own
+ * share comes from here instead. */
+export interface OwnRaw {
+  /** CPU time the group has used since it began, in microseconds. */
+  cpuUsec: number;
+  /** A monotonic clock in ms (the machine's uptime), the other half of a rate. */
+  clockMs: number;
+  /** Cores the group may use: its quota when it has one, else the cores it can see. */
+  cores: number;
+  /** Memory in use, caches the kernel can drop already taken off. */
+  memUsedBytes: number;
+  /** The group's memory limit; null when there is none. */
+  memLimitBytes: number | null;
 }
 
 /** `cpu  user nice system idle iowait irq softirq steal guest guest_nice`.
@@ -69,6 +87,83 @@ export function countCores(statText: string): number | null {
   return count > 0 ? count : null;
 }
 
+/** A cgroup v1 limit file says "no limit" with a number near 2^63. */
+const V1_UNLIMITED_BYTES = 2 ** 62;
+
+function ownNumber(values: Map<string, string>, key: string): number | null {
+  const raw = values.get(key);
+  if (raw === undefined || !/^\d+$/.test(raw)) return null;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) ? value : null;
+}
+
+/**
+ * Cody's own CPU and memory from the lines both collectors print. Each line is
+ * `cg2 <name> <value…>` (cgroup v2) or `cg1 <name> <value>` (v1), plus
+ * `up <seconds>`, the machine's uptime, as the clock. v2 names are the kernel's
+ * (`usage_usec`, `memory.current`, `memory.max`, `cpu.max`, `inactive_file`);
+ * v1's are `cpuacct.usage` (ns), `memory.usage_in_bytes`,
+ * `memory.limit_in_bytes`, `cpu.cfs_quota_us`, `cpu.cfs_period_us` and
+ * `total_inactive_file`. `nproc` is how many cores the group can see. Null when
+ * the machine shows no usable group: the bar then says "whole machine".
+ */
+export function parseOwn(lines: Iterable<string>, fallbackCores: number | null): OwnRaw | null {
+  const values = new Map<string, string>();
+  let version: 1 | 2 | null = null;
+  let uptime: number | null = null;
+  for (const line of lines) {
+    const match = /^cg([12]) (\S+) ?(.*)$/.exec(line.trim());
+    if (match) {
+      const lineVersion = match[1] === "2" ? 2 : 1;
+      if (version === null) version = lineVersion;
+      if (lineVersion === version) values.set(match[2], match[3].trim());
+      continue;
+    }
+    const up = /^up (\d+(?:\.\d+)?)$/.exec(line.trim());
+    if (up) uptime = Number(up[1]);
+  }
+  if (version === null || uptime === null) return null;
+
+  let cpuUsec: number | null;
+  let memCurrent: number | null;
+  let inactive: number | null;
+  let limit: number | null;
+  let quotaCores: number | null = null;
+  if (version === 2) {
+    cpuUsec = ownNumber(values, "usage_usec");
+    memCurrent = ownNumber(values, "memory.current");
+    inactive = ownNumber(values, "inactive_file");
+    limit = ownNumber(values, "memory.max"); // "max" is not a number: no limit
+    const [quota, period] = (values.get("cpu.max") ?? "").split(/\s+/);
+    if (/^\d+$/.test(quota ?? "") && /^\d+$/.test(period ?? "") && Number(period) > 0 && Number(quota) > 0) {
+      quotaCores = Number(quota) / Number(period);
+    }
+  } else {
+    const ns = ownNumber(values, "cpuacct.usage");
+    cpuUsec = ns === null ? null : ns / 1000;
+    memCurrent = ownNumber(values, "memory.usage_in_bytes");
+    inactive = ownNumber(values, "total_inactive_file");
+    limit = ownNumber(values, "memory.limit_in_bytes");
+    if (limit !== null && limit >= V1_UNLIMITED_BYTES) limit = null;
+    // v1 spells "no quota" as -1, which is not a number either
+    const quota = ownNumber(values, "cpu.cfs_quota_us");
+    const period = ownNumber(values, "cpu.cfs_period_us");
+    if (quota !== null && period !== null && period > 0 && quota > 0) quotaCores = quota / period;
+  }
+  if (cpuUsec === null || memCurrent === null) return null;
+
+  const visible = ownNumber(values, "nproc") ?? fallbackCores;
+  const cores = quotaCores !== null ? (visible !== null ? Math.min(quotaCores, visible) : quotaCores) : visible;
+  if (cores === null || !(cores > 0)) return null;
+  return {
+    cpuUsec,
+    clockMs: uptime * 1000,
+    cores,
+    memUsedBytes: Math.max(0, memCurrent - (inactive ?? 0)),
+    memLimitBytes: limit !== null && limit > 0 ? limit : null,
+  };
+}
+
 /** Assemble a reading from the pieces both collectors produce. Null when the
  * CPU line or memory is missing: a half-read reading is worse than none. */
 export function buildRawSample(input: {
@@ -76,6 +171,8 @@ export function buildRawSample(input: {
   memLines: Iterable<string>;
   loadLine: string | null;
   cores: number | null;
+  /** The `cg1`/`cg2`/`up` lines (see {@link parseOwn}); none when the machine has no cgroup. */
+  ownLines?: Iterable<string>;
 }): RawSample | null {
   const cpu = input.cpuLine === null ? null : parseCpuTimes(input.cpuLine);
   const mem = parseMeminfo(input.memLines);
@@ -86,6 +183,7 @@ export function buildRawSample(input: {
     memTotalKb: mem.totalKb,
     memAvailableKb: mem.availableKb,
     load1: input.loadLine === null ? null : parseLoad1(input.loadLine),
+    own: input.ownLines ? parseOwn(input.ownLines, input.cores) : null,
   };
 }
 
@@ -99,10 +197,40 @@ export function cpuPercent(previous: CpuTimes, next: CpuTimes): number | null {
   return Math.round(Math.min(100, Math.max(0, busy)) * 10) / 10;
 }
 
+/** Cody's own CPU share, 0–100 of the cores it may use, between two readings.
+ * Null when no time passed or a counter went backwards (a restart). */
+export function ownCpuPercent(previous: OwnRaw, next: OwnRaw): number | null {
+  const wallUsec = (next.clockMs - previous.clockMs) * 1000;
+  const usedUsec = next.cpuUsec - previous.cpuUsec;
+  if (!(wallUsec > 0) || usedUsec < 0) return null;
+  const busy = (usedUsec / (wallUsec * next.cores)) * 100;
+  return Math.round(Math.min(100, Math.max(0, busy)) * 10) / 10;
+}
+
+/** Cody's own figures. Memory is measured against the MACHINE's memory (the
+ * same scale as the whole-machine bar, so the two can be compared and Cody's
+ * part always sits inside the machine's); a container limit smaller than that
+ * is reported on the side as `memLimitBytes`. */
+function ownMetricsFrom(previous: RawSample | null, next: RawSample): OwnMetrics | null {
+  const own = next.own;
+  if (!own) return null;
+  const memTotalBytes = next.memTotalKb * 1024;
+  const memUsedBytes = Math.min(own.memUsedBytes, memTotalBytes);
+  return {
+    cpuPercent: previous?.own ? ownCpuPercent(previous.own, own) : null,
+    cores: Math.round(own.cores * 10) / 10,
+    memUsedBytes,
+    memTotalBytes,
+    memPercent: Math.round((memUsedBytes / memTotalBytes) * 1000) / 10,
+    memLimitBytes: own.memLimitBytes !== null && own.memLimitBytes < memTotalBytes ? own.memLimitBytes : null,
+  };
+}
+
 /** The numbers the top bar shows, from this reading and the one before it. */
 export function metricsFrom(previous: RawSample | null, next: RawSample, at: number): MachineMetrics {
   const usedKb = next.memTotalKb - next.memAvailableKb;
   return {
+    own: ownMetricsFrom(previous, next),
     cpuPercent: previous ? cpuPercent(previous.cpu, next.cpu) : null,
     cores: next.cores,
     load1: next.load1,
@@ -164,6 +292,7 @@ export class SampleStream {
           memLines: block,
           loadLine: block.find((entry) => /^\d+(?:\.\d+)?\s/.test(entry)) ?? null,
           cores: this.cores,
+          ownLines: block,
         });
         if (sample) events.push({ kind: "sample", sample });
       }

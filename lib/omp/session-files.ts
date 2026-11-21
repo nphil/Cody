@@ -3,6 +3,7 @@ import type { Dirent } from "fs";
 import {
   closeSync,
   existsSync,
+  fstatSync,
   mkdtempSync,
   mkdirSync,
   openSync,
@@ -159,15 +160,19 @@ export function readTitleSlot(filePath: string): SessionTitleSlot | undefined {
     return undefined;
   }
   try {
-    const buffer = Buffer.allocUnsafe(SESSION_TITLE_SLOT_BYTES);
-    const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
-    const head = buffer.subarray(0, bytesRead).toString("utf8");
-    const newlineIndex = head.indexOf("\n");
-    if (newlineIndex < 0) return undefined;
-    return parseTitleSlotLine(head.slice(0, newlineIndex));
+    return readTitleSlotFd(fd);
   } finally {
     closeSync(fd);
   }
+}
+
+function readTitleSlotFd(fd: number): SessionTitleSlot | undefined {
+  const buffer = Buffer.allocUnsafe(SESSION_TITLE_SLOT_BYTES);
+  const bytesRead = readSync(fd, buffer, 0, buffer.length, 0);
+  const head = buffer.subarray(0, bytesRead).toString("utf8");
+  const newlineIndex = head.indexOf("\n");
+  if (newlineIndex < 0) return undefined;
+  return parseTitleSlotLine(head.slice(0, newlineIndex));
 }
 
 // ============================================================================
@@ -262,6 +267,12 @@ function readBlobSync(hash: string): Buffer | null {
   } catch {
     return null;
   }
+}
+
+/** Bytes of the blob a `blob:sha256:<hex>` ref names; null for anything else (not a ref, bad hash, missing blob). */
+export function readBlobRefSync(data: string): Buffer | null {
+  const hash = parseBlobRef(data);
+  return hash ? readBlobSync(hash) : null;
 }
 
 function isImageBlock(value: unknown): value is { type: "image"; data: string; mimeType?: string } {
@@ -390,54 +401,152 @@ const SESSION_READ_CHUNK_BYTES = 1024 * 1024;
  */
 export const MAX_SESSION_LOAD_BYTES = 1024 * 1024 * 1024;
 
+/** How much of the parsed part of a file an extend re-reads to prove it unchanged. */
+const SESSION_PARSE_ANCHOR_BYTES = 4096;
+
+interface LineReadResult {
+  /** Offset just past the last byte read. */
+  end: number;
+  /** Offset just past the last newline read (where the read started when there was none). */
+  lineEnd: number;
+}
+
 /**
- * Read a file line by line over a byte buffer. Unlike readFileSync(path,"utf8")
- * this never materializes the whole file as a single JS string, so sessions
- * past Node's ~512 MiB string cap still open. Lines exclude the newline; the
- * decoder carries multi-byte characters across chunk boundaries. A callback
- * that returns `true` stops the read early.
+ * Read a file line by line over a byte buffer, from byte `from` to EOF. Unlike
+ * readFileSync(path,"utf8") this never materializes the whole file as a single
+ * JS string, so sessions past Node's ~512 MiB string cap still open. Lines
+ * exclude the newline; the decoder carries multi-byte characters across chunk
+ * boundaries. A last line with no newline after it (a write in progress, or a
+ * torn one) comes with `terminated` false. A callback that returns `true`
+ * stops the read early.
  */
+function forEachLineSync(fd: number, onLine: (line: string, terminated: boolean) => void | boolean, from = 0): LineReadResult {
+  const buffer = Buffer.allocUnsafe(SESSION_READ_CHUNK_BYTES);
+  const decoder = new StringDecoder("utf8");
+  // Fragments of the current unterminated line, joined only when a chunk
+  // actually contains a newline (or EOF completes the file). Appending to a
+  // single `pending` string per 1 MiB chunk copies the whole accumulated
+  // prefix every chunk — quadratic on single-line files (17ms @8MiB → 149ms
+  // @32MiB). With fragments, a newline-free file is joined exactly once at
+  // EOF; a file with newlines joins only the (small) tail since the last
+  // newline, so the total cost stays linear in file size.
+  const fragments: string[] = [];
+  let hasNewline = false;
+  let position = from;
+  let lineEnd = from;
+  for (;;) {
+    const bytesRead = readSync(fd, buffer, 0, buffer.length, position);
+    if (bytesRead === 0) break;
+    // A newline byte never occurs inside a multi-byte UTF-8 character, so the
+    // raw bytes tell where the last complete line ends.
+    const lastNewline = buffer.lastIndexOf(0x0a, bytesRead - 1);
+    if (lastNewline !== -1) lineEnd = position + lastNewline + 1;
+    position += bytesRead;
+    const decoded = decoder.write(buffer.subarray(0, bytesRead));
+    hasNewline = hasNewline || decoded.includes("\n");
+    fragments.push(decoded);
+    if (!hasNewline) continue;
+    // Materialize the accumulated buffer once, emit every completed line,
+    // and keep only the unterminated tail (bounded by the largest line).
+    const joined = fragments.join("");
+    fragments.length = 0;
+    hasNewline = false;
+    let start = 0;
+    let newlineIndex = joined.indexOf("\n", start);
+    while (newlineIndex !== -1) {
+      if (onLine(joined.slice(start, newlineIndex), true) === true) return { end: position, lineEnd };
+      start = newlineIndex + 1;
+      newlineIndex = joined.indexOf("\n", start);
+    }
+    if (start < joined.length) fragments.push(joined.slice(start));
+  }
+  const tail = decoder.end();
+  if (tail) fragments.push(tail);
+  if (fragments.length > 0) onLine(fragments.join(""), false);
+  return { end: position, lineEnd };
+}
+
 function forEachFileLineSync(filePath: string, onLine: (line: string) => void | boolean): void {
   const fd = openSync(filePath, "r");
   try {
-    const buffer = Buffer.allocUnsafe(SESSION_READ_CHUNK_BYTES);
-    const decoder = new StringDecoder("utf8");
-    // Fragments of the current unterminated line, joined only when a chunk
-    // actually contains a newline (or EOF completes the file). Appending to a
-    // single `pending` string per 1 MiB chunk copies the whole accumulated
-    // prefix every chunk — quadratic on single-line files (17ms @8MiB → 149ms
-    // @32MiB). With fragments, a newline-free file is joined exactly once at
-    // EOF; a file with newlines joins only the (small) tail since the last
-    // newline, so the total cost stays linear in file size.
-    const fragments: string[] = [];
-    let hasNewline = false;
-    for (;;) {
-      const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
-      if (bytesRead === 0) break;
-      const decoded = decoder.write(buffer.subarray(0, bytesRead));
-      hasNewline = hasNewline || decoded.includes("\n");
-      fragments.push(decoded);
-      if (!hasNewline) continue;
-      // Materialize the accumulated buffer once, emit every completed line,
-      // and keep only the unterminated tail (bounded by the largest line).
-      const joined = fragments.join("");
-      fragments.length = 0;
-      hasNewline = false;
-      let start = 0;
-      let newlineIndex = joined.indexOf("\n", start);
-      while (newlineIndex !== -1) {
-        if (onLine(joined.slice(start, newlineIndex)) === true) return;
-        start = newlineIndex + 1;
-        newlineIndex = joined.indexOf("\n", start);
-      }
-      if (start < joined.length) fragments.push(joined.slice(start));
-    }
-    const tail = decoder.end();
-    if (tail) fragments.push(tail);
-    if (fragments.length > 0) onLine(fragments.join(""));
+    forEachLineSync(fd, onLine);
   } finally {
     closeSync(fd);
   }
+}
+
+/**
+ * Where a parse of a session file stopped, so a later read of the same file
+ * can parse only what was added since (extendLoadedSession). omp only ever
+ * appends to a session file. A rename rewrites the fixed-width title slot in
+ * place; every other rewrite (omp's own, setSessionTitle's legacy path, an
+ * import) writes a temp file and renames it over the path, which gives the
+ * path a new inode.
+ */
+export interface SessionParseCursor {
+  dev: number;
+  ino: number;
+  /** Bytes parsed: the file's size when the read reached its end. */
+  size: number;
+  /** The file's mtime while `size` was still its size; NaN when it grew during the read, so the next read never takes the file for unchanged. */
+  mtimeMs: number;
+  /** Offset just past the last newline parsed. */
+  offset: number;
+  /** Entries that came from an unterminated last line (0 or 1): an extend parses that line again. */
+  tailEntries: number;
+  /** The bytes just before `offset`: an extend re-reads them to prove the parsed part of the file unchanged. */
+  anchor: Buffer;
+  /** The header line as stored, before the title slot is folded in. */
+  header: SessionHeader;
+  /** Line 1 is a title slot, which a rename rewrites in place: an extend reads it again. */
+  titleSlot: boolean;
+}
+
+export interface CursoredSessionLoad {
+  loaded: LoadedSession;
+  /** Null when only a full parse can bring this result up to date (a legacy file migrated as a whole, or a failed load). */
+  cursor: SessionParseCursor | null;
+}
+
+function readBytesSync(fd: number, position: number, length: number): Buffer {
+  const buffer = Buffer.alloc(length);
+  let filled = 0;
+  while (filled < length) {
+    const bytesRead = readSync(fd, buffer, filled, length - filled, position + filled);
+    if (bytesRead === 0) break;
+    filled += bytesRead;
+  }
+  return filled === length ? buffer : buffer.subarray(0, filled);
+}
+
+function foldTitleSlot(header: SessionHeader, titleSlot: SessionTitleSlot | undefined): void {
+  if (!titleSlot) return;
+  if (titleSlot.title) {
+    header.title = titleSlot.title;
+    if (titleSlot.source) header.titleSource = titleSlot.source;
+    else delete header.titleSource;
+  } else {
+    delete header.title;
+    delete header.titleSource;
+  }
+}
+
+function parseCursor(fd: number, read: LineReadResult, tailEntries: number, header: SessionHeader, titleSlot: boolean): SessionParseCursor {
+  const stat = fstatSync(fd);
+  // The anchor never covers the title slot: a rename rewrites it in place.
+  const floor = Math.min(read.lineEnd, titleSlot ? SESSION_TITLE_SLOT_BYTES : 0);
+  const anchorStart = Math.max(floor, read.lineEnd - SESSION_PARSE_ANCHOR_BYTES);
+  return {
+    dev: stat.dev,
+    ino: stat.ino,
+    size: read.end,
+    mtimeMs: stat.size === read.end ? stat.mtimeMs : Number.NaN,
+    offset: read.lineEnd,
+    tailEntries,
+    anchor: readBytesSync(fd, anchorStart, read.lineEnd - anchorStart),
+    header,
+    titleSlot,
+  };
 }
 
 /**
@@ -449,65 +558,130 @@ function forEachFileLineSync(filePath: string, onLine: (line: string) => void | 
  * instead of reporting it as malformed.
  */
 export function loadSessionFile(filePath: string, options: LoadSessionOptions = {}): LoadedSession {
-  let size: number;
-  try {
-    size = statSync(filePath).size;
-  } catch {
-    return { header: null, entries: [], titleSlot: undefined };
-  }
-  if (size > MAX_SESSION_LOAD_BYTES) {
-    return { header: null, entries: [], titleSlot: undefined, error: "too_large" };
-  }
+  return loadSessionFileWithCursor(filePath, options).loaded;
+}
 
-  let titleSlot: SessionTitleSlot | undefined;
-  const records: Record<string, unknown>[] = [];
-  let isFirstLine = true;
+/** loadSessionFile, plus the cursor extendLoadedSession needs to bring the result up to date later. */
+export function loadSessionFileWithCursor(filePath: string, options: LoadSessionOptions = {}): CursoredSessionLoad {
+  let fd: number;
   try {
-    forEachFileLineSync(filePath, (rawLine) => {
-      if (isFirstLine) {
-        isFirstLine = false;
-        titleSlot = parseTitleSlotLine(rawLine);
-        if (titleSlot) return;
-      }
+    fd = openSync(filePath, "r");
+  } catch {
+    return { loaded: { header: null, entries: [], titleSlot: undefined }, cursor: null };
+  }
+  try {
+    if (fstatSync(fd).size > MAX_SESSION_LOAD_BYTES) {
+      return { loaded: { header: null, entries: [], titleSlot: undefined, error: "too_large" }, cursor: null };
+    }
+    let titleSlot: SessionTitleSlot | undefined;
+    const records: Record<string, unknown>[] = [];
+    let lastFromTail = false;
+    let isFirstLine = true;
+    let read: LineReadResult;
+    try {
+      read = forEachLineSync(fd, (rawLine, terminated) => {
+        if (isFirstLine) {
+          isFirstLine = false;
+          titleSlot = parseTitleSlotLine(rawLine);
+          if (titleSlot) return;
+        }
+        const line = rawLine.trim();
+        if (!line) return;
+        try {
+          records.push(JSON.parse(line) as Record<string, unknown>);
+          lastFromTail = !terminated;
+        } catch {
+          // Skip malformed line (torn write).
+        }
+      });
+    } catch (error) {
+      // A single line past the string cap, or an allocation failure part-way in.
+      const tooLarge = error instanceof RangeError;
+      return { loaded: { header: null, entries: [], titleSlot, ...(tooLarge ? { error: "too_large" as const } : {}) }, cursor: null };
+    }
+
+    const headerRecord = records[0];
+    if (!headerRecord || headerRecord.type !== "session" || typeof headerRecord.id !== "string") {
+      return { loaded: { header: null, entries: [], titleSlot }, cursor: null };
+    }
+    const header = headerRecord as unknown as SessionHeader;
+    // Only a file already in the current format can be extended later: a
+    // legacy one is migrated as a whole.
+    const stored = (header.version ?? 1) >= CURRENT_SESSION_VERSION ? { ...header } : null;
+    const entries = records.slice(1).filter((record) => record.type !== "session") as unknown as MutableEntry[];
+
+    migrateToCurrentVersion(header, entries);
+    foldTitleSlot(header, titleSlot);
+
+    if (options.resolveBlobs) {
+      resolveBlobRefsInEntries(entries, { skipToolResultImages: options.skipToolResultImages });
+    }
+
+    const loaded: LoadedSession = { header, entries, titleSlot };
+    if (!stored || (lastFromTail && records.length === 1)) return { loaded, cursor: null };
+    const tailEntries = lastFromTail && records[records.length - 1].type !== "session" ? 1 : 0;
+    return { loaded, cursor: parseCursor(fd, read, tailEntries, stored, titleSlot !== undefined) };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Bring a cursored load up to date by parsing only the lines appended since,
+ * or return null when that cannot be proven safe and the caller must parse the
+ * whole file again: another file at the path, a file that shrank or passed the
+ * load ceiling, bytes before the cursor that changed, or a title slot that is
+ * gone. `options` must be the ones `previous` was loaded with. `previous` is
+ * left as it was (its entries may still be in use): the result gets its own
+ * entries array and header.
+ */
+export function extendLoadedSession(filePath: string, previous: CursoredSessionLoad, options: LoadSessionOptions = {}): CursoredSessionLoad | null {
+  const cursor = previous.cursor;
+  if (!cursor) return null;
+  let fd: number;
+  try {
+    fd = openSync(filePath, "r");
+  } catch {
+    return null;
+  }
+  try {
+    const stat = fstatSync(fd);
+    if (stat.dev !== cursor.dev || stat.ino !== cursor.ino) return null;
+    if (stat.size < cursor.size || stat.size > MAX_SESSION_LOAD_BYTES) return null;
+    if (!readBytesSync(fd, cursor.offset - cursor.anchor.length, cursor.anchor.length).equals(cursor.anchor)) return null;
+    let titleSlot: SessionTitleSlot | undefined;
+    if (cursor.titleSlot) {
+      titleSlot = readTitleSlotFd(fd);
+      if (!titleSlot) return null;
+    }
+    const records: Record<string, unknown>[] = [];
+    let lastFromTail = false;
+    const read = forEachLineSync(fd, (rawLine, terminated) => {
       const line = rawLine.trim();
       if (!line) return;
       try {
         records.push(JSON.parse(line) as Record<string, unknown>);
+        lastFromTail = !terminated;
       } catch {
         // Skip malformed line (torn write).
       }
-    });
-  } catch (error) {
-    // A single line past the string cap, or an allocation failure part-way in.
-    const tooLarge = error instanceof RangeError;
-    return { header: null, entries: [], titleSlot, ...(tooLarge ? { error: "too_large" as const } : {}) };
-  }
-
-  const headerRecord = records[0];
-  if (!headerRecord || headerRecord.type !== "session" || typeof headerRecord.id !== "string") {
-    return { header: null, entries: [], titleSlot };
-  }
-  const header = headerRecord as unknown as SessionHeader;
-  const entries = records.slice(1).filter((record) => record.type !== "session") as unknown as MutableEntry[];
-
-  migrateToCurrentVersion(header, entries);
-
-  if (titleSlot) {
-    if (titleSlot.title) {
-      header.title = titleSlot.title;
-      if (titleSlot.source) header.titleSource = titleSlot.source;
-      else delete header.titleSource;
-    } else {
-      delete header.title;
-      delete header.titleSource;
+    }, cursor.offset);
+    const added = records.filter((record) => record.type !== "session") as unknown as SessionEntry[];
+    if (options.resolveBlobs) {
+      resolveBlobRefsInEntries(added, { skipToolResultImages: options.skipToolResultImages });
     }
+    const entries = previous.loaded.entries.slice(0, previous.loaded.entries.length - cursor.tailEntries);
+    for (const entry of added) entries.push(entry);
+    const header = { ...cursor.header };
+    foldTitleSlot(header, titleSlot);
+    const tailEntries = lastFromTail && records[records.length - 1].type !== "session" ? 1 : 0;
+    return { loaded: { header, entries, titleSlot }, cursor: parseCursor(fd, read, tailEntries, cursor.header, cursor.titleSlot) };
+  } catch {
+    // Unreadable part-way, or a line past the string cap: a full parse decides what to report.
+    return null;
+  } finally {
+    closeSync(fd);
   }
-
-  if (options.resolveBlobs) {
-    resolveBlobRefsInEntries(entries, { skipToolResultImages: options.skipToolResultImages });
-  }
-
-  return { header, entries, titleSlot };
 }
 
 /**
@@ -681,7 +855,8 @@ const SESSION_LIST_SUFFIX_BYTES = 65_536;
  *  (size, mtime) version. */
 const SESSION_LIST_LAST_ACTIVE_WIDE_BYTES = 1_048_576;
 /**
- * omp 18.7 persists an `xdev-mount-notice` for the host tools Cody registers
+ * omp 18.7 persists an `xdev-mount-notice` (`tool-command-mount-notice` from
+ * omp 19.1) for the host tools Cody registers
  * at spawn — before the first user message, ~3 KB with Cody's roster — which
  * pushes that message past the 4 KiB window: the list read "(no messages)"
  * and the session namer, which needs the first message, never named the chat.

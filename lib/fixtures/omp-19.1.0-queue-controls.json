@@ -1,0 +1,1732 @@
+{
+  "note": "Recorded from a real omp 19.1.0 rpc-ui child (isolated HOME and agent dir, a fake Anthropic server). A slow reply is streaming with one steer and one follow-up queued; then abort_and_restore_queue (Cody's Stop), plain abort (Cody's Steer now), abort_and_deliver_queue and resume (both new in 19.1.0) are tried; deliverEmpty/resumeIdle/resumeStreaming are their edge cases.",
+  "views": "get_state data is a view: `model` is provider/id, `sessionFile` is a placeholder and `keys` lists every key the real payload had; the other fields are as sent. Event frames are summaries (message text cut to 70 characters); eventsBefore arrived before the command's response, eventsAfter after it.",
+  "engine": "19.1.0",
+  "setup": {
+    "provider": "mock (api anthropic-messages, a local fake server; no real model call is made)",
+    "models": {
+      "mock/claude-opus-5-5": {
+        "thinkingEfforts": [ "minimal", "low", "medium", "high", "xhigh" ],
+        "note": "no explicit thinking block: omp's default ladder"
+      },
+      "mock/claude-opus-5-6": {
+        "thinkingEfforts": [ "minimal", "low", "medium", "high", "xhigh" ],
+        "defaultLevel": "medium"
+      },
+      "mock/claude-haiku-5-5": {
+        "thinkingEfforts": [ "minimal", "low", "medium" ]
+      }
+    },
+    "modelRoles": {
+      "default": "mock/claude-opus-5-5",
+      "smol": "mock/claude-haiku-5-5",
+      "slow": "mock/claude-opus-5-6:high"
+    }
+  },
+  "scenarios": {
+    "restore": {
+      "steps": [
+        {
+          "command": {
+            "type": "get_state"
+          },
+          "response": {
+            "success": true,
+            "data": {
+              "model": "mock/claude-opus-5-5",
+              "thinkingLevel": "high",
+              "configuredThinkingLevel": "high",
+              "thinkingLevels": [ "off", "auto", "minimal", "low", "medium", "high", "xhigh" ],
+              "isStreaming": false,
+              "queuedMessageCount": 0,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionFile": "<session-file>",
+              "keys": [ "autoCompactionEnabled", "configuredThinkingLevel", "contextUsage", "dumpTools", "fastModeActive", "fastModeEnabled", "followUpMode", "goal", "hasPendingAsyncWork", "interruptMode", "isCompacting", "isSettled", "isStreaming", "messageCount", "model", "queuedMessageCount", "queuedMessages", "sessionFile", "sessionId", "slowModeEnabled", "slowModeSupported", "steeringMode", "systemPrompt", "thinkingLevel", "thinkingLevels", "todoPhases", "tokensPerSecond" ]
+            }
+          }
+        },
+        {
+          "group": "LC-LONG starts",
+          "command": {
+            "type": "prompt",
+            "message": "LC-LONG slow reply"
+          },
+          "response": {
+            "success": true
+          },
+          "eventsAfter": [
+            {
+              "type": "agent_start"
+            },
+            {
+              "type": "message_start",
+              "role": "user",
+              "text": "LC-LONG slow reply"
+            },
+            {
+              "type": "message_end",
+              "role": "user",
+              "text": "LC-LONG slow reply"
+            }
+          ]
+        },
+        {
+          "group": "LC-LONG starts",
+          "label": "in flight",
+          "command": {
+            "type": "get_state"
+          },
+          "response": {
+            "success": true,
+            "data": {
+              "model": "mock/claude-opus-5-5",
+              "thinkingLevel": "high",
+              "configuredThinkingLevel": "high",
+              "thinkingLevels": [ "off", "auto", "minimal", "low", "medium", "high", "xhigh" ],
+              "isStreaming": true,
+              "queuedMessageCount": 0,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionFile": "<session-file>",
+              "keys": [ "autoCompactionEnabled", "configuredThinkingLevel", "contextUsage", "dumpTools", "fastModeActive", "fastModeEnabled", "followUpMode", "goal", "hasPendingAsyncWork", "interruptMode", "isCompacting", "isSettled", "isStreaming", "messageCount", "model", "queuedMessageCount", "queuedMessages", "sessionFile", "sessionId", "slowModeEnabled", "slowModeSupported", "steeringMode", "systemPrompt", "thinkingLevel", "thinkingLevels", "todoPhases", "tokensPerSecond" ]
+            }
+          }
+        },
+        {
+          "group": "queue a steer and a follow-up",
+          "command": {
+            "type": "prompt",
+            "message": "LC-FOLLOW steer-one",
+            "streamingBehavior": "steer"
+          },
+          "response": {
+            "success": true
+          },
+          "eventsBefore": [
+            {
+              "type": "queue_update",
+              "steering": [ "LC-FOLLOW steer-one" ],
+              "followUp": [],
+              "liveSteered": 0
+            }
+          ]
+        },
+        {
+          "group": "queue a steer and a follow-up",
+          "command": {
+            "type": "prompt",
+            "message": "LC-FOLLOW follow-one",
+            "streamingBehavior": "followUp"
+          },
+          "response": {
+            "success": true
+          },
+          "eventsBefore": [
+            {
+              "type": "queue_update",
+              "steering": [ "LC-FOLLOW steer-one" ],
+              "followUp": [ "LC-FOLLOW follow-one" ],
+              "liveSteered": 0
+            }
+          ]
+        },
+        {
+          "group": "queue a steer and a follow-up",
+          "label": "queued",
+          "command": {
+            "type": "get_state"
+          },
+          "response": {
+            "success": true,
+            "data": {
+              "model": "mock/claude-opus-5-5",
+              "thinkingLevel": "high",
+              "configuredThinkingLevel": "high",
+              "thinkingLevels": [ "off", "auto", "minimal", "low", "medium", "high", "xhigh" ],
+              "isStreaming": true,
+              "queuedMessageCount": 2,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionFile": "<session-file>",
+              "keys": [ "autoCompactionEnabled", "configuredThinkingLevel", "contextUsage", "dumpTools", "fastModeActive", "fastModeEnabled", "followUpMode", "goal", "hasPendingAsyncWork", "interruptMode", "isCompacting", "isSettled", "isStreaming", "messageCount", "model", "queuedMessageCount", "queuedMessages", "sessionFile", "sessionId", "slowModeEnabled", "slowModeSupported", "steeringMode", "systemPrompt", "thinkingLevel", "thinkingLevels", "todoPhases", "tokensPerSecond" ]
+            }
+          }
+        },
+        {
+          "group": "abort_and_restore_queue",
+          "command": {
+            "type": "abort_and_restore_queue"
+          },
+          "response": {
+            "success": true,
+            "data": {
+              "steering": [
+                {
+                  "text": "LC-FOLLOW steer-one"
+                }
+              ],
+              "followUp": [
+                {
+                  "text": "LC-FOLLOW follow-one"
+                }
+              ]
+            }
+          },
+          "eventsBefore": [
+            {
+              "type": "queue_update",
+              "steering": [],
+              "followUp": [],
+              "liveSteered": 0
+            },
+            {
+              "type": "message_start",
+              "role": "assistant",
+              "stopReason": "aborted",
+              "model": "claude-opus-5-5",
+              "text": ""
+            },
+            {
+              "type": "message_end",
+              "role": "assistant",
+              "stopReason": "aborted",
+              "model": "claude-opus-5-5",
+              "text": ""
+            },
+            {
+              "type": "agent_end",
+              "isTerminal": true,
+              "yielded": true,
+              "assistantModels": [ "claude-opus-5-5:aborted" ]
+            }
+          ],
+          "eventsAfter": [
+            {
+              "type": "prompt_result",
+              "id": "prompt-3",
+              "agentInvoked": true,
+              "status": "aborted",
+              "sessionSettled": true
+            },
+            {
+              "type": "prompt_result",
+              "id": "prompt-5",
+              "agentInvoked": true,
+              "status": "aborted",
+              "sessionSettled": true
+            },
+            {
+              "type": "prompt_result",
+              "id": "prompt-6",
+              "agentInvoked": true,
+              "status": "aborted",
+              "sessionSettled": true
+            },
+            {
+              "type": "session_settled"
+            }
+          ]
+        },
+        {
+          "group": "settled",
+          "command": {
+            "type": "get_state"
+          },
+          "response": {
+            "success": true,
+            "data": {
+              "model": "mock/claude-opus-5-5",
+              "thinkingLevel": "high",
+              "configuredThinkingLevel": "high",
+              "thinkingLevels": [ "off", "auto", "minimal", "low", "medium", "high", "xhigh" ],
+              "isStreaming": false,
+              "queuedMessageCount": 0,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionFile": "<session-file>",
+              "keys": [ "autoCompactionEnabled", "configuredThinkingLevel", "contextUsage", "dumpTools", "fastModeActive", "fastModeEnabled", "followUpMode", "goal", "hasPendingAsyncWork", "interruptMode", "isCompacting", "isSettled", "isStreaming", "messageCount", "model", "queuedMessageCount", "queuedMessages", "sessionFile", "sessionId", "slowModeEnabled", "slowModeSupported", "steeringMode", "systemPrompt", "thinkingLevel", "thinkingLevels", "todoPhases", "tokensPerSecond" ]
+            }
+          }
+        }
+      ],
+      "result": {
+        "reply": {
+          "success": true,
+          "data": {
+            "steering": [
+              {
+                "text": "LC-FOLLOW steer-one"
+              }
+            ],
+            "followUp": [
+              {
+                "text": "LC-FOLLOW follow-one"
+              }
+            ]
+          }
+        },
+        "finalQueued": 0
+      },
+      "providerRequests": [
+        {
+          "kind": "main",
+          "model": "claude-opus-5-5",
+          "lastUser": "<system-reminder> Today: 2026-11-21; current working directo",
+          "reply": "LONG-REPLY"
+        }
+      ]
+    },
+    "abort": {
+      "steps": [
+        {
+          "command": {
+            "type": "get_state"
+          },
+          "response": {
+            "success": true,
+            "data": {
+              "model": "mock/claude-opus-5-5",
+              "thinkingLevel": "high",
+              "configuredThinkingLevel": "high",
+              "thinkingLevels": [ "off", "auto", "minimal", "low", "medium", "high", "xhigh" ],
+              "isStreaming": false,
+              "queuedMessageCount": 0,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionFile": "<session-file>",
+              "keys": [ "autoCompactionEnabled", "configuredThinkingLevel", "contextUsage", "dumpTools", "fastModeActive", "fastModeEnabled", "followUpMode", "goal", "hasPendingAsyncWork", "interruptMode", "isCompacting", "isSettled", "isStreaming", "messageCount", "model", "queuedMessageCount", "queuedMessages", "sessionFile", "sessionId", "slowModeEnabled", "slowModeSupported", "steeringMode", "systemPrompt", "thinkingLevel", "thinkingLevels", "todoPhases", "tokensPerSecond" ]
+            }
+          }
+        },
+        {
+          "group": "LC-LONG starts",
+          "command": {
+            "type": "prompt",
+            "message": "LC-LONG slow reply"
+          },
+          "response": {
+            "success": true
+          },
+          "eventsAfter": [
+            {
+              "type": "agent_start"
+            },
+            {
+              "type": "message_start",
+              "role": "user",
+              "text": "LC-LONG slow reply"
+            },
+            {
+              "type": "message_end",
+              "role": "user",
+              "text": "LC-LONG slow reply"
+            }
+          ]
+        },
+        {
+          "group": "LC-LONG starts",
+          "label": "in flight",
+          "command": {
+            "type": "get_state"
+          },
+          "response": {
+            "success": true,
+            "data": {
+              "model": "mock/claude-opus-5-5",
+              "thinkingLevel": "high",
+              "configuredThinkingLevel": "high",
+              "thinkingLevels": [ "off", "auto", "minimal", "low", "medium", "high", "xhigh" ],
+              "isStreaming": true,
+              "queuedMessageCount": 0,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionFile": "<session-file>",
+              "keys": [ "autoCompactionEnabled", "configuredThinkingLevel", "contextUsage", "dumpTools", "fastModeActive", "fastModeEnabled", "followUpMode", "goal", "hasPendingAsyncWork", "interruptMode", "isCompacting", "isSettled", "isStreaming", "messageCount", "model", "queuedMessageCount", "queuedMessages", "sessionFile", "sessionId", "slowModeEnabled", "slowModeSupported", "steeringMode", "systemPrompt", "thinkingLevel", "thinkingLevels", "todoPhases", "tokensPerSecond" ]
+            }
+          }
+        },
+        {
+          "group": "queue a steer and a follow-up",
+          "command": {
+            "type": "prompt",
+            "message": "LC-FOLLOW steer-one",
+            "streamingBehavior": "steer"
+          },
+          "response": {
+            "success": true
+          },
+          "eventsBefore": [
+            {
+              "type": "queue_update",
+              "steering": [ "LC-FOLLOW steer-one" ],
+              "followUp": [],
+              "liveSteered": 0
+            }
+          ]
+        },
+        {
+          "group": "queue a steer and a follow-up",
+          "command": {
+            "type": "prompt",
+            "message": "LC-FOLLOW follow-one",
+            "streamingBehavior": "followUp"
+          },
+          "response": {
+            "success": true
+          },
+          "eventsBefore": [
+            {
+              "type": "queue_update",
+              "steering": [ "LC-FOLLOW steer-one" ],
+              "followUp": [ "LC-FOLLOW follow-one" ],
+              "liveSteered": 0
+            }
+          ]
+        },
+        {
+          "group": "queue a steer and a follow-up",
+          "label": "queued",
+          "command": {
+            "type": "get_state"
+          },
+          "response": {
+            "success": true,
+            "data": {
+              "model": "mock/claude-opus-5-5",
+              "thinkingLevel": "high",
+              "configuredThinkingLevel": "high",
+              "thinkingLevels": [ "off", "auto", "minimal", "low", "medium", "high", "xhigh" ],
+              "isStreaming": true,
+              "queuedMessageCount": 2,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionFile": "<session-file>",
+              "keys": [ "autoCompactionEnabled", "configuredThinkingLevel", "contextUsage", "dumpTools", "fastModeActive", "fastModeEnabled", "followUpMode", "goal", "hasPendingAsyncWork", "interruptMode", "isCompacting", "isSettled", "isStreaming", "messageCount", "model", "queuedMessageCount", "queuedMessages", "sessionFile", "sessionId", "slowModeEnabled", "slowModeSupported", "steeringMode", "systemPrompt", "thinkingLevel", "thinkingLevels", "todoPhases", "tokensPerSecond" ]
+            }
+          }
+        },
+        {
+          "group": "abort",
+          "command": {
+            "type": "abort"
+          },
+          "response": {
+            "success": true
+          },
+          "eventsBefore": [
+            {
+              "type": "message_start",
+              "role": "assistant",
+              "stopReason": "aborted",
+              "model": "claude-opus-5-5",
+              "text": ""
+            },
+            {
+              "type": "message_end",
+              "role": "assistant",
+              "stopReason": "aborted",
+              "model": "claude-opus-5-5",
+              "text": ""
+            }
+          ],
+          "eventsAfter": [
+            {
+              "type": "queue_update",
+              "steering": [],
+              "followUp": [ "LC-FOLLOW follow-one" ],
+              "liveSteered": 0
+            },
+            {
+              "type": "agent_end",
+              "isTerminal": false,
+              "yielded": true,
+              "assistantModels": [ "claude-opus-5-5:aborted" ]
+            },
+            {
+              "type": "agent_start"
+            },
+            {
+              "type": "message_start",
+              "role": "user",
+              "text": "LC-FOLLOW steer-one"
+            },
+            {
+              "type": "message_end",
+              "role": "user",
+              "text": "LC-FOLLOW steer-one"
+            },
+            {
+              "type": "message_start",
+              "role": "assistant",
+              "stopReason": "stop",
+              "model": "claude-opus-5-5",
+              "text": "LONG-REPLY"
+            },
+            {
+              "type": "message_end",
+              "role": "assistant",
+              "stopReason": "stop",
+              "model": "claude-opus-5-5",
+              "text": "LONG-REPLY"
+            },
+            {
+              "type": "queue_update",
+              "steering": [],
+              "followUp": [],
+              "liveSteered": 0
+            },
+            {
+              "type": "message_start",
+              "role": "user",
+              "text": "LC-FOLLOW follow-one"
+            },
+            {
+              "type": "message_end",
+              "role": "user",
+              "text": "LC-FOLLOW follow-one"
+            },
+            {
+              "type": "message_start",
+              "role": "assistant",
+              "stopReason": "stop",
+              "model": "claude-opus-5-5",
+              "text": "FOLLOWED"
+            },
+            {
+              "type": "message_end",
+              "role": "assistant",
+              "stopReason": "stop",
+              "model": "claude-opus-5-5",
+              "text": "FOLLOWED"
+            },
+            {
+              "type": "agent_end",
+              "isTerminal": true,
+              "yielded": true,
+              "assistantModels": [ "claude-opus-5-5:stop", "claude-opus-5-5:stop" ]
+            },
+            {
+              "type": "prompt_result",
+              "id": "prompt-3",
+              "agentInvoked": true,
+              "status": "completed",
+              "sessionSettled": true
+            },
+            {
+              "type": "prompt_result",
+              "id": "prompt-5",
+              "agentInvoked": true,
+              "status": "completed",
+              "sessionSettled": true
+            },
+            {
+              "type": "prompt_result",
+              "id": "prompt-6",
+              "agentInvoked": true,
+              "status": "completed",
+              "sessionSettled": true
+            },
+            {
+              "type": "session_settled"
+            }
+          ]
+        },
+        {
+          "group": "settled",
+          "command": {
+            "type": "get_state"
+          },
+          "response": {
+            "success": true,
+            "data": {
+              "model": "mock/claude-opus-5-5",
+              "thinkingLevel": "high",
+              "configuredThinkingLevel": "high",
+              "thinkingLevels": [ "off", "auto", "minimal", "low", "medium", "high", "xhigh" ],
+              "isStreaming": false,
+              "queuedMessageCount": 0,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionFile": "<session-file>",
+              "keys": [ "autoCompactionEnabled", "configuredThinkingLevel", "contextUsage", "dumpTools", "fastModeActive", "fastModeEnabled", "followUpMode", "goal", "hasPendingAsyncWork", "interruptMode", "isCompacting", "isSettled", "isStreaming", "messageCount", "model", "queuedMessageCount", "queuedMessages", "sessionFile", "sessionId", "slowModeEnabled", "slowModeSupported", "steeringMode", "systemPrompt", "thinkingLevel", "thinkingLevels", "todoPhases", "tokensPerSecond" ]
+            }
+          }
+        }
+      ],
+      "result": {
+        "reply": {
+          "success": true
+        },
+        "finalQueued": 0
+      },
+      "providerRequests": [
+        {
+          "kind": "main",
+          "model": "claude-opus-5-5",
+          "lastUser": "<system-reminder> Today: 2026-11-21; current working directo",
+          "reply": "LONG-REPLY"
+        },
+        {
+          "kind": "main",
+          "model": "claude-opus-5-5",
+          "lastUser": "<system-reminder> Today: 2026-11-21; current working directo",
+          "reply": "LONG-REPLY"
+        },
+        {
+          "kind": "main",
+          "model": "claude-opus-5-5",
+          "lastUser": "LC-FOLLOW follow-one",
+          "reply": "FOLLOWED"
+        }
+      ]
+    },
+    "deliver": {
+      "steps": [
+        {
+          "command": {
+            "type": "get_state"
+          },
+          "response": {
+            "success": true,
+            "data": {
+              "model": "mock/claude-opus-5-5",
+              "thinkingLevel": "high",
+              "configuredThinkingLevel": "high",
+              "thinkingLevels": [ "off", "auto", "minimal", "low", "medium", "high", "xhigh" ],
+              "isStreaming": false,
+              "queuedMessageCount": 0,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionFile": "<session-file>",
+              "keys": [ "autoCompactionEnabled", "configuredThinkingLevel", "contextUsage", "dumpTools", "fastModeActive", "fastModeEnabled", "followUpMode", "goal", "hasPendingAsyncWork", "interruptMode", "isCompacting", "isSettled", "isStreaming", "messageCount", "model", "queuedMessageCount", "queuedMessages", "sessionFile", "sessionId", "slowModeEnabled", "slowModeSupported", "steeringMode", "systemPrompt", "thinkingLevel", "thinkingLevels", "todoPhases", "tokensPerSecond" ]
+            }
+          }
+        },
+        {
+          "group": "LC-LONG starts",
+          "command": {
+            "type": "prompt",
+            "message": "LC-LONG slow reply"
+          },
+          "response": {
+            "success": true
+          },
+          "eventsAfter": [
+            {
+              "type": "agent_start"
+            },
+            {
+              "type": "message_start",
+              "role": "user",
+              "text": "LC-LONG slow reply"
+            },
+            {
+              "type": "message_end",
+              "role": "user",
+              "text": "LC-LONG slow reply"
+            }
+          ]
+        },
+        {
+          "group": "LC-LONG starts",
+          "label": "in flight",
+          "command": {
+            "type": "get_state"
+          },
+          "response": {
+            "success": true,
+            "data": {
+              "model": "mock/claude-opus-5-5",
+              "thinkingLevel": "high",
+              "configuredThinkingLevel": "high",
+              "thinkingLevels": [ "off", "auto", "minimal", "low", "medium", "high", "xhigh" ],
+              "isStreaming": true,
+              "queuedMessageCount": 0,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionFile": "<session-file>",
+              "keys": [ "autoCompactionEnabled", "configuredThinkingLevel", "contextUsage", "dumpTools", "fastModeActive", "fastModeEnabled", "followUpMode", "goal", "hasPendingAsyncWork", "interruptMode", "isCompacting", "isSettled", "isStreaming", "messageCount", "model", "queuedMessageCount", "queuedMessages", "sessionFile", "sessionId", "slowModeEnabled", "slowModeSupported", "steeringMode", "systemPrompt", "thinkingLevel", "thinkingLevels", "todoPhases", "tokensPerSecond" ]
+            }
+          }
+        },
+        {
+          "group": "queue a steer and a follow-up",
+          "command": {
+            "type": "prompt",
+            "message": "LC-FOLLOW steer-one",
+            "streamingBehavior": "steer"
+          },
+          "response": {
+            "success": true
+          },
+          "eventsBefore": [
+            {
+              "type": "queue_update",
+              "steering": [ "LC-FOLLOW steer-one" ],
+              "followUp": [],
+              "liveSteered": 0
+            }
+          ]
+        },
+        {
+          "group": "queue a steer and a follow-up",
+          "command": {
+            "type": "prompt",
+            "message": "LC-FOLLOW follow-one",
+            "streamingBehavior": "followUp"
+          },
+          "response": {
+            "success": true
+          },
+          "eventsBefore": [
+            {
+              "type": "queue_update",
+              "steering": [ "LC-FOLLOW steer-one" ],
+              "followUp": [ "LC-FOLLOW follow-one" ],
+              "liveSteered": 0
+            }
+          ]
+        },
+        {
+          "group": "queue a steer and a follow-up",
+          "label": "queued",
+          "command": {
+            "type": "get_state"
+          },
+          "response": {
+            "success": true,
+            "data": {
+              "model": "mock/claude-opus-5-5",
+              "thinkingLevel": "high",
+              "configuredThinkingLevel": "high",
+              "thinkingLevels": [ "off", "auto", "minimal", "low", "medium", "high", "xhigh" ],
+              "isStreaming": true,
+              "queuedMessageCount": 2,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionFile": "<session-file>",
+              "keys": [ "autoCompactionEnabled", "configuredThinkingLevel", "contextUsage", "dumpTools", "fastModeActive", "fastModeEnabled", "followUpMode", "goal", "hasPendingAsyncWork", "interruptMode", "isCompacting", "isSettled", "isStreaming", "messageCount", "model", "queuedMessageCount", "queuedMessages", "sessionFile", "sessionId", "slowModeEnabled", "slowModeSupported", "steeringMode", "systemPrompt", "thinkingLevel", "thinkingLevels", "todoPhases", "tokensPerSecond" ]
+            }
+          }
+        },
+        {
+          "group": "abort_and_deliver_queue",
+          "command": {
+            "type": "abort_and_deliver_queue"
+          },
+          "response": {
+            "success": true,
+            "data": {
+              "aborted": true
+            }
+          },
+          "eventsBefore": [
+            {
+              "type": "message_start",
+              "role": "assistant",
+              "stopReason": "aborted",
+              "model": "claude-opus-5-5",
+              "text": ""
+            },
+            {
+              "type": "message_end",
+              "role": "assistant",
+              "stopReason": "aborted",
+              "model": "claude-opus-5-5",
+              "text": ""
+            },
+            {
+              "type": "queue_update",
+              "steering": [ "LC-FOLLOW steer-one", "LC-FOLLOW follow-one" ],
+              "followUp": [],
+              "liveSteered": 0
+            }
+          ],
+          "eventsAfter": [
+            {
+              "type": "queue_update",
+              "steering": [ "LC-FOLLOW follow-one" ],
+              "followUp": [],
+              "liveSteered": 0
+            },
+            {
+              "type": "agent_end",
+              "isTerminal": false,
+              "yielded": true,
+              "assistantModels": [ "claude-opus-5-5:aborted" ]
+            },
+            {
+              "type": "agent_start"
+            },
+            {
+              "type": "message_start",
+              "role": "user",
+              "text": "LC-FOLLOW steer-one"
+            },
+            {
+              "type": "message_end",
+              "role": "user",
+              "text": "LC-FOLLOW steer-one"
+            },
+            {
+              "type": "message_start",
+              "role": "assistant",
+              "stopReason": "stop",
+              "model": "claude-opus-5-5",
+              "text": "LONG-REPLY"
+            },
+            {
+              "type": "message_end",
+              "role": "assistant",
+              "stopReason": "stop",
+              "model": "claude-opus-5-5",
+              "text": "LONG-REPLY"
+            },
+            {
+              "type": "queue_update",
+              "steering": [],
+              "followUp": [],
+              "liveSteered": 0
+            },
+            {
+              "type": "message_start",
+              "role": "user",
+              "text": "LC-FOLLOW follow-one"
+            },
+            {
+              "type": "message_end",
+              "role": "user",
+              "text": "LC-FOLLOW follow-one"
+            },
+            {
+              "type": "message_start",
+              "role": "assistant",
+              "stopReason": "stop",
+              "model": "claude-opus-5-5",
+              "text": "FOLLOWED"
+            },
+            {
+              "type": "message_end",
+              "role": "assistant",
+              "stopReason": "stop",
+              "model": "claude-opus-5-5",
+              "text": "FOLLOWED"
+            },
+            {
+              "type": "agent_end",
+              "isTerminal": true,
+              "yielded": true,
+              "assistantModels": [ "claude-opus-5-5:stop", "claude-opus-5-5:stop" ]
+            },
+            {
+              "type": "prompt_result",
+              "id": "prompt-3",
+              "agentInvoked": true,
+              "status": "completed",
+              "sessionSettled": true
+            },
+            {
+              "type": "prompt_result",
+              "id": "prompt-5",
+              "agentInvoked": true,
+              "status": "completed",
+              "sessionSettled": true
+            },
+            {
+              "type": "prompt_result",
+              "id": "prompt-6",
+              "agentInvoked": true,
+              "status": "completed",
+              "sessionSettled": true
+            },
+            {
+              "type": "session_settled"
+            }
+          ]
+        },
+        {
+          "group": "settled",
+          "command": {
+            "type": "get_state"
+          },
+          "response": {
+            "success": true,
+            "data": {
+              "model": "mock/claude-opus-5-5",
+              "thinkingLevel": "high",
+              "configuredThinkingLevel": "high",
+              "thinkingLevels": [ "off", "auto", "minimal", "low", "medium", "high", "xhigh" ],
+              "isStreaming": false,
+              "queuedMessageCount": 0,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionFile": "<session-file>",
+              "keys": [ "autoCompactionEnabled", "configuredThinkingLevel", "contextUsage", "dumpTools", "fastModeActive", "fastModeEnabled", "followUpMode", "goal", "hasPendingAsyncWork", "interruptMode", "isCompacting", "isSettled", "isStreaming", "messageCount", "model", "queuedMessageCount", "queuedMessages", "sessionFile", "sessionId", "slowModeEnabled", "slowModeSupported", "steeringMode", "systemPrompt", "thinkingLevel", "thinkingLevels", "todoPhases", "tokensPerSecond" ]
+            }
+          }
+        }
+      ],
+      "result": {
+        "reply": {
+          "success": true,
+          "data": {
+            "aborted": true
+          }
+        },
+        "finalQueued": 0
+      },
+      "providerRequests": [
+        {
+          "kind": "main",
+          "model": "claude-opus-5-5",
+          "lastUser": "<system-reminder> Today: 2026-11-21; current working directo",
+          "reply": "LONG-REPLY"
+        },
+        {
+          "kind": "main",
+          "model": "claude-opus-5-5",
+          "lastUser": "<system-reminder> Today: 2026-11-21; current working directo",
+          "reply": "LONG-REPLY"
+        },
+        {
+          "kind": "main",
+          "model": "claude-opus-5-5",
+          "lastUser": "LC-FOLLOW follow-one",
+          "reply": "FOLLOWED"
+        }
+      ]
+    },
+    "deliverEmpty": {
+      "steps": [
+        {
+          "command": {
+            "type": "get_state"
+          },
+          "response": {
+            "success": true,
+            "data": {
+              "model": "mock/claude-opus-5-5",
+              "thinkingLevel": "high",
+              "configuredThinkingLevel": "high",
+              "thinkingLevels": [ "off", "auto", "minimal", "low", "medium", "high", "xhigh" ],
+              "isStreaming": false,
+              "queuedMessageCount": 0,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionFile": "<session-file>",
+              "keys": [ "autoCompactionEnabled", "configuredThinkingLevel", "contextUsage", "dumpTools", "fastModeActive", "fastModeEnabled", "followUpMode", "goal", "hasPendingAsyncWork", "interruptMode", "isCompacting", "isSettled", "isStreaming", "messageCount", "model", "queuedMessageCount", "queuedMessages", "sessionFile", "sessionId", "slowModeEnabled", "slowModeSupported", "steeringMode", "systemPrompt", "thinkingLevel", "thinkingLevels", "todoPhases", "tokensPerSecond" ]
+            }
+          }
+        },
+        {
+          "group": "LC-LONG with nothing queued",
+          "command": {
+            "type": "prompt",
+            "message": "LC-LONG slow reply"
+          },
+          "response": {
+            "success": true
+          },
+          "eventsAfter": [
+            {
+              "type": "agent_start"
+            },
+            {
+              "type": "message_start",
+              "role": "user",
+              "text": "LC-LONG slow reply"
+            },
+            {
+              "type": "message_end",
+              "role": "user",
+              "text": "LC-LONG slow reply"
+            }
+          ]
+        },
+        {
+          "group": "LC-LONG with nothing queued",
+          "label": "in flight",
+          "command": {
+            "type": "get_state"
+          },
+          "response": {
+            "success": true,
+            "data": {
+              "model": "mock/claude-opus-5-5",
+              "thinkingLevel": "high",
+              "configuredThinkingLevel": "high",
+              "thinkingLevels": [ "off", "auto", "minimal", "low", "medium", "high", "xhigh" ],
+              "isStreaming": true,
+              "queuedMessageCount": 0,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionFile": "<session-file>",
+              "keys": [ "autoCompactionEnabled", "configuredThinkingLevel", "contextUsage", "dumpTools", "fastModeActive", "fastModeEnabled", "followUpMode", "goal", "hasPendingAsyncWork", "interruptMode", "isCompacting", "isSettled", "isStreaming", "messageCount", "model", "queuedMessageCount", "queuedMessages", "sessionFile", "sessionId", "slowModeEnabled", "slowModeSupported", "steeringMode", "systemPrompt", "thinkingLevel", "thinkingLevels", "todoPhases", "tokensPerSecond" ]
+            }
+          }
+        },
+        {
+          "group": "abort_and_deliver_queue with nothing queued",
+          "command": {
+            "type": "abort_and_deliver_queue"
+          },
+          "response": {
+            "success": true,
+            "data": {
+              "aborted": false
+            }
+          },
+          "eventsAfter": [
+            {
+              "type": "message_start",
+              "role": "assistant",
+              "stopReason": "stop",
+              "model": "claude-opus-5-5",
+              "text": "LONG-REPLY"
+            },
+            {
+              "type": "message_end",
+              "role": "assistant",
+              "stopReason": "stop",
+              "model": "claude-opus-5-5",
+              "text": "LONG-REPLY"
+            },
+            {
+              "type": "agent_end",
+              "isTerminal": true,
+              "yielded": true,
+              "assistantModels": [ "claude-opus-5-5:stop" ]
+            },
+            {
+              "type": "prompt_result",
+              "id": "prompt-3",
+              "agentInvoked": true,
+              "status": "completed",
+              "sessionSettled": true
+            },
+            {
+              "type": "session_settled"
+            }
+          ]
+        },
+        {
+          "group": "again, idle",
+          "command": {
+            "type": "abort_and_deliver_queue"
+          },
+          "response": {
+            "success": true,
+            "data": {
+              "aborted": false
+            }
+          }
+        },
+        {
+          "group": "again, idle",
+          "command": {
+            "type": "get_state"
+          },
+          "response": {
+            "success": true,
+            "data": {
+              "model": "mock/claude-opus-5-5",
+              "thinkingLevel": "high",
+              "configuredThinkingLevel": "high",
+              "thinkingLevels": [ "off", "auto", "minimal", "low", "medium", "high", "xhigh" ],
+              "isStreaming": false,
+              "queuedMessageCount": 0,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionFile": "<session-file>",
+              "keys": [ "autoCompactionEnabled", "configuredThinkingLevel", "contextUsage", "dumpTools", "fastModeActive", "fastModeEnabled", "followUpMode", "goal", "hasPendingAsyncWork", "interruptMode", "isCompacting", "isSettled", "isStreaming", "messageCount", "model", "queuedMessageCount", "queuedMessages", "sessionFile", "sessionId", "slowModeEnabled", "slowModeSupported", "steeringMode", "systemPrompt", "thinkingLevel", "thinkingLevels", "todoPhases", "tokensPerSecond" ]
+            }
+          }
+        }
+      ],
+      "providerRequests": [
+        {
+          "kind": "main",
+          "model": "claude-opus-5-5",
+          "lastUser": "<system-reminder> Today: 2026-11-21; current working directo",
+          "reply": "LONG-REPLY"
+        }
+      ]
+    },
+    "resumeQueued": {
+      "steps": [
+        {
+          "command": {
+            "type": "get_state"
+          },
+          "response": {
+            "success": true,
+            "data": {
+              "model": "mock/claude-opus-5-5",
+              "thinkingLevel": "high",
+              "configuredThinkingLevel": "high",
+              "thinkingLevels": [ "off", "auto", "minimal", "low", "medium", "high", "xhigh" ],
+              "isStreaming": false,
+              "queuedMessageCount": 0,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionFile": "<session-file>",
+              "keys": [ "autoCompactionEnabled", "configuredThinkingLevel", "contextUsage", "dumpTools", "fastModeActive", "fastModeEnabled", "followUpMode", "goal", "hasPendingAsyncWork", "interruptMode", "isCompacting", "isSettled", "isStreaming", "messageCount", "model", "queuedMessageCount", "queuedMessages", "sessionFile", "sessionId", "slowModeEnabled", "slowModeSupported", "steeringMode", "systemPrompt", "thinkingLevel", "thinkingLevels", "todoPhases", "tokensPerSecond" ]
+            }
+          }
+        },
+        {
+          "group": "LC-LONG starts",
+          "command": {
+            "type": "prompt",
+            "message": "LC-LONG slow reply"
+          },
+          "response": {
+            "success": true
+          },
+          "eventsAfter": [
+            {
+              "type": "agent_start"
+            },
+            {
+              "type": "message_start",
+              "role": "user",
+              "text": "LC-LONG slow reply"
+            },
+            {
+              "type": "message_end",
+              "role": "user",
+              "text": "LC-LONG slow reply"
+            }
+          ]
+        },
+        {
+          "group": "LC-LONG starts",
+          "label": "in flight",
+          "command": {
+            "type": "get_state"
+          },
+          "response": {
+            "success": true,
+            "data": {
+              "model": "mock/claude-opus-5-5",
+              "thinkingLevel": "high",
+              "configuredThinkingLevel": "high",
+              "thinkingLevels": [ "off", "auto", "minimal", "low", "medium", "high", "xhigh" ],
+              "isStreaming": true,
+              "queuedMessageCount": 0,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionFile": "<session-file>",
+              "keys": [ "autoCompactionEnabled", "configuredThinkingLevel", "contextUsage", "dumpTools", "fastModeActive", "fastModeEnabled", "followUpMode", "goal", "hasPendingAsyncWork", "interruptMode", "isCompacting", "isSettled", "isStreaming", "messageCount", "model", "queuedMessageCount", "queuedMessages", "sessionFile", "sessionId", "slowModeEnabled", "slowModeSupported", "steeringMode", "systemPrompt", "thinkingLevel", "thinkingLevels", "todoPhases", "tokensPerSecond" ]
+            }
+          }
+        },
+        {
+          "group": "queue a steer and a follow-up",
+          "command": {
+            "type": "prompt",
+            "message": "LC-FOLLOW steer-one",
+            "streamingBehavior": "steer"
+          },
+          "response": {
+            "success": true
+          },
+          "eventsBefore": [
+            {
+              "type": "queue_update",
+              "steering": [ "LC-FOLLOW steer-one" ],
+              "followUp": [],
+              "liveSteered": 0
+            }
+          ]
+        },
+        {
+          "group": "queue a steer and a follow-up",
+          "command": {
+            "type": "prompt",
+            "message": "LC-FOLLOW follow-one",
+            "streamingBehavior": "followUp"
+          },
+          "response": {
+            "success": true
+          },
+          "eventsBefore": [
+            {
+              "type": "queue_update",
+              "steering": [ "LC-FOLLOW steer-one" ],
+              "followUp": [ "LC-FOLLOW follow-one" ],
+              "liveSteered": 0
+            }
+          ]
+        },
+        {
+          "group": "queue a steer and a follow-up",
+          "label": "queued",
+          "command": {
+            "type": "get_state"
+          },
+          "response": {
+            "success": true,
+            "data": {
+              "model": "mock/claude-opus-5-5",
+              "thinkingLevel": "high",
+              "configuredThinkingLevel": "high",
+              "thinkingLevels": [ "off", "auto", "minimal", "low", "medium", "high", "xhigh" ],
+              "isStreaming": true,
+              "queuedMessageCount": 2,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionFile": "<session-file>",
+              "keys": [ "autoCompactionEnabled", "configuredThinkingLevel", "contextUsage", "dumpTools", "fastModeActive", "fastModeEnabled", "followUpMode", "goal", "hasPendingAsyncWork", "interruptMode", "isCompacting", "isSettled", "isStreaming", "messageCount", "model", "queuedMessageCount", "queuedMessages", "sessionFile", "sessionId", "slowModeEnabled", "slowModeSupported", "steeringMode", "systemPrompt", "thinkingLevel", "thinkingLevels", "todoPhases", "tokensPerSecond" ]
+            }
+          }
+        },
+        {
+          "group": "resume",
+          "command": {
+            "type": "resume"
+          },
+          "response": {
+            "success": true
+          },
+          "eventsBefore": [
+            {
+              "type": "message_start",
+              "role": "assistant",
+              "stopReason": "aborted",
+              "model": "claude-opus-5-5",
+              "text": ""
+            },
+            {
+              "type": "message_end",
+              "role": "assistant",
+              "stopReason": "aborted",
+              "model": "claude-opus-5-5",
+              "text": ""
+            },
+            {
+              "type": "queue_update",
+              "steering": [ "LC-FOLLOW steer-one", "LC-FOLLOW follow-one" ],
+              "followUp": [],
+              "liveSteered": 0
+            }
+          ],
+          "eventsAfter": [
+            {
+              "type": "queue_update",
+              "steering": [ "LC-FOLLOW follow-one" ],
+              "followUp": [],
+              "liveSteered": 0
+            },
+            {
+              "type": "agent_end",
+              "isTerminal": false,
+              "yielded": true,
+              "assistantModels": [ "claude-opus-5-5:aborted" ]
+            },
+            {
+              "type": "agent_start"
+            },
+            {
+              "type": "message_start",
+              "role": "user",
+              "text": "LC-FOLLOW steer-one"
+            },
+            {
+              "type": "message_end",
+              "role": "user",
+              "text": "LC-FOLLOW steer-one"
+            },
+            {
+              "type": "message_start",
+              "role": "assistant",
+              "stopReason": "stop",
+              "model": "claude-opus-5-5",
+              "text": "LONG-REPLY"
+            },
+            {
+              "type": "message_end",
+              "role": "assistant",
+              "stopReason": "stop",
+              "model": "claude-opus-5-5",
+              "text": "LONG-REPLY"
+            },
+            {
+              "type": "queue_update",
+              "steering": [],
+              "followUp": [],
+              "liveSteered": 0
+            },
+            {
+              "type": "message_start",
+              "role": "user",
+              "text": "LC-FOLLOW follow-one"
+            },
+            {
+              "type": "message_end",
+              "role": "user",
+              "text": "LC-FOLLOW follow-one"
+            },
+            {
+              "type": "message_start",
+              "role": "assistant",
+              "stopReason": "stop",
+              "model": "claude-opus-5-5",
+              "text": "FOLLOWED"
+            },
+            {
+              "type": "message_end",
+              "role": "assistant",
+              "stopReason": "stop",
+              "model": "claude-opus-5-5",
+              "text": "FOLLOWED"
+            },
+            {
+              "type": "agent_end",
+              "isTerminal": true,
+              "yielded": true,
+              "assistantModels": [ "claude-opus-5-5:stop", "claude-opus-5-5:stop" ]
+            },
+            {
+              "type": "prompt_result",
+              "id": "prompt-3",
+              "agentInvoked": true,
+              "status": "completed",
+              "sessionSettled": true
+            },
+            {
+              "type": "prompt_result",
+              "id": "prompt-5",
+              "agentInvoked": true,
+              "status": "completed",
+              "sessionSettled": true
+            },
+            {
+              "type": "prompt_result",
+              "id": "prompt-6",
+              "agentInvoked": true,
+              "status": "completed",
+              "sessionSettled": true
+            },
+            {
+              "type": "session_settled"
+            }
+          ]
+        },
+        {
+          "group": "settled",
+          "command": {
+            "type": "get_state"
+          },
+          "response": {
+            "success": true,
+            "data": {
+              "model": "mock/claude-opus-5-5",
+              "thinkingLevel": "high",
+              "configuredThinkingLevel": "high",
+              "thinkingLevels": [ "off", "auto", "minimal", "low", "medium", "high", "xhigh" ],
+              "isStreaming": false,
+              "queuedMessageCount": 0,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionFile": "<session-file>",
+              "keys": [ "autoCompactionEnabled", "configuredThinkingLevel", "contextUsage", "dumpTools", "fastModeActive", "fastModeEnabled", "followUpMode", "goal", "hasPendingAsyncWork", "interruptMode", "isCompacting", "isSettled", "isStreaming", "messageCount", "model", "queuedMessageCount", "queuedMessages", "sessionFile", "sessionId", "slowModeEnabled", "slowModeSupported", "steeringMode", "systemPrompt", "thinkingLevel", "thinkingLevels", "todoPhases", "tokensPerSecond" ]
+            }
+          }
+        }
+      ],
+      "result": {
+        "reply": {
+          "success": true
+        },
+        "finalQueued": 0
+      },
+      "providerRequests": [
+        {
+          "kind": "main",
+          "model": "claude-opus-5-5",
+          "lastUser": "<system-reminder> Today: 2026-11-21; current working directo",
+          "reply": "LONG-REPLY"
+        },
+        {
+          "kind": "main",
+          "model": "claude-opus-5-5",
+          "lastUser": "<system-reminder> Today: 2026-11-21; current working directo",
+          "reply": "LONG-REPLY"
+        },
+        {
+          "kind": "main",
+          "model": "claude-opus-5-5",
+          "lastUser": "LC-FOLLOW follow-one",
+          "reply": "FOLLOWED"
+        }
+      ]
+    },
+    "resumeIdle": {
+      "steps": [
+        {
+          "command": {
+            "type": "get_state"
+          },
+          "response": {
+            "success": true,
+            "data": {
+              "model": "mock/claude-opus-5-5",
+              "thinkingLevel": "high",
+              "configuredThinkingLevel": "high",
+              "thinkingLevels": [ "off", "auto", "minimal", "low", "medium", "high", "xhigh" ],
+              "isStreaming": false,
+              "queuedMessageCount": 0,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionFile": "<session-file>",
+              "keys": [ "autoCompactionEnabled", "configuredThinkingLevel", "contextUsage", "dumpTools", "fastModeActive", "fastModeEnabled", "followUpMode", "goal", "hasPendingAsyncWork", "interruptMode", "isCompacting", "isSettled", "isStreaming", "messageCount", "model", "queuedMessageCount", "queuedMessages", "sessionFile", "sessionId", "slowModeEnabled", "slowModeSupported", "steeringMode", "systemPrompt", "thinkingLevel", "thinkingLevels", "todoPhases", "tokensPerSecond" ]
+            }
+          }
+        },
+        {
+          "group": "resume on a fresh chat (no user turn)",
+          "command": {
+            "type": "resume"
+          },
+          "response": {
+            "success": false,
+            "error": "Nothing to resume"
+          }
+        },
+        {
+          "group": "one normal turn",
+          "command": {
+            "type": "prompt",
+            "message": "LC-PLAIN hello"
+          },
+          "response": {
+            "success": true
+          },
+          "eventsAfter": [
+            {
+              "type": "agent_start"
+            },
+            {
+              "type": "message_start",
+              "role": "user",
+              "text": "LC-PLAIN hello"
+            },
+            {
+              "type": "message_end",
+              "role": "user",
+              "text": "LC-PLAIN hello"
+            },
+            {
+              "type": "message_start",
+              "role": "assistant",
+              "stopReason": "stop",
+              "model": "claude-opus-5-5",
+              "text": "PLAIN-REPLY"
+            },
+            {
+              "type": "message_end",
+              "role": "assistant",
+              "stopReason": "stop",
+              "model": "claude-opus-5-5",
+              "text": "PLAIN-REPLY"
+            },
+            {
+              "type": "agent_end",
+              "isTerminal": true,
+              "yielded": true,
+              "assistantModels": [ "claude-opus-5-5:stop" ]
+            },
+            {
+              "type": "prompt_result",
+              "id": "prompt-4",
+              "agentInvoked": true,
+              "status": "completed",
+              "sessionSettled": true
+            },
+            {
+              "type": "session_settled"
+            }
+          ]
+        },
+        {
+          "group": "resume on an idle chat",
+          "command": {
+            "type": "resume"
+          },
+          "response": {
+            "success": true
+          },
+          "eventsAfter": [
+            {
+              "type": "agent_start"
+            },
+            {
+              "type": "message_start",
+              "role": "developer",
+              "text": "<system-notice> Continue. MUST resume most recent intent; complete un"
+            },
+            {
+              "type": "message_end",
+              "role": "developer",
+              "text": "<system-notice> Continue. MUST resume most recent intent; complete un"
+            },
+            {
+              "type": "message_start",
+              "role": "assistant",
+              "stopReason": "stop",
+              "model": "claude-opus-5-5",
+              "text": "PLAIN-REPLY"
+            },
+            {
+              "type": "message_end",
+              "role": "assistant",
+              "stopReason": "stop",
+              "model": "claude-opus-5-5",
+              "text": "PLAIN-REPLY"
+            },
+            {
+              "type": "agent_end",
+              "isTerminal": true,
+              "yielded": true,
+              "assistantModels": [ "claude-opus-5-5:stop" ]
+            },
+            {
+              "type": "session_settled"
+            }
+          ]
+        },
+        {
+          "group": "resume on an idle chat",
+          "command": {
+            "type": "get_state"
+          },
+          "response": {
+            "success": true,
+            "data": {
+              "model": "mock/claude-opus-5-5",
+              "thinkingLevel": "high",
+              "configuredThinkingLevel": "high",
+              "thinkingLevels": [ "off", "auto", "minimal", "low", "medium", "high", "xhigh" ],
+              "isStreaming": false,
+              "queuedMessageCount": 0,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionFile": "<session-file>",
+              "keys": [ "autoCompactionEnabled", "configuredThinkingLevel", "contextUsage", "dumpTools", "fastModeActive", "fastModeEnabled", "followUpMode", "goal", "hasPendingAsyncWork", "interruptMode", "isCompacting", "isSettled", "isStreaming", "messageCount", "model", "queuedMessageCount", "queuedMessages", "sessionFile", "sessionId", "slowModeEnabled", "slowModeSupported", "steeringMode", "systemPrompt", "thinkingLevel", "thinkingLevels", "todoPhases", "tokensPerSecond" ]
+            }
+          }
+        }
+      ],
+      "providerRequests": [
+        {
+          "kind": "main",
+          "model": "claude-opus-5-5",
+          "lastUser": "<system-reminder> Today: 2026-11-21; current working directo",
+          "reply": "PLAIN-REPLY"
+        },
+        {
+          "kind": "main",
+          "model": "claude-opus-5-5",
+          "lastUser": "<system-notice> Continue. MUST resume most recent intent; co",
+          "reply": "PLAIN-REPLY"
+        }
+      ],
+      "transcriptTail": [
+        {
+          "type": "message",
+          "role": "user",
+          "text": "LC-PLAIN hello"
+        },
+        {
+          "type": "message",
+          "role": "assistant",
+          "text": "PLAIN-REPLY"
+        },
+        {
+          "type": "message",
+          "role": "developer",
+          "text": "<system-notice> Continue. MUST resume most recent intent; complete un"
+        },
+        {
+          "type": "message",
+          "role": "assistant",
+          "text": "PLAIN-REPLY"
+        }
+      ]
+    },
+    "resumeStreaming": {
+      "steps": [
+        {
+          "command": {
+            "type": "get_state"
+          },
+          "response": {
+            "success": true,
+            "data": {
+              "model": "mock/claude-opus-5-5",
+              "thinkingLevel": "high",
+              "configuredThinkingLevel": "high",
+              "thinkingLevels": [ "off", "auto", "minimal", "low", "medium", "high", "xhigh" ],
+              "isStreaming": false,
+              "queuedMessageCount": 0,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionFile": "<session-file>",
+              "keys": [ "autoCompactionEnabled", "configuredThinkingLevel", "contextUsage", "dumpTools", "fastModeActive", "fastModeEnabled", "followUpMode", "goal", "hasPendingAsyncWork", "interruptMode", "isCompacting", "isSettled", "isStreaming", "messageCount", "model", "queuedMessageCount", "queuedMessages", "sessionFile", "sessionId", "slowModeEnabled", "slowModeSupported", "steeringMode", "systemPrompt", "thinkingLevel", "thinkingLevels", "todoPhases", "tokensPerSecond" ]
+            }
+          }
+        },
+        {
+          "group": "LC-LONG starts",
+          "command": {
+            "type": "prompt",
+            "message": "LC-LONG slow reply"
+          },
+          "response": {
+            "success": true
+          },
+          "eventsAfter": [
+            {
+              "type": "agent_start"
+            },
+            {
+              "type": "message_start",
+              "role": "user",
+              "text": "LC-LONG slow reply"
+            },
+            {
+              "type": "message_end",
+              "role": "user",
+              "text": "LC-LONG slow reply"
+            }
+          ]
+        },
+        {
+          "group": "LC-LONG starts",
+          "label": "in flight",
+          "command": {
+            "type": "get_state"
+          },
+          "response": {
+            "success": true,
+            "data": {
+              "model": "mock/claude-opus-5-5",
+              "thinkingLevel": "high",
+              "configuredThinkingLevel": "high",
+              "thinkingLevels": [ "off", "auto", "minimal", "low", "medium", "high", "xhigh" ],
+              "isStreaming": true,
+              "queuedMessageCount": 0,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionFile": "<session-file>",
+              "keys": [ "autoCompactionEnabled", "configuredThinkingLevel", "contextUsage", "dumpTools", "fastModeActive", "fastModeEnabled", "followUpMode", "goal", "hasPendingAsyncWork", "interruptMode", "isCompacting", "isSettled", "isStreaming", "messageCount", "model", "queuedMessageCount", "queuedMessages", "sessionFile", "sessionId", "slowModeEnabled", "slowModeSupported", "steeringMode", "systemPrompt", "thinkingLevel", "thinkingLevels", "todoPhases", "tokensPerSecond" ]
+            }
+          }
+        },
+        {
+          "group": "resume while streaming",
+          "command": {
+            "type": "resume"
+          },
+          "response": {
+            "success": true
+          },
+          "eventsBefore": [
+            {
+              "type": "message_start",
+              "role": "assistant",
+              "stopReason": "aborted",
+              "model": "claude-opus-5-5",
+              "text": ""
+            },
+            {
+              "type": "message_end",
+              "role": "assistant",
+              "stopReason": "aborted",
+              "model": "claude-opus-5-5",
+              "text": ""
+            },
+            {
+              "type": "agent_end",
+              "isTerminal": false,
+              "yielded": true,
+              "assistantModels": [ "claude-opus-5-5:aborted" ]
+            },
+            {
+              "type": "agent_start"
+            }
+          ],
+          "eventsAfter": [
+            {
+              "type": "prompt_result",
+              "id": "prompt-3",
+              "agentInvoked": true,
+              "status": "aborted",
+              "sessionSettled": false
+            },
+            {
+              "type": "message_start",
+              "role": "assistant",
+              "stopReason": "stop",
+              "model": "claude-opus-5-5",
+              "text": "LONG-REPLY"
+            },
+            {
+              "type": "message_end",
+              "role": "assistant",
+              "stopReason": "stop",
+              "model": "claude-opus-5-5",
+              "text": "LONG-REPLY"
+            },
+            {
+              "type": "agent_end",
+              "isTerminal": true,
+              "yielded": true,
+              "assistantModels": [ "claude-opus-5-5:stop" ]
+            },
+            {
+              "type": "session_settled"
+            }
+          ]
+        },
+        {
+          "group": "resume while streaming",
+          "command": {
+            "type": "get_state"
+          },
+          "response": {
+            "success": true,
+            "data": {
+              "model": "mock/claude-opus-5-5",
+              "thinkingLevel": "high",
+              "configuredThinkingLevel": "high",
+              "thinkingLevels": [ "off", "auto", "minimal", "low", "medium", "high", "xhigh" ],
+              "isStreaming": false,
+              "queuedMessageCount": 0,
+              "steeringMode": "one-at-a-time",
+              "followUpMode": "one-at-a-time",
+              "sessionFile": "<session-file>",
+              "keys": [ "autoCompactionEnabled", "configuredThinkingLevel", "contextUsage", "dumpTools", "fastModeActive", "fastModeEnabled", "followUpMode", "goal", "hasPendingAsyncWork", "interruptMode", "isCompacting", "isSettled", "isStreaming", "messageCount", "model", "queuedMessageCount", "queuedMessages", "sessionFile", "sessionId", "slowModeEnabled", "slowModeSupported", "steeringMode", "systemPrompt", "thinkingLevel", "thinkingLevels", "todoPhases", "tokensPerSecond" ]
+            }
+          }
+        }
+      ],
+      "providerRequests": [
+        {
+          "kind": "main",
+          "model": "claude-opus-5-5",
+          "lastUser": "<system-reminder> Today: 2026-11-21; current working directo",
+          "reply": "LONG-REPLY"
+        },
+        {
+          "kind": "main",
+          "model": "claude-opus-5-5",
+          "lastUser": "<system-reminder> Today: 2026-11-21; current working directo",
+          "reply": "LONG-REPLY"
+        }
+      ]
+    }
+  }
+}

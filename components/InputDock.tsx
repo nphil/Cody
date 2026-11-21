@@ -8,8 +8,10 @@ import { PermissionRequestCard } from "./PermissionRequestCard";
 import { DeviceTrustCard } from "./DeviceTrustCard";
 import { ExtensionInputCard } from "./ExtensionDialog";
 import { AskDialogForm } from "./AskDialogForm";
+import { AskHtmlForm } from "./AskHtmlForm";
 import type { ExtensionDialogRequest, PendingInput, PendingInputResponse, RefusalDecision } from "@/lib/pending-input";
 import { askWithdrawnByMessage } from "@/lib/ask-walk";
+import { formHeadline, parseFormCached } from "@/lib/ask-form-view";
 import { extensionPrompt } from "@/lib/extension-title";
 
 export interface InputDockProps {
@@ -40,6 +42,7 @@ function requestTitle(item: PendingInput, t: Translate): string {
   switch (item.kind) {
     case "extension": {
       const request = item.request;
+      if (request.method === "form") return formHeadline(parseFormCached(request.html));
       if (request.method !== "ask") return extensionPrompt(request, item.fromAsk === true).headline;
       const first = request.questions[0];
       return first ? first.header || first.question : "";
@@ -56,6 +59,12 @@ function requestTitle(item: PendingInput, t: Translate): string {
  * and the dock's header while a phone's keyboard shrinks the app (`--app-height`, hooks/useVisualViewportHeight.ts).
  */
 const ASK_SCROLL_MAX = "max(120px, min(calc(var(--app-height, 100dvh) * 0.58 - 56px), calc(var(--app-height, 100dvh) - 340px)))";
+/**
+ * An omp 19.1 form is one long scroll area (explanations, tables, several fields) with Cancel/Submit pinned inside it,
+ * and the phone keyboard is usually up while it is answered, so it may take more of the screen than a one-line question:
+ * about 70% of the app height, still leaving the top bar, the dock header and the composer in view.
+ */
+const FORM_SCROLL_MAX = "max(160px, min(calc(var(--app-height, 100dvh) * 0.7 - 48px), calc(var(--app-height, 100dvh) - 270px)))";
 const PLAIN_SCROLL_MAX = "calc(40vh - 56px)";
 
 /** The one-line warning under the model's question: on current engines a message sent now withdraws it. */
@@ -328,7 +337,7 @@ export function InputDock({ pendingInputs, onRespond, composerRef }: InputDockPr
           <div
             ref={scrollRef}
             style={{
-              maxHeight: fromAsk ? ASK_SCROLL_MAX : PLAIN_SCROLL_MAX,
+              maxHeight: fromAsk ? (item?.kind === "extension" && item.request.method === "form" ? FORM_SCROLL_MAX : ASK_SCROLL_MAX) : PLAIN_SCROLL_MAX,
               overflowY: "auto",
               overscrollBehavior: "contain",
               scrollPaddingBottom: 64,
@@ -336,6 +345,13 @@ export function InputDock({ pendingInputs, onRespond, composerRef }: InputDockPr
               minWidth: 0,
             }}
           >
+            {item.kind === "extension" && item.request.method === "form" && (
+              <AskHtmlForm
+                key={item.request.id}
+                request={item.request}
+                onRespond={(response) => respond({ kind: "extension", response })}
+              />
+            )}
             {item.kind === "extension" && item.request.method === "ask" && (
               <AskDialogForm
                 key={item.request.id}
@@ -343,7 +359,7 @@ export function InputDock({ pendingInputs, onRespond, composerRef }: InputDockPr
                 onRespond={(response) => respond({ kind: "extension", response })}
               />
             )}
-            {item.kind === "extension" && item.request.method !== "ask" && (
+            {item.kind === "extension" && item.request.method !== "ask" && item.request.method !== "form" && (
               <ExtensionInputCard
                 key={extensionKey(item.request)}
                 request={item.request}

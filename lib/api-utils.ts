@@ -138,3 +138,20 @@ export async function getStateBounded(session: EngineSession): Promise<BoundedAg
     : null;
   return { running: true, state, stale: true };
 }
+
+/**
+ * The run phase this server already holds for a live session: no `get_state`
+ * round trip, so it answers at once even while a busy engine's serialized
+ * command queue would hold `get_state` for seconds. Same shape as a stale
+ * {@link getStateBounded} answer whose `state` carries only the phase flags.
+ * Null when the engine keeps no phase of its own (ask getStateBounded then).
+ */
+export function livePhaseState(session: EngineSession): BoundedAgentState | null {
+  const live = session.livePhase?.();
+  if (!live) return null;
+  return {
+    running: true,
+    stale: true,
+    state: { isStreaming: live.streaming, isPromptRunning: live.promptRunning, isBashRunning: live.bashRunning, isCompacting: live.compacting },
+  };
+}

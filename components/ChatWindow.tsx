@@ -124,7 +124,7 @@ function phaseLabel(phase: AgentPhase, cardShowsTail: boolean): string {
     else label = translate("chatWindow.runningNamedMore", { names: names.slice(0, 2).join(", "), more: names.length - 2 });
     // The oldest tool is the one worth narrating: append the newest line it
     // streamed about itself. A long silent call (omp's gh run_watch behind
-    // `write xd://github`, polling a GitHub Actions run to completion) must
+    // `write xd://github` or, from omp 19.1, a `github` command in bash, polling a GitHub Actions run to completion) must
     // read as a live watch, never as a hang. The ELAPSED clock deliberately
     // lives outside this string: the status line renders through a
     // crossfade, and folding a per-second tick into the crossfaded text made

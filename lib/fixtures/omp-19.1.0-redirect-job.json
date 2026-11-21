@@ -1,0 +1,1565 @@
+{
+  "note": "Recorded from a real omp 19.1.0 rpc-ui child: async bash job that redirects its output to a file. The redirected bytes appear in no frame.",
+  "run": {
+    "engine": "19.1",
+    "scenario": "redir",
+    "state": {
+      "sessionId": "01a1feca-68c0-7795-9db1-1af5a6139e0b",
+      "isStreaming": false
+    },
+    "probes": [
+      {
+        "at": 4024,
+        "phase": "mid-job",
+        "state": {
+          "model": {
+            "id": "claude-opus-5-5",
+            "name": "Mock Opus",
+            "api": "anthropic-messages",
+            "provider": "mock",
+            "baseUrl": "http://127.0.0.1:39294",
+            "reasoning": true,
+            "thinking": {
+              "mode": "anthropic-adaptive",
+              "efforts": [
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "supportsDisplay": true,
+              "prefixBinding": true
+            },
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "cacheRead": 0.2,
+              "cacheWrite": 5,
+              "input": 4,
+              "output": 20
+            },
+            "contextWindow": 1000000,
+            "maxTokens": 32000,
+            "compat": {
+              "officialEndpoint": false,
+              "signingEndpoint": false,
+              "supportsContextManagement": true,
+              "supportsServerCompaction": false,
+              "supportsMessageThreads": false,
+              "firstPartyProvider": false,
+              "honorsClaudeCodeBetaKillSwitch": false,
+              "supportsOutputEffort": true,
+              "disableStrictTools": false,
+              "disableAdaptiveThinking": false,
+              "allowAnthropicHeaderOverrides": false,
+              "supportsEagerToolInputStreaming": false,
+              "supportsLongCacheRetention": false,
+              "supportsMidConversationSystem": false,
+              "supportsTurnScopedSystem": false,
+              "supportsMidConversationToolChanges": false,
+              "supportsPerMessageEffort": false,
+              "supportsThinkingBindingControls": false,
+              "supportsBetweenToolsThinking": false,
+              "supportsForcedToolChoice": false,
+              "supportsSamplingParams": false,
+              "requiresToolResultId": false,
+              "requiresThinkingEnabled": false,
+              "requiresThinkingPresence": false,
+              "replayUnsignedThinking": true,
+              "escapeBuiltinToolNames": false,
+              "injectClaudeCodeInstruction": true,
+              "stripImageInput": false
+            },
+            "tokenizer": "claude-v5",
+            "isOAuth": true,
+            "identity": {
+              "class": "anthropic",
+              "family": "opus",
+              "revision": "5.5.0"
+            },
+            "requiresGlyphTokenization": true,
+            "supportsComputerUse": false,
+            "webSearch": "anthropic",
+            "webSearchModel": "claude-haiku-4-5",
+            "int": 59.1
+          },
+          "thinkingLevel": "high",
+          "configuredThinkingLevel": "high",
+          "thinkingLevels": [
+            "off",
+            "auto",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "isStreaming": false,
+          "isCompacting": false,
+          "steeringMode": "one-at-a-time",
+          "followUpMode": "one-at-a-time",
+          "interruptMode": "immediate",
+          "sessionFile": "/scratch/lab191/19_1-redir/agent/sessions/--tmp-cs-cd8c4851df4c-lab191-19_1-redir-work--/2026-11-21T15-47-20-384Z_01a1feca-68c0-7795-9db1-1af5a6139e0b.jsonl",
+          "sessionId": "01a1feca-68c0-7795-9db1-1af5a6139e0b",
+          "autoCompactionEnabled": true,
+          "queuedMessageCount": 0,
+          "hasPendingAsyncWork": true,
+          "isSettled": false,
+          "queuedMessages": {
+            "steering": [],
+            "followUp": [],
+            "liveSteered": 0
+          },
+          "todoPhases": [],
+          "fastModeEnabled": false,
+          "tokensPerSecond": null,
+          "fastModeActive": false,
+          "slowModeSupported": false,
+          "slowModeEnabled": false,
+          "messageCount": 4,
+          "systemPrompt": [
+            "You are omp's trusted coding assistant.\n\n# Engineering\n- Correctness, then six-month maintainability. Delete dead weight; prefer boring design to needless abstraction.\n- Compiled code: NEVER avoidable allocation, copying, computation.\n- Unexpected repo changes are the user's; adapt. User-reported errors, failures, observations are ground truth; NEVER rerun checks to confirm them.\n- Final chat MAY use LaTeX math (`$`, `$$`) and color (\\textcolor, \\colorbox, \\fcolorbox).\n- MAY react to the user when chatting: start reply with emoji.\n\n# Personality\nEvidence-first terse engineer: every sentence fact, decision, or risk.\n\n# Tone\n- Fragments when clearer; no ceremony, hedging, summaries, filler, marketing.\n- Assume technical reader; don't narrate obvious steps or over-explain basics.\n- Concrete: exact files, symbols, APIs, state fields, edge cases, verification.\n- Uncertainty: state at claim; name tradeoff; choose boring/safe option.\n- Code: invariants, risks, verification.\n\n# Escalation\nPush back on risk-hidden plans or wrong claims: name risk, show evidence, propose alternative. If overruled, execute user's call; don't relitigate.\n\n⁂ Runtime\n# Internal URLs\nMost FS/bash tools resolve these; path selectors: `read` docs. Further sub-paths, queries, limits: help://read/urls.\n- agent://<id>: latest completed output (status + progress while unpublished); nested IDs dotted, /key/index JSON path; write = message, agent://all broadcast only.\n- history://<id>: read-only concise transcript ",
+            "# Browser user sessions\n\n- Relay and CDP actions operate on real user sessions.\n- `target` borrows the user's own tab or Tern block: NEVER navigate it (`url`, `goto`) without authorization.\n- Report a step as done only when the page did it. NEVER alter the page with scripts to make a step look done\n  (inserting controls, writing app state, revealing hidden elements); when a step cannot be done through the page, say so.\n  When the user asks you to change the page with a script, do it.\n\n- On Linux under X11, Chrome 150 and later brings its window to the front when a mouse or touch press lands in the tab a window shows (the relay's `browser.targets()` marks it `shown`) while another window is in front, and what the user types next goes to that page. Presses: `click`, `dblclick`, `tap`, `drag`, `mouseDown`, `clickAt`, `check`/`uncheck` unless the element is already in the requested state (one that refuses the change still presses; unchecking a native radio does not press), and `uploadFile` on anything but an `<input type=file>`. Keys (`type`, `fill`, `press`), `focus`, `select`, `hover`, scrolling and screenshots are not presses, and a tab its window is not showing never comes forward. There, when the user must keep their app in front, use those on a shown tab instead: `focus()` then `press(\"Enter\")` for a button, `press(\"Space\")` for a checkbox, `uploadFile` on the file input itself. A control that opens a new tab or popup may still bring Chrome forward, however it is activated.",
+            "Use the eval `commit` namespace to commit your changes (`d = await commit.draft()`, then `await d.commit(\"subject\", [\"- body\"])`) rather than `git add`/`git commit`: it captures only the lines you and your subagents wrote, leaving other agents' staged and unstaged work untouched.",
+            "Binary analysis lives in eval's `dsm` namespace; read `help://eval/dsm` before use. Bare executable reads show metadata only.\n\nSharing a database with a child: pass the string from `db.handle()` in its task/context. The child MUST `await dsm.open(handle)` to retain its own reference, then close its handle in `finally`. Keep the parent's reference until the children finish; NEVER pass a process-local database object or assume its variable exists in a child.",
+            "<project-context>\n<workstation>\n- OS: linux 6.18.64-Unraid\n- Arch: x64\n- Model: mock/claude-opus-5-5\n</workstation>\n</project-context>\n\n<critical>\n- Each response MUST advance the task; completion only stopping condition.\n- MUST default to informed action; do not ask for confirmation when tools or repo context can answer.\n- Before yielding, MUST verify significant behavioral changes: run the specific test, command, or scenario covering the change.\n</critical>"
+          ],
+          "dumpTools": [
+            {
+              "name": "read",
+              "description": "Use `read` for static web; browser only if needed.\n\nPut line ranges in `path`, never a separate range/offset/limit parameter:\n- `{\"path\":\"notes.txt:450-455\"}` reads lines 450-455; `{\"path\":\"notes.txt:-5\"}` reads the last 5.\n- Include the selector on every ranged call; repeating a bare path does not advance through the file.\n\nPath suffixes:\n- :50 line 50; :50- from line 50 on; :50-200 inclusive; :50+150 counts lines; :-60 last 60.\n- Commas join ranges (:5-16,960-973) or individual lines (:19,59).\n- A single non-raw range also shows 1 line before and 3 after (:50-80 shows 49-83).\n- Non-raw reads (comma lists too) may add the open/close line of a cut block; only :raw stays exact.\n- :raw verbatim without anchors/prefixes; combine :2-4:raw or :raw:2-4 for exactly those lines.\n\nSources:\n- Bare code: declarations only; re-read ONLY footer-named omissions, NEVER guess `..`/`…`.\n- Selected file: `[foo.ts#1A2B]` snapshot+lines. Copy `[FILENAME#TAG]` for anchored edits; NEVER invent tag.\n- Directory: complete root; child listings cap at 12 (`… N more`), read child; page via :N-M/:-N.\n- URLs: reader text/markdown, :raw original HTML; bare host:port needs trailing slash.\n- PDF/DOCX/PPTX/XLSX/EPUB: extracted text; notebooks: editable cells; images: decoded inline.\n- Also, with selectors in help://read/sources (read it before first use):\n  - SQLite, archives (ZIP, TAR, 7z, RAR and more), JSON/JSONL by jq filter, executable metadata, video, SVG as image, merge conflicts.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "description": "Local path, internal URI, or URL; selectors inline."
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "additionalProperties": false
+              }
+            },
+            {
+              "name": "bash",
+              "description": "Persistent bash 5.3.\ncwd will reset after each turn, don't rely on cd; `pty` = interactive.\nInternal URIs work as paths for builtins/coreutils, redirects, globs.\nIn-process builtins, ahead of PATH: ast-grep, awk, b2sum, base32, base64, basename, cat, chmod, cksum, cmp, combine, comm, cp, cut, date, dd, df, diff, direnv, dirname, du, entr, env, errno, fd, file, find, flock, fold, fswatch, grep, head, hostname, id, ifne, isutf8, jq, ln, ls, lsof, md5, md5sum, mkdir, mktemp, mv, nl, nohup, nproc, od, open, paste, pgrep, pidwait, pkill, printenv, ps, readlink, realpath, rg, rm, rmdir, rsync, say, sd, sed, seq, sg, sha1sum, sha224sum, sha256sum, sha384sum, sha512sum, shasum, sleep, sort, sponge, stat, strings, tac, tail, tar, tee, timeout, top, touch, tr, truncate, ts, uname, uniq, uptime, urlmap, watchexec, wc, which, whoami, xargs, xdg-open, yes.\n`async` defers finite results but keeps the deadline (default 300s); `timeout: 0` for watchers and long jobs.\n`notify` (regex; implies `async`) sends each matching output line as a follow-up while the job runs, ahead of its result. Match only lines you'd act on: too many matches switch it off.\nDon't trunc output by habit, result will be summarized and saved as an artifact.\nLong-lived services:\n- unique name; ready requires name; no async/timeout; pty defaults true.\n- ready needs log regex or port (both if given); host defaults localhost, ready.timeout 30s.\n- `notify` (regex) sends each matching output line as a follow-up while the servi",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "command": {
+                    "type": "string"
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "description": "timeout in seconds; 0 disables the command deadline; nonzero values are clamped to 1-3600"
+                  },
+                  "cwd": {
+                    "type": "string"
+                  },
+                  "pty": {
+                    "type": "boolean"
+                  },
+                  "async": {
+                    "type": "boolean"
+                  },
+                  "notify": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string",
+                    "pattern": "^(?:\\s*|[A-Za-z0-9][A-Za-z0-9._-]{0,47})$",
+                    "description": "starts a long-lived supervised service under this name; omit for finite commands, async jobs included. 1-48 of [A-Za-z0-9._-]"
+                  },
+                  "ready": {
+                    "type": "object",
+                    "properties": {
+                      "log": {
+                        "type": "string",
+                        "description": "regex an output line matches once the service is ready"
+                      },
+                      "port": {
+                        "type": "number",
+                        "description": "TCP port the service accepts connections on once ready"
+                      },
+                      "host": {
+                        "type": "string",
+                        "description": "host for the port probe; default localhost (127.0.0.1 and ::1)"
+                      },
+                      "timeout": {
+                        "type": "number",
+                        "description": "seconds to wait for readiness; default 30"
+                      }
+                    },
+                    "description": "service readiness; needs log or port",
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "command"
+                ],
+                "additionalProperties": false
+              }
+            },
+            {
+              "name": "edit",
+              "description": "Hashline patches existing files; new files: `write`. Each file: `[PATH#TAG]`, `TAG` required 4-hex snapshot from latest `read`/`search`. Numbers: original `LINE:TEXT`, never hunk-shifted.\n\n<ops>\n`PUT N.=M:` replace inclusive N–M with `+` body (`N.=N` for one line); `PUT N*:` replace block N.\n`PUT <N:`/`PUT >N:` insert before/after N (`<1` head, `>$` tail). `PUT >N*:` insert after block N at sibling depth; inside, use `PUT >M:` at closer.\n`CUT N.=M`/`CUT N*` delete and capture, optionally as `@name`.\n`PUT <N @name`/`PUT >N @name` paste at gap (omit name for anonymous CUT); `PUT N.=M @name`/`PUT N* @name` paste over range/block (name REQUIRED). Register pastes have NO body; named registers persist across calls.\n`REM` delete file; `MV DEST` rename after prior edits (quote spaced paths).\n</ops>\n\n<rules>\n- `:` ops only: body rows `+TEXT` verbatim incl. indent; lone `+` blank. Literal `- item`/`+ item` → `+- item`/`++ item`. NEVER `-`/bare context. Body length independent of range; delete with CUT, not empty PUT.\n- Touch displayed changed lines only; `…`, `..`, collapsed `N-M:` and out-of-window lines UNSEEN. Re-read first. Tight ranges: split nonadjacent changes; NEVER include keepers or start/end mid-expression/block. Pure addition uses gap PUT.\n- `*` requires multi-line opener, NEVER closer/last/inner statement; use range/gap for one statement. Anchor first decorator/attribute/doc-comment to include it; standalone comments need explicit range.\n- Markdown heading blocks run throu",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "input": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "input"
+                ],
+                "additionalProperties": false
+              }
+            },
+            {
+              "name": "ask",
+              "description": "Ask the user to fill in one HTML form; blocks until they submit or cancel.\n\nAsk only for materially different tradeoffs the user must decide.\nDefault: act using code/config/docs/history and conventions.\nSeveral viable choices: pick conservative/standard, proceed, state choice.\n\n<instruction>\n- `html`: one <form> of plain semantic HTML, rendered natively in the user's terminal.\n  - NEVER <script>, <style>, style=, or buttons (<button>, type=\"submit\"): the UI supplies Submit and Cancel.\n- Every control needs a name; the submitted form data arrives as JSON `{\"name\": value}`.\n- One-of: `<input type=\"radio\">`; many-of: type=\"checkbox\"; long lists: <select>.\n- Wrap each control in a <label>; group a question in a <fieldset> with a <legend>, or put it in a <p> right before the group.\n- Radio and checkbox groups automatically get an \"Other\" free-text answer. NEVER add your own \"Other\" option or a text field for it.\n- Preselect your recommendation with checked/selected/value: those values are submitted if the user does not answer in time.\n- Context the user needs to decide (findings, tradeoffs, diffs, drafts) goes inside the form: <p>, <ul>, <table>, <pre>.\n- Keep forms short: a few questions, 2–5 options each; ask follow-ups in a later call.\n- Answer values:\n  - radio group or <select> → the chosen value\n  - checkbox group (shared name) or <select multiple> → an array\n  - lone checkbox or radio group left unchecked → omitted\n  - type=\"number\" → a number; text fields → their text\n  - ",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "html": {
+                    "type": "string",
+                    "description": "one HTML <form>"
+                  }
+                },
+                "required": [
+                  "html"
+                ],
+                "additionalProperties": false
+              }
+            },
+            {
+              "name": "eval",
+              "description": "One cell per call; top-level state persists, including across compaction. Subagents have separate kernels.\nPython: plain Python subprocess, not IPython (no `get_ipython()`, `obj?`, or %matplotlib).\nMagics like %pip, %load, %time and `!cmd` are rewritten to Python.\nTop-level `await` works; `asyncio.run(…)` fails.\nJS: Bun (Bun.file, Bun.write, Bun.$); top-level `await`/`return` work.\nOn error, retry only the failed step; earlier steps may have taken effect.\nPrinting an image or figure attaches it.\n\n<prelude>\nPython helpers take kwargs; JS helpers take the same parameters (camelCase) as positional args or ONE trailing options object.\n`await` marks async helpers; the rest are sync.\n```\nprint(value, ...)  log(message)  phase(title)  env(key?, value?)\nread(path, offset?, limit?)  write(path, content)  output(*ids, format?, query?, offset?, limit?); JS: await read(…)  await write(…)  await output(…)\nwait(handles, timeout?=None, raise_errors?=True); JS: await wait(…) — agent/completion barrier, ordered results; raise_errors=False retains failures\nawait tool.<name>(args) — session tool; `args` is its parameter object\nsh(command, cwd?, timeout?); JS: await sh(…) or await sh`cmd ${arg}` — embedded bash engine, runs to completion (never backgrounded)\n  returns stdout+stderr; non-zero exit raises ShellError (.exit_code/.exitCode, .output)\n  JS interpolations are shell-quoted; starts in the session cwd unless cwd is given\n```\nSession tool names: read, bash, edit, ask, eval, glob, grep, tas",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "language": {
+                    "enum": [
+                      "py",
+                      "js"
+                    ],
+                    "type": "string",
+                    "description": "\"py\": Python; \"js\": Bun"
+                  },
+                  "code": {
+                    "type": "string",
+                    "description": "Code or standalone % command."
+                  },
+                  "title": {
+                    "type": "string",
+                    "description": "Short transcript label."
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "description": "Cell deadline in seconds; nonzero values clamp to 1–3600; 0 disables it."
+                  },
+                  "reset": {
+                    "type": "boolean",
+                    "description": "Wipe only this kernel."
+                  }
+                },
+                "required": [
+                  "language",
+                  "code"
+                ],
+                "additionalProperties": false
+              },
+              "examples": [
+                {
+                  "caption": "Load a script with spaces without echoing its source",
+                  "call": {
+                    "language": "py",
+                    "code": "%load \"scripts/my setup.py\""
+                  }
+                }
+              ]
+            },
+            {
+              "name": "glob",
+              "description": "Glob files/dirs: `;`-separated paths or internal URLs (local://*.md, omp://**/*.md); default workspace root.\n`gitignore` and `hidden` default true; ignored dotfiles need `gitignore: false`. Newest-first by directory; dirs end `/`.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "hidden": {
+                    "type": "boolean"
+                  },
+                  "gitignore": {
+                    "type": "boolean"
+                  },
+                  "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            {
+              "name": "grep",
+              "description": "Regex: Rust, then PCRE2. `path`: `;`-separated file/dir/glob/URL; default `.`. Default case-sensitive, gitignore respected; `skip` paginates files.\nFile-only selector: `src/foo.ts:50-100`. Literal `\\n`/`\\\\n` enables cross-line.\nBare glob `*.ts` matches any depth; `dir/*.ts` only `dir`'s direct children (`dir/**/*.ts` recurses). A `!glob` entry excludes matching files and folders below the searched paths (`src;!**/*.test.ts`).",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "pattern": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "case": {
+                    "type": "boolean"
+                  },
+                  "gitignore": {
+                    "type": "boolean"
+                  },
+                  "skip": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "pattern"
+                ],
+                "additionalProperties": false
+              }
+            },
+            {
+              "name": "task",
+              "description": "Spawn `tasks[]` concurrently; IDs return immediately.\n\nResults auto-deliver; NEVER poll. Completely blocked? Call `wait` until it returns the first settled job you started.\n`completed`: subagent yielded successfully; claimed artifacts unverified.\n\n# Inputs\n- `agent`: most specific, inside each `tasks[]` item, NEVER at the top level.\n  - Omit only for the default (`task`); NEVER name it.\n  - Read-only research MUST use `scout` only when files unknown.\n  - Prefer one agent to investigate + edit.\n- `context`: shared (`# Goal`, `# Contract` interfaces); NEVER repeat per task.\n- `task`: self-contained (`# Target` files/non-goals, `# Change` steps/APIs, `# Acceptance` observable result).\n  - Children start blank; parent IRC steers immediately; large payloads via local://<path>, NEVER inline.\n- `name`: CamelCase ≤32, auto-generated if omitted; address agent by name.\n- `solutionSpace`: how open-ended the child's problem is: fix or design given, or which causes or designs remain open.\n  - Volume of work does not widen it; NEVER mention sibling agents or coordination.\n  - Examples: `one fix: rename, names given`; `one fix: slice end in paginate`; `single-flight cache load; races easy to miss`;\n    `several retry API shapes; error classes to choose`; `deadlock cause open, no repro`\n- `tools`: eval-defined, run in your kernel.\n\nShared edits need one integration owner; give each task its files.\nEvery task MUST skip build/lint/tests/formatters mid-flight; run once afterward.\n\n# Available A",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "context": {
+                    "type": "string"
+                  },
+                  "tasks": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "task": {
+                          "type": "string"
+                        },
+                        "solutionSpace": {
+                          "type": "string"
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "agent": {
+                          "type": "string"
+                        },
+                        "tools": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "required": [
+                        "task",
+                        "solutionSpace"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "context",
+                  "tasks"
+                ],
+                "additionalProperties": false
+              }
+            },
+            {
+              "name": "wait",
+              "description": "Wait only when blocked with nothing else to do.\nBlocks on background jobs/services you started, or on the answer to a question you sent this run.\nNothing you started running and no answer owed? Returns at once; so does a wait on an agent that is idle with nothing to wake it, or that is waiting on you.\n- MUST wait only on your own jobs/services, or rarely the answer to a question that blocks you.\n- NEVER wait for another agent's progress or for messages nobody owes you.\n- Agent you wait on is waiting on you? Answer it first.\n- Result in, other jobs still running? SHOULD act on it before waiting again.\n- A wait returned with nothing new and nothing else is left? Call `wait` right away with no other tool call: it then blocks up to 4m, longer for a reply.\nResults and messages auto-deliver. NEVER poll while work remains.",
+              "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+              }
+            },
+            {
+              "name": "todo",
+              "description": "`todo` NEVER takes a turn of its own: emit it in the same response as your next real tool call (parallel tool calls), `init` beside the first read or action, `done`/`start` beside the next action or check. A response whose only call is `todo` wastes a full model round trip.\nTasks identified by verbatim content, NEVER generated IDs (task-1). Unique, stable task/phase names; lost text: view, NEVER guess.\n`append` requires `items`; omitted `phase` uses the in-progress task's phase, else the first pending task's phase, else the last phase, else a new `Tasks` phase. Supply `phase` to target another phase; an empty name is invalid.\nBefore work, init for 3+ steps, requested task sets, or new instructions. MUST list EVERY user item separately (phased/numbered/bulleted/N); NEVER omit or remember leftovers.\nAfter successful mutation: no active means earliest pending starts (phase order); multiple active means only earliest stays. Done out of order may rewind pointer but NEVER reopen completed. Mark done immediately; follow phase order.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "enum": [
+                      "init",
+                      "start",
+                      "done",
+                      "rm",
+                      "drop",
+                      "append",
+                      "view"
+                    ],
+                    "type": "string"
+                  },
+                  "list": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "phase": {
+                          "type": "string"
+                        },
+                        "items": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          },
+                          "minItems": 1
+                        }
+                      },
+                      "required": [
+                        "phase",
+                        "items"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "description": "phases for init"
+                  },
+                  "task": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    ],
+                    "description": "verbatim task content; array targets several (not start)"
+                  },
+                  "phase": {
+                    "type": "string"
+                  },
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "tasks for flat init or append"
+                  }
+                },
+                "required": [
+                  "op"
+                ],
+                "additionalProperties": false
+              }
+            },
+            {
+              "name": "web_search",
+              "description": "Known URLs/programmatic data → `read`.\nQuery: site: or -site:, after: or before: YYYY-MM-DD, inurl:, intitle:, filetype:, \"phrase\", -term, OR.\nHacker News stories/comments → site:news.ycombinator.com.\nPrefer primary sources; MUST link citations.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "query": {
+                    "type": "string"
+                  },
+                  "recency": {
+                    "enum": [
+                      "day",
+                      "week",
+                      "month",
+                      "year"
+                    ],
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": "number"
+                  },
+                  "max_tokens": {
+                    "type": "number"
+                  },
+                  "temperature": {
+                    "type": "number"
+                  },
+                  "num_search_results": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "query"
+                ],
+                "additionalProperties": false
+              }
+            },
+            {
+              "name": "write",
+              "description": "SHOULD `edit` existing files; `write` for required new files or whole-file replacement. NEVER create docs or emojis unless requested.\nArchive members and SQLite rows are writable too: help://read/sources.",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "content": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path",
+                  "content"
+                ],
+                "additionalProperties": false
+              }
+            }
+          ],
+          "contextUsage": {
+            "tokens": 1,
+            "contextWindow": 1000000,
+            "percent": 0.00009999999999999999
+          },
+          "goal": null
+        }
+      }
+    ],
+    "frames": [
+      {
+        "type": "ready",
+        "protocolVersion": 1,
+        "supportedProtocolVersions": [
+          1,
+          2
+        ],
+        "maxFrameBytes": 1048576,
+        "maxReassembledFrameBytes": 67108864,
+        "supportsBashExcludeFromContext": true,
+        "__t": 1405
+      },
+      {
+        "type": "agent_start",
+        "__t": 1537
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "LC-REDIR run the redirected job"
+            }
+          ],
+          "attribution": "user",
+          "timestamp": 1795276040625
+        },
+        "messageId": "msg-1",
+        "__t": 1578
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "toolCall",
+              "id": "toolu_0",
+              "name": "bash",
+              "arguments": {
+                "command": "for i in 1 2 3 4 5 6 7 8; do echo redir-line-$i; sleep 1; done > redir.log 2>&1; echo REDIR-DONE",
+                "async": true,
+                "i": "Running the redirected job"
+              }
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 5,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 6,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.0001,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.00010400000000000001
+            }
+          },
+          "stopReason": "toolUse",
+          "timestamp": 1795276040679,
+          "responseId": "msg_0",
+          "duration": 17.95620900000017,
+          "ttft": 16.185315000000173,
+          "completedAt": 1795276040702
+        },
+        "messageId": "msg-2",
+        "__t": 1593
+      },
+      {
+        "type": "tool_execution_start",
+        "toolCallId": "toolu_0",
+        "toolName": "bash",
+        "args": {
+          "command": "for i in 1 2 3 4 5 6 7 8; do echo redir-line-$i; sleep 1; done > redir.log 2>&1; echo REDIR-DONE",
+          "async": true,
+          "i": "Running the redirected job"
+        },
+        "__t": 1609
+      },
+      {
+        "type": "tool_execution_end",
+        "toolCallId": "toolu_0",
+        "toolName": "bash",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "Backgrounded as job bg_1 (killed once it has run 300s in total; `timeout: 0` disables the deadline); its output is injected into the conversation as a follow-up the moment it finishes. Do NOT poll for it (no `sleep`, `ps`, `pgrep`, `top`, `pidwait`, log tailing): every poll is a wasted turn. Do other work, or end your reply and wait to be woken."
+            }
+          ],
+          "details": {
+            "async": {
+              "state": "running",
+              "jobId": "bg_1",
+              "type": "bash"
+            },
+            "timeoutSeconds": 300
+          }
+        },
+        "isError": false,
+        "__t": 1614
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "toolResult",
+          "toolCallId": "toolu_0",
+          "toolName": "bash",
+          "content": [
+            {
+              "type": "text",
+              "text": "Backgrounded as job bg_1 (killed once it has run 300s in total; `timeout: 0` disables the deadline); its output is injected into the conversation as a follow-up the moment it finishes. Do NOT poll for it (no `sleep`, `ps`, `pgrep`, `top`, `pidwait`, log tailing): every poll is a wasted turn. Do other work, or end your reply and wait to be woken."
+            }
+          ],
+          "details": {
+            "async": {
+              "state": "running",
+              "jobId": "bg_1",
+              "type": "bash"
+            },
+            "timeoutSeconds": 300
+          },
+          "isError": false,
+          "timestamp": 1795276040724
+        },
+        "messageId": "msg-3",
+        "__t": 1615
+      },
+      {
+        "type": "turn_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "toolCall",
+              "id": "toolu_0",
+              "name": "bash",
+              "arguments": {
+                "command": "for i in 1 2 3 4 5 6 7 8; do echo redir-line-$i; sleep 1; done > redir.log 2>&1; echo REDIR-DONE",
+                "async": true,
+                "i": "Running the redirected job"
+              }
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 5,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 6,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.0001,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.00010400000000000001
+            }
+          },
+          "stopReason": "toolUse",
+          "timestamp": 1795276040679,
+          "responseId": "msg_0",
+          "duration": 17.95620900000017,
+          "ttft": 16.185315000000173
+        },
+        "toolResults": [
+          {
+            "role": "toolResult",
+            "toolCallId": "toolu_0",
+            "toolName": "bash",
+            "content": [
+              {
+                "type": "text",
+                "text": "Backgrounded as job bg_1 (killed once it has run 300s in total; `timeout: 0` disables the deadline); its output is injected into the conversation as a follow-up the moment it finishes. Do NOT poll for it (no `sleep`, `ps`, `pgrep`, `top`, `pidwait`, log tailing): every poll is a wasted turn. Do other work, or end your reply and wait to be woken."
+              }
+            ],
+            "details": {
+              "async": {
+                "state": "running",
+                "jobId": "bg_1",
+                "type": "bash"
+              },
+              "timeoutSeconds": 300
+            },
+            "isError": false,
+            "timestamp": 1795276040724
+          }
+        ],
+        "__t": 1617
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "WAITING-FOR-HELPER"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 2,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 3,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.00004,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.000044000000000000006
+            }
+          },
+          "stopReason": "stop",
+          "timestamp": 1795276040733,
+          "responseId": "msg_1",
+          "duration": 4.388171000000057,
+          "ttft": 3.70479800000021,
+          "completedAt": 1795276040738
+        },
+        "messageId": "msg-4",
+        "__t": 1629
+      },
+      {
+        "type": "turn_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "WAITING-FOR-HELPER"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 2,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 3,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.00004,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.000044000000000000006
+            }
+          },
+          "stopReason": "stop",
+          "timestamp": 1795276040733,
+          "responseId": "msg_1",
+          "duration": 4.388171000000057,
+          "ttft": 3.70479800000021
+        },
+        "toolResults": [],
+        "__t": 1629
+      },
+      {
+        "type": "agent_end",
+        "messages": 4,
+        "isTerminal": false,
+        "yielded": true,
+        "awaitingAsyncWork": true,
+        "__t": 1638
+      },
+      {
+        "type": "prompt_result",
+        "id": "prompt-4",
+        "agentInvoked": true,
+        "status": "completed",
+        "sessionSettled": false,
+        "__t": 1638
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_0",
+        "toolName": "bash",
+        "args": {
+          "command": "for i in 1 2 3 4 5 6 7 8; do echo redir-line-$i; sleep 1; done > redir.log 2>&1; echo REDIR-DONE",
+          "async": true,
+          "i": "Running the redirected job"
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "async": {
+              "state": "running",
+              "jobId": "bg_1",
+              "type": "bash"
+            }
+          }
+        },
+        "__t": 1726
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_0",
+        "toolName": "bash",
+        "args": {
+          "command": "for i in 1 2 3 4 5 6 7 8; do echo redir-line-$i; sleep 1; done > redir.log 2>&1; echo REDIR-DONE",
+          "async": true,
+          "i": "Running the redirected job"
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "async": {
+              "state": "running",
+              "jobId": "bg_1",
+              "type": "bash"
+            }
+          }
+        },
+        "__t": 2715
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_0",
+        "toolName": "bash",
+        "args": {
+          "command": "for i in 1 2 3 4 5 6 7 8; do echo redir-line-$i; sleep 1; done > redir.log 2>&1; echo REDIR-DONE",
+          "async": true,
+          "i": "Running the redirected job"
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "async": {
+              "state": "running",
+              "jobId": "bg_1",
+              "type": "bash"
+            }
+          }
+        },
+        "__t": 3669
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_0",
+        "toolName": "bash",
+        "args": {
+          "command": "for i in 1 2 3 4 5 6 7 8; do echo redir-line-$i; sleep 1; done > redir.log 2>&1; echo REDIR-DONE",
+          "async": true,
+          "i": "Running the redirected job"
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "async": {
+              "state": "running",
+              "jobId": "bg_1",
+              "type": "bash"
+            }
+          }
+        },
+        "__t": 4710
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_0",
+        "toolName": "bash",
+        "args": {
+          "command": "for i in 1 2 3 4 5 6 7 8; do echo redir-line-$i; sleep 1; done > redir.log 2>&1; echo REDIR-DONE",
+          "async": true,
+          "i": "Running the redirected job"
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "async": {
+              "state": "running",
+              "jobId": "bg_1",
+              "type": "bash"
+            }
+          }
+        },
+        "__t": 5675
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_0",
+        "toolName": "bash",
+        "args": {
+          "command": "for i in 1 2 3 4 5 6 7 8; do echo redir-line-$i; sleep 1; done > redir.log 2>&1; echo REDIR-DONE",
+          "async": true,
+          "i": "Running the redirected job"
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "async": {
+              "state": "running",
+              "jobId": "bg_1",
+              "type": "bash"
+            }
+          }
+        },
+        "__t": 6718
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_0",
+        "toolName": "bash",
+        "args": {
+          "command": "for i in 1 2 3 4 5 6 7 8; do echo redir-line-$i; sleep 1; done > redir.log 2>&1; echo REDIR-DONE",
+          "async": true,
+          "i": "Running the redirected job"
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "async": {
+              "state": "running",
+              "jobId": "bg_1",
+              "type": "bash"
+            }
+          }
+        },
+        "__t": 7681
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_0",
+        "toolName": "bash",
+        "args": {
+          "command": "for i in 1 2 3 4 5 6 7 8; do echo redir-line-$i; sleep 1; done > redir.log 2>&1; echo REDIR-DONE",
+          "async": true,
+          "i": "Running the redirected job"
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "async": {
+              "state": "running",
+              "jobId": "bg_1",
+              "type": "bash"
+            }
+          }
+        },
+        "__t": 8725
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_0",
+        "toolName": "bash",
+        "args": {
+          "command": "for i in 1 2 3 4 5 6 7 8; do echo redir-line-$i; sleep 1; done > redir.log 2>&1; echo REDIR-DONE",
+          "async": true,
+          "i": "Running the redirected job"
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": "REDIR-DONE\n"
+            }
+          ],
+          "details": {
+            "async": {
+              "state": "running",
+              "jobId": "bg_1",
+              "type": "bash"
+            }
+          }
+        },
+        "__t": 9674
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_0",
+        "toolName": "bash",
+        "args": {
+          "command": "for i in 1 2 3 4 5 6 7 8; do echo redir-line-$i; sleep 1; done > redir.log 2>&1; echo REDIR-DONE",
+          "async": true,
+          "i": "Running the redirected job"
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": "REDIR-DONE\n"
+            }
+          ],
+          "details": {
+            "async": {
+              "state": "running",
+              "jobId": "bg_1",
+              "type": "bash"
+            }
+          }
+        },
+        "__t": 9675
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_0",
+        "toolName": "bash",
+        "args": {
+          "command": "for i in 1 2 3 4 5 6 7 8; do echo redir-line-$i; sleep 1; done > redir.log 2>&1; echo REDIR-DONE",
+          "async": true,
+          "i": "Running the redirected job"
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": "REDIR-DONE\n\n\nWall time: 8.07 seconds"
+            }
+          ],
+          "details": {
+            "wallTimeNoticeEmitted": true,
+            "timeoutSeconds": 300,
+            "wallTimeMs": 8067.75797,
+            "async": {
+              "state": "completed",
+              "jobId": "bg_1",
+              "type": "bash"
+            }
+          }
+        },
+        "__t": 9680
+      },
+      {
+        "type": "agent_start",
+        "__t": 9684
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "custom",
+          "customType": "async-result",
+          "content": "<system-notice>\nBackground job bg_1 (for i in 1 2 3 4 5 6 7 8; do echo redir-line-$i; sleep 1; done > redir.log 2>&1; echo REDIR-DONE) has completed.\nResume your work using the result below.\nREDIR-DONE\nWall time: 8.07 seconds\n</system-notice>",
+          "display": true,
+          "attribution": "agent",
+          "details": {
+            "meta": {
+              "source": {
+                "type": "report",
+                "value": "background job delivery"
+              }
+            },
+            "jobs": [
+              {
+                "jobId": "bg_1",
+                "type": "bash",
+                "status": "completed",
+                "label": "for i in 1 2 3 4 5 6 7 8; do echo redir-line-$i; sleep 1; done > redir.log 2>&1; echo REDIR-DONE",
+                "durationMs": 8070
+              }
+            ]
+          },
+          "timestamp": 1795276048793
+        },
+        "messageId": "msg-5",
+        "__t": 9689
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "PLAIN-REPLY"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 2,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 3,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.00004,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.000044000000000000006
+            }
+          },
+          "stopReason": "stop",
+          "timestamp": 1795276048798,
+          "responseId": "msg_2",
+          "duration": 3.244065999999293,
+          "ttft": 2.8709969999999885,
+          "completedAt": 1795276048802
+        },
+        "messageId": "msg-6",
+        "__t": 9692
+      },
+      {
+        "type": "turn_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "PLAIN-REPLY"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 2,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 3,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.00004,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.000044000000000000006
+            }
+          },
+          "stopReason": "stop",
+          "timestamp": 1795276048798,
+          "responseId": "msg_2",
+          "duration": 3.244065999999293,
+          "ttft": 2.8709969999999885
+        },
+        "toolResults": [],
+        "__t": 9693
+      },
+      {
+        "type": "agent_end",
+        "messages": 2,
+        "isTerminal": true,
+        "yielded": true,
+        "__t": 9694
+      },
+      {
+        "type": "session_settled",
+        "__t": 9695
+      }
+    ],
+    "entries": [
+      {
+        "type": "title",
+        "v": 1,
+        "title": "",
+        "updatedAt": "2026-11-21T15:47:20.384Z",
+        "pad": "                                                                                                                                                                              "
+      },
+      {
+        "type": "session",
+        "version": 3,
+        "id": "01a1feca-68c0-7795-9db1-1af5a6139e0b",
+        "timestamp": "2026-11-21T15:47:20.384Z",
+        "cwd": "/scratch/lab191/19_1-redir/work"
+      },
+      {
+        "type": "model_change",
+        "id": "d1817e0f",
+        "parentId": null,
+        "timestamp": "2026-11-21T15:47:20.476Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "model": "mock/claude-opus-5-5",
+        "resolvedModelIsFallback": false
+      },
+      {
+        "type": "thinking_level_change",
+        "id": "2ba30150",
+        "parentId": "d1817e0f",
+        "timestamp": "2026-11-21T15:47:20.476Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "thinkingLevel": "high",
+        "configured": null
+      },
+      {
+        "type": "custom",
+        "customType": "date-cwd-reminder",
+        "data": {
+          "conversation": "user:1795276040625:user",
+          "turn": "user:1795276040625:user",
+          "reminder": "<system-reminder>\nToday: 2026-11-21; current working directory: '/scratch/lab191/19_1-redir/work'. Do not repeat this information in your reply.\n</system-reminder>",
+          "placement": "prefix",
+          "firstTurn": "c9c410a802258973"
+        },
+        "id": "cc6deb9d",
+        "parentId": "2ba30150",
+        "timestamp": "2026-11-21T15:47:20.656Z",
+        "runtime": {
+          "version": "19.1.0"
+        }
+      },
+      {
+        "type": "message",
+        "id": "628acbdd",
+        "parentId": "cc6deb9d",
+        "timestamp": "2026-11-21T15:47:20.688Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "LC-REDIR run the redirected job"
+            }
+          ],
+          "attribution": "user",
+          "timestamp": 1795276040625
+        }
+      },
+      {
+        "type": "custom",
+        "customType": "system-prompt-digest",
+        "data": "cdf7046303f980ed",
+        "id": "b4d5a3fe",
+        "parentId": "628acbdd",
+        "timestamp": "2026-11-21T15:47:20.703Z",
+        "runtime": {
+          "version": "19.1.0"
+        }
+      },
+      {
+        "type": "message",
+        "id": "75d3fec6",
+        "parentId": "b4d5a3fe",
+        "timestamp": "2026-11-21T15:47:20.703Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "toolCall",
+              "id": "toolu_0",
+              "name": "bash",
+              "arguments": {
+                "command": "for i in 1 2 3 4 5 6 7 8; do echo redir-line-$i; sleep 1; done > redir.log 2>&1; echo REDIR-DONE",
+                "async": true,
+                "i": "Running the redirected job"
+              }
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 5,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 6,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.0001,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.00010400000000000001
+            }
+          },
+          "stopReason": "toolUse",
+          "timestamp": 1795276040679,
+          "responseId": "msg_0",
+          "duration": 17.95620900000017,
+          "ttft": 16.185315000000173,
+          "completedAt": 1795276040702,
+          "contextSnapshot": {
+            "promptTokens": 1,
+            "nonMessageTokens": 11578,
+            "toolSchemaTokens": 7785,
+            "compactionEpoch": 0
+          }
+        }
+      },
+      {
+        "type": "custom",
+        "customType": "tool_execution_start",
+        "data": {
+          "toolCallId": "toolu_0",
+          "toolName": "bash",
+          "startedAt": "2026-11-21T15:47:20.718Z",
+          "args": {
+            "command": "for i in 1 2 3 4 5 6 7 8; do echo redir-line-$i; sleep 1; done > redir.log 2>&1; echo REDIR-DONE"
+          }
+        },
+        "id": "2b613290",
+        "parentId": "75d3fec6",
+        "timestamp": "2026-11-21T15:47:20.718Z",
+        "runtime": {
+          "version": "19.1.0"
+        }
+      },
+      {
+        "type": "message",
+        "id": "4c93680a",
+        "parentId": "2b613290",
+        "timestamp": "2026-11-21T15:47:20.724Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "message": {
+          "role": "toolResult",
+          "toolCallId": "toolu_0",
+          "toolName": "bash",
+          "content": [
+            {
+              "type": "text",
+              "text": "Backgrounded as job bg_1 (killed once it has run 300s in total; `timeout: 0` disables the deadline); its output is injected into the conversation as a follow-up the moment it finishes. Do NOT poll for it (no `sleep`, `ps`, `pgrep`, `top`, `pidwait`, log tailing): every poll is a wasted turn. Do other work, or end your reply and wait to be woken."
+            }
+          ],
+          "details": {
+            "async": {
+              "state": "running",
+              "jobId": "bg_1",
+              "type": "bash"
+            },
+            "timeoutSeconds": 300
+          },
+          "isError": false,
+          "timestamp": 1795276040724
+        }
+      },
+      {
+        "type": "message",
+        "id": "41425b14",
+        "parentId": "4c93680a",
+        "timestamp": "2026-11-21T15:47:20.739Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "WAITING-FOR-HELPER"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 2,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 3,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.00004,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.000044000000000000006
+            }
+          },
+          "stopReason": "stop",
+          "timestamp": 1795276040733,
+          "responseId": "msg_1",
+          "duration": 4.388171000000057,
+          "ttft": 3.70479800000021,
+          "completedAt": 1795276040738,
+          "contextSnapshot": {
+            "promptTokens": 1,
+            "nonMessageTokens": 11578,
+            "toolSchemaTokens": 7785,
+            "compactionEpoch": 0
+          }
+        }
+      },
+      {
+        "type": "custom_message",
+        "customType": "async-result",
+        "content": "<system-notice>\nBackground job bg_1 (for i in 1 2 3 4 5 6 7 8; do echo redir-line-$i; sleep 1; done > redir.log 2>&1; echo REDIR-DONE) has completed.\nResume your work using the result below.\nREDIR-DONE\nWall time: 8.07 seconds\n</system-notice>",
+        "display": true,
+        "details": {
+          "meta": {
+            "source": {
+              "type": "report",
+              "value": "background job delivery"
+            }
+          },
+          "jobs": [
+            {
+              "jobId": "bg_1",
+              "type": "bash",
+              "status": "completed",
+              "label": "for i in 1 2 3 4 5 6 7 8; do echo redir-line-$i; sleep 1; done > redir.log 2>&1; echo REDIR-DONE",
+              "durationMs": 8070
+            }
+          ]
+        },
+        "attribution": "agent",
+        "id": "6af3c81f",
+        "parentId": "41425b14",
+        "timestamp": "2026-11-21T15:47:28.793Z",
+        "runtime": {
+          "version": "19.1.0"
+        }
+      },
+      {
+        "type": "message",
+        "id": "971991bf",
+        "parentId": "6af3c81f",
+        "timestamp": "2026-11-21T15:47:28.802Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "PLAIN-REPLY"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 2,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 3,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.00004,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.000044000000000000006
+            }
+          },
+          "stopReason": "stop",
+          "timestamp": 1795276048798,
+          "responseId": "msg_2",
+          "duration": 3.244065999999293,
+          "ttft": 2.8709969999999885,
+          "completedAt": 1795276048802,
+          "contextSnapshot": {
+            "promptTokens": 1,
+            "nonMessageTokens": 11578,
+            "toolSchemaTokens": 7785,
+            "compactionEpoch": 0
+          }
+        }
+      }
+    ],
+    "mockLog": [
+      {
+        "kind": "main",
+        "reply": "tool:_bash",
+        "t": 1795276040692
+      },
+      {
+        "kind": "main",
+        "reply": "WAITING-FOR-HELPER",
+        "t": 1795276040735
+      },
+      {
+        "kind": "main",
+        "reply": "PLAIN-REPLY",
+        "t": 1795276048801
+      }
+    ]
+  }
+}

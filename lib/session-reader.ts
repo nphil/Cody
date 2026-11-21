@@ -5,9 +5,12 @@ import { getAgentDir, getSidebarChatsDir } from "./omp/paths";
 import {
   invalidateSessionFileListCache,
   listAllSessionInfos,
+  extendLoadedSession,
   loadSessionFile,
+  loadSessionFileWithCursor,
   readSessionHeaderSync,
   resolveSessionLeafId,
+  type CursoredSessionLoad,
   type LoadedSession,
   type LoadSessionOptions,
   type OmpSessionInfo,
@@ -26,6 +29,7 @@ import { isRecord } from "./type-guards";
 import { goalFromPersistedMode } from "./goal-state";
 import { taskResultRetryFailure, taskResultStructuredOutput, taskResultUsageCost } from "./task-result-details";
 import { isAskXdevDetails, keepAskToolResultDetails } from "./ask-result";
+import { toolCommandRecords } from "./tool-command";
 import type { TodoPhase } from "./pi-types";
 import { sessionPathKey } from "./session-path";
 import { foldSystemReminder } from "./system-reminder";
@@ -252,10 +256,6 @@ export function invalidateSessionListCache(): void {
   // not change when a file is added inside an existing project subdirectory
   // (Windows/NTFS). Clear it too so new sessions appear immediately.
   invalidateSessionFileListCache();
-  // Drop cached entry parses so a mutation preserving size+mtime (rare) can
-  // never serve stale entries; the (size, mtimeMs) key already invalidates
-  // the common case, this closes the remaining window.
-  globalThis.__ompSessionEntriesCache?.clear();
 }
 
 /**
@@ -425,107 +425,27 @@ export function readSessionHeader(filePath: string): SessionHeader | null {
   return readSessionHeaderSync(filePath);
 }
 
-/** Full-file entry parse memoized on (path, size, mtimeMs). Read-only scans
- * (subagent history, file-reference checks, thinking routes) re-parse MB-scale
- * session files on every 15s reconcile poll and again at run end; the memo
- * turns each UNCHANGED file's parse into a single stat — the same convention
- * as scanSessionInfoCached. Stored on globalThis for hot-reload safety and
- * LRU-bounded. Entries are SHARED across cache hits: callers must treat them
- * as immutable (all current callers only read). */
-interface SessionEntriesCacheEntry {
+/** A parse-cache slot: what the file held when it was (size, mtimeMs). */
+interface SessionParseCacheEntry {
   size: number;
   mtimeMs: number;
-  entries: SessionEntry[];
+  parsed: CursoredSessionLoad;
 }
 
-declare global {
-  var __ompSessionEntriesCache: Map<string, SessionEntriesCacheEntry> | undefined;
-}
-
-const MAX_SESSION_ENTRIES_CACHE_ENTRIES = 32;
-
-function getSessionEntriesCache(): Map<string, SessionEntriesCacheEntry> {
-  if (!globalThis.__ompSessionEntriesCache) globalThis.__ompSessionEntriesCache = new Map();
-  return globalThis.__ompSessionEntriesCache;
-}
-
-function loadSessionEntriesCached(filePath: string): SessionEntry[] {
-  let size: number;
-  let mtimeMs: number;
-  try {
-    const stat = statSync(filePath);
-    size = stat.size;
-    mtimeMs = stat.mtimeMs;
-  } catch {
-    // Missing/unreadable file — mirror loadSessionFile's lenient empty result.
-    return loadSessionFile(filePath).entries;
-  }
-  const cache = getSessionEntriesCache();
-  const cached = cache.get(filePath);
-  if (cached && cached.size === size && cached.mtimeMs === mtimeMs) {
-    cache.delete(filePath);
-    cache.set(filePath, cached);
-    return cached.entries;
-  }
-  const entries = loadSessionFile(filePath).entries;
-  cache.set(filePath, { size, mtimeMs, entries });
-  while (cache.size > MAX_SESSION_ENTRIES_CACHE_ENTRIES) {
-    const oldestKey = cache.keys().next().value;
-    if (oldestKey === undefined) break;
-    cache.delete(oldestKey);
-  }
-  return entries;
-}
-
-/** Session entries without blob resolution (fine for reference/thinking scans). */
-export function getSessionEntries(filePath: string): SessionEntry[] {
-  return loadSessionEntriesCached(filePath);
-}
-
-/** loadSessionFile() memoized on (path, size, mtimeMs, resolveBlobs,
- * skipToolResultImages). The main transcript route (GET /api/sessions/[id])
- * re-reads and re-parses the WHOLE file — including blob resolution — on
- * every session switch, even when nothing on disk changed since the last
- * view: measured ~0.4-1.6s per request on a 20+ MB real session, EVERY
- * time, with no caching. Same (path, size, mtimeMs) convention as
- * loadSessionEntriesCached above, but a SEPARATE cache: that one never
- * resolves blobs, and is shared with read-only scans that must not
- * receive blob-inflated content by accident. The options are part of the
- * key because deferMedia (skipToolResultImages) changes what gets parsed
- * into the result, not just how it is rendered afterward.
- *
- * Callers must treat the returned LoadedSession as immutable — entries are
- * SHARED across cache hits. Every caller downstream (buildSessionTree,
- * buildSessionContext, entryToUiMessage, normalizeToolCalls, …) already
- * only reads entries and returns new objects, never mutates them in place —
- * the same assumption loadSessionEntriesCached above already relies on.
- */
-interface LoadedSessionCacheEntry {
-  size: number;
-  mtimeMs: number;
-  loaded: LoadedSession;
-}
-
-declare global {
-  var __ompLoadedSessionCache: Map<string, LoadedSessionCacheEntry> | undefined;
-}
-
-// Smaller than MAX_SESSION_ENTRIES_CACHE_ENTRIES above: an entry here can
-// hold blob-resolved (base64-inflated) content, so it costs more memory per
-// slot for an image-heavy session.
-const MAX_LOADED_SESSION_CACHE_ENTRIES = 8;
-
-function getLoadedSessionCache(): Map<string, LoadedSessionCacheEntry> {
-  if (!globalThis.__ompLoadedSessionCache) globalThis.__ompLoadedSessionCache = new Map();
-  return globalThis.__ompLoadedSessionCache;
-}
-
-function loadedSessionCacheKey(filePath: string, options: LoadSessionOptions): string {
-  return `${filePath}\u0000${options.resolveBlobs ? "1" : "0"}\u0000${options.skipToolResultImages ? "1" : "0"}`;
-}
-
-export function loadSessionFileCached(filePath: string, options: LoadSessionOptions = {}): LoadedSession {
-  const key = loadedSessionCacheKey(filePath, options);
+/** Bring a session file's cached parse up to date and return it. An
+ * unchanged file (same size and mtime) costs one stat. A file that only grew
+ * (omp appends every entry) costs a parse of the appended lines alone, so a
+ * running chat's transcript no longer re-parses tens of MB on every switch and
+ * reconcile poll while blocking the server's one thread. Anything else (a
+ * rewritten, shrunk or replaced file) is parsed again in full. Entries are
+ * SHARED with earlier results: callers must treat them as immutable. */
+function loadThroughParseCache(
+  cache: Map<string, SessionParseCacheEntry>,
+  key: string,
+  filePath: string,
+  options: LoadSessionOptions,
+  maxEntries: number,
+): LoadedSession {
   let size: number;
   let mtimeMs: number;
   try {
@@ -536,26 +456,77 @@ export function loadSessionFileCached(filePath: string, options: LoadSessionOpti
     // Missing/unreadable file — mirror loadSessionFile's lenient empty result.
     return loadSessionFile(filePath, options);
   }
-  const cache = getLoadedSessionCache();
   const cached = cache.get(key);
   if (cached && cached.size === size && cached.mtimeMs === mtimeMs) {
     cache.delete(key);
     cache.set(key, cached);
-    return cached.loaded;
+    return cached.parsed.loaded;
   }
-  const loaded = loadSessionFile(filePath, options);
+  const parsed = (cached && extendLoadedSession(filePath, cached.parsed, options)) ?? loadSessionFileWithCursor(filePath, options);
   // Only cache a successfully parsed session: a too-large/malformed result is
   // cheap to reproduce, and pinning it would waste a slot forever if the
   // underlying condition was transient (e.g. a torn concurrent write).
-  if (loaded.header) {
-    cache.set(key, { size, mtimeMs, loaded });
-    while (cache.size > MAX_LOADED_SESSION_CACHE_ENTRIES) {
-      const oldestKey = cache.keys().next().value;
-      if (oldestKey === undefined) break;
-      cache.delete(oldestKey);
-    }
+  if (!parsed.loaded.header) return parsed.loaded;
+  // A cursor knows the size and mtime its parse reached. Without one, the stat
+  // taken before the parse is the safe key: a write during the parse changes
+  // the file's stat, so the next read parses again.
+  cache.delete(key);
+  cache.set(key, parsed.cursor
+    ? { size: parsed.cursor.size, mtimeMs: parsed.cursor.mtimeMs, parsed }
+    : { size, mtimeMs, parsed });
+  while (cache.size > maxEntries) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey === undefined) break;
+    cache.delete(oldestKey);
   }
-  return loaded;
+  return parsed.loaded;
+}
+
+/** Session entries without blob resolution, through a parse cache (see
+ * loadThroughParseCache) for read-only scans (file-reference checks, thinking
+ * routes, delivery checks) that run on every reconcile poll and at run end.
+ * Stored on globalThis for hot-reload safety and LRU-bounded. */
+declare global {
+  var __ompSessionEntriesParseCache: Map<string, SessionParseCacheEntry> | undefined;
+}
+
+const MAX_SESSION_ENTRIES_CACHE_ENTRIES = 32;
+
+export function getSessionEntries(filePath: string): SessionEntry[] {
+  globalThis.__ompSessionEntriesParseCache ??= new Map();
+  return loadThroughParseCache(globalThis.__ompSessionEntriesParseCache, filePath, filePath, {}, MAX_SESSION_ENTRIES_CACHE_ENTRIES).entries;
+}
+
+/** loadSessionFile() through a parse cache (see loadThroughParseCache) keyed
+ * on (path, resolveBlobs, skipToolResultImages). The main transcript route
+ * (GET /api/sessions/[id]) reads every session switch through it. A SEPARATE
+ * cache from getSessionEntries': that one never resolves blobs, and is shared
+ * with read-only scans that must not receive blob-inflated content by
+ * accident. The options are part of the key because deferMedia
+ * (skipToolResultImages) changes what gets parsed into the result, not just
+ * how it is rendered afterward.
+ *
+ * Callers must treat the returned LoadedSession as immutable — entries are
+ * SHARED across cache hits and extends. Every caller downstream
+ * (buildSessionTree, buildSessionContext, entryToUiMessage,
+ * normalizeToolCalls, …) only reads entries and returns new objects.
+ */
+declare global {
+  var __ompLoadedSessionParseCache: Map<string, SessionParseCacheEntry> | undefined;
+}
+
+// Smaller than MAX_SESSION_ENTRIES_CACHE_ENTRIES above: an entry here can
+// hold blob-resolved (base64-inflated) content, so it costs more memory per
+// slot for an image-heavy session.
+const MAX_LOADED_SESSION_CACHE_ENTRIES = 8;
+
+function loadedSessionCacheKey(filePath: string, options: LoadSessionOptions): string {
+  return `${filePath}\u0000${options.resolveBlobs ? "1" : "0"}\u0000${options.skipToolResultImages ? "1" : "0"}`;
+}
+
+export function loadSessionFileCached(filePath: string, options: LoadSessionOptions = {}): LoadedSession {
+  globalThis.__ompLoadedSessionParseCache ??= new Map();
+  return loadThroughParseCache(globalThis.__ompLoadedSessionParseCache, loadedSessionCacheKey(filePath, options), filePath, options, MAX_LOADED_SESSION_CACHE_ENTRIES);
 }
 
 function parseTodoPhases(value: unknown): TodoPhase[] | null {
@@ -781,6 +752,8 @@ function base64ImageInfo(block: unknown): { bytes: number; mime?: string } | nul
  * renders. An ask that ran as `write xd://ask` (omp 18.19+) is a `write`
  * result; its details say so (`xdev.tool === "ask"`) and keep the same bounded
  * subset under `xdev.inner`.
+ * A `bash` result that ran a tool as a command (omp 19.1) keeps `details.toolCommands` as
+ * `{tool, mode, exitCode}` only (lib/tool-command.ts), so a reloaded card still names the tool.
  * Task toolResults additionally keep a SIZE-BOUNDED subset of their
  * results/progress (telemetry, no full output) so the message flow can render
  * a per-subagent summary. On-disk parsing (loadSessionFile/getSessionEntries)
@@ -895,6 +868,12 @@ function stripToolResultDetails(message: AgentMessage): AgentMessage {
       const askDetails = keepAskToolResultDetails(details);
       if (askDetails) Object.assign(kept, askDetails);
     }
+    // omp 19.1 ran a tool as a command in `bash`: keep WHICH tool and how it went (never its arguments or the
+    // MCP payload nested under `inner`), so a reloaded card still names the tool.
+    if (message.toolName === "bash") {
+      const commands = toolCommandRecords(details).map(({ tool, mode, exitCode }) => ({ tool, mode, exitCode }));
+      if (commands.length > 0) kept.toolCommands = commands;
+    }
     if (Object.keys(kept).length > 0) return { ...rest, details: kept };
   }
   return rest;
@@ -968,6 +947,13 @@ function compactionUiMessage(entry: CompactionEntry, active: boolean): CustomMes
   };
 }
 
+/** Whether an assistant message's `usage` records any tokens or cost. */
+function hasUsage(usage: unknown): boolean {
+  if (!isRecord(usage)) return false;
+  const spent = (value: unknown): boolean => typeof value === "number" && value > 0;
+  return spent(usage.input) || spent(usage.output) || spent(usage.cacheRead) || spent(usage.cacheWrite) || (isRecord(usage.cost) && spent(usage.cost.total));
+}
+
 // Convert a session entry on the active branch into a UI message.
 // Returns null for entries that do not map to chat history (metadata, non-message types).
 export function entryToUiMessage(
@@ -986,6 +972,11 @@ export function entryToUiMessage(
       if (!isRecord(entry.message)) return null;
       const raw = entry.message;
       if (isHiddenFromTranscript(raw as { role?: string; customType?: string })) return null;
+      // A failed attempt omp's retry saga accounted for (`retryRecovery`, written when the
+      // saga settles) is not the turn's outcome: omp's own transcript hides it too. Only one
+      // that cost nothing (the provider refused before answering) is dropped here, because
+      // the UI's cost total sums the messages this builds (hooks/useAgentSession.ts).
+      if (raw.role === "assistant" && isRecord(raw.retryRecovery) && !hasUsage(raw.usage)) return null;
       // omp-only roles are folded into displayable custom messages so the
       // existing role-keyed UI renders them without new components.
       if (raw.role === "developer") {

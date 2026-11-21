@@ -185,7 +185,10 @@ export function getPromptProfile(
         suppressContextFiles: [...CONTEXT_FILE_BASENAMES],
         settingsOverlay: {
           ...buildCompactionOverlay(contextWindow, maxOutputTokens, estimatedOverheadTokens),
-          tools: { xdev: false },
+          // No tool behind a command line: every tool stays on the model's own list. omp 19.1 renamed
+          // `tools.xdev` to `tools.commands`; an engine ignores a key it does not know (measured on 19.0.0 and
+          // 19.1.0), so the overlay carries both and each engine reads its own.
+          tools: { commands: false, xdev: false },
           disabledExtensions: contextFileExtensionIds(CONTEXT_FILE_BASENAMES),
         },
         estimatedOverheadTokens,

@@ -82,7 +82,7 @@ export function ExtensionInputCard({
   onRespond,
   fromAsk = false,
 }: {
-  request: Exclude<ExtensionDialogRequest, { method: "ask" }>;
+  request: Exclude<ExtensionDialogRequest, { method: "ask" | "form" }>;
   selectedOptionIndex: number;
   onSelectOption: (index: number) => void;
   onRespond: (response: ExtensionDialogResponse) => void;

@@ -1,0 +1,94 @@
+[
+ {
+  "type": "message",
+  "id": "c596ac94",
+  "parentId": "79e866eb",
+  "timestamp": "2026-11-21T15:39:13.260Z",
+  "runtime": {
+   "version": "19.1.0"
+  },
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "toolCall",
+     "id": "toolu_0",
+     "name": "ask",
+     "arguments": {
+      "html": "<form>\n  <fieldset><legend>Which colour should the logo be?</legend>\n    <label><input type=\"radio\" name=\"colour\" value=\"red\"> Red</label>\n    <label><input type=\"radio\" name=\"colour\" value=\"green\" checked> Green</label>\n    <label><input type=\"radio\" name=\"colour\" value=\"blue\"> Blue</label>\n  </fieldset>\n  <fieldset><legend>Which toppings?</legend>\n    <label><input type=\"checkbox\" name=\"toppings\" value=\"cheese\"> Cheese</label>\n    <label><input type=\"checkbox\" name=\"toppings\" value=\"olives\"> Olives</label>\n    <label><input type=\"checkbox\" name=\"toppings\" value=\"mushrooms\"> Mushrooms</label>\n  </fieldset>\n  <label>Anything else? <textarea name=\"notes\"></textarea></label>\n</form>"
+     }
+    }
+   ],
+   "api": "anthropic-messages",
+   "provider": "mock",
+   "model": "claude-opus-5-5",
+   "usage": {
+    "input": 1,
+    "output": 5,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 6,
+    "cost": {
+     "input": 4e-06,
+     "output": 0.0001,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0.00010400000000000001
+    }
+   },
+   "stopReason": "toolUse",
+   "timestamp": 1795275553238,
+   "responseId": "msg_0",
+   "duration": 15.735945000000129,
+   "ttft": 13.904674000000114,
+   "completedAt": 1795275553260,
+   "contextSnapshot": {
+    "promptTokens": 1,
+    "nonMessageTokens": 11578,
+    "toolSchemaTokens": 7785,
+    "compactionEpoch": 0
+   }
+  }
+ },
+ {
+  "type": "message",
+  "id": "55940e6b",
+  "parentId": "a2cc7ceb",
+  "timestamp": "2026-11-21T15:39:13.274Z",
+  "runtime": {
+   "version": "19.1.0"
+  },
+  "message": {
+   "role": "toolResult",
+   "toolCallId": "toolu_0",
+   "toolName": "ask",
+   "content": [
+    {
+     "type": "text",
+     "text": "User answers:\n{\n  \"colour\": \"blue\",\n  \"toppings\": [\n    \"cheese\",\n    \"mushrooms\"\n  ],\n  \"notes\": \"Please keep it quiet.\\nThanks.\"\n}"
+    }
+   ],
+   "details": {
+    "answers": [
+     {
+      "name": "colour",
+      "question": "Which colour should the logo be?",
+      "answer": "Blue"
+     },
+     {
+      "name": "toppings",
+      "question": "Which toppings?",
+      "answer": "Cheese, Mushrooms"
+     },
+     {
+      "name": "notes",
+      "question": "Anything else?",
+      "answer": "Please keep it quiet.\nThanks."
+     }
+    ]
+   },
+   "isError": false,
+   "timestamp": 1795275553273
+  }
+ }
+]

@@ -579,11 +579,11 @@ notes are missing, and is what clients should key any "stale" caveat off.
 | `/api/sessions/<id>` | GET | transcript, tree and context |
 | `/api/sessions/<id>` | PATCH | `{name}` — rename |
 | `/api/sessions/<id>` | DELETE | delete session and artifacts, and the earlier copies its row stands in for (see `continuationOf`) |
-| `/api/sessions/<id>/state` | GET | `{running}` (+ `state` when live) |
+| `/api/sessions/<id>/state` | GET | `{running}` (+ `state` when live). `?fast=1`: a live session answers at once from the server's own run phase (`stale: true`, `state` = `isStreaming`/`isPromptRunning`/`isBashRunning`/`isCompacting` only), never waiting on `get_state` |
 | `/api/sessions/<id>/context` | GET | context window accounting |
 | `/api/sessions/<id>/export` | GET | transcript export |
 | `/api/sessions/<id>/auto-name` | POST | name a session: engine title, else a short model-written name, else a first-message truncation |
-| `/api/sessions/<id>/subagents` | GET | subagent roster |
+| `/api/sessions/<id>/subagents` | GET | `subagentUsage`: tokens/cost summed from the subagents' own transcripts (usage only; the live roster is `get_subagents`) |
 | `/api/sessions/<id>/subagents/<subagentId>` | GET | one subagent's transcript, read by byte range (never the whole file): `?tail=1` newest page, `?beforeByte=N` the page before offset N, `?fromByte=N` the page from offset N; `?mode=completion` the final output |
 | `/api/sessions/<id>/btw` | GET | side-question (`/btw`) topics, newest first; never starts an engine (omp only) |
 | `/api/sessions/<id>/media` | GET | attachments referenced by the transcript |
@@ -937,6 +937,14 @@ Wire format, all **Stable**:
   `false`, so a client that believed a turn was in flight must treat it as
   lost rather than keep waiting (additive field: absent means unknown, infer
   nothing).
+- `?replay=1` (opt-in; Cody's page sends it): right after `connected`, a live
+  session re-sends what attaching mid-run cost the client: the latest
+  `subagent_lifecycle` / `subagent_progress` frame of every helper still
+  running, then the current run's last 8 finished assistant replies and tool
+  results as their `message_end` frames with `"replayed":true`. Skip a
+  replayed message you already show (same `timestamp`, plus `toolCallId` for
+  a tool result); the rest finished between your transcript read and this
+  subscription. Without the parameter nothing is replayed.
 - `{"type":"notice","level":"error"|"warning"|"info","message":"…"}` reports
   failures that are not tied to a message, including a failed engine spawn.
   The engine may add a `source` (omp: `session-persistence`, `agent-end`);

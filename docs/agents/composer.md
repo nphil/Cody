@@ -144,9 +144,36 @@ Sections in this file:
   keep the picker disabled while a turn runs: mid-prompt `set_model`
   acceptance is unverified there, and `handleModelChange` refuses it
   without `chatExtras` regardless of the UI.
+- **omp 19.1 model controls: what Cody uses, what it leaves.** 19.1 adds
+  `get_model_picker`, `abort_and_deliver_queue`, `resume`, `role` +
+  `thinkingLevel` on `set_model` (19.0 accepts both and silently ignores them)
+  and `get_state.configuredThinkingLevel` + `thinkingLevels`. Proved on real
+  frames, 19.1 against 19.0: `lib/omp/model-controls.test.mjs`,
+  `lib/fixtures/omp-19.1.0-{model,queue}-controls.json`,
+  `omp-19.0.0-model-controls.json`. **Used:** the two `get_state` fields. They
+  are authoritative, so the remembered-Auto guess (`thinkingConfiguredAutoRef`
+  in `resolveThinkingSelector`) and the catalog ladder guess
+  (`ThinkingModelMeta.engineLevels` wins for the model omp runs) serve older
+  engines only; they pass through `buildWebState` only when reported. **Left
+  alone, on purpose:** the picker (omp's has no hide/pin, usage marks or
+  new-model ledger); Smart (follows the chat's preset binding, not omp's roles,
+  which only change when the engine restarts); the step-boundary wait (omp's
+  provider-session close code is byte-identical in 19.0 and 19.1 and a Codex
+  WebSocket close cannot be mocked); `set_model`'s level/role fields (the same
+  two steps `switch.ts` already sends, and an unknown level sent to 19.1 is
+  accepted and corrupts the state, so `switch.ts` keeps validating); Stop
+  (`abort_and_restore_queue`) and Steer (`promote_queued_message` + `abort`;
+  `abort_and_deliver_queue` would also promote every follow-up); Continue
+  (`resume` sends omp's fixed notice where `recoveryPrompt` carries the cause).
+  Roles and helper models: no RPC writes `modelRoles` or
+  `task.agentModelOverrides` (`set_model` `role` only labels the session's
+  `model_change` entry), so Settings and `agent-switch.ts` stay.
 - **Running subagents cannot be switched, and Cody says so instead of
-  pretending.** omp's RPC exposes only `get_subagents`,
-  `get_subagent_messages` and `set_subagent_subscription`; `set_model` and
+  pretending.** omp's RPC exposes `get_subagents`, `get_subagent_messages`,
+  `set_subagent_subscription`, `cancel_subagent` and `steer_subagent`, and no
+  command that changes a helper's model (re-proved on 19.1: `set_subagent_model`
+  is an unknown command, a `subagentId` on `set_model` is ignored and the helper
+  keeps its model); `set_model` and
   `set_thinking_level` address the root session. A child resolves its model
   and effort once at spawn (request model > `task.agentModelOverrides` >
   agent frontmatter, with the task role expanded from settings re-read from

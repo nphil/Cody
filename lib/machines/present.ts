@@ -2,6 +2,7 @@ import {
   DEFAULT_LOCAL_MACHINE_NAME,
   WORKER_PROBLEMS,
   type MachineKind,
+  type MachineMetrics,
   type MachineReason,
   type MachineState,
   type MachineStatus,
@@ -53,6 +54,29 @@ export function machineInitial(name: string): string {
   return first ? first.toLocaleUpperCase() : "?";
 }
 
+/** What the top bar's little bars draw: Cody's own share of the machine when it
+ * is known (a container on someone's server shows only Cody, not the neighbours
+ * beside it), else the whole machine's numbers. `scope` says which. */
+export function barFigures(metrics: MachineMetrics): { cpu: number | null; mem: number; scope: "cody" | "machine" } {
+  return metrics.own
+    ? { cpu: metrics.own.cpuPercent, mem: metrics.own.memPercent, scope: "cody" }
+    : { cpu: metrics.cpuPercent, mem: metrics.memPercent, scope: "machine" };
+}
+
+/** The whole machine's memory in use, never less than Cody's own part of it. A
+ * container's `/proc/meminfo` (lxcfs on Proxmox) counts caches a little
+ * differently from its cgroup, and a part that is bigger than its whole would
+ * read as a mistake. */
+export function machineMemoryUsedBytes(metrics: MachineMetrics): number {
+  return Math.max(metrics.memUsedBytes, metrics.own?.memUsedBytes ?? 0);
+}
+
+/** The busier of the two bars in {@link barFigures}. */
+export function peakPercent(metrics: MachineMetrics): number {
+  const { cpu, mem } = barFigures(metrics);
+  return Math.max(cpu ?? 0, mem);
+}
+
 export type MachineSeverity = "normal" | "warning" | "error" | "down" | "pending";
 
 /** How worried to be about one machine, from its numbers or its state. The
@@ -61,7 +85,7 @@ export type MachineSeverity = "normal" | "warning" | "error" | "down" | "pending
 export function machineSeverity(machine: MachineState): MachineSeverity {
   if (machine.status === "offline") return "down";
   if (machine.status === "connecting" || machine.status === "unavailable" || !machine.metrics) return "pending";
-  const peak = Math.max(machine.metrics.cpuPercent ?? 0, machine.metrics.memPercent);
+  const peak = peakPercent(machine.metrics);
   if (peak >= 90) return "error";
   if (peak >= 70) return "warning";
   return "normal";
@@ -78,7 +102,7 @@ export function worstMachine(machines: readonly MachineState[]): MachineState | 
   let worstPeak = -1;
   for (const machine of machines) {
     const rank = SEVERITY_RANK[machineSeverity(machine)];
-    const peak = machine.metrics ? Math.max(machine.metrics.cpuPercent ?? 0, machine.metrics.memPercent) : 0;
+    const peak = machine.metrics ? peakPercent(machine.metrics) : 0;
     if (rank > worstRank || (rank === worstRank && peak > worstPeak)) {
       worst = machine;
       worstRank = rank;

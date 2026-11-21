@@ -3793,3 +3793,25 @@ span.linenumber {
   .background-activity__toggle, .background-activity__raw-toggle { min-height: 44px; }
 }
 .background-activity__review { flex-shrink: 0; color: var(--status-warning); font-weight: 650; }
+
+/* omp 19.1's ask form (components/AskHtmlForm.tsx). A choice is a whole-row tap target, so the focus ring goes round
+   the row instead of the 20px control inside it. */
+.ask-form-row:has(:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.ask-form-row :focus-visible {
+  outline: none;
+}
+.ask-form label,
+.ask-form button {
+  touch-action: manipulation;
+}
+/* A phone zooms into a focused field set below 16px, and the view then has to be pinched back. */
+@media (hover: none), (pointer: coarse) {
+  .ask-form input:not([type="checkbox"]):not([type="radio"]),
+  .ask-form select,
+  .ask-form textarea {
+    font-size: 16px !important;
+  }
+}

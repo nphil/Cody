@@ -16,8 +16,9 @@ import { checkMachineDestination, type MachineReason } from "./types";
 /**
  * The loop that runs on the far side. Written for any POSIX `sh` (BusyBox
  * included): no bash-isms, no fractional `sleep`. It prints the machine's first
- * `cpu` line, the memory fields Cody needs and the load average, framed by
- * `@S <cores>` and `@E`, once a second the first time (so the first CPU figure
+ * `cpu` line, the memory fields Cody needs, the load average and, when the
+ * machine shows a control group (container), Cody's own usage as `cg1`/`cg2`
+ * lines plus `up <uptime>` as their clock, framed by `@S <cores>` and `@E`, once a second the first time (so the first CPU figure
  * arrives after one second, not three) and every two seconds after. A machine
  * without `/proc` (not Linux) answers `@NOPROC` and stops.
  *
@@ -35,9 +36,20 @@ import { checkMachineDestination, type MachineReason } from "./types";
  * job is started with `&` and a space rather than `& ;`.
  */
 export const SAMPLE_SCRIPT =
-  '[ -r /proc/stat ] || { echo @NOPROC; exit 0; }; n=$(grep -c "^cpu[0-9]" /proc/stat); '
+  '[ -r /proc/stat ] || { echo @NOPROC; exit 0; }; n=$(grep -c "^cpu[0-9]" /proc/stat); p=$(nproc 2>/dev/null || echo $n); '
+  + "c=/sys/fs/cgroup; g=0; "
+  + "if [ -r $c/cpu.stat ] && [ -r $c/memory.current ]; then g=2; "
+  + "elif [ -r $c/cpuacct/cpuacct.usage ] && [ -r $c/memory/memory.usage_in_bytes ]; then g=1; k=$c/cpuacct; q=$c/cpu; m=$c/memory; "
+  + "elif [ -r $c/cpu,cpuacct/cpuacct.usage ] && [ -r $c/memory/memory.usage_in_bytes ]; then g=1; k=$c/cpu,cpuacct; q=$k; m=$c/memory; fi; "
+  + 'v() { echo "cg$g $1 $(cat $2 2>/dev/null)"; }; '
+  + 'w() { grep -E "^$1 " $2 2>/dev/null | sed "s/^/cg$g /"; }; '
   + "exec 3<&0; (cat <&3 >/dev/null; kill $$) & d=1; "
-  + 'while :; do echo "@S $n"; head -n 1 /proc/stat; grep -E "^(MemTotal|MemFree|MemAvailable|Buffers|Cached):" /proc/meminfo; cat /proc/loadavg; echo @E; sleep $d; d=2; done';
+  + 'while :; do echo "@S $n"; head -n 1 /proc/stat; grep -E "^(MemTotal|MemFree|MemAvailable|Buffers|Cached):" /proc/meminfo; cat /proc/loadavg; '
+  + 'read u x < /proc/uptime; echo "up $u"; '
+  + 'if [ $g = 2 ]; then echo "cg2 nproc $p"; w usage_usec $c/cpu.stat; v memory.current $c/memory.current; v memory.max $c/memory.max; v cpu.max $c/cpu.max; w inactive_file $c/memory.stat; '
+  + 'elif [ $g = 1 ]; then echo "cg1 nproc $p"; v cpuacct.usage $k/cpuacct.usage; v memory.usage_in_bytes $m/memory.usage_in_bytes; v memory.limit_in_bytes $m/memory.limit_in_bytes; '
+  + 'v cpu.cfs_quota_us $q/cpu.cfs_quota_us; v cpu.cfs_period_us $q/cpu.cfs_period_us; w total_inactive_file $m/memory.stat; fi; '
+  + "echo @E; sleep $d; d=2; done";
 
 export const SAMPLE_COMMAND = `sh -c '${SAMPLE_SCRIPT}'`;
 

@@ -60,11 +60,16 @@ export async function GET(
     };
     const beforeRaw = searchParams.get("beforeByte");
     const tailRaw = searchParams.get("tail");
+    // Tool-result images ride as urls into the sibling media route (same
+    // deferral the main chat uses), never as base64 inside the page.
+    const mediaBase = `/api/sessions/${encodeURIComponent(id)}/subagents/${encodeURIComponent(subagentId)}/media`;
+    const imageUrl = (offset: number, entryId: string, index: number) =>
+      `${mediaBase}?offset=${offset}&entryId=${encodeURIComponent(entryId)}&index=${index}`;
     const page = tailRaw === "1" || tailRaw === "true"
-      ? readSubagentTranscriptPage(resolved, 0, { tail: true })
+      ? readSubagentTranscriptPage(resolved, 0, { tail: true, imageUrl })
       : beforeRaw !== null
-        ? readSubagentTranscriptPage(resolved, byteParam(beforeRaw), { before: true })
-        : readSubagentTranscriptPage(resolved, byteParam(searchParams.get("fromByte")));
+        ? readSubagentTranscriptPage(resolved, byteParam(beforeRaw), { before: true, imageUrl })
+        : readSubagentTranscriptPage(resolved, byteParam(searchParams.get("fromByte")), { imageUrl });
     return NextResponse.json(page);
   } catch (error) {
     return NextResponse.json(

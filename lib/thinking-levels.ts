@@ -8,6 +8,9 @@
  * catalog only lists enabled providers). When the catalog misses the current
  * model, the live metadata is the authoritative fallback, so the dropdown
  * never falls back to the generic ladder and lists unsupported efforts.
+ *
+ * omp 19.1+ makes the guess unnecessary for the model it runs: `get_state`
+ * carries the selector list omp's own picker shows, and `engineLevels` holds it.
  */
 
 /** Model-level thinking metadata read off the live session state. */
@@ -17,6 +20,10 @@ export interface ThinkingModelMeta {
   name?: string;
   reasoning?: boolean;
   thinking?: { efforts?: string[]; unverified?: boolean };
+  /** omp 19.1+ `get_state.thinkingLevels`: the selectors omp offers for this
+   *  model (`off`, `auto`, its efforts). Absent on older engines; empty (so
+   *  ignored) for a model with no efforts. */
+  engineLevels?: string[];
 }
 
 const DEFAULT_THINKING_LEVELS = ["auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -45,18 +52,21 @@ export function hasUnverifiedLadder(meta: Pick<ThinkingModelMeta, "thinking">): 
 }
 
 /**
- * Levels offered for the current model: the catalog's baked ladder wins; the
- * live session model backs non-catalog models. Returns null when neither
- * source knows the model — callers then fall back to the generic ladder.
+ * Levels offered for the current model. omp 19.1+ names them itself for the
+ * model it is running (`engineLevels`), and that list wins; otherwise the
+ * catalog's baked ladder wins and the live session model backs non-catalog
+ * models. Returns null when no source knows the model — callers then fall back
+ * to the generic ladder.
  */
 export function resolveAvailableThinkingLevels(
   catalogLevels: string[] | undefined,
   model: { provider: string; modelId: string } | null,
   liveModel: ThinkingModelMeta | null,
 ): string[] | null {
+  // A live report describes the model omp runs, which a pick still waiting to
+  // apply is not: it only answers for the model on screen when they match.
+  const live = model && liveModel && liveModel.provider === model.provider && liveModel.modelId === model.modelId ? liveModel : null;
+  if (live?.engineLevels && live.engineLevels.length > 0) return live.engineLevels;
   if (catalogLevels && catalogLevels.length > 0) return catalogLevels;
-  if (model && liveModel && liveModel.provider === model.provider && liveModel.modelId === model.modelId) {
-    return thinkingLevelsForMeta(liveModel);
-  }
-  return null;
+  return live ? thinkingLevelsForMeta(live) : null;
 }

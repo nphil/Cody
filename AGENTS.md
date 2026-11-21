@@ -95,6 +95,7 @@ app/api/
   sessions/[id]/context/route.ts  GET ?leafId= leaf context
   sessions/[id]/export/route.ts  GET export HTML
   sessions/[id]/media/route.ts  GET deferred tool-result image
+  sessions/[id]/subagents/[subagentId]/media/route.ts  GET one deferred helper-transcript image
   sessions/[id]/scheduled/route.ts  GET/POST scheduled messages
   sessions/[id]/scheduled/[itemId]/route.ts  PATCH/DELETE item
   sessions/[id]/scheduled/[itemId]/send-now/route.ts  POST send now
@@ -183,6 +184,7 @@ lib/
   daily-limit/  daily time limit; pure: active-time.ts, ledger.ts, state.ts, view.ts; store.ts server only
   draft-store.ts  composer drafts: memory plus sessionStorage text
   homelabber-approval.ts  pure half of HomeLabber approvals in chat
+  tool-command.ts  pure: a tool run as a bash command (omp 19.1 `details.toolCommands`) for cards and approvals
   image-compress.ts  browser-side image batch preparation
   image-attachments.ts  server validation of base64 image payloads
   context-usage.ts  idle/reconnect gauge usage from messages
@@ -202,7 +204,7 @@ lib/
     client.ts  fetch-based client over both hosts
     tool.ts  `forge` host tool (omp only; lib/rpc-manager.ts, bin/cody-display-mcp.js)
   disk/  disk hygiene: scratch.ts, janitor.ts, sweep.ts, walk.ts, transcripts.ts, mentions.ts, gate.ts, status.ts, settings.ts; no `@/`
-  machines/  top-bar meters + worker state; browser-safe types.ts/present.ts; server only proc.ts, ssh.ts, store.ts, sampler.ts, jobs.ts (job counts + checks on globalThis); no `@/` (bin/cody-server.js)
+  machines/  top-bar meters + worker state; browser-safe types.ts/present.ts; server only proc.ts, cgroup.ts, ssh.ts, store.ts, sampler.ts, jobs.ts (job counts + checks on globalThis); no `@/` (bin/cody-server.js)
   workers/  `run_on_worker`: definition.ts (the words the agent reads), access.ts (omp agents' token), tool.ts (parser + runOnWorker), run.ts (one job), scheduler.ts (FIFO queue), placement.ts, health.ts (check + monitor), facts.ts, files.ts, tarball.ts, transfer.ts, execute.ts, remote.ts (incl. same-path `JOB_WRAPPER`), shell.ts (the ssh seam), output.ts, progress.ts, local.ts, format.ts, live.ts, types.ts; no `@/`; tests use local-shell.mjs
   live-tool-output.ts  live tail of a running tool: server slim + throttle (`ToolUpdateThrottle`, in rpc-manager) and the page store (`LiveToolOutputStore`); browser-safe, no `@/`. UI: hooks/useLiveToolOutput.ts, components/LiveToolTail.tsx, components/ElapsedClock.tsx
   engine-guard.ts  requireEngine()/requireCapability(): omp-only routes 400
@@ -244,6 +246,7 @@ lib/
   omp/extensions/cody-on-demand-mcp.ts  `load_tools` extension
   omp/agent-roster.ts  which helper agents exist (built-in unpacked from the binary + agent files); omp/agent-model-overrides.ts  `task.agentModelOverrides` read/write; omp/agent-switch.ts  move one running helper
   omp/extensions/cody-agent-switch.ts  one-shot model for the next helper start (`before_subagent_spawn`, omp 18.19+)
+  omp/model-controls.test.mjs + omp/fixtures/model-controls/rpc-lab.mjs  omp 19.1 model-control proofs: recorded frames (`lib/fixtures/omp-19.1.0-{model,queue}-controls.json`, `omp-19.0.0-model-controls.json`) and a real omp child against a fake Anthropic server
   omp/extensions/cody-run-on-worker.ts  `run_on_worker` for the main chat AND helper agents (calls /api/internal/workers with CODY_WORKERS_*)
   omp/engine-db.ts  engine database health service (check, guarded repair, push)
   usage/reading-age.ts  age of a usage reading from omp's own fetchedAt
@@ -299,6 +302,7 @@ lib/
   scheduled/model-ui.ts  Send menu "Model" row logic, no React
   notifications/signed-out.ts  notice for an ended provider login
   ask-result.ts  `ask` call/result normalised for the transcript card
+  ask-form.ts  omp 19.1 `ask` form rules: defaults, per-field problems, the answer `data` omp accepts (port of omp's own HTML-form checks); ask-form-parse.ts / -dom.ts / -entities.ts are its parser; ask-form-view.ts the view's draft and answer helpers
   bash-output-meta.ts  omp's meta for cut-down shell output
   extension-title.ts  dock header + body text from a multi-line engine prompt (`extensionPrompt`)
   helper-memory-limit.ts  how big a helper's history may grow (browser- and Bun-safe)
@@ -344,6 +348,7 @@ components/
   MarkdownBody.tsx  markdown renderer
   InputDock.tsx  non-modal question panel (`ask` walk; one scroll area, sticky buttons)
   ExtensionDialog.tsx  extension select/input requests; lib/ask-walk.ts
+  AskHtmlForm.tsx  omp 19.1 `ask` form (dialog method `form`): one scroll area, sticky Cancel/Submit
   PermissionRequestCard.tsx  ACP approval card in InputDock
   ProviderIcon.tsx  vendored brand marks; never hotlinked
   ModelsConfig.tsx  models.yml editors; in settings/providers/ProviderDetail
@@ -511,6 +516,7 @@ Details: docs/agents/session-runtime.md
 - Live session can MOVE to a new id/file (`notice` `session-persistence`): copy owner/preset state, never rename; re-key once (`noteIdentityChange`).
 - Paused on background work (omp 18.21+): a non-terminal `agent_end` with `awaitingAsyncWork:true` sets `pausedOnWork` — follow-ups go in at once (not held), `isRunning()` stays true; cleared by `agent_start`, a terminal end, `settleAfterStop`, restart.
 - omp 19.0.0, proved on the real binary (docs/agents/session-runtime.md "Notes for maintainers (omp 19.0.0…)"): Stop on a paused run ends it with a terminal `agent_end` and the job's later result is dropped (18.20.1 sent no frame and the result still woke the model); `bash notify` wakes an idle or paused chat as an ordinary run (`async-notify`, shown as Background activity); `/handoff` is background compaction; `set_model` keeps the chat's thinking level; `tools.intentTracing` is OFF in RPC, so `cody-launch-defaults-intent-tracing.yml` turns it back on (helper chips, plan keeper, ask labels).
+- omp 19.1.0, proved on the real binary (session-runtime.md "Notes for maintainers (omp 19.1.0…)", fixtures `lib/fixtures/omp-19.1.0-{approval-records,redirect-job,retry,wait}.json`, test `lib/omp-19.1-runtime.test.mjs`): session files gain `custom` entries `tool_approval_requested` / `tool_approval_resolved` (the reader ignores them; "waiting for approval" for chats Cody does not stream is NOT built, it needs `omp session lease`); redirected background-job output is in no RPC frame (empty `LiveToolTail`, unchanged); retry frames are unchanged and a failed attempt stamped `retryRecovery` with zero usage is hidden by `entryToUiMessage` (one with usage stays, the cost total sums those messages); the 4-min first `wait` is TUI-only, rpc-ui still returns after 5 s.
 Details: docs/agents/session-runtime.md
 
 ### Push notifications (`lib/notifications/`)
@@ -571,6 +577,7 @@ Details: docs/agents/automation.md
 - `checkMachineDestination` is a WHITELIST (value feeds ssh argv and a shell line); remote command is constant `SAMPLE_COMMAND`.
 - Never add `-n` to ssh or give its stdin to anything outliving the server — Cody holds that pipe; EOF kills the far loop, even on SIGKILL.
 - Errors only a person can fix retry every 5 min (login loops get Cody banned); sampler on `globalThis`; no `@/` in `lib/machines/`.
+- Two readings per machine: `/proc` is the WHOLE host (even in Docker/LXC), Cody's own share is its cgroup (`cgroup.ts` locally, `cg1`/`cg2`/`up` lines in `SAMPLE_COMMAND`); top bar draws Cody's (`barFigures`), the tapped panel layers Cody over the machine.
 Details: docs/agents/usage-monitoring.md
 
 ### Workers: heavy jobs on other machines (`lib/workers/`, `lib/machines/`)
@@ -621,7 +628,7 @@ Details: docs/agents/disk.md
 - Janitor (`janitor.ts`) is the ONLY cleanup (no host cron); removes a temp entry only if unchanged and unreferenced by process/chat; doubt keeps; never `<tmp>/jiti`.
 - Gate (`gate.ts`, `status.ts`): below 5 % free, new work gets 507 `disk_full`; steer/abort still pass so agents can be told to clean up.
 - Trap: in omp any extension `tool_call`/`tool_result` handler vetoes `task.speculativeLaunch`; `cody-disk-budget.ts` registers `tool_result` lazily.
-- Trap: an extension's `before_agent_start` must NEVER return `systemPrompt` (omp then re-announces the whole xd:// tool catalog as a user message, ~6.6k tokens, every time): return ONE hidden `message`, only when `noteIsLive` says the note is gone (gate, disk rule, context budget, on-demand restore); a new type goes in `HIDDEN_CUSTOM_TYPES` AND `isModelOnlyNote` (`lib/message-display.ts`).
+- Trap: an extension's `before_agent_start` must NEVER return `systemPrompt` (omp then re-announces the whole tool catalog (xd:// or tool commands) as a user message, ~6.6k tokens, every time): return ONE hidden `message`, only when `noteIsLive` says the note is gone (gate, disk rule, context budget, on-demand restore); a new type goes in `HIDDEN_CUSTOM_TYPES` AND `isModelOnlyNote` (`lib/message-display.ts`).
 Details: docs/agents/disk.md
 
 ### Disk exhaustion is a first-class failure (`lib/disk-space.ts`)
@@ -675,6 +682,7 @@ Details: docs/agents/turn-flow.md
 - Render agent's options in its order; `kind` is styling only, `optionId` is identity (two share `allow_always`) — never dedupe/reorder by kind.
 - Double-click latch is a ref, not `disabled` state (3 answers measured); read `toolCall` fields defensively.
 - omp 18.20 `ask` selects carry the form text before the last title line plus `initialIndex` / `selectionMarker` / `checkedIndices` / `markableCount`; `lib/ask-walk.ts` reads them (ticks come from `checkedIndices`, never guessed). The dock is ONE scroll area with sticky Cancel/Done. The ask is `write xd://ask` on engines that mount it there: test `isAskToolCall` (live) / `askCallInput` (transcript card), never `toolName === "ask"` alone.
+- omp 19.1 `ask` is ONE HTML form: a plain top-level `ask` call plus a single `extension_ui_request` `{method:"form", html, timeout?}` (it arrives before `tool_execution_start`). The host replies `{type:"extension_ui_response", id, data:{<name>: string | string[]}}` or `{cancelled:true}` (a cancel ends the agent's turn). `components/AskHtmlForm.tsx` draws it; the parser and omp's acceptance rules are ported in `lib/ask-form*.ts` and proved against recorded engine verdicts (`lib/fixtures/omp-19.1.0-ask-form-cases.json`). A form that omp would refuse is never sent: inline problems, first bad field focused inside the tap. Engines < 19.1 keep the field-by-field walk. A notification answers a form only when `simpleChoice(form)` holds (one single-pick field); otherwise it says "Open the chat to answer.".
 - omp 19.0.0 `ask`: same frames and entries as 18.20 (no `formDialog` in the RPC host, so the walk is unchanged). A steer sent while a dialog is open cancels it ("Ask interrupted by message"); a follow-up does not.
 Details: docs/agents/approvals.md
 
@@ -695,6 +703,7 @@ Details: docs/agents/session-runtime.md
 ### Composer model + tools controls
 - Smart row sends no `set_model` on a new session, so omp resolves `modelRoles.default`; `smartPinnedModel` keeps the label `Smart` while the model matches.
 - Live `set_model` waits for a step boundary (`modelSwitchPending`), never mid-stream — on Codex WebSocket it ends the response as an error; `set_thinking_level` is safe any time.
+- omp 19.1+ `get_state.configuredThinkingLevel`/`thinkingLevels` are authoritative (`resolveThinkingSelector`, `ThinkingModelMeta.engineLevels`); the remembered-Auto guess and the catalog ladder serve older engines only. 19.1's `get_model_picker`, `resume`, `abort_and_deliver_queue` and `set_model` `role`/`thinkingLevel` are proven but unused (19.0 silently ignores those two fields; an unknown level corrupts 19.1 state, so `switch.ts` validates). No omp RPC changes a helper's model or writes roles (`lib/omp/model-controls.test.mjs`, composer.md).
 - Never reintroduce an invisible restriction: Core preset (`--tools read,bash,edit,write`) kills `task`/`todo`/`github`/`web_search`; `lib/tool-preset-preference.ts` resets unacked values.
 - `classifyFallbackReason` tests refusal FIRST: a refusal pins the fallback for the rest of the run (only a manual re-pick returns); a quota clears itself at reset.
 - Word completion (`predict_word`): `POST /api/agent/[id]` NEVER spawns (`getRpcSession`, not `startRpcSession`) — typing rate; `Unknown command`/`unsupported` disables it silently, other errors back off 30 s.
@@ -765,8 +774,11 @@ Details: docs/agents/distill.md
 
 ### Subagent integration (`lib/subagent-types.ts`, `lib/subagent-history.ts`)
 - Subscribe to lifecycle+progress, NEVER "events" (`SUBAGENT_SUBSCRIPTION_LEVEL`) — 5.3 GB in 5 min froze sessions (check `/tmp/omp-rpc-output-*`).
-- Roster is run-scoped; never seed from `extractSubagentHistory` (20+ stale chips).
+- Roster is run-scoped; never seed it from the parent file's task history (20+ stale chips). `GET /api/sessions/<id>/subagents` is usage-only (`subagentUsage`) and never parses the parent file; the live roster is `get_subagents`, read as soon as the event stream opens.
+- Session-file parses (`loadSessionFileCached`, `getSessionEntries`) are append-aware: a grown file parses only its new lines (`extendLoadedSession`); never add a full uncached `loadSessionFile` to a per-switch or per-image route.
+- A page attaches to a live chat from `/state?fast=1` (the wrapper's run phase, no `get_state`) in parallel with the transcript; its stream (`?replay=1`) gets the running helpers (`liveSubagentFrames`) and the run's last finished messages (`liveMessageFrames`, deduped and kept over the transcript landing by lib/attach-replay.ts). Never gate the stream or the helper panel on `get_state`/`get_subagents` again: a busy engine answers them seconds late.
 - Transcript route reads only needed bytes (`readSubagentTranscriptPage`), never the whole 14–21 MB file.
+- Helper-window tool-result images are deferred like the main chat's: pages carry url blocks to `subagents/[subagentId]/media?offset=&entryId=&index=` (`readSubagentTranscriptImage` reads one line; same `isDeferrableToolResultImage` index). A `blob:sha256:` ref in a helper line is NOT resolved by the page reader.
 - Validate ids as safe filename components with realpath confinement, not an AdjectiveNoun regex.
 Details: docs/agents/subagents.md
 
@@ -808,6 +820,8 @@ Details: docs/agents/chat-ui.md
 - User scope admin-only (`userScopeDenied`): stdio runs in everyone's sessions.
 - Enable/disable = user `disabledServers` (`setUserServerDisabled`), not `enabled`; delete must remove entry.
 - omp 19 drops a stdio server by COMMAND (`node_repl`, setting `mcp.builtinTransforms`) and can expose servers as eval namespaces (`mcp.evalNamespaces`: no `xd://mcp__…` path); the on-demand `load_tools` result names the eval call.
+- omp 19.1 runs rarely-used tools (Cody host tools, `mcp__*`, extension tools) as BASH commands (`<tool> -j '{…}'`, docs `help://<tool>`) while `bash` is active and `tools.commands` is on (renamed from `tools.xdev`; likewise `commandDocs`, `commandInline`, `commandNotices`). Routing is unchanged (`host_tool_call` keeps `toolName`); `lib/tool-command.ts` relabels cards from `details.toolCommands`, never by guessing a first word; `isToolMountNotice` hides the mount notice (`source: "toolCommands"`).
+- The minimal local profile's overlay writes BOTH `tools.commands` and `tools.xdev` false on purpose: an engine ignores a key it lacks (measured 19.0.0 and 19.1.0), so a sync writer needs no version gate for a renamed key. `load_tools` words its result by `pi.pi.VERSION`. MCP servers now live in omp's shared daemon (`omp ps` unit `kind: "mcp"`); Cody's Services card ignores them and `/mcp list` is unchanged.
 Details: docs/agents/mcp-plugins.md
 
 ### Load on demand (heavy MCP servers + desktop control)

@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import { LiveSubagentFrames } from "./subagent-live-frames";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import path from "path";
@@ -539,8 +540,8 @@ export function unrestorableModelOf(error: unknown): { provider: string; modelId
 }
 
 // Extension UI methods that stay pending until the client answers (replayed to
-// newly-attached SSE listeners so dialogs survive reconnects).
-const PENDING_UI_METHODS = new Set(["select", "confirm", "input", "editor", "open_url", "ask"]);
+// newly-attached SSE listeners so dialogs survive reconnects). `form` is omp 19.1's `ask`.
+const PENDING_UI_METHODS = new Set(["select", "confirm", "input", "editor", "open_url", "ask", "form"]);
 
 // Commands forwarded to omp verbatim (request shape already matches rpc-types).
 // An omp that predates one answers `Unknown command: <type>` — an ordinary
@@ -1163,6 +1164,12 @@ export class AgentSessionWrapper {
    */
   private observers = new Set<(event: AgentEvent) => void>();
   private pendingUiRequests = new Map<string, AgentEvent>();
+  // Replayed by the events route to a page that attaches mid-run (see
+  // lib/subagent-live-frames.ts); cleared with the pending dialogs.
+  private readonly liveSubagents = new LiveSubagentFrames<AgentEvent>();
+  // The current run's last 8 finished replies and tool results, replayed the
+  // same way (see liveMessageFrames); cleared at run start/end and compaction.
+  private recentMessageEnds: AgentEvent[] = [];
   private pendingRefusalDecision: PendingRefusalRequest | null = null;
   /** omp announces a fallback (`retry_fallback_applied`) a few milliseconds
    *  BEFORE the refusal guard asks about it. Held briefly so a fallback the
@@ -1427,8 +1434,9 @@ export class AgentSessionWrapper {
    * It used to follow the browser's device socket instead, and that socket
    * comes and goes with every reload, session switch, backgrounded phone tab
    * and network blip. Each flip re-sent the whole tool roster to omp, which
-   * announced it in the transcript ("xd://: unmounted device_list", then
-   * "mounted") and handled it on the same one-at-a-time command line a
+   * announced it in the transcript ("xd://: unmounted device_list" through
+   * omp 19.0, "Tool commands: removed device_list" from 19.1, then the
+   * matching "mounted"/"added") and handled it on the same one-at-a-time command line a
    * message waits in — a burst of flips was a burst of delay before a send.
    */
   private deviceToolsForSession(): HostToolDefinition[] {
@@ -2033,6 +2041,7 @@ export class AgentSessionWrapper {
       case "agent_start":
         this.scratchActivity?.();
         this.streaming = true;
+        this.recentMessageEnds = [];
         this.pausedOnWork = false;
         this.lastReplyText = null;
         // The continuation a "Steer now" was waiting for has begun.
@@ -2074,6 +2083,7 @@ export class AgentSessionWrapper {
           break;
         }
         if (event.isTerminal !== false) {
+          this.recentMessageEnds = [];
           this.clearSteerInterrupt();
           this.runningToolCalls.clear();
           this.lastTerminalAgentEndAt = Date.now();
@@ -2113,6 +2123,10 @@ export class AgentSessionWrapper {
         break;
       case "message_end": {
         this.resolveDeliveryFromMessage(event);
+        if (isRecord(event.message) && (event.message.role === "toolResult" || (event.message.role === "assistant" && event.message.stopReason !== "error"))) {
+          this.recentMessageEnds.push(event);
+          if (this.recentMessageEnds.length > 8) this.recentMessageEnds.shift();
+        }
         const text = assistantReplyText(event as unknown as { type: string; [key: string]: unknown });
         if (text !== null) {
           this.lastReplyText = text;
@@ -2160,6 +2174,7 @@ export class AgentSessionWrapper {
         break;
       }
       case "subagent_lifecycle": {
+        this.liveSubagents.note(event);
         const payload = event.payload;
         if (isRecord(payload) && (payload.status === "completed" || payload.status === "failed" || payload.status === "aborted")) {
           this.getPlanKeeper()?.notifySubagentTerminal({
@@ -2170,6 +2185,9 @@ export class AgentSessionWrapper {
         }
         break;
       }
+      case "subagent_progress":
+        this.liveSubagents.note(event);
+        break;
       case "turn_end":
         this.getPlanKeeper()?.notifyTurnEnd();
         break;
@@ -2229,6 +2247,7 @@ export class AgentSessionWrapper {
         break;
       case "auto_compaction_start":
         this.compacting = true;
+        this.recentMessageEnds = [];
         break;
       case "auto_compaction_end":
         this.compacting = false;
@@ -2243,6 +2262,7 @@ export class AgentSessionWrapper {
         // asked for (a typed command, an extension's ctx.compact()). It holds
         // the session busy like the `compact` command below does.
         this.compacting = true;
+        this.recentMessageEnds = [];
         break;
       case "manual_compaction_end":
         this.compacting = false;
@@ -2367,6 +2387,8 @@ export class AgentSessionWrapper {
     this.uiExpiryTimers.clear();
     this.pendingUiRequests.clear();
     this.pendingPermissionRequests.clear();
+    this.liveSubagents.clear();
+    this.recentMessageEnds = [];
     if (hadPending) this.notifyObservers({ type: "cody_ui_requests_cleared" });
     if (!this.clearPendingRefusalDecision()) notifyRunningChange();
   }
@@ -3306,6 +3328,11 @@ export class AgentSessionWrapper {
       contextUsage: state.contextUsage ?? null,
       systemPrompt: state.systemPrompt?.join("\n\n") ?? "",
       thinkingLevel: state.thinkingLevel ?? "off",
+      // omp 19.1+: the chosen selector (Auto, or the level) and the ladder of the
+      // model running. Passed through only when reported, so an older omp and the
+      // other engines carry neither and the browser keeps its own bookkeeping.
+      ...(state.configuredThinkingLevel !== undefined ? { configuredThinkingLevel: state.configuredThinkingLevel } : {}),
+      ...(state.thinkingLevels !== undefined ? { thinkingLevels: state.thinkingLevels } : {}),
       // The child's per-family tier map is authoritative: it changes when the
       // model switches families (isFastModeEnabled is family-scoped) or when
       // the runtime auto-disables priority (e.g. after an Anthropic reject).
@@ -3441,6 +3468,19 @@ export class AgentSessionWrapper {
    * trip does not land inside their short wait. */
   lastKnownState(): WebSessionState | null {
     return this._lastKnownState;
+  }
+
+  /** Lifecycle + latest progress frames of the subagents still running, for
+   * the events route to replay to a page that attaches mid-run. */
+  liveSubagentFrames(): AgentEvent[] {
+    return this.liveSubagents.snapshot();
+  }
+
+  /** The current run's latest finished replies and tool results, for the
+   * events route to replay to a page that attaches mid-run: they fill the gap
+   * between its transcript read and its subscription. */
+  liveMessageFrames(): AgentEvent[] {
+    return [...this.recentMessageEnds];
   }
 
   /** Evict expired entries, then the oldest ones over the cap — run on every

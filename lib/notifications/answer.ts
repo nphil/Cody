@@ -1,4 +1,5 @@
 import { isAskDoneRow, isAskOtherRow, isToolApprovalTitle } from "../ask-walk";
+import { parseFormCached, simpleChoice } from "../ask-form-view";
 import type { EngineEvent, EngineSession } from "../harness/types";
 import { readPermissionOptions } from "../permission-request";
 import { isRecord } from "../type-guards";
@@ -77,6 +78,14 @@ function cleanUiAnswer(pending: EngineEvent, answer: Record<string, unknown>): R
       const chosen = entry.selectedOptions;
       if (!Array.isArray(chosen) || chosen.length !== 1 || typeof chosen[0] !== "string" || !question.options.includes(chosen[0])) return null;
       return { answers: [{ id: question.id, selectedOptions: [chosen[0]] }] };
+    }
+    case "form": {
+      // Only the one single-pick question a notification offers can be answered from a tap, and only with one of its options.
+      const only = typeof pending.html === "string" ? simpleChoice(parseFormCached(pending.html)) : null;
+      const data = answer.data;
+      if (!only || !isRecord(data) || Object.keys(data).length !== 1) return null;
+      const value = data[only.name];
+      return typeof value === "string" && only.options.some((option) => option.value === value) ? { data: { [only.name]: value } } : null;
     }
     default:
       return null;

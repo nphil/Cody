@@ -126,6 +126,13 @@ export type UsageLimitState =
 export interface RpcSessionState {
   model?: OmpModel;
   thinkingLevel: string | undefined;
+  /** omp 19.1+: the selector the person chose, `auto` while auto mode picks the
+   * effort, else the level. `thinkingLevel` above is the EFFECTIVE level, so an
+   * Auto chat reads `high` there. Absent on older omp, pi and the ACP engines. */
+  configuredThinkingLevel?: string;
+  /** omp 19.1+: the selectors the active model accepts, as omp's own picker
+   * lists them (`off`, `auto`, its efforts); empty for a model without efforts. */
+  thinkingLevels?: string[];
   isStreaming: boolean;
   isCompacting: boolean;
   steeringMode: "all" | "one-at-a-time";
@@ -190,6 +197,10 @@ export interface WebSessionState {
   contextUsage: ContextUsage | null;
   systemPrompt: string;
   thinkingLevel: string;
+  /** omp 19.1+ selector state, passed through only when the engine reported it
+   * (see RpcSessionState): the chosen selector, and the ladder for this model. */
+  configuredThinkingLevel?: string;
+  thinkingLevels?: string[];
   fastModeEnabled: boolean;
   fastModeActive?: boolean;
   /** Slow-mode and usage-limit fields pass through untouched: the browser
@@ -349,6 +360,7 @@ export interface OmpSelectMarkers {
  * the browser-facing union in lib/types.ts (`open_url`, `cancel`). The wrapper
  * adds `expiresAt` when a timeout is present so reconnecting clients can
  * expire stale dialogs.
+ * omp 19.1 sends the model's `ask` as ONE `form` (its HTML), answered with `{data}` or `{cancelled:true}`.
  */
 export type OmpExtensionUiRequest =
   | ({ type: "extension_ui_request"; id: string; method: "select"; title: string; options: string[]; optionDetails?: OmpSelectOptionDetail[]; timeout?: number; expiresAt?: number } & OmpSelectMarkers)
@@ -356,6 +368,7 @@ export type OmpExtensionUiRequest =
   | { type: "extension_ui_request"; id: string; method: "input"; title: string; placeholder?: string; secret?: boolean; timeout?: number; expiresAt?: number }
   | { type: "extension_ui_request"; id: string; method: "editor"; title: string; prefill?: string; promptStyle?: boolean; timeout?: number; expiresAt?: number }
   | { type: "extension_ui_request"; id: string; method: "ask"; questions: OmpAskQuestion[]; timeout?: number; expiresAt?: number }
+  | { type: "extension_ui_request"; id: string; method: "form"; html: string; timeout?: number; expiresAt?: number }
   | { type: "extension_ui_request"; id: string; method: "cancel"; targetId: string }
   | { type: "extension_ui_request"; id: string; method: "notify"; message: string; notifyType?: "info" | "warning" | "error" }
   | { type: "extension_ui_request"; id: string; method: "setStatus"; statusKey: string; statusText: string | undefined }

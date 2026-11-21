@@ -10,6 +10,8 @@ import {
   machineInitial,
   machineSeverity,
   machineStatusKey,
+  barFigures,
+  peakPercent,
   pickMeterDensity,
   wholePercent,
   worstMachine,
@@ -88,8 +90,8 @@ function MachineChip({ machine, density, single }: { machine: MachineState; dens
           ? <ServerOff size={13} strokeWidth={2} aria-hidden="true" style={{ color: "var(--status-error)" }} />
           : (
             <span className="mm-bars">
-              <Track percent={metrics?.cpuPercent ?? null} />
-              <Track percent={metrics?.memPercent ?? null} />
+              <Track percent={metrics ? barFigures(metrics).cpu : null} />
+              <Track percent={metrics ? barFigures(metrics).mem : null} />
             </span>
           )}
       </span>
@@ -108,8 +110,8 @@ function MachineChip({ machine, density, single }: { machine: MachineState; dens
       {machine.status === "unavailable" && <span className="mm-note">{t(machineStatusKey("unavailable"))}</span>}
       {machine.status !== "offline" && machine.status !== "unavailable" && (
         <span className="mm-rows">
-          <MeterRow kind="cpu" percent={metrics?.cpuPercent ?? null} density={density} />
-          <MeterRow kind="mem" percent={metrics?.memPercent ?? null} density={density} />
+          <MeterRow kind="cpu" percent={metrics ? barFigures(metrics).cpu : null} density={density} />
+          <MeterRow kind="mem" percent={metrics ? barFigures(metrics).mem : null} density={density} />
         </span>
       )}
     </span>
@@ -123,7 +125,7 @@ function WorstIndicator({ machine }: { machine: MachineState }) {
   if (severity === "down") {
     return <ServerOff size={15} strokeWidth={2} aria-hidden="true" style={{ color: "var(--status-error)" }} />;
   }
-  const peak = machine.metrics ? Math.max(machine.metrics.cpuPercent ?? 0, machine.metrics.memPercent) : 0;
+  const peak = machine.metrics ? peakPercent(machine.metrics) : 0;
   const radius = 6;
   const circumference = 2 * Math.PI * radius;
   const arc = Math.max(wholePercent(peak), 2) / 100 * circumference;
@@ -191,10 +193,11 @@ export const MachineMeters = forwardRef<HTMLButtonElement, MachineMetersProps>(f
     if (machine.status !== "online" || !metrics) {
       return t("machines.tooltip.state", { name: machine.name, state: t(machineStatusKey(machine.status)) });
     }
-    return t("machines.tooltip.reading", {
+    const figures = barFigures(metrics);
+    return t(figures.scope === "cody" ? "machines.tooltip.readingCody" : "machines.tooltip.reading", {
       name: machine.name,
-      cpu: metrics.cpuPercent === null ? "…" : `${wholePercent(metrics.cpuPercent)}%`,
-      memory: `${wholePercent(metrics.memPercent)}%`,
+      cpu: figures.cpu === null ? "…" : `${wholePercent(figures.cpu)}%`,
+      memory: `${wholePercent(figures.mem)}%`,
     });
   }).join("  |  ");
 

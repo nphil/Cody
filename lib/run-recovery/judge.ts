@@ -67,7 +67,7 @@ const WAITS_BY_DESIGN: Record<string, true> = { wait: true, ask: true, task: tru
 /**
  * Tools that finish in moments and have no timeout of their own. A call that
  * never answers is overdue; one that keeps reporting progress (`write
- * xd://github` watching a CI run posts an update per poll) is not.
+ * xd://github` (a bash `github -j …` command from omp 19.1) watching a CI run posts an update per poll) is not.
  */
 const QUICK_TOOLS: Record<string, true> = {
   read: true,

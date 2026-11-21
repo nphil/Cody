@@ -89,36 +89,6 @@ export interface SubagentHistoryResult {
   branchName?: string;
 }
 
-/** On-disk subagent history recovered from a parent session's task toolResults. */
-export interface SubagentHistoryEntry {
-  id: string;
-  agent: string;
-  agentSource?: SubagentAgentSource;
-  status: "started" | "completed" | "failed" | "aborted";
-  task?: string;
-  assignment?: string;
-  description?: string;
-  index: number;
-  sessionFile?: string;
-  transcriptAvailable: boolean;
-  /** True when the spawn was detached/async (parent turn kept working). */
-  detached?: boolean;
-  lastIntent?: string;
-  toolCount?: number;
-  requests?: number;
-  tokens?: number;
-  contextTokens?: number;
-  contextWindow?: number;
-  cost?: number;
-  durationMs?: number;
-  modelOverride?: string | string[];
-  modelRole?: string;
-  resolvedModel?: string;
-  resolvedModelIsFallback?: boolean;
-  retryFailure?: { attempt: number; errorMessage: string };
-  result?: SubagentHistoryResult;
-}
-
 /** get_subagents snapshot (RpcSubagentSnapshot) as seen over the wire. */
 export interface SubagentSnapshotLike {
   id: string;

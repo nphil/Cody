@@ -35,21 +35,34 @@
   A progress frame for a RUNNING child the roster does not know adopts it —
   that is how a child reappears after a session switch or a missed
   `started` frame; `mergeSubagents` refuses terminal frames for unknown ids
-  outside a run so late completions cannot resurrect chips. Seeding from
-  `extractSubagentHistory` is the removed design that bloated long
-  conversations to 20+ stale chips — do not bring it back; past runs stay
-  reachable through each task call's in-message summary (TaskResultPanel).
-  `get_subagents` snapshots rehydrate the LIVE roster on mount of ANY live
-  session (main agent idle or not — the event stream is attached then too),
-  after SSE reconnect, on send, and on the reconcile poll; the `/subagents`
-  route is now consumed only for its `subagentUsage` sum
-  (`refreshSubagentUsage`).
+  outside a run so late completions cannot resurrect chips. Seeding the
+  roster from the parent file's task history is the removed design that
+  bloated long conversations to 20+ stale chips — do not bring it back; past
+  runs stay reachable through each task call's in-message summary
+  (TaskResultPanel). `get_subagents` snapshots rehydrate the LIVE roster on
+  mount of ANY live session (main agent idle or not), as soon as the event
+  stream opens (a 600 ms timer is only the fallback for a slow stream; the
+  server subscribes a live session's stream before answering, so no frame
+  falls between snapshot and stream), after SSE reconnect, on send, and on
+  the reconcile poll. The `/subagents` route is usage-only: it returns
+  `subagentUsage` (`refreshSubagentUsage`) and never parses the parent file
+  (its old roster payload had no reader and cost a second full parse of a
+  running chat's file on every switch: 1.4–2 s on a 185 MB session).
+- **Running helpers are replayed on attach** (`lib/subagent-live-frames.ts`):
+  the session wrapper keeps the newest `subagent_lifecycle` and
+  `subagent_progress` frame of every helper it saw start and not finish, and
+  the events route sends them to each newly attached stream that asks
+  (`?replay=1`; the web page does). A page opening a
+  busy chat paints its panel as the stream opens instead of waiting for a
+  `get_subagents` answer queued behind the engine's running command. Terminal
+  frames drop a helper (a late progress frame cannot resurrect it), progress
+  for a helper never seen starting is left to `get_subagents`, the map is
+  capped at 64, and a restart or close clears it with the pending dialogs.
 - **On-disk history** (`lib/subagent-history.ts`, `/api/sessions/[id]/subagents*`):
   omp persists each subagent's transcript to the parent session's sibling
   artifacts dir (`<session-dir>/<subagent-id>.jsonl`) and the parent file's
-  task toolResults keep `progress[]`/`results[]` snapshots
-  (`extractSubagentHistory` still reads them for the route's roster payload
-  and usage sum). The transcript route (`?tail=1` newest page,
+  task toolResults keep `progress[]`/`results[]` snapshots (read by each task
+  call's in-message summary). The transcript route (`?tail=1` newest page,
   `?beforeByte=N` the page before N, `?fromByte=N` forward) reads ONLY the
   bytes a page needs (`readSubagentTranscriptPage`: fd range reads, 64 KB
   newline scans, one reusable buffer) — never the whole file, so there is no
@@ -68,6 +81,7 @@
   reader cannot find. The dialog reads the final output — `<id>.md` via
   `?mode=completion` (bounded read) with a live `get_subagents` snapshot
   fallback for header enrichment.
+  **Tool-result images** (`read` of a PNG, `preview_screenshot`) are deferred like the main chat's (`deferMedia`, `isDeferrableToolResultImage`): `readSubagentTranscriptPage(..., { imageUrl })` replaces each with a url-source block pointing at `GET /api/sessions/[id]/subagents/[subagentId]/media?offset=<line byte>&entryId=<id>&index=<n>`, so `MessageView`'s normal `ClickableImage` shows the thumbnail and opens the lightbox. Before this, helper lines kept `data: "blob:sha256:<hex>"` (omp stores images in the blob store, and the page reader never resolved it) and the card drew a broken `data:…;base64,blob:…` image, i.e. only the "Read image file …" text. The media route reads ONLY the addressed line (`readSubagentTranscriptImage`: the offset must be a line start, the entry id must match, only `toolResult` images count, line cap 8 MB, blob ref resolved by `readBlobRefSync`, hash-checked), after the same `resolveSessionPathOr404` ownership check and `resolveSubagentArtifact` realpath confinement as the transcript route; unaligned or unknown refs are 404, malformed refs 400. Offsets are stable because transcripts are append-only, so the response is cached for a day. Images in `user` messages and the RPC fallback path are not deferred. Proof: `lib/subagent-history.test.mjs`, `lib/subagent-media-route.test.mjs`.
   IDs can be explicit task names with spaces/punctuation: validate a bounded safe
   filename component and retain realpath confinement, not an AdjectiveNoun regex.
 - **The transcript dialog** (`SubagentTranscriptDialog` → `SubagentTranscript`,
@@ -170,7 +184,10 @@ through `lib/helper-memory-limit.ts`). `GET /api/omp-agents` builds the roster:
 
 "Change model" in the helper window (`components/SubagentModelSwitch.tsx`, shown
 while the helper runs, omp chats only, hidden when `cancel_subagent` is
-unsupported). No omp RPC changes a running helper's model, so
+unsupported). No omp RPC changes a running helper's model (re-proved on real omp
+19.1.0 frames: `set_subagent_model` and `set_subagent_thinking_level` are unknown
+commands, a `subagentId` on `set_model` is ignored and the helper keeps its model,
+`lib/omp/model-controls.test.mjs`), so
 `POST /api/agent/[id]/switch-helper` (`lib/omp/agent-switch.ts`, `switchHelper`):
 
 1. leaves the model choice first: checkbox on -> `setAgentModelOverride` (config

@@ -10,6 +10,7 @@ import { anchorIsInsideOpenBlock } from "@/lib/transcript-anchor";
 import { translate, translatePlural, useI18n, type Locale } from "@/lib/i18n";
 import { taskCallPreview } from "@/lib/task-call-preview";
 import { askAnswersFromDetails, askCallInput, askCallPreview } from "@/lib/ask-result";
+import { toolCommandCall } from "@/lib/tool-command";
 import { ircSender, ircTags, parentIrcAsCustomMessage } from "@/lib/irc-display";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { isActionableCustomDetails, isEmptyThinkingBlock, isInternalBackgroundMessage, isVisibleTranscriptMessage } from "@/lib/message-display";
@@ -1251,7 +1252,11 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
   const askInput = useMemo(() => askCallInput(block.toolName, block.input), [block.toolName, block.input]);
   const inputJson = useMemo(() => JSON.stringify(askInput ?? block.input, null, 2) ?? "", [askInput, block.input]);
   const displayedJson = inputJson;
-  const displayedPreview = getToolPreview(block, askInput);
+  // omp 19.1 runs Cody's host tools, MCP tools and the other rarely-used tools as commands in `bash`
+  // (`open_url -j '{…}'`): the card names the tool and previews its arguments. Null for every other call.
+  const toolCommand = useMemo(() => toolCommandCall(block.toolName, block.input, result?.details), [block.toolName, block.input, result?.details]);
+  const shownToolName = askInput ? "ask" : toolCommand?.tool ?? block.toolName;
+  const displayedPreview = toolCommand ? toolCommand.rest.slice(0, 120) : getToolPreview(block, askInput);
   const isEditTool = isEditToolName(block.toolName);
   const resultDiff = result && !result.isError ? getResultDiff(result) : null;
   // A settled `ask` shows its answers as rows instead of the raw HTML form /
@@ -1315,7 +1320,7 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
           }}
         >
           <span style={{ color: TONE_COLOR[tone], fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 11, flexShrink: 0 }}>
-            {askInput ? "ask" : block.toolName}
+            {shownToolName}
           </span>
           <span style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0, maxWidth: "64ch", marginRight: "auto" }}>
             {displayedPreview}
@@ -1337,7 +1342,7 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
         {approval?.role === "request" && <ApprovalStatusRow card={approval} />}
         {/* The last lines a running call prints; outside the collapsible panel so
             it shows while the card is collapsed. Renders nothing for a settled call. */}
-        <LiveToolTail toolCallId={block.toolCallId} toolName={block.toolName} />
+        <LiveToolTail toolCallId={block.toolCallId} toolName={shownToolName} />
 
         {/* ── Expanded content (input args + paired result), mounted by the
             panel and width-pinned by .collapse-box-inner so the grow

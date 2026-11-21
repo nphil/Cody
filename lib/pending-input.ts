@@ -1,4 +1,5 @@
 import type { AskAnswer } from "@/lib/ask-dialog";
+import type { HtmlFormData } from "@/lib/ask-form";
 import type { AskWalkView } from "@/lib/ask-walk";
 import type { DeviceTrustRequest } from "@/lib/devices/trust";
 import type { AgentPermissionRequest } from "@/lib/permission-request";
@@ -9,6 +10,9 @@ export type { RefusalDecision } from "@/lib/pi-types";
 
 /** omp >= 18.4's multi-question `ask` dialog (after `set_ask_dialog`). */
 export type ExtensionAskRequest = Extract<OmpExtensionUiRequest, { method: "ask" }>;
+
+/** omp >= 19.1's `ask`: the model's HTML form as ONE request (lib/ask-form.ts reads it). */
+export type ExtensionFormRequest = Extract<OmpExtensionUiRequest, { method: "form" }>;
 
 /**
  * A `select`, as omp sent it plus two fields only the browser adds while omp's
@@ -24,12 +28,14 @@ export type ExtensionSelectRequest = Extract<OmpExtensionUiRequest, { method: "s
 export type ExtensionDialogRequest =
   | Extract<ExtensionUiRequest, { method: "confirm" | "input" | "editor" }>
   | ExtensionSelectRequest
-  | ExtensionAskRequest;
+  | ExtensionAskRequest
+  | ExtensionFormRequest;
 
 export type ExtensionDialogResponse =
   | { value: string }
   | { confirmed: boolean }
   | { answers: AskAnswer[] }
+  | { data: HtmlFormData }
   | { cancelled: true };
 
 

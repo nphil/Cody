@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { loadSessionFile } from "@/lib/omp/session-files";
-import { isDeferrableToolResultImage } from "@/lib/session-reader";
+import { readBlobRefSync } from "@/lib/omp/session-files";
+import { isDeferrableToolResultImage, loadSessionFileCached } from "@/lib/session-reader";
 import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
 
 /**
@@ -29,8 +29,11 @@ export async function GET(
     const resolved = await resolveSessionPathOr404(id, req);
     if ("response" in resolved) return resolved.response;
 
-    // Resolve blobs INCLUDING toolResult images — serving them is the point.
-    const { entries, error: loadError } = loadSessionFile(resolved.filePath, { resolveBlobs: true });
+    // The parse the deferred transcript was built from (a cache hit when it was
+    // just read): its toolResult images are still blob refs, exactly what the
+    // deferral counted, so `index` lines up even when a blob is missing. Only
+    // the one image asked for is read from the blob store.
+    const { entries, error: loadError } = loadSessionFileCached(resolved.filePath, { resolveBlobs: true, skipToolResultImages: true });
     if (loadError === "too_large") {
       return NextResponse.json({ error: "Session file is too large", code: "session_file_too_large" }, { status: 413 });
     }
@@ -41,11 +44,11 @@ export async function GET(
     const images = content.filter(isDeferrableToolResultImage);
     const block = images[index] as { data?: string; mimeType?: string; source?: { data?: string; media_type?: string } } | undefined;
     const data = typeof block?.data === "string" ? block.data : block?.source?.data;
-    if (!data) {
+    const bytes = data ? readBlobRefSync(data) ?? (data.startsWith("blob:") ? null : Buffer.from(data, "base64")) : null;
+    if (!bytes) {
       return NextResponse.json({ error: "Image not found", code: "media_not_found" }, { status: 404 });
     }
     const mime = block?.mimeType ?? block?.source?.media_type ?? "image/png";
-    const bytes = Buffer.from(data, "base64");
     return new Response(new Uint8Array(bytes), {
       headers: {
         "Content-Type": /^image\//.test(mime) ? mime : "application/octet-stream",

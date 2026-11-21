@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { readOwnLines } from "./cgroup";
 import { buildRawSample, countCores, metricsFrom, type RawSample } from "./proc";
 import { runSsh, type SshRun } from "./ssh";
 import { listMachineConfigs } from "./store";
@@ -63,16 +64,18 @@ export const REAL_TIMERS: Timers = {
 // ── Collectors ───────────────────────────────────────────────────────────────
 
 async function readProcFiles(): Promise<RawSample | null> {
-  const [stat, meminfo, loadavg] = await Promise.all([
+  const [stat, meminfo, loadavg, ownLines] = await Promise.all([
     readFile("/proc/stat", "utf8"),
     readFile("/proc/meminfo", "utf8"),
     readFile("/proc/loadavg", "utf8").catch(() => ""),
+    readOwnLines(),
   ]);
   return buildRawSample({
     cpuLine: stat.split("\n", 1)[0] ?? null,
     memLines: meminfo.split("\n"),
     loadLine: loadavg.split("\n", 1)[0] ?? null,
     cores: countCores(stat),
+    ownLines,
   });
 }
 

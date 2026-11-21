@@ -15,7 +15,7 @@
 //
 // The rule is a message and never a system-prompt line: omp reads ANY
 // `before_agent_start` result that carries a `systemPrompt` as a replaced
-// prompt, and answers by re-announcing its whole tool list (the xd:// catalog,
+// prompt, and answers by re-announcing its whole tool list (the xd:// or tool-command catalog,
 // thousands of tokens) as a user message. The message is added once per live
 // context: a conversation that already holds it, back to its last compaction
 // or `/clear`, gets nothing, and one that lost it gets it with the next prompt.

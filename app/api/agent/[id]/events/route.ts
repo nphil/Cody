@@ -13,6 +13,7 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  const replay = new URL(req.url).searchParams.get("replay") === "1";
 
   // Ownership gate: someone else's session answers the same 404 as a missing
   // one. This route streams full session content, so it cannot rely on the
@@ -172,6 +173,16 @@ export async function GET(
         }
         if (closed) return;
         unsubscribe = session.onEvent((event) => encode(event));
+        // A page that asks (`?replay=1`) gets what attaching mid-run cost it:
+        // the running helpers' latest lifecycle/progress frames, so the panel
+        // paints now instead of after a get_subagents round trip that a busy
+        // engine answers late, then the run's latest finished messages, flagged
+        // `replayed` (lib/attach-replay.ts: the page adds only what it lacks),
+        // for the gap between its transcript read and this subscription.
+        if (replay) {
+          for (const frame of session.liveSubagentFrames?.() ?? []) encode(frame);
+          for (const frame of session.liveMessageFrames?.() ?? []) encode({ ...frame, replayed: true });
+        }
         // A resume of an older copy opened the newer one (omp 18.13.2+ follows
         // the old file's `continuationOf` link), so this stream, asked for `id`,
         // is attached to a chat that runs as another id. Say so the way a live

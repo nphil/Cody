@@ -70,6 +70,27 @@ Sections in this file:
   extensions' `ctx.ui.askDialog` calls (an extension-only path, so `AskDialogForm`
   is now rare). The call stays harmless on every engine (an omp that predates it
   answers `Unknown command`).
+- **Session files are read through an append-aware parse cache**
+  (`lib/session-reader.ts` `loadThroughParseCache`, cursor from
+  `loadSessionFileWithCursor` in `lib/omp/session-files.ts`). omp only
+  appends; a rename rewrites the 256-byte title slot in place; every other
+  rewrite goes through a temp file + rename (new inode). The cursor relies on
+  exactly that: same inode, not smaller, and an unchanged 4 KB anchor before
+  the parsed end (title slot excluded) mean "only appended", so only the new
+  lines are parsed. An unterminated last line is parsed again next time.
+  Legacy (pre-v3) files get no cursor and are always parsed whole.
+- **Live attach never waits on `get_state`.** `GET /api/sessions/<id>/state?fast=1`
+  answers a live session from the wrapper's own phase flags (`livePhase()`,
+  via `livePhaseState` in lib/api-utils.ts), the shape of a stale
+  `getStateBounded` answer with only `isStreaming`/`isPromptRunning`/
+  `isBashRunning`/`isCompacting`. omp serializes RPC commands, so `get_state`
+  sits behind a running command; the page uses the fast read to attach and
+  lets the full read reconcile later. For the same attach the wrapper keeps
+  the current run's last 8 finished replies and tool results
+  (`liveMessageFrames`; cleared at run start, run end and compaction), which
+  the events route replays after the running helpers to a stream opened with
+  `?replay=1`, flagged `replayed`: they cover the gap between the page's
+  transcript read and its subscription.
 - **A live session can MOVE to a new id** (omp 18.4.9). When another omp
   process owns the session file for writing, this one's next write moves the
   live session to a NEW sibling `.jsonl` under a NEW session id
@@ -191,6 +212,18 @@ mount buried the phone screen (2026-11-13). The chat already shows the
 - **Subagents.** `before_subagent_spawn` is unchanged and still fires on 19.0.0: with a pending switch file the helper's request ran on the switched model while the main chat stayed on its own, and the entry was consumed (`lib/omp/extensions/cody-agent-switch.ts`, proved live on both engines). 19 starts a helper with three auxiliary "solution space" requests, exactly as 18.20.1 does.
 - **Cache warming frames and bridge compaction.** `cache_warming_start/end` gained `phase`, `method`, `provider`, `model`, `outcome`, `usage` and `warmingStopReason`; omp 19's new strategies (`providers.cacheWarmingStrategy`: `auto` default, `keepalive`, `compact`; `providers.cacheWarmingCompactPercent` 60 / `...CompactTokens` 150000) can also compact the history in the background behind a pending long tool call (a `remote` or `handoff` summary armed during the wait and committed at the next boundary, `session-maintenance.ts startBridgeCompaction`). Cody treats the frames as informational (`rpc-manager.handleFrame`, `supervisor.ts`), and the burn guard reads only assistant `usage` and `compaction` entries (any method), so a warming replay is not a request and a bridge compaction is one ordinary entry that frees most of the context. [INFERENCE] none of this was triggered live (the lab never lets a cache expire, a bridge needs a 4-minute tool call); from the source a bridge cannot repeat until the context regrows to the threshold, so it cannot look like `churn`.
 - **Extension messages.** None of Cody's extensions calls `pi.sendMessage`: they use hidden `before_agent_start` notes (`display:false`, model-facing on purpose), `additionalContext` or `pi.appendEntry`, so omp 19's `excludeFromContext` has nothing to apply to. A future person-only note must pass it behind a version check (18.x ignores the field and would show the model the note).
+
+**Notes for maintainers (omp 19.1.0, what a chat does at run time).** Proved against the real 19.1.0 binary and a mock Anthropic server (19.0.0 diffed alongside); frames and files are in `lib/fixtures/omp-19.1.0-{approval-records,redirect-job,retry,wait}.json`, replayed by `lib/omp-19.1-runtime.test.mjs`. 19.0 / 18.x keep working through the same code.
+
+- **Approval records.** 19.1 writes `custom` entries `tool_approval_requested` (`data:{toolCallId, parentToolCallId?, toolName, approvalMode, reason?, requestedAt}`, flushed to disk BEFORE the prompt opens) and `tool_approval_resolved` (`data:{toolCallId, toolName, approved, reason?, resolvedAt}`; reason "denied by user", an abort text or "no interactive UI available"). A request with no resolution or tool result after it is pending. 19.0 writes neither. The RPC prompt (`extension_ui_request` `select`, "Allow tool: bash\nCommand: ...", Approve / Approve bash for this session / Deny) is identical on both, and Cody's own chats already surface it as `awaitingInput` through `pendingUiRequests` → `hasPendingInput()`. `session-reader` ignores every `type:"custom"` entry, so nothing renders. **Not built:** "waiting for approval" for a chat Cody is NOT streaming. The file alone cannot tell a live wait from a crashed one; the only liveness probe is the new `omp session lease --json -- <id>...` (or RPC `get_session_lease`), which needs a child spawn plus a tail scan of every session per refresh, and Cody has no notion of sessions held by outside omp processes.
+- **Redirected background jobs.** The "live visibility" of 19.1 is in-process (`proc://<id>/streams`, the TUI jobs sheet). The RPC frames are the 19.0 frames: `tool_execution_update` for an async bash job carries `partialResult.content[0].text` = what the command printed to the terminal (empty while a redirected loop runs) and `details.async {state, jobId, type}`. The redirected bytes are in no frame and no RPC command lists jobs, so `LiveToolTail` shows an empty tail for such a job, exactly as before. No change.
+- **Retries.** Frames are unchanged (`auto_retry_start` gains `errorId`, `auto_retry_end` gains an always-present `retryErrors[]`); "failed attempts stay out of the transcript" is the TUI only (`event-controller.ts`). A failed attempt still arrives as an assistant `message_end` with `stopReason:"error"` BEFORE `auto_retry_start`, and the file keeps it; once the saga settles omp stamps the attempt `retryRecovery {kind:"auto-retry", status:"recovered"|"superseded", attempt, recovery, note}` (a field 19.0 wrote too). **Cody change:** `entryToUiMessage` skips such an attempt when its `usage` is zero (the provider refused before answering), because the UI's cost total sums the rebuilt messages; one that cost something stays. A dropped connection mid-stream is a silent retry with NO `auto_retry_*` frames: one error `message_end` + `turn_end` + a non-terminal `agent_end` (no `isTerminal`) + `agent_start` per attempt, one terminal `agent_end` at the end. The supervisor and burn guard read the same frames/file as on 19.0 (`burn-trail.ts` counts every assistant entry with usage, stamped or not). Provider-layer retries (HTTP 5xx/529 inside the SDK) emit nothing at all. A retry wait can now last up to `retry.maxDelayMs` (30 min default) in silence: under the 60 min silence verdict, and the 10 min probe is answered by the engine.
+- **`wait`.** The 4-minute first wait is the interactive TUI (`tuiTranscript`); on rpc-ui the first call still returns after 5 s ("No job finished within 5.0s") and back-to-back idle waits climb to 240 s (jobs) or up to 30 min (a helper's reply). `wait` stays in `WAITS_BY_DESIGN` (`lib/run-recovery/judge.ts`); nothing changed.
+
+### Tool commands in the transcript (omp 19.1)
+- A tool run as a command is a `bash` toolCall. The card names the tool (`toolCommandCall` in `lib/tool-command.ts`): from the result's `details.toolCommands` record when it has one, else only for an `mcp__*` first word of one simple command, so a Cody host tool shows as `bash` until its result arrives. `RunningToolInfo.name` stays `bash` (the status line and tail logic depend on it). Old `xd://` calls keep rendering as plain `write` cards.
+- The mount notice is `source: "toolCommands"` / `Tool commands: added …` live and a `tool-command-mount-notice` custom message in the file (~3.3 KB, before the first user message). Both are hidden (`isToolMountNotice`, `HIDDEN_CUSTOM_TYPES`), like omp's older `xdev` forms.
+- History keeps a bounded `{tool, mode, exitCode}` projection of `details.toolCommands` for `bash` results (`stripToolResultDetails` in `lib/session-reader.ts`), never the arguments or the MCP payload.
 
 ### Long tool calls narrate themselves
 - `tool_execution_update` frames are handled, not dropped: the newest text

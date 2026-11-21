@@ -1,0 +1,3066 @@
+{
+  "note": "Recorded from a real omp 19.1.0 rpc-ui child: a 22 s background job and three wait calls. The first wait returns after 5.0 s (the 4-minute first wait is the interactive TUI only).",
+  "run": {
+    "engine": "19.1",
+    "scenario": "wait",
+    "state": {
+      "sessionId": "01a1fecd-dd03-7109-b60f-d9fdead7240d",
+      "isStreaming": false
+    },
+    "probes": [],
+    "frames": [
+      {
+        "type": "ready",
+        "protocolVersion": 1,
+        "supportedProtocolVersions": [
+          1,
+          2
+        ],
+        "maxFrameBytes": 1048576,
+        "maxReassembledFrameBytes": 67108864,
+        "supportsBashExcludeFromContext": true,
+        "__t": 1391
+      },
+      {
+        "type": "agent_start",
+        "__t": 1515
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "LC-WAITJOB start then wait"
+            }
+          ],
+          "attribution": "user",
+          "timestamp": 1795276266973
+        },
+        "messageId": "msg-1",
+        "__t": 1549
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "toolCall",
+              "id": "toolu_0",
+              "name": "bash",
+              "arguments": {
+                "command": "sleep 22; echo JOBDONE",
+                "async": true,
+                "i": "Starting the job"
+              }
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 5,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 6,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.0001,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.00010400000000000001
+            }
+          },
+          "stopReason": "toolUse",
+          "timestamp": 1795276267026,
+          "responseId": "msg_0",
+          "duration": 20.77747700000009,
+          "ttft": 19.002276000000165,
+          "completedAt": 1795276267053
+        },
+        "messageId": "msg-2",
+        "__t": 1568
+      },
+      {
+        "type": "tool_execution_start",
+        "toolCallId": "toolu_0",
+        "toolName": "bash",
+        "args": {
+          "command": "sleep 22; echo JOBDONE",
+          "async": true,
+          "i": "Starting the job"
+        },
+        "__t": 1580
+      },
+      {
+        "type": "tool_execution_end",
+        "toolCallId": "toolu_0",
+        "toolName": "bash",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "Backgrounded as job bg_1 (killed once it has run 300s in total; `timeout: 0` disables the deadline); its output is injected into the conversation as a follow-up the moment it finishes. Do NOT poll for it (no `sleep`, `ps`, `pgrep`, `top`, `pidwait`, log tailing): every poll is a wasted turn. Do other work, or end your reply and wait to be woken."
+            }
+          ],
+          "details": {
+            "async": {
+              "state": "running",
+              "jobId": "bg_1",
+              "type": "bash"
+            },
+            "timeoutSeconds": 300
+          }
+        },
+        "isError": false,
+        "__t": 1585
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "toolResult",
+          "toolCallId": "toolu_0",
+          "toolName": "bash",
+          "content": [
+            {
+              "type": "text",
+              "text": "Backgrounded as job bg_1 (killed once it has run 300s in total; `timeout: 0` disables the deadline); its output is injected into the conversation as a follow-up the moment it finishes. Do NOT poll for it (no `sleep`, `ps`, `pgrep`, `top`, `pidwait`, log tailing): every poll is a wasted turn. Do other work, or end your reply and wait to be woken."
+            }
+          ],
+          "details": {
+            "async": {
+              "state": "running",
+              "jobId": "bg_1",
+              "type": "bash"
+            },
+            "timeoutSeconds": 300
+          },
+          "isError": false,
+          "timestamp": 1795276267069
+        },
+        "messageId": "msg-3",
+        "__t": 1585
+      },
+      {
+        "type": "turn_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "toolCall",
+              "id": "toolu_0",
+              "name": "bash",
+              "arguments": {
+                "command": "sleep 22; echo JOBDONE",
+                "async": true,
+                "i": "Starting the job"
+              }
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 5,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 6,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.0001,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.00010400000000000001
+            }
+          },
+          "stopReason": "toolUse",
+          "timestamp": 1795276267026,
+          "responseId": "msg_0",
+          "duration": 20.77747700000009,
+          "ttft": 19.002276000000165
+        },
+        "toolResults": [
+          {
+            "role": "toolResult",
+            "toolCallId": "toolu_0",
+            "toolName": "bash",
+            "content": [
+              {
+                "type": "text",
+                "text": "Backgrounded as job bg_1 (killed once it has run 300s in total; `timeout: 0` disables the deadline); its output is injected into the conversation as a follow-up the moment it finishes. Do NOT poll for it (no `sleep`, `ps`, `pgrep`, `top`, `pidwait`, log tailing): every poll is a wasted turn. Do other work, or end your reply and wait to be woken."
+              }
+            ],
+            "details": {
+              "async": {
+                "state": "running",
+                "jobId": "bg_1",
+                "type": "bash"
+              },
+              "timeoutSeconds": 300
+            },
+            "isError": false,
+            "timestamp": 1795276267069
+          }
+        ],
+        "__t": 1588
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "toolCall",
+              "id": "toolu_1",
+              "name": "wait",
+              "arguments": {}
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 5,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 6,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.0001,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.00010400000000000001
+            }
+          },
+          "stopReason": "toolUse",
+          "timestamp": 1795276267079,
+          "responseId": "msg_1",
+          "duration": 4.4776580000000195,
+          "ttft": 3.9930550000001404,
+          "completedAt": 1795276267084
+        },
+        "messageId": "msg-4",
+        "__t": 1600
+      },
+      {
+        "type": "tool_execution_start",
+        "toolCallId": "toolu_1",
+        "toolName": "wait",
+        "args": {},
+        "__t": 1601
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_0",
+        "toolName": "bash",
+        "args": {
+          "command": "sleep 22; echo JOBDONE",
+          "async": true,
+          "i": "Starting the job"
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "async": {
+              "state": "running",
+              "jobId": "bg_1",
+              "type": "bash"
+            }
+          }
+        },
+        "__t": 1683
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_1",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 894,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 2477
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_1",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 1394,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 2974
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_1",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 1894,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 3474
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_1",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 2394,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 3974
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_1",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 2894,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 4474
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_1",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 3394,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 4974
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_1",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 3894,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 5475
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_1",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 4394,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 5975
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_1",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 4894,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 6475
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_1",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 5395,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 6975
+      },
+      {
+        "type": "tool_execution_end",
+        "toolCallId": "toolu_1",
+        "toolName": "wait",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "## Still Running (1)\n\n- `bg_1` [bash] — sleep 22; echo JOBDONE\n\nNo job finished within 5.0s. Nothing else left? Call `wait` again right away: it then blocks up to 4m."
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "meta": {
+              "source": {
+                "type": "report",
+                "value": "background jobs snapshot"
+              }
+            },
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 5894,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          },
+          "useless": true
+        },
+        "isError": false,
+        "__t": 7475
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "toolResult",
+          "toolCallId": "toolu_1",
+          "toolName": "wait",
+          "content": [
+            {
+              "type": "text",
+              "text": "## Still Running (1)\n\n- `bg_1` [bash] — sleep 22; echo JOBDONE\n\nNo job finished within 5.0s. Nothing else left? Call `wait` again right away: it then blocks up to 4m."
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "meta": {
+              "source": {
+                "type": "report",
+                "value": "background jobs snapshot"
+              }
+            },
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 5894,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          },
+          "isError": false,
+          "useless": true,
+          "timestamp": 1795276272960
+        },
+        "messageId": "msg-5",
+        "__t": 7476
+      },
+      {
+        "type": "turn_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "toolCall",
+              "id": "toolu_1",
+              "name": "wait",
+              "arguments": {}
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 5,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 6,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.0001,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.00010400000000000001
+            }
+          },
+          "stopReason": "toolUse",
+          "timestamp": 1795276267079,
+          "responseId": "msg_1",
+          "duration": 4.4776580000000195,
+          "ttft": 3.9930550000001404
+        },
+        "toolResults": [
+          {
+            "role": "toolResult",
+            "toolCallId": "toolu_1",
+            "toolName": "wait",
+            "content": [
+              {
+                "type": "text",
+                "text": "## Still Running (1)\n\n- `bg_1` [bash] — sleep 22; echo JOBDONE\n\nNo job finished within 5.0s. Nothing else left? Call `wait` again right away: it then blocks up to 4m."
+              }
+            ],
+            "details": {
+              "op": "wait",
+              "meta": {
+                "source": {
+                  "type": "report",
+                  "value": "background jobs snapshot"
+                }
+              },
+              "jobs": [
+                {
+                  "id": "bg_1",
+                  "type": "bash",
+                  "status": "running",
+                  "label": "sleep 22; echo JOBDONE",
+                  "durationMs": 5894,
+                  "widget": {
+                    "title": "sleep 22; echo JOBDONE",
+                    "blocks": [],
+                    "state": "fallback",
+                    "updatedAt": 1795276267065
+                  }
+                }
+              ]
+            },
+            "isError": false,
+            "useless": true,
+            "timestamp": 1795276272960
+          }
+        ],
+        "__t": 7478
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "toolCall",
+              "id": "toolu_2",
+              "name": "wait",
+              "arguments": {}
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 5,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 6,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.0001,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.00010400000000000001
+            }
+          },
+          "stopReason": "toolUse",
+          "timestamp": 1795276272966,
+          "responseId": "msg_2",
+          "duration": 2.678862000000663,
+          "ttft": 2.1586880000004385,
+          "completedAt": 1795276272969
+        },
+        "messageId": "msg-6",
+        "__t": 7485
+      },
+      {
+        "type": "tool_execution_start",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "__t": 7485
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 5906,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 7486
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 6406,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 7986
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 6906,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 8486
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 7406,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 8986
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 7906,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 9487
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 8406,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 9987
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 8907,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 10487
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 9407,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 10987
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 9907,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 11487
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 10407,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 11987
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 10907,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 12487
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 11407,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 12987
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 11907,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 13487
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 12407,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 13987
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 12907,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 14487
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 13407,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 14988
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 13907,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 15488
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 14407,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 15988
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 14907,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 16488
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 15408,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 16993
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 15908,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 17488
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 16408,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 17988
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 16908,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 18488
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 17408,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 18988
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 17908,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 19488
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 18408,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 19988
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 18908,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 20488
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 19408,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 20989
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 19908,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 21489
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 20408,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 21989
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 20909,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 22489
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 21409,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 22989
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "args": {},
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": ""
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 21909,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          }
+        },
+        "__t": 23489
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_0",
+        "toolName": "bash",
+        "args": {
+          "command": "sleep 22; echo JOBDONE",
+          "async": true,
+          "i": "Starting the job"
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": "JOBDONE\n"
+            }
+          ],
+          "details": {
+            "async": {
+              "state": "running",
+              "jobId": "bg_1",
+              "type": "bash"
+            }
+          }
+        },
+        "__t": 23634
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_0",
+        "toolName": "bash",
+        "args": {
+          "command": "sleep 22; echo JOBDONE",
+          "async": true,
+          "i": "Starting the job"
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": "JOBDONE\n"
+            }
+          ],
+          "details": {
+            "async": {
+              "state": "running",
+              "jobId": "bg_1",
+              "type": "bash"
+            }
+          }
+        },
+        "__t": 23634
+      },
+      {
+        "type": "tool_execution_update",
+        "toolCallId": "toolu_0",
+        "toolName": "bash",
+        "args": {
+          "command": "sleep 22; echo JOBDONE",
+          "async": true,
+          "i": "Starting the job"
+        },
+        "partialResult": {
+          "content": [
+            {
+              "type": "text",
+              "text": "JOBDONE\n\n\nWall time: 22.05 seconds"
+            }
+          ],
+          "details": {
+            "wallTimeNoticeEmitted": true,
+            "timeoutSeconds": 300,
+            "wallTimeMs": 22054.207086,
+            "async": {
+              "state": "completed",
+              "jobId": "bg_1",
+              "type": "bash"
+            }
+          }
+        },
+        "__t": 23636
+      },
+      {
+        "type": "tool_execution_end",
+        "toolCallId": "toolu_2",
+        "toolName": "wait",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "## Completed (1)\n\n### bg_1 [bash] — completed\nLabel: sleep 22; echo JOBDONE\nDelivery: delivered by this wait — it finished while you were waiting.\n```\nJOBDONE\n\n\nWall time: 22.05 seconds\n```"
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "meta": {
+              "source": {
+                "type": "report",
+                "value": "background jobs snapshot"
+              }
+            },
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "completed",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 22056,
+                "settledAtMs": 1795276289121,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "stage": "JOBDONE",
+                  "blocks": [
+                    {
+                      "kind": "stat",
+                      "items": [
+                        {
+                          "label": "lines",
+                          "text": "1"
+                        },
+                        {
+                          "label": "lines/s",
+                          "text": "0.05"
+                        }
+                      ]
+                    }
+                  ],
+                  "state": "fallback",
+                  "updatedAt": 1795276289121
+                },
+                "resultText": "JOBDONE\n\n\nWall time: 22.05 seconds"
+              }
+            ]
+          }
+        },
+        "isError": false,
+        "__t": 23637
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "toolResult",
+          "toolCallId": "toolu_2",
+          "toolName": "wait",
+          "content": [
+            {
+              "type": "text",
+              "text": "## Completed (1)\n\n### bg_1 [bash] — completed\nLabel: sleep 22; echo JOBDONE\nDelivery: delivered by this wait — it finished while you were waiting.\n```\nJOBDONE\n\n\nWall time: 22.05 seconds\n```"
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "meta": {
+              "source": {
+                "type": "report",
+                "value": "background jobs snapshot"
+              }
+            },
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "completed",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 22056,
+                "settledAtMs": 1795276289121,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "stage": "JOBDONE",
+                  "blocks": [
+                    {
+                      "kind": "stat",
+                      "items": [
+                        {
+                          "label": "lines",
+                          "text": "1"
+                        },
+                        {
+                          "label": "lines/s",
+                          "text": "0.05"
+                        }
+                      ]
+                    }
+                  ],
+                  "state": "fallback",
+                  "updatedAt": 1795276289121
+                },
+                "resultText": "JOBDONE\n\n\nWall time: 22.05 seconds"
+              }
+            ]
+          },
+          "isError": false,
+          "timestamp": 1795276289122
+        },
+        "messageId": "msg-7",
+        "__t": 23638
+      },
+      {
+        "type": "turn_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "toolCall",
+              "id": "toolu_2",
+              "name": "wait",
+              "arguments": {}
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 5,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 6,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.0001,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.00010400000000000001
+            }
+          },
+          "stopReason": "toolUse",
+          "timestamp": 1795276272966,
+          "responseId": "msg_2",
+          "duration": 2.678862000000663,
+          "ttft": 2.1586880000004385
+        },
+        "toolResults": [
+          {
+            "role": "toolResult",
+            "toolCallId": "toolu_2",
+            "toolName": "wait",
+            "content": [
+              {
+                "type": "text",
+                "text": "## Completed (1)\n\n### bg_1 [bash] — completed\nLabel: sleep 22; echo JOBDONE\nDelivery: delivered by this wait — it finished while you were waiting.\n```\nJOBDONE\n\n\nWall time: 22.05 seconds\n```"
+              }
+            ],
+            "details": {
+              "op": "wait",
+              "meta": {
+                "source": {
+                  "type": "report",
+                  "value": "background jobs snapshot"
+                }
+              },
+              "jobs": [
+                {
+                  "id": "bg_1",
+                  "type": "bash",
+                  "status": "completed",
+                  "label": "sleep 22; echo JOBDONE",
+                  "durationMs": 22056,
+                  "settledAtMs": 1795276289121,
+                  "widget": {
+                    "title": "sleep 22; echo JOBDONE",
+                    "stage": "JOBDONE",
+                    "blocks": [
+                      {
+                        "kind": "stat",
+                        "items": [
+                          {
+                            "label": "lines",
+                            "text": "1"
+                          },
+                          {
+                            "label": "lines/s",
+                            "text": "0.05"
+                          }
+                        ]
+                      }
+                    ],
+                    "state": "fallback",
+                    "updatedAt": 1795276289121
+                  },
+                  "resultText": "JOBDONE\n\n\nWall time: 22.05 seconds"
+                }
+              ]
+            },
+            "isError": false,
+            "timestamp": 1795276289122
+          }
+        ],
+        "__t": 23638
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "toolCall",
+              "id": "toolu_4",
+              "name": "wait",
+              "arguments": {}
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 5,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 6,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.0001,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.00010400000000000001
+            }
+          },
+          "stopReason": "toolUse",
+          "timestamp": 1795276289126,
+          "responseId": "msg_4",
+          "duration": 2.3040970000001835,
+          "ttft": 1.801674999998795,
+          "completedAt": 1795276289129
+        },
+        "messageId": "msg-8",
+        "__t": 23645
+      },
+      {
+        "type": "tool_execution_start",
+        "toolCallId": "toolu_4",
+        "toolName": "wait",
+        "args": {},
+        "__t": 23645
+      },
+      {
+        "type": "tool_execution_end",
+        "toolCallId": "toolu_4",
+        "toolName": "wait",
+        "result": {
+          "content": [
+            {
+              "type": "text",
+              "text": "Nothing to wait for: no background job or service you started is running, and no agent you messaged this run owes a reply. Other agents' results and messages arrive on their own."
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": []
+          },
+          "useless": true
+        },
+        "isError": false,
+        "__t": 23646
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "toolResult",
+          "toolCallId": "toolu_4",
+          "toolName": "wait",
+          "content": [
+            {
+              "type": "text",
+              "text": "Nothing to wait for: no background job or service you started is running, and no agent you messaged this run owes a reply. Other agents' results and messages arrive on their own."
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": []
+          },
+          "isError": false,
+          "useless": true,
+          "timestamp": 1795276289131
+        },
+        "messageId": "msg-9",
+        "__t": 23646
+      },
+      {
+        "type": "turn_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "toolCall",
+              "id": "toolu_4",
+              "name": "wait",
+              "arguments": {}
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 5,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 6,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.0001,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.00010400000000000001
+            }
+          },
+          "stopReason": "toolUse",
+          "timestamp": 1795276289126,
+          "responseId": "msg_4",
+          "duration": 2.3040970000001835,
+          "ttft": 1.801674999998795
+        },
+        "toolResults": [
+          {
+            "role": "toolResult",
+            "toolCallId": "toolu_4",
+            "toolName": "wait",
+            "content": [
+              {
+                "type": "text",
+                "text": "Nothing to wait for: no background job or service you started is running, and no agent you messaged this run owes a reply. Other agents' results and messages arrive on their own."
+              }
+            ],
+            "details": {
+              "op": "wait",
+              "jobs": []
+            },
+            "isError": false,
+            "useless": true,
+            "timestamp": 1795276289131
+          }
+        ],
+        "__t": 23647
+      },
+      {
+        "type": "message_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "WAITING-FOR-HELPER"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 2,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 3,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.00004,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.000044000000000000006
+            }
+          },
+          "stopReason": "stop",
+          "timestamp": 1795276289134,
+          "responseId": "msg_5",
+          "duration": 1.9149859999997716,
+          "ttft": 1.6295930000014778,
+          "completedAt": 1795276289137
+        },
+        "messageId": "msg-10",
+        "__t": 23652
+      },
+      {
+        "type": "turn_end",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "WAITING-FOR-HELPER"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 2,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 3,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.00004,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.000044000000000000006
+            }
+          },
+          "stopReason": "stop",
+          "timestamp": 1795276289134,
+          "responseId": "msg_5",
+          "duration": 1.9149859999997716,
+          "ttft": 1.6295930000014778
+        },
+        "toolResults": [],
+        "__t": 23652
+      },
+      {
+        "type": "agent_end",
+        "messages": 10,
+        "isTerminal": true,
+        "yielded": true,
+        "__t": 23660
+      },
+      {
+        "type": "prompt_result",
+        "id": "prompt-4",
+        "agentInvoked": true,
+        "status": "completed",
+        "sessionSettled": true,
+        "__t": 23661
+      },
+      {
+        "type": "session_settled",
+        "__t": 23661
+      }
+    ],
+    "entries": [
+      {
+        "type": "title",
+        "v": 1,
+        "title": "",
+        "updatedAt": "2026-11-21T15:51:06.755Z",
+        "pad": "                                                                                                                                                                              "
+      },
+      {
+        "type": "session",
+        "version": 3,
+        "id": "01a1fecd-dd03-7109-b60f-d9fdead7240d",
+        "timestamp": "2026-11-21T15:51:06.755Z",
+        "cwd": "/scratch/lab191/19_1-wait/work"
+      },
+      {
+        "type": "model_change",
+        "id": "263a521b",
+        "parentId": null,
+        "timestamp": "2026-11-21T15:51:06.834Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "model": "mock/claude-opus-5-5",
+        "resolvedModelIsFallback": false
+      },
+      {
+        "type": "thinking_level_change",
+        "id": "e28e811a",
+        "parentId": "263a521b",
+        "timestamp": "2026-11-21T15:51:06.834Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "thinkingLevel": "high",
+        "configured": null
+      },
+      {
+        "type": "custom",
+        "customType": "date-cwd-reminder",
+        "data": {
+          "conversation": "user:1795276266973:user",
+          "turn": "user:1795276266973:user",
+          "reminder": "<system-reminder>\nToday: 2026-11-21; current working directory: '/scratch/lab191/19_1-wait/work'. Do not repeat this information in your reply.\n</system-reminder>",
+          "placement": "prefix",
+          "firstTurn": "c070ca59b1fefc97"
+        },
+        "id": "bfa11171",
+        "parentId": "e28e811a",
+        "timestamp": "2026-11-21T15:51:07.008Z",
+        "runtime": {
+          "version": "19.1.0"
+        }
+      },
+      {
+        "type": "message",
+        "id": "7ccceeec",
+        "parentId": "bfa11171",
+        "timestamp": "2026-11-21T15:51:07.034Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "LC-WAITJOB start then wait"
+            }
+          ],
+          "attribution": "user",
+          "timestamp": 1795276266973
+        }
+      },
+      {
+        "type": "custom",
+        "customType": "system-prompt-digest",
+        "data": "cdf7046303f980ed",
+        "id": "00f34c02",
+        "parentId": "7ccceeec",
+        "timestamp": "2026-11-21T15:51:07.053Z",
+        "runtime": {
+          "version": "19.1.0"
+        }
+      },
+      {
+        "type": "message",
+        "id": "806a73db",
+        "parentId": "00f34c02",
+        "timestamp": "2026-11-21T15:51:07.053Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "toolCall",
+              "id": "toolu_0",
+              "name": "bash",
+              "arguments": {
+                "command": "sleep 22; echo JOBDONE",
+                "async": true,
+                "i": "Starting the job"
+              }
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 5,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 6,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.0001,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.00010400000000000001
+            }
+          },
+          "stopReason": "toolUse",
+          "timestamp": 1795276267026,
+          "responseId": "msg_0",
+          "duration": 20.77747700000009,
+          "ttft": 19.002276000000165,
+          "completedAt": 1795276267053,
+          "contextSnapshot": {
+            "promptTokens": 1,
+            "nonMessageTokens": 11578,
+            "toolSchemaTokens": 7785,
+            "compactionEpoch": 0
+          }
+        }
+      },
+      {
+        "type": "custom",
+        "customType": "tool_execution_start",
+        "data": {
+          "toolCallId": "toolu_0",
+          "toolName": "bash",
+          "startedAt": "2026-11-21T15:51:07.064Z",
+          "args": {
+            "command": "sleep 22; echo JOBDONE"
+          }
+        },
+        "id": "c179e201",
+        "parentId": "806a73db",
+        "timestamp": "2026-11-21T15:51:07.064Z",
+        "runtime": {
+          "version": "19.1.0"
+        }
+      },
+      {
+        "type": "message",
+        "id": "f85ebb97",
+        "parentId": "c179e201",
+        "timestamp": "2026-11-21T15:51:07.070Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "message": {
+          "role": "toolResult",
+          "toolCallId": "toolu_0",
+          "toolName": "bash",
+          "content": [
+            {
+              "type": "text",
+              "text": "Backgrounded as job bg_1 (killed once it has run 300s in total; `timeout: 0` disables the deadline); its output is injected into the conversation as a follow-up the moment it finishes. Do NOT poll for it (no `sleep`, `ps`, `pgrep`, `top`, `pidwait`, log tailing): every poll is a wasted turn. Do other work, or end your reply and wait to be woken."
+            }
+          ],
+          "details": {
+            "async": {
+              "state": "running",
+              "jobId": "bg_1",
+              "type": "bash"
+            },
+            "timeoutSeconds": 300
+          },
+          "isError": false,
+          "timestamp": 1795276267069
+        }
+      },
+      {
+        "type": "message",
+        "id": "913a8bf1",
+        "parentId": "f85ebb97",
+        "timestamp": "2026-11-21T15:51:07.085Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "toolCall",
+              "id": "toolu_1",
+              "name": "wait",
+              "arguments": {}
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 5,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 6,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.0001,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.00010400000000000001
+            }
+          },
+          "stopReason": "toolUse",
+          "timestamp": 1795276267079,
+          "responseId": "msg_1",
+          "duration": 4.4776580000000195,
+          "ttft": 3.9930550000001404,
+          "completedAt": 1795276267084,
+          "contextSnapshot": {
+            "promptTokens": 1,
+            "nonMessageTokens": 11578,
+            "toolSchemaTokens": 7785,
+            "compactionEpoch": 0
+          }
+        }
+      },
+      {
+        "type": "custom",
+        "customType": "tool_execution_start",
+        "data": {
+          "toolCallId": "toolu_1",
+          "toolName": "wait",
+          "startedAt": "2026-11-21T15:51:07.086Z"
+        },
+        "id": "fc0b207d",
+        "parentId": "913a8bf1",
+        "timestamp": "2026-11-21T15:51:07.086Z",
+        "runtime": {
+          "version": "19.1.0"
+        }
+      },
+      {
+        "type": "message",
+        "id": "9472668d",
+        "parentId": "fc0b207d",
+        "timestamp": "2026-11-21T15:51:12.960Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "message": {
+          "role": "toolResult",
+          "toolCallId": "toolu_1",
+          "toolName": "wait",
+          "content": [
+            {
+              "type": "text",
+              "text": "## Still Running (1)\n\n- `bg_1` [bash] — sleep 22; echo JOBDONE\n\nNo job finished within 5.0s. Nothing else left? Call `wait` again right away: it then blocks up to 4m."
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "meta": {
+              "source": {
+                "type": "report",
+                "value": "background jobs snapshot"
+              }
+            },
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "running",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 5894,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "blocks": [],
+                  "state": "fallback",
+                  "updatedAt": 1795276267065
+                }
+              }
+            ]
+          },
+          "isError": false,
+          "useless": true,
+          "timestamp": 1795276272960
+        }
+      },
+      {
+        "type": "message",
+        "id": "9f4a73b3",
+        "parentId": "9472668d",
+        "timestamp": "2026-11-21T15:51:12.970Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "toolCall",
+              "id": "toolu_2",
+              "name": "wait",
+              "arguments": {}
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 5,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 6,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.0001,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.00010400000000000001
+            }
+          },
+          "stopReason": "toolUse",
+          "timestamp": 1795276272966,
+          "responseId": "msg_2",
+          "duration": 2.678862000000663,
+          "ttft": 2.1586880000004385,
+          "completedAt": 1795276272969,
+          "contextSnapshot": {
+            "promptTokens": 1,
+            "nonMessageTokens": 11578,
+            "toolSchemaTokens": 7785,
+            "compactionEpoch": 0
+          }
+        }
+      },
+      {
+        "type": "custom",
+        "customType": "tool_execution_start",
+        "data": {
+          "toolCallId": "toolu_2",
+          "toolName": "wait",
+          "startedAt": "2026-11-21T15:51:12.970Z"
+        },
+        "id": "05e78f1e",
+        "parentId": "9f4a73b3",
+        "timestamp": "2026-11-21T15:51:12.970Z",
+        "runtime": {
+          "version": "19.1.0"
+        }
+      },
+      {
+        "type": "model_usage",
+        "id": "46c5441c",
+        "parentId": "05e78f1e",
+        "timestamp": "2026-11-21T15:51:22.481Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "purpose": "job-caption",
+        "api": "anthropic-messages",
+        "provider": "mock",
+        "model": "claude-opus-5-5",
+        "usage": {
+          "input": 1,
+          "output": 2,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "totalTokens": 3,
+          "cost": {
+            "input": 0.000004,
+            "output": 0.00004,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0.000044000000000000006
+          }
+        },
+        "stopReason": "stop",
+        "duration": 1.9400210000021616,
+        "ttft": 1.3178050000024086,
+        "completion": {
+          "prompt": "<job>\nKilled after: 300s\nCommand:\n```\nsleep 22; echo JOBDONE\n```\n</job>",
+          "reply": "aux"
+        }
+      },
+      {
+        "type": "message",
+        "id": "41f5b01b",
+        "parentId": "46c5441c",
+        "timestamp": "2026-11-21T15:51:29.123Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "message": {
+          "role": "toolResult",
+          "toolCallId": "toolu_2",
+          "toolName": "wait",
+          "content": [
+            {
+              "type": "text",
+              "text": "## Completed (1)\n\n### bg_1 [bash] — completed\nLabel: sleep 22; echo JOBDONE\nDelivery: delivered by this wait — it finished while you were waiting.\n```\nJOBDONE\n\n\nWall time: 22.05 seconds\n```"
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "meta": {
+              "source": {
+                "type": "report",
+                "value": "background jobs snapshot"
+              }
+            },
+            "jobs": [
+              {
+                "id": "bg_1",
+                "type": "bash",
+                "status": "completed",
+                "label": "sleep 22; echo JOBDONE",
+                "durationMs": 22056,
+                "settledAtMs": 1795276289121,
+                "widget": {
+                  "title": "sleep 22; echo JOBDONE",
+                  "stage": "JOBDONE",
+                  "blocks": [
+                    {
+                      "kind": "stat",
+                      "items": [
+                        {
+                          "label": "lines",
+                          "text": "1"
+                        },
+                        {
+                          "label": "lines/s",
+                          "text": "0.05"
+                        }
+                      ]
+                    }
+                  ],
+                  "state": "fallback",
+                  "updatedAt": 1795276289121
+                },
+                "resultText": "JOBDONE\n\n\nWall time: 22.05 seconds"
+              }
+            ]
+          },
+          "isError": false,
+          "timestamp": 1795276289122
+        }
+      },
+      {
+        "type": "message",
+        "id": "17c312c1",
+        "parentId": "41f5b01b",
+        "timestamp": "2026-11-21T15:51:29.130Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "toolCall",
+              "id": "toolu_4",
+              "name": "wait",
+              "arguments": {}
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 5,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 6,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.0001,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.00010400000000000001
+            }
+          },
+          "stopReason": "toolUse",
+          "timestamp": 1795276289126,
+          "responseId": "msg_4",
+          "duration": 2.3040970000001835,
+          "ttft": 1.801674999998795,
+          "completedAt": 1795276289129,
+          "contextSnapshot": {
+            "promptTokens": 1,
+            "nonMessageTokens": 11578,
+            "toolSchemaTokens": 7785,
+            "compactionEpoch": 0
+          }
+        }
+      },
+      {
+        "type": "custom",
+        "customType": "tool_execution_start",
+        "data": {
+          "toolCallId": "toolu_4",
+          "toolName": "wait",
+          "startedAt": "2026-11-21T15:51:29.130Z"
+        },
+        "id": "07e478f9",
+        "parentId": "17c312c1",
+        "timestamp": "2026-11-21T15:51:29.130Z",
+        "runtime": {
+          "version": "19.1.0"
+        }
+      },
+      {
+        "type": "message",
+        "id": "299ca2b4",
+        "parentId": "07e478f9",
+        "timestamp": "2026-11-21T15:51:29.131Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "message": {
+          "role": "toolResult",
+          "toolCallId": "toolu_4",
+          "toolName": "wait",
+          "content": [
+            {
+              "type": "text",
+              "text": "Nothing to wait for: no background job or service you started is running, and no agent you messaged this run owes a reply. Other agents' results and messages arrive on their own."
+            }
+          ],
+          "details": {
+            "op": "wait",
+            "jobs": []
+          },
+          "isError": false,
+          "useless": true,
+          "timestamp": 1795276289131
+        }
+      },
+      {
+        "type": "message",
+        "id": "aae20a8d",
+        "parentId": "299ca2b4",
+        "timestamp": "2026-11-21T15:51:29.137Z",
+        "runtime": {
+          "version": "19.1.0"
+        },
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "WAITING-FOR-HELPER"
+            }
+          ],
+          "api": "anthropic-messages",
+          "provider": "mock",
+          "model": "claude-opus-5-5",
+          "usage": {
+            "input": 1,
+            "output": 2,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "totalTokens": 3,
+            "cost": {
+              "input": 0.000004,
+              "output": 0.00004,
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "total": 0.000044000000000000006
+            }
+          },
+          "stopReason": "stop",
+          "timestamp": 1795276289134,
+          "responseId": "msg_5",
+          "duration": 1.9149859999997716,
+          "ttft": 1.6295930000014778,
+          "completedAt": 1795276289137,
+          "contextSnapshot": {
+            "promptTokens": 1,
+            "nonMessageTokens": 11578,
+            "toolSchemaTokens": 7785,
+            "compactionEpoch": 0
+          }
+        }
+      }
+    ],
+    "mockLog": [
+      {
+        "kind": "main",
+        "reply": "tool:_bash",
+        "t": 1795276267038
+      },
+      {
+        "kind": "main",
+        "reply": "tool:_wait",
+        "t": 1795276267081
+      },
+      {
+        "kind": "main",
+        "reply": "tool:_wait",
+        "t": 1795276272968
+      },
+      {
+        "kind": "aux",
+        "reply": "aux",
+        "t": 1795276282479
+      },
+      {
+        "kind": "main",
+        "reply": "tool:_wait",
+        "t": 1795276289128
+      },
+      {
+        "kind": "main",
+        "reply": "WAITING-FOR-HELPER",
+        "t": 1795276289136
+      }
+    ]
+  }
+}

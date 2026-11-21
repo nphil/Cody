@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
-import { loadSessionFile } from "@/lib/omp/session-files";
-import { buildSessionContext } from "@/lib/session-reader";
+import { buildSessionContext, loadSessionFileCached } from "@/lib/session-reader";
 import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
 
 export async function GET(
@@ -18,7 +17,7 @@ export async function GET(
     if ("response" in resolved) return resolved.response;
     const filePath = resolved.filePath;
 
-    const { header, entries, error: loadError } = loadSessionFile(filePath, {
+    const { header, entries, error: loadError } = loadSessionFileCached(filePath, {
       resolveBlobs: true,
       skipToolResultImages: deferToolResultImages,
     });
