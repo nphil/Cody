@@ -171,6 +171,47 @@ behind an authenticating reverse proxy.
   sends a push notification if you set them up. Set `CODY_RUN_RECOVERY=0` to
   turn this off.
 
+## The container won't start after an Unraid update
+
+Check the Docker tab's start error (or `docker start Cody` in the Unraid
+terminal) before anything else, because the usual cause stops the container
+before Cody's own code runs and so leaves nothing in the container log.
+
+**`error gathering device information while adding custom device "/dev/dri/renderD129": no such file or directory`**
+— the GPU Device field names one render node instead of the whole `/dev/dri`,
+and that node's number moved. Numbers are handed out in probe order, so any
+change in which DRM drivers load renumbers them. This is exactly what the
+Unraid 7.4.1 update did on the owner's box: `nvidia_drm` no longer loaded at
+boot, the NVIDIA P40 lost its `renderD128`, the Intel iGPU slid from
+`renderD129` to `renderD128`, and Docker refused to create the container
+pinned to `renderD129`. Fix: Docker tab → Cody → **Edit** → GPU Device =
+`/dev/dri` → **Apply**. Cody picks the Intel/AMD node itself every boot. A
+container that is still pinned but happens to start prints this warning at
+boot, so check for it after any template edit:
+
+```
+[Cody] WARNING: GPU Device is pinned to specific node(s) — the host also has renderD128, ...
+```
+
+**Other things an update can break, in the order worth checking:**
+
+- `unknown or invalid runtime name: nvidia` — Extra Parameters carry
+  `--runtime=nvidia` and the Nvidia Driver plugin has not yet installed a driver
+  for the new kernel. Open the plugin's page, let it finish downloading, and
+  reboot.
+- The container restart-loops while exiting with code 0 and logs nothing, and
+  the template has Unraid's **Tailscale** toggle on. That integration replaces
+  the entrypoint with `/opt/unraid/tailscale`, and the hook then runs whatever
+  `ORG_ENTRYPOINT` names. dockerMan sets that variable itself when it creates
+  the container, but a container recreated by hand from the rendered
+  `docker run` line does not get it. So always recreate through **Edit →
+  Apply**, or add `-e ORG_ENTRYPOINT=cody-entrypoint` yourself.
+- App Data or Projects paths on a pool or share that is not mounted yet (the
+  array has not started, or a pool was renamed).
+
+`/data` and `/workspace` are volumes, so removing and recreating the container
+never touches your state or repositories.
+
 ## Full-fidelity previews behind HTTPS (optional)
 
 When the agent starts a dev server, the Preview panel embeds it. It picks the
@@ -254,8 +295,12 @@ Nothing else changes.
 **Which node is the Intel one?** `renderD128` is *not* a reliable answer. The
 numbers are assigned in device-probe order, so on a box with a discrete card the
 iGPU can land on `renderD129` or higher — on the owner's host `renderD128` is an
-NVIDIA Tesla P40 and `renderD129` is the Intel UHD 630. Ask sysfs, from any
-shell on the host or in the container:
+NVIDIA Tesla P40 and `renderD129` is the Intel UHD 630 — whenever `nvidia_drm`
+loads. When it does not, as after the Unraid 7.4.1 update, the P40 has no render
+node and the Intel one becomes `renderD128`. The numbers can change from one boot
+to the next, which is why the field must stay `/dev/dri` (see
+[the container won't start after an Unraid update](#the-container-wont-start-after-an-unraid-update)).
+Ask sysfs, from any shell on the host or in the container:
 
 ```bash
 for d in /sys/class/drm/render*/device; do echo "$d $(cat $d/vendor)"; done

@@ -224,6 +224,29 @@ if [ -n "${_nodes}" ]; then
   echo "[Cody] GPU: DRM render nodes: ${_nodes}"
 fi
 
+# A GPU Device pinned to ONE node (`/dev/dri/renderD129`) instead of the whole
+# `/dev/dri` is a time bomb, not a style choice. Render-node numbers are handed
+# out in probe order and move whenever the set of DRM drivers changes — on the
+# owner's box the Unraid 7.4.1 update left nvidia_drm unloaded, the NVIDIA P40
+# lost its renderD128, the Intel iGPU slid from renderD129 down to renderD128,
+# and Docker then refused to create the container at all ("error gathering
+# device information while adding custom device /dev/dri/renderD129: no such
+# file or directory"). That failure happens before this script runs, so nothing
+# here can rescue it; what this CAN do is notice the pin on every boot that
+# still works and say so while it is a one-field fix. /sys is the host's, so
+# any host render node that did not reach our /dev/dri means the device list is
+# a hand-picked subset.
+_missing=""
+if [ -n "${_nodes}" ]; then
+  for _sys in /sys/class/drm/renderD*; do
+    [ -e "${_sys}" ] || continue
+    [ -e "/dev/dri/${_sys##*/}" ] || _missing="${_missing}${_missing:+, }${_sys##*/}"
+  done
+fi
+if [ -n "${_missing}" ]; then
+  echo "[Cody] WARNING: GPU Device is pinned to specific node(s) — the host also has ${_missing}, which this container was not given. Render-node numbers change across reboots and Unraid/driver updates, and when a pinned node disappears Docker refuses to start the container at all. Set the GPU Device field to /dev/dri (the whole directory)."
+fi
+
 CODY_GPU_NVIDIA=""
 for _node in /dev/nvidia[0-9]*; do
   if [ -e "${_node}" ]; then
@@ -380,7 +403,7 @@ fi
 export CODY_GPU CODY_GPU_RENDER_NODE CODY_GPU_ENCODER CODY_GPU_ENCODER_DEVICE \
   CODY_X_BACKENDS CODY_X_RUNTIME_DIR CODY_WESTON_SHELL CODY_SETPRIV_BIN \
   CODY_FFMPEG_BIN CODY_XVFB_BIN CODY_WESTON_BIN CODY_XWAYLAND_BIN
-unset _node _nodes _r _rank _shell _vendor _why CODY_GPU_VENDOR CODY_GPU_NVIDIA
+unset _node _nodes _r _rank _shell _vendor _why _missing _sys CODY_GPU_VENDOR CODY_GPU_NVIDIA
 
 # Containers keep the wide bind (Docker port mapping needs it, and auth is
 # always on). The Windows desktop shell overrides with 127.0.0.1: inside WSL2
