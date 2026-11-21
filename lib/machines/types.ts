@@ -103,6 +103,12 @@ export interface WorkerFacts {
   tools: string[];
   /** `limits.onlyWhenIdle`: the machine has other work of its own, so a job starts only while it is quiet. */
   onlyWhenIdle: boolean;
+  /**
+   * Absolute directories the machine keeps empty so a job can see its project at the SAME path it has on this
+   * server: `/data` lets a project at `/data/home/app` run as `/data/home/app` (a private mount per job, see
+   * `lib/workers/remote.ts`). None: jobs run in a work directory of their own.
+   */
+  mapPaths: string[];
 }
 
 /** Why a worker check found a problem besides a failed connection (those are
@@ -213,6 +219,23 @@ export function normalizeWorkerArch(raw: unknown): WorkerArch | null {
 export const WORKER_TOOL_PATTERN = /^[a-z0-9][a-z0-9._+-]{0,31}$/;
 export const MAX_WORKER_SLOTS = 64;
 const MAX_WORKER_TOOLS = 64;
+const MAX_MAP_PATHS = 8;
+
+/** Top-level directories that belong to the worker itself: never shown as, or under, a project's path. */
+const NEVER_MAPPED_TOPS: Record<string, true> = {
+  bin: true, boot: true, dev: true, etc: true, lib: true, lib32: true, lib64: true, libx32: true, proc: true,
+  root: true, run: true, sbin: true, srv: true, sys: true, tmp: true, usr: true, var: true,
+};
+
+/**
+ * A directory a worker may keep empty for path mapping (`mapPaths`): absolute, plain characters, no `.`/`..`
+ * steps or trailing slash, below the root, and not one of the machine's own system directories.
+ */
+export function isMapAnchor(value: unknown): value is string {
+  if (typeof value !== "string" || !/^\/[A-Za-z0-9_.-]+(\/[A-Za-z0-9_.-]+)*$/.test(value)) return false;
+  const steps = value.split("/").slice(1);
+  return !steps.includes(".") && !steps.includes("..") && NEVER_MAPPED_TOPS[steps[0]] !== true;
+}
 
 function wholeNumber(value: unknown, min: number, max: number): number | null {
   return typeof value === "number" && Number.isInteger(value) && value >= min && value <= max ? value : null;
@@ -227,8 +250,8 @@ export type WorkerFactsCheck = { ok: true; facts: WorkerFacts } | { ok: false; f
  * server saved earlier (`onlyWhenIdle`) go through, so a hand-edited file or
  * saved document can never put an odd value in front of the scheduler. A
  * failure names the first field that is missing or wrong. `slots` defaults to
- * one job at a time, `tools` to none and `onlyWhenIdle` to false; `amd64` and
- * `arm64` are read as the kernel's own `x86_64` and `aarch64`.
+ * one job at a time, `tools` and `mapPaths` to none and `onlyWhenIdle` to false;
+ * `amd64` and `arm64` are read as the kernel's own `x86_64` and `aarch64`.
  */
 export function checkWorkerFacts(raw: unknown): WorkerFactsCheck {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return { ok: false, field: "the file" };
@@ -254,12 +277,21 @@ export function checkWorkerFacts(raw: unknown): WorkerFactsCheck {
     }
   }
 
+  const mapPaths: string[] = [];
+  if (record.mapPaths !== undefined) {
+    if (!Array.isArray(record.mapPaths) || record.mapPaths.length > MAX_MAP_PATHS) return { ok: false, field: "mapPaths" };
+    for (const entry of record.mapPaths) {
+      if (!isMapAnchor(entry)) return { ok: false, field: "mapPaths" };
+      if (!mapPaths.includes(entry)) mapPaths.push(entry);
+    }
+  }
+
   const limits = record.limits;
   const idle = typeof limits === "object" && limits !== null && !Array.isArray(limits)
     ? (limits as Record<string, unknown>).onlyWhenIdle
     : record.onlyWhenIdle;
   if (idle !== undefined && typeof idle !== "boolean") return { ok: false, field: "limits.onlyWhenIdle" };
-  return { ok: true, facts: { name: name.value, arch, cpus, memMB, slots, tools, onlyWhenIdle: idle === true } };
+  return { ok: true, facts: { name: name.value, arch, cpus, memMB, slots, tools, onlyWhenIdle: idle === true, mapPaths } };
 }
 
 // ── HTTP payloads ────────────────────────────────────────────────────────────

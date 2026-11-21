@@ -9,7 +9,6 @@ import { startSharedBrowser } from "./display/shared-browser";
 import { isLoopbackHost } from "./display/ladder";
 import { ForgeError } from "./forge/client";
 import { FORGE_HOST_TOOL, runForgeTool } from "./forge/tool";
-import { RUN_ON_WORKER_TOOL, runOnWorker } from "./workers/tool";
 import { getHarness } from "./harness";
 import type { EngineSession, EngineSessionOptions, HarnessAdapter, RpcUiSpawn } from "./harness/types";
 import { validateAgentImages } from "./image-attachments";
@@ -49,6 +48,7 @@ import { COMPUTER_SERVER, onDemandSignalFromEvent } from "./on-demand-mcp/regist
 import { selectPromptProfileId, type PromptProfileId } from "./local-model-profile";
 import { PRESET_FULL } from "./tool-presets";
 import { isRecord } from "./type-guards";
+import { ToolUpdateThrottle } from "./live-tool-output";
 import { displaySessionTitle } from "./session-title";
 import { goalAgeMs, parseGoalModeState, validateGoalRequest } from "./goal-state";
 import { normalizeTimeZone, serverTimeZone } from "./time-zone";
@@ -443,11 +443,10 @@ const SERVER_HOST_TOOLS: HostToolDefinition[] = [{
 // engine commands the composer's own picker sends. Main chats only, for the
 // same schema-budget reason.
 ...MODEL_SWITCH_TOOLS.map(({ handler: _handler, ...tool }) => tool),
-FORGE_HOST_TOOL,
-// Heavy jobs on another machine (lib/workers/tool.ts). Settled here because
-// the ssh keys and machine list live in this process. Like the tools above it
-// is part of SERVER_HOST_TOOLS, so only a main chat on a full profile gets it.
-RUN_ON_WORKER_TOOL];
+FORGE_HOST_TOOL];
+// run_on_worker (lib/workers/) is deliberately NOT a host tool: omp offers host
+// tools to the main chat only, while an extension reaches helper agents too
+// (lib/omp/extensions/cody-run-on-worker.ts, via /api/internal/workers).
 /** Every tool the SERVER settles itself, so `handleFrame` routes its calls
  * here instead of to a browser. The sidebar's context tools are server-side
  * for the same reason the rest are: they read the filesystem and the session
@@ -814,6 +813,8 @@ export function buildEngineRpcLaunch(
     args.push("--extension", path.join(extensions, "cody-context-budget.ts"));
     args.push("--extension", path.join(extensions, "cody-on-demand-mcp.ts"));
     args.push("--extension", path.join(extensions, "cody-agent-switch.ts"));
+    // run_on_worker is an extension too, so the main chat and every helper agent get it; the smallest local profile keeps its two-tool schema.
+    if (opts.profile?.profileId !== "minimal") args.push("--extension", path.join(extensions, "cody-run-on-worker.ts"));
     defaultsEnv = codyLaunchDefaultsEnv(opts.profile?.env?.PI_CONFIG_FILES ?? process.env.PI_CONFIG_FILES, packageRoot);
   }
   // A sidebar child gets its own agent dir, whose `mcp.json` is empty, so the
@@ -1223,6 +1224,12 @@ export class AgentSessionWrapper {
    */
   private runningToolCalls = new Set<string>();
   /**
+   * omp sends a running call's whole output so far (up to 50 KB, a build can
+   * make that ~13 times a second). The browser draws a few lines, so it is
+   * sent the newest ~8 KB at most four times a second (lib/live-tool-output.ts).
+   */
+  private readonly toolUpdates = new ToolUpdateThrottle((frame) => this.emit(frame as AgentEvent));
+  /**
    * Set while "Steer now" has aborted the model's reply so omp continues with
    * the queued steer. omp restores that steer to its queue on abort and drains
    * it at once (a queued steer bypasses its post-interrupt suppression), so the
@@ -1296,8 +1303,6 @@ export class AgentSessionWrapper {
   private hostTools: Array<Record<string, unknown>> = [];
   /** host_tool_call ids awaiting a host_tool_result from the browser. */
   private pendingHostTools: Map<string, AgentEvent> = new Map();
-  /** In-flight server-settled host tool calls that can be stopped (run_on_worker): host_tool_call id -> its abort switch. */
-  private serverToolCalls: Map<string, AbortController> = new Map();
   /** URI schemes the web UI registered via set_host_uri_schemes. */
   private hostUriSchemes: Map<string, { writable?: boolean }> = new Map();
   private hostUriSchemeEntries: Array<Record<string, unknown>> = [];
@@ -2138,12 +2143,18 @@ export class AgentSessionWrapper {
         }
         break;
       }
+      case "tool_execution_update":
+        this.toolUpdates.push(event);
+        return;
       case "tool_execution_start":
         if (typeof event.toolCallId === "string") this.runningToolCalls.add(event.toolCallId);
         this.getPlanKeeper()?.notifyToolExecutionStart(event);
         break;
       case "tool_execution_end": {
-        if (typeof event.toolCallId === "string") this.runningToolCalls.delete(event.toolCallId);
+        if (typeof event.toolCallId === "string") {
+          this.runningToolCalls.delete(event.toolCallId);
+          this.toolUpdates.settle(event.toolCallId);
+        }
         this.getPlanKeeper()?.notifyToolExecutionEnd(event);
         this.applyOnDemandSignal(event);
         break;
@@ -2293,12 +2304,6 @@ export class AgentSessionWrapper {
       }
       case "host_tool_cancel": {
         const targetId = typeof event.targetId === "string" ? event.targetId : "";
-        // omp gave up on a server-settled call: stop the job; its late result is dropped.
-        const serverCall = targetId ? this.serverToolCalls.get(targetId) : undefined;
-        if (serverCall) {
-          serverCall.abort();
-          return;
-        }
         if (targetId && this.pendingHostTools.delete(targetId)) {
           this.emit(event);
           notifyRunningChange();
@@ -2809,44 +2814,6 @@ export class AgentSessionWrapper {
       }
       return;
     }
-    if (toolName === "run_on_worker" && this.engine.kind !== "sidebar") {
-      const controller = new AbortController();
-      const proc = this.proc;
-      this.serverToolCalls.set(id, controller);
-      // Once the call was cancelled or its engine replaced, omp no longer waits
-      // for an answer: nothing more is written for it.
-      const stale = () => controller.signal.aborted || this.proc !== proc;
-      try {
-        const result = await runOnWorker(event.arguments, {
-          cwd: this.cwd,
-          sessionId: this._sessionId,
-          scratchDir: this._scratchDir,
-          signal: controller.signal,
-          onProgress: (text) => {
-            if (stale()) return;
-            proc.sendFrame({ type: "host_tool_update", id, partialResult: { content: [{ type: "text", text }] } });
-          },
-        });
-        if (stale()) return;
-        this.sendHostToolResult({
-          type: "host_tool_result",
-          id,
-          ...(result.isError ? { isError: true } : {}),
-          result: { content: [{ type: "text", text: result.text }] },
-        });
-      } catch (error) {
-        if (stale()) return;
-        this.sendHostToolResult({
-          type: "host_tool_result",
-          id,
-          isError: true,
-          result: { content: [{ type: "text", text: `Worker request failed: ${error instanceof Error ? error.message : String(error)}` }] },
-        });
-      } finally {
-        if (this.serverToolCalls.get(id) === controller) this.serverToolCalls.delete(id);
-      }
-      return;
-    }
     if (toolName === "open_preview") {
       try {
         const request = await publishDisplayRequest(this._sessionId, event.arguments as Record<string, unknown>);
@@ -3049,12 +3016,6 @@ export class AgentSessionWrapper {
       });
     }
     this.pendingHostTools.clear();
-  }
-
-  /** Stop every in-flight server-settled host tool call (engine exit, restart, destroy): each job cleans up on its own and its late result is dropped. */
-  private abortServerToolCalls(): void {
-    for (const controller of this.serverToolCalls.values()) controller.abort();
-    this.serverToolCalls.clear();
   }
 
   /** Reject every outstanding host URI request (browser disconnected / destroy). */
@@ -3414,7 +3375,6 @@ export class AgentSessionWrapper {
     const old = this.proc;
     this.restarting = true;
     this.unsubscribeFrames?.();
-    this.abortServerToolCalls();
     try {
       await old.dispose();
       if (!this._alive) return;
@@ -4499,6 +4459,7 @@ export class AgentSessionWrapper {
       this.sessionFileSignalTimer = null;
     }
     this.planKeeper?.dispose();
+    this.toolUpdates.dispose();
     this.deviceWatch?.();
     this.deviceWatch = null;
     this.operationWatch?.();
@@ -4512,7 +4473,6 @@ export class AgentSessionWrapper {
       this.mcpListWaiter = null;
     }
     const disposed = this.proc.dispose().catch(() => {});
-    this.abortServerToolCalls();
     this.destroyPromise = disposed;
     this.pendingHostTools.clear();
     this.hostToolNames.clear();
@@ -4643,6 +4603,14 @@ async function waitForRetiringChild(sessionId: string): Promise<void> {
 
 export function getRpcSession(sessionId: string): EngineSession | undefined {
   return getRegistry().get(sessionId);
+}
+
+/** The live chat whose engine runs in the scratch folder named `key` (a duplicated chat shares its parent's engine, so any match speaks for it). */
+export function findRpcSessionByScratch(key: string): EngineSession | undefined {
+  for (const session of getRegistry().values()) {
+    if (session.scratchDir && path.basename(session.scratchDir) === key) return session;
+  }
+  return undefined;
 }
 
 /** The scratch dirs live engines are running in. Neither the janitor nor a

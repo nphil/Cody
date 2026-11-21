@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { shQuote } from "./shell";
 
 /**
@@ -37,6 +37,11 @@ function checkedDirectory(directory: string): string {
   return directory;
 }
 
+/** An absolute path made of plain steps only: nothing to quote, no empty, `.` or `..` step. */
+function plainPath(path: string): boolean {
+  return SAFE_DIRECTORY.test(path) && path.split("/").slice(1).every((step) => step !== "" && step !== "." && step !== "..");
+}
+
 function checkedToken(token: string): string {
   if (!TOKEN.test(token)) throw new Error("Refusing a malformed job token");
   return token;
@@ -58,6 +63,84 @@ export function buildCopyInCommand(directory: string, cwdRel: string, hasFiles: 
   return wrap([steps.join(" && ")]);
 }
 
+/** A chat's scratch directory name (the last part of its path on this server): hex Cody made itself. */
+const SCRATCH_KEY = /^[0-9a-f]{6,32}$/;
+
+/** Show the project at the path it has on this server, so one command works in both places. */
+export interface ExecMap {
+  /** The project's top directory on this server (real path). The job's copy appears at exactly this path. */
+  project: string;
+  /** The worker's `mapPaths`: directories it keeps empty for this. The one that holds `project` is used. */
+  anchors: readonly string[];
+}
+
+/**
+ * What runs inside the job's private namespace (or plainly, when there is no
+ * namespace): `sh -c` with ten arguments: the job directory, the project path,
+ * the anchor, the working directory (relative to the project), the work root,
+ * the chat's scratch name, the project's cache id, `1` when a user and mount
+ * namespace is in place, a note to print, and the command. No single quotes in
+ * here: it is quoted twice on the way out.
+ *
+ * With a namespace it puts the worker's mirror of the anchor (`<work
+ * root>/root<anchor>`, holding toolchains and caches at their server paths)
+ * over the anchor's empty directory, the job's copy over the project's path
+ * inside it, and a persistent directory over the Cargo `target` of the
+ * project (the topmost Cargo.toml from the working directory up), so a second
+ * build is incremental. It never covers something that has files in it. Any
+ * step that fails leaves the command running in the plain job directory,
+ * with one line saying why, so the agent knows its absolute paths do not
+ * resolve. Then: the chat's persistent scratch, the worker's own `env.sh`
+ * (when it has no syntax error), and the command.
+ */
+const JOB_WRAPPER = [
+  "D=$1 M=$2 T=$3 R=$4 W=$5 K=$6 H=$7 NS=$8 NOTE=$9; shift 9; C=$1",
+  "ok=0; why=",
+  'if [ -n "$M" ]; then',
+  '  if [ "$NS" != 1 ]; then why="user namespaces are not available"',
+  '  elif [ ! -d "$T" ] || [ -L "$T" ]; then why="the worker has no empty $T directory"',
+  '  elif [ -n "$(ls -A "$T" 2>/dev/null)" ]; then why="$T is not empty on the worker"',
+  '  elif [ ! -d "$W/root$T" ]; then why="$W/root$T does not exist"',
+  '  elif ! mount --bind "$W/root$T" "$T" 2>/dev/null; then why="mounting $T failed"',
+  '  elif [ -L "$M" ] || ! mkdir -p "$M" 2>/dev/null; then why="$M cannot be made"',
+  '  elif [ -n "$(ls -A "$M" 2>/dev/null)" ]; then why="$M is not empty on the worker"',
+  '  elif ! mount --bind "$D" "$M" 2>/dev/null; then why="mounting the project at $M failed"',
+  "  else ok=1; fi",
+  "fi",
+  'if [ "$ok" = 1 ]; then',
+  "  CODY_JOB_MAPPED=1; CODY_MAPPED_ROOT=$M; export CODY_JOB_MAPPED CODY_MAPPED_ROOT",
+  '  top=; d=$M; [ -n "$R" ] && d=$M/$R; n=0',
+  '  while [ "$n" -lt 64 ]; do',
+  '    [ -f "$d/Cargo.toml" ] && top=$d',
+  '    [ "$d" = "$M" ] && break',
+  "    d=${d%/*}; n=$((n+1))",
+  "  done",
+  '  if [ -n "$top" ]; then',
+  '    rel=${top#"$M"}; rel=${rel#/}; t=${rel:+$rel/}target; kd=$W/keep/$H/$t',
+  '    if [ ! -L "$M/$t" ] && [ -z "$(ls -A "$M/$t" 2>/dev/null)" ] && mkdir -p "$kd" "$M/$t" 2>/dev/null; then',
+  '      mount --bind "$kd" "$M/$t" 2>/dev/null && touch "$W/keep/$H" 2>/dev/null',
+  "    fi",
+  "  fi",
+  '  cd "$M/$R" 2>/dev/null || cd "$M"',
+  'elif [ -n "$M" ]; then',
+  '  echo "[cody] not run at $M ($why): it runs in $PWD on the worker, so paths under $T do not resolve here"',
+  'elif [ -n "$NOTE" ]; then',
+  '  echo "[cody] $NOTE"',
+  "fi",
+  'if [ -n "$K" ]; then',
+  '  Z=$W/scratch/$K',
+  '  if mkdir -p "$Z/tmp" "$Z/data" 2>/dev/null; then',
+  '    touch "$Z" 2>/dev/null',
+  '    CODY_SCRATCH=$Z/tmp CODY_DATA_SCRATCH=$Z/data TMPDIR=$Z/tmp TMP=$Z/tmp TEMP=$Z/tmp',
+  "    export CODY_SCRATCH CODY_DATA_SCRATCH TMPDIR TMP TEMP",
+  "  fi",
+  "fi",
+  'if [ -r "$W/env.sh" ]; then',
+  '  if sh -n "$W/env.sh" 2>/dev/null; then . "$W/env.sh"; else echo "[cody] $W/env.sh has a syntax error and was skipped"; fi',
+  "fi",
+  'exec sh -c "$C"',
+].join("\n");
+
 /**
  * Run the agent's command in the copy of its working directory.
  *
@@ -75,10 +158,45 @@ export function buildCopyInCommand(directory: string, cwdRel: string, hasFiles: 
  * a late watcher from signalling a group that is already gone. Whatever the
  * command left running in its group is stopped when it ends, so a build that
  * starts a background server does not leave it on the worker.
+ *
+ * With `map` and/or `scratch` the command goes through {@link JOB_WRAPPER}
+ * (a private user + mount namespace when the worker allows one) first.
  */
-export function buildExecCommand(options: { directory: string; cwdRel: string; command: string; token: string }): string {
+export function buildExecCommand(options: {
+  directory: string;
+  cwdRel: string;
+  command: string;
+  token: string;
+  map?: ExecMap;
+  /** The chat's scratch directory name: the job gets its own persistent `CODY_SCRATCH`, `CODY_DATA_SCRATCH` and `TMPDIR`. */
+  scratch?: string;
+}): string {
   const dir = checkedDirectory(options.directory);
   const token = checkedToken(options.token);
+  const scratch = options.scratch && SCRATCH_KEY.test(options.scratch) ? options.scratch : "";
+  let project = "";
+  let anchor = "";
+  let note = "";
+  if (options.map) {
+    const wanted = options.map.project;
+    const found = options.map.anchors.find((candidate) => plainPath(candidate) && wanted.startsWith(`${candidate}/`));
+    if (!plainPath(wanted)) {
+      note = "this project's path has unusual characters, so it runs in the worker's own job directory";
+    } else if (!found) {
+      note = `${wanted} is not under ${options.map.anchors.join(" or ")}, the only paths this worker can show a project at, so absolute paths into the project do not resolve here`;
+    } else {
+      project = wanted;
+      anchor = found;
+    }
+  }
+  const wrapped = Boolean(options.map) || scratch !== "";
+  const workRoot = dir.slice(0, dir.lastIndexOf("/"));
+  const launch = wrapped
+    ? [
+      ...(project ? ['U=; NS=0; if unshare --user --map-root-user --mount true >/dev/null 2>&1; then U="unshare --user --map-root-user --mount"; NS=1; fi'] : ["U=; NS=0"]),
+      `$S $N $U sh -c ${shQuote(JOB_WRAPPER)} cody-job "$D" ${[project, anchor, project ? options.cwdRel : "", workRoot, scratch, project ? createHash("sha1").update(project).digest("hex").slice(0, 16) : ""].map(shQuote).join(" ")} "$NS" ${shQuote(note)} ${shQuote(options.command)} </dev/null 2>&1 3<&- &`,
+    ]
+    : [`$S $N sh -c ${shQuote(options.command)} </dev/null 2>&1 3<&- &`];
   return wrap([
     "umask 077",
     `D=${dir}`,
@@ -88,7 +206,7 @@ export function buildExecCommand(options: { directory: string; cwdRel: string; c
     "exec 3<&0",
     "S=; command -v setsid >/dev/null 2>&1 && S=setsid",
     'N=; command -v nice >/dev/null 2>&1 && N="nice -n 19"',
-    `$S $N sh -c ${shQuote(options.command)} </dev/null 2>&1 3<&- &`,
+    ...launch,
     "p=$!",
     '( cat <&3 >/dev/null 2>&1; [ -e "$D/.done" ] && exit 0; kill -TERM -$p 2>/dev/null || kill -TERM $p 2>/dev/null; sleep 5; kill -KILL -$p 2>/dev/null || kill -KILL $p 2>/dev/null ) >/dev/null 2>&1 &',
     "w=$!",

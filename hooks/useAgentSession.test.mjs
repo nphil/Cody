@@ -101,7 +101,7 @@ test("the degraded and lost states reach the UI with a retry affordance", () => 
 
   // The plain "Waiting for model…" label must not survive a degraded stream,
   // and an exhausted retry loop must not keep claiming to be reconnecting.
-  assert.match(chatWindow, /streamAlert\?\.kind === "stream_lost"\s*\n\s*\? t\("agentStream\.disconnected"\)\s*\n\s*: streamDegraded\s*\n\s*\? t\("agentStream\.reconnecting"\)\s*\n\s*: phaseLabel\(agentPhase\)/);
+  assert.match(chatWindow, /streamAlert\?\.kind === "stream_lost"\s*\n\s*\? t\("agentStream\.disconnected"\)\s*\n\s*: streamDegraded\s*\n\s*\? t\("agentStream\.reconnecting"\)\s*\n\s*: phaseLabel\(agentPhase, activityDisplayMode !== "hidden"\)/);
   assert.match(chatWindow, /<StreamAlertBanner/);
   assert.match(chatWindow, /onRetry=\{retryEventStream\}/);
   assert.match(chatWindow, /onDismiss=\{dismissStreamAlert\}/);
@@ -167,7 +167,12 @@ test("long tool calls surface streamed progress and an elapsed clock", () => {
   // an entire CI run while streaming per-poll snapshots. Dropping those
   // frames made the watch indistinguishable from a hang — pin the wiring.
   assert.match(hook, /case "tool_execution_update":/, "the update frame must be handled, not ignored");
-  assert.match(hook, /toolUpdateStatusText\(event\.partialResult\)/, "status text comes from the frame's partialResult");
+  assert.match(hook, /toolUpdateStatusText\(event\.partialResult, name\)/, "status text comes from the frame's partialResult");
+  // The live tail (lib/live-tool-output.ts) rides beside the status line, never in the transcript.
+  assert.match(hook, /liveToolOutput\.begin\(id, name, Date\.now\(\)\)/, "a started call gets a live entry");
+  assert.match(hook, /liveToolOutput\.update\(id, name, event\.partialResult\)/, "update frames feed the live tail");
+  assert.match(hook, /liveToolOutput\.end\(id\)/, "a finished call drops its live entry");
+  assert.match(hook, /STATUS_TEXT_MIN_INTERVAL_MS/, "the crossfaded status line is rate limited");
   assert.match(hook, /startedAt: Date\.now\(\)/, "tool_execution_start must stamp a start time");
   assert.match(chatWindow, /phaseElapsed\(agentPhase, toolClockNow\)/, "the elapsed clock renders against the ticking clock");
   assert.match(chatWindow, /LONG_TOOL_THRESHOLD_MS/, "elapsed shows only past the long-call threshold");

@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
 /**
@@ -40,6 +41,16 @@ export function isInside(parent: string, child: string): boolean {
 
 function toPosix(value: string): string {
   return path.sep === "/" ? value : value.split(path.sep).join("/");
+}
+
+/** The home directory's real path: a repository that holds it is never a project. */
+function realHome(): string {
+  const home = os.homedir();
+  try {
+    return fs.realpathSync(home);
+  } catch {
+    return home;
+  }
 }
 
 // ── Where the project is ─────────────────────────────────────────────────────
@@ -87,7 +98,11 @@ async function gitToplevel(directory: string, signal?: AbortSignal): Promise<str
  * Find the tree for a call. `workspace` is the chat's directory; `requested` is
  * the agent's `cwd` (relative to the workspace, or absolute). The command may
  * run anywhere inside the workspace's repository (or inside the workspace when
- * it is not one) and nowhere else.
+ * it is not one), or inside another git repository: a chat that works on one
+ * project often builds a neighbouring one, and a repository names its project
+ * exactly (the tracked files). A plain directory elsewhere is refused, and so
+ * is a repository that holds the home directory (its "project" would be the
+ * whole home, secrets included).
  */
 export async function resolveTree(workspace: string, requested: string | undefined, signal?: AbortSignal): Promise<Outcome<Tree>> {
   let workspaceReal: string;
@@ -108,10 +123,16 @@ export async function resolveTree(workspace: string, requested: string | undefin
   }
 
   const workspaceRoot = (await gitToplevel(workspaceReal, signal)) ?? workspaceReal;
-  if (!isInside(workspaceRoot, cwd)) {
-    return { ok: false, message: `cwd ${wanted} is outside the workspace${workspaceRoot === workspaceReal ? "" : "'s repository"}; the job's directory must be inside it` };
-  }
   const own = await gitToplevel(cwd, signal);
+  if (!isInside(workspaceRoot, cwd)) {
+    if (own && !isInside(own, realHome())) {
+      return { ok: true, value: { root: own, cwd, cwdRel: toPosix(path.relative(own, cwd)), isGit: true } };
+    }
+    return {
+      ok: false,
+      message: `cwd ${wanted} is outside the workspace${workspaceRoot === workspaceReal ? "" : "'s repository"}; the job's directory must be inside it or inside another git repository`,
+    };
+  }
   const root = own && isInside(workspaceRoot, own) ? own : cwd;
   return { ok: true, value: { root, cwd, cwdRel: toPosix(path.relative(root, cwd)), isGit: own !== null && root === own } };
 }

@@ -14,6 +14,12 @@ import { DEFAULT_WORK_ROOT, WORKER_FACTS_PATH, type WorkerLoad } from "./types";
  * anything a person or an agent typed. */
 const SAFE_PATH = /^\/[A-Za-z0-9_./-]*$/;
 
+/** Warm build state (`keep/`) and per-chat scratch (`scratch/`) that nothing has touched for this long is deleted. */
+export const CACHE_MAX_AGE_DAYS = 14;
+/** When the work disk is fuller than this, the oldest caches go first, until it is under {@link CACHE_RELIEF_PERCENT}. */
+export const CACHE_PRESSURE_PERCENT = 85;
+export const CACHE_RELIEF_PERCENT = 70;
+
 /**
  * The command that reads a worker. Plain `sh -c '…'` written the way the meter
  * loop is (no quote, backslash or `!` inside) so any login shell can parse it,
@@ -23,12 +29,20 @@ const SAFE_PATH = /^\/[A-Za-z0-9_./-]*$/;
  * - `@FACTS` the file; `@ROOT` `yes`/`no`: the work root is a writable
  *   directory; `@JOBS` how many job directories have a live process (it also
  *   removes the ones a crashed Cody left behind, older than 12 hours and not
- *   running); `@LOAD` two meter frames in the exact shape `ssh.ts` prints; `@END`.
+ *   running, and tidies the warm caches jobs leave under `keep/` and
+ *   `scratch/`: anything untouched for two weeks, and the oldest first when
+ *   the disk is over 85% full; a cache used in the last hour is never taken);
+ *   `@LOAD` two meter frames in the exact shape `ssh.ts` prints; `@END`.
  */
-export function buildWorkerCheckCommand(options: { factsPath?: string; workRoot?: string } = {}): string {
+export function buildWorkerCheckCommand(
+  options: { factsPath?: string; workRoot?: string; cachePressure?: number; cacheRelief?: number } = {},
+): string {
   const factsPath = options.factsPath ?? WORKER_FACTS_PATH;
   const workRoot = options.workRoot ?? DEFAULT_WORK_ROOT;
+  const pressure = options.cachePressure ?? CACHE_PRESSURE_PERCENT;
+  const relief = options.cacheRelief ?? CACHE_RELIEF_PERCENT;
   if (!SAFE_PATH.test(factsPath) || !SAFE_PATH.test(workRoot)) throw new Error("Refusing to build a worker check around an unsafe path");
+  if (![pressure, relief].every((value) => Number.isInteger(value) && value >= 0 && value <= 100)) throw new Error("Refusing a cache threshold outside 0-100");
   const script = [
     `F=${factsPath}`,
     `R=${workRoot}`,
@@ -40,6 +54,12 @@ export function buildWorkerCheckCommand(options: { factsPath?: string; workRoot?
     + 'if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then n=$((n+1)); '
     + 'elif [ -n "$(find "$d" -maxdepth 0 -mmin +720 2>/dev/null)" ]; then rm -rf "$d"; fi; done',
     "echo $n",
+    `for d in "$R"/keep/* "$R"/scratch/*; do [ -d "$d" ] || continue; [ -n "$(find "$d" -maxdepth 0 -mtime +${CACHE_MAX_AGE_DAYS} 2>/dev/null)" ] && rm -rf "$d"; done`,
+    'u=$(df -P "$R" 2>/dev/null | tail -n 1); u=${u%%%*}; u=${u##* }',
+    `if [ "\${u:-0}" -gt ${pressure} ] 2>/dev/null; then for d in $(ls -1dtr "$R"/keep/* "$R"/scratch/* 2>/dev/null); do `
+    + '[ -n "$(find "$d" -maxdepth 0 -mmin +60 2>/dev/null)" ] || continue; rm -rf "$d"; '
+    + 'u=$(df -P "$R" 2>/dev/null | tail -n 1); u=${u%%%*}; u=${u##* }; '
+    + `[ "\${u:-100}" -le ${relief} ] && break; done; fi`,
     "echo @LOAD",
     'c=$(grep -c "^cpu[0-9]" /proc/stat 2>/dev/null)',
     's() { echo "@S $c"; head -n 1 /proc/stat; grep -E "^(MemTotal|MemFree|MemAvailable|Buffers|Cached):" /proc/meminfo; cat /proc/loadavg; echo @E; }',

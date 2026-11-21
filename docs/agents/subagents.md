@@ -137,6 +137,8 @@ shows them as small tags. `AgentProgress.stage`/`watch` (omp 18.19) come only
 from the completion probe, which omp never runs under RPC, so Cody does not
 read them.
 
+**Live progress of a running helper.** At subscription level `progress` omp sends `subagent_progress` about once a second with `progress.currentTool`, `currentToolArgs` (a bash command, cut at ~100 chars), `currentToolStartMs` (epoch ms), `toolCount`, `tokens`, `cost`, `durationMs`. It does NOT stream a helper's tool output (`recentOutput` is assistant text, `recentTools` is empty while a command runs; omp forwards `tool_execution_update` only for nested `task` calls, and the only levels are `off|progress|events`), so a helper build cannot show a tail. Cody shows what is true: the chip appends `HelperToolClock` (`components/ElapsedClock.tsx`) once one tool has run 8 s, and `SubagentTranscriptDialog` renders a "Running now" strip (`HelperNowRunning`: tool, intent, command, clock, and for bash a note that output is not streamed). The dialog takes the live roster entry as `liveProgress` because its `subagent` prop is a click-time snapshot. Elapsed uses `helperToolStart(currentToolStartMs, firstSeenAt)` so a skewed browser clock cannot show a negative or huge time.
+
 ### Helper agents: which model each kind runs on, and moving a running one
 
 Settings > Models > Helper agents (`components/settings/models/HelperAgents.tsx`,

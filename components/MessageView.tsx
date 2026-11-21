@@ -24,6 +24,7 @@ import { requestDistill, retryDistill, thinkingSummaryKeys, useDistillChatSettin
 import { SubagentStatusIcon } from "./SubagentStatusIcon";
 import { AskResultPanel } from "./AskResultPanel";
 import { ApprovalChip, ApprovalStatusRow, TONE_COLOR, TONE_FRAME, useApprovalCard } from "./HomelabberApproval";
+import { LiveToolTail } from "./LiveToolTail";
 import { approvalTone } from "@/lib/homelabber-approval";
 import { formatCost, formatDuration, formatTokens, shortModel } from "@/lib/subagent-format";
 import { bashOutputNotes, type BashOutputNote } from "@/lib/bash-output-meta";
@@ -1334,6 +1335,9 @@ const ToolCallBlock = memo(function ToolCallBlock({ block, result, duration, isS
           />
         </CollapsibleTrigger>
         {approval?.role === "request" && <ApprovalStatusRow card={approval} />}
+        {/* The last lines a running call prints; outside the collapsible panel so
+            it shows while the card is collapsed. Renders nothing for a settled call. */}
+        <LiveToolTail toolCallId={block.toolCallId} toolName={block.toolName} />
 
         {/* ── Expanded content (input args + paired result), mounted by the
             panel and width-pinned by .collapse-box-inner so the grow

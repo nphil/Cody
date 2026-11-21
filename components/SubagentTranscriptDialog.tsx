@@ -1,7 +1,7 @@
 "use client";
 
 import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
-import { Ban, ChevronRight, Info, Loader2, Send } from "lucide-react";
+import { Ban, ChevronRight, Info, Loader2, Send, Wrench } from "lucide-react";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { useI18n } from "@/lib/i18n";
@@ -10,11 +10,12 @@ import { useHelperLimitConfig } from "@/hooks/useHelperLimitConfig";
 import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
 import { MarkdownBody } from "./MarkdownBody";
 import { BLOCK_LABEL_STYLE, SubagentTranscript, TEXT_BUTTON_STYLE } from "./SubagentTranscript";
+import { HelperToolClock } from "./ElapsedClock";
 import { SubagentModelSwitch } from "./SubagentModelSwitch";
 import { Dialog, DialogContent, DialogTitle } from "./ui/primitives";
 import { toast } from "./ui/toast";
 import type { SubagentInfo } from "@/hooks/useAgentSession";
-import { isUnsupportedCommandError, parseSubagentProgress } from "@/lib/subagent-types";
+import { isUnsupportedCommandError, parseSubagentProgress, subagentActivityIntent } from "@/lib/subagent-types";
 import type { SubagentActivityEvent, SubagentProgress, SubagentSnapshotLike } from "@/lib/subagent-types";
 
 /** Recursive renderer for structured completions: string values keep their
@@ -544,14 +545,66 @@ export function SteerSubagentBox({ subagentId, onSend }: {
   );
 }
 
+/**
+ * What a running helper is doing right now: its current tool, the command (or
+ * the first argument omp previews) and a clock. omp streams a helper's
+ * progress, not the output of the command it runs, so this says so instead of
+ * leaving an empty box to look like a hang.
+ */
+function HelperNowRunning({ progress }: { progress: SubagentProgress }) {
+  const { t } = useI18n();
+  const tool = progress.currentTool;
+  if (!tool) return null;
+  const intent = subagentActivityIntent(progress);
+  const args = progress.currentToolArgs?.trim();
+  return (
+    <div
+      aria-label={t("subagentTranscript.nowRunning")}
+      style={{
+        display: "grid",
+        gap: 4,
+        padding: "8px 10px",
+        border: "1px solid var(--border)",
+        borderRadius: "var(--radius-control)",
+        background: "var(--bg-panel)",
+        minWidth: 0,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 11, minWidth: 0 }}>
+        <Wrench size={11} strokeWidth={1.8} aria-hidden style={{ flexShrink: 0, color: "var(--text-dim)" }} />
+        <span style={{ color: "var(--text-dim)", flexShrink: 0 }}>{t("subagentTranscript.nowRunning")}</span>
+        <span style={{ color: "var(--accent)", fontFamily: "var(--font-mono)", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{tool}</span>
+        <span style={{ marginLeft: "auto", color: "var(--text-dim)" }}>
+          <HelperToolClock tool={tool} startMs={progress.currentToolStartMs} />
+        </span>
+      </div>
+      {intent && <div style={{ fontSize: 12, color: "var(--text-muted)", overflowWrap: "anywhere" }}>{intent}</div>}
+      {args && (
+        <div
+          style={{
+            fontFamily: "var(--font-mono)", fontSize: 11, lineHeight: 1.45, color: "var(--text-muted)",
+            whiteSpace: "pre-wrap", overflowWrap: "anywhere",
+            display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical", overflow: "hidden",
+          }}
+        >
+          {args}
+        </div>
+      )}
+      {tool === "bash" && <div style={{ fontSize: 10.5, color: "var(--text-dim)" }}>{t("subagentTranscript.nowRunningNote")}</div>}
+    </div>
+  );
+}
+
 /** How often a running child's frames may trigger a refetch (trailing edge). */
 const TRANSCRIPT_REFRESH_MS = 600;
 
-export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersion, events, onSteer, onClose }: {
+export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersion, events, liveProgress, onSteer, onClose }: {
   subagent: SubagentInfo | null;
   sessionId: string | null;
   transcriptVersion: number;
   events?: SubagentActivityEvent[];
+  /** The roster's newest progress frame for this child (the `subagent` snapshot is frozen at click time). */
+  liveProgress?: SubagentProgress;
   /** Steers the parent turn (the composer's steer path). Absent when the
    * engine cannot be steered or the parent is idle; the cancel affordance
    * then hides rather than rendering broken. */
@@ -652,7 +705,7 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
   const agent = currentDetail?.agent ?? subagent?.agent ?? "";
   const description = currentDetail?.description ?? subagent?.description ?? "";
   const task = currentDetail?.task ?? subagent?.task ?? subagent?.assignment ?? "";
-  const progress = parseSubagentProgress(currentDetail?.progress) ?? subagent?.progress;
+  const progress = liveProgress ?? parseSubagentProgress(currentDetail?.progress) ?? subagent?.progress;
   let latestModelEvent: SubagentActivityEvent | undefined;
   let latestThinkingEvent: SubagentActivityEvent | undefined;
   if (live && events) {
@@ -821,6 +874,7 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
                     content={content}
                   />
                 )}
+                {subagentActive && progress?.currentTool && <HelperNowRunning progress={progress} />}
                 {recentEvents && (
                   <div
                     aria-live="polite"

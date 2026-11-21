@@ -211,6 +211,22 @@ mount buried the phone screen (2026-11-13). The chat already shows the
   whole line flicker every second. The clock renders as a plain sibling span
   (`phaseElapsed`, tabular digits); only real status changes crossfade.
 
+### Live tail on the running-tool card (`lib/live-tool-output.ts`)
+What omp 19.0.0 streams during a long call (proved on the real binary with a mock model):
+
+- **Foreground `bash`**: `tool_execution_update` per output chunk (~50 ms throttle), `partialResult.content[0].text` = the WHOLE output so far, capped at 50 KB (head + elision + tail, so the tail is always the newest). Cody's launch config (`display.shellVisualization: false`) also removes the ~625 KB `details.trace` omp otherwise attaches to every frame. A 1 line/s build is ~1 frame/s of 0.4-1.5 KB; a very chatty one ~13 frames/s of up to 53 KB.
+- **Async `bash`** (`async:true`): start and end arrive ~10 ms apart (result "Backgrounded as job bg_N"); `tool_execution_update` for the SAME `toolCallId` then keeps coming, even after the non-terminal `agent_end`, with `details.async = {state: "running"|"completed", jobId, type}`.
+- **`run_on_worker`** (an extension tool, `lib/omp/extensions/cody-run-on-worker.ts`; any chat or helper that has a shell): the extension posts to `/api/internal/workers` and relays the route's NDJSON progress as tool updates; `lib/workers/progress.ts` text = a headline line plus up to 20 newest output lines, ≤2/s plus a 5 s refresh. Earlier it was a host tool (`host_tool_update`), which only the main chat could hold. Read from code, not run through a live Cody.
+- **Helpers** (subagent level `progress`): only `subagent_progress` (~1 KB, ~1/s) with `currentTool`, `currentToolArgs` (command, ~100 chars), `currentToolStartMs`, counts, tokens. **No tool output.** omp only forwards `tool_execution_update` for nested `task` calls.
+
+What Cody does with it:
+
+- Server: `ToolUpdateThrottle` (in `rpc-manager`) slims each frame (`slimToolUpdateFrame`: last 8 KB of text, `details.async`, no `args`) and sends per call at most one frame per 250 ms (leading edge + trailing flush; a finished job flushes at once; `tool_execution_end` settles).
+- Page: `LiveToolOutputStore` (one per chat hook, provided via `LiveToolOutputContext`, read by `useLiveToolOutput(id)`) keeps the newest 24 lines of ≤240 chars per call, notifies at most every 250 ms, drops entries on `tool_execution_end` / end of run (async jobs stay while they stream, then linger 8 s after "completed"). Max 12 entries. Nothing goes into messages, the transcript cache or the model.
+- UI: `LiveToolTail` under the card header, outside the collapsible panel, fixed height (4 rows, 14 expanded), shown only after a call has run 1.2 s. The footer carries a pulse dot, label, `ElapsedClock` (its own 1 s interval, never inside `StatusTextCrossfade`) and an expand chevron. The status line skips the bash last-line text while the card draws the tail (`phaseLabel(phase, cardShowsTail)`); other tools keep it, moving at most every 2 s.
+- Helpers: chips append `HelperToolClock` after 8 s of one tool; the transcript dialog shows a "Running now" strip (tool, intent, command, clock) from the roster's `progress`. Clock start = `currentToolStartMs` when plausible against the page's clock, else first sight (`helperToolStart`).
+- Limits: the clock counts from when THIS page first heard of the call; a reload loses the tails of running foreground calls (async jobs refill on their next update); the page only ever sees `tool_execution_update` while subscribed, so a helper's own bash lines are never available.
+
 ### Running state SSE + reconciliation
 - The sidebar listens to `/api/agent/running/events`, backed by `subscribeRunningSessions()` in `lib/rpc-manager.ts`, so running badges update without polling.
 - `useAgentSession` still treats per-session SSE as primary for chat events, but while a run is active it periodically calls `GET /api/agent/[id]` and also reconciles on `visibilitychange`/`online`. This fixes missed `agent_end` events from background tabs or half-open connections.

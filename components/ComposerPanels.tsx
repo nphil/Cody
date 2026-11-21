@@ -13,6 +13,7 @@ import { countNestedSubagents, formatCost, formatDuration, formatTokens, shortMo
 import { useHelperLimitConfig } from "@/hooks/useHelperLimitConfig";
 import { subagentActivityIntent } from "@/lib/subagent-types";
 import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
+import { HelperToolClock } from "./ElapsedClock";
 import { TodoList } from "./TodoList";
 import { SubagentStatusIcon } from "./SubagentStatusIcon";
 import { GoalPanel, type FallbackGoal, type GoalAutoContinueControl } from "./GoalPanel";
@@ -24,6 +25,9 @@ const SUBAGENT_STATE_KEYS: Record<SubagentInfo["status"], string> = {
   failed: "chatWindow.subagentState.failed",
   aborted: "chatWindow.subagentState.aborted",
 };
+
+/** A helper's command shows a running clock once it has run this long (the roster would otherwise churn every second). */
+const HELPER_CLOCK_AFTER_MS = 8_000;
 
 function SubagentStatusBadge({ subagent }: { subagent: SubagentInfo }) {
   return <SubagentStatusIcon status={subagent.status} live={subagent.source !== "history"} />;
@@ -78,6 +82,9 @@ function SubagentActivityLine({ subagent, helperConfig }: { subagent: SubagentIn
       parts.push(
         <SubagentMetric key="activity" icon={progress?.currentTool ? Wrench : Activity} label={activity}>
           {activity}
+          {progress?.currentTool && (
+            <HelperToolClock tool={progress.currentTool} startMs={progress.currentToolStartMs} minMs={HELPER_CLOCK_AFTER_MS} style={{ marginLeft: 5, color: "var(--text-dim)" }} />
+          )}
         </SubagentMetric>,
       );
     }

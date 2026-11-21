@@ -128,6 +128,7 @@ import { createActiveGoal, parseActiveGoal, type ActiveGoal, type ActivePlan } f
 import { adoptGoal, goalErrorKey, parseGoalCommand, parseGoalModeState, readGoalUpdate, type GoalModeState, type GoalView } from "@/lib/goal-state";
 import type { HostToolDefinition, HostUriSchemeDefinition, PlanOverlay, RpcAvailableSlashCommand, SessionStatsInfo, TodoPhase, UsageLimitState } from "@/lib/pi-types";
 import { asCount, asNumber, asString, isRecord } from "@/lib/type-guards";
+import { LiveToolOutputStore, partialResultText, tailLines } from "@/lib/live-tool-output";
 import { addUsageTotals, aggregateMessageUsage, countEditRejections, emptyUsageTotals, usageTokenTotal, type UsageTotals } from "@/lib/session-usage";
 import { SESSION_STORAGE_PREFIXES } from "@/lib/storage-keys";
 import { getCachedSessionData, setCachedSessionData } from "@/lib/session-transcript-cache";
@@ -567,6 +568,9 @@ export type NoticeAction =
   | { type: "mark_oldest_exiting" }
   | { type: "remove"; id: string };
 
+/** The status line of a running tool moves at most this often (it crossfades on each change). */
+const STATUS_TEXT_MIN_INTERVAL_MS = 2_000;
+
 /** A tool call the engine is executing right now. `startedAt` feeds the
  * elapsed indicator once a tool runs long; `statusText` is the newest line the
  * tool streamed about itself (tool_execution_update) — for a long watch like
@@ -577,6 +581,8 @@ export interface RunningToolInfo {
   name: string;
   startedAt: number;
   statusText?: string;
+  /** When `statusText` last changed (it moves at most every `STATUS_TEXT_MIN_INTERVAL_MS`). */
+  statusAt?: number;
   /** The model's own `ask` question: omp 18.20 runs it as `write xd://ask`, so the name alone is just `write`. */
   ask?: boolean;
 }
@@ -768,15 +774,25 @@ export type AgentPhase =
 
 /** First informative line of a streamed partial tool result, compacted for the
  * one-line status surfaces (markdown heading markers stripped, clamped). */
-export function toolUpdateStatusText(partialResult: unknown): string | undefined {
+export function toolUpdateStatusText(partialResult: unknown, toolName?: string): string | undefined {
+  // A shell command prints raw output, so its newest line is the news; every
+  // other tool leads with its own status line.
+  if (toolName === "bash") {
+    const newest = tailLines(partialResultText(partialResult), 1)[0];
+    return newest && newest.trim().length > 0 ? clampStatusLine(newest.trim()) : undefined;
+  }
   if (!isRecord(partialResult) || !Array.isArray(partialResult.content)) return undefined;
   for (const block of partialResult.content) {
     if (!isRecord(block) || block.type !== "text" || typeof block.text !== "string") continue;
     const line = block.text.split("\n").map((entry) => entry.replace(/^#+\s*/, "").trim()).find((entry) => entry.length > 0);
     if (!line) continue;
-    return line.length > 160 ? `${line.slice(0, 159)}…` : line;
+    return clampStatusLine(line);
   }
   return undefined;
+}
+
+function clampStatusLine(line: string): string {
+  return line.length > 160 ? `${line.slice(0, 159)}…` : line;
 }
 
 /**
@@ -1371,6 +1387,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return () => window.clearTimeout(timer);
   }, [compactionStatus]);
   const [agentPhase, setAgentPhase] = useState<AgentPhase>(null);
+  // The tail of every running call of this chat. The hook is remounted per
+  // session (AppShell keys it), so the store is per chat by construction; a
+  // card subscribes to its own call only (hooks/useLiveToolOutput.ts).
+  const [liveToolOutput] = useState(() => new LiveToolOutputStore());
+  // The turn is over (no tool is running any more): foreground tails go, a
+  // background job's tail stays while the job streams on.
+  useEffect(() => {
+    if (agentPhase === null) liveToolOutput.endRun();
+  }, [agentPhase, liveToolOutput]);
   // Event-stream health, surfaced so a believed-running turn is never rendered
   // as a healthy "Waiting for model…" against a stream that is not delivering.
   const [streamDegraded, setStreamDegraded] = useState(false);
@@ -4269,6 +4294,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const id = event.toolCallId as string;
         const name = event.toolName as string;
         const ask = isAskToolCall(name, event.args);
+        liveToolOutput.begin(id, name, Date.now());
         setAgentPhase((prev) => {
           const tools = prev?.kind === "running_tools" ? [...prev.tools] : [];
           if (!tools.some((t) => t.id === id)) tools.push({ id, name, startedAt: Date.now(), ask });
@@ -4278,18 +4304,26 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       case "tool_execution_update": {
         // Long-running tools stream progress about themselves (omp's gh
-        // run_watch reports every CI poll this way). Keep only the newest
-        // line per tool — without it a long `write xd://github` watch is
-        // indistinguishable from a hang.
+        // run_watch reports every CI poll this way, a build prints its
+        // output). The status surfaces keep one line per tool; the card
+        // draws the last few lines from the store. Neither reaches the
+        // transcript or the model.
         const id = event.toolCallId as string;
-        const statusText = toolUpdateStatusText(event.partialResult);
+        const name = typeof event.toolName === "string" ? event.toolName : "";
+        liveToolOutput.update(id, name, event.partialResult);
+        const statusText = toolUpdateStatusText(event.partialResult, name);
         if (!statusText) break;
+        const statusAt = Date.now();
         setAgentPhase((prev) => {
           if (prev?.kind !== "running_tools") return prev;
           const index = prev.tools.findIndex((t) => t.id === id);
           if (index === -1 || prev.tools[index].statusText === statusText) return prev;
+          // The status line crossfades on every text change: a chatty build
+          // must not turn it into a strobe, so it moves at most every 2 s.
+          const previousAt = prev.tools[index].statusAt;
+          if (previousAt !== undefined && statusAt - previousAt < STATUS_TEXT_MIN_INTERVAL_MS) return prev;
           const tools = [...prev.tools];
-          tools[index] = { ...tools[index], statusText };
+          tools[index] = { ...tools[index], statusText, statusAt };
           return { kind: "running_tools", tools };
         });
         break;
@@ -4297,6 +4331,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "tool_execution_end": {
         assistantProviderCallRef.current = true;
         const id = event.toolCallId as string;
+        liveToolOutput.end(id);
         if (event.toolName === "todo" && sessionIdRef.current) {
           void reconcileAgentState(sessionIdRef.current);
         }
@@ -4637,7 +4672,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         handleExtensionUiRequest(event as unknown as IncomingExtensionUiRequest);
         break;
     }
-  }, [addNotice, addEngineErrorNotice, announceClaudeCreditsReturn, announceFallbackApplied, announceFallbackSucceeded, applyAuthoritativeModel, adoptFastModeState, adoptGoalState, adoptThinkingLevel, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities, applyOutboxDelivery, beginAuthoritativeModelSync, cancelHeldPlanLimitNotice, dispatchPendingModelSwitch, dropRetryBanner, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, holdPlanLimitNotice, holdRetryBanner, holdTailForReader, loadSession, maybeAutoNameSession, mergeSubagents, noteModelUnrestorable, onAgentEnd, onPreviewUrlsSeen, onSessionForked, opts.chatInputRef, publishRewoundDraft, reconcileAgentState, refreshTodoState, resetSubagentActivityState, settleAgentModelSwitch]);
+  }, [addNotice, liveToolOutput, addEngineErrorNotice, announceClaudeCreditsReturn, announceFallbackApplied, announceFallbackSucceeded, applyAuthoritativeModel, adoptFastModeState, adoptGoalState, adoptThinkingLevel, adoptSessionModels, adoptSessionModes, adoptSessionPromptCapabilities, applyOutboxDelivery, beginAuthoritativeModelSync, cancelHeldPlanLimitNotice, dispatchPendingModelSwitch, dropRetryBanner, finishPromptWithoutStream, handleExtensionUiRequest, handleHostToolCall, handleHostUriRequest, holdPlanLimitNotice, holdRetryBanner, holdTailForReader, loadSession, maybeAutoNameSession, mergeSubagents, noteModelUnrestorable, onAgentEnd, onPreviewUrlsSeen, onSessionForked, opts.chatInputRef, publishRewoundDraft, reconcileAgentState, refreshTodoState, resetSubagentActivityState, settleAgentModelSwitch]);
   handleAgentEventRef.current = handleAgentEvent;
 
   /** Shared recovery for a send that never actually started a run: undo the
@@ -6559,7 +6594,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     autoModelSwitch: autoModelSwitch && autoModelSwitch.forSession === (session?.id ?? sessionIdRef.current)
       ? { from: autoModelSwitch.from, to: autoModelSwitch.to, role: autoModelSwitch.role, reason: autoModelSwitch.reason, reasonKind: autoModelSwitch.reasonKind, job: autoModelSwitch.job }
       : null,
-    agentPhase,
+    agentPhase, liveToolOutput,
     pendingRefusalDecision, rewoundDraft,
     // Event-stream health: `streamDegraded` replaces the "Waiting for model…"
     // label while the stream is not delivering; `streamAlert` is the banner for

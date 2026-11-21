@@ -11,7 +11,7 @@ const { DEVICE_TRUST_NOTE, DEVICE_OPERATION_TOOLS } = await jiti.import("../lib/
 const { SCHEDULE_TOOLS } = await jiti.import("../lib/scheduled/tools.ts");
 const { CHAT_MESSAGE_TOOLS } = await jiti.import("../lib/chat-messages/tools.ts");
 const { MODEL_SWITCH_TOOLS } = await jiti.import("../lib/model-switch/tool.ts");
-const { RUN_ON_WORKER_TOOL } = await jiti.import("../lib/workers/tool.ts");
+const { RUN_ON_WORKER_TOOL } = await jiti.import("../lib/workers/definition.ts");
 
 /**
  * Engines launched through displayMcpAcpServer() / claudeDisplayMcpConfig() do

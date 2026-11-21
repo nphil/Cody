@@ -24,6 +24,8 @@ import { StatusTextCrossfade } from "./StatusTextCrossfade";
 import { ModelRecoveryBanner } from "./ModelRecoveryBanner";
 import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-layout";
 import { useAgentSession, type AgentPhase, type NoticeItem, type RunningToolInfo, type StreamAlert, type SubagentInfo } from "@/hooks/useAgentSession";
+import { LiveToolOutputContext } from "@/hooks/useLiveToolOutput";
+import { formatToolElapsed } from "@/lib/live-tool-output";
 import { ALL_CAPABILITIES, OMP_ENGINE_ID, type ActiveEngineInfo, type EngineCapabilities } from "./SettingsTabs";
 import { loadEngineInfo } from "@/lib/engine-capabilities";
 import { useAudio } from "@/hooks/useAudio";
@@ -108,20 +110,12 @@ export interface SessionModelUsage extends ContextModelUsage {
  * below it, the churn would be noise; above it, silence reads as a hang. */
 const LONG_TOOL_THRESHOLD_MS = 8_000;
 
-function formatToolElapsed(ms: number): string {
-  const totalSeconds = Math.floor(ms / 1000);
-  const minutes = Math.floor(totalSeconds / 60);
-  if (minutes >= 60) return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
-  if (minutes > 0) return `${minutes}m ${String(totalSeconds % 60).padStart(2, "0")}s`;
-  return `${totalSeconds}s`;
-}
-
 function oldestRunningTool(phase: AgentPhase): RunningToolInfo | null {
   if (phase?.kind !== "running_tools" || phase.tools.length === 0) return null;
   return phase.tools.reduce((oldest, tool) => (tool.startedAt < oldest.startedAt ? tool : oldest));
 }
 
-function phaseLabel(phase: AgentPhase): string {
+function phaseLabel(phase: AgentPhase, cardShowsTail: boolean): string {
   if (phase?.kind === "running_tools") {
     const names = phase.tools.map((tool) => tool.name);
     let label: string;
@@ -136,7 +130,10 @@ function phaseLabel(phase: AgentPhase): string {
     // crossfade, and folding a per-second tick into the crossfaded text made
     // the whole line re-animate every second.
     const oldest = oldestRunningTool(phase);
-    if (oldest?.statusText) label += ` — ${oldest.statusText}`;
+    // A shell command's newest output line is NOT narrated here when its card
+    // draws the live tail: it would only repeat the tail, and a wrapped line
+    // changes the height of this slot every couple of seconds.
+    if (oldest?.statusText && !(cardShowsTail && oldest.name === "bash")) label += ` — ${oldest.statusText}`;
     return label;
   }
   if (phase?.kind === "waiting_model") return translate("chatWindow.waitingModel");
@@ -902,7 +899,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, cap
     notices, extensionCustomUi, extensionStatuses, extensionWidgets, sendExtensionCustomInput,
     pendingInputs, respondToInput, rewoundDraft,
     isAutoModelSelection, autoModelSwitch, modelSwitchPending, localOnly, selectLocalOnly,
-    agentPhase, streamDegraded, streamAlert, dismissStreamAlert, retryEventStream, modelRecovery, recoverModel, activeGoal, activePlan,
+    agentPhase, liveToolOutput, streamDegraded, streamAlert, dismissStreamAlert, retryEventStream, modelRecovery, recoverModel, activeGoal, activePlan,
     sideQuestions,
     goal, goalBusy, runGoalOp, dismissGoal, kickGoal,
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases, planOverlay,
@@ -1530,6 +1527,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, cap
         sessionId={session?.id ?? sessionIdRef.current ?? null}
         transcriptVersion={selectedSubagent ? (subagentTranscriptVersions[selectedSubagent.id] ?? 0) : 0}
         events={selectedSubagent ? (subagentEvents[selectedSubagent.id] ?? []) : undefined}
+        liveProgress={selectedSubagent ? subagents.find((entry) => entry.id === selectedSubagent.id)?.progress : undefined}
         onSteer={steerWhileRunning}
         onClose={() => setSelectedSubagent(null)}
       />
@@ -1609,6 +1607,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, cap
               <ExtensionStatusBar statuses={extensionStatuses} />
               <ExtensionWidgets widgets={aboveEditorWidgets} />
 
+            <LiveToolOutputContext.Provider value={liveToolOutput}>
             <TranscriptViewportContext.Provider value={transcriptViewport}>
             <HomelabberApprovalProvider messages={messages} toolResults={conversationMeta.toolResultsMap}>
             <CommittedTranscript
@@ -1648,6 +1647,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, cap
             )}
             </HomelabberApprovalProvider>
             </TranscriptViewportContext.Provider>
+            </LiveToolOutputContext.Provider>
 
             {activityDisplayMode === "compact" && pendingToolHeaders.map((tool) => (
               <div
@@ -1718,7 +1718,7 @@ export const ChatWindow = memo(function ChatWindow({ session, newSessionCwd, cap
                           ? t("agentStream.disconnected")
                           : streamDegraded
                             ? t("agentStream.reconnecting")
-                            : phaseLabel(agentPhase),
+                            : phaseLabel(agentPhase, activityDisplayMode !== "hidden"),
                         activeSubagentCount > 0 ? tn("chatWindow.subagentCount", activeSubagentCount) : null,
                         currentTodoPhase
                           ? t("chatWindow.todoPhaseStatus", {

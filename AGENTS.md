@@ -164,7 +164,7 @@ app/api/
   machines/stream/route.ts  GET SSE machine status
   machines/test/route.ts  POST ssh sample (admin)
   machines/worker-check/route.ts  POST read a worker's /etc/cody-worker.json over ssh (admin)
-  internal/workers/route.ts  POST ACP run_on_worker (ndjson progress; capability-token auth)
+  internal/workers/route.ts  POST run_on_worker for ACP engines and omp agents incl. helpers (ndjson progress; capability-token auth, scratch-folder capability for omp)
   statistics/route.ts  GET usage stats / ?session=
   ../statistics/page.tsx  Statistics page
   disk/route.ts  GET disk meters; POST clean, PUT (admin)
@@ -203,7 +203,8 @@ lib/
     tool.ts  `forge` host tool (omp only; lib/rpc-manager.ts, bin/cody-display-mcp.js)
   disk/  disk hygiene: scratch.ts, janitor.ts, sweep.ts, walk.ts, transcripts.ts, mentions.ts, gate.ts, status.ts, settings.ts; no `@/`
   machines/  top-bar meters + worker state; browser-safe types.ts/present.ts; server only proc.ts, ssh.ts, store.ts, sampler.ts, jobs.ts (job counts + checks on globalThis); no `@/` (bin/cody-server.js)
-  workers/  `run_on_worker`: tool.ts (definition + runOnWorker), run.ts (one job), scheduler.ts (FIFO queue), placement.ts, health.ts (check + monitor), facts.ts, files.ts, tarball.ts, transfer.ts, execute.ts, remote.ts, shell.ts (the ssh seam), output.ts, progress.ts, local.ts, format.ts, live.ts, types.ts; no `@/`; tests use local-shell.mjs
+  workers/  `run_on_worker`: definition.ts (the words the agent reads), access.ts (omp agents' token), tool.ts (parser + runOnWorker), run.ts (one job), scheduler.ts (FIFO queue), placement.ts, health.ts (check + monitor), facts.ts, files.ts, tarball.ts, transfer.ts, execute.ts, remote.ts (incl. same-path `JOB_WRAPPER`), shell.ts (the ssh seam), output.ts, progress.ts, local.ts, format.ts, live.ts, types.ts; no `@/`; tests use local-shell.mjs
+  live-tool-output.ts  live tail of a running tool: server slim + throttle (`ToolUpdateThrottle`, in rpc-manager) and the page store (`LiveToolOutputStore`); browser-safe, no `@/`. UI: hooks/useLiveToolOutput.ts, components/LiveToolTail.tsx, components/ElapsedClock.tsx
   engine-guard.ts  requireEngine()/requireCapability(): omp-only routes 400
   file-access.ts  allowed file roots for /api/files and worktrees
   distill/  Distill server half
@@ -243,6 +244,7 @@ lib/
   omp/extensions/cody-on-demand-mcp.ts  `load_tools` extension
   omp/agent-roster.ts  which helper agents exist (built-in unpacked from the binary + agent files); omp/agent-model-overrides.ts  `task.agentModelOverrides` read/write; omp/agent-switch.ts  move one running helper
   omp/extensions/cody-agent-switch.ts  one-shot model for the next helper start (`before_subagent_spawn`, omp 18.19+)
+  omp/extensions/cody-run-on-worker.ts  `run_on_worker` for the main chat AND helper agents (calls /api/internal/workers with CODY_WORKERS_*)
   omp/engine-db.ts  engine database health service (check, guarded repair, push)
   usage/reading-age.ts  age of a usage reading from omp's own fetchedAt
   project-registry.ts  managed-project registry (projects.json)
@@ -572,7 +574,7 @@ Details: docs/agents/automation.md
 Details: docs/agents/usage-monitoring.md
 
 ### Workers: heavy jobs on other machines (`lib/workers/`, `lib/machines/`)
-- `run_on_worker` copies the project to an ssh machine switched on as a worker (Settings › Machines › "Use as worker"), runs the command there niced, streams output as tool progress, copies the named `results` back and deletes the copy. Definition lives ONLY in `lib/workers/tool.ts`; `bin/cody-display-mcp.js` repeats it for ACP and `bin/cody-display-mcp.test.mjs` fails on drift.
+- `run_on_worker` copies the project to an ssh machine switched on as a worker (Settings › Machines › "Use as worker"), runs the command there niced (at the SAME absolute path when the worker lists `mapPaths` and mirrors the toolchains), streams output as tool progress, copies the named `results` back and deletes the copy. It is an omp EXTENSION (`lib/omp/extensions/cody-run-on-worker.ts`), not a host tool: omp gives host tools to the main chat only, and helper agents ran 89% of the heavy commands. Definition lives ONLY in `lib/workers/definition.ts`; `bin/cody-display-mcp.js` repeats it for ACP and `bin/cody-display-mcp.test.mjs` fails on drift. Details: `docs/agents/workers.md`.
 - A worker = ssh destination + `/etc/cody-worker.json` + writable `/srv/cody-work`; facts go through `checkWorkerFacts`, never trusted raw. Same ssh rules as the meters: whitelisted destination, constant/`shQuote`d remote commands, NEVER `-n`; the job's ssh stdin is the far side's dead-man's switch.
 - Only the exit marker proves a command ended. No start marker = never ran (next worker); start but no exit = dropped: rerun ONCE elsewhere or here, second loss = error. Never report a half result as success.
 - Results come back through Cody's own tar reader (`tarball.ts`): regular files/dirs under the named `results` paths only; never `..`, absolute, `.git` or a link out.
@@ -686,6 +688,8 @@ Details: docs/agents/approvals.md
 ### Long tool calls narrate themselves
 - `tool_execution_update` text goes to `RunningToolInfo.statusText`; past ~8 s (`LONG_TOOL_THRESHOLD_MS`) status adds it plus elapsed — else `run_watch` looks hung.
 - Trap: elapsed clock = plain sibling span, never inside `StatusTextCrossfade` text (per-second flicker).
+- Live tail: the running-tool card shows the newest lines of a long `bash` (and async jobs, `run_on_worker`) from `tool_execution_update`. They live ONLY in `LiveToolOutputStore` (context `LiveToolOutputContext`), never in messages or the transcript cache; the server slims frames (last 8 KB, ≤4/s per call).
+- Helpers: omp streams NO tool output for a helper (only `subagent_progress` with `currentTool`/`currentToolArgs`/`currentToolStartMs`), so chips and the dialog show the command + elapsed clock, never a tail.
 Details: docs/agents/session-runtime.md
 
 ### Composer model + tools controls

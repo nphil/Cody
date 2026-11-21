@@ -3,6 +3,7 @@ import { createInterface } from "readline";
 import { OMP_BIN_MISSING, resolveOmpBin } from "./omp-cli";
 import { encodeOutboundRpcFrame, RpcFrameDecoder, RpcFrameTooLargeError, type RpcFrameRecord, type RpcProtocolVersion } from "./rpc-frame";
 import { engineChildEnv } from "../harness/provider-keys";
+import { workersEnv } from "../workers/access";
 
 /**
  * Process + protocol layer for `omp --mode rpc-ui` (NDJSON over stdio).
@@ -182,7 +183,7 @@ export class RpcProcess {
       cwd: options.cwd,
       // Cody provider credentials, then launch-specific profile/routing data,
       // then an explicit process override supplied by the caller.
-      env: engineChildEnv({ ...(options.launch?.env ?? {}), ...(options.env ?? {}) }, { timeZone: options.timeZone, scratchDir: options.scratchDir }),
+      env: engineChildEnv({ ...(options.scratchDir ? workersEnv(options.scratchDir) : {}), ...(options.launch?.env ?? {}), ...(options.env ?? {}) }, { timeZone: options.timeZone, scratchDir: options.scratchDir }),
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       // On POSIX, omp launches grandchildren (LSP servers, extension subprocesses). Run the

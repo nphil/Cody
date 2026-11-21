@@ -234,7 +234,14 @@ class JobRun {
     const execution = await executeOnWorker({
       shell: deps.shell,
       destination: machine.destination,
-      command: buildExecCommand({ directory, cwdRel: tree.cwdRel, command: request.command, token }),
+      command: buildExecCommand({
+        directory,
+        cwdRel: tree.cwdRel,
+        command: request.command,
+        token,
+        ...(machine.facts && machine.facts.mapPaths.length > 0 ? { map: { project: tree.root, anchors: machine.facts.mapPaths } } : {}),
+        ...(ctx.scratchDir ? { scratch: path.basename(ctx.scratchDir) } : {}),
+      }),
       token,
       timeoutMs: request.timeoutMs,
       signal: ctx.signal,

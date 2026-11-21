@@ -344,14 +344,15 @@ async function main() {
       return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to switch the model" }] };
     }
   });
-  // Heavy jobs on another machine. Written once in lib/workers/tool.ts; bin/cody-display-mcp.test.mjs fails when this copy drifts.
+  // Heavy jobs on another machine. Written once in lib/workers/definition.ts; bin/cody-display-mcp.test.mjs fails when this copy drifts.
   server.registerTool("run_on_worker", {
-    description: "Run a heavy command on another machine (a \"worker\") instead of on the server this chat runs on, and get its output and result files back. "
-      + "Use it for long CPU- or memory-hungry work: full builds and compiles (cargo, go, next build, bun build), whole test suites, bundling, image builds. "
+    description: "Run a heavy command on another machine (a \"worker\") instead of on the server this chat runs on, and get its output and result files back. Helper agents can call it too. "
+      + "Use it for builds and tests you expect to take over a minute: a cold cargo or zig build (also the TV cross build), a Next or bun build, a whole test suite, bundling, image builds. This server is usually busy, so these run faster on the worker and stop slowing every other chat down. "
       + "Do NOT use it for quick commands, edits, git, or anything that needs this machine's running services, dev server, ports or secrets: those stay local with your normal shell tool. "
-      + "Cody copies the project to the worker (default: the git repository's tracked and untracked-but-not-ignored files, so node_modules and other ignored files are NOT copied: install dependencies inside `command`, for example `bun install && bun run build`), "
+      + "Cody copies the project to the worker (default: the git repository's tracked and untracked-but-not-ignored files, so node_modules and build output are NOT copied: narrow the copy with `include` and install dependencies inside `command`, for example `npm ci && npm test`), "
       + "runs `command` there at low priority from the copy of `cwd`, streams the output, copies the paths in `results` back into the workspace, and deletes the copy. "
       + "Edits you make to files while it runs are not copied. "
+      + "A worker that mirrors this server runs the project at the SAME absolute path (for example /data/home/project) with the same toolchains, $HOME and venvs, so absolute paths in configs and scripts work unchanged; a Cargo `target` directory is kept between runs, so the next build is incremental. The output says when a worker could not do this. "
       + "The worker is chosen for you (it must match `arch` and have every tool in `tools`; the one with the most free CPU and memory wins). "
       + "If no worker can take the job right now it runs on this server instead and the result says so; pass fallbackLocal=false to wait in the queue for a worker instead. "
       + "If the worker drops out mid-run, Cody runs the job once more elsewhere and tells you exactly what happened. "
@@ -359,11 +360,11 @@ async function main() {
       + "Results copied back overwrite files in the workspace but never delete any.",
     inputSchema: {
       command: z.string().describe("The shell command, run with sh -c from the copy of `cwd` on the worker. Failures are reported through the exit code."),
-      cwd: z.string().optional().describe("Directory the command runs in. Default: this chat's workspace. Relative paths resolve against the workspace; it must be inside the workspace's git repository."),
-      include: z.array(z.string()).optional().describe("Globs, relative to `cwd`, of the files to copy to the worker (for example [\"src/**\", \"package.json\"]). Default: every tracked and untracked-but-not-ignored file of the git repository (the whole repository, not only `cwd`)."),
+      cwd: z.string().optional().describe("Directory the command runs in. Default: this chat's workspace (a helper agent: its own directory). Relative paths resolve against the workspace; it must be inside the workspace or inside another git repository."),
+      include: z.array(z.string()).optional().describe("Globs, relative to `cwd`, of the files to copy to the worker (for example [\"src/**\", \"package.json\"]). Default: every tracked and untracked-but-not-ignored file of the git repository (the whole repository, not only `cwd`): pass `include` for a big repository."),
       results: z.array(z.string()).optional().describe("Files or directories, relative to `cwd`, to copy back into the workspace when the command finishes, also when it fails (for example [\"dist\", \"target/release/app\"]). Default: none."),
       arch: z.enum(["x86_64", "aarch64"]).optional().describe("Require a worker of this CPU architecture. Set it when the results are programs that must run on this server."),
-      tools: z.array(z.string()).optional().describe("Toolchains the worker must have, for example [\"node\", \"rust\", \"docker\"] (see what workers offer by asking the person, or leave empty)."),
+      tools: z.array(z.string()).optional().describe("Toolchains the worker must have, for example [\"node\", \"rust\", \"zig\"]. Leave it empty unless the job really needs one: a worker without it is skipped."),
       timeoutSeconds: z.number().optional().describe("Stop the command after this many seconds of running (default 1800, at most 7200)."),
       fallbackLocal: z.boolean().optional().describe("Default true: when no worker can take the job now, run it on this server and say so. false: wait in the queue for a worker (up to 30 minutes) and never run it here."),
     },

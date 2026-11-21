@@ -7,75 +7,14 @@ import { MAX_COMMAND_BYTES } from "./remote";
 import { DEFAULT_JOB_TIMING, runWorkerJob, type JobDeps, type JobRequest } from "./run";
 import { sshShell } from "./shell";
 import { DEFAULT_WORK_ROOT } from "./types";
-import type { HostToolDefinition } from "../pi-types";
+import { DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS } from "./definition";
 
 /**
  * `run_on_worker`: the agent's way to send a heavy command to another machine.
  * Everything else about it lives in the sibling modules; this file is the
- * agent-facing surface (the description it reads, the arguments it may pass)
- * and the one function every harness calls.
+ * parser for the arguments the agent may pass and the one function every
+ * harness calls. The words the agent reads are in definition.ts.
  */
-
-export const DEFAULT_TIMEOUT_SECONDS = 1800;
-export const MAX_TIMEOUT_SECONDS = 7200;
-
-export const RUN_ON_WORKER_TOOL: HostToolDefinition = {
-  name: "run_on_worker",
-  description:
-    "Run a heavy command on another machine (a \"worker\") instead of on the server this chat runs on, and get its output and result files back. "
-    + "Use it for long CPU- or memory-hungry work: full builds and compiles (cargo, go, next build, bun build), whole test suites, bundling, image builds. "
-    + "Do NOT use it for quick commands, edits, git, or anything that needs this machine's running services, dev server, ports or secrets: those stay local with your normal shell tool. "
-    + "Cody copies the project to the worker (default: the git repository's tracked and untracked-but-not-ignored files, so node_modules and other ignored files are NOT copied: install dependencies inside `command`, for example `bun install && bun run build`), "
-    + "runs `command` there at low priority from the copy of `cwd`, streams the output, copies the paths in `results` back into the workspace, and deletes the copy. "
-    + "Edits you make to files while it runs are not copied. "
-    + "The worker is chosen for you (it must match `arch` and have every tool in `tools`; the one with the most free CPU and memory wins). "
-    + "If no worker can take the job right now it runs on this server instead and the result says so; pass fallbackLocal=false to wait in the queue for a worker instead. "
-    + "If the worker drops out mid-run, Cody runs the job once more elsewhere and tells you exactly what happened. "
-    + "The result starts with the exit code and where it ran, then the last 200 lines of output; the whole output is saved to a file whose path is given. "
-    + "Results copied back overwrite files in the workspace but never delete any.",
-  parameters: {
-    type: "object",
-    properties: {
-      command: {
-        type: "string",
-        description: "The shell command, run with sh -c from the copy of `cwd` on the worker. Failures are reported through the exit code.",
-      },
-      cwd: {
-        type: "string",
-        description: "Directory the command runs in. Default: this chat's workspace. Relative paths resolve against the workspace; it must be inside the workspace's git repository.",
-      },
-      include: {
-        type: "array",
-        items: { type: "string" },
-        description: "Globs, relative to `cwd`, of the files to copy to the worker (for example [\"src/**\", \"package.json\"]). Default: every tracked and untracked-but-not-ignored file of the git repository (the whole repository, not only `cwd`).",
-      },
-      results: {
-        type: "array",
-        items: { type: "string" },
-        description: "Files or directories, relative to `cwd`, to copy back into the workspace when the command finishes, also when it fails (for example [\"dist\", \"target/release/app\"]). Default: none.",
-      },
-      arch: {
-        type: "string",
-        enum: ["x86_64", "aarch64"],
-        description: "Require a worker of this CPU architecture. Set it when the results are programs that must run on this server.",
-      },
-      tools: {
-        type: "array",
-        items: { type: "string" },
-        description: "Toolchains the worker must have, for example [\"node\", \"rust\", \"docker\"] (see what workers offer by asking the person, or leave empty).",
-      },
-      timeoutSeconds: {
-        type: "number",
-        description: `Stop the command after this many seconds of running (default ${DEFAULT_TIMEOUT_SECONDS}, at most ${MAX_TIMEOUT_SECONDS}).`,
-      },
-      fallbackLocal: {
-        type: "boolean",
-        description: "Default true: when no worker can take the job now, run it on this server and say so. false: wait in the queue for a worker (up to 30 minutes) and never run it here.",
-      },
-    },
-    required: ["command"],
-  },
-};
 
 /** What the harness knows about the call. */
 export interface RunOnWorkerContext {

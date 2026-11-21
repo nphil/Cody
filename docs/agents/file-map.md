@@ -164,8 +164,8 @@ app/api/
   machines/worker-check/route.ts  POST {id} (admin) one real check of a saved ssh worker:
                                   reads /etc/cody-worker.json, the work root and the load over ssh;
                                   200 either way, `ok:false` carries a reason code; 429 while 2 run
-  internal/workers/route.ts       POST the run_on_worker tool for ACP engines (capability-token auth);
-                                  answers application/x-ndjson: progress, heartbeat, one result
+  internal/workers/route.ts       POST the run_on_worker tool for ACP engines and omp agents, helpers included
+                                  (capability-token auth); answers application/x-ndjson: progress, heartbeat, one result
   statistics/route.ts             GET  usage totals, ring tree, timeline, insights
                                    (?preset|from&to &groupBy &refresh) / one chat's
                                    deep dive (?session=)
@@ -287,7 +287,9 @@ lib/
                        `checkWorkerFacts`; `store.ts` keeps `worker` and `workerFacts` per ssh machine
   workers/             `run_on_worker`: heavy commands on another machine ("Workers: heavy jobs on other
                        machines"). Nothing here may use `@/`.
-    tool.ts            the tool definition the agent reads + `runOnWorker` (every harness calls it)
+    definition.ts      the tool words the agent reads (pure; the omp extension and bin/cody-display-mcp.js repeat them)
+    access.ts          the CODY_WORKERS_* env an omp engine gets (a scratch-folder capability)
+    tool.ts            the argument parser + `runOnWorker` (every harness calls it)
     run.ts             one job from start to result: pick a worker, copy in, run, copy back, clean up,
                        rerun once on a drop, fall back to this server
     scheduler.ts       the FIFO queue and the leases; placement.ts picks the worker (pure)

@@ -769,7 +769,11 @@ Agent engines that reach Cody over MCP get `run_on_worker` (run a heavy command
 on a machine switched on as a worker) through `POST /api/internal/workers`, which
 is not part of this contract: it is authenticated by a per-session capability
 token, answers as NDJSON (progress lines, then the result) and exists only for
-the bundled MCP server. An omp main chat gets the tool as a host tool instead.
+the bundled MCP server. An omp chat, helper agents included, gets the same tool
+from the `cody-run-on-worker` extension, which calls the same route with a
+capability for the chat's scratch folder; the route finds the chat itself and
+takes its directory from there. Worker facts carry `mapPaths` (absolute anchors
+where the worker shows a project at the same path as on the server).
 
 ## Agent and the event stream
 

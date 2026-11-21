@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import { parseJsonWithinLimit } from "@/lib/bounded-form-data";
 import { verifyDisplayCapability } from "@/lib/display/capability";
-import { getRpcSession } from "@/lib/rpc-manager";
+import { findRpcSessionByScratch, getRpcSession } from "@/lib/rpc-manager";
 import { isRecord } from "@/lib/type-guards";
+import { scratchKeyOf } from "@/lib/workers/access";
 import { runOnWorker } from "@/lib/workers/tool";
 
 export const dynamic = "force-dynamic";
@@ -19,7 +20,7 @@ function invalidResponse(error: string, status = 400) {
 }
 
 /**
- * POST /api/internal/workers — run_on_worker for engines reached over MCP (bin/cody-display-mcp.js).
+ * POST /api/internal/workers — run_on_worker for engines reached over MCP (bin/cody-display-mcp.js) and for omp's agents, helpers included (lib/omp/extensions/cody-run-on-worker.ts).
  *
  * The answer is application/x-ndjson, one JSON object per line:
  *   {"type":"progress","text":"..."}   the first non-empty line of text is a one-line status
@@ -56,14 +57,17 @@ export async function POST(request: Request) {
     return invalidResponse("Unknown worker tool");
   }
 
-  // The chat comes from the verified token, never from the request body.
-  const session = getRpcSession(capability.sid);
+  // The chat comes from the verified token, never from the request body. An
+  // omp agent holds a token that names its chat's scratch folder instead of a
+  // session id (lib/workers/access.ts).
+  const scratchKey = scratchKeyOf(capability.sid);
+  const session = scratchKey ? findRpcSessionByScratch(scratchKey) : getRpcSession(capability.sid);
   if (!session) {
     return invalidResponse("Session not found", 404);
   }
   const { cwd } = session;
   const scratchDir = session.scratchDir ?? null;
-  const sessionId = capability.sid;
+  const sessionId = scratchKey ? session.sessionId : capability.sid;
   const toolArgs: Record<string, unknown> = isRecord(body.arguments) ? body.arguments : {};
 
   // Stopped when the bridge hangs up (the agent cancelled the call) as well as when the request itself aborts.
