@@ -12,8 +12,10 @@ import type { PlanOverlay, TodoPhase } from "@/lib/pi-types";
 import { countNestedSubagents, formatCost, formatDuration, formatTokens, shortModel, subagentContextGauge } from "@/lib/subagent-format";
 import { useHelperLimitConfig } from "@/hooks/useHelperLimitConfig";
 import { subagentActivityIntent } from "@/lib/subagent-types";
+import { formatTierTotals, helperTierNote, tierCostTotals } from "@/lib/helper-tier";
 import { thinkingLevelLabel } from "@/lib/thinking-level-labels";
 import { HelperToolClock } from "./ElapsedClock";
+import { HelperTierReason } from "./HelperTierReason";
 import { TodoList } from "./TodoList";
 import { SubagentStatusIcon } from "./SubagentStatusIcon";
 import { GoalPanel, type FallbackGoal, type GoalAutoContinueControl } from "./GoalPanel";
@@ -203,6 +205,7 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
 
   const visibleSubagents = selectVisibleSubagents(subagents, showAll);
   const truncatable = subagents.length > MAX_VISIBLE_SUBAGENTS;
+  const tierTotals = tierCostTotals(subagents);
 
   return (
     <section
@@ -220,9 +223,24 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
         style={{ background: "none" }}
       >
         <Network size={14} strokeWidth={1.8} aria-hidden />
-        <strong className="font-medium text-text">{t("chatWindow.subagentsPanel")}</strong>
+        <strong className="shrink-0 font-medium text-text">{t("chatWindow.subagentsPanel")}</strong>
+        {tierTotals.length > 0 && (
+          <span
+            data-subagent-tier-totals
+            aria-label={t("helperTier.costTotals", { totals: formatTierTotals(tierTotals) })}
+            title={t("helperTier.costTotals", { totals: formatTierTotals(tierTotals) })}
+            className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-right"
+            style={{ fontFamily: "var(--font-mono)", fontSize: 10.5, color: "var(--text-dim)" }}
+          >
+            {tierTotals.map((total, index) => (
+              <span key={total.agent} style={total.expensive ? { color: "var(--text)", fontWeight: 600 } : undefined}>
+                {index > 0 ? " · " : ""}{total.agent} {formatCost(total.cost)}
+              </span>
+            ))}
+          </span>
+        )}
         <span
-          className="ml-auto inline-flex items-center gap-1.5"
+          className="ml-auto inline-flex shrink-0 items-center gap-1.5"
           aria-label={t("chatWindow.subagentSummary", { running: runningCount, total: subagents.length })}
           title={t("chatWindow.subagentSummary", { running: runningCount, total: subagents.length })}
         >
@@ -298,6 +316,7 @@ function SubagentsPanel({ subagents, onSelectSubagent, defaultExpanded = false }
                     </span>
                   )}
                 </span>
+                <HelperTierReason note={helperTierNote(subagent)} />
                 <SubagentActivityLine subagent={subagent} helperConfig={helperConfig} />
               </button>
             );

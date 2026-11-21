@@ -514,3 +514,58 @@ test("an engine without goal mode leaves a note that can be dismissed, not contr
   const both = renderGoal({ goal: goalView("paused", {}, { enabled: false }), fallbackGoal: { objective: "an old note", startedAt: 0 } });
   assert.doesNotMatch(both, /an old note/);
 });
+
+const tierPanel = (subagents, extra = {}) => renderToStaticMarkup(React.createElement(ComposerPanels, {
+  todoPhases: [], subagents, onSelectSubagent: noop, defaultExpanded: true, ...extra,
+}));
+
+test("an expensive helper's chip carries the reason the parent gave, on one calm line", () => {
+  const html = tierPanel([{
+    id: "h1", agent: "heavy-task", status: "started", index: 0, task: "Find the leak",
+    assignment: "# Context\nSomething leaks.\n\nWhy heavy-task: task could not find the root cause twice.\n",
+  }]);
+  assert.match(html, /data-helper-tier="given"/);
+  assert.match(html, /Why this tier: task could not find the root cause twice\./);
+  assert.doesNotMatch(html, /no reason given/);
+});
+
+test("an expensive helper with an assignment that states no reason shows a muted warning", () => {
+  const html = tierPanel([{
+    id: "h1", agent: "deep-task", status: "started", index: 0, task: "Rewrite parser", assignment: "Rewrite the parser.",
+  }]);
+  assert.match(html, /data-helper-tier="missing"/);
+  assert.match(html, /Why this tier: no reason given/);
+  assert.match(html, /var\(--status-warning\)/);
+});
+
+test("a chip says nothing about the tier before the assignment text has arrived, and for cheap helpers", () => {
+  const html = tierPanel([
+    { id: "h1", agent: "heavy-task", status: "started", index: 0 },
+    { id: "t1", agent: "task", status: "started", index: 1, assignment: "Do a small thing", progress: { modelRole: "task" } },
+  ]);
+  assert.doesNotMatch(html, /data-helper-tier/);
+});
+
+test("any agent running on the default or slow role gets the tier line", () => {
+  const html = tierPanel([{
+    id: "r1", agent: "reviewer", status: "started", index: 0, task: "Review", assignment: "Review it.", progress: { modelRole: "slow" },
+  }]);
+  assert.match(html, /data-helper-tier="missing"/);
+});
+
+test("the panel header totals cost per helper kind, dearest first, on one ellipsised line", () => {
+  const html = tierPanel([
+    { id: "a", agent: "task", status: "completed", index: 0, progress: { cost: 0.7 } },
+    { id: "b", agent: "task", status: "started", index: 1, progress: { cost: 0.5 } },
+    { id: "c", agent: "heavy-task", status: "started", index: 2, progress: { cost: 8.4 } },
+    { id: "d", agent: "scout", status: "started", index: 3 },
+  ], { defaultExpanded: false });
+  assert.match(html, /data-subagent-tier-totals/);
+  assert.match(html, /aria-label="Cost this run by helper kind: heavy-task \$8\.40 · task \$1\.20"/);
+  assert.match(html, /whitespace-nowrap/);
+  assert.doesNotMatch(html, /scout \$/);
+});
+
+test("no cost yet means no totals in the header", () => {
+  assert.doesNotMatch(tierPanel([{ id: "a", agent: "task", status: "started", index: 0 }]), /data-subagent-tier-totals/);
+});

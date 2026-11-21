@@ -310,6 +310,7 @@ lib/
   helper-agents.ts  Helper agents rows + dropdown choices + status words (browser-safe); agent-model-selector.ts  role/model/custom selector parse
   irc-display.ts  parent-to-subagent IRC messages shown plainly
   task-call-preview.ts  counted phrases for the task-call preview
+  helper-tier.ts  which helpers are expensive (heavy-task/deep-task or default/slow role), the reason the parent gave, cost per helper kind
 components/
   AppShell.tsx  layout, URL state, tabs
   SessionSidebar.tsx  session tree + FileExplorer
@@ -327,6 +328,7 @@ components/
   TodoList.tsx  todo phase grid
   SubagentTranscriptDialog.tsx  subagent dialog + steer footer
   SubagentModelSwitch.tsx  "Change model" control in the helper window
+  HelperTierReason.tsx  the "Why this tier" line (chip + helper window)
   SubagentTranscript.tsx  transcript section of that dialog
   MessageView.tsx  one message
   HomelabberApproval.tsx  approval index, useApprovalCard
@@ -784,6 +786,7 @@ Details: docs/agents/distill.md
 - Transcript route reads only needed bytes (`readSubagentTranscriptPage`), never the whole 14–21 MB file.
 - Helper-window tool-result images are deferred like the main chat's: pages carry url blocks to `subagents/[subagentId]/media?offset=&entryId=&index=` (`readSubagentTranscriptImage` reads one line; same `isDeferrableToolResultImage` index). A `blob:sha256:` ref in a helper line is NOT resolved by the page reader.
 - Validate ids as safe filename components with realpath confinement, not an AdjectiveNoun regex.
+- Tier visibility: an expensive helper (`isExpensiveHelper`: heavy-task, deep-task, or `progress.modelRole` default/slow) shows one "Why this tier: …" line on its chip and at the top of its window, parsed from the assignment text Cody already holds (`parseTierReason`, no model call); a stated-nothing assignment shows "no reason given" in a muted warning, and nothing shows until the assignment text has arrived. The Subagents header totals cost per helper kind (`tierCostTotals`, one ellipsised line). Tests: `lib/helper-tier.test.mjs`, `ComposerPanels.test.mjs`.
 Details: docs/agents/subagents.md
 
 ### Worktrees and project grouping

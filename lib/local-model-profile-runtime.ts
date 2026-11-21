@@ -138,7 +138,7 @@ function inheritedConfigFiles(): string[] {
 }
 
 function profileOverlay(profile: PromptProfile): Record<string, unknown> {
-  const { disabledExtensions: profileDisabled, tools, ...compaction } = profile.settingsOverlay;
+  const { disabledExtensions: profileDisabled, tools, dev, ...compaction } = profile.settingsOverlay;
   const existingDisabled = inheritedConfigFiles().flatMap(disabledExtensionsFrom);
   const disabledExtensions = Array.isArray(profileDisabled)
     ? [...new Set([...existingDisabled, ...profileDisabled.filter((entry): entry is string => typeof entry === "string")])]
@@ -146,6 +146,7 @@ function profileOverlay(profile: PromptProfile): Record<string, unknown> {
   return {
     ...(Object.keys(compaction).length ? { compaction } : {}),
     ...(tools && isRecord(tools) ? { tools } : {}),
+    ...(dev && isRecord(dev) ? { dev } : {}),
     ...(disabledExtensions.length ? { disabledExtensions } : {}),
   };
 }

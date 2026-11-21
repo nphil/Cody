@@ -17,6 +17,8 @@ import { toast } from "./ui/toast";
 import type { SubagentInfo } from "@/hooks/useAgentSession";
 import { isUnsupportedCommandError, parseSubagentProgress, subagentActivityIntent } from "@/lib/subagent-types";
 import type { SubagentActivityEvent, SubagentProgress, SubagentSnapshotLike } from "@/lib/subagent-types";
+import { helperTierNote } from "@/lib/helper-tier";
+import { HelperTierReason } from "./HelperTierReason";
 
 /** Recursive renderer for structured completions: string values keep their
  * line breaks (JSON.parse already unescapes them), arrays become bullet
@@ -729,6 +731,7 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
         ...(latestThinkingEvent ? { thinkingLevel: latestThinkingEvent.thinkingLevel ?? progress?.thinkingLevel } : {}),
       }
     : progress;
+  const tierNote = helperTierNote({ agent, progress: displayProgress, assignment: currentDetail?.assignment ?? subagent?.assignment, task });
   const contextGauge = subagentContextGauge(progress, agent, helperConfig);
   const contextTitle = contextGauge
     ? t("chatWindow.contextGauge", { used: contextGauge.used, total: contextGauge.total })
@@ -807,6 +810,11 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
                 {description && (
                   <div style={{ fontSize: 12.5, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginBottom: 4 }}>
                     {description}
+                  </div>
+                )}
+                {tierNote && (
+                  <div style={{ marginBottom: 4 }}>
+                    <HelperTierReason note={tierNote} wrap />
                   </div>
                 )}
                 <div style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{currentDetail?.sessionFile ?? subagent.sessionFile ?? subagent.id}</div>

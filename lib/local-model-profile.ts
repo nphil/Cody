@@ -189,6 +189,9 @@ export function getPromptProfile(
           // `tools.xdev` to `tools.commands`; an engine ignores a key it does not know (measured on 19.0.0 and
           // 19.1.0), so the overlay carries both and each engine reads its own.
           tools: { commands: false, xdev: false },
+          // omp 19.1 adds a `report_issue` tool to every chat while Auto-QA (`dev.autoqa`, default on) is on: a third
+          // tool schema the small model pays for on every request and could call instead of doing the work.
+          dev: { autoqa: false },
           disabledExtensions: contextFileExtensionIds(CONTEXT_FILE_BASENAMES),
         },
         estimatedOverheadTokens,
