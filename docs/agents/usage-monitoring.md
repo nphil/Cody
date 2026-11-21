@@ -95,6 +95,17 @@ gone (tokens stay in the session popover and the button's tooltip).
     vs track 3.5 (light) / 5.0 (dark), muted layer vs track 1.7 / 2.1.
   - Limit: if a container is capped to fewer cores than the machine has, Cody's
     % is of its own cores (quota), not of the machine's.
+- **A worker beside Cody** (same machine: its reading's boot id is this
+  server's) has no card or top-bar entry of its own: this server's card splits
+  the machine into Cody (accent), the worker (accent, striped:
+  `WORKER_LAYER`) and the whole machine (muted). The headline reads "Cody x% ·
+  worker y% · machine z%"; each figure is `nowrap` and the group wraps
+  right-aligned under the label when a narrow card cannot hold all three (it
+  overflowed at 1024 and 1440 px before). Under each card, while the panel is
+  open (`GET /api/machines/memory`, every 30 s): jobs it ran in the last 24 h,
+  its newest 3 memory events (out-of-memory kills, Cody passing 90% of its
+  limit) and, for this server, how long tasks waited on memory in the last 10 s
+  (PSI) for Cody and the worker. Rules behind it: docs/agents/workers.md › Memory.
 - **Top bar layout** (`MachineMeters.tsx`). The component owns a `flex: 1 1 0`
   slot between the left controls and the session button and measures it with a
   ResizeObserver; `pickMeterDensity` picks the richest of `full` (name, labelled

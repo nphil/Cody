@@ -22,6 +22,16 @@ export interface WorkerLoad {
   memAvailMB: number | null;
   /** Epoch ms of the reading. */
   at: number;
+  /** The machine's boot id (the same for every container on one machine), when the reading had it. */
+  bootId?: string;
+  /** The worker's own memory limit (its control group's), MB, when it has one. */
+  capMB?: number;
+  /** Memory in use under that limit, MB, caches the kernel can drop taken off. */
+  capUsedMB?: number;
+  /** PSI `some avg10` of its memory, percent: how much of the last ten seconds something waited on memory. */
+  pressure?: number;
+  /** Processes the kernel killed for memory there since it started (its control group's count). */
+  oomKills?: number;
 }
 
 /** One worker as the placement sees it. */
@@ -39,6 +49,10 @@ export interface WorkerCandidate {
   /** Jobs Cody started on it within the last few seconds: too new to show in a reading. */
   recentLaunches: number;
   load: WorkerLoad | null;
+  /** The worker is behind the others for a few minutes (it ran out of memory, or was short of it, just now). */
+  cooling?: "oom" | "pressure";
+  /** The worker runs on the same machine as this server (same boot id): it competes with Cody for CPU and memory. */
+  sameHost?: boolean;
 }
 
 export interface PlacementRequest {
@@ -47,6 +61,10 @@ export interface PlacementRequest {
   tools: readonly string[];
   /** Machine ids that already failed this job. */
   excluded: ReadonlySet<string>;
+  /** What the command needed lately (with a margin), MB: workers with that much free go first. */
+  needMB?: number | null;
+  /** The job already ran out of memory on a worker with this much: only workers with more may take it. */
+  minCapMB?: number | null;
 }
 
 /** Why one worker cannot take the job now; a code plus the plain words used in messages. */
@@ -59,7 +77,8 @@ export interface Refusal {
 }
 
 export type Placement =
-  | { kind: "placed"; id: string; label: string; freeCores: number }
+  /** `caveat`: why this worker is a compromise (in plain words); `tight`: the command's known need does not fit in its free memory. Both only when so. */
+  | { kind: "placed"; id: string; label: string; freeCores: number; caveat?: string; tight?: true }
   | { kind: "busy"; refusals: Refusal[] }
   | { kind: "none"; refusals: Refusal[] };
 

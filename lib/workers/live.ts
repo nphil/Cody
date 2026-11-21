@@ -1,4 +1,6 @@
 import { setWorkerJobs } from "../machines/jobs";
+import { machineCooldown, noteMachineMemory } from "../machines/memory-store";
+import { readLocalMemory } from "../machines/memory-watch";
 import { getMachineStates, notifyMachinesChanged } from "../machines/sampler";
 import { listMachineConfigs } from "../machines/store";
 import { loadFromMetrics } from "./facts";
@@ -44,6 +46,13 @@ export function workerScheduler(): WorkerScheduler {
       notifyMachinesChanged();
     },
     clock: REAL_CLOCK,
+    memory: {
+      noteLoad(machine, load, now) {
+        noteMachineMemory(machine.id, machine.label, { bootId: load.bootId, oomKills: load.oomKills, pressure: load.pressure }, now);
+      },
+      cooling: (machineId, now) => machineCooldown(machineId, now)?.why ?? null,
+      local: () => readLocalMemory(),
+    },
   });
   return globalThis.__codyWorkerScheduler;
 }

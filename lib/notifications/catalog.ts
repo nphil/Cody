@@ -22,6 +22,7 @@ export const NOTIFICATION_EVENT_IDS = [
   "quotaOut",
   "accountSignedOut",
   "engineDbDamaged",
+  "memoryHigh",
 ] as const;
 
 export type NotificationEventId = (typeof NOTIFICATION_EVENT_IDS)[number];
@@ -148,6 +149,15 @@ export const NOTIFICATION_EVENTS: readonly NotificationEventSpec[] = [
     group: "problems",
     label: "Engine database damaged",
     description: "The engine's database is damaged in a way Cody will not repair by itself, or its automatic repair failed.",
+    scope: "account",
+    defaultEnabled: true,
+    defaultPriority: 4,
+  },
+  {
+    id: "memoryHigh",
+    group: "problems",
+    label: "Cody low on memory",
+    description: "Cody's server passed 90% of its memory limit. Once until it is back under 80%.",
     scope: "account",
     defaultEnabled: true,
     defaultPriority: 4,

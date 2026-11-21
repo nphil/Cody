@@ -1,3 +1,6 @@
+import { localSpareMB } from "../machines/memory";
+import { countJobStart, jobNeedMB, recordJobRun } from "../machines/memory-store";
+import { readLocalMemory } from "../machines/memory-watch";
 import { normalizeWorkerArch, WORKER_TOOL_PATTERN } from "../machines/types";
 import type { WorkerArch } from "../machines/types";
 import { isRecord } from "../type-guards";
@@ -149,6 +152,12 @@ function liveDeps(): JobDeps {
     runLocal: runLocalCommand,
     timing: DEFAULT_JOB_TIMING,
     now: Date.now,
+    memory: {
+      needMB: jobNeedMB,
+      recordRun: recordJobRun,
+      countJob: countJobStart,
+      localSpareMB: () => localSpareMB(readLocalMemory()),
+    },
   };
 }
 

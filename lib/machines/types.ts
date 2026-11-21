@@ -82,6 +82,10 @@ export interface OwnMetrics {
   memPercent: number;
   /** The container's memory limit when it is smaller than the machine's memory. */
   memLimitBytes: number | null;
+  /** Processes the kernel killed for memory in the container so far (cgroup v2 `oom_kill`), when it said. */
+  oomKills?: number;
+  /** How much of the last ten seconds something in the container waited on memory, percent (PSI `some avg10`), when it said. */
+  pressure?: number;
 }
 
 export interface MachineMetrics {
@@ -101,6 +105,8 @@ export interface MachineMetrics {
   memPercent: number;
   /** Epoch ms of the reading. */
   at: number;
+  /** The kernel's boot id: every container on one machine has the same one. */
+  bootId?: string;
 }
 
 // ── Workers ──────────────────────────────────────────────────────────────────
@@ -170,6 +176,9 @@ export interface MachineState {
   metrics: MachineMetrics | null;
   /** Present only for a machine used as a worker. */
   worker?: MachineWorkerState;
+  /** An ssh machine that runs on this server's own machine (a container beside Cody's, the same kernel): the id of the
+   * local entry, so the top bar shows the two as one machine. Kept while it is down. */
+  sameHostAs?: string;
 }
 
 /** The frames of `GET /api/machines/stream`. */

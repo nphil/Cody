@@ -31,6 +31,8 @@ FROM node:22-bookworm-slim AS runtime
 #   python3(+pip/venv): scripts, tooling, agent-written code
 #   ripgrep/jq:        search and JSON plumbing agents and humans both use
 #   nano/less/unzip/zip: quality of life in SSH/terminal sessions
+#   rsync:             scripts/sync-worker-mirror.sh copies the toolchains to a
+#                      mirror worker with it (1.2 MiB installed with libpopt0)
 #   openssh-server:    direct SSH into the workspace (entrypoint-managed,
 #                      only enabled when credentials are configured)
 #   procps/curl:       healthcheck + debug
@@ -157,7 +159,7 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     git gh curl wget ca-certificates procps openssh-client openssh-server \
     python3 python3-pip python3-venv \
-    ripgrep jq nano less unzip zip \
+    ripgrep jq nano less unzip zip rsync \
     chromium fonts-liberation fonts-noto-cjk fonts-noto-color-emoji \
     libegl1 libegl-mesa0 \
     libva-drm2 intel-media-va-driver vainfo \
@@ -205,6 +207,14 @@ COPY --from=build /app/scripts ./scripts
 
 COPY docker/entrypoint.sh /usr/local/bin/cody-entrypoint
 RUN chmod 0755 /usr/local/bin/cody-entrypoint
+
+# Worker mode: the same image as a build worker for a Cody server (the
+# run_on_worker tool), started with `--entrypoint=/usr/local/bin/cody-worker`.
+# No web UI and no network port: sshd answers on a Unix socket in a folder only
+# the Cody container shares. Setup: docs/unraid.md ("Build worker").
+COPY docker/worker/cody-worker /usr/local/bin/cody-worker
+COPY docker/worker/listen.py /usr/local/lib/cody-worker/listen.py
+RUN chmod 0755 /usr/local/bin/cody-worker /usr/local/lib/cody-worker/listen.py
 
 # 30177 = WebUI (PORT env), 2222 = SSH (CODY_SSH_PORT env; the daemon only
 # starts when CODY_SSH_PASSWORD is set or authorized keys exist — see

@@ -1,0 +1,195 @@
+#!/bin/sh
+# cody-worker: run this image as a build worker for a Cody server (the run_on_worker tool), and nothing else.
+#
+# No Cody server, web UI or network port runs here. Each connection on a Unix socket gets its own sshd
+# (listen.py); the socket sits in a folder shared with the Cody container, so only Cody can reach it. Cody puts
+# its public key beside the socket (authorized_keys) and this side publishes its host key there for Cody to pin.
+#
+# The server's home is mounted read-only inside this worker's view of /data (/srv/cody-work/root/data/home), so a
+# job finds every toolchain, venv and neighbouring repository at the path it has on the server. What builds write
+# into caches (cargo registry, npm, uv, ...) goes to this worker's own disk instead (/srv/cody-work/own).
+# Setup and settings: docs/unraid.md ("Build worker"). Protocol: docs/agents/workers.md.
+set -eu
+
+# PID 1 has to reap: a dropped connection leaves orphans behind (the same guard as cody-entrypoint).
+if [ "$$" = "1" ] && [ -x /usr/bin/tini ]; then exec /usr/bin/tini -- "$0" "$@"; fi
+
+W=/srv/cody-work
+VIEW=$W/root/data
+SOCKET=${CODY_WORKER_SOCKET:-/run/cody-worker/ssh.sock}
+SHARED=${SOCKET%/*}
+STATE=$W/.worker
+LIB=${CODY_WORKER_LIB:-/usr/local/lib/cody-worker}
+NAME=${CODY_WORKER_NAME:-$(hostname)}
+
+say() { echo "cody-worker: $*"; }
+die() { say "$*" >&2; exit 1; }
+
+case $NAME in *[!A-Za-z0-9._-]*|'') die "CODY_WORKER_NAME may only use letters, digits, '.', '_' and '-'" ;; esac
+[ -d "$W" ] && [ -w "$W" ] || die "mount this worker's own disk at $W (writable)"
+[ -d "$SHARED" ] || die "mount the folder shared with the Cody container at $SHARED"
+[ -d /data ] && [ -z "$(ls -A /data 2>/dev/null)" ] || die "/data must be an empty directory (the template mounts a small tmpfs there): jobs see this worker's view of the server's /data at it"
+if [ -z "$(ls -A "$VIEW/home" 2>/dev/null)" ]; then
+  say "warning: the server's home is not mounted at $VIEW/home (read-only), so jobs will not find its toolchains"
+fi
+chmod 700 "$SHARED"
+mkdir -p "$STATE" "$W/own" /run/sshd
+chmod 700 "$STATE"
+
+# ── Extra system packages (CODY_WORKER_PACKAGES), installed once per container, downloads kept on the work disk ──
+if [ -n "${CODY_WORKER_PACKAGES:-}" ]; then
+  missing=
+  for p in $CODY_WORKER_PACKAGES; do
+    dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "install ok installed" || missing="$missing $p"
+  done
+  if [ -n "$missing" ]; then
+    say "installing$missing"
+    mkdir -p "$STATE/apt/archives/partial"
+    if ! { apt-get -qq update && DEBIAN_FRONTEND=noninteractive apt-get -qq -o Dir::Cache::archives="$STATE/apt/archives" \
+      install -y --no-install-recommends $missing; } >"$STATE/apt.log" 2>&1; then
+      say "warning: installing packages failed (see $STATE/apt.log); continuing without them"
+    fi
+  fi
+fi
+
+# ── The server's environment for jobs ($W/env.sh, sourced by Cody's job wrapper) ──
+# Caches a build writes. Each one that exists in the server's home gets this worker's own writable copy, which
+# starts empty (a first build downloads what it needs once). Folders that also hold installed things (browsers,
+# models, `go install` tools) stay as the server's, read-only.
+OWN=".npm .bun/install .gradle .m2 .nuget .yarn .swiftpm/security .swiftpm/cache .cache/uv .cache/pip .cache/pypoetry .cache/pre-commit
+.cache/zig .cache/go-build .cache/node-gyp .cache/node .cache/yarn .cache/pnpm .cache/bun .cache/deno .cache/typescript
+.cache/esbuild .cache/sccache .cache/ccache .cache/clang .cache/clangd .cache/cargo-zigbuild .cache/matplotlib .cache/fontconfig
+.cache/mesa_shader_cache .cache/mesa_shader_cache_db .cache/org.swift.swiftpm .cache/org.swift.foundation.URLCache
+${CODY_WORKER_OWN_EXTRA:-}"
+OWN=$(printf '%s\n' $OWN | grep -E '^[A-Za-z0-9._+-]+(/[A-Za-z0-9._+-]+)*$' | grep -vE '(^|/)\.\.?(/|$)' | sort -u | tr '\n' ' ')
+cat >"$W/env.sh.new" <<EOF
+# Written by cody-worker when the container started: change the container's settings, not this file.
+# Sourced by Cody's job wrapper (lib/workers/remote.ts) after it showed the job's project at its server path.
+if [ "\${CODY_JOB_MAPPED:-}" = 1 ] && [ -d /data/home ]; then
+  # The server's home is read-only here; these caches get this worker's own writable copy.
+  for rel in $OWN; do
+    [ -d "/data/home/\$rel" ] && [ ! -L "/data/home/\$rel" ] || continue
+    mkdir -p "$W/own/\$rel" 2>/dev/null && mount --bind "$W/own/\$rel" "/data/home/\$rel" 2>/dev/null \\
+      || echo "[cody] /data/home/\$rel stays read-only on this worker"
+  done
+  # Cargo keeps its locks and index beside the registry, so CARGO_HOME is this worker's own, with the
+  # server's installed tools (bin, env, config) shown inside it at their usual paths.
+  if [ -d /data/home/.cargo ] && [ ! -L /data/home/.cargo ] && mkdir -p "$W/own/.cargo" 2>/dev/null; then
+    s=$VIEW/home/.cargo
+    for e in "\$s"/* "\$s"/.[!.]*; do
+      [ -e "\$e" ] || continue
+      n=\${e##*/}
+      case \$n in registry|git|.package-cache*|.global-cache*) continue ;; esac
+      if [ -d "\$e" ]; then mkdir -p "$W/own/.cargo/\$n"; elif [ ! -e "$W/own/.cargo/\$n" ]; then : >"$W/own/.cargo/\$n"; fi
+    done 2>/dev/null
+    if mount --bind "$W/own/.cargo" /data/home/.cargo 2>/dev/null; then
+      for e in "\$s"/* "\$s"/.[!.]*; do
+        [ -e "\$e" ] || continue
+        n=\${e##*/}
+        case \$n in registry|git|.package-cache*|.global-cache*) continue ;; esac
+        mount --bind "\$e" "/data/home/.cargo/\$n" 2>/dev/null || echo "[cody] /data/home/.cargo/\$n is missing on this worker"
+      done
+    else
+      echo "[cody] /data/home/.cargo stays read-only on this worker"
+    fi
+  fi
+  HOME=/data/home
+  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  export HOME PATH
+  # The server's own login profile puts its tools on PATH, the same way its shells get them.
+  if [ -r "\$HOME/.profile" ]; then . "\$HOME/.profile" >/dev/null 2>&1 </dev/null || true; fi
+else
+  # Not shown at its server path: still give the job the server's tools, read-only.
+  HOME=$W/home
+  RUSTUP_HOME=$VIEW/home/.rustup
+  PATH=$VIEW/home/.local/bin:$VIEW/home/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  mkdir -p "\$HOME" 2>/dev/null
+  export HOME RUSTUP_HOME PATH
+fi
+# A job's user namespace maps one user (root), so node-gyp cannot unpack the node headers it downloads (the tarball's
+# chown fails: EINVAL) and every native npm build (node-pty) fails. Hand it the headers that sit beside the node on PATH.
+if [ -z "\${npm_config_nodedir:-}" ] && nd=\$(command -v node 2>/dev/null); then
+  nd=\${nd%/*}; nd=\${nd%/*}
+  [ -f "\$nd/include/node/node.h" ] && export npm_config_nodedir=\$nd
+fi
+# The non-interactive settings the server gives its agents' shells.
+export LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=${TZ:-UTC} CI=true DEBIAN_FRONTEND=noninteractive GIT_EDITOR=true GIT_PAGER=cat PAGER=cat \\
+  NO_COLOR=1 npm_config_yes=true PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_NO_INPUT=1 PYTHONUNBUFFERED=1 \\
+  RUST_MIN_STACK=8388608 CARGO_TERM_PROGRESS_WHEN=never NODE_ENV=${NODE_ENV:-production}${NODE_VERSION:+ NODE_VERSION=$NODE_VERSION}
+EOF
+sh -n "$W/env.sh.new" || die "generated env.sh has a syntax error"
+mv "$W/env.sh.new" "$W/env.sh"
+
+# ── What this worker offers (/etc/cody-worker.json) ──
+# Tools are looked up the way a job sees them: in a private namespace with the server's /data view and env.sh.
+CANDIDATES="node:node nodejs:node npm:npm npx:npx bun:bun yarn:yarn pnpm:pnpm deno:deno python:python3 python3:python3
+pip:pip3,pip uv:uv rust:rustc cargo:cargo rustc:rustc rustup:rustup cargo-zigbuild:cargo-zigbuild
+cargo-nextest:cargo-nextest sccache:sccache zig:zig go:go golang:go gcc:gcc g++:g++ cc:cc clang:clang make:make
+cmake:cmake ninja:ninja meson:meson pkg-config:pkg-config patchelf:patchelf git:git rg:rg ripgrep:rg ffmpeg:ffmpeg
+ffprobe:ffprobe xvfb:Xvfb xvfb-run:xvfb-run weston:weston chromium:chromium java:java javac:javac gradle:gradle
+mvn:mvn kotlin:kotlinc dotnet:dotnet swift:swift docker:docker shellcheck:shellcheck qemu:qemu-aarch64-static,qemu-aarch64"
+EXTRA=$(printf '%s\n' ${CODY_WORKER_TOOLS_EXTRA:-} | grep -E '^[A-Za-z0-9._+-]+=/[A-Za-z0-9._+/-]+$' || true)
+probe='CODY_JOB_MAPPED=0
+if mount --rbind "$1" /data 2>/dev/null; then CODY_JOB_MAPPED=1; fi
+export CODY_JOB_MAPPED
+. "$2" >/dev/null 2>&1 </dev/null
+for c in $3; do
+  n=${c%%:*}
+  for x in $(echo "${c#*:}" | tr , " "); do
+    if command -v "$x" >/dev/null 2>&1; then echo "$n"; break; fi
+  done
+done
+for e in $4; do [ -e "${e#*=}" ] && echo "${e%%=*}"; done
+if ldconfig -p 2>/dev/null | grep -q "libSDL2-2.0.so"; then echo sdl2; fi'
+if unshare --user --map-root-user --mount true >/dev/null 2>&1; then
+  TOOLS=$(unshare --user --map-root-user --mount sh -c "$probe" probe "$VIEW" "$W/env.sh" "$CANDIDATES" "$EXTRA" | sort -u)
+else
+  say "warning: user namespaces are not allowed (the template's seccomp setting), so jobs cannot see the server's paths"
+  TOOLS=$(sh -c "$probe" probe /nonexistent "$W/env.sh" "$CANDIDATES" "$EXTRA" | sort -u)
+fi
+cpus=$(nproc)
+if read -r quota period </sys/fs/cgroup/cpu.max 2>/dev/null && [ "$quota" != max ]; then
+  c=$(((quota + period - 1) / period)); [ "$c" -lt "$cpus" ] && cpus=$c
+fi
+mem=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo max)
+if [ "$mem" = max ]; then memMB=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo); else memMB=$((mem / 1048576)); fi
+slots=${CODY_WORKER_SLOTS:-$((cpus / 4))}
+case $slots in ''|*[!0-9]*) slots=1 ;; esac
+[ "$slots" -ge 1 ] || slots=1
+idle=false
+case ${CODY_WORKER_ONLY_WHEN_IDLE:-} in 1|true|yes) idle=true ;; esac
+tools_json=$(for t in $TOOLS; do printf '"%s"\n' "$t"; done | paste -sd, -)
+printf '{"name":"%s","arch":"%s","cpus":%s,"memMB":%s,"slots":%s,"tools":[%s],"limits":{"onlyWhenIdle":%s},"mapPaths":["/data"]}\n' \
+  "$NAME" "$(uname -m)" "$cpus" "$memMB" "$slots" "$tools_json" "$idle" >/etc/cody-worker.json
+say "$NAME: $cpus cpus, $memMB MB, $slots slots; tools:" $TOOLS
+
+# ── sshd, reachable only through the shared folder ──
+[ -s "$STATE/ssh_host_ed25519_key" ] || ssh-keygen -q -t ed25519 -N '' -C "$NAME" -f "$STATE/ssh_host_ed25519_key"
+cp "$STATE/ssh_host_ed25519_key.pub" "$SHARED/ssh_host_ed25519_key.pub"
+chmod 644 "$SHARED/ssh_host_ed25519_key.pub"
+[ -s "$SHARED/authorized_keys" ] || say "waiting for Cody: put its public key in $SHARED/authorized_keys (see docs/unraid.md)"
+cat >/etc/ssh/cody-worker.conf <<EOF
+HostKey $STATE/ssh_host_ed25519_key
+AuthorizedKeysFile $SHARED/authorized_keys
+PermitRootLogin prohibit-password
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+UsePAM no
+StrictModes yes
+AllowTcpForwarding no
+AllowStreamLocalForwarding no
+AllowAgentForwarding no
+X11Forwarding no
+PermitTunnel no
+PermitUserEnvironment no
+PrintMotd no
+PrintLastLog no
+UseDNS no
+LogLevel ERROR
+ClientAliveInterval 30
+ClientAliveCountMax 4
+Subsystem sftp internal-sftp
+EOF
+/usr/sbin/sshd -t -f /etc/ssh/cody-worker.conf || die "the sshd configuration does not load"
+exec python3 "$LIB/listen.py" "$SOCKET" /usr/sbin/sshd -i -e -f /etc/ssh/cody-worker.conf

@@ -1,7 +1,7 @@
 import { StringDecoder } from "node:string_decoder";
 import { firstStderrLine } from "../machines/ssh";
 import type { MachineReason } from "../machines/types";
-import { ExecStreamParser, type ExecEvent } from "./remote";
+import { ExecStreamParser, type ExecEvent, type JobMemory } from "./remote";
 import { describeRemoteFailure, type RemoteShell } from "./shell";
 
 /**
@@ -49,10 +49,10 @@ export interface ExecuteOptions {
 }
 
 export type ExecuteOutcome =
-  /** The command ended by itself; `code` is its exit status. */
-  | { kind: "exited"; code: number }
+  /** The command ended by itself; `code` is its exit status, `memory` its peak and the kernel's out-of-memory kills (when the worker said). */
+  | { kind: "exited"; code: number; memory?: JobMemory }
   /** The time limit ran out and the job was stopped; `code` is what it ended with, if it said. */
-  | { kind: "timeout"; code: number | null }
+  | { kind: "timeout"; code: number | null; memory?: JobMemory }
   | { kind: "cancelled" }
   /** It never started: another worker may do. */
   | { kind: "no_start"; reason: MachineReason; detail: string }
@@ -70,6 +70,7 @@ export async function executeOnWorker(options: ExecuteOptions): Promise<ExecuteO
   let startFailed = false;
   let noDirectory = false;
   let exitCode: number | null = null;
+  let memory: JobMemory | undefined;
   let timedOut = false;
   let cancelled = false;
   let stopping = false;
@@ -103,6 +104,7 @@ export async function executeOnWorker(options: ExecuteOptions): Promise<ExecuteO
         options.onOutput(event.text);
       } else {
         exitCode = event.code;
+        memory = event.memory;
         later(timing.exitWaitMs, () => proc.kill());
       }
     }
@@ -133,8 +135,8 @@ export async function executeOnWorker(options: ExecuteOptions): Promise<ExecuteO
     handle(parser.end());
 
     if (cancelled) return { kind: "cancelled" };
-    if (timedOut) return { kind: "timeout", code: exitCode };
-    if (exitCode !== null) return { kind: "exited", code: exitCode };
+    if (timedOut) return { kind: "timeout", code: exitCode, ...(memory ? { memory } : {}) };
+    if (exitCode !== null) return { kind: "exited", code: exitCode, ...(memory ? { memory } : {}) };
     const failure = describeRemoteFailure(exit);
     if (noDirectory) return { kind: "no_start", reason: "failed", detail: "the job's directory is missing on the worker" };
     if (!started) {

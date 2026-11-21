@@ -6,6 +6,7 @@ import { useMachineMeters } from "@/hooks/useMachineMeters";
 import { usageToneColor } from "@/lib/format";
 import { useI18n } from "@/lib/i18n";
 import {
+  foldSameHost,
   machineDisplayName,
   machineInitial,
   machineSeverity,
@@ -181,8 +182,9 @@ export const MachineMeters = forwardRef<HTMLButtonElement, MachineMetersProps>(f
     return () => observer.disconnect();
   }, []);
 
-  // This server's default name is stored in English; the bar shows it in the reader's language.
-  const machines = (live?.machines ?? []).map((machine) => ({ ...machine, name: machineDisplayName(machine, t) }));
+  // This server's default name is stored in English; the bar shows it in the reader's language. A worker that runs
+  // beside Cody on this server's own machine is part of this server's entry, not a machine of its own.
+  const machines = foldSameHost(live?.machines ?? []).map((machine) => ({ ...machine, name: machineDisplayName(machine, t) }));
   const showDivider = followedByStats && !isMobile;
   const divider = showDivider ? DIVIDER_WIDTH : 0;
   const density: MeterDensity = pickMeterDensity(machines, room - divider, isMobile);
@@ -194,7 +196,8 @@ export const MachineMeters = forwardRef<HTMLButtonElement, MachineMetersProps>(f
       return t("machines.tooltip.state", { name: machine.name, state: t(machineStatusKey(machine.status)) });
     }
     const figures = barFigures(metrics);
-    return t(figures.scope === "cody" ? "machines.tooltip.readingCody" : "machines.tooltip.reading", {
+    const scope = figures.scope === "machine" ? "machines.tooltip.reading" : machine.guests ? "machines.tooltip.readingCodyWorkers" : "machines.tooltip.readingCody";
+    return t(scope, {
       name: machine.name,
       cpu: figures.cpu === null ? "…" : `${wholePercent(figures.cpu)}%`,
       memory: `${wholePercent(figures.mem)}%`,

@@ -534,3 +534,89 @@ ripgrep, jq) are on PATH. Host keys persist in `appdata/cody/ssh`, so the
 server identity survives image updates. The usual caveat applies: SSH here
 is root on the container with full access to `/data` and `/workspace` —
 keep the port on your LAN or behind a VPN.
+
+## Build worker (optional)
+
+A second container from the same image, started in worker mode, takes the
+builds and tests Cody's `run_on_worker` tool sends it. A runaway build is then
+killed inside the worker at its own memory limit (16 GiB in the template) at
+the lowest CPU priority, instead of taking memory from Cody or your other apps.
+The worker has no web UI and no network port: its sshd answers on a Unix socket
+in a folder only the Cody container shares with it. Cody's home is mounted
+read-only, so a job finds every toolchain, venv and neighbouring repository at
+the path it has in Cody; what builds write to caches goes to the worker's own
+disk. Protocol and scheduling: [agents/workers.md](agents/workers.md).
+
+1. **Zero swap (recommended).** Docker on Unraid runs in the root cgroup, so it
+   ignores `--memory-swap` with a warning and a capped container spills into
+   swap/zram instead of being stopped (moby #51480). Give the worker a parent
+   cgroup with swap off by adding this to `/boot/config/go` (back it up first)
+   and running the lines once by hand:
+
+   ```sh
+   # CODY-WORKER-CGROUP: zero swap for the Cody build worker (--cgroup-parent=/docker/cody-worker).
+   # Inside /docker because Unraid deletes empty top-level cgroups.
+   mkdir -p /sys/fs/cgroup/docker/cody-worker
+   echo +memory > /sys/fs/cgroup/cgroup.subtree_control
+   echo +memory > /sys/fs/cgroup/docker/cgroup.subtree_control
+   echo 0 > /sys/fs/cgroup/docker/cody-worker/memory.swap.max
+   ```
+
+   Check: `cat /sys/fs/cgroup/docker/cody-worker/memory.swap.max` prints `0`.
+   Cody's own container is not under it, so Cody itself can still use swap.
+2. **Container.** Copy [`docker/unraid-worker-template.xml`](../docker/unraid-worker-template.xml)
+   to `/boot/config/plugins/dockerMan/templates-user/my-CodyWorker.xml`, then
+   Docker › Add Container › CodyWorker. Adjust the paths if your App Data is
+   not `/mnt/user/appdata/cody`, and the memory limit in Extra Parameters
+   (`--memory` and `--memory-swap` together). `seccomp=unconfined` is what lets
+   a job see Cody's paths (user namespaces); `--oom-score-adj=1000` makes the
+   worker the first thing the kernel stops if the whole server runs short.
+3. **Key and alias, inside Cody** (its terminal):
+
+   ```sh
+   ssh-keygen -t ed25519 -N '' -C cody-worker -f ~/.ssh/cody_unraid_worker_ed25519
+   cp ~/.ssh/cody_unraid_worker_ed25519.pub /data/workers/unraid/authorized_keys
+   echo "cody-worker-unraid $(cut -d' ' -f1,2 /data/workers/unraid/ssh_host_ed25519_key.pub)" > ~/.ssh/cody_unraid_worker_known_hosts
+   ```
+
+   Save a small ProxyCommand as `~/.ssh/cody-unix-proxy` (it connects to the
+   socket and hands the connection to ssh):
+
+   ```python
+   #!/usr/bin/env python3
+   import socket, sys
+   conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+   try:
+       conn.connect(sys.argv[1])
+   except OSError as error:
+       sys.exit(f"cody-worker: {sys.argv[1]} does not answer ({error.strerror}): is the worker container running?")
+   socket.send_fds(socket.fromfd(1, socket.AF_UNIX, socket.SOCK_STREAM), [b"\0"], [conn.fileno()])
+   ```
+
+   and add to `~/.ssh/config`:
+
+   ```
+   Host cody-worker-unraid
+       HostName cody-worker-unraid
+       User root
+       IdentityFile ~/.ssh/cody_unraid_worker_ed25519
+       IdentitiesOnly yes
+       PreferredAuthentications publickey
+       UserKnownHostsFile ~/.ssh/cody_unraid_worker_known_hosts
+       StrictHostKeyChecking yes
+       ProxyCommand /usr/bin/python3 ~/.ssh/cody-unix-proxy /data/workers/unraid/ssh.sock
+       ProxyUseFdpass yes
+   ```
+
+   `ssh cody-worker-unraid cat /etc/cody-worker.json` should print the
+   worker's name, CPUs, memory, slots and tools.
+4. **Register it.** Settings › Machines › Add machine, destination
+   `cody-worker-unraid`, switch on **Use as worker**, then **Check worker**.
+   The top bar shows it as part of this server (the same kernel); the Machines
+   panel splits this server's card into Cody, the worker and the whole machine.
+
+Tools that live at a fixed path rather than on `PATH` (an Android NDK, a Swift
+toolchain) go in **Extra tools**; extra build caches under Cody's home in
+**Extra caches**. To remove the worker: delete it in Settings › Machines, remove
+the container, its `appdata/cody-worker` folder, the `Host` block and keys in
+Cody's `~/.ssh`, and the `CODY-WORKER-CGROUP` lines from `/boot/config/go`.

@@ -29,6 +29,20 @@ function remoteFault(exit: RemoteExit, what: string): { reason: MachineReason; d
   return describeRemoteFailure(exit);
 }
 
+/**
+ * What tar here says when the far end of its pipe went away: its stdout is ssh's stdin, so a
+ * worker that vanishes (a stopped container, a dropped connection, a disk that filled up over there)
+ * shows up as a failed WRITE of the archive. Nothing in these lines is about the files on this side.
+ */
+const DESTINATION_WRITE_ERROR = /cannot write: (?:broken pipe|connection reset by peer|connection timed out|connection aborted|connection refused|no route to host|network is unreachable|transport endpoint is not connected)/i;
+const DESTINATION_WRITE_FOLLOWUP = /error is not recoverable|exiting with failure status|child returned status/i;
+
+/** True when every complaint tar made is that it could not write the archive to the worker. */
+export function onlyDestinationWriteErrors(stderr: string): boolean {
+  const lines = stderr.split("\n").map((line) => line.trim()).filter(Boolean);
+  return lines.some((line) => DESTINATION_WRITE_ERROR.test(line)) && lines.every((line) => DESTINATION_WRITE_ERROR.test(line) || DESTINATION_WRITE_FOLLOWUP.test(line));
+}
+
 // ── Out ──────────────────────────────────────────────────────────────────────
 
 export interface CopyInOptions {
@@ -105,8 +119,13 @@ export async function copyIn(options: CopyInOptions): Promise<CopyInResult> {
 
   if (cancelled) return { ok: false, fault: "cancelled" };
   // tar ending on its own with an error status and a message is a problem with the files here;
-  // tar killed because ssh went away says nothing.
+  // tar killed because ssh went away says nothing. tar that could only not WRITE to ssh, while ssh
+  // itself failed, is the worker (or the way to it) going away, not a problem with the files.
   if (tar && !tar.ok && tar.code !== null && tar.stderr.trim()) {
+    if (!stalled && (exit.code !== 0 || pipeError) && onlyDestinationWriteErrors(tar.stderr)) {
+      const remote = exit.code !== 0 ? remoteFault(exit, "tar") : { reason: "dropped" as const, detail: "" };
+      return { ok: false, fault: "worker", reason: remote.reason, detail: remote.detail || pipeError?.message || firstStderrLine(tar.stderr) };
+    }
     return { ok: false, fault: "local", message: `tar could not pack the project: ${firstStderrLine(tar.stderr)}` };
   }
   if (stalled) {

@@ -64,18 +64,19 @@ export const REAL_TIMERS: Timers = {
 // ── Collectors ───────────────────────────────────────────────────────────────
 
 async function readProcFiles(): Promise<RawSample | null> {
-  const [stat, meminfo, loadavg, ownLines] = await Promise.all([
+  const [stat, meminfo, loadavg, ownLines, boot] = await Promise.all([
     readFile("/proc/stat", "utf8"),
     readFile("/proc/meminfo", "utf8"),
     readFile("/proc/loadavg", "utf8").catch(() => ""),
     readOwnLines(),
+    readFile("/proc/sys/kernel/random/boot_id", "utf8").catch(() => ""),
   ]);
   return buildRawSample({
     cpuLine: stat.split("\n", 1)[0] ?? null,
     memLines: meminfo.split("\n"),
     loadLine: loadavg.split("\n", 1)[0] ?? null,
     cores: countCores(stat),
-    ownLines,
+    ownLines: [...ownLines, `boot ${boot.trim()}`],
   });
 }
 
@@ -286,6 +287,9 @@ export class MachineSampler {
   private running = false;
   private cancelIdleStop: (() => void) | null = null;
   private cancelEmit: (() => void) | null = null;
+  /** The newest kernel boot id each machine reported. Kept through outages and restarts of the sampler: a worker that
+   * shares this server's machine stays shown with it while it is down. */
+  private readonly boots = new Map<string, string>();
 
   constructor(private readonly deps: SamplerDeps) {}
 
@@ -309,18 +313,29 @@ export class MachineSampler {
   /** Every machine, in the order Settings lists them. */
   states(): MachineState[] {
     if (!this.running) {
-      return this.deps.readConfig().map((config): MachineState => {
+      return this.markSameHost(this.deps.readConfig().map((config): MachineState => {
         const state: MachineState = {
           id: config.id, name: config.name, kind: config.kind, status: "connecting", reason: "starting", metrics: null,
         };
         if (config.worker && this.deps.workerState) state.worker = this.deps.workerState(config.id);
         return state;
-      });
+      }));
     }
     const states: MachineState[] = [];
     for (const id of this.order) {
       const runtime = this.runtimes.get(id);
       if (runtime) states.push(stateOf(runtime, this.deps.workerState));
+    }
+    return this.markSameHost(states);
+  }
+
+  /** An ssh machine whose kernel is this server's own (the same boot id: a container beside Cody's) points at it. */
+  private markSameHost(states: MachineState[]): MachineState[] {
+    const local = states.find((state) => state.kind === "local");
+    const boot = local ? this.boots.get(local.id) : undefined;
+    if (!local || !boot) return states;
+    for (const state of states) {
+      if (state.kind === "ssh" && this.boots.get(state.id) === boot) state.sameHostAs = local.id;
     }
     return states;
   }
@@ -335,6 +350,7 @@ export class MachineSampler {
       if (wanted.has(id)) continue;
       runtime.collector?.stop();
       this.runtimes.delete(id);
+      this.boots.delete(id);
     }
     this.order = configs.map((config) => config.id);
     for (const config of configs) {
@@ -344,6 +360,7 @@ export class MachineSampler {
       } else if (existing.config.kind !== config.kind || existing.config.destination !== config.destination) {
         existing.collector?.stop();
         this.runtimes.delete(config.id);
+        this.boots.delete(config.id);
         this.createRuntime(config);
       } else {
         existing.config = config;
@@ -388,6 +405,7 @@ export class MachineSampler {
           if (!live()) return;
           runtime.metrics = metricsFrom(runtime.raw, raw, this.deps.timers.now());
           runtime.raw = raw;
+          if (runtime.metrics.bootId) this.boots.set(config.id, runtime.metrics.bootId);
           runtime.status = "online";
           runtime.reason = null;
           this.scheduleEmit();

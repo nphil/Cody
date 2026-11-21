@@ -37,7 +37,7 @@ import { checkMachineDestination, type MachineReason } from "./types";
  */
 export const SAMPLE_SCRIPT =
   '[ -r /proc/stat ] || { echo @NOPROC; exit 0; }; n=$(grep -c "^cpu[0-9]" /proc/stat); p=$(nproc 2>/dev/null || echo $n); '
-  + "c=/sys/fs/cgroup; g=0; "
+  + "c=/sys/fs/cgroup; g=0; b=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null); "
   + "if [ -r $c/cpu.stat ] && [ -r $c/memory.current ]; then g=2; "
   + "elif [ -r $c/cpuacct/cpuacct.usage ] && [ -r $c/memory/memory.usage_in_bytes ]; then g=1; k=$c/cpuacct; q=$c/cpu; m=$c/memory; "
   + "elif [ -r $c/cpu,cpuacct/cpuacct.usage ] && [ -r $c/memory/memory.usage_in_bytes ]; then g=1; k=$c/cpu,cpuacct; q=$k; m=$c/memory; fi; "
@@ -45,8 +45,9 @@ export const SAMPLE_SCRIPT =
   + 'w() { grep -E "^$1 " $2 2>/dev/null | sed "s/^/cg$g /"; }; '
   + "exec 3<&0; (cat <&3 >/dev/null; kill $$) & d=1; "
   + 'while :; do echo "@S $n"; head -n 1 /proc/stat; grep -E "^(MemTotal|MemFree|MemAvailable|Buffers|Cached):" /proc/meminfo; cat /proc/loadavg; '
-  + 'read u x < /proc/uptime; echo "up $u"; '
+  + 'read u x < /proc/uptime; echo "up $u"; echo "boot $b"; '
   + 'if [ $g = 2 ]; then echo "cg2 nproc $p"; w usage_usec $c/cpu.stat; v memory.current $c/memory.current; v memory.max $c/memory.max; v cpu.max $c/cpu.max; w inactive_file $c/memory.stat; '
+  + 'w oom_kill $c/memory.events; [ -r $c/memory.pressure ] && read e f h < $c/memory.pressure && echo "cg2 psi_some ${f#avg10=}"; '
   + 'elif [ $g = 1 ]; then echo "cg1 nproc $p"; v cpuacct.usage $k/cpuacct.usage; v memory.usage_in_bytes $m/memory.usage_in_bytes; v memory.limit_in_bytes $m/memory.limit_in_bytes; '
   + 'v cpu.cfs_quota_us $q/cpu.cfs_quota_us; v cpu.cfs_period_us $q/cpu.cfs_period_us; w total_inactive_file $m/memory.stat; fi; '
   + "echo @E; sleep $d; d=2; done";

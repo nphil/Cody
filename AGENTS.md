@@ -165,6 +165,7 @@ app/api/
   machines/stream/route.ts  GET SSE machine status
   machines/test/route.ts  POST ssh sample (admin)
   machines/worker-check/route.ts  POST read a worker's /etc/cody-worker.json over ssh (admin)
+  machines/memory/route.ts  GET the week's memory events + jobs per machine in 24 h (any signed-in person)
   internal/workers/route.ts  POST run_on_worker for ACP engines and omp agents incl. helpers (ndjson progress; capability-token auth, scratch-folder capability for omp)
   statistics/route.ts  GET usage stats / ?session=
   ../statistics/page.tsx  Statistics page
@@ -204,7 +205,7 @@ lib/
     client.ts  fetch-based client over both hosts
     tool.ts  `forge` host tool (omp only; lib/rpc-manager.ts, bin/cody-display-mcp.js)
   disk/  disk hygiene: scratch.ts, janitor.ts, sweep.ts, walk.ts, transcripts.ts, mentions.ts, gate.ts, status.ts, settings.ts; no `@/`
-  machines/  top-bar meters + worker state; browser-safe types.ts/present.ts; server only proc.ts, cgroup.ts, ssh.ts, store.ts, sampler.ts, jobs.ts (job counts + checks on globalThis); no `@/` (bin/cody-server.js)
+  machines/  top-bar meters + worker state; browser-safe types.ts/present.ts; server only proc.ts, cgroup.ts, ssh.ts, store.ts, sampler.ts, jobs.ts (job counts + checks on globalThis), memory.ts (pure memory rules), memory-store.ts (ledger `cody-worker-memory.json`), memory-watch.ts (this server's cgroup watch + `memoryHigh`); no `@/` (bin/cody-server.js)
   workers/  `run_on_worker`: definition.ts (the words the agent reads), access.ts (omp agents' token), tool.ts (parser + runOnWorker), run.ts (one job), scheduler.ts (FIFO queue), placement.ts, health.ts (check + monitor), facts.ts, files.ts, tarball.ts, transfer.ts, execute.ts, remote.ts (incl. same-path `JOB_WRAPPER`), shell.ts (the ssh seam), output.ts, progress.ts, local.ts, format.ts, live.ts, types.ts; no `@/`; tests use local-shell.mjs
   live-tool-output.ts  live tail of a running tool: server slim + throttle (`ToolUpdateThrottle`, in rpc-manager) and the page store (`LiveToolOutputStore`); browser-safe, no `@/`. UI: hooks/useLiveToolOutput.ts, components/LiveToolTail.tsx, components/ElapsedClock.tsx
   engine-guard.ts  requireEngine()/requireCapability(): omp-only routes 400
@@ -586,6 +587,9 @@ Details: docs/agents/usage-monitoring.md
 - Only the exit marker proves a command ended. No start marker = never ran (next worker); start but no exit = dropped: rerun ONCE elsewhere or here, second loss = error. Never report a half result as success.
 - Results come back through Cody's own tar reader (`tarball.ts`): regular files/dirs under the named `results` paths only; never `..`, absolute, `.git` or a link out.
 - One FIFO queue per server (`globalThis.__codyWorkerScheduler`); busy + `fallbackLocal` (default true) runs here and says so. No `@/` under `lib/workers/`.
+- Memory never refuses a job, it only reorders: need = biggest of the last 3 runs × 1.2; a worker that ran out of memory goes last for 5 min; a job killed for memory reruns only on a machine with MORE memory. A worker on Cody's own machine (`sameHost`, same boot id) ranks 2 cores lower.
+- Sibling Cargo path dependencies outside the repository are copied too: each sibling git repository whole, or only its crates when the whole would pass the 1 GiB / 100,000-file limit.
+- A worker beside Cody = Cody's image with entrypoint `docker/worker/cody-worker` (+ `listen.py`, template `docker/unraid-worker-template.xml`): Cody's home read-only, caches in its OWN list writable, sshd on a Unix socket. A remote worker's toolchains: `scripts/sync-worker-mirror.sh` (needs rsync both ends).
 Details: docs/agents/workers.md
 
 ### Statistics page (`lib/statistics/`, `components/statistics/`, `app/statistics/`)

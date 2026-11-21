@@ -2,18 +2,25 @@ import { spawn, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { engineChildEnv } from "../harness/provider-keys";
+import { parseOomKills } from "../machines/memory";
 import type { WorkerArch } from "../machines/types";
+import type { JobMemory } from "./remote";
 
 /**
  * The same job, run on this server: what happens when no worker can take it
  * and the agent allowed that (`fallbackLocal`, the default). It runs in the
  * workspace itself, like the agent's own shell tool would, so nothing is copied
- * in or out; it is still niced and still gets the output streamed back.
+ * in or out; it is still niced and still gets the output streamed back. It is
+ * also the first thing the kernel kills when this server runs out of memory
+ * (`oom_score_adj` 1000), so Cody and its chats are not, and its peak memory
+ * and any out-of-memory kill come back with the result, as on a worker.
  */
 
 const KILL_GRACE_MS = 5_000;
 /** How long a command that has ended gets to deliver output still in the pipe when something it left behind holds it open. */
 const OUTPUT_GRACE_MS = 1_500;
+/** How often the memory a job's processes hold is added up. */
+const PEAK_EVERY_MS = 2_000;
 
 /** Tool names an agent may use that are not the name of the program. */
 const TOOL_PROGRAMS: Readonly<Record<string, readonly string[]>> = {
@@ -77,6 +84,8 @@ export interface LocalRunOptions {
   /** Stop the command after this long. */
   timeoutMs: number;
   signal?: AbortSignal;
+  /** This server's control group (tests point it at a fake one). */
+  cgroupRoot?: string;
 }
 
 export interface LocalRunResult {
@@ -88,6 +97,40 @@ export interface LocalRunResult {
   aborted: boolean;
   /** The command could not be started. */
   startError: string | null;
+  /** Its peak memory (null before the first reading, two seconds in) and the out-of-memory kills in this server's control group while it ran (null when unknown). */
+  memory: JobMemory;
+}
+
+/** The memory every process of one session holds, bytes. A job is started detached, so it leads its own session and the session id is its pid. */
+export function sessionBytes(sessionId: number, procRoot = "/proc"): number {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(procRoot);
+  } catch {
+    return 0;
+  }
+  let total = 0;
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    try {
+      const stat = fs.readFileSync(`${procRoot}/${entry}/stat`, "utf8");
+      // `pid (name) state ppid pgrp session …`; the name may hold spaces and brackets.
+      if (Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[3]) !== sessionId) continue;
+      const kb = /^VmRSS:\s+(\d+) kB$/m.exec(fs.readFileSync(`${procRoot}/${entry}/status`, "utf8"))?.[1];
+      if (kb) total += Number(kb) * 1024;
+    } catch {
+      // it ended in between
+    }
+  }
+  return total;
+}
+
+function oomKillsIn(cgroupRoot: string): number | null {
+  try {
+    return parseOomKills(fs.readFileSync(`${cgroupRoot}/memory.events`, "utf8"));
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -102,7 +145,9 @@ export function runLocalCommand(options: LocalRunOptions): Promise<LocalRunResul
   let finished = false;
 
   const env = engineChildEnv(undefined, { scratchDir: options.scratchDir ?? null });
-  const inner = ["-c", 'exec sh -c "$0" 2>&1', options.command];
+  const inner = ["-c", '{ echo 1000 > /proc/self/oom_score_adj; } 2>/dev/null; exec sh -c "$0" 2>&1', options.command];
+  const cgroupRoot = options.cgroupRoot ?? "/sys/fs/cgroup";
+  const oomBefore = oomKillsIn(cgroupRoot);
   const niced = onPath("nice", env.PATH);
   let child: ChildProcess;
   try {
@@ -110,7 +155,7 @@ export function runLocalCommand(options: LocalRunOptions): Promise<LocalRunResul
       ? spawn("nice", ["-n", "19", "sh", ...inner], { cwd: options.cwd, env, detached: true, stdio: ["ignore", "pipe", "ignore"], windowsHide: true })
       : spawn("sh", inner, { cwd: options.cwd, env, detached: true, stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
   } catch (error) {
-    resolve({ code: null, signal: null, timedOut: false, aborted: false, startError: error instanceof Error ? error.message : String(error) });
+    resolve({ code: null, signal: null, timedOut: false, aborted: false, startError: error instanceof Error ? error.message : String(error), memory: { peakBytes: null, oomKills: null } });
     return promise;
   }
 
@@ -146,6 +191,11 @@ export function runLocalCommand(options: LocalRunOptions): Promise<LocalRunResul
   };
   if (options.signal?.aborted) onAbort();
   else options.signal?.addEventListener("abort", onAbort, { once: true });
+  let peak = 0;
+  const sampler = setInterval(() => {
+    if (child.pid) peak = Math.max(peak, sessionBytes(child.pid));
+  }, PEAK_EVERY_MS);
+  sampler.unref();
 
   child.stdout?.setEncoding("utf8");
   child.stdout?.on("data", (chunk: string) => options.onOutput(chunk));
@@ -155,11 +205,14 @@ export function runLocalCommand(options: LocalRunOptions): Promise<LocalRunResul
     finished = true;
     clearTimeout(timer);
     clearTimeout(hardKill);
+    clearInterval(sampler);
     options.signal?.removeEventListener("abort", onAbort);
     // Whatever the command left running in its group goes with it, which also lets go of the output pipe.
     stopGroup("SIGKILL");
     child.stdout?.destroy();
-    resolve({ code, signal, timedOut, aborted, startError });
+    const oomAfter = oomKillsIn(cgroupRoot);
+    const oomKills = oomBefore !== null && oomAfter !== null ? Math.max(0, oomAfter - oomBefore) : null;
+    resolve({ code, signal, timedOut, aborted, startError, memory: { peakBytes: peak > 0 ? peak : null, oomKills } });
   };
   child.once("error", (error) => settle(null, null, error.message));
   // The command ended; something it left behind may still hold the output pipe open, so `close` is waited for only briefly.

@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>CodyWorker</Name>
+  <Repository>ghcr.io/nphil/cody:latest</Repository>
+  <Registry>https://ghcr.io/nphil/cody</Registry>
+  <Network>bridge</Network>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/nphil/Cody/issues</Support>
+  <Project>https://github.com/nphil/Cody</Project>
+  <Overview>A build worker for the Cody container on this server. Cody's run_on_worker tool sends builds and tests here, so a runaway build is capped at this container's memory limit and the lowest CPU priority instead of taking memory from Cody or your other apps. Same image as Cody, started in worker mode: no web UI and no network port. Its sshd answers on a socket in a folder only the Cody container shares with it, so only Cody can reach it (key-only). Cody's home is mounted read-only, so jobs find every toolchain, venv and neighbouring repository at the path it has in Cody; what builds write to caches stays on this worker's own disk. Setup: docs/unraid.md, "Build worker".</Overview>
+  <Category>Tools: Productivity:</Category>
+  <WebUI/>
+  <TemplateURL/>
+  <Icon>https://raw.githubusercontent.com/nphil/Cody/main/docker/icon.png</Icon>
+  <ExtraParams>--entrypoint=/usr/local/bin/cody-worker --hostname=cody-worker --restart unless-stopped --memory=16g --memory-swap=16g --cgroup-parent=/docker/cody-worker --cpu-shares=2 --pids-limit=8192 --oom-score-adj=1000 --security-opt seccomp=unconfined --security-opt no-new-privileges --tmpfs /data:size=1m,mode=0755 --tmpfs /workspace:size=1m,mode=0755 --health-cmd="python3 /usr/local/lib/cody-worker/listen.py --check /run/cody-worker/ssh.sock" --health-interval=60s --health-timeout=15s --health-start-period=10m</ExtraParams>
+  <PostArgs/>
+  <DonateText/>
+  <DonateLink/>
+  <Requires>The Cody container: it shares the folder below and puts its public key there. Recommended: the zero-swap block for /boot/config/go in docs/unraid.md ("Build worker"), because Docker on Unraid ignores --memory-swap.</Requires>
+  <Config Name="Worker disk" Target="/srv/cody-work" Default="/mnt/user/appdata/cody-worker/work" Mode="rw" Description="The worker's own disk: job copies, build folders kept between runs, and its own caches (cargo registry, npm, uv, ...)." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/cody-worker/work</Config>
+  <Config Name="Cody home (read-only)" Target="/srv/cody-work/root/data/home" Default="/mnt/user/appdata/cody/home" Mode="ro" Description="Cody's home (its App Data folder + /home), shown read-only at /data/home inside each job: toolchains, venvs and neighbouring repositories at the same paths as in Cody." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/cody/home</Config>
+  <Config Name="Shared with Cody" Target="/run/cody-worker" Default="/mnt/user/appdata/cody/workers/unraid" Mode="rw" Description="The worker's door: its ssh socket and host key, and Cody's public key (authorized_keys). Inside Cody it is /data/workers/unraid." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/cody/workers/unraid</Config>
+  <Config Name="Temp files" Target="/tmp" Default="/mnt/user/appdata/cody-worker/tmp" Mode="rw" Description="Kept off the Docker image so leftover test files cannot fill it." Type="Path" Display="advanced" Required="false" Mask="false">/mnt/user/appdata/cody-worker/tmp</Config>
+  <Config Name="Worker name" Target="CODY_WORKER_NAME" Default="cody-worker" Mode="" Description="The name in /etc/cody-worker.json (letters, digits, '.', '_' and '-')." Type="Variable" Display="advanced" Required="false" Mask="false">cody-worker</Config>
+  <Config Name="Job slots" Target="CODY_WORKER_SLOTS" Default="" Mode="" Description="Jobs at once. Empty: a quarter of the CPUs." Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="Only when idle" Target="CODY_WORKER_ONLY_WHEN_IDLE" Default="" Mode="" Description="1: Cody sends jobs here only when this machine is otherwise idle." Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="Extra tools" Target="CODY_WORKER_TOOLS_EXTRA" Default="" Mode="" Description="name=/absolute/path pairs for tools that are not on PATH but that agents use at a fixed path, e.g. swift=/data/home/.cache/toolchains/swift/usr/bin/swift. Advertised when the path exists." Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="Extra caches" Target="CODY_WORKER_OWN_EXTRA" Default="" Mode="" Description="Further folders under Cody's home that builds write to (relative paths, e.g. go .cache/gradle-home). Each gets this worker's own writable copy, starting empty." Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="Extra packages" Target="CODY_WORKER_PACKAGES" Default="build-essential pkg-config patchelf file bzip2" Mode="" Description="Debian packages installed when the container starts (downloads kept on the worker disk). The Cody image has no C compiler or make of its own." Type="Variable" Display="advanced" Required="false" Mask="false">build-essential pkg-config patchelf file bzip2</Config>
+  <Config Name="TZ" Target="TZ" Default="" Mode="" Description="Time zone for jobs, e.g. Europe/Berlin. Empty: UTC." Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+</Container>

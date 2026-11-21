@@ -6,9 +6,11 @@ import {
   type MachineReason,
   type MachineState,
   type MachineStatus,
+  type OwnMetrics,
   type WorkerFacts,
   type WorkerProblem,
 } from "./types";
+import type { MemoryEvent } from "./memory";
 
 /**
  * What the top bar, its dropdown and the Settings card agree on when they put
@@ -203,4 +205,120 @@ export function workerFactPieces(
  * long toolchain list does not push the card off the screen. */
 export function visibleWorkerTools(tools: readonly string[], max = 8): { shown: string[]; hidden: number } {
   return { shown: tools.slice(0, max), hidden: Math.max(0, tools.length - max) };
+}
+
+// ── This server's machine, shared with workers ───────────────────────────────
+// A worker can run beside Cody on this server's own machine (a container next
+// to Cody's; the sampler marks it `sameHostAs`). The top bar shows that machine
+// once, the dropdown shows how it splits.
+
+/** One part of a machine, on the machine's own scale. */
+export interface MachinePart {
+  /** 0–100 of ALL the machine's cores; null until a second reading exists. */
+  cpuPercent: number | null;
+  memUsedBytes: number;
+  /** How much of the last ten seconds something in it waited on memory, percent; null when it did not say. */
+  pressure: number | null;
+}
+
+/** This server's machine three ways: Cody, the workers beside it, and the whole machine, which holds both. */
+export interface HostSplit {
+  /** The machine's cores: every CPU figure here is a share of all of them. */
+  cores: number;
+  memTotalBytes: number;
+  cody: MachinePart;
+  /** The workers beside Cody that are online and show their own share, together; null when none does. */
+  workers: MachinePart | null;
+  machine: { cpuPercent: number | null; memUsedBytes: number };
+}
+
+function partOf(own: OwnMetrics, cores: number): MachinePart {
+  return {
+    cpuPercent: own.cpuPercent === null ? null : (own.cpuPercent * own.cores) / cores,
+    memUsedBytes: own.memUsedBytes,
+    pressure: own.pressure ?? null,
+  };
+}
+
+/** The machine `host` runs on, split between Cody and `guests`; null when this server shows no share of its own (its
+ * numbers are then the whole machine's, the workers' included) or has no reading. */
+export function splitHost(host: MachineState, guests: readonly MachineState[]): HostSplit | null {
+  const metrics = host.status === "online" ? host.metrics : null;
+  if (!metrics?.own) return null;
+  const cores = metrics.cores ?? metrics.own.cores;
+  const cody = partOf(metrics.own, cores);
+  const parts = guests.flatMap((guest) => (guest.status === "online" && guest.metrics?.own ? [partOf(guest.metrics.own, cores)] : []));
+  const workers: MachinePart | null = parts.length === 0
+    ? null
+    : {
+      cpuPercent: parts.some((part) => part.cpuPercent === null) ? null : parts.reduce((sum, part) => sum + (part.cpuPercent ?? 0), 0),
+      memUsedBytes: parts.reduce((sum, part) => sum + part.memUsedBytes, 0),
+      pressure: parts.reduce<number | null>((most, part) => (part.pressure === null ? most : Math.max(most ?? 0, part.pressure)), null),
+    };
+  const together = cody.memUsedBytes + (workers?.memUsedBytes ?? 0);
+  return {
+    cores,
+    memTotalBytes: metrics.memTotalBytes,
+    cody,
+    workers,
+    machine: { cpuPercent: metrics.cpuPercent, memUsedBytes: Math.max(machineMemoryUsedBytes(metrics), together) },
+  };
+}
+
+/** Each machine with the workers that run on it beside Cody, in list order; such a worker is not listed on its own. */
+export function hostGroups(machines: readonly MachineState[]): { machine: MachineState; guests: MachineState[] }[] {
+  const ids = new Set(machines.map((machine) => machine.id));
+  return machines
+    .filter((machine) => !(machine.sameHostAs && ids.has(machine.sameHostAs)))
+    .map((machine) => ({ machine, guests: machines.filter((other) => other.sameHostAs === machine.id) }));
+}
+
+/** A machine as the top bar draws it; `guests` are the workers folded into it. */
+export type ShownMachine = MachineState & { guests?: readonly MachineState[] };
+
+/**
+ * The top bar's list: a worker beside Cody is folded into this server's entry,
+ * whose own figures become Cody's and its workers' together, as shares of the
+ * whole machine. Without a share of its own, this server's numbers already are
+ * the whole machine's, workers included, and are left as they are.
+ */
+export function foldSameHost(machines: readonly MachineState[]): ShownMachine[] {
+  return hostGroups(machines).map(({ machine, guests }) => {
+    if (guests.length === 0) return machine;
+    const split = splitHost(machine, guests);
+    if (!split || !machine.metrics) return { ...machine, guests };
+    const memUsedBytes = split.cody.memUsedBytes + (split.workers?.memUsedBytes ?? 0);
+    const own: OwnMetrics = {
+      cpuPercent: split.cody.cpuPercent === null ? null : split.cody.cpuPercent + (split.workers?.cpuPercent ?? 0),
+      cores: split.cores,
+      memUsedBytes,
+      memTotalBytes: split.memTotalBytes,
+      memPercent: split.memTotalBytes > 0 ? (memUsedBytes / split.memTotalBytes) * 100 : 0,
+      memLimitBytes: null,
+    };
+    return { ...machine, guests, metrics: { ...machine.metrics, own } };
+  });
+}
+
+/** A memory event in the reader's language, from its figures; one saved without them keeps its own (English) words. */
+export function memoryEventWords(
+  event: MemoryEvent,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+  tn: (key: string, count: number, vars?: Record<string, string | number>) => string,
+): string {
+  const detail = event.detail;
+  if (!detail) return event.text;
+  switch (detail.what) {
+    case "killed":
+      return tn("machines.memory.killed", detail.count, { used: formatGigabytes(detail.usedBytes), limit: formatGigabytes(detail.limitBytes) });
+    case "high": {
+      const percent = detail.limitBytes > 0 ? Math.round((detail.usedBytes / detail.limitBytes) * 100) : 0;
+      const words = t("machines.memory.high", { used: formatGigabytes(detail.usedBytes), limit: formatGigabytes(detail.limitBytes), percent });
+      return detail.biggest.length > 0 ? `${words} ${t("machines.memory.biggest", { list: detail.biggest.join(", ") })}` : words;
+    }
+    case "cooldown":
+      return t(event.kind === "oom" ? "machines.memory.cooldownOom" : "machines.memory.cooldownPressure", { minutes: detail.minutes });
+    case "job":
+      return detail.peakBytes === null ? t("machines.memory.job") : t("machines.memory.jobPeak", { peak: formatGigabytes(detail.peakBytes) });
+  }
 }

@@ -23,6 +23,8 @@ export interface RawSample {
   load1: number | null;
   /** Cody's own container (its cgroup); null when the machine does not show one. */
   own: OwnRaw | null;
+  /** The kernel's boot id (a `boot <id>` line), when the collector printed one. */
+  bootId?: string;
 }
 
 /** One reading of the control group Cody runs in. On a Docker host or a
@@ -39,6 +41,10 @@ export interface OwnRaw {
   memUsedBytes: number;
   /** The group's memory limit; null when there is none. */
   memLimitBytes: number | null;
+  /** cgroup v2 `oom_kill`: processes killed for memory in the group so far. */
+  oomKills?: number;
+  /** cgroup v2 memory PSI `some avg10`, percent. */
+  pressure?: number;
 }
 
 /** `cpu  user nice system idle iowait irq softirq steal guest guest_nice`.
@@ -155,12 +161,16 @@ export function parseOwn(lines: Iterable<string>, fallbackCores: number | null):
   const visible = ownNumber(values, "nproc") ?? fallbackCores;
   const cores = quotaCores !== null ? (visible !== null ? Math.min(quotaCores, visible) : quotaCores) : visible;
   if (cores === null || !(cores > 0)) return null;
+  const oomKills = version === 2 ? ownNumber(values, "oom_kill") : null;
+  const pressure = version === 2 ? values.get("psi_some") ?? "" : "";
   return {
     cpuUsec,
     clockMs: uptime * 1000,
     cores,
     memUsedBytes: Math.max(0, memCurrent - (inactive ?? 0)),
     memLimitBytes: limit !== null && limit > 0 ? limit : null,
+    ...(oomKills !== null ? { oomKills } : {}),
+    ...(/^\d+(?:\.\d+)?$/.test(pressure) ? { pressure: Number(pressure) } : {}),
   };
 }
 
@@ -171,19 +181,26 @@ export function buildRawSample(input: {
   memLines: Iterable<string>;
   loadLine: string | null;
   cores: number | null;
-  /** The `cg1`/`cg2`/`up` lines (see {@link parseOwn}); none when the machine has no cgroup. */
+  /** The `cg1`/`cg2`/`up` lines (see {@link parseOwn}) and a `boot <id>` line; none when the machine has no cgroup. */
   ownLines?: Iterable<string>;
 }): RawSample | null {
   const cpu = input.cpuLine === null ? null : parseCpuTimes(input.cpuLine);
   const mem = parseMeminfo(input.memLines);
   if (!cpu || !mem) return null;
+  const ownLines = input.ownLines ? [...input.ownLines] : null;
+  let bootId: string | undefined;
+  for (const line of ownLines ?? []) {
+    const match = /^boot ([0-9a-f-]{8,64})$/.exec(line.trim());
+    if (match) bootId = match[1];
+  }
   return {
     cpu,
     cores: input.cores,
     memTotalKb: mem.totalKb,
     memAvailableKb: mem.availableKb,
     load1: input.loadLine === null ? null : parseLoad1(input.loadLine),
-    own: input.ownLines ? parseOwn(input.ownLines, input.cores) : null,
+    own: ownLines ? parseOwn(ownLines, input.cores) : null,
+    ...(bootId ? { bootId } : {}),
   };
 }
 
@@ -223,6 +240,8 @@ function ownMetricsFrom(previous: RawSample | null, next: RawSample): OwnMetrics
     memTotalBytes,
     memPercent: Math.round((memUsedBytes / memTotalBytes) * 1000) / 10,
     memLimitBytes: own.memLimitBytes !== null && own.memLimitBytes < memTotalBytes ? own.memLimitBytes : null,
+    ...(own.oomKills !== undefined ? { oomKills: own.oomKills } : {}),
+    ...(own.pressure !== undefined ? { pressure: own.pressure } : {}),
   };
 }
 
@@ -238,6 +257,7 @@ export function metricsFrom(previous: RawSample | null, next: RawSample, at: num
     memUsedBytes: usedKb * 1024,
     memPercent: Math.round((usedKb / next.memTotalKb) * 1000) / 10,
     at,
+    ...(next.bootId ? { bootId: next.bootId } : {}),
   };
 }
 

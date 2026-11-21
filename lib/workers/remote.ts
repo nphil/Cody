@@ -75,35 +75,46 @@ export interface ExecMap {
 }
 
 /**
- * What runs inside the job's private namespace (or plainly, when there is no
- * namespace): `sh -c` with ten arguments: the job directory, the project path,
- * the anchor, the working directory (relative to the project), the work root,
- * the chat's scratch name, the project's cache id, `1` when a user and mount
- * namespace is in place, a note to print, and the command. No single quotes in
- * here: it is quoted twice on the way out.
+ * The script a mapped job runs in (inside its private user and mount
+ * namespace): `sh -c` with eleven arguments: the job directory, the project
+ * path, the anchor, the working directory (relative to the project), the work
+ * root, the chat's scratch name, the project's cache id, `1` when a user and
+ * mount namespace is in place, a note to print, the directories outside the
+ * project it needs (space-separated, see {@link buildExecCommand}), and the
+ * command. No single quotes in here: it is quoted twice on the way out.
  *
  * With a namespace it puts the worker's mirror of the anchor (`<work
- * root>/root<anchor>`, holding toolchains and caches at their server paths)
- * over the anchor's empty directory, the job's copy over the project's path
- * inside it, and a persistent directory over the Cargo `target` of the
- * project (the topmost Cargo.toml from the working directory up), so a second
- * build is incremental. It never covers something that has files in it. Any
- * step that fails leaves the command running in the plain job directory,
- * with one line saying why, so the agent knows its absolute paths do not
- * resolve. Then: the chat's persistent scratch, the worker's own `env.sh`
- * (when it has no syntax error), and the command.
+ * root>/root<anchor>`, holding toolchains and caches at their server paths,
+ * with whatever is mounted inside it) over the anchor's empty directory, the
+ * job's copy over the project's path inside it, the copies of the outside
+ * directories over theirs, and a persistent directory over the Cargo `target`
+ * of the project (the topmost Cargo.toml from the working directory up), so a
+ * second build is incremental. It never covers something writable that has
+ * files in it (a directory that holds only empty directories counts as empty:
+ * docker bind mounts leave such leftovers at the real paths); a read-only
+ * directory (a worker that shows the server's own files read-only) may be
+ * covered by the job's copy. Any step that fails
+ * leaves the command running in the plain job directory, with one line saying
+ * why, so the agent knows its absolute paths do not resolve. Then: the chat's
+ * persistent scratch, the worker's own `env.sh` (when it has no syntax error),
+ * and the command. The job is the first thing the kernel stops when the
+ * worker runs out of memory (`oom_score_adj` 1000).
  */
 const JOB_WRAPPER = [
-  "D=$1 M=$2 T=$3 R=$4 W=$5 K=$6 H=$7 NS=$8 NOTE=$9; shift 9; C=$1",
+  "D=$1 M=$2 T=$3 R=$4 W=$5 K=$6 H=$7 NS=$8 NOTE=$9; shift 9; X=$1 C=$2",
+  "{ echo 1000 > /proc/self/oom_score_adj; } 2>/dev/null",
+  // Empty means nothing but directories (find does not follow links; an error line counts as content): a job that ran
+  // docker with bind mounts leaves empty directories at the real paths, and those must not stop later jobs.
+  'bare() { [ -z "$(find "$1" ! -type d 2>&1 | head -n 1)" ]; }',
   "ok=0; why=",
   'if [ -n "$M" ]; then',
   '  if [ "$NS" != 1 ]; then why="user namespaces are not available"',
   '  elif [ ! -d "$T" ] || [ -L "$T" ]; then why="the worker has no empty $T directory"',
-  '  elif [ -n "$(ls -A "$T" 2>/dev/null)" ]; then why="$T is not empty on the worker"',
+  '  elif ! bare "$T"; then why="$T is not empty on the worker"',
   '  elif [ ! -d "$W/root$T" ]; then why="$W/root$T does not exist"',
-  '  elif ! mount --bind "$W/root$T" "$T" 2>/dev/null; then why="mounting $T failed"',
+  '  elif ! mount --rbind "$W/root$T" "$T" 2>/dev/null; then why="mounting $T failed"',
   '  elif [ -L "$M" ] || ! mkdir -p "$M" 2>/dev/null; then why="$M cannot be made"',
-  '  elif [ -n "$(ls -A "$M" 2>/dev/null)" ]; then why="$M is not empty on the worker"',
+  '  elif [ -w "$M" ] && ! bare "$M"; then why="$M is not empty on the worker"',
   '  elif ! mount --bind "$D" "$M" 2>/dev/null; then why="mounting the project at $M failed"',
   "  else ok=1; fi",
   "fi",
@@ -121,6 +132,13 @@ const JOB_WRAPPER = [
   '      mount --bind "$kd" "$M/$t" 2>/dev/null && touch "$W/keep/$H" 2>/dev/null',
   "    fi",
   "  fi",
+  "  for P in $X; do",
+  '    if [ -L "$P" ] || ! mkdir -p "$P" 2>/dev/null; then why="it cannot be made"',
+  '    elif [ -w "$P" ] && ! bare "$P"; then why="it is not empty on the worker"',
+  '    elif ! mount --bind "$D-ext$P" "$P" 2>/dev/null; then why="mounting it failed"',
+  "    else continue; fi",
+  '    echo "[cody] $P, which the project uses from outside itself, is not there on the worker ($why)"',
+  "  done",
   '  cd "$M/$R" 2>/dev/null || cd "$M"',
   'elif [ -n "$M" ]; then',
   '  echo "[cody] not run at $M ($why): it runs in $PWD on the worker, so paths under $T do not resolve here"',
@@ -141,15 +159,52 @@ const JOB_WRAPPER = [
   'exec sh -c "$C"',
 ].join("\n");
 
+/** Two paths where one is the other or holds it. */
+function overlaps(a: string, b: string): boolean {
+  return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+}
+
+/** Where a mapped job's project appears: at its own path under the worker's anchor that holds it, or (with why) in the job directory. */
+function placeProject(map: ExecMap | undefined): { project: string; anchor: string; note: string } {
+  if (!map) return { project: "", anchor: "", note: "" };
+  const wanted = map.project;
+  const found = map.anchors.find((candidate) => plainPath(candidate) && wanted.startsWith(`${candidate}/`));
+  if (!plainPath(wanted)) return { project: "", anchor: "", note: "this project's path has unusual characters, so it runs in the worker's own job directory" };
+  if (!found) {
+    return { project: "", anchor: "", note: `${wanted} is not under ${map.anchors.join(" or ")}, the only paths this worker can show a project at, so absolute paths into the project do not resolve here` };
+  }
+  return { project: wanted, anchor: found, note: "" };
+}
+
+/**
+ * Which of `external` (directories on this server that the project uses from
+ * outside itself) a job on this worker sees at their own paths: plain paths
+ * under the anchor the project is shown at, that neither hold the project nor
+ * sit inside it, outermost first. None when the project itself is not shown at
+ * its own path.
+ */
+export function mountableExternal(map: ExecMap | undefined, external: readonly string[]): string[] {
+  const { project, anchor } = placeProject(map);
+  if (!project) return [];
+  return [...new Set(external)]
+    .filter((entry) => plainPath(entry) && entry.startsWith(`${anchor}/`) && !overlaps(entry, project))
+    .sort((a, b) => a.length - b.length || a.localeCompare(b));
+}
+
 /**
  * Run the agent's command in the copy of its working directory.
  *
  * It prints `@@cody-<token>-started` once the directory is entered, the job's
- * own output (stdout and stderr together), and last `@@cody-<token>-exit:<code>`;
- * no exit marker means the connection or the machine went away mid-run.
+ * own output (stdout and stderr together), and last
+ * `@@cody-<token>-exit:<code>:<peak KB>:<OOM kills>`; no exit marker means the
+ * connection or the machine went away mid-run. The peak is the most memory the
+ * job's processes held together (summed every 2 seconds from `/proc`), the OOM
+ * count how many processes the kernel killed for memory in the worker's
+ * control group while it ran; either is empty when the worker cannot tell.
  *
  * The job runs at low priority in its own process group (when `setsid` exists)
- * with no stdin. Cody keeps ssh's stdin open and never writes to it: the
+ * with no stdin, and it is the first thing the kernel stops when memory runs
+ * out. Cody keeps ssh's stdin open and never writes to it: the
  * session's stdin is saved as fd 3 and a watcher reads it, so the moment Cody
  * closes it on purpose (a timeout, a cancelled call) or dies by any means, the
  * watcher stops the job: TERM to its group, KILL five seconds later. Without
@@ -161,6 +216,9 @@ const JOB_WRAPPER = [
  *
  * With `map` and/or `scratch` the command goes through {@link JOB_WRAPPER}
  * (a private user + mount namespace when the worker allows one) first.
+ * `external` names directories outside the project that it uses (a Cargo path
+ * dependency in a sibling repository); their copies are in `<job>-ext<path>`
+ * and appear at their own paths, when those are under the same anchor.
  */
 export function buildExecCommand(options: {
   directory: string;
@@ -170,33 +228,22 @@ export function buildExecCommand(options: {
   map?: ExecMap;
   /** The chat's scratch directory name: the job gets its own persistent `CODY_SCRATCH`, `CODY_DATA_SCRATCH` and `TMPDIR`. */
   scratch?: string;
+  /** Server paths of directories outside the project the job needs, copied to `<directory>-ext<path>`. */
+  external?: readonly string[];
 }): string {
   const dir = checkedDirectory(options.directory);
   const token = checkedToken(options.token);
   const scratch = options.scratch && SCRATCH_KEY.test(options.scratch) ? options.scratch : "";
-  let project = "";
-  let anchor = "";
-  let note = "";
-  if (options.map) {
-    const wanted = options.map.project;
-    const found = options.map.anchors.find((candidate) => plainPath(candidate) && wanted.startsWith(`${candidate}/`));
-    if (!plainPath(wanted)) {
-      note = "this project's path has unusual characters, so it runs in the worker's own job directory";
-    } else if (!found) {
-      note = `${wanted} is not under ${options.map.anchors.join(" or ")}, the only paths this worker can show a project at, so absolute paths into the project do not resolve here`;
-    } else {
-      project = wanted;
-      anchor = found;
-    }
-  }
+  const { project, anchor, note } = placeProject(options.map);
+  const external = mountableExternal(options.map, options.external ?? []);
   const wrapped = Boolean(options.map) || scratch !== "";
   const workRoot = dir.slice(0, dir.lastIndexOf("/"));
   const launch = wrapped
     ? [
       ...(project ? ['U=; NS=0; if unshare --user --map-root-user --mount true >/dev/null 2>&1; then U="unshare --user --map-root-user --mount"; NS=1; fi'] : ["U=; NS=0"]),
-      `$S $N $U sh -c ${shQuote(JOB_WRAPPER)} cody-job "$D" ${[project, anchor, project ? options.cwdRel : "", workRoot, scratch, project ? createHash("sha1").update(project).digest("hex").slice(0, 16) : ""].map(shQuote).join(" ")} "$NS" ${shQuote(note)} ${shQuote(options.command)} </dev/null 2>&1 3<&- &`,
+      `$S $N $U sh -c ${shQuote(JOB_WRAPPER)} cody-job "$D" ${[project, anchor, project ? options.cwdRel : "", workRoot, scratch, project ? createHash("sha1").update(project).digest("hex").slice(0, 16) : ""].map(shQuote).join(" ")} "$NS" ${shQuote(note)} ${shQuote(external.join(" "))} ${shQuote(options.command)} </dev/null 2>&1 3<&- &`,
     ]
-    : [`$S $N sh -c ${shQuote(options.command)} </dev/null 2>&1 3<&- &`];
+    : [`$S $N sh -c ${shQuote('{ echo 1000 > /proc/self/oom_score_adj; } 2>/dev/null; exec sh -c "$0"')} ${shQuote(options.command)} </dev/null 2>&1 3<&- &`];
   return wrap([
     "umask 077",
     `D=${dir}`,
@@ -206,16 +253,22 @@ export function buildExecCommand(options: {
     "exec 3<&0",
     "S=; command -v setsid >/dev/null 2>&1 && S=setsid",
     'N=; command -v nice >/dev/null 2>&1 && N="nice -n 19"',
+    'E=/sys/fs/cgroup/memory.events; o=$(sed -n "s/^oom_kill //p" $E 2>/dev/null)',
     ...launch,
     "p=$!",
     '( cat <&3 >/dev/null 2>&1; [ -e "$D/.done" ] && exit 0; kill -TERM -$p 2>/dev/null || kill -TERM $p 2>/dev/null; sleep 5; kill -KILL -$p 2>/dev/null || kill -KILL $p 2>/dev/null ) >/dev/null 2>&1 &',
     "w=$!",
+    "( m=0; while kill -0 $p 2>/dev/null; do t=$(cat /proc/[0-9]*/status 2>/dev/null | awk -v s=$p '/^Name:/{a=0} /^NSsid:/{a=($2==s)} /^VmRSS:/{if(a)r+=$2} END{print r+0}'); [ \"${t:-0}\" -gt \"$m\" ] 2>/dev/null && m=$t && echo $m > \"$D/.peak\"; sleep 2; done ) >/dev/null 2>&1 3<&- &",
+    "q=$!",
     "wait $p",
     "rc=$?",
     ': > "$D/.done"',
     "kill -KILL -$p 2>/dev/null",
-    "kill $w 2>/dev/null",
-    `printf '\\n@@cody-${token}-exit:%s\\n' "$rc"`,
+    "kill $w $q 2>/dev/null",
+    'k=$(sed -n "s/^oom_kill //p" $E 2>/dev/null)',
+    'case "$o:$k" in *[!0-9:]*|:*|*:) k= ;; *) k=$((k-o)); [ "$k" -ge 0 ] || k= ;; esac',
+    'm=$(cat "$D/.peak" 2>/dev/null); case "$m" in *[!0-9]*) m= ;; esac',
+    `printf '\\n@@cody-${token}-exit:%s:%s:%s\\n' "$rc" "$m" "$k"`,
   ]);
 }
 
@@ -244,7 +297,7 @@ export function buildCopyBackCommand(options: { directory: string; paths: readon
   ]);
 }
 
-/** Delete the job directory once nothing of the job is alive (waiting a few seconds for a stopped one to go). */
+/** Delete the job directory (and the copies of outside directories next to it) once nothing of the job is alive (waiting a few seconds for a stopped one to go). */
 export function buildCleanupCommand(directory: string, workRoot: string): string {
   const dir = checkedDirectory(directory);
   const root = checkedDirectory(workRoot);
@@ -254,19 +307,28 @@ export function buildCleanupCommand(directory: string, workRoot: string): string
     `case "$D" in ${root}/j-*) ;; *) exit 98;; esac`,
     'p=$(cat "$D/.pid" 2>/dev/null); n=0',
     'while [ -n "$p" ] && kill -0 "$p" 2>/dev/null && [ "$n" -lt 15 ]; do sleep 1; n=$((n+1)); done',
-    'rm -rf "$D"',
-    '[ ! -e "$D" ]',
+    'rm -rf "$D" "$D-ext"',
+    '[ ! -e "$D" ] && [ ! -e "$D-ext" ]',
   ]);
 }
 
 // ── Reading what the job printed ─────────────────────────────────────────────
+
+/** What the worker could tell about a job's memory when it ended. */
+export interface JobMemory {
+  /** The most memory the job's processes held together; null when unknown. */
+  peakBytes: number | null;
+  /** Processes the kernel killed for memory in the worker's control group while the job ran; null when unknown. */
+  oomKills: number | null;
+}
 
 export type ExecEvent =
   | { kind: "started" }
   /** The working directory was not there: nothing ran. */
   | { kind: "nodir" }
   | { kind: "output"; text: string }
-  | { kind: "exit"; code: number };
+  /** `memory` is there when the worker's script reports it (every script this version sends). */
+  | { kind: "exit"; code: number; memory?: JobMemory };
 
 /** How much of what came before the start marker is kept (login banners, or the reason it never started). */
 const PREAMBLE_KEEP = 4096;
@@ -333,15 +395,20 @@ export class ExecStreamParser {
       const at = this.buffer.indexOf(this.exitMarker);
       if (at >= 0) {
         const after = this.buffer.slice(at + this.exitMarker.length);
-        const code = /^(\d{1,3})\n/.exec(after);
+        const code = /^(\d{1,3})(?::(\d{0,12}):(\d{0,9}))?\n/.exec(after);
         if (code) {
           if (at > 0) events.push({ kind: "output", text: this.buffer.slice(0, at) });
-          events.push({ kind: "exit", code: Number.parseInt(code[1], 10) });
+          const exitCode = Number.parseInt(code[1], 10);
+          events.push(
+            code[2] === undefined
+              ? { kind: "exit", code: exitCode }
+              : { kind: "exit", code: exitCode, memory: { peakBytes: code[2] ? Number(code[2]) * 1024 : null, oomKills: code[3] ? Number(code[3]) : null } },
+          );
           this.state = "done";
           this.buffer = "";
           return events;
         }
-        if (!after.includes("\n") && after.length < 6) {
+        if (!after.includes("\n") && after.length < 32) {
           // the marker is still arriving
           if (at > 0) events.push({ kind: "output", text: this.buffer.slice(0, at) });
           this.buffer = this.buffer.slice(at);

@@ -19,6 +19,7 @@ export const CACHE_MAX_AGE_DAYS = 14;
 /** When the work disk is fuller than this, the oldest caches go first, until it is under {@link CACHE_RELIEF_PERCENT}. */
 export const CACHE_PRESSURE_PERCENT = 85;
 export const CACHE_RELIEF_PERCENT = 70;
+const MIB = 1024 * 1024;
 
 /**
  * The command that reads a worker. Plain `sh -c '…'` written the way the meter
@@ -32,7 +33,12 @@ export const CACHE_RELIEF_PERCENT = 70;
  *   running, and tidies the warm caches jobs leave under `keep/` and
  *   `scratch/`: anything untouched for two weeks, and the oldest first when
  *   the disk is over 85% full; a cache used in the last hour is never taken);
- *   `@LOAD` two meter frames in the exact shape `ssh.ts` prints; `@END`.
+ *   `@MEM` the machine's boot id and its control group's memory (in use,
+ *   limit, droppable cache, out-of-memory kills so far, and how much of the
+ *   last ten seconds something waited on memory), each line empty when the
+ *   machine does not have it; `@LOAD` two meter frames in the exact shape
+ *   `ssh.ts` prints; `@END`. An answer without `@MEM` (an older check) is
+ *   still read.
  */
 export function buildWorkerCheckCommand(
   options: { factsPath?: string; workRoot?: string; cachePressure?: number; cacheRelief?: number } = {},
@@ -60,6 +66,13 @@ export function buildWorkerCheckCommand(
     + '[ -n "$(find "$d" -maxdepth 0 -mmin +60 2>/dev/null)" ] || continue; rm -rf "$d"; '
     + 'u=$(df -P "$R" 2>/dev/null | tail -n 1); u=${u%%%*}; u=${u##* }; '
     + `[ "\${u:-100}" -le ${relief} ] && break; done; fi`,
+    "echo @MEM; g=/sys/fs/cgroup",
+    'echo "boot $(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"',
+    'echo "current $(cat $g/memory.current 2>/dev/null)"',
+    'echo "max $(cat $g/memory.max 2>/dev/null)"',
+    'grep -E "^inactive_file " $g/memory.stat 2>/dev/null',
+    'grep -E "^oom_kill " $g/memory.events 2>/dev/null',
+    '[ -r $g/memory.pressure ] && read x y z < $g/memory.pressure && echo "psi ${y#avg10=}"',
     "echo @LOAD",
     'c=$(grep -c "^cpu[0-9]" /proc/stat 2>/dev/null)',
     's() { echo "@S $c"; head -n 1 /proc/stat; grep -E "^(MemTotal|MemFree|MemAvailable|Buffers|Cached):" /proc/meminfo; cat /proc/loadavg; echo @E; }',
@@ -89,12 +102,41 @@ export function parseWorkerFacts(text: string): { ok: true; facts: WorkerFacts }
 }
 
 export function loadFromMetrics(metrics: MachineMetrics): WorkerLoad {
+  const own = metrics.own;
   return {
     cpuPercent: metrics.cpuPercent,
     load1: metrics.load1,
-    memAvailMB: Math.round((metrics.memTotalBytes - metrics.memUsedBytes) / (1024 * 1024)),
+    memAvailMB: Math.round((metrics.memTotalBytes - metrics.memUsedBytes) / MIB),
     at: metrics.at,
+    ...(metrics.bootId ? { bootId: metrics.bootId } : {}),
+    ...(own?.memLimitBytes != null ? { capMB: Math.round(own.memLimitBytes / MIB), capUsedMB: Math.round(own.memUsedBytes / MIB) } : {}),
+    ...(own?.pressure != null ? { pressure: own.pressure } : {}),
+    ...(own?.oomKills != null ? { oomKills: own.oomKills } : {}),
   };
+}
+
+/**
+ * The `@MEM` lines as load fields. The limit counts only when it is a number
+ * smaller than the machine's memory (a container's); `max` or a bigger one is
+ * no limit of its own.
+ */
+export function memoryFromProbe(lines: readonly string[], memTotalBytes: number | null): Partial<WorkerLoad> {
+  const value = (name: string) => lines.find((line) => line.startsWith(`${name} `))?.slice(name.length + 1).trim() ?? "";
+  const whole = (text: string) => (/^\d+$/.test(text) && Number.isSafeInteger(Number(text)) ? Number(text) : null);
+  const boot = value("boot");
+  const current = whole(value("current"));
+  const max = whole(value("max"));
+  const oom = whole(value("oom_kill"));
+  const psi = value("psi");
+  const memory: Partial<WorkerLoad> = {};
+  if (/^[0-9a-f-]{8,64}$/.test(boot)) memory.bootId = boot;
+  if (current !== null && max !== null && max > 0 && (memTotalBytes === null || max < memTotalBytes)) {
+    memory.capMB = Math.round(max / MIB);
+    memory.capUsedMB = Math.round(Math.max(0, current - (whole(value("inactive_file")) ?? 0)) / MIB);
+  }
+  if (oom !== null) memory.oomKills = oom;
+  if (/^\d+(?:\.\d+)?$/.test(psi)) memory.pressure = Number(psi);
+  return memory;
 }
 
 /** Read the output of {@link buildWorkerCheckCommand}. */
@@ -126,10 +168,12 @@ export function parseWorkerProbe(stdout: string, now: number): WorkerProbe {
     .flatMap((event) => (event.kind === "sample" ? [event.sample] : []));
   const last = samples.at(-1);
   const reading = last ? metricsFrom(samples.length > 1 ? samples[0] : null, last, now) : null;
+  const mem = at("@MEM");
+  const memory = mem > jobs && mem < load ? memoryFromProbe(lines.slice(mem + 1, load), reading?.memTotalBytes ?? null) : {};
   return {
     ok: true,
     facts: parsed.facts,
-    load: reading ? loadFromMetrics(reading) : null,
+    load: reading ? { ...loadFromMetrics(reading), ...memory } : null,
     liveJobs: Number.isFinite(liveJobs) && liveJobs > 0 ? liveJobs : 0,
   };
 }

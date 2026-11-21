@@ -1,3 +1,4 @@
+import { gigabytes, localSpareMB, localStrain, type LocalMemory } from "../machines/memory";
 import type { WorkerArch } from "../machines/types";
 import { describeRefusals, place } from "./placement";
 import type { ProbeOutcome, Refusal, WorkerCandidate, WorkerLoad, WorkerMachine } from "./types";
@@ -18,8 +19,12 @@ import type { ProbeOutcome, Refusal, WorkerCandidate, WorkerLoad, WorkerMachine 
  * What it knows about a worker comes from three places, newest wins: the live
  * meters (when someone has the Machines list open), a probe over ssh
  * (cached for a few seconds, and dropped when one of Cody's jobs ends there),
- * and Cody's own count of jobs it has running. All of it is injected, so the
- * rules can be tested without a network or a clock.
+ * and Cody's own count of jobs it has running. Memory adds two things: a
+ * worker that just ran out of memory (or is short of it) goes behind the
+ * others for a few minutes, and a job that may run here waits up to
+ * {@link LOCAL_WAIT_MS} for a worker while this server itself is short of
+ * memory, then runs here anyway. All of it is injected, so the rules can be
+ * tested without a network or a clock.
  */
 
 /** At most this many jobs wait at once; the next one is told to try later. */
@@ -36,6 +41,8 @@ export const FAILED_PROBE_TTL_MS = 30_000;
 export const METER_FRESH_MS = 6_000;
 /** A job Cody started this recently is not in any reading yet. */
 export const RECENT_LAUNCH_MS = 6_000;
+/** A job that could run here waits at most this long for a worker while this server is short of memory. */
+export const LOCAL_WAIT_MS = 60_000;
 
 export interface SchedulerClock {
   now(): number;
@@ -52,6 +59,16 @@ export const REAL_CLOCK: SchedulerClock = {
   },
 };
 
+/** What the scheduler learns and reads about memory (memory-store.ts and memory-watch.ts in the server). */
+export interface SchedulerMemory {
+  /** A fresh reading of a worker: notices it running short, or out, of memory. */
+  noteLoad(machine: WorkerMachine, load: WorkerLoad, now: number): void;
+  /** The cool-down a worker is in, if any. */
+  cooling(machineId: string, now: number): "oom" | "pressure" | null;
+  /** This server's memory now; null when it cannot tell. */
+  local(): LocalMemory | null;
+}
+
 export interface SchedulerDeps {
   /** Machines switched on as workers, in Settings order. */
   listWorkers(): WorkerMachine[];
@@ -62,6 +79,7 @@ export interface SchedulerDeps {
   /** The number of Cody's jobs on a machine changed. */
   publishJobs(machineId: string, count: number): void;
   clock: SchedulerClock;
+  memory?: SchedulerMemory;
 }
 
 export interface AcquireRequest {
@@ -71,6 +89,10 @@ export interface AcquireRequest {
   excluded: ReadonlySet<string>;
   /** This server may run the job instead of waiting (the caller allowed it and arch and tools fit). */
   local: boolean;
+  /** What the command needed lately (with a margin), MB; workers with that much free go first. */
+  needMB?: number | null;
+  /** The job already ran out of memory on a worker with this much: only workers with more may take it. */
+  minCapMB?: number | null;
 }
 
 export interface WaitingInfo {
@@ -95,7 +117,8 @@ export interface WorkerLease {
 }
 
 export type Acquired =
-  | { kind: "worker"; lease: WorkerLease; waitedMs: number; freeCores: number }
+  /** `caveat`: why the worker is a compromise (memory), in plain words, when it is one. */
+  | { kind: "worker"; lease: WorkerLease; waitedMs: number; freeCores: number; caveat?: string }
   | { kind: "local"; why: string; waitedMs: number }
   | { kind: "refused"; why: string; waitedMs: number }
   | { kind: "aborted" };
@@ -253,16 +276,28 @@ export class WorkerScheduler {
   private pass(): void {
     const now = this.deps.clock.now();
     const machines = this.deps.listWorkers();
+    const local = this.deps.memory?.local() ?? null;
     for (const waiter of [...this.queue]) {
       if (!this.queue.includes(waiter)) continue;
       const { request } = waiter;
       const waitedMs = now - waiter.enqueuedAt;
-      const placement = place(this.candidates(machines, now), { arch: request.arch, tools: request.tools, excluded: request.excluded });
+      const placement = place(this.candidates(machines, now, local), {
+        arch: request.arch,
+        tools: request.tools,
+        excluded: request.excluded,
+        needMB: request.needMB,
+        minCapMB: request.minCapMB,
+      });
 
       if (placement.kind === "placed") {
         const machine = machines.find((candidate) => candidate.id === placement.id);
         if (machine) {
-          waiter.settle({ kind: "worker", lease: this.grant(machine, now), waitedMs, freeCores: placement.freeCores });
+          const spare = localSpareMB(local);
+          if (placement.tight && request.local && request.needMB && spare !== null && spare >= request.needMB) {
+            waiter.settle({ kind: "local", why: `no worker had the ${gigabytes(request.needMB * 1024 * 1024)} GB of memory this command needed lately free, and this server had ${gigabytes(spare * 1024 * 1024)} GB to spare`, waitedMs });
+            continue;
+          }
+          waiter.settle({ kind: "worker", lease: this.grant(machine, now), waitedMs, freeCores: placement.freeCores, ...(placement.caveat ? { caveat: placement.caveat } : {}) });
           continue;
         }
       }
@@ -271,15 +306,24 @@ export class WorkerScheduler {
         waiter.settle(request.local ? { kind: "local", why, waitedMs } : { kind: "refused", why, waitedMs });
         continue;
       }
-      const why = placement.kind === "busy" ? busyReasons(placement.refusals) : "the machine that was chosen has just been removed from the list";
+      let why = placement.kind === "busy" ? busyReasons(placement.refusals) : "the machine that was chosen has just been removed from the list";
       if (request.local) {
-        waiter.settle({ kind: "local", why, waitedMs });
-        continue;
+        const strain = localStrain(local);
+        if (!strain) {
+          waiter.settle({ kind: "local", why, waitedMs });
+          continue;
+        }
+        if (waitedMs >= LOCAL_WAIT_MS) {
+          waiter.settle({ kind: "local", why: `${why}; ${strain}, so it waited ${Math.round(waitedMs / 1000)} s for a worker first`, waitedMs });
+          continue;
+        }
+        why = `${why}; ${strain}, so it waits up to ${Math.round(LOCAL_WAIT_MS / 1000)} s for a worker before running here`;
       }
       if (!waiter.waiting) {
         const waitingNow = this.queue.filter((other) => other.waiting).length;
         if (waitingNow >= MAX_QUEUE) {
-          waiter.settle({ kind: "refused", why: `${waitingNow} jobs are already waiting for a worker (the queue holds ${MAX_QUEUE}); ${why}`, waitedMs });
+          const full = `${waitingNow} jobs are already waiting for a worker (the queue holds ${MAX_QUEUE}); ${why}`;
+          waiter.settle(request.local ? { kind: "local", why: full, waitedMs } : { kind: "refused", why: full, waitedMs });
           continue;
         }
         waiter.waiting = true;
@@ -303,7 +347,8 @@ export class WorkerScheduler {
     }
   }
 
-  private candidates(machines: readonly WorkerMachine[], now: number): WorkerCandidate[] {
+  private candidates(machines: readonly WorkerMachine[], now: number, local: LocalMemory | null): WorkerCandidate[] {
+    const { memory } = this.deps;
     return machines.map((machine): WorkerCandidate => {
       const probe = this.freshProbe(machine.id, now);
       const meter = this.deps.meterOf(machine.id);
@@ -318,6 +363,8 @@ export class WorkerScheduler {
       } else if (probe) {
         healthy = false;
       }
+      if (load && memory) memory.noteLoad(machine, load, now);
+      const cooling = memory?.cooling(machine.id, now) ?? null;
       const ours = [...(this.leases.get(machine.id) ?? [])];
       return {
         id: machine.id,
@@ -328,6 +375,8 @@ export class WorkerScheduler {
         running: Math.max(ours.length, live),
         recentLaunches: ours.filter((record) => now - record.at < RECENT_LAUNCH_MS).length,
         load,
+        ...(cooling ? { cooling } : {}),
+        ...(load?.bootId && local?.bootId === load.bootId ? { sameHost: true } : {}),
       };
     });
   }

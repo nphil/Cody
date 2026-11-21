@@ -422,6 +422,283 @@ export async function listTreeFiles(tree: Tree, include: readonly string[] | und
   return { ok: true, value: { files: collector.files, bytes: collector.bytes, skipped: collector.skipped } };
 }
 
+// ── What the project builds from outside itself ──────────────────────────────
+
+/** At most this many crates outside the project are followed (dependencies of dependencies included). */
+const MAX_OUTSIDE_CRATES = 256;
+/** At most this many of the project's own manifests are read. */
+const MAX_MANIFESTS = 512;
+/** A manifest bigger than this is not read. */
+const MAX_MANIFEST_BYTES = 1024 * 1024;
+/** How many directories up from an outside crate the top of its workspace is looked for. */
+const MAX_WORKSPACE_DEPTH = 8;
+/** Never part of a crate's own files: build output, and what never goes to a worker anyway. */
+const CRATE_SKIPPED: readonly string[] = [...HEAVY_DIRECTORIES, "target"];
+
+/** `path = "…"` values in a Cargo manifest: path dependencies and patches (target paths name files, and are dropped). */
+const PATH_VALUE = /(?:^|[\s{,])path\s*=\s*(?:"([^"\n]*)"|'([^'\n]*)')/g;
+/** The manifest takes fields from its workspace (`edition.workspace = true`, `{ workspace = true }`) or names it (`workspace = "../.."`). */
+const USES_WORKSPACE = /\bworkspace\s*=\s*(?:true\b|["'])/;
+const NAMES_WORKSPACE = /^\s*workspace\s*=\s*(?:"([^"\n]+)"|'([^'\n]+)')/m;
+const WORKSPACE_TABLE = /^\s*\[workspace\]/m;
+
+export interface OutsideDir {
+  /** Where it is on this server (real path); the job sees its copy at the same path. */
+  path: string;
+  /** Paths relative to `path`, with `/`. */
+  files: string[];
+  bytes: number;
+}
+
+export interface OutsideDirs {
+  dirs: OutsideDir[];
+  /** Why directories the project uses from outside itself were left out; null when none were. */
+  note: string | null;
+}
+
+async function readManifest(file: string): Promise<string> {
+  try {
+    const stat = await fs.promises.stat(file);
+    return stat.isFile() && stat.size <= MAX_MANIFEST_BYTES ? await fs.promises.readFile(file, "utf8") : "";
+  } catch {
+    return "";
+  }
+}
+
+function pathValues(manifest: string): string[] {
+  const values: string[] = [];
+  for (const line of manifest.split("\n")) {
+    if (/^\s*#/.test(line)) continue;
+    for (const match of line.matchAll(PATH_VALUE)) {
+      const value = match[1] ?? match[2];
+      if (value) values.push(value);
+    }
+  }
+  return values;
+}
+
+/** The real path of a directory that holds a Cargo manifest, or null. */
+async function crateDirectory(candidate: string): Promise<string | null> {
+  try {
+    const real = await fs.promises.realpath(candidate);
+    return (await fs.promises.stat(path.join(real, "Cargo.toml"))).isFile() ? real : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The top of the workspace an outside crate takes fields from, found the way Cargo finds it; null when it takes none. */
+async function workspaceTop(crate: string, manifest: string): Promise<string | null> {
+  if (!USES_WORKSPACE.test(manifest) || WORKSPACE_TABLE.test(manifest)) return null;
+  const named = NAMES_WORKSPACE.exec(manifest);
+  if (named) {
+    const dir = await crateDirectory(path.resolve(crate, named[1] ?? named[2] ?? ""));
+    return dir && WORKSPACE_TABLE.test(await readManifest(path.join(dir, "Cargo.toml"))) ? dir : null;
+  }
+  let dir = crate;
+  for (let depth = 0; depth < MAX_WORKSPACE_DEPTH; depth += 1) {
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+    if (WORKSPACE_TABLE.test(await readManifest(path.join(dir, "Cargo.toml")))) return dir;
+  }
+  return null;
+}
+
+/** Every file below `dir` (relative to it), without the skipped directories; null when there are too many to walk. */
+async function walkCrate(dir: string): Promise<string[] | null> {
+  const names: string[] = [];
+  const stack = [""];
+  let visited = 0;
+  while (stack.length > 0) {
+    const relative = stack.pop() as string;
+    let entries: fs.Dirent[];
+    try {
+      entries = await fs.promises.readdir(path.join(dir, relative), { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      visited += 1;
+      if (visited > MAX_WALK_ENTRIES) return null;
+      const name = relative ? `${relative}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        if (!CRATE_SKIPPED.includes(entry.name)) stack.push(name);
+      } else if (entry.isFile() || entry.isSymbolicLink()) {
+        names.push(name);
+      }
+    }
+  }
+  return names;
+}
+
+/** What git lists in a directory (tracked, and new files it does not ignore), relative to it; null outside git. */
+async function gitListed(dir: string, signal?: AbortSignal): Promise<string[] | null> {
+  const listed = await git(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], dir, signal);
+  if (!listed.ok) return null;
+  const names: string[] = [];
+  for (const raw of listed.stdout.toString("latin1").split("\0")) {
+    const name = raw ? utf8Name(Buffer.from(raw, "latin1")) : null;
+    if (name) names.push(name);
+  }
+  return names;
+}
+
+/**
+ * A crate's own files, relative to its directory: what git lists there (every
+ * file, outside git), without build output or the packages nested inside it
+ * (those are crates of their own, followed only when something uses them).
+ * Null when there are too many to walk.
+ */
+async function crateFiles(dir: string, signal?: AbortSignal): Promise<string[] | null> {
+  let names = await gitListed(dir, signal);
+  // Outside git, or in a repository that ignores the crate (vendored code): its files as they are.
+  if (!names?.includes("Cargo.toml")) names = await walkCrate(dir);
+  if (names === null) return null;
+  const nested = names.filter((name) => name.endsWith("/Cargo.toml")).map((name) => name.slice(0, -"/Cargo.toml".length));
+  return names.filter((name) => !name.split("/").some((step) => CRATE_SKIPPED.includes(step)) && !nested.some((inner) => name.startsWith(`${inner}/`)));
+}
+
+/** Every file of a directory outside the project, relative to it, the way the project's own are listed: what git lists there (every file, outside git), without build output. Null when there are too many to walk. */
+async function unitFiles(dir: string, signal?: AbortSignal): Promise<string[] | null> {
+  let names = await gitListed(dir, signal);
+  if (!names?.length) names = await walkCrate(dir);
+  return names && names.filter((name) => !name.split("/").some((step) => CRATE_SKIPPED.includes(step)));
+}
+
+/** The directories that are not inside another one of them. */
+function outermost(dirs: readonly string[]): string[] {
+  const kept: string[] = [];
+  for (const dir of [...new Set(dirs)].sort((a, b) => a.length - b.length)) if (!kept.some((unit) => isInside(unit, dir))) kept.push(dir);
+  return kept;
+}
+
+/** The files (absolute) under the directory each is in, with their sizes, when they fit in one copy with the project's own; otherwise which limit they pass. */
+async function sizeUnits(units: readonly string[], absolute: readonly string[], list: FileList): Promise<{ ok: true; dirs: OutsideDir[] } | { ok: false; over: "files" | "bytes" }> {
+  const grouped = new Map(units.map((unit) => [unit, new Set<string>()]));
+  for (const file of absolute) {
+    const unit = units.find((candidate) => isInside(candidate, file));
+    if (unit) grouped.get(unit)?.add(toPosix(path.relative(unit, file)));
+  }
+  let count = list.files.length;
+  let bytes = list.bytes;
+  const dirs: OutsideDir[] = [];
+  for (const unit of units) {
+    const listed = [...(grouped.get(unit) ?? [])].sort();
+    if (count + listed.length > MAX_COPY_FILES) return { ok: false, over: "files" };
+    const sized = await sizeFiles(unit, listed);
+    count += sized.files.length;
+    bytes += sized.bytes;
+    dirs.push({ path: unit, files: sized.files, bytes: sized.bytes });
+  }
+  return bytes > MAX_COPY_BYTES ? { ok: false, over: "bytes" } : { ok: true, dirs };
+}
+
+/** The ones that are files or links, with their size. */
+async function sizeFiles(root: string, relatives: readonly string[]): Promise<{ files: string[]; bytes: number }> {
+  const files: string[] = [];
+  let bytes = 0;
+  for (let start = 0; start < relatives.length; start += 64) {
+    const batch = relatives.slice(start, start + 64);
+    const stats = await Promise.all(batch.map((relative) => statEntry(root, relative)));
+    batch.forEach((relative, index) => {
+      const stat = stats[index];
+      if (!stat || !(stat.isFile() || stat.isSymbolicLink())) return;
+      files.push(relative);
+      bytes += stat.isFile() ? stat.size : 0;
+    });
+  }
+  return { files, bytes };
+}
+
+/**
+ * Directories outside the project that its Cargo manifests build from: path
+ * dependencies in a sibling repository (and theirs). Each sibling repository
+ * goes whole, the way the project does (outside git: the workspace, or the lone
+ * crate), because a build may read any of its files: a build script's assets,
+ * an `include_str!`. Each one that would break the copy limits sends only what
+ * the build needs at the least: its crates' own files and the top manifest of
+ * the workspace they take fields from (`edition.workspace = true`). A job
+ * sees each copy at the same path when the worker shows the project at its own
+ * path. Nothing that holds the project or the home directory is ever one.
+ * Whatever would still break the limits is left out with a note, and the job
+ * runs as it would have without it.
+ */
+export async function findOutsideDirs(tree: Tree, list: FileList, signal?: AbortSignal): Promise<OutsideDirs> {
+  const none: OutsideDirs = { dirs: [], note: null };
+  const queue = list.files
+    .filter((file) => file === "Cargo.toml" || file.endsWith("/Cargo.toml"))
+    .slice(0, MAX_MANIFESTS)
+    .map((file) => path.join(tree.root, file));
+  if (queue.length === 0) return none;
+  const home = realHome();
+  /** Each outside crate, with the top of the workspace it takes fields from. */
+  const crates = new Map<string, string | null>();
+  const read = new Set<string>();
+  while (queue.length > 0) {
+    if (signal?.aborted) return none;
+    const manifest = queue.shift() as string;
+    if (read.has(manifest)) continue;
+    read.add(manifest);
+    for (const value of pathValues(await readManifest(manifest))) {
+      const crate = await crateDirectory(path.resolve(path.dirname(manifest), value));
+      if (!crate || crates.has(crate) || isInside(tree.root, crate) || isInside(crate, tree.root) || isInside(crate, home)) continue;
+      if (crates.size >= MAX_OUTSIDE_CRATES) {
+        return { dirs: [], note: `The project's Cargo manifests use more than ${MAX_OUTSIDE_CRATES} crates from outside it, so none of them were copied` };
+      }
+      const own = path.join(crate, "Cargo.toml");
+      const top = await workspaceTop(crate, await readManifest(own));
+      const usable = top && !isInside(top, tree.root) && !isInside(top, home) ? top : null;
+      crates.set(crate, usable);
+      queue.push(own);
+      if (usable) queue.push(path.join(usable, "Cargo.toml"));
+    }
+  }
+  if (crates.size === 0) return none;
+
+  // What the build needs at the least: each crate's own files and its workspace's top manifest.
+  const needed: string[] = [];
+  for (const [crate, top] of crates) {
+    if (signal?.aborted) return none;
+    const own = await crateFiles(crate, signal);
+    if (own === null) return { dirs: [], note: `${crate}, which the project builds from, has too many files to list, so nothing outside the project was copied` };
+    for (const file of own) needed.push(path.join(crate, file));
+    if (top) needed.push(path.join(top, "Cargo.toml"));
+  }
+  let units = outermost([...crates].map(([crate, top]) => top ?? crate));
+  const least = await sizeUnits(units, needed, list);
+  if (!least.ok) {
+    const shown = [...crates.keys()];
+    const names = shown.length > 3 ? `${shown.slice(0, 3).join(", ")} and ${shown.length - 3} more crates` : shown.join(", ");
+    const limit = least.over === "files" ? `${MAX_COPY_FILES.toLocaleString("en-US")} files` : `${Math.round(MAX_COPY_BYTES / (1024 * 1024)).toLocaleString("en-US")} MB`;
+    return { dirs: [], note: `${names}, which the project builds from, would take the copy past ${limit}, so none of it was copied` };
+  }
+
+  // Better: each sibling repository whole (outside git, the workspace or lone crate), every one that still fits.
+  const wholes: string[] = [];
+  for (const [crate, top] of crates) {
+    if (signal?.aborted) return none;
+    if (wholes.some((unit) => isInside(unit, crate))) continue;
+    const repository = await gitToplevel(crate, signal);
+    wholes.push(repository && !isInside(repository, tree.root) && !isInside(repository, home) ? repository : (top ?? crate));
+  }
+  let files = needed;
+  let dirs = least.dirs;
+  for (const unit of outermost(wholes)) {
+    if (signal?.aborted) return none;
+    const listed = await unitFiles(unit, signal);
+    if (listed === null) continue;
+    const grown = outermost([...units, unit]);
+    const more = [...files, ...listed.map((file) => path.join(unit, file))];
+    const sized = await sizeUnits(grown, more, list);
+    if (!sized.ok) continue;
+    units = grown;
+    files = more;
+    dirs = sized.dirs;
+  }
+  return { dirs, note: null };
+}
+
 // ── Paths that come back ─────────────────────────────────────────────────────
 
 /**

@@ -6,7 +6,9 @@ import { availableParallelism, uptime } from "node:os";
  * the same `cg1`/`cg2`/`up` lines the ssh loop in `ssh.ts` prints, so one
  * parser (`parseOwn` in proc.ts) serves both. Inside a Docker container
  * `/proc/stat` and `/proc/meminfo` describe the whole host; these files
- * describe the container.
+ * describe the container. On cgroup v2 it also gives the out-of-memory kills
+ * so far (`memory.events`) and how much of the last ten seconds something
+ * waited on memory (`memory.pressure`).
  */
 
 const ROOT = "/sys/fs/cgroup";
@@ -46,11 +48,14 @@ export async function readOwnLines(options: OwnReadOptions = {}): Promise<string
 
   const [usageUsec, current] = await Promise.all([text(`${root}/cpu.stat`), text(`${root}/memory.current`)]);
   if (usageUsec !== null && current !== null) {
-    const [max, cpuMax, memStat] = await Promise.all([
+    const [max, cpuMax, memStat, events, pressure] = await Promise.all([
       text(`${root}/memory.max`),
       text(`${root}/cpu.max`),
       text(`${root}/memory.stat`),
+      text(`${root}/memory.events`),
+      text(`${root}/memory.pressure`),
     ]);
+    const some = /^some avg10=(\d+(?:\.\d+)?)/m.exec(pressure ?? "")?.[1];
     return [
       clock,
       `cg2 nproc ${nproc}`,
@@ -59,6 +64,8 @@ export async function readOwnLines(options: OwnReadOptions = {}): Promise<string
       `cg2 memory.max ${max ?? ""}`,
       `cg2 cpu.max ${cpuMax ?? ""}`,
       ...statLines(2, memStat, ["inactive_file"]),
+      ...statLines(2, events, ["oom_kill"]),
+      ...(some ? [`cg2 psi_some ${some}`] : []),
     ];
   }
 

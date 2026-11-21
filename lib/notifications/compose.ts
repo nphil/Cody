@@ -31,6 +31,7 @@ export const EVENT_TITLES: Record<NotificationEventId, string> = {
   quotaOut: "Quota used up",
   accountSignedOut: "Signed out",
   engineDbDamaged: "Engine database",
+  memoryHigh: "Memory high",
 };
 
 /** ntfy turns a tag that is an emoji short code into that emoji in front of the title. */
@@ -47,6 +48,7 @@ export const EVENT_TAGS: Record<NotificationEventId, string> = {
   quotaOut: "no_entry",
   accountSignedOut: "key",
   engineDbDamaged: "floppy_disk",
+  memoryHigh: "chart_with_upwards_trend",
 };
 
 export const TITLE_MAX_CHARS = 120;

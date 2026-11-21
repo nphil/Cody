@@ -19,6 +19,7 @@ const { closeNativeGateway, proxyNativeHttp, proxyNativeUpgrade } = jiti("../lib
 const { getTerminalManager } = jiti("../lib/terminal-manager.ts");
 const { startEngineHousekeeping, stopEngineHousekeeping } = jiti("../lib/harness/housekeeping.ts");
 const { startQuotaWatch, stopQuotaWatch } = jiti("../lib/notifications/quota-watch.ts");
+const { startMemoryWatch, stopMemoryWatch } = jiti("../lib/machines/memory-watch.ts");
 const { startScheduledSender, stopScheduledSender } = jiti("../lib/scheduled/scheduler.ts");
 const { startRunRecovery, stopRunRecovery } = jiti("../lib/run-recovery/supervisor.ts");
 const { markServerShuttingDown } = jiti("../lib/run-recovery/shutdown.ts");
@@ -174,6 +175,7 @@ async function main(argv = process.argv.slice(2)) {
     getTerminalManager().dispose();
     stopEngineHousekeeping();
     stopQuotaWatch();
+    stopMemoryWatch();
     stopScheduledSender();
     stopMachineSampler();
     terminalWs.close();
@@ -188,6 +190,7 @@ async function main(argv = process.argv.slice(2)) {
     console.log(`Cody server Ready at http://${options.hostname}:${options.port}`);
     startEngineHousekeeping();
     startQuotaWatch();
+    startMemoryWatch();
     startScheduledSender();
     startRunRecovery();
   });
