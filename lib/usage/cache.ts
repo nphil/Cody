@@ -4,6 +4,7 @@ import { fetchOmpUsageSnapshot, unavailableUsageSnapshot } from "./omp-usage";
 import { ALIBABA_TOKEN_PLAN_PROVIDER, fetchAlibabaTokenPlanUsage, type AlibabaUsageResult } from "./alibaba-usage";
 import { carryForwardMissingAccounts, reserveLastGood, type GoodReading } from "./last-good";
 import { withOutdatedReadings } from "./reading-age";
+import { recordQuotaReadings } from "./quota-history";
 import type { UsageSnapshot } from "./types";
 
 /**
@@ -41,6 +42,8 @@ async function loadUsageSnapshot(): Promise<UsageSnapshot> {
     } catch {
       // Ordering is a nicety; quota numbers are the point of this read.
     }
+    // The calibration history (quota-history.ts) is fed from the engine's own read only, never from a test's loader seam or a carried-over account.
+    recordQuotaReadings(snapshot, Date.now());
   }
   if ("account" in alibaba) {
     // A provider the engine cannot see still makes the snapshot available:

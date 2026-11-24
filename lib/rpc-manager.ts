@@ -62,6 +62,7 @@ import { MODEL_SWITCH_TOOLS } from "./model-switch/tool";
 import { moveSessionItems } from "./scheduled/store";
 import { findUserById, hasAnyUser, type UserRecord } from "./auth/users";
 import { DEVICE_OPERATION_TOOLS } from "./devices/operation-tools";
+import { BROWSER_HOST_TOOLS, BROWSER_HOST_URI_SCHEMES, isBrowserHostTool } from "./browser-host-tools";
 import { DeviceNoticeBatcher, deviceNoticeFrame, noticeForOperation, type DeviceNotice } from "./devices/operation-notices";
 import { DEVICE_TOOLS } from "./devices/tools";
 import { aliasDeviceBridge, getDeviceBridge } from "./devices/bus";
@@ -1305,14 +1306,19 @@ export class AgentSessionWrapper {
    *  in the transcript, so an identical roster is never sent twice. */
   private publishedHostToolsSignature: string | null = null;
   private publishedHostUriSchemesSignature: string | null = null;
-  /** Host tools the web UI registered via set_host_tools (agent-callable). */
-  private hostToolNames: Set<string> = new Set();
-  private hostTools: Array<Record<string, unknown>> = [];
+  /** The agent-callable tools of Cody's browser window. Seeded with the fixed
+   *  roster (lib/browser-host-tools.ts) so every child this wrapper spawns
+   *  advertises the same tools whether or not a browser is attached: a roster
+   *  that shrinks at a restart makes omp rebuild the prompt prefix and the
+   *  provider re-writes the whole chat into its cache. A browser's own
+   *  set_host_tools can only add to it. */
+  private hostToolNames: Set<string> = new Set(BROWSER_HOST_TOOLS.map((tool) => tool.name));
+  private hostTools: Array<Record<string, unknown>> = BROWSER_HOST_TOOLS.map((tool) => ({ ...tool }));
   /** host_tool_call ids awaiting a host_tool_result from the browser. */
   private pendingHostTools: Map<string, AgentEvent> = new Map();
-  /** URI schemes the web UI registered via set_host_uri_schemes. */
-  private hostUriSchemes: Map<string, { writable?: boolean }> = new Map();
-  private hostUriSchemeEntries: Array<Record<string, unknown>> = [];
+  /** URI schemes the web UI registered via set_host_uri_schemes (seeded like hostTools). */
+  private hostUriSchemes: Map<string, { writable?: boolean }> = new Map(BROWSER_HOST_URI_SCHEMES.map((entry) => [entry.scheme, { writable: entry.writable === true }]));
+  private hostUriSchemeEntries: Array<Record<string, unknown>> = BROWSER_HOST_URI_SCHEMES.map((entry) => ({ ...entry }));
   /** host_uri_request ids awaiting a host_uri_result from the browser. */
   private pendingHostUris: Map<string, AgentEvent> = new Map();
   /** Watches this session's activity and keeps the composer-attached plan
@@ -1396,11 +1402,18 @@ export class AgentSessionWrapper {
     this.publishedHostToolsSignature = signature;
   }
 
+  /** Sidebar and minimal chats get no browser tools, so they get no browser URI scheme either. */
+  private hostUriSchemesForCurrentProfile(): Array<Record<string, unknown>> {
+    if (this.engine.kind === "sidebar" || this.localProfileLaunch?.profileId === "minimal") return [];
+    return this.hostUriSchemeEntries;
+  }
+
   private async publishHostUriSchemes(options: { force?: boolean } = {}): Promise<void> {
-    const signature = JSON.stringify(this.hostUriSchemeEntries);
+    const schemes = this.hostUriSchemesForCurrentProfile();
+    const signature = JSON.stringify(schemes);
     if (!options.force && signature === this.publishedHostUriSchemesSignature) return;
     this.publishedHostUriSchemesSignature = null;
-    await this.proc.sendCommand({ type: "set_host_uri_schemes", schemes: this.hostUriSchemeEntries });
+    await this.proc.sendCommand({ type: "set_host_uri_schemes", schemes });
     this.publishedHostUriSchemesSignature = signature;
   }
 
@@ -1839,6 +1852,9 @@ export class AgentSessionWrapper {
     // engines without this surface are never asked.
     if (this.engine.rpcUi.hostTools) {
       await this.publishHostTools({ force: true }).catch(() => {});
+      if (this.hostUriSchemesForCurrentProfile().length) {
+        await this.publishHostUriSchemes({ force: true }).catch(() => {});
+      }
     }
     const state = await this.proc.sendCommand<RpcSessionState>({ type: "get_state" });
     this.applyIdentity(state);
@@ -3020,7 +3036,9 @@ export class AgentSessionWrapper {
       result: {
         content: [{
           type: "text",
-          text: `Host tool \"${toolName}\" is not available in Cody. Use OMP's built-in tools within the selected workspace.`,
+          text: this.hostToolNames.has(toolName)
+            ? `No Cody window is open on this chat right now, so "${toolName}" had nobody to show it to. Nothing was opened or sent.`
+            : `Host tool \"${toolName}\" is not available in Cody. Use OMP's built-in tools within the selected workspace.`,
         }],
       },
     });
@@ -3443,7 +3461,7 @@ export class AgentSessionWrapper {
         await this.enableAskDialog(proc);
         if (this.engine.rpcUi.hostTools) {
           await this.publishHostTools({ force: true }).catch(() => {});
-          if (this.hostUriSchemeEntries.length) {
+          if (this.hostUriSchemesForCurrentProfile().length) {
             await this.publishHostUriSchemes({ force: true }).catch(() => {});
           }
         }
@@ -4422,9 +4440,10 @@ export class AgentSessionWrapper {
 
       case "set_host_tools": {
         const tools = Array.isArray(command.tools) ? command.tools as Array<{ name?: unknown; [key: string]: unknown }> : [];
-        const valid = tools.filter((t) => typeof t.name === "string" && t.name && !SERVER_HOST_TOOL_NAMES.has(t.name as string));
-        this.hostToolNames = new Set(valid.map((t) => t.name as string));
-        this.hostTools = valid;
+        // Extras only: the fixed browser roster is always present and always first, so what a browser sends (or does not send) never reshapes the prompt prefix.
+        const extras = tools.filter((t) => typeof t.name === "string" && t.name && !SERVER_HOST_TOOL_NAMES.has(t.name as string) && !isBrowserHostTool(t.name as string));
+        this.hostTools = [...BROWSER_HOST_TOOLS.map((tool) => ({ ...tool })), ...extras];
+        this.hostToolNames = new Set(this.hostTools.map((t) => t.name as string));
         if (this.engine.rpcUi.hostTools) await this.publishHostTools();
         return null;
       }
@@ -4437,13 +4456,9 @@ export class AgentSessionWrapper {
 
       case "set_host_uri_schemes": {
         const schemes = Array.isArray(command.schemes) ? command.schemes as Array<{ scheme?: unknown; writable?: unknown; [key: string]: unknown }> : [];
-        this.hostUriSchemes = new Map();
-        for (const entry of schemes) {
-          if (typeof entry.scheme === "string" && entry.scheme) {
-            this.hostUriSchemes.set(entry.scheme, { writable: entry.writable === true });
-          }
-        }
-        this.hostUriSchemeEntries = schemes;
+        const extras = schemes.filter((entry) => typeof entry.scheme === "string" && entry.scheme && !BROWSER_HOST_URI_SCHEMES.some((own) => own.scheme === entry.scheme));
+        this.hostUriSchemeEntries = [...BROWSER_HOST_URI_SCHEMES.map((entry) => ({ ...entry })), ...extras];
+        this.hostUriSchemes = new Map(this.hostUriSchemeEntries.map((entry) => [entry.scheme as string, { writable: entry.writable === true }]));
         if (this.engine.rpcUi.hostTools) await this.publishHostUriSchemes();
         return null;
       }

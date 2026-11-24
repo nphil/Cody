@@ -12,6 +12,7 @@ import type {
   SteerNowResult,
 } from "@/lib/types";
 import { normalizeToolCalls } from "@/lib/normalize";
+import { BROWSER_HOST_TOOLS, BROWSER_HOST_URI_SCHEMES } from "@/lib/browser-host-tools";
 import { foldSystemReminder } from "@/lib/system-reminder";
 import { appendBackgroundMessage, isInternalBackgroundMessage, isToolMountNotice } from "@/lib/message-display";
 import {
@@ -2795,38 +2796,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // The built-in ask tool already covers user questions via the extension
   // UI protocol, so we only register web-UI-specific capabilities.
   // ---------------------------------------------------------------------
-  const HOST_TOOL_DEFINITIONS = useMemo<HostToolDefinition[]>(() => [
-    {
-      name: "open_url",
-      description: "Open a URL in a new browser tab. Loopback URLs (localhost / 127.0.0.1) open in Cody's embedded Preview panel instead.",
-      parameters: {
-        type: "object",
-        properties: { url: { type: "string" } },
-        required: ["url"],
-      },
-    },
-    {
-      name: "notify",
-      description: "Show a browser notification to the user.",
-      parameters: {
-        type: "object",
-        properties: {
-          title: { type: "string" },
-          message: { type: "string", description: "Optional notification body." },
-        },
-        required: ["title"],
-      },
-    },
-    {
-      name: "open_file",
-      description: "Open a file in the workspace file viewer.",
-      parameters: {
-        type: "object",
-        properties: { path: { type: "string", description: "Absolute or workspace-relative file path." } },
-        required: ["path"],
-      },
-    },
-  ], []);
+  const HOST_TOOL_DEFINITIONS = BROWSER_HOST_TOOLS as HostToolDefinition[];
 
   /** Re-register host tools on run start / SSE reconnect so the agent always
    * has them available (set_host_tools is per-wrapper, not persisted). */
@@ -2842,13 +2812,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
    * `pi-web://clipboard` lets the agent read the user's clipboard (best-effort:
    * the browser may gate clipboard reads behind a permission prompt) and copy
    * text back. */
-  const HOST_URI_SCHEMES = useMemo<HostUriSchemeDefinition[]>(() => [
-    {
-      scheme: "pi-web",
-      description: "Browser-integrated resources: pi-web://clipboard reads/writes the user's clipboard via the web UI.",
-      writable: true,
-    },
-  ], []);
+  const HOST_URI_SCHEMES = BROWSER_HOST_URI_SCHEMES as HostUriSchemeDefinition[];
 
   const registerHostUriSchemes = useCallback(async (sid: string) => {
     try {

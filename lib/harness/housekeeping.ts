@@ -4,6 +4,7 @@ import { pruneUsageCache } from "../disk/usage";
 import { formatBytes } from "../format-bytes";
 import { checkEngineDbIfDue, watchEngineCrashesForDbCheck } from "../omp/engine-db";
 import { sweepOmpTempFiles } from "../omp/temp-files";
+import { pruneQuotaHistory } from "../usage/quota-history";
 
 /**
  * Long-running cleanup the server does on its own, so an install never
@@ -33,6 +34,7 @@ export interface HousekeepingJobs {
 const DEFAULT_JOBS: HousekeepingJobs = {
   janitor: (trigger) => {
     pruneUsageCache();
+    pruneQuotaHistory();
     return runDiskJanitor({ trigger });
   },
   ompTemp: () => sweepOmpTempFiles(),
