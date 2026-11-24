@@ -84,7 +84,7 @@ export interface OmpApi {
   registerTool(tool: ToolDefinition): void;
   getActiveTools(): string[];
   appendEntry(customType: string, data?: unknown): void;
-  /** The omp package the engine runs (`VERSION` is its own version; read as 19.1.0 and 19.0.0 from the real engines). Older engines may lack it. */
+  /** The omp package the engine runs (`VERSION` is its own version; read as 19.1.1, 19.1.0 and 19.0.0 from the real engines). Older engines may lack it. */
   pi?: { VERSION?: unknown };
 }
 

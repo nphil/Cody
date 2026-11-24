@@ -3700,5 +3700,10 @@
   "diskUsage.blobs.free": "释放",
   "diskUsage.blobs.freed": "已释放未使用的 blob {size}",
   "diskUsage.blobs.unsupported": "此引擎无法清理 blob。",
-  "statistics.state.indexError": "读取聊天时出现问题（{error}），当前数字可能不是最新的。"
+  "statistics.state.indexError": "读取聊天时出现问题（{error}），当前数字可能不是最新的。",
+  "settings.newFirst.title": "本次更新新增",
+  "settings.newFirst.hint": "本次更新新增的设置，按引擎自身的顺序排列。你查看或修改过之后，下次打开设置时它们会回到原来的分区。",
+  "settings.newFirst.in": "位于 {section}",
+  "settings.newFirst.count.one": "{count} 项新设置",
+  "settings.newFirst.count.other": "{count} 项新设置"
 }

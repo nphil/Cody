@@ -3700,5 +3700,10 @@
   "diskUsage.blobs.free": "Free it",
   "diskUsage.blobs.freed": "Freed {size} of unused blobs",
   "diskUsage.blobs.unsupported": "This engine cannot sweep blobs.",
-  "statistics.state.indexError": "Reading your chats ran into a problem ({error}), so these numbers may be out of date."
+  "statistics.state.indexError": "Reading your chats ran into a problem ({error}), so these numbers may be out of date.",
+  "settings.newFirst.title": "New in this update",
+  "settings.newFirst.hint": "Settings this update added, in the engine's own order. They move back into their sections the next time you open Settings once you have seen or changed them.",
+  "settings.newFirst.in": "In {section}",
+  "settings.newFirst.count.one": "{count} new setting",
+  "settings.newFirst.count.other": "{count} new settings"
 }

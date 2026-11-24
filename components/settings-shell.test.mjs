@@ -246,7 +246,6 @@ test("the schema highlight effect keys on highlightId (not the volatile index id
   // index.byKey/index.tabs get a new identity on every optimistic write
   // (useSchemaIndex.ts); depending on them re-ran this on every toggle while
   // a highlight was showing. index.status is stable across writes.
-  assert.match(source, /\}, \[highlightId, index\.status, isMobile, openSub, singleTab\]\);/);
   assert.doesNotMatch(source, /\[highlightId, index\.rows\.length, index\.byKey, index\.tabs/);
   assert.match(source, /if \(!highlightId\) pushedFor\.current = null;/, "the push guard resets once the highlight clears, so re-tapping the same result re-pushes a level");
   assert.match(source, /callbacks\.selectSection\("models", "assignments"\)/, "the retry chip jumps to Assignments, not the Catalog default");

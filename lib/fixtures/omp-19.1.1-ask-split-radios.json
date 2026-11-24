@@ -1,0 +1,100 @@
+{
+ "omp": "19.1.1",
+ "note": "Recorded from the real omp 19.1.1 binary (rpc-ui, protocol v2) against a scripted model that calls `ask`, nothing else touched. A fieldset whose radios each carry their own name is refused by the engine BEFORE any form frame: the tool result is plain text starting `Error:` with `isError:false` and `details.answers: []`. omp 19.1.0 sent the same html as a form request. A fieldset whose options share one name still gets its form request on 19.1.1. The scripted answer to the form request was not delivered (the lab client overwrites the response id), so only the request is recorded for that case.",
+ "cases": [
+  {
+   "id": "split-radio-groups",
+   "html": "<form><fieldset><legend>Which store should we use?</legend><label><input type=\"radio\" name=\"sqlite\" value=\"sqlite\" checked> SQLite</label><label><input type=\"radio\" name=\"redis\" value=\"redis\"> Redis</label></fieldset></form>",
+   "formFrameOn19_1_1": null,
+   "formFrameOn19_1_0": {
+    "method": "form",
+    "keys": [
+     "type",
+     "id",
+     "method",
+     "html"
+    ],
+    "sameHtml": true
+   },
+   "toolEnd": [
+    {
+     "toolName": "ask",
+     "isError": false,
+     "result": {
+      "content": [
+       {
+        "type": "text",
+        "text": "Error: a <fieldset> holds radios that each carry a different `name`, so each is a group of its own:\n- <fieldset> \"Which store should we use?\": sqlite, redis\n\nA preselected radio of one group is submitted together with the user's pick in another, so the answer holds two values for one question. Give every option of a question the same `name` with its own `value`:\n\n```html\n<fieldset>\n  <legend>Session store</legend>\n  <label><input type=\"radio\" name=\"store\" value=\"sqlite\" checked> SQLite</label>\n  <label><input type=\"radio\" name=\"store\" value=\"redis\"> Redis</label>\n</fieldset>\n```\n\nQuestions that really are separate get a <fieldset> each. Then call ask again."
+       }
+      ],
+      "details": {
+       "answers": []
+      }
+     }
+    }
+   ],
+   "entries": [
+    {
+     "type": "message",
+     "message": {
+      "role": "assistant",
+      "content": [
+       {
+        "type": "toolCall",
+        "id": "toolu_ask",
+        "name": "ask",
+        "arguments": {
+         "html": "<form><fieldset><legend>Which store should we use?</legend><label><input type=\"radio\" name=\"sqlite\" value=\"sqlite\" checked> SQLite</label><label><input type=\"radio\" name=\"redis\" value=\"redis\"> Redis</label></fieldset></form>"
+        }
+       }
+      ]
+     }
+    },
+    {
+     "type": "message",
+     "message": {
+      "role": "toolResult",
+      "toolCallId": "toolu_ask",
+      "toolName": "ask",
+      "content": [
+       {
+        "type": "text",
+        "text": "Error: a <fieldset> holds radios that each carry a different `name`, so each is a group of its own:\n- <fieldset> \"Which store should we use?\": sqlite, redis\n\nA preselected radio of one group is submitted together with the user's pick in another, so the answer holds two values for one question. Give every option of a question the same `name` with its own `value`:\n\n```html\n<fieldset>\n  <legend>Session store</legend>\n  <label><input type=\"radio\" name=\"store\" value=\"sqlite\" checked> SQLite</label>\n  <label><input type=\"radio\" name=\"store\" value=\"redis\"> Redis</label>\n</fieldset>\n```\n\nQuestions that really are separate get a <fieldset> each. Then call ask again."
+       }
+      ],
+      "details": {
+       "answers": []
+      },
+      "isError": false
+     }
+    }
+   ]
+  },
+  {
+   "id": "one-name-per-question",
+   "html": "<form><fieldset><legend>Which store should we use?</legend><label><input type=\"radio\" name=\"store\" value=\"sqlite\" checked> SQLite</label><label><input type=\"radio\" name=\"store\" value=\"redis\"> Redis</label></fieldset></form>",
+   "formFrameOn19_1_1": {
+    "method": "form",
+    "keys": [
+     "type",
+     "id",
+     "method",
+     "html"
+    ],
+    "sameHtml": true
+   },
+   "formFrameOn19_1_0": {
+    "method": "form",
+    "keys": [
+     "type",
+     "id",
+     "method",
+     "html"
+    ],
+    "sameHtml": true
+   },
+   "toolEnd": [],
+   "entries": []
+  }
+ ]
+}

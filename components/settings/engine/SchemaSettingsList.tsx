@@ -21,25 +21,31 @@
  *
  * A setting the engine added in its last update wears a "New" chip (the
  * state is components/settings/new-badges.ts); the tab buttons, the group
- * headers and the phone contents add an `N new` count.
+ * headers and the phone contents add an `N new` count. When there are new
+ * settings they are listed first, in a "New in this update" group taken once
+ * per open (./new-first.ts): lifted out of their sections, never shown twice.
  */
 import { AlertCircle, Check, ChevronDown, ChevronRight, Copy, RotateCcw } from "lucide-react";
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { SecretInput } from "@/components/ui/field";
 import { Select } from "@/components/ui/Select";
 import { useSchemaIndex, type SchemaGroup, type SchemaIndex, type SchemaRow, type SchemaSetting, type SchemaTab, type SchemaValue } from "@/hooks/useSchemaIndex";
+import { useI18n } from "@/lib/i18n";
 import { Directory } from "../Directory";
 import { countBadged, isBadgedRow, newCountLabel, useSettingsNewBadges } from "../new-badges";
 import { NativeSetting, READ_ONLY_BADGE, SettingsHighlightContext, TERMINAL_ONLY_BADGE, ToggleSwitch, chipStyle, nativeInputStyle } from "../primitives";
 import { useSaveStatus } from "../SaveStatus";
 import { useSettingsShell } from "../shell-context";
 import { LIST_DRAFT_HINT, formatListDraft, parseListDraft } from "./list-draft";
+import { liftNewFirst, newFirstEntries, newFirstSnapshot, nextNewFirstSnapshot, type NewFirstEntry } from "./new-first";
 import { ALSO_UNDER, ENGINE_PANEL_ID, cardOwner, cardSurfaceAvailable, rowSearchIdBesideCard, searchIdForKey, type CardSurface } from "./recommended-cards";
 
 /** Beyond this many rows a tab's groups start collapsed on desktop too: a
  * schema-driven engine can declare hundreds of settings in one tab, and an
  * open wall of them is not a page anyone reads top to bottom. */
 export const COLLAPSE_ABOVE_ROWS = 120;
+
+const NO_SNAPSHOT: readonly string[] = [];
 
 /** Beyond this, an option label will not fit a select sitting beside the
  * setting's name, so the control moves to its own full-width row. */
@@ -423,13 +429,36 @@ function groupKey(tabId: string, groupId: string): string {
   return `${tabId} ${groupId}`;
 }
 
-/** A collapsible section: `Group · N settings · M changed`. */
-function GroupSection({ tabId, group, open, onToggle, columns, index }: { tabId: string; group: SchemaGroup; open: boolean; onToggle: () => void; columns: number; index: SchemaIndex }) {
+/** What turns a section into the "New in this update" group: where each row
+ * belongs (`Tab › Group`) and a line saying when it goes back. */
+interface NewFirstView {
+  sections: ReadonlyMap<string, string>;
+  hint: string;
+}
+
+function newFirstView(entries: readonly NewFirstEntry<SchemaRow>[], hint: string, t: (key: string, vars?: Record<string, string | number>) => string): NewFirstView {
+  return { sections: new Map(entries.map((entry) => [entry.row.key, t("settings.newFirst.in", { section: entry.section })])), hint };
+}
+
+/** A row of the "New in this update" group, with the section it belongs to above it. */
+function NewFirstRowCard({ row, section, index }: { row: SchemaRow; section: string | undefined; index: SchemaIndex }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0 }}>
+      {section && <span style={{ fontSize: 10.5, color: "var(--text-dim)", letterSpacing: "0.02em", overflowWrap: "anywhere" }}>{section}</span>}
+      <SchemaSettingRow row={row} index={index} />
+    </div>
+  );
+}
+
+/** A collapsible section: `Group · N settings · M changed`. With `newFirst` it
+ * is the "New in this update" group: its count is the settings it lists, and
+ * each row names the section it came from. */
+function GroupSection({ tabId, group, open, onToggle, columns, index, newFirst }: { tabId: string; group: SchemaGroup; open: boolean; onToggle: () => void; columns: number; index: SchemaIndex; newFirst?: NewFirstView }) {
   const { isNew } = useSettingsNewBadges();
   const visible = group.rows.filter((row) => row.visible);
   if (visible.length === 0) return null;
   const changed = visible.filter((row) => row.modified).length;
-  const fresh = countBadged(visible, isNew);
+  const fresh = newFirst ? 0 : countBadged(visible, isNew);
   const id = `schema-group-${tabId}-${group.id}`.replace(/[^a-z0-9-]+/gi, "-");
   return (
     <section id={id} aria-labelledby={`${id}-heading`} style={{ display: "flex", flexDirection: "column", gap: 10, scrollMarginTop: 56 }}>
@@ -442,15 +471,18 @@ function GroupSection({ tabId, group, open, onToggle, columns, index }: { tabId:
         style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "6px 0", border: "none", borderBottom: "1px solid var(--border)", background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", minHeight: 32 }}
       >
         {open ? <ChevronDown size={14} aria-hidden="true" style={{ color: "var(--text-muted)", flexShrink: 0 }} /> : <ChevronRight size={14} aria-hidden="true" style={{ color: "var(--text-muted)", flexShrink: 0 }} />}
-        <span style={{ fontSize: 12, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em", color: "var(--text-muted)" }}>{group.label}</span>
+        <span style={{ fontSize: 12, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em", color: newFirst ? "var(--accent)" : "var(--text-muted)" }}>{group.label}</span>
         <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
           · {visible.length} setting{visible.length === 1 ? "" : "s"}{changed > 0 ? ` · ${changed} changed` : ""}
           {fresh > 0 && <span style={{ color: "var(--accent)", fontWeight: 600 }}>{` · ${newCountLabel(fresh)}`}</span>}
         </span>
       </button>
+      {open && newFirst && <p style={{ margin: 0, fontSize: 11.5, lineHeight: 1.45, color: "var(--text-muted)" }}>{newFirst.hint}</p>}
       {open && (
         <div style={{ display: "grid", gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`, gap: 10 }}>
-          {visible.map((row) => <SchemaSettingRow key={row.key} row={row} index={index} />)}
+          {visible.map((row) => newFirst
+            ? <NewFirstRowCard key={row.key} row={row} section={newFirst.sections.get(row.key)} index={index} />
+            : <SchemaSettingRow key={row.key} row={row} index={index} />)}
         </div>
       )}
     </section>
@@ -496,8 +528,10 @@ function TabSections({ tab, openState, setOpenState, defaultOpen, columns, index
  * including the search highlight: MobileStack re-provides
  * `SettingsHighlightContext` around pushed levels, so reading it here (now
  * that it actually carries a value) is what lets the level open the
- * highlighted row's own group instead of landing on an all-collapsed tab. */
-function SchemaLevel({ tabId, groupId }: { tabId: string; groupId?: string }) {
+ * highlighted row's own group instead of landing on an all-collapsed tab.
+ * `lifted` is the snapshot keys of the "New in this update" group, which the
+ * tab does not list again (captured at push time like everything else here). */
+function SchemaLevel({ tabId, groupId, lifted }: { tabId: string; groupId?: string; lifted: readonly string[] }) {
   const { capabilities } = useSettingsShell();
   const index = useSchemaIndex({ enabled: capabilities.nativeSettings });
   const highlightId = useContext(SettingsHighlightContext);
@@ -509,7 +543,7 @@ function SchemaLevel({ tabId, groupId }: { tabId: string; groupId?: string }) {
     const rowGroupId = row.group ?? (row.key.includes(".") ? row.key.slice(0, row.key.indexOf(".")) : "General");
     return { [groupKey(tabId, rowGroupId)]: true };
   });
-  const tab = index.tabs.find((entry) => entry.id === tabId);
+  const tab = liftNewFirst(index.tabs, lifted).find((entry) => entry.id === tabId);
   if (!tab) return null;
   if (groupId !== undefined) {
     const group = [...tab.groups, ...tab.ungrouped].find((entry) => entry.id === groupId);
@@ -524,13 +558,29 @@ function SchemaLevel({ tabId, groupId }: { tabId: string; groupId?: string }) {
   return <TabSections tab={tab} openState={openState} setOpenState={setOpenState} defaultOpen={false} columns={1} index={index} />;
 }
 
+/** The phone level behind the "New in this update" entry of the contents. */
+function NewFirstLevel({ keys }: { keys: readonly string[] }) {
+  const { capabilities } = useSettingsShell();
+  const { t } = useI18n();
+  const index = useSchemaIndex({ enabled: capabilities.nativeSettings });
+  const entries = newFirstEntries(index.tabs, keys);
+  const view = newFirstView(entries, t("settings.newFirst.hint"), t);
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 10 }}>
+      <p style={{ margin: 0, fontSize: 11.5, lineHeight: 1.45, color: "var(--text-muted)" }}>{view.hint}</p>
+      {entries.map((entry) => <NewFirstRowCard key={entry.row.key} row={entry.row} section={view.sections.get(entry.row.key)} index={index} />)}
+    </div>
+  );
+}
+
 function rowMatches(row: SchemaRow, query: string): boolean {
   return `${row.label} ${row.description ?? ""} ${row.key} ${row.group ?? ""}`.toLowerCase().includes(query);
 }
 
 export function SchemaSettingsList() {
   const { capabilities, isMobile, harnessLabel, openSub } = useSettingsShell();
-  const { isNew } = useSettingsNewBadges();
+  const { isNew, loaded: newKeysLoaded } = useSettingsNewBadges();
+  const { t, tn } = useI18n();
   const index = useSchemaIndex({ enabled: capabilities.nativeSettings });
   const shortName = index.shortName ?? harnessLabel;
   const [activeTab, setActiveTab] = useState<string | null>(null);
@@ -538,7 +588,18 @@ export function SchemaSettingsList() {
   const [openState, setOpenState] = useState<OpenState>({});
   const columns = isMobile ? 1 : 2;
 
-  const tabs = index.tabs;
+  // The "New in this update" group: the badged keys, read ONCE when both the
+  // schema and the server's answer are in, then kept for this open. A setting
+  // seen or changed meanwhile loses its chip but keeps its place until the
+  // list is next opened (see ./new-first.ts).
+  const [snapshot, setSnapshot] = useState<readonly string[] | null>(null);
+  const nextSnapshot = nextNewFirstSnapshot(snapshot, newKeysLoaded && index.status === "ready", () => newFirstSnapshot(index.rows, (row) => isBadgedRow(row, isNew)));
+  if (nextSnapshot !== snapshot) setSnapshot(nextSnapshot);
+  const newKeys = snapshot ?? NO_SNAPSHOT;
+  const snapshotRef = useRef(newKeys);
+  snapshotRef.current = newKeys;
+  const newEntries = useMemo(() => newFirstEntries(index.tabs, newKeys), [index.tabs, newKeys]);
+  const tabs = useMemo(() => liftNewFirst(index.tabs, newKeys), [index.tabs, newKeys]);
   const currentTab = useMemo(() => (activeTab && tabs.some((tab) => tab.id === activeTab) ? activeTab : tabs[0]?.id ?? null), [activeTab, tabs]);
   const tab = tabs.find((entry) => entry.id === currentTab) ?? null;
   const singleTab = tabs.length === 1;
@@ -588,9 +649,11 @@ export function SchemaSettingsList() {
     if (isMobile && pushedFor.current !== highlightId) {
       pushedFor.current = highlightId;
       const tabLabel = idx.tabs.find((entry) => entry.id === row.tab)?.label ?? row.tab;
-      openSub(<SchemaLevel tabId={row.tab} groupId={singleTab ? groupId : undefined} />, singleTab ? groupId : tabLabel);
+      const lifted = snapshotRef.current;
+      if (lifted.includes(row.key)) openSub(<NewFirstLevel keys={lifted} />, t("settings.newFirst.title"));
+      else openSub(<SchemaLevel tabId={row.tab} groupId={singleTab ? groupId : undefined} lifted={lifted} />, singleTab ? groupId : tabLabel);
     }
-  }, [highlightId, index.status, isMobile, openSub, singleTab]);
+  }, [highlightId, index.status, isMobile, openSub, singleTab, t]);
 
   const jumpToGroup = useCallback((groupId: string) => {
     if (!tab) return;
@@ -679,9 +742,16 @@ export function SchemaSettingsList() {
   });
 
   if (isMobile) {
-    const rows = singleTab && tab
-      ? tocRows([...tab.groups, ...tab.ungrouped], (groupId) => openSub(<SchemaLevel tabId={tab.id} groupId={groupId} />, groupId))
-      : tocRows(tabs, (tabId) => openSub(<SchemaLevel tabId={tabId} />, tabs.find((entry) => entry.id === tabId)?.label ?? tabId));
+    const tocRowsList = singleTab && tab
+      ? tocRows([...tab.groups, ...tab.ungrouped], (groupId) => openSub(<SchemaLevel tabId={tab.id} groupId={groupId} lifted={newKeys} />, groupId))
+      : tocRows(tabs, (tabId) => openSub(<SchemaLevel tabId={tabId} lifted={newKeys} />, tabs.find((entry) => entry.id === tabId)?.label ?? tabId));
+    const newRows = newEntries.length === 0 ? [] : [{
+      id: "schema-new-first",
+      title: t("settings.newFirst.title"),
+      subtitle: <span style={{ color: "var(--accent)", fontWeight: 600 }}>{tn("settings.newFirst.count", newEntries.length)}</span>,
+      onOpen: () => openSub(<NewFirstLevel keys={newKeys} />, `${t("settings.newFirst.title")} · ${newEntries.length}`),
+    }];
+    const rows = [...newRows, ...tocRowsList];
     return (
       <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 14 }}>
         {heading}
@@ -696,6 +766,17 @@ export function SchemaSettingsList() {
   return (
     <div style={{ padding: 20, display: "flex", flexDirection: "column", gap: 16 }}>
       {heading}
+      {!query && newEntries.length > 0 && (
+        <GroupSection
+          tabId="new-first"
+          group={{ id: "new", label: t("settings.newFirst.title"), rows: newEntries.map((entry) => entry.row), changed: 0 }}
+          open={openState[groupKey("new-first", "new")] ?? true}
+          onToggle={() => setOpenState((current) => ({ ...current, [groupKey("new-first", "new")]: !(current[groupKey("new-first", "new")] ?? true) }))}
+          columns={columns}
+          index={index}
+          newFirst={newFirstView(newEntries, t("settings.newFirst.hint"), t)}
+        />
+      )}
       <div style={{ position: "sticky", top: 0, zIndex: 2, background: "var(--bg)", padding: "6px 0", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
         {query ? (
           <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{matches.length} matching setting{matches.length === 1 ? "" : "s"} across every tab</span>

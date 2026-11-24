@@ -119,7 +119,32 @@ active engine, named by its short name); **System** (the server).
   other key → Behavior); `N new` counts on the All-settings tab buttons, group
   headers and phone contents; and a chip on dialog-wide search results
   (`SearchEntry.isNew`). Settings copy is English-only, so no `lib/i18n`
-  entries.
+  entries, except the "New in this update" group below.
+- **Design decision — new settings are listed FIRST, from the same ledger
+  and the same rule as the chip.** The All-settings list
+  (`SchemaSettingsList`) opens with a "New in this update" group: the rows
+  `isBadgedRow` marks, in the engine's own row order, each captioned with its
+  section (`Tab › Group`; the group alone for a one-tab engine), the count in
+  the heading. There is no second ledger. The pure rules are in
+  `components/settings/engine/new-first.ts` (`newFirstSnapshot`,
+  `newFirstEntries`, `liftNewFirst`, `nextNewFirstSnapshot`; tests in
+  `new-first.test.mjs`). The badged keys are SNAPSHOT once per open, when both
+  the schema and the server's answer are in (`SettingsNewKeysState.loaded`;
+  an empty `newKeys` before that only means "not known yet"). A setting is in
+  the group for that whole open even after its chip is gone (changed, or seen
+  enough): it leaves by the chip's own rule (3 opens seen, or changed) at the
+  NEXT open, so nothing jumps while being read or edited. Group rows are
+  MOVED, never shown twice (`liftNewFirst` removes them from their sections,
+  counts follow), so each setting keeps one set of DOM ids and the dialog
+  search highlight lands on it. No new settings: no group, no phone entry,
+  nothing changes. The group is hidden while the filter box has text (the
+  filter runs over every row as before; search is otherwise untouched). On a
+  phone the group is the first row of the contents and opens its own level
+  (`NewFirstLevel`); `SchemaLevel` takes the snapshot keys as a prop because a
+  pushed level is captured at push time. Rail and phone-root dots, the
+  heading's `N new` and dialog-search chips are unchanged. Copy:
+  `settings.newFirst.*` in en/ja/zh-CN. Only engine settings: the new-models
+  badges are a separate mechanism.
 - **Safety & approvals cards (Settings > Behavior).** The Recommended "Safety & approvals" group has seven cards: `tools.approvalMode`, `tools.approval.bash`, `tools.approval.extension`, `tools.restrictedFolders`, `bash.gitGuard`, `session.warnCost`, `session.maxCost`. `tools.approvalMode` also takes `always-ask-cached` ("Ask and remember", omp 18.12.3+). Cody offers it only when the installed schema lists it, but the typed config read/write (`lib/omp/settings-config.ts`) always accepts it. The typed read keeps EVERY `tools.approval.<tool>` entry holding allow/prompt/deny (e.g. `computer.control`, omp 18.14+), so a save never drops one; the Settings UI has no editor for them. `tools.restrictedFolders` and `bash.gitGuard` are schema-declared (18.13.1 / 18.8.7) so their cards hide on older engines like the other versioned cards (`INTRODUCED_IN` in `components/recommended-cards.test.mjs`). `session.warnCost` / `session.maxCost` have no UI metadata in omp, so they are `CURATED_ONLY` number cards (section `session`, `unset: true`, `minVersion: "18.13.0"`, hidden below that version by `curatedSupported`). omp accepts only POSITIVE USD amounts for them (0 is rejected), so "off" means the key is absent: the card starts empty and Reset removes it. Cody has no /forget-approvals button; the card hint says to type the slash command in the composer. The `ask.timeout` note in `SETTING_NOTES` describes 18.19 behaviour (submit the form's current values) and says older engines pick the recommended answer; the cfg:// approval part is left out because only the terminal UI registers a host for it.
 
   The `tools.approval.extension` card ("Extension Tool Requests") is Cody's own: omp reads no such key. Its one consumer is the auto-approve branch of `trackExtensionUiRequest` in `lib/rpc-manager.ts`, which, when the value is `allow`, answers a tool approval through `autoApprovalReply` (`lib/notifications/compose.ts`, built on the same `toolApprovalSelect` / `isToolApprovalTitle` the notification buttons use). omp 18.8.3 and 18.19.0 ask the approval as a `select` titled `Allow tool: <name>…`, so the reply is the option that allows THIS call once (`Approve`, or `Approve Once` beside grants), never a session-wide, remembered or `Deny` option; a list it cannot recognise is left for the person. The legacy `confirm` form still gets `confirmed: true`. Provider safety-check prompts (`Provider safety checks:` in the title) and restricted-folder prompts (`Reason: Restricted folder:`) are never auto-approved. Tests: `lib/rpc-manager.test.mjs` ("auto approve …").
@@ -373,3 +398,7 @@ setting added upstream appears without a Cody change.
 ### Renamed keys: `tools.xdev*` to `tools.commands*` (omp 19.1)
 - `tools.xdev`, `xdevDocs`, `xdevInlineDevices`, `xdevNotices` became `tools.commands`, `commandDocs`, `commandInline`, `commandNotices`; `tui.completeScrollback` was removed (Cody never referenced it). The panel follows the engine's schema, so each engine shows the keys it has; the Cody note for the notices exists under both names (`NOTE_REMOVED_IN` in `lib/omp/settings-surface.test.mjs` judges the old name only where the engine still has it).
 - An engine IGNORES a settings key it does not know (measured on 19.0.0 and 19.1.0, in `config.yml` and in a `PI_CONFIG_FILES` layer), so the minimal local profile's overlay writes both names (`lib/local-model-profile.ts`). Do the same for any other renamed key written from sync code. `lib/harness/fixtures/omp-schema-keys.json` is the 18.19.0 floor, so the old names there are right.
+
+### Settings in omp 19.1.1 (467 keys; 19.1.0 had 466)
+- `computer.backgroundFallback` became `computer.takeover` (enum `fallback` / `foreground` / `always` / `refuse`, default `fallback`); the engine migrates an old `refuse` value in memory and drops the old key. Cody reads only `computer.enabled` (kept off by default, on-demand), so no code changed; the panel follows the schema, and the 18.19.0 floor fixture still names the old key correctly. 19.1.0 and older engines ignore `computer.takeover`, as they ignore any key they lack.
+- `todo.backend` is new (string, default `native`, a runtime option). It names an extension (`pi.registerTodoBackend`) that mirrors the todo list to an outside store. Cody installs none, so the panel shows a text box with a Cody note (`SETTING_NOTES` in `lib/omp/settings-surface.ts`, judged from 19.1.1 by `NOTE_SINCE` in `settings-surface.test.mjs`). The `tree` status-line segment is terminal-only. `lib/settings-new-keys.ts` needed no change.

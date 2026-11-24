@@ -322,6 +322,11 @@ const SETTING_NOTES: Record<string, string> = {
     "Cody never shows these notices in the chat, so turning this off changes nothing you can see. The assistant still learns of a change with its next prompt.",
   "tools.commandNotices":
     "Cody never shows these notices in the chat, so turning this off changes nothing you can see. The assistant still learns of a change with its next prompt.",
+  // omp 19.1.1 `todo.backend`: names an extension (`pi.registerTodoBackend`) that mirrors the todo list to
+  // an outside store; its choices come from the terminal UI's runtime registry, so Cody can only offer a
+  // text box. Cody installs no such extension, so only `native` does anything.
+  "todo.backend":
+    "Names an extension that copies the todo list to an outside store. Cody installs none, so leave this on native: any other name changes nothing unless you installed an omp extension that registers it.",
   // omp 18.16.0 hindsight backend: `retain` / `learn` may pass `scope: "global"`
   // only when this is on, and the memory scoping mode must be global or
   // per-project-tagged for it to take effect.

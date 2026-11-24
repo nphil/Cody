@@ -3700,5 +3700,10 @@
   "diskUsage.blobs.free": "解放する",
   "diskUsage.blobs.freed": "未使用のブロブ {size} を解放しました",
   "diskUsage.blobs.unsupported": "このエンジンではブロブを整理できません。",
-  "statistics.state.indexError": "チャットの読み込み中に問題が発生しました（{error}）。表示中の数値は古い可能性があります。"
+  "statistics.state.indexError": "チャットの読み込み中に問題が発生しました（{error}）。表示中の数値は古い可能性があります。",
+  "settings.newFirst.title": "このアップデートの新機能",
+  "settings.newFirst.hint": "このアップデートで追加された設定を、エンジン本来の順序で表示しています。確認または変更した設定は、次に設定を開いたときに元のセクションへ戻ります。",
+  "settings.newFirst.in": "{section} 内",
+  "settings.newFirst.count.one": "新しい設定 {count} 件",
+  "settings.newFirst.count.other": "新しい設定 {count} 件"
 }

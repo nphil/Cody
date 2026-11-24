@@ -31,6 +31,9 @@ import { subscribeSettingsWritten } from "./useConfigWriter";
 export interface SettingsNewKeysState {
   /** The keys that are still "New" for this person in this open, changed ones removed. */
   newKeys: ReadonlySet<string>;
+  /** The server's answer for this open is in (or there is nothing to wait for). A list that groups the new settings
+   * first reads `newKeys` once, when this turns true: before it, an empty set only means "not known yet". */
+  loaded: boolean;
   isNew(key: string): boolean;
   /** The engine version that brought `key`; null when it is not known. */
   introducedIn(key: string): string | null;
@@ -45,6 +48,7 @@ const NO_KEYS: ReadonlySet<string> = new Set();
 /** The state when nothing is badged: the default of the context, and what a disabled hook returns. */
 export const NO_NEW_KEYS: SettingsNewKeysState = {
   newKeys: NO_KEYS,
+  loaded: true,
   isNew: () => false,
   introducedIn: () => null,
   reportSeen: () => {},
@@ -158,6 +162,7 @@ export function useSettingsNewKeys({ enabled, engineId }: { enabled: boolean; en
     if (!enabled) return NO_NEW_KEYS;
     return {
       newKeys,
+      loaded: loaded !== null,
       isNew: (key) => newKeys.has(key),
       introducedIn: (key) => loaded?.answer.since[key] ?? null,
       reportSeen,
