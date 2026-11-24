@@ -148,7 +148,7 @@ function deviceOf(target: string): number | null {
  * never created means no chat was ever started; one that is not a Map is
  * unknown, and unknown means "everything is running".
  */
-function readLiveSessions(): LiveSessions | null {
+export function readLiveSessions(): LiveSessions | null {
   const registry = globalThis.__ompSessions;
   const live: LiveSessions = { ids: new Set(), cwds: new Set(), dirs: new Set() };
   if (registry === undefined) return live;

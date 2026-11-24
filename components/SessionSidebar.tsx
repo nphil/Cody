@@ -22,6 +22,7 @@ import { Check, ChevronDown, ChevronRight, CircleHelp, FilePlus, FileUp, Folder,
 import { engineScopedKey, STORAGE_KEYS } from "@/lib/storage-keys";
 import { EMPTY_ID_SET } from "@/lib/sidebar-prefs";
 import { openLiveStream, type LiveStream } from "@/lib/live-stream";
+import { SHOW_IN_FILES_EVENT } from "@/lib/show-in-files";
 import { OMP_ENGINE_ID, type ActiveEngineInfo } from "./SettingsTabs";
 
 declare global {
@@ -949,6 +950,18 @@ export function SessionSidebar({ selectedSessionId, optimisticSession, onSelectS
     setSelectedCwd(path);
     expandProject(path);
   }, [expandProject]);
+
+  // Settings › Disk space asks to see a folder: select it as the project and open the explorer under the list.
+  useEffect(() => {
+    const onShow = (event: Event) => {
+      const path = (event as CustomEvent<{ path?: unknown }>).detail?.path;
+      if (typeof path !== "string" || path === "") return;
+      activateProject(path);
+      setExplorerOpen(true);
+    };
+    window.addEventListener(SHOW_IN_FILES_EVENT, onShow);
+    return () => window.removeEventListener(SHOW_IN_FILES_EVENT, onShow);
+  }, [activateProject, setExplorerOpen]);
 
   // Notify parent only when the effective cwd actually changes (not when
   // projectRootFor identity changes due to session/worktree refreshes).

@@ -1,5 +1,6 @@
 import { runDiskJanitor, type JanitorReport, type JanitorTrigger } from "../disk/janitor";
 import type { DiskAreaId } from "../disk/status";
+import { pruneUsageCache } from "../disk/usage";
 import { formatBytes } from "../format-bytes";
 import { checkEngineDbIfDue, watchEngineCrashesForDbCheck } from "../omp/engine-db";
 import { sweepOmpTempFiles } from "../omp/temp-files";
@@ -30,7 +31,10 @@ export interface HousekeepingJobs {
 }
 
 const DEFAULT_JOBS: HousekeepingJobs = {
-  janitor: (trigger) => runDiskJanitor({ trigger }),
+  janitor: (trigger) => {
+    pruneUsageCache();
+    return runDiskJanitor({ trigger });
+  },
   ompTemp: () => sweepOmpTempFiles(),
   engineDb: () => checkEngineDbIfDue(),
 };

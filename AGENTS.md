@@ -635,6 +635,7 @@ Details: docs/agents/disk.md
 - Gate (`gate.ts`, `status.ts`): below 5 % free, new work gets 507 `disk_full`; steer/abort still pass so agents can be told to clean up.
 - Trap: in omp any extension `tool_call`/`tool_result` handler vetoes `task.speculativeLaunch`; `cody-disk-budget.ts` registers `tool_result` lazily.
 - Trap: an extension's `before_agent_start` must NEVER return `systemPrompt` (omp then re-announces the whole tool catalog (xd:// or tool commands) as a user message, ~6.6k tokens, every time): return ONE hidden `message`, only when `noteIsLive` says the note is gone (gate, disk rule, context budget, on-demand restore); a new type goes in `HIDDEN_CUSTOM_TYPES` AND `isModelOnlyNote` (`lib/message-display.ts`).
+- "What is using space" (Settings › System › Disk space): `bin/cody-disk-usage.mjs` scans in a SEPARATE low-priority process (lstat only, never follows links or crosses devices) and `lib/disk/usage.ts` labels at READ time; clearing re-labels against the live disk and never trusts a cached label. Only a folder next to its project file (`target`/Cargo.toml, `node_modules`/package.json, `.next`, `build`, …) or a known cache is deletable; refused if changed in the last 15 min (ctime counts), in use, or touching `agent.db`/the agent dir. Chat transcripts go through `DELETE /api/sessions/<id>`, never by path. Fixtures for tests must be random bytes on tmpfs (ZFS compresses and reports size late).
 Details: docs/agents/disk.md
 
 ### Disk exhaustion is a first-class failure (`lib/disk-space.ts`)

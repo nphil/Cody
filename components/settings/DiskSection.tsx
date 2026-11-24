@@ -23,6 +23,7 @@ import { ApiError, ErrorNote, primaryButtonStyle, requestJson, smallButtonStyle 
 import { cardStyle, cardTitleStyle, dimLineStyle, LoadingLine, mutedLineStyle } from "./EngineRoster";
 import { nativeInputStyle, SettingsHighlightContext } from "./primitives";
 import { ReplayDataRow } from "./ReplayDataRow";
+import { DiskUsage } from "./DiskUsage";
 
 export const DISK_ROUTE = "/api/disk";
 
@@ -267,6 +268,19 @@ export function DiskSection({ initial }: { initial?: DiskPayload } = {}) {
           {areas.map((area) => (
             <Meter key={area.id} label={sharedDisk && area.id === "tmp" ? "Temp space and data (one shared disk)" : AREA_LABELS[area.id]} area={area} />
           ))}
+
+          {areas.length > 0 && (
+            <DiskUsage
+              volumes={sharedDisk ? ["data"] : ["data", "tmp"]}
+              canEdit={canEdit}
+              usedBytes={{
+                data: (sharedDisk ? areas[0] : areas.find((area) => area.id === "data"))?.usedBytes,
+                tmp: areas.find((area) => area.id === "tmp")?.usedBytes,
+              }}
+              onCleanNow={cleanNow}
+              cleaning={busy}
+            />
+          )}
 
           <div style={{ display: "flex", flexDirection: "column", gap: 4, minWidth: 0, paddingTop: 8, borderTop: "1px solid var(--border)" }}>
             <div style={{ fontSize: 12, fontWeight: 600 }}>Largest scratch folders</div>
