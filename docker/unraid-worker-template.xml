@@ -13,11 +13,11 @@
   <WebUI/>
   <TemplateURL/>
   <Icon>https://raw.githubusercontent.com/nphil/Cody/main/docker/icon.png</Icon>
-  <ExtraParams>--entrypoint=/usr/local/bin/cody-worker --hostname=cody-worker --restart unless-stopped --memory=16g --memory-swap=16g --cgroup-parent=/docker/cody-worker --cpu-shares=2 --pids-limit=8192 --oom-score-adj=1000 --security-opt seccomp=unconfined --security-opt no-new-privileges --tmpfs /data:size=1m,mode=0755 --tmpfs /workspace:size=1m,mode=0755 --health-cmd="python3 /usr/local/lib/cody-worker/listen.py --check /run/cody-worker/ssh.sock" --health-interval=60s --health-timeout=15s --health-start-period=10m</ExtraParams>
+  <ExtraParams>--entrypoint=/usr/local/bin/cody-worker --hostname=cody-worker --restart unless-stopped --memory=16g --cpu-shares=2 --pids-limit=8192 --oom-score-adj=1000 --security-opt seccomp=unconfined --security-opt no-new-privileges --tmpfs /data:size=1m,mode=0755 --tmpfs /workspace:size=1m,mode=0755 --health-cmd="python3 /usr/local/lib/cody-worker/listen.py --check /run/cody-worker/ssh.sock" --health-interval=60s --health-timeout=15s --health-start-period=10m</ExtraParams>
   <PostArgs/>
   <DonateText/>
   <DonateLink/>
-  <Requires>The Cody container: it shares the folder below and puts its public key there. Recommended: the zero-swap block for /boot/config/go in docs/unraid.md ("Build worker"), because Docker on Unraid ignores --memory-swap.</Requires>
+  <Requires>The Cody container: it shares the folder below and puts its public key there. On Unraid 7.4 or newer you can move the memory limit from Extra Parameters (--memory) to the Memory limit field.</Requires>
   <Config Name="Worker disk" Target="/srv/cody-work" Default="/mnt/user/appdata/cody-worker/work" Mode="rw" Description="The worker's own disk: job copies, build folders kept between runs, and its own caches (cargo registry, npm, uv, ...)." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/cody-worker/work</Config>
   <Config Name="Cody home (read-only)" Target="/srv/cody-work/root/data/home" Default="/mnt/user/appdata/cody/home" Mode="ro" Description="Cody's home (its App Data folder + /home), shown read-only at /data/home inside each job: toolchains, venvs and neighbouring repositories at the same paths as in Cody." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/cody/home</Config>
   <Config Name="Shared with Cody" Target="/run/cody-worker" Default="/mnt/user/appdata/cody/workers/unraid" Mode="rw" Description="The worker's door: its ssh socket and host key, and Cody's public key (authorized_keys). Inside Cody it is /data/workers/unraid." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/cody/workers/unraid</Config>

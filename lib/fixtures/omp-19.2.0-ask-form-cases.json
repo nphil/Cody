@@ -1,0 +1,2421 @@
+{
+  "omp": "19.2.0",
+  "note": "Recorded from the real omp 19.2.0 binary (rpc-ui, protocol v2) against a scripted model that calls `ask`, replaying every case of omp-19.1.0-ask-form-cases.json: the form HTML was sent as one `form` extension_ui_request, the `data` below was answered, and the engine's tool result was recorded. 18 cases that omp 19.1.0 refused (a broken required / pattern / min / max / type rule) are accepted by 19.2.0; `isError` cases are only the ones the engine still refuses (shape, unknown name, split radios, cancel). `view-default-*` cases submit what Cody's form view starts from (defaultFormData).",
+  "forms": {
+    "plain": "<form>\n  <fieldset><legend>Which colour should the logo be?</legend>\n    <label><input type=\"radio\" name=\"colour\" value=\"red\"> Red</label>\n    <label><input type=\"radio\" name=\"colour\" value=\"green\" checked> Green</label>\n    <label><input type=\"radio\" name=\"colour\" value=\"blue\"> Blue</label>\n  </fieldset>\n  <fieldset><legend>Which toppings?</legend>\n    <label><input type=\"checkbox\" name=\"toppings\" value=\"cheese\"> Cheese</label>\n    <label><input type=\"checkbox\" name=\"toppings\" value=\"olives\"> Olives</label>\n    <label><input type=\"checkbox\" name=\"toppings\" value=\"mushrooms\"> Mushrooms</label>\n  </fieldset>\n  <label>Anything else? <textarea name=\"notes\"></textarea></label>\n</form>",
+    "req": "<form>\n  <h3>Create the deploy target</h3>\n  <p>Fields marked required must be filled before you can submit.</p>\n  <fieldset><legend>Environment</legend>\n    <label><input type=\"radio\" name=\"env\" value=\"staging\" required> Staging</label>\n    <label><input type=\"radio\" name=\"env\" value=\"prod\"> Production</label>\n    <label><input type=\"radio\" name=\"env\" value=\"dev\"> Development</label>\n  </fieldset>\n  <fieldset><legend>Regions</legend>\n    <label><input type=\"checkbox\" name=\"regions\" value=\"eu\" required> EU</label>\n    <label><input type=\"checkbox\" name=\"regions\" value=\"us\"> US</label>\n    <label><input type=\"checkbox\" name=\"regions\" value=\"ap\"> Asia-Pacific</label>\n  </fieldset>\n  <label>Contact email <input type=\"email\" name=\"email\" required placeholder=\"you@example.com\"></label>\n  <label>Replicas (1 to 10) <input type=\"number\" name=\"replicas\" min=\"1\" max=\"10\" value=\"2\"></label>\n  <label>Service slug <input type=\"text\" name=\"slug\" required pattern=\"[a-z0-9-]+\" minlength=\"3\" maxlength=\"24\" placeholder=\"my-service\"></label>\n  <label>Size <select name=\"size\"><option value=\"s\">Small</option><option value=\"m\" selected>Medium</option><option value=\"l\">Large</option></select></label>\n  <label>Notes <textarea name=\"notes\" rows=\"3\" placeholder=\"Anything the operator should know\"></textarea></label>\n  <input type=\"hidden\" name=\"ticket\" value=\"OPS-42\">\n</form>",
+    "rich": "<form>\n  <h2>Migration plan</h2>\n  <p>We can migrate <strong>in one step</strong> or <em>in phases</em>. Run <code>npm run migrate -- --dry</code> first and read the output.</p>\n  <ul><li>One step: faster, riskier.</li><li>Phases: slower, safer.</li></ul>\n  <ol><li>Back up the database</li><li>Run the migration</li><li>Verify the counts</li></ol>\n  <pre>ALTER TABLE users ADD COLUMN plan text;\nUPDATE users SET plan = 'free';</pre>\n  <table><thead><tr><th>Option</th><th>Downtime</th><th>Risk</th></tr></thead><tbody>\n    <tr><td>One step</td><td>10 min</td><td>High</td></tr>\n    <tr><td>Phases</td><td>none</td><td>Low</td></tr>\n  </tbody></table>\n  <img src=\"data:image/png;base64,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\" alt=\"Diagram of the two paths\">\n  <fieldset><legend>How should we migrate?</legend>\n    <label><input type=\"radio\" name=\"path\" value=\"one\" checked> One step</label>\n    <label><input type=\"radio\" name=\"path\" value=\"phases\"> In phases</label>\n    <label><input type=\"radio\" name=\"path\" value=\"later\"> Not now</label>\n  </fieldset>\n  <fieldset><legend>Which checks should run?</legend>\n    <label><input type=\"checkbox\" name=\"checks\" value=\"counts\" checked> Row counts</label>\n    <label><input type=\"checkbox\" name=\"checks\" value=\"hash\"> Checksums</label>\n    <label><input type=\"checkbox\" name=\"checks\" value=\"smoke\"> Smoke tests</label>\n  </fieldset>\n  <label>Comments <textarea name=\"comments\" placeholder=\"Optional\"></textarea></label>\n</form>",
+    "other": "<form>\n  <fieldset><legend>Which database?</legend>\n    <label><input type=\"radio\" name=\"db\" value=\"sqlite\"> SQLite</label>\n    <label><input type=\"radio\" name=\"db\" value=\"pg\" checked> Postgres</label>\n    <label><input type=\"radio\" name=\"db\" value=\"mysql\"> MySQL</label>\n  </fieldset>\n  <fieldset><legend>Which languages?</legend>\n    <label><input type=\"checkbox\" name=\"langs\" value=\"ts\"> TypeScript</label>\n    <label><input type=\"checkbox\" name=\"langs\" value=\"py\"> Python</label>\n    <label><input type=\"checkbox\" name=\"langs\" value=\"other\"> Other (say which)</label>\n  </fieldset>\n  <fieldset><legend>Own Other option?</legend>\n    <label><input type=\"radio\" name=\"own\" value=\"a\"> Alpha</label>\n    <label><input type=\"radio\" name=\"own\" value=\"o\"> Other</label>\n  </fieldset>\n</form>",
+    "many": "<form>\n  <p>Pick the region, then every feature you want. The list is long on purpose.</p>\n  <fieldset><legend>Which region should host it?</legend>\n    <label><input type=\"radio\" name=\"region\" value=\"r1\"> Region 1 (eu-west-1)</label>\n    <label><input type=\"radio\" name=\"region\" value=\"r2\"> Region 2 (eu-north-2)</label>\n    <label><input type=\"radio\" name=\"region\" value=\"r3\"> Region 3 (us-east-3)</label>\n    <label><input type=\"radio\" name=\"region\" value=\"r4\"> Region 4 (us-west-4)</label>\n    <label><input type=\"radio\" name=\"region\" value=\"r5\"> Region 5 (ap-south-5)</label>\n    <label><input type=\"radio\" name=\"region\" value=\"r6\"> Region 6 (ap-east-6)</label>\n    <label><input type=\"radio\" name=\"region\" value=\"r7\"> Region 7 (sa-east-7)</label>\n    <label><input type=\"radio\" name=\"region\" value=\"r8\"> Region 8 (eu-west-8)</label>\n    <label><input type=\"radio\" name=\"region\" value=\"r9\"> Region 9 (eu-north-9)</label>\n    <label><input type=\"radio\" name=\"region\" value=\"r10\"> Region 10 (us-east-10)</label>\n    <label><input type=\"radio\" name=\"region\" value=\"r11\"> Region 11 (us-west-11)</label>\n    <label><input type=\"radio\" name=\"region\" value=\"r12\"> Region 12 (ap-south-12)</label>\n    <label><input type=\"radio\" name=\"region\" value=\"r13\"> Region 13 (ap-east-13)</label>\n    <label><input type=\"radio\" name=\"region\" value=\"r14\"> Region 14 (sa-east-14)</label>\n  </fieldset>\n  <fieldset><legend>Which features should be enabled?</legend>\n    <label><input type=\"checkbox\" name=\"features\" value=\"f1\"> Feature 1: audit log retention for regulated customers</label>\n    <label><input type=\"checkbox\" name=\"features\" value=\"f2\"> Feature 2: single sign-on with SCIM provisioning</label>\n    <label><input type=\"checkbox\" name=\"features\" value=\"f3\"> Feature 3: priority support with a four hour response time</label>\n    <label><input type=\"checkbox\" name=\"features\" value=\"f4\"> Feature 4: private networking between regions</label>\n    <label><input type=\"checkbox\" name=\"features\" value=\"f5\"> Feature 5: audit log retention for regulated customers</label>\n    <label><input type=\"checkbox\" name=\"features\" value=\"f6\"> Feature 6: single sign-on with SCIM provisioning</label>\n    <label><input type=\"checkbox\" name=\"features\" value=\"f7\"> Feature 7: priority support with a four hour response time</label>\n    <label><input type=\"checkbox\" name=\"features\" value=\"f8\"> Feature 8: private networking between regions</label>\n    <label><input type=\"checkbox\" name=\"features\" value=\"f9\"> Feature 9: audit log retention for regulated customers</label>\n    <label><input type=\"checkbox\" name=\"features\" value=\"f10\"> Feature 10: single sign-on with SCIM provisioning</label>\n  </fieldset>\n</form>",
+    "matrix": "<form>\n  <p>Rate each option.</p>\n  <table><tr><th>Option</th><th>Keep</th><th>Drop</th></tr>\n    <tr><td>Feature A</td><td><input type=\"radio\" name=\"a\" value=\"keep\" aria-label=\"Keep A\"></td><td><input type=\"radio\" name=\"a\" value=\"drop\" aria-label=\"Drop A\"></td></tr>\n    <tr><td>Feature B</td><td><input type=\"radio\" name=\"b\" value=\"keep\" aria-label=\"Keep B\"></td><td><input type=\"radio\" name=\"b\" value=\"drop\" aria-label=\"Drop B\"></td></tr>\n  </table>\n</form>",
+    "loose": "<form>\n  <p>Before we start.</p>\n  <label for=\"nm\">Your name</label> <input id=\"nm\" name=\"name\" type=\"text\" value=\"Nitin\">\n  <label><input type=\"checkbox\" name=\"consent\" value=\"yes\" required> I agree to the terms</label>\n  <label>Budget <input type=\"range\" name=\"budget\" min=\"0\" max=\"100\" value=\"40\"></label>\n  <label>Start date <input type=\"date\" name=\"start\"></label>\n</form>",
+    "long": "<form>\n  <h3>Choose a rollout</h3>\n  <p>This paragraph explains the rollout in a lot of words so it wraps over many lines on a phone and has to scroll. This paragraph explains the rollout in a lot of words so it wraps over many lines on a phone and has to scroll. This paragraph explains the rollout in a lot of words so it wraps over many lines on a phone and has to scroll. This paragraph explains the rollout in a lot of words so it wraps over many lines on a phone and has to scroll. </p>\n  <p>Source: https://example.com/a/really/long/path/that/never/breaks/segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-segment-end</p>\n  <p>A second paragraph follows with more background about why the choice matters and what each path costs. A second paragraph follows with more background about why the choice matters and what each path costs. A second paragraph follows with more background about why the choice matters and what each path costs. </p>\n  <fieldset><legend>Which rollout?</legend>\n    <label><input type=\"radio\" name=\"rollout\" value=\"canary\"> Canary first, then everyone after a day of metrics looks clean and the on-call engineer agrees</label>\n    <label><input type=\"radio\" name=\"rollout\" value=\"all\"> Everyone now</label>\n  </fieldset>\n</form>",
+    "entities": "<form>\n  <p>Fish &amp; chips &mdash; &pound;5 &#8364; &lt;tag&gt; and &nbsp;spaced.</p>\n  <label>Caf&eacute; <input type=\"text\" name=\"cafe\" value=\"Caf&eacute; &amp; Bar\"></label>\n  <label><input type=\"radio\" name=\"r\" value=\"a&amp;b\"> A &amp; B</label>\n  <label><input type=\"radio\" name=\"r\" value=\"c\"> C</label>\n</form>",
+    "pat": "<form>\n  <label>Code <input name=\"code\" pattern=\"[A-Z]{3}[0-9]+\"></label>\n  <label>Long <input name=\"long\" pattern=\"(alpha|beta|gamma|delta|epsilon|zeta|eta|theta|iota|kappa)+\"></label>\n  <label>Range <input type=\"range\" name=\"vol\" min=\"0\" max=\"10\"></label>\n  <label>When <input type=\"date\" name=\"when\"></label>\n</form>",
+    "sel": "<form>\n  <label>Size <select name=\"size\"><option value=\"s\">Small</option><option value=\"m\">Medium</option><option value=\"l\">Large</option></select></label>\n  <label>Tags <select name=\"tags\" multiple><option value=\"a\">Alpha</option><option value=\"b\" selected>Beta</option><option value=\"c\">Gamma</option></select></label>\n  <label>Role <select name=\"role\" required><option value=\"\" disabled selected>Pick one</option><option value=\"dev\">Developer</option><option value=\"ops\">Operator</option></select></label>\n  <label>Solo <select name=\"solo\" multiple><option value=\"x\">Only one</option></select></label>\n  <label>Plain <select name=\"plain\"><option>First</option><option>Second</option></select></label>\n</form>",
+    "disabled": "<form>\n  <fieldset><legend>Pick one</legend>\n    <label><input type=\"radio\" name=\"x\" value=\"a\"> A</label>\n    <label><input type=\"radio\" name=\"x\" value=\"b\" disabled> B (not available)</label>\n    <label><input type=\"radio\" name=\"x\" value=\"c\" checked> C</label>\n  </fieldset>\n  <label><input type=\"checkbox\" name=\"agree\" value=\"yes\" checked> Agree</label>\n  <input type=\"hidden\" name=\"source\" value=\"deploy-ui\">\n</form>",
+    "dup": "<form>\n  <label><input type=\"radio\" name=\"x\" value=\"a\"> A</label>\n  <label><input type=\"radio\" name=\"x\" value=\"b\"> B</label>\n  <label>Free <input type=\"text\" name=\"x\"></label>\n</form>"
+  },
+  "cases": [
+    {
+      "id": "plain-default",
+      "form": "plain",
+      "cancel": false,
+      "data": {},
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"toppings\": [],\n  \"notes\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "colour",
+            "question": "Which colour should the logo be?",
+            "answer": ""
+          },
+          {
+            "name": "toppings",
+            "question": "Which toppings?",
+            "answer": ""
+          },
+          {
+            "name": "notes",
+            "question": "Anything else?",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "plain-valid",
+      "form": "plain",
+      "cancel": false,
+      "data": {
+        "colour": "blue",
+        "toppings": [
+          "cheese",
+          "mushrooms"
+        ],
+        "notes": "Please keep it quiet.\nThanks."
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"colour\": \"blue\",\n  \"toppings\": [\n    \"cheese\",\n    \"mushrooms\"\n  ],\n  \"notes\": \"Please keep it quiet.\\nThanks.\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "colour",
+            "question": "Which colour should the logo be?",
+            "answer": "Blue"
+          },
+          {
+            "name": "toppings",
+            "question": "Which toppings?",
+            "answer": "Cheese, Mushrooms"
+          },
+          {
+            "name": "notes",
+            "question": "Anything else?",
+            "answer": "Please keep it quiet.\nThanks."
+          }
+        ]
+      }
+    },
+    {
+      "id": "plain-radio-other",
+      "form": "plain",
+      "cancel": false,
+      "data": {
+        "colour": "Purple"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"colour\": \"Purple\",\n  \"toppings\": [],\n  \"notes\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "colour",
+            "question": "Which colour should the logo be?",
+            "answer": "Other: Purple"
+          },
+          {
+            "name": "toppings",
+            "question": "Which toppings?",
+            "answer": ""
+          },
+          {
+            "name": "notes",
+            "question": "Anything else?",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "plain-radio-other-padded",
+      "form": "plain",
+      "cancel": false,
+      "data": {
+        "colour": "  Purple  "
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"colour\": \"Purple\",\n  \"toppings\": [],\n  \"notes\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "colour",
+            "question": "Which colour should the logo be?",
+            "answer": "Other: Purple"
+          },
+          {
+            "name": "toppings",
+            "question": "Which toppings?",
+            "answer": ""
+          },
+          {
+            "name": "notes",
+            "question": "Anything else?",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "plain-checkbox-other",
+      "form": "plain",
+      "cancel": false,
+      "data": {
+        "toppings": [
+          "cheese",
+          "Pineapple"
+        ]
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"toppings\": [\n    \"cheese\",\n    \"Pineapple\"\n  ],\n  \"notes\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "colour",
+            "question": "Which colour should the logo be?",
+            "answer": ""
+          },
+          {
+            "name": "toppings",
+            "question": "Which toppings?",
+            "answer": "Cheese, Other: Pineapple"
+          },
+          {
+            "name": "notes",
+            "question": "Anything else?",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "plain-checkbox-two-other",
+      "form": "plain",
+      "cancel": false,
+      "data": {
+        "toppings": [
+          "Pineapple",
+          "Ham"
+        ]
+      },
+      "formRequested": true,
+      "isError": true,
+      "text": "Form field \"toppings\" carries unexpected value \"Ham\"",
+      "details": {}
+    },
+    {
+      "id": "plain-checkbox-duplicate",
+      "form": "plain",
+      "cancel": false,
+      "data": {
+        "toppings": [
+          "cheese",
+          "cheese"
+        ]
+      },
+      "formRequested": true,
+      "isError": true,
+      "text": "Form field \"toppings\" carries unexpected value \"cheese\"",
+      "details": {}
+    },
+    {
+      "id": "plain-checkbox-string",
+      "form": "plain",
+      "cancel": false,
+      "data": {
+        "toppings": "cheese"
+      },
+      "formRequested": true,
+      "isError": true,
+      "text": "Form field \"toppings\" must carry an array of strings",
+      "details": {}
+    },
+    {
+      "id": "plain-radio-array",
+      "form": "plain",
+      "cancel": false,
+      "data": {
+        "colour": [
+          "red"
+        ]
+      },
+      "formRequested": true,
+      "isError": true,
+      "text": "Form field \"colour\" must carry one string, not an array",
+      "details": {}
+    },
+    {
+      "id": "plain-unknown-field",
+      "form": "plain",
+      "cancel": false,
+      "data": {
+        "nope": "x"
+      },
+      "formRequested": true,
+      "isError": true,
+      "text": "Form dialog data carries unknown field \"nope\"",
+      "details": {}
+    },
+    {
+      "id": "plain-number-for-text",
+      "form": "plain",
+      "cancel": false,
+      "data": {
+        "notes": 5
+      },
+      "formRequested": true,
+      "isError": true,
+      "text": "Form field \"notes\" must carry a string",
+      "details": {}
+    },
+    {
+      "id": "plain-data-null",
+      "form": "plain",
+      "cancel": false,
+      "data": null,
+      "formRequested": true,
+      "isError": true,
+      "text": "Form dialog response must carry a data object",
+      "details": {}
+    },
+    {
+      "id": "plain-data-array",
+      "form": "plain",
+      "cancel": false,
+      "data": [],
+      "formRequested": true,
+      "isError": true,
+      "text": "Form dialog response must carry a data object",
+      "details": {}
+    },
+    {
+      "id": "plain-cancel",
+      "form": "plain",
+      "cancel": true,
+      "formRequested": true,
+      "isError": true,
+      "text": "Ask tool was cancelled by the user",
+      "details": {}
+    },
+    {
+      "id": "req-valid",
+      "form": "req",
+      "cancel": false,
+      "data": {
+        "env": "staging",
+        "regions": [
+          "eu",
+          "us"
+        ],
+        "email": "me@example.com",
+        "replicas": 3,
+        "slug": "my-service",
+        "size": "l",
+        "notes": "ok"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"ticket\": \"OPS-42\",\n  \"env\": \"staging\",\n  \"regions\": [\n    \"eu\",\n    \"us\"\n  ],\n  \"email\": \"me@example.com\",\n  \"replicas\": 3,\n  \"slug\": \"my-service\",\n  \"size\": \"l\",\n  \"notes\": \"ok\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "env",
+            "question": "Environment",
+            "answer": "Staging"
+          },
+          {
+            "name": "regions",
+            "question": "Regions",
+            "answer": "EU, US"
+          },
+          {
+            "name": "email",
+            "question": "Contact email",
+            "answer": "me@example.com"
+          },
+          {
+            "name": "replicas",
+            "question": "Replicas (1 to 10)",
+            "answer": "3"
+          },
+          {
+            "name": "slug",
+            "question": "Service slug",
+            "answer": "my-service"
+          },
+          {
+            "name": "size",
+            "question": "Size",
+            "answer": "Large"
+          },
+          {
+            "name": "notes",
+            "question": "Notes",
+            "answer": "ok"
+          }
+        ]
+      }
+    },
+    {
+      "id": "req-valid-string-number",
+      "form": "req",
+      "cancel": false,
+      "data": {
+        "env": "prod",
+        "regions": [
+          "ap"
+        ],
+        "email": "a@b.c",
+        "replicas": "10",
+        "slug": "abc",
+        "size": "s"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"ticket\": \"OPS-42\",\n  \"env\": \"prod\",\n  \"regions\": [\n    \"ap\"\n  ],\n  \"email\": \"a@b.c\",\n  \"replicas\": 10,\n  \"slug\": \"abc\",\n  \"size\": \"s\",\n  \"notes\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "env",
+            "question": "Environment",
+            "answer": "Production"
+          },
+          {
+            "name": "regions",
+            "question": "Regions",
+            "answer": "Asia-Pacific"
+          },
+          {
+            "name": "email",
+            "question": "Contact email",
+            "answer": "a@b.c"
+          },
+          {
+            "name": "replicas",
+            "question": "Replicas (1 to 10)",
+            "answer": "10"
+          },
+          {
+            "name": "slug",
+            "question": "Service slug",
+            "answer": "abc"
+          },
+          {
+            "name": "size",
+            "question": "Size",
+            "answer": "Small"
+          },
+          {
+            "name": "notes",
+            "question": "Notes",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "req-missing-radio",
+      "form": "req",
+      "cancel": false,
+      "data": {
+        "regions": [
+          "eu"
+        ],
+        "email": "me@example.com",
+        "slug": "my-service"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"ticket\": \"OPS-42\",\n  \"regions\": [\n    \"eu\"\n  ],\n  \"email\": \"me@example.com\",\n  \"replicas\": \"\",\n  \"slug\": \"my-service\",\n  \"notes\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "env",
+            "question": "Environment",
+            "answer": ""
+          },
+          {
+            "name": "regions",
+            "question": "Regions",
+            "answer": "EU"
+          },
+          {
+            "name": "email",
+            "question": "Contact email",
+            "answer": "me@example.com"
+          },
+          {
+            "name": "replicas",
+            "question": "Replicas (1 to 10)",
+            "answer": ""
+          },
+          {
+            "name": "slug",
+            "question": "Service slug",
+            "answer": "my-service"
+          },
+          {
+            "name": "size",
+            "question": "Size",
+            "answer": ""
+          },
+          {
+            "name": "notes",
+            "question": "Notes",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "req-empty-checkbox",
+      "form": "req",
+      "cancel": false,
+      "data": {
+        "env": "dev",
+        "regions": [],
+        "email": "me@example.com",
+        "slug": "my-service"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"ticket\": \"OPS-42\",\n  \"env\": \"dev\",\n  \"regions\": [],\n  \"email\": \"me@example.com\",\n  \"replicas\": \"\",\n  \"slug\": \"my-service\",\n  \"notes\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "env",
+            "question": "Environment",
+            "answer": "Development"
+          },
+          {
+            "name": "regions",
+            "question": "Regions",
+            "answer": ""
+          },
+          {
+            "name": "email",
+            "question": "Contact email",
+            "answer": "me@example.com"
+          },
+          {
+            "name": "replicas",
+            "question": "Replicas (1 to 10)",
+            "answer": ""
+          },
+          {
+            "name": "slug",
+            "question": "Service slug",
+            "answer": "my-service"
+          },
+          {
+            "name": "size",
+            "question": "Size",
+            "answer": ""
+          },
+          {
+            "name": "notes",
+            "question": "Notes",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "req-bad-email",
+      "form": "req",
+      "cancel": false,
+      "data": {
+        "env": "dev",
+        "regions": [
+          "eu"
+        ],
+        "email": "nope",
+        "slug": "my-service"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"ticket\": \"OPS-42\",\n  \"env\": \"dev\",\n  \"regions\": [\n    \"eu\"\n  ],\n  \"email\": \"nope\",\n  \"replicas\": \"\",\n  \"slug\": \"my-service\",\n  \"notes\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "env",
+            "question": "Environment",
+            "answer": "Development"
+          },
+          {
+            "name": "regions",
+            "question": "Regions",
+            "answer": "EU"
+          },
+          {
+            "name": "email",
+            "question": "Contact email",
+            "answer": "nope"
+          },
+          {
+            "name": "replicas",
+            "question": "Replicas (1 to 10)",
+            "answer": ""
+          },
+          {
+            "name": "slug",
+            "question": "Service slug",
+            "answer": "my-service"
+          },
+          {
+            "name": "size",
+            "question": "Size",
+            "answer": ""
+          },
+          {
+            "name": "notes",
+            "question": "Notes",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "req-missing-email",
+      "form": "req",
+      "cancel": false,
+      "data": {
+        "env": "dev",
+        "regions": [
+          "eu"
+        ],
+        "slug": "my-service"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"ticket\": \"OPS-42\",\n  \"env\": \"dev\",\n  \"regions\": [\n    \"eu\"\n  ],\n  \"email\": \"\",\n  \"replicas\": \"\",\n  \"slug\": \"my-service\",\n  \"notes\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "env",
+            "question": "Environment",
+            "answer": "Development"
+          },
+          {
+            "name": "regions",
+            "question": "Regions",
+            "answer": "EU"
+          },
+          {
+            "name": "email",
+            "question": "Contact email",
+            "answer": ""
+          },
+          {
+            "name": "replicas",
+            "question": "Replicas (1 to 10)",
+            "answer": ""
+          },
+          {
+            "name": "slug",
+            "question": "Service slug",
+            "answer": "my-service"
+          },
+          {
+            "name": "size",
+            "question": "Size",
+            "answer": ""
+          },
+          {
+            "name": "notes",
+            "question": "Notes",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "req-replicas-high",
+      "form": "req",
+      "cancel": false,
+      "data": {
+        "env": "dev",
+        "regions": [
+          "eu"
+        ],
+        "email": "a@b.c",
+        "slug": "my-service",
+        "replicas": 11
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"ticket\": \"OPS-42\",\n  \"env\": \"dev\",\n  \"regions\": [\n    \"eu\"\n  ],\n  \"email\": \"a@b.c\",\n  \"replicas\": 11,\n  \"slug\": \"my-service\",\n  \"notes\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "env",
+            "question": "Environment",
+            "answer": "Development"
+          },
+          {
+            "name": "regions",
+            "question": "Regions",
+            "answer": "EU"
+          },
+          {
+            "name": "email",
+            "question": "Contact email",
+            "answer": "a@b.c"
+          },
+          {
+            "name": "replicas",
+            "question": "Replicas (1 to 10)",
+            "answer": "11"
+          },
+          {
+            "name": "slug",
+            "question": "Service slug",
+            "answer": "my-service"
+          },
+          {
+            "name": "size",
+            "question": "Size",
+            "answer": ""
+          },
+          {
+            "name": "notes",
+            "question": "Notes",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "req-replicas-low",
+      "form": "req",
+      "cancel": false,
+      "data": {
+        "env": "dev",
+        "regions": [
+          "eu"
+        ],
+        "email": "a@b.c",
+        "slug": "my-service",
+        "replicas": 0
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"ticket\": \"OPS-42\",\n  \"env\": \"dev\",\n  \"regions\": [\n    \"eu\"\n  ],\n  \"email\": \"a@b.c\",\n  \"replicas\": 0,\n  \"slug\": \"my-service\",\n  \"notes\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "env",
+            "question": "Environment",
+            "answer": "Development"
+          },
+          {
+            "name": "regions",
+            "question": "Regions",
+            "answer": "EU"
+          },
+          {
+            "name": "email",
+            "question": "Contact email",
+            "answer": "a@b.c"
+          },
+          {
+            "name": "replicas",
+            "question": "Replicas (1 to 10)",
+            "answer": "0"
+          },
+          {
+            "name": "slug",
+            "question": "Service slug",
+            "answer": "my-service"
+          },
+          {
+            "name": "size",
+            "question": "Size",
+            "answer": ""
+          },
+          {
+            "name": "notes",
+            "question": "Notes",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "req-replicas-text",
+      "form": "req",
+      "cancel": false,
+      "data": {
+        "env": "dev",
+        "regions": [
+          "eu"
+        ],
+        "email": "a@b.c",
+        "slug": "my-service",
+        "replicas": "many"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"ticket\": \"OPS-42\",\n  \"env\": \"dev\",\n  \"regions\": [\n    \"eu\"\n  ],\n  \"email\": \"a@b.c\",\n  \"replicas\": \"many\",\n  \"slug\": \"my-service\",\n  \"notes\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "env",
+            "question": "Environment",
+            "answer": "Development"
+          },
+          {
+            "name": "regions",
+            "question": "Regions",
+            "answer": "EU"
+          },
+          {
+            "name": "email",
+            "question": "Contact email",
+            "answer": "a@b.c"
+          },
+          {
+            "name": "replicas",
+            "question": "Replicas (1 to 10)",
+            "answer": "many"
+          },
+          {
+            "name": "slug",
+            "question": "Service slug",
+            "answer": "my-service"
+          },
+          {
+            "name": "size",
+            "question": "Size",
+            "answer": ""
+          },
+          {
+            "name": "notes",
+            "question": "Notes",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "req-slug-pattern",
+      "form": "req",
+      "cancel": false,
+      "data": {
+        "env": "dev",
+        "regions": [
+          "eu"
+        ],
+        "email": "a@b.c",
+        "slug": "My Service"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"ticket\": \"OPS-42\",\n  \"env\": \"dev\",\n  \"regions\": [\n    \"eu\"\n  ],\n  \"email\": \"a@b.c\",\n  \"replicas\": \"\",\n  \"slug\": \"My Service\",\n  \"notes\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "env",
+            "question": "Environment",
+            "answer": "Development"
+          },
+          {
+            "name": "regions",
+            "question": "Regions",
+            "answer": "EU"
+          },
+          {
+            "name": "email",
+            "question": "Contact email",
+            "answer": "a@b.c"
+          },
+          {
+            "name": "replicas",
+            "question": "Replicas (1 to 10)",
+            "answer": ""
+          },
+          {
+            "name": "slug",
+            "question": "Service slug",
+            "answer": "My Service"
+          },
+          {
+            "name": "size",
+            "question": "Size",
+            "answer": ""
+          },
+          {
+            "name": "notes",
+            "question": "Notes",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "req-slug-short",
+      "form": "req",
+      "cancel": false,
+      "data": {
+        "env": "dev",
+        "regions": [
+          "eu"
+        ],
+        "email": "a@b.c",
+        "slug": "ab"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"ticket\": \"OPS-42\",\n  \"env\": \"dev\",\n  \"regions\": [\n    \"eu\"\n  ],\n  \"email\": \"a@b.c\",\n  \"replicas\": \"\",\n  \"slug\": \"ab\",\n  \"notes\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "env",
+            "question": "Environment",
+            "answer": "Development"
+          },
+          {
+            "name": "regions",
+            "question": "Regions",
+            "answer": "EU"
+          },
+          {
+            "name": "email",
+            "question": "Contact email",
+            "answer": "a@b.c"
+          },
+          {
+            "name": "replicas",
+            "question": "Replicas (1 to 10)",
+            "answer": ""
+          },
+          {
+            "name": "slug",
+            "question": "Service slug",
+            "answer": "ab"
+          },
+          {
+            "name": "size",
+            "question": "Size",
+            "answer": ""
+          },
+          {
+            "name": "notes",
+            "question": "Notes",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "req-slug-long",
+      "form": "req",
+      "cancel": false,
+      "data": {
+        "env": "dev",
+        "regions": [
+          "eu"
+        ],
+        "email": "a@b.c",
+        "slug": "aaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"ticket\": \"OPS-42\",\n  \"env\": \"dev\",\n  \"regions\": [\n    \"eu\"\n  ],\n  \"email\": \"a@b.c\",\n  \"replicas\": \"\",\n  \"slug\": \"aaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"notes\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "env",
+            "question": "Environment",
+            "answer": "Development"
+          },
+          {
+            "name": "regions",
+            "question": "Regions",
+            "answer": "EU"
+          },
+          {
+            "name": "email",
+            "question": "Contact email",
+            "answer": "a@b.c"
+          },
+          {
+            "name": "replicas",
+            "question": "Replicas (1 to 10)",
+            "answer": ""
+          },
+          {
+            "name": "slug",
+            "question": "Service slug",
+            "answer": "aaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          {
+            "name": "size",
+            "question": "Size",
+            "answer": ""
+          },
+          {
+            "name": "notes",
+            "question": "Notes",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "req-slug-blank",
+      "form": "req",
+      "cancel": false,
+      "data": {
+        "env": "dev",
+        "regions": [
+          "eu"
+        ],
+        "email": "a@b.c",
+        "slug": "   "
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"ticket\": \"OPS-42\",\n  \"env\": \"dev\",\n  \"regions\": [\n    \"eu\"\n  ],\n  \"email\": \"a@b.c\",\n  \"replicas\": \"\",\n  \"slug\": \"   \",\n  \"notes\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "env",
+            "question": "Environment",
+            "answer": "Development"
+          },
+          {
+            "name": "regions",
+            "question": "Regions",
+            "answer": "EU"
+          },
+          {
+            "name": "email",
+            "question": "Contact email",
+            "answer": "a@b.c"
+          },
+          {
+            "name": "replicas",
+            "question": "Replicas (1 to 10)",
+            "answer": ""
+          },
+          {
+            "name": "slug",
+            "question": "Service slug",
+            "answer": "   "
+          },
+          {
+            "name": "size",
+            "question": "Size",
+            "answer": ""
+          },
+          {
+            "name": "notes",
+            "question": "Notes",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "req-hidden-echo",
+      "form": "req",
+      "cancel": false,
+      "data": {
+        "env": "dev",
+        "regions": [
+          "eu"
+        ],
+        "email": "a@b.c",
+        "slug": "abc",
+        "ticket": "OPS-99"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"ticket\": \"OPS-42\",\n  \"env\": \"dev\",\n  \"regions\": [\n    \"eu\"\n  ],\n  \"email\": \"a@b.c\",\n  \"replicas\": \"\",\n  \"slug\": \"abc\",\n  \"notes\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "env",
+            "question": "Environment",
+            "answer": "Development"
+          },
+          {
+            "name": "regions",
+            "question": "Regions",
+            "answer": "EU"
+          },
+          {
+            "name": "email",
+            "question": "Contact email",
+            "answer": "a@b.c"
+          },
+          {
+            "name": "replicas",
+            "question": "Replicas (1 to 10)",
+            "answer": ""
+          },
+          {
+            "name": "slug",
+            "question": "Service slug",
+            "answer": "abc"
+          },
+          {
+            "name": "size",
+            "question": "Size",
+            "answer": ""
+          },
+          {
+            "name": "notes",
+            "question": "Notes",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "req-select-unknown",
+      "form": "req",
+      "cancel": false,
+      "data": {
+        "env": "dev",
+        "regions": [
+          "eu"
+        ],
+        "email": "a@b.c",
+        "slug": "abc",
+        "size": "xl"
+      },
+      "formRequested": true,
+      "isError": true,
+      "text": "Form field \"size\" carries unexpected value \"xl\"",
+      "details": {}
+    },
+    {
+      "id": "rich-default",
+      "form": "rich",
+      "cancel": false,
+      "data": {},
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"checks\": [],\n  \"comments\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "path",
+            "question": "How should we migrate?",
+            "answer": ""
+          },
+          {
+            "name": "checks",
+            "question": "Which checks should run?",
+            "answer": ""
+          },
+          {
+            "name": "comments",
+            "question": "Comments",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "rich-valid",
+      "form": "rich",
+      "cancel": false,
+      "data": {
+        "path": "phases",
+        "checks": [
+          "counts",
+          "hash"
+        ],
+        "comments": "go"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"path\": \"phases\",\n  \"checks\": [\n    \"counts\",\n    \"hash\"\n  ],\n  \"comments\": \"go\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "path",
+            "question": "How should we migrate?",
+            "answer": "In phases"
+          },
+          {
+            "name": "checks",
+            "question": "Which checks should run?",
+            "answer": "Row counts, Checksums"
+          },
+          {
+            "name": "comments",
+            "question": "Comments",
+            "answer": "go"
+          }
+        ]
+      }
+    },
+    {
+      "id": "other-own-free-text",
+      "form": "other",
+      "cancel": false,
+      "data": {
+        "own": "free text"
+      },
+      "formRequested": true,
+      "isError": true,
+      "text": "Form field \"own\" carries unexpected value \"free text\"",
+      "details": {}
+    },
+    {
+      "id": "other-own-option",
+      "form": "other",
+      "cancel": false,
+      "data": {
+        "own": "o"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"langs\": [],\n  \"own\": \"o\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "db",
+            "question": "Which database?",
+            "answer": ""
+          },
+          {
+            "name": "langs",
+            "question": "Which languages?",
+            "answer": ""
+          },
+          {
+            "name": "own",
+            "question": "Own Other option?",
+            "answer": "Other"
+          }
+        ]
+      }
+    },
+    {
+      "id": "other-db-other",
+      "form": "other",
+      "cancel": false,
+      "data": {
+        "db": "Cockroach",
+        "langs": [
+          "ts",
+          "Rust"
+        ]
+      },
+      "formRequested": true,
+      "isError": true,
+      "text": "Form field \"langs\" carries unexpected value \"Rust\"",
+      "details": {}
+    },
+    {
+      "id": "other-langs-explicit-other",
+      "form": "other",
+      "cancel": false,
+      "data": {
+        "langs": [
+          "other"
+        ]
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"langs\": [\n    \"other\"\n  ]\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "db",
+            "question": "Which database?",
+            "answer": ""
+          },
+          {
+            "name": "langs",
+            "question": "Which languages?",
+            "answer": "Other (say which)"
+          },
+          {
+            "name": "own",
+            "question": "Own Other option?",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "other-langs-free",
+      "form": "other",
+      "cancel": false,
+      "data": {
+        "langs": [
+          "Rust"
+        ]
+      },
+      "formRequested": true,
+      "isError": true,
+      "text": "Form field \"langs\" carries unexpected value \"Rust\"",
+      "details": {}
+    },
+    {
+      "id": "many-valid",
+      "form": "many",
+      "cancel": false,
+      "data": {
+        "region": "r3",
+        "features": [
+          "f1",
+          "f4"
+        ]
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"region\": \"r3\",\n  \"features\": [\n    \"f1\",\n    \"f4\"\n  ]\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "region",
+            "question": "Which region should host it?",
+            "answer": "Region 3 (us-east-3)"
+          },
+          {
+            "name": "features",
+            "question": "Which features should be enabled?",
+            "answer": "Feature 1: audit log retention for regulated customers, Feature 4: private networking between regions"
+          }
+        ]
+      }
+    },
+    {
+      "id": "many-default",
+      "form": "many",
+      "cancel": false,
+      "data": {},
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"features\": []\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "region",
+            "question": "Which region should host it?",
+            "answer": ""
+          },
+          {
+            "name": "features",
+            "question": "Which features should be enabled?",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "matrix-valid",
+      "form": "matrix",
+      "cancel": false,
+      "data": {
+        "a": "keep",
+        "b": "drop"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"a\": \"keep\",\n  \"b\": \"drop\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "a",
+            "question": "Feature A",
+            "answer": "Keep"
+          },
+          {
+            "name": "b",
+            "question": "Feature B",
+            "answer": "Drop"
+          }
+        ]
+      }
+    },
+    {
+      "id": "matrix-default",
+      "form": "matrix",
+      "cancel": false,
+      "data": {},
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{}",
+      "details": {
+        "answers": [
+          {
+            "name": "a",
+            "question": "Feature A",
+            "answer": ""
+          },
+          {
+            "name": "b",
+            "question": "Feature B",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "loose-valid",
+      "form": "loose",
+      "cancel": false,
+      "data": {
+        "name": "Nitin",
+        "consent": "yes",
+        "budget": 55,
+        "start": "2026-11-21"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"name\": \"Nitin\",\n  \"consent\": \"yes\",\n  \"budget\": 55,\n  \"start\": \"2026-11-21\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "name",
+            "question": "Your name",
+            "answer": "Nitin"
+          },
+          {
+            "name": "consent",
+            "question": "I agree to the terms",
+            "answer": "I agree to the terms"
+          },
+          {
+            "name": "budget",
+            "question": "Budget",
+            "answer": "55"
+          },
+          {
+            "name": "start",
+            "question": "Start date",
+            "answer": "2026-11-21"
+          }
+        ]
+      }
+    },
+    {
+      "id": "loose-consent-missing",
+      "form": "loose",
+      "cancel": false,
+      "data": {
+        "name": "Nitin"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"name\": \"Nitin\",\n  \"budget\": \"\",\n  \"start\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "name",
+            "question": "Your name",
+            "answer": "Nitin"
+          },
+          {
+            "name": "consent",
+            "question": "I agree to the terms",
+            "answer": ""
+          },
+          {
+            "name": "budget",
+            "question": "Budget",
+            "answer": ""
+          },
+          {
+            "name": "start",
+            "question": "Start date",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "loose-budget-string",
+      "form": "loose",
+      "cancel": false,
+      "data": {
+        "consent": "yes",
+        "budget": "70"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"name\": \"\",\n  \"consent\": \"yes\",\n  \"budget\": 70,\n  \"start\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "name",
+            "question": "Your name",
+            "answer": ""
+          },
+          {
+            "name": "consent",
+            "question": "I agree to the terms",
+            "answer": "I agree to the terms"
+          },
+          {
+            "name": "budget",
+            "question": "Budget",
+            "answer": "70"
+          },
+          {
+            "name": "start",
+            "question": "Start date",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "long-valid",
+      "form": "long",
+      "cancel": false,
+      "data": {
+        "rollout": "canary"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"rollout\": \"canary\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "rollout",
+            "question": "Which rollout?",
+            "answer": "Canary first, then everyone after a day of metrics looks clean and the on-call engineer agrees"
+          }
+        ]
+      }
+    },
+    {
+      "id": "entities-valid",
+      "form": "entities",
+      "cancel": false,
+      "data": {
+        "cafe": "Café",
+        "r": "a&b"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"cafe\": \"Café\",\n  \"r\": \"a&b\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "cafe",
+            "question": "Café",
+            "answer": "Café"
+          },
+          {
+            "name": "r",
+            "question": "r",
+            "answer": "A & B"
+          }
+        ]
+      }
+    },
+    {
+      "id": "entities-raw-entity-value",
+      "form": "entities",
+      "cancel": false,
+      "data": {
+        "r": "a&amp;b"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"cafe\": \"\",\n  \"r\": \"a&amp;b\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "cafe",
+            "question": "Café",
+            "answer": ""
+          },
+          {
+            "name": "r",
+            "question": "r",
+            "answer": "Other: a&amp;b"
+          }
+        ]
+      }
+    },
+    {
+      "id": "pat-valid",
+      "form": "pat",
+      "cancel": false,
+      "data": {
+        "code": "ABC123",
+        "long": "alphabeta",
+        "vol": 4,
+        "when": "2026-11-21"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"code\": \"ABC123\",\n  \"long\": \"alphabeta\",\n  \"vol\": 4,\n  \"when\": \"2026-11-21\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "code",
+            "question": "Code",
+            "answer": "ABC123"
+          },
+          {
+            "name": "long",
+            "question": "Long",
+            "answer": "alphabeta"
+          },
+          {
+            "name": "vol",
+            "question": "Range",
+            "answer": "4"
+          },
+          {
+            "name": "when",
+            "question": "When",
+            "answer": "2026-11-21"
+          }
+        ]
+      }
+    },
+    {
+      "id": "pat-code-mismatch",
+      "form": "pat",
+      "cancel": false,
+      "data": {
+        "code": "abc"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"code\": \"abc\",\n  \"long\": \"\",\n  \"vol\": \"\",\n  \"when\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "code",
+            "question": "Code",
+            "answer": "abc"
+          },
+          {
+            "name": "long",
+            "question": "Long",
+            "answer": ""
+          },
+          {
+            "name": "vol",
+            "question": "Range",
+            "answer": ""
+          },
+          {
+            "name": "when",
+            "question": "When",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "pat-long-mismatch",
+      "form": "pat",
+      "cancel": false,
+      "data": {
+        "long": "nope"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"code\": \"\",\n  \"long\": \"nope\",\n  \"vol\": \"\",\n  \"when\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "code",
+            "question": "Code",
+            "answer": ""
+          },
+          {
+            "name": "long",
+            "question": "Long",
+            "answer": "nope"
+          },
+          {
+            "name": "vol",
+            "question": "Range",
+            "answer": ""
+          },
+          {
+            "name": "when",
+            "question": "When",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "pat-range-string",
+      "form": "pat",
+      "cancel": false,
+      "data": {
+        "vol": "7"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"code\": \"\",\n  \"long\": \"\",\n  \"vol\": 7,\n  \"when\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "code",
+            "question": "Code",
+            "answer": ""
+          },
+          {
+            "name": "long",
+            "question": "Long",
+            "answer": ""
+          },
+          {
+            "name": "vol",
+            "question": "Range",
+            "answer": "7"
+          },
+          {
+            "name": "when",
+            "question": "When",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "pat-range-text",
+      "form": "pat",
+      "cancel": false,
+      "data": {
+        "vol": "loud"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"code\": \"\",\n  \"long\": \"\",\n  \"vol\": \"loud\",\n  \"when\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "code",
+            "question": "Code",
+            "answer": ""
+          },
+          {
+            "name": "long",
+            "question": "Long",
+            "answer": ""
+          },
+          {
+            "name": "vol",
+            "question": "Range",
+            "answer": "loud"
+          },
+          {
+            "name": "when",
+            "question": "When",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "sel-valid",
+      "form": "sel",
+      "cancel": false,
+      "data": {
+        "size": "m",
+        "tags": [
+          "a",
+          "b"
+        ],
+        "role": "dev",
+        "solo": "x",
+        "plain": "Second"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"size\": \"m\",\n  \"tags\": [\n    \"a\",\n    \"b\"\n  ],\n  \"role\": \"dev\",\n  \"solo\": \"x\",\n  \"plain\": \"Second\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "size",
+            "question": "Size",
+            "answer": "Medium"
+          },
+          {
+            "name": "tags",
+            "question": "Tags",
+            "answer": "Alpha, Beta"
+          },
+          {
+            "name": "role",
+            "question": "Role",
+            "answer": "Developer"
+          },
+          {
+            "name": "solo",
+            "question": "Solo",
+            "answer": "Only one"
+          },
+          {
+            "name": "plain",
+            "question": "Plain",
+            "answer": "Second"
+          }
+        ]
+      }
+    },
+    {
+      "id": "sel-default",
+      "form": "sel",
+      "cancel": false,
+      "data": {},
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"tags\": []\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "size",
+            "question": "Size",
+            "answer": ""
+          },
+          {
+            "name": "tags",
+            "question": "Tags",
+            "answer": ""
+          },
+          {
+            "name": "role",
+            "question": "Role",
+            "answer": ""
+          },
+          {
+            "name": "solo",
+            "question": "Solo",
+            "answer": ""
+          },
+          {
+            "name": "plain",
+            "question": "Plain",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "sel-role-disabled",
+      "form": "sel",
+      "cancel": false,
+      "data": {
+        "role": ""
+      },
+      "formRequested": true,
+      "isError": true,
+      "text": "Form field \"role\" carries disabled option \"\"",
+      "details": {}
+    },
+    {
+      "id": "sel-tags-single",
+      "form": "sel",
+      "cancel": false,
+      "data": {
+        "role": "ops",
+        "tags": "a"
+      },
+      "formRequested": true,
+      "isError": true,
+      "text": "Form field \"tags\" must carry an array of strings",
+      "details": {}
+    },
+    {
+      "id": "sel-solo-array",
+      "form": "sel",
+      "cancel": false,
+      "data": {
+        "role": "ops",
+        "solo": [
+          "x"
+        ]
+      },
+      "formRequested": true,
+      "isError": true,
+      "text": "Form field \"solo\" must carry one string, not an array",
+      "details": {}
+    },
+    {
+      "id": "sel-unknown-option",
+      "form": "sel",
+      "cancel": false,
+      "data": {
+        "role": "ops",
+        "size": "huge"
+      },
+      "formRequested": true,
+      "isError": true,
+      "text": "Form field \"size\" carries unexpected value \"huge\"",
+      "details": {}
+    },
+    {
+      "id": "disabled-pick",
+      "form": "disabled",
+      "cancel": false,
+      "data": {
+        "x": "b"
+      },
+      "formRequested": true,
+      "isError": true,
+      "text": "Form field \"x\" carries disabled option \"b\"",
+      "details": {}
+    },
+    {
+      "id": "disabled-valid",
+      "form": "disabled",
+      "cancel": false,
+      "data": {
+        "x": "a",
+        "agree": "yes"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"source\": \"deploy-ui\",\n  \"x\": \"a\",\n  \"agree\": \"yes\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "x",
+            "question": "Pick one",
+            "answer": "A"
+          },
+          {
+            "name": "agree",
+            "question": "Agree",
+            "answer": "Agree"
+          }
+        ]
+      }
+    },
+    {
+      "id": "disabled-uncheck",
+      "form": "disabled",
+      "cancel": false,
+      "data": {
+        "x": "c"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"source\": \"deploy-ui\",\n  \"x\": \"c\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "x",
+            "question": "Pick one",
+            "answer": "C"
+          },
+          {
+            "name": "agree",
+            "question": "Agree",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "disabled-hidden-echo",
+      "form": "disabled",
+      "cancel": false,
+      "data": {
+        "x": "c",
+        "source": "elsewhere"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"source\": \"deploy-ui\",\n  \"x\": \"c\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "x",
+            "question": "Pick one",
+            "answer": "C"
+          },
+          {
+            "name": "agree",
+            "question": "Agree",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "dup-radio",
+      "form": "dup",
+      "cancel": false,
+      "data": {
+        "x": "a"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"x\": \"a\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "x",
+            "question": "x",
+            "answer": "A"
+          },
+          {
+            "name": "x",
+            "question": "Free",
+            "answer": "a"
+          }
+        ]
+      }
+    },
+    {
+      "id": "dup-free",
+      "form": "dup",
+      "cancel": false,
+      "data": {
+        "x": "typed"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"x\": \"typed\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "x",
+            "question": "x",
+            "answer": "Other: typed"
+          },
+          {
+            "name": "x",
+            "question": "Free",
+            "answer": "typed"
+          }
+        ]
+      }
+    },
+    {
+      "id": "dup-none",
+      "form": "dup",
+      "cancel": false,
+      "data": {},
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"x\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "x",
+            "question": "x",
+            "answer": "Other: "
+          },
+          {
+            "name": "x",
+            "question": "Free",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "view-default-plain",
+      "form": "plain",
+      "cancel": false,
+      "data": {
+        "colour": "green",
+        "toppings": [],
+        "notes": ""
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"colour\": \"green\",\n  \"toppings\": [],\n  \"notes\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "colour",
+            "question": "Which colour should the logo be?",
+            "answer": "Green"
+          },
+          {
+            "name": "toppings",
+            "question": "Which toppings?",
+            "answer": ""
+          },
+          {
+            "name": "notes",
+            "question": "Anything else?",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "view-default-req",
+      "form": "req",
+      "cancel": false,
+      "data": {
+        "ticket": "OPS-42",
+        "regions": [],
+        "email": "",
+        "replicas": 2,
+        "slug": "",
+        "size": "m",
+        "notes": ""
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"ticket\": \"OPS-42\",\n  \"regions\": [],\n  \"email\": \"\",\n  \"replicas\": 2,\n  \"slug\": \"\",\n  \"size\": \"m\",\n  \"notes\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "env",
+            "question": "Environment",
+            "answer": ""
+          },
+          {
+            "name": "regions",
+            "question": "Regions",
+            "answer": ""
+          },
+          {
+            "name": "email",
+            "question": "Contact email",
+            "answer": ""
+          },
+          {
+            "name": "replicas",
+            "question": "Replicas (1 to 10)",
+            "answer": "2"
+          },
+          {
+            "name": "slug",
+            "question": "Service slug",
+            "answer": ""
+          },
+          {
+            "name": "size",
+            "question": "Size",
+            "answer": "Medium"
+          },
+          {
+            "name": "notes",
+            "question": "Notes",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "view-default-rich",
+      "form": "rich",
+      "cancel": false,
+      "data": {
+        "path": "one",
+        "checks": [
+          "counts"
+        ],
+        "comments": ""
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"path\": \"one\",\n  \"checks\": [\n    \"counts\"\n  ],\n  \"comments\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "path",
+            "question": "How should we migrate?",
+            "answer": "One step"
+          },
+          {
+            "name": "checks",
+            "question": "Which checks should run?",
+            "answer": "Row counts"
+          },
+          {
+            "name": "comments",
+            "question": "Comments",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "view-default-other",
+      "form": "other",
+      "cancel": false,
+      "data": {
+        "db": "pg",
+        "langs": []
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"db\": \"pg\",\n  \"langs\": []\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "db",
+            "question": "Which database?",
+            "answer": "Postgres"
+          },
+          {
+            "name": "langs",
+            "question": "Which languages?",
+            "answer": ""
+          },
+          {
+            "name": "own",
+            "question": "Own Other option?",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "view-default-many",
+      "form": "many",
+      "cancel": false,
+      "data": {
+        "features": []
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"features\": []\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "region",
+            "question": "Which region should host it?",
+            "answer": ""
+          },
+          {
+            "name": "features",
+            "question": "Which features should be enabled?",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "view-default-matrix",
+      "form": "matrix",
+      "cancel": false,
+      "data": {},
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{}",
+      "details": {
+        "answers": [
+          {
+            "name": "a",
+            "question": "Feature A",
+            "answer": ""
+          },
+          {
+            "name": "b",
+            "question": "Feature B",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "view-default-loose",
+      "form": "loose",
+      "cancel": false,
+      "data": {
+        "name": "Nitin",
+        "budget": 40,
+        "start": ""
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"name\": \"Nitin\",\n  \"budget\": 40,\n  \"start\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "name",
+            "question": "Your name",
+            "answer": "Nitin"
+          },
+          {
+            "name": "consent",
+            "question": "I agree to the terms",
+            "answer": ""
+          },
+          {
+            "name": "budget",
+            "question": "Budget",
+            "answer": "40"
+          },
+          {
+            "name": "start",
+            "question": "Start date",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "view-default-long",
+      "form": "long",
+      "cancel": false,
+      "data": {},
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{}",
+      "details": {
+        "answers": [
+          {
+            "name": "rollout",
+            "question": "Which rollout?",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "view-default-entities",
+      "form": "entities",
+      "cancel": false,
+      "data": {
+        "cafe": "Café & Bar"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"cafe\": \"Café & Bar\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "cafe",
+            "question": "Café",
+            "answer": "Café & Bar"
+          },
+          {
+            "name": "r",
+            "question": "r",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "view-default-pat",
+      "form": "pat",
+      "cancel": false,
+      "data": {
+        "code": "",
+        "long": "",
+        "vol": "",
+        "when": ""
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"code\": \"\",\n  \"long\": \"\",\n  \"vol\": \"\",\n  \"when\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "code",
+            "question": "Code",
+            "answer": ""
+          },
+          {
+            "name": "long",
+            "question": "Long",
+            "answer": ""
+          },
+          {
+            "name": "vol",
+            "question": "Range",
+            "answer": ""
+          },
+          {
+            "name": "when",
+            "question": "When",
+            "answer": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "view-default-sel",
+      "form": "sel",
+      "cancel": false,
+      "data": {
+        "size": "s",
+        "tags": [
+          "b"
+        ],
+        "plain": "First"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"size\": \"s\",\n  \"tags\": [\n    \"b\"\n  ],\n  \"plain\": \"First\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "size",
+            "question": "Size",
+            "answer": "Small"
+          },
+          {
+            "name": "tags",
+            "question": "Tags",
+            "answer": "Beta"
+          },
+          {
+            "name": "role",
+            "question": "Role",
+            "answer": ""
+          },
+          {
+            "name": "solo",
+            "question": "Solo",
+            "answer": ""
+          },
+          {
+            "name": "plain",
+            "question": "Plain",
+            "answer": "First"
+          }
+        ]
+      }
+    },
+    {
+      "id": "view-default-disabled",
+      "form": "disabled",
+      "cancel": false,
+      "data": {
+        "source": "deploy-ui",
+        "x": "c",
+        "agree": "yes"
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"source\": \"deploy-ui\",\n  \"x\": \"c\",\n  \"agree\": \"yes\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "x",
+            "question": "Pick one",
+            "answer": "C"
+          },
+          {
+            "name": "agree",
+            "question": "Agree",
+            "answer": "Agree"
+          }
+        ]
+      }
+    },
+    {
+      "id": "view-default-dup",
+      "form": "dup",
+      "cancel": false,
+      "data": {
+        "x": ""
+      },
+      "formRequested": true,
+      "isError": false,
+      "text": "User answers:\n{\n  \"x\": \"\"\n}",
+      "details": {
+        "answers": [
+          {
+            "name": "x",
+            "question": "x",
+            "answer": "Other: "
+          },
+          {
+            "name": "x",
+            "question": "Free",
+            "answer": ""
+          }
+        ]
+      }
+    }
+  ]
+}

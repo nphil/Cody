@@ -4,6 +4,8 @@ import { useEffect, useId, useMemo, useRef, useState, type CSSProperties, type K
 import { ClickableImage } from "./ImageLightbox";
 import { useI18n, type Translate } from "@/lib/i18n";
 import { type FieldProblem, fieldQuestions, formDataError } from "@/lib/ask-form";
+import { askFormEnforcesRules } from "@/lib/ask-walk";
+import { useEngineVersion } from "@/hooks/useEngineVersion";
 import type { ChoiceField, FormBlock, FormField, FormSection, FormSpan, HtmlForm, TextField } from "@/lib/ask-form-parse";
 import {
   type ChoiceDraft,
@@ -546,6 +548,8 @@ export function AskHtmlForm({
   onRespond: (response: ExtensionDialogResponse) => void;
 }) {
   const { t, tn } = useI18n();
+  // omp 19.2 flags a broken field rule and sends the answer on; 19.1 fails the tool call, so there the answer is held back.
+  const enforceRules = askFormEnforcesRules(useEngineVersion());
   const uid = useId();
   const form: HtmlForm = useMemo(() => parseFormCached(request.html), [request.html]);
   const [drafts, setDrafts] = useState<FieldDraft[]>(() => recalledDrafts(request.id, request.html) ?? initialDrafts(form));
@@ -581,9 +585,9 @@ export function AskHtmlForm({
   const submit = () => {
     if (answeredRef.current) return;
     const data = buildFormData(form, drafts);
-    const first = problems.findIndex((problem) => problem !== undefined);
+    const first = enforceRules ? problems.findIndex((problem) => problem !== undefined) : -1;
     // The field rules above are omp's; asking omp's own check as well keeps a mismatch from sending an answer it would refuse.
-    const refused = first < 0 ? formDataError(form, data) : undefined;
+    const refused = first < 0 ? formDataError(form, data, enforceRules) : undefined;
     if (first >= 0 || refused !== undefined) {
       setAttempted(true);
       setRejected(refused ?? null);
@@ -631,7 +635,7 @@ export function AskHtmlForm({
     uid,
     drafts,
     problems,
-    attempted,
+    attempted: attempted || !enforceRules,
     questions,
     indexOf,
     firstNamed: named[0] ?? -1,
@@ -643,7 +647,7 @@ export function AskHtmlForm({
   };
 
   const hint =
-    attempted && problemCount > 0
+    (attempted || !enforceRules) && problemCount > 0
       ? tn("askForm.needsAttention", problemCount)
       : attempted && rejected
         ? t("askForm.problem.rejected", { reason: rejected })

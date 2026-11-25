@@ -9,9 +9,10 @@ import {
 
 /**
  * Answers of a parsed `ask` form (omp >= 19.1). Mirrors `pi-tui/src/html-form/data.ts` and the validation in omp's
- * `rpc-mode.ts` (`parseFormDialogResponse`): omp THROWS on any submitted data that does not fit the form it
- * parsed, which fails the agent's tool call. So the form view builds data with `choiceValue`/`textValue`, checks
- * every field with `fieldError`, and re-checks the whole payload with `formDataError` before it is sent.
+ * `rpc-mode.ts` (`parseFormDialogResponse`): omp 19.1 THROWS on any submitted data that does not fit the form it
+ * parsed, which fails the agent's tool call; omp 19.2 still throws on a wrong shape but only flags a broken field
+ * rule. So the form view builds data with `choiceValue`/`textValue`, checks every field with `fieldError`, and
+ * re-checks the whole payload with `formDataError` before it is sent (`enforceRules` = the engine blocks on rules).
  */
 
 export { parseHtmlForm };
@@ -235,10 +236,12 @@ function parseFormText(field: TextField, value: unknown): HtmlFormValue {
 
 /**
  * The data omp would hand the model for `submitted`, or the error omp would fail the tool call with. Same checks
- * as omp's `parseFormDialogResponse`: unknown names, wrong shapes, disabled/unknown option values, and every
- * field's `fieldError`. Hidden inputs keep the form's own values.
+ * as omp's `parseFormDialogResponse`: unknown names, wrong shapes, disabled/unknown option values, and (with
+ * `enforceRules`, omp 19.1 and earlier) every field's `fieldError`. omp 19.2 flags a broken `required` / `pattern` /
+ * `min` / `max` in its own form but sends the answer on, so callers on 19.2+ pass `false`. Hidden inputs keep the
+ * form's own values.
  */
-export function parseFormSubmission(form: HtmlForm, submitted: unknown): { data: HtmlFormData } | { error: string } {
+export function parseFormSubmission(form: HtmlForm, submitted: unknown, enforceRules = true): { data: HtmlFormData } | { error: string } {
   try {
     if (typeof submitted !== "object" || submitted === null || Array.isArray(submitted)) {
       throw new Error("Form dialog response must carry a data object");
@@ -270,7 +273,7 @@ export function parseFormSubmission(form: HtmlForm, submitted: unknown): { data:
       });
       if (!values.some(({ carried }) => carried)) throw mismatch;
       for (const { field, value, carried } of values) {
-        const problem = fieldError(field, value);
+        const problem = enforceRules ? fieldError(field, value) : undefined;
         if (problem) throw new Error(`Form field ${JSON.stringify(name)}: ${problem}`);
         if (carried && value !== undefined) data[name] = value;
       }
@@ -282,8 +285,8 @@ export function parseFormSubmission(form: HtmlForm, submitted: unknown): { data:
 }
 
 /** True when `data` (what the view built) would be accepted as submitted. */
-export function formDataError(form: HtmlForm, data: HtmlFormData): string | undefined {
-  const parsed = parseFormSubmission(form, data);
+export function formDataError(form: HtmlForm, data: HtmlFormData, enforceRules = true): string | undefined {
+  const parsed = parseFormSubmission(form, data, enforceRules);
   return "error" in parsed ? parsed.error : undefined;
 }
 

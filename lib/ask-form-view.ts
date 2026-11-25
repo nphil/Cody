@@ -92,9 +92,9 @@ export function fieldProblems(form: HtmlForm, drafts: readonly FieldDraft[]): (F
   return form.fields.map((field, index) => (field.name ? fieldProblem(field, draftValue(field, drafts[index])) : undefined));
 }
 
-/** Whether omp would take what the view would send now, and if not why (omp's own words). */
-export function submitError(form: HtmlForm, drafts: readonly FieldDraft[]): string | undefined {
-  return formDataError(form, buildFormData(form, drafts));
+/** Whether omp would take what the view would send now, and if not why (omp's own words). `enforceRules`: the engine refuses a broken field rule (omp 19.1 and earlier). */
+export function submitError(form: HtmlForm, drafts: readonly FieldDraft[], enforceRules = true): string | undefined {
+  return formDataError(form, buildFormData(form, drafts), enforceRules);
 }
 
 const clip = (text: string, length: number) => (text.length > length ? `${text.slice(0, length - 1).trimEnd()}\u2026` : text);

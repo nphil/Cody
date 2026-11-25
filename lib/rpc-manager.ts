@@ -44,6 +44,7 @@ import { copySessionLocalRouting, materializeLocalRoutingOverlay, readLocalRouti
 import { copySessionPreset, renameSessionPreset, sessionPresetOverlay } from "./model-presets/overlay";
 import { materializeClaudeCreditsOverlay } from "./omp/claude-credits-overlay";
 import { codyLaunchDefaultsEnv } from "./omp/cody-launch-defaults";
+import { findOmpPackageRoot, ompPackageVersion } from "./omp/package-source";
 import { copySessionToolsets, onDemandLaunch, renameSessionToolsets, setSessionToolset } from "./omp/on-demand-chats";
 import { COMPUTER_SERVER, onDemandSignalFromEvent } from "./on-demand-mcp/registry";
 import { selectPromptProfileId, type PromptProfileId } from "./local-model-profile";
@@ -736,6 +737,14 @@ export function buildSessionSpawnArgs(
   return args;
 }
 
+/** omp 19.2 made `--no-tools` strict: no extensions load, and the flag is a usage error next to `--extension`. An
+ * engine whose version cannot be read is taken as an older one (the launch Cody always made). */
+function engineRefusesExtensionsWithNoTools(bin: string): boolean {
+  const root = findOmpPackageRoot(bin);
+  const match = /^(\d+)\.(\d+)/.exec((root && ompPackageVersion(root)) || "");
+  return match !== null && (Number(match[1]) > 19 || (Number(match[1]) === 19 && Number(match[2]) >= 2));
+}
+
 /** Complete launch for an rpc-dialect session. A local profile is launch-only:
  * it changes no live OMP configuration and applies on both new and resumed sessions. */
 export function buildEngineRpcLaunch(
@@ -808,15 +817,19 @@ export function buildEngineRpcLaunch(
   if (harness.id === "omp" && opts.kind !== "sidebar") {
     const packageRoot = process.env.CODY_PACKAGE_DIR || process.cwd();
     const extensions = path.join(packageRoot, "lib", "omp", "extensions");
-    args.push("--extension", path.join(extensions, "cody-refusal-guard.ts"));
-    args.push("--extension", path.join(extensions, "cody-local-time.ts"));
-    args.push("--extension", path.join(extensions, "cody-homelabber-gate.ts"));
-    args.push("--extension", path.join(extensions, "cody-disk-budget.ts"));
-    args.push("--extension", path.join(extensions, "cody-context-budget.ts"));
-    args.push("--extension", path.join(extensions, "cody-on-demand-mcp.ts"));
-    args.push("--extension", path.join(extensions, "cody-agent-switch.ts"));
-    // run_on_worker is an extension too, so the main chat and every helper agent get it; the smallest local profile keeps its two-tool schema.
-    if (opts.profile?.profileId !== "minimal") args.push("--extension", path.join(extensions, "cody-run-on-worker.ts"));
+    // omp 19.2 loads no extensions in a `--no-tools` chat and refuses the flag next to `--extension`, so the smallest
+    // local profile (and an empty tool preset) starts without them there; the config layers below still apply.
+    if (!(args.includes("--no-tools") && engineRefusesExtensionsWithNoTools(bin))) {
+      args.push("--extension", path.join(extensions, "cody-refusal-guard.ts"));
+      args.push("--extension", path.join(extensions, "cody-local-time.ts"));
+      args.push("--extension", path.join(extensions, "cody-homelabber-gate.ts"));
+      args.push("--extension", path.join(extensions, "cody-disk-budget.ts"));
+      args.push("--extension", path.join(extensions, "cody-context-budget.ts"));
+      args.push("--extension", path.join(extensions, "cody-on-demand-mcp.ts"));
+      args.push("--extension", path.join(extensions, "cody-agent-switch.ts"));
+      // run_on_worker is an extension too, so the main chat and every helper agent get it; the smallest local profile keeps its two-tool schema.
+      if (opts.profile?.profileId !== "minimal") args.push("--extension", path.join(extensions, "cody-run-on-worker.ts"));
+    }
     defaultsEnv = codyLaunchDefaultsEnv(opts.profile?.env?.PI_CONFIG_FILES ?? process.env.PI_CONFIG_FILES, packageRoot);
   }
   // A sidebar child gets its own agent dir, whose `mcp.json` is empty, so the

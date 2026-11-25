@@ -172,6 +172,18 @@ export function askWithdrawnByMessage(version: string | null | undefined): boole
   return true;
 }
 
+/**
+ * omp 19.2 no longer refuses an `ask` form answer that breaks a field's `required` / `pattern` / `min` / `max`: it
+ * flags the field and sends the answer on. 19.1 and earlier fail the tool call, so Cody must hold such an answer
+ * back there. An unreadable version claims nothing, so it keeps holding back.
+ */
+export function askFormEnforcesRules(version: string | null | undefined): boolean {
+  const match = /(\d+)\.(\d+)\.(\d+)/.exec(version ?? "");
+  if (!match) return true;
+  const found = [Number(match[1]), Number(match[2])];
+  return found[0] !== 19 ? found[0] < 19 : found[1] < 2;
+}
+
 /** One row of a walk step. `ticked` is set only while the screen knows it. */
 export interface AskWalkRow {
   /** The exact string omp sent, and the one an answer must send back. */

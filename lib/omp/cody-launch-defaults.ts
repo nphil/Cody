@@ -6,7 +6,7 @@ import { readPersistedBoolean } from "./settings-values";
  * The config layers carrying Cody's own launch defaults (cody-launch-defaults*.yml
  * beside this file): omp settings whose default is right for its terminal UI but
  * wrong for an engine Cody drives over a pipe (`display.shellVisualization`,
- * `async.widgets`), plus desktop control, which Cody offers on demand per chat
+ * `async.widgets`, and omp 19.2's peer-agent prompt line `task.crossInstance`), plus desktop control, which Cody offers on demand per chat
  * (`computer.enabled`, see on-demand-chats.ts), plus the one setting Cody turns
  * back ON: omp 19 stopped asking the model for a tool-call intent line outside
  * its terminal UI (`tools.intentTracing`), and Cody shows what that line feeds.
@@ -30,6 +30,7 @@ export const CODY_LAUNCH_DEFAULTS_LAYERS: ReadonlyArray<{ file: string; key: str
   { file: "cody-launch-defaults-async-widgets.yml", key: "async.widgets", value: false },
   { file: "cody-launch-defaults-computer.yml", key: "computer.enabled", value: false },
   { file: "cody-launch-defaults-intent-tracing.yml", key: "tools.intentTracing", value: true },
+  { file: "cody-launch-defaults-cross-instance.yml", key: "task.crossInstance", value: false },
 ];
 
 /** The layers' paths for a chat started from `packageRoot`: each file that exists

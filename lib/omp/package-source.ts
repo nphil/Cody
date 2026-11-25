@@ -43,9 +43,9 @@ function makeAny() {
 module.exports = makeAny();
 `;
 
-/** Walk up from the omp binary to the package root that owns it. */
-export function findOmpPackageRoot(): string | null {
-  const bin = resolveOmpBin();
+/** Walk up from the omp binary (the resolved one unless `binary` is given) to the package root that owns it. */
+export function findOmpPackageRoot(binary: string | null = resolveOmpBin()): string | null {
+  const bin = binary;
   if (!bin) return null;
   let current: string;
   try {
@@ -92,7 +92,25 @@ export function loadOmpPackageSource(packageRoot: string, ...segments: string[])
  * `modes/magic-keywords.ts` is what `magicKeywords.<id>` is generated from, and
  * under the stub the panel lost every keyword switch. These load for real, with
  * their own imports stubbed. */
-const SETTINGS_DATA_MODULES: Record<string, true> = { "magic-keywords.ts": true };
+const SETTINGS_DATA_MODULES: Record<string, true> = { "magic-keywords.ts": true, "levels.ts": true, "frame-rate.ts": true, "advisor-config-types.ts": true, "tree-selector.ts": true };
+
+/** One key as a plain label (`ctrl+c` -> `Ctrl+C`, `escape` -> `Esc`). */
+function plainKeyLabel(key: unknown): string {
+  const names: Record<string, string> = { escape: "Esc", return: "Enter", pageup: "PageUp", pagedown: "PageDown" };
+  return String(key).split("+").map((part) => names[part] ?? (part.length === 1 ? part.toUpperCase() : part.charAt(0).toUpperCase() + part.slice(1))).join("+");
+}
+
+/** omp 19.2 builds some setting descriptions from key hints (`ui/keys/hints.ts`),
+ * which read the live theme and keybindings. Under the stub they come back as
+ * empty strings and the description reads "Keep drafts cleared with  in local
+ * history". Earlier engines threw there, so the description was dropped. These
+ * stand in for that module with the same words a plain keymap would give. */
+const SETTINGS_SYNTHETIC_MODULES: Record<string, Record<string, unknown>> = {
+  "hints.ts": {
+    formatKeyHint: plainKeyLabel,
+    formatKeyHints: (keys: unknown) => (Array.isArray(keys) ? keys : [keys]).map(plainKeyLabel).join("/"),
+  },
+};
 
 export interface OmpRegistrySettingsResult {
   definitions: Record<string, unknown>[] | null;
@@ -146,7 +164,13 @@ export function loadOmpRegistrySettings(packageRoot: string): OmpRegistrySetting
     const overrides: Record<string, Record<string, unknown>> = { [registrySpecifier]: registry };
     for (const specifier of sourceImports(source)) {
       const dataPath = specifier.startsWith(".") ? resolveSourceSpecifier(modulePath, specifier) : null;
-      if (!dataPath || !SETTINGS_DATA_MODULES[path.basename(dataPath)]) continue;
+      if (!dataPath) continue;
+      const synthetic = SETTINGS_SYNTHETIC_MODULES[path.basename(dataPath)];
+      if (synthetic) {
+        overrides[specifier] = synthetic;
+        continue;
+      }
+      if (!SETTINGS_DATA_MODULES[path.basename(dataPath)]) continue;
       const data = loadOmpSourceFile(dataPath, 1, undefined, errors);
       if (data) overrides[specifier] = data;
     }
@@ -207,12 +231,15 @@ function loadOmpSettingsUiMetadata(packageRoot: string, errors: string[]): Recor
     errors.push("Could not resolve OMP settings tab metadata from " + uiSourcePath);
     return null;
   }
-  const ui = loadOmpSourceFile(sourcePath, 0, undefined, errors);
-  if (!ui || !Array.isArray(ui.SETTING_TABS)) {
+  const loadedUi = loadOmpSourceFile(sourcePath, 0, undefined, errors);
+  if (!loadedUi || !Array.isArray(loadedUi.SETTING_TABS)) {
     errors.push(errors.at(-1) ?? "OMP settings tab metadata is unavailable in " + sourcePath);
     return null;
   }
-  return ui;
+  // omp 19.2 moved the tab labels out of the settings defs into the settings window's page table.
+  const pagesPath = path.join(packageRoot, "src", "ui", "overlays", "settings", "pages.ts");
+  const pages = !loadedUi.TAB_METADATA && fs.existsSync(pagesPath) ? loadOmpSourceFile(pagesPath, 1, undefined, errors) : null;
+  return pages && typeof pages.SETTINGS_PAGES === "object" ? { ...loadedUi, TAB_METADATA: pages.SETTINGS_PAGES } : loadedUi;
 }
 
 function sourceImports(source: string): string[] {

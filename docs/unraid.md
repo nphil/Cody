@@ -547,30 +547,23 @@ read-only, so a job finds every toolchain, venv and neighbouring repository at
 the path it has in Cody; what builds write to caches goes to the worker's own
 disk. Protocol and scheduling: [agents/workers.md](agents/workers.md).
 
-1. **Zero swap (recommended).** Docker on Unraid runs in the root cgroup, so it
-   ignores `--memory-swap` with a warning and a capped container spills into
-   swap/zram instead of being stopped (moby #51480). Give the worker a parent
-   cgroup with swap off by adding this to `/boot/config/go` (back it up first)
-   and running the lines once by hand:
-
-   ```sh
-   # CODY-WORKER-CGROUP: zero swap for the Cody build worker (--cgroup-parent=/docker/cody-worker).
-   # Inside /docker because Unraid deletes empty top-level cgroups.
-   mkdir -p /sys/fs/cgroup/docker/cody-worker
-   echo +memory > /sys/fs/cgroup/cgroup.subtree_control
-   echo +memory > /sys/fs/cgroup/docker/cgroup.subtree_control
-   echo 0 > /sys/fs/cgroup/docker/cody-worker/memory.swap.max
-   ```
-
-   Check: `cat /sys/fs/cgroup/docker/cody-worker/memory.swap.max` prints `0`.
-   Cody's own container is not under it, so Cody itself can still use swap.
+1. **Limits use Docker's own settings only.** The template sets a memory
+   limit, the lowest CPU priority (`--cpu-shares=2`) and
+   `--oom-score-adj=1000`, which makes the worker the first thing the kernel
+   stops if the whole server runs short. Do not put the worker under a
+   cgroup parent of its own (`--cgroup-parent`): CPU shares only compare
+   containers in the same group, so a private parent silently gives the
+   worker normal priority again (measured: 5.5 cores against 2.2 under full
+   load). Known limit: Docker on Unraid runs in the root cgroup and ignores
+   `--memory-swap` (moby #51480), so a worker at its memory limit can spill
+   into swap/zram before it is stopped.
 2. **Container.** Copy [`docker/unraid-worker-template.xml`](../docker/unraid-worker-template.xml)
    to `/boot/config/plugins/dockerMan/templates-user/my-CodyWorker.xml`, then
    Docker › Add Container › CodyWorker. Adjust the paths if your App Data is
-   not `/mnt/user/appdata/cody`, and the memory limit in Extra Parameters
-   (`--memory` and `--memory-swap` together). `seccomp=unconfined` is what lets
-   a job see Cody's paths (user namespaces); `--oom-score-adj=1000` makes the
-   worker the first thing the kernel stops if the whole server runs short.
+   not `/mnt/user/appdata/cody`, and the memory limit (`--memory` in Extra
+   Parameters; on Unraid 7.4 or newer use the Memory limit field instead and
+   delete the option). `seccomp=unconfined` is what lets a job see Cody's
+   paths (user namespaces).
 3. **Key and alias, inside Cody** (its terminal):
 
    ```sh
@@ -619,4 +612,4 @@ Tools that live at a fixed path rather than on `PATH` (an Android NDK, a Swift
 toolchain) go in **Extra tools**; extra build caches under Cody's home in
 **Extra caches**. To remove the worker: delete it in Settings › Machines, remove
 the container, its `appdata/cody-worker` folder, the `Host` block and keys in
-Cody's `~/.ssh`, and the `CODY-WORKER-CGROUP` lines from `/boot/config/go`.
+Cody's `~/.ssh`.

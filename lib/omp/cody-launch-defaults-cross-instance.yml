@@ -1,0 +1,12 @@
+# Cody launch default (see cody-launch-defaults.ts): one layer per setting.
+
+task:
+  # omp 19.2 switched `task.crossInstance` on by default. It lets the model see and
+  # message agents in OTHER omp processes (`agent://peers`), and its only effect on
+  # the request is one more system-prompt sentence about that address, sent with
+  # every request of the chat. omp binds the agent mesh only for its own terminal UI;
+  # under rpc-ui (every Cody chat) there is none, so the sentence is wasted tokens and
+  # points the model at an address that never answers. Older engines have no such key
+  # and ignore it. A config.yml that explicitly turns it on keeps it on and drops
+  # this layer.
+  crossInstance: false

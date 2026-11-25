@@ -95,12 +95,12 @@ export const ompHarness: HarnessAdapter = {
   // makes omp exit 1 with "Bun runtime must be >= 1.4.4"; Cody's installer
   // checks the package's `engines.bun` before replacing a working engine).
   //
-  // Audited against 19.1.1 (the engine-facing tests, the settings schema, the
-  // request body and the CLI outputs were run on the real 19.1.1 binary, and
-  // 19.1.0 and 19.0.0 still pass; earlier audits covered 19.0.0, 18.20.1,
+  // Audited against 19.2.0 (the engine-facing tests, the settings schema, the
+  // request body and the CLI outputs were run on the real 19.2.0 binary, and
+  // 19.1.0 still passes; earlier audits covered 19.1.1, 19.0.0, 18.20.1,
   // 18.19.0 and 18.22.2). 18.8.3 still works: every 18.9+ feature Cody uses is
   // feature-detected, never assumed.
-  verifiedVersion: "19.1.1",
+  verifiedVersion: "19.2.0",
   capabilities: {
     liveSessions: true,
     models: true,
