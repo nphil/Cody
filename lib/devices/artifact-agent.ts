@@ -13,11 +13,25 @@
  */
 
 import type { ArtifactSaveAck, ArtifactSaveSelection, DeviceArtifactSaveFrame } from "./protocol";
+import { ARTIFACT_LIST_PAGE, type DeviceArtifactInfo, type DeviceArtifactInputFrame } from "./protocol";
+import type { DeviceArtifactStore } from "./artifacts";
 import type { DeviceArtifact, TransferJob } from "./artifact-model";
 import type { SaveBegun } from "./artifact-upload";
 import { effectiveSetName, groupArtifactSets, selectionLabel, setFileLabel, shortArtifactName } from "./artifact-sets";
 import { DeviceArtifactError } from "./artifact-model";
 import { isRecord } from "../type-guards";
+
+/** Only bounded metadata goes over the socket, never a Blob or server-copy paths. */
+function info({ id, name, size, sha256, kind, source, createdAt }: DeviceArtifact): DeviceArtifactInfo {
+  return { id, name: name.slice(0, 256), size, sha256, kind, source, createdAt };
+}
+
+export async function runArtifactInput(store: Pick<DeviceArtifactStore, "importAuthorizedFile" | "hydrate">, sessionId: string, frame: DeviceArtifactInputFrame, signal: AbortSignal) {
+  signal.throwIfAborted();
+  if (frame.type === "artifacts.import") return [info(await store.importAuthorizedFile(sessionId, frame.image, signal))];
+  const files = await store.hydrate(sessionId);
+  return { total: files.length, artifacts: files.slice(frame.offset, frame.offset + ARTIFACT_LIST_PAGE).map(info) };
+}
 
 /** The part of the artifact store this needs, so a test can stand in for it. */
 export interface AgentSaveStore {

@@ -99,10 +99,6 @@ test("every device operation tool the host defines can be discovered through the
         assert.deepEqual(exposed.inputSchema.properties.protocol.enum, hosted.parameters.properties.protocol.enum, `${hosted.name} offers different protocols through the bridge`);
       }
     }
-    // An engine is never told to expect an approval, a typed override or a shell grant: the user's one trust answer replaced them.
-    for (const hosted of DEVICE_OPERATION_TOOLS) {
-      assert.doesNotMatch(bridge.get(hosted.name).description, /typed|confirmation|shell grant|shell access|Devices panel to approve/i, `${hosted.name} still describes an approval step through the bridge`);
-    }
   });
 });
 

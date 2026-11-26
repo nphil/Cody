@@ -42,6 +42,9 @@ import type {
 /** What a caller's host-tool dispatch supplies to every handler here. */
 export interface DeviceToolContext {
   bridge: DeviceBridge;
+  /** Bound by the session dispatcher, never supplied in agent arguments. */
+  cwd?: string;
+  sessionId?: string;
 }
 
 export type DeviceToolArgs = Record<string, unknown>;

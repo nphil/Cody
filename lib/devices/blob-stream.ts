@@ -19,16 +19,21 @@ export async function hashBlob(blob: Blob): Promise<string> {
  * SHA-256 and CRC-32 of the same bytes in ONE pass. The CRC is what a ZIP entry stores, so recording it when a file
  * is saved means "Download all" starts at once instead of reading every byte again first.
  */
-export async function hashBlobWithCrc(blob: Blob): Promise<{ sha256: string; crc32: number }> {
+export async function hashBlobWithCrc(blob: Blob, signal?: AbortSignal): Promise<{ sha256: string; crc32: number }> {
   const hash = sha256.create();
   const crc = new Crc32();
   const reader = blob.stream().getReader();
   try {
     for (;;) {
+      signal?.throwIfAborted();
       const next = await reader.read();
       if (next.done) return { sha256: bytesToHex(hash.digest()), crc32: crc.digest() };
       hash.update(next.value);
       crc.update(next.value);
     }
-  } finally { reader.releaseLock(); hash.destroy(); }
+  } finally {
+    if (signal?.aborted) await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+    hash.destroy();
+  }
 }

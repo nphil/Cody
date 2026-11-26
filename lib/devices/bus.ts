@@ -17,6 +17,13 @@
  */
 
 import {
+  ARTIFACT_IMPORT_TIMEOUT_MS,
+  ARTIFACT_LIST_PAGE,
+  isArtifactList,
+  type DeviceArtifactInfo,
+  type DeviceArtifactInputFrame,
+  type DeviceArtifactSaveFrame,
+  type WorkspaceImport,
   DEVICE_BUFFER_BYTES,
   DEVICE_LIVENESS_TIMEOUT_MS,
   DEVICE_NO_DATA,
@@ -573,25 +580,7 @@ export class DeviceBridge {
    * by its id. Rejects with the page's own plain-English reason when it cannot (nothing matches, the server refused).
    */
   async requestArtifactSave(selection: ArtifactSaveSelection, label?: string): Promise<ArtifactSaveAck> {
-    const send = this.send;
-    if (!send) {
-      throw new Error("No browser is attached to this session, so its saved files are unreachable. Open this chat in Cody in a browser tab and keep it open.");
-    }
-    const id = String(this.nextOpId++);
-    const answer = await new Promise<unknown>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error("The browser did not acknowledge the save within " + Math.round(DEVICE_LIVENESS_TIMEOUT_MS / 1000) + "s; it may be asleep or closed."));
-      }, DEVICE_LIVENESS_TIMEOUT_MS);
-      this.pending.set(id, { resolve, reject, timer, deviceId: "artifacts" });
-      try {
-        send({ type: "artifacts.save", id, selection, ...(label ? { label } : {}) });
-      } catch (error) {
-        this.pending.delete(id);
-        clearTimeout(timer);
-        reject(error instanceof Error ? error : new Error(String(error)));
-      }
-    });
+    const answer = await this.requestArtifactFrame({ type: "artifacts.save", id: String(this.nextOpId++), selection, ...(label ? { label } : {}) });
     if (!isRecord(answer) || typeof answer.saveId !== "string" || typeof answer.archive !== "string") {
       throw new Error("The browser answered the save request with something this server does not understand.");
     }
@@ -599,6 +588,44 @@ export class DeviceBridge {
     this.artifactSaveIds.push(ack.saveId);
     while (this.artifactSaveIds.length > 20) this.artifactSaveIds.shift();
     return ack;
+  }
+
+  private requestArtifactFrame(frame: DeviceArtifactSaveFrame | DeviceArtifactInputFrame, timeout = DEVICE_LIVENESS_TIMEOUT_MS): Promise<unknown> {
+    const send = this.send;
+    if (!send) {
+      throw new Error("No browser is attached to this session, so its saved files are unreachable. Open this chat in Cody in a browser tab and keep it open.");
+    }
+    const { id } = frame;
+    const { promise, resolve, reject } = Promise.withResolvers<unknown>();
+    const timer = setTimeout(() => {
+      this.pending.delete(id);
+      reject(new Error(`The browser did not acknowledge ${frame.type} within ${Math.round(timeout / 1000)}s; completion is unknown. Check this chat's files before retrying.`));
+    }, timeout);
+    this.pending.set(id, { resolve, reject, timer, deviceId: "artifacts" });
+    try {
+      send(frame);
+    } catch (error) {
+      this.pending.delete(id);
+      clearTimeout(timer);
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
+    return promise;
+  }
+
+  async requestArtifactImport(image: WorkspaceImport, timeout = ARTIFACT_IMPORT_TIMEOUT_MS): Promise<DeviceArtifactInfo> {
+    const answer = await this.requestArtifactFrame({ type: "artifacts.import", id: String(this.nextOpId++), image }, timeout);
+    if (!isArtifactList(answer) || answer.length !== 1 || answer[0].sha256 !== image.sha256 || answer[0].size !== image.size
+      || answer[0].kind !== "input" || answer[0].source !== "server-file") throw new Error("The browser did not confirm the workspace image's SHA-256 and size.");
+    return answer[0];
+  }
+
+  async requestArtifactList(offset: number): Promise<{ artifacts: DeviceArtifactInfo[]; total: number }> {
+    const answer = await this.requestArtifactFrame({ type: "artifacts.list", id: String(this.nextOpId++), offset });
+    if (!isRecord(answer) || !isArtifactList(answer.artifacts) || typeof answer.total !== "number" || !Number.isSafeInteger(answer.total)
+      || answer.total < 0 || answer.artifacts.length !== Math.min(ARTIFACT_LIST_PAGE, Math.max(0, answer.total - offset))) {
+      throw new Error("The browser returned an invalid artifact list.");
+    }
+    return { artifacts: answer.artifacts, total: answer.total };
   }
 
   /** Whether this session's agent started the save, and so may ask about it. */

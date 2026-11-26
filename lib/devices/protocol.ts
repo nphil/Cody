@@ -297,6 +297,30 @@ export interface DeviceArtifactSaveFrame {
   label?: string;
 }
 
+/** No URL, session id, filesystem root or device action may be supplied by the agent or selected by the frame. */
+export interface WorkspaceImport { token: string; name: string; size: number; sha256: string }
+export const ARTIFACT_IMPORT_TIMEOUT_MS = 30 * 60_000;
+export const ARTIFACT_LIST_PAGE = 100;
+export type DeviceArtifactInputFrame =
+  | { type: "artifacts.import"; id: string; image: WorkspaceImport }
+  | { type: "artifacts.list"; id: string; offset: number };
+
+export function validArtifactPath(path: unknown): path is string {
+  if (typeof path !== "string" || path.length > 4096 || /[\\:]/.test(path)) return false;
+  for (let index = 0; index < path.length; index++) {
+    const code = path.charCodeAt(index);
+    if (code < 32 || code === 127) return false;
+  }
+  return path.split("/").every(part => part.trim().length > 0 && part.length <= 255 && !part.startsWith("."));
+}
+
+export function validWorkspaceImport(value: unknown): value is WorkspaceImport {
+  const image = recordOf(value);
+  return !!image && typeof image.token === "string" && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(image.token)
+    && validArtifactPath(image.name) && !image.name.includes("/") && typeof image.size === "number" && Number.isSafeInteger(image.size)
+    && image.size > 0 && typeof image.sha256 === "string" && /^[a-f0-9]{64}$/.test(image.sha256);
+}
+
 /** What the page tells the agent once the server has accepted the save, before the bytes have moved. */
 export interface ArtifactSaveAck {
   saveId: string;
@@ -309,7 +333,7 @@ export interface ArtifactSaveAck {
   alreadySaved: boolean;
 }
 
-export type DeviceServerFrame = DeviceRequestFrame | DeviceActivityFrame | DeviceOperationRequestFrame | DeviceArtifactSaveFrame | TunnelFrame;
+export type DeviceServerFrame = DeviceRequestFrame | DeviceActivityFrame | DeviceOperationRequestFrame | DeviceArtifactSaveFrame | DeviceArtifactInputFrame | TunnelFrame;
 
 /** How often the activity feed is pushed while a link is busy. Faster than a
  * person reads a changing number, slow enough to cost nothing next to the
@@ -363,7 +387,7 @@ function recordOf(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
-function isArtifactList(value: unknown): boolean {
+export function isArtifactList(value: unknown): value is DeviceArtifactInfo[] {
   if (!Array.isArray(value) || value.length > 128) return false;
   const ids = new Set<string>();
   for (const entry of value) {

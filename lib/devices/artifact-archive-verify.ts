@@ -483,7 +483,7 @@ export async function verifyArchiveFile(file: string, expected: ExpectedArchive,
  * not deflated, so this is one small read. Never throws: anything that is not a readable archive holding such a stored,
  * intact manifest (a person's own zip, a half-copied file) is simply `undefined`.
  */
-export async function readArchiveManifest(file: string): Promise<{ readonly folder: string; readonly manifest: unknown } | undefined> {
+export async function readArchiveManifest(file: string): Promise<{ readonly folder: string; readonly manifest: unknown; readonly sha256: string } | undefined> {
   let handle: FileHandle | undefined;
   try {
     handle = await open(file, "r");
@@ -494,7 +494,7 @@ export async function readArchiveManifest(file: string): Promise<{ readonly fold
     const { dataStart } = await readLocalHeader(handle, entry, MANIFEST_NAME, false);
     const bytes = await readExactly(handle, dataStart, entry.size);
     if (crc32(bytes) !== entry.crc) return undefined;
-    return { folder: entry.name.slice(0, entry.name.indexOf("/")), manifest: JSON.parse(bytes.toString("utf8")) as unknown };
+    return { folder: entry.name.slice(0, entry.name.indexOf("/")), manifest: JSON.parse(bytes.toString("utf8")) as unknown, sha256: createHash("sha256").update(bytes).digest("hex") };
   } catch {
     return undefined;
   } finally {

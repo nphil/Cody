@@ -48,8 +48,9 @@ import { getAgentDir } from "../omp/paths";
 import { isRecord } from "../type-guards";
 import { ArchiveError, buildArchiveManifest, MANIFEST_FORMAT, metadataSources, writeArchive, type ArchiveSource, type ManifestFile, type ManifestOperation } from "./artifact-archive";
 import { ArchiveCheckError, readArchiveManifest, verifyArchiveFile, type ExpectedArchive } from "./artifact-archive-verify";
+import { copyVerifiedBackup } from "./artifact-export";
 import type { BackupScope } from "./artifact-model";
-import { isVaultInternalName, labelSlug, partName, STATE_NAME, uniqueFileNames } from "./artifact-names";
+import { isVaultInternalName, labelSlug, partName, safeFileName, STATE_NAME, uniqueFileNames } from "./artifact-names";
 
 const MiB = 1024 * 1024;
 const GiB = 1024 * MiB;
@@ -224,7 +225,10 @@ interface ArchiveManifest {
   readonly completedAt: string;
   readonly totalBytes: number;
   readonly verified: true;
-  readonly files: readonly { readonly name: string; readonly path: string; readonly size: number; readonly sha256: string }[];
+  readonly files: readonly (Pick<SaveFileInput, "name" | "size" | "sha256" | "artifactId" | "kind" | "source"> & {
+    readonly path: string;
+    readonly operation?: Pick<ManifestOperation, "id" | "deviceId" | "protocol" | "action" | "target" | "command">;
+  })[];
 }
 
 interface FinishedSave {
@@ -233,6 +237,7 @@ interface FinishedSave {
   readonly archiveBytes: number;
   /** The folder every entry lives in, as stored. */
   readonly folder: string;
+  readonly manifestSha256: string;
   readonly manifest: ArchiveManifest;
 }
 
@@ -464,7 +469,7 @@ async function finishedAt(file: string): Promise<FinishedSave | undefined> {
   if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) return cached.save;
   const read = await readArchiveManifest(file);
   const manifest = read ? parseArchiveManifest(read.manifest) : undefined;
-  const save: FinishedSave | undefined = read && manifest ? { archive: file, archiveBytes: stat.size, folder: read.folder, manifest } : undefined;
+  const save: FinishedSave | undefined = read && manifest ? { archive: file, archiveBytes: stat.size, folder: read.folder, manifest, manifestSha256: read.sha256 } : undefined;
   manifestCache.delete(file);
   manifestCache.set(file, { size: stat.size, mtimeMs: stat.mtimeMs, save });
   for (const oldest of manifestCache.keys()) {
@@ -550,6 +555,21 @@ function statusOfFinished({ archive, archiveBytes, folder, manifest }: FinishedS
     completedAt: Date.parse(manifest.completedAt),
     verified: true,
   };
+}
+
+/** A finished archive is found by its vault id, never by a path supplied by a tool or by the browser. */
+export async function exportDeviceBackup(config: VaultConfig, saveId: string, sessionId: string, owner: string | null, cwd: string, directory: string): Promise<string> {
+  const done = SAVE_ID.test(saveId) && (await finishedSaves(config)).find(({ manifest }) =>
+    manifest.saveId === saveId && manifest.sessionId === sessionId && manifest.owner.id === owner);
+  if (!done) throw new Error("No completed, verified save with that id belongs to this chat and its owner. Check device_artifacts_status.");
+  const { files } = done.manifest;
+  if (!files.length || files.some((f) => f.kind !== "output" || f.source !== "device" || !cleanOperation(f.operation))) {
+    throw new Error("Only outputs with a recorded device operation can be exported as a backup. Imported images and files of unknown origin are not device backups.");
+  }
+  if (!ARCHIVE_NAME.test(path.basename(done.archive)) || !ARCHIVE_NAME.test(`${done.folder}.zip`) || files.some((f) => safeFileName(f.path) !== f.path)) {
+    throw new Error("The archive or one of its entries does not have a safe vault name.");
+  }
+  return copyVerifiedBackup(done.archive, { folder: done.folder, files, manifestSha256: done.manifestSha256 }, cwd, directory);
 }
 
 /** The save with this id, finished or not, or undefined. */
@@ -763,8 +783,8 @@ export function parseSaveRequest(raw: unknown, limits: VaultLimits, now: number)
       name,
       size,
       sha256: item.sha256.toLowerCase(),
-      kind: text(item.kind, 16) ?? "output",
-      source: text(item.source, 32) ?? "device",
+      kind: text(item.kind, 16) ?? "unknown",
+      source: text(item.source, 32) ?? "unknown",
       createdAt: validTime(item.createdAt) ?? now,
       ...(artifactId ? { artifactId } : {}),
       ...(operation ? { operation } : {}),
@@ -811,6 +831,18 @@ async function takenNames(config: VaultConfig, unfinished: readonly StoredSave[]
   return taken;
 }
 
+/** Identical bytes can be a factory image, or a dump of either slot. Resume only the same escrow records, in the order the uploader indexes. */
+function sameFiles(stored: readonly Omit<ArchiveManifest["files"][number], "path">[], requested: readonly SaveFileInput[]): boolean {
+  return stored.length === requested.length && stored.every((file, i) => {
+    const other = requested[i]!;
+    return file.artifactId === other.artifactId && file.kind === other.kind && file.source === other.source &&
+      file.name === other.name && file.size === other.size && file.sha256 === other.sha256 &&
+      file.operation?.id === other.operation?.id && file.operation?.deviceId === other.operation?.deviceId &&
+      file.operation?.protocol === other.operation?.protocol && file.operation?.action === other.operation?.action &&
+      file.operation?.target === other.operation?.target && file.operation?.command === other.operation?.command;
+  });
+}
+
 /**
  * Starts a save, or finds the one this is: the same `key` from the same account either has a finished save (answered as
  * `existing`, nothing to upload) or an unfinished one (answered with what is already stored, so the upload carries on).
@@ -824,9 +856,9 @@ export async function beginSave(config: VaultConfig, actor: SaveActor, raw: unkn
     await sweepIncoming(config, now, finished);
     const unfinished = await incomingSaves(config);
     if (request.key) {
-      const done = finished.find((entry) => entry.manifest.key === request.key && entry.manifest.owner.id === actor.owner && entry.manifest.sessionId === request.sessionId);
+      const done = finished.find((entry) => entry.manifest.key === request.key && entry.manifest.owner.id === actor.owner && entry.manifest.sessionId === request.sessionId && sameFiles(entry.manifest.files, request.files));
       if (done) return { ...statusOfFinished(done), existing: true };
-      const open = unfinished.find((stored) => stored.key === request.key && stored.owner === actor.owner && stored.sessionId === request.sessionId && !finished.some((entry) => entry.manifest.saveId === stored.saveId));
+      const open = unfinished.find((stored) => stored.key === request.key && stored.owner === actor.owner && stored.sessionId === request.sessionId && sameFiles(stored.files, request.files) && !finished.some((entry) => entry.manifest.saveId === stored.saveId));
       if (open) {
         // Announcing the save again is trying again: what stopped the last build is no longer what the save says, so a
         // follower (the agent's status) does not report a failure the sender is already putting right.

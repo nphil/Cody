@@ -2847,6 +2847,8 @@ export class AgentSessionWrapper {
       // reach hardware granted to another conversation.
       const text = await deviceTool.handler(isRecord(event.arguments) ? event.arguments : {}, {
         bridge: getDeviceBridge(this._sessionId),
+        cwd: this.cwd,
+        sessionId: this._sessionId,
       });
       this.sendHostToolResult({ type: "host_tool_result", id, result: { content: [{ type: "text", text }] } });
       return;

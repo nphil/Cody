@@ -120,10 +120,10 @@ export interface HardwareContext {
   declareScope?: (scope: BackupScope) => void;
   /**
    * Declare, immediately before sending it, what is about to change on the device: the exact destination and
-   * digest. Protocols call this before every destructive action, including shell exec. Nothing is asked of the
-   * person here - their trust covered the operation before it began - but the runner checks the declaration
-   * against the request, writes it to the operation's log, and holds for the countdown the request asked for
-   * (cancellable) before this returns. A cancelled operation rejects.
+   * digest. Protocols call this before every destructive action, including shell exec. The runner binds the
+   * declaration to the request, logs it and holds for any requested countdown. For a Fastboot partition write
+   * it also requires a fresh decision in the device's browser on the exact preflight plan. Device trust and a
+   * countdown are not that decision. Cancellation rejects.
    */
   confirm: (risk: HardwareRisk) => Promise<void>;
 }

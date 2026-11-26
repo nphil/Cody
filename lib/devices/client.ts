@@ -39,9 +39,9 @@ import { TunnelClient } from "./tunnel-client";
 import { parseTunnelMessage } from "./tunnel";
 import { deviceTrustKey, type DeviceTrustSubject } from "./trust";
 import { deviceTrustHub } from "./trust-hub";
-import { parseArtifactSaveFrame, runArtifactSave } from "./artifact-agent";
+import { parseArtifactSaveFrame, runArtifactInput, runArtifactSave } from "./artifact-agent";
 import { deviceArtifacts } from "./artifacts";
-import type { DeviceArtifactSaveFrame } from "./protocol";
+import { ARTIFACT_IMPORT_TIMEOUT_MS, validWorkspaceImport, type DeviceArtifactSaveFrame } from "./protocol";
 
 /**
  * TypeScript's bundled DOM lib does not yet ship the User-Agent Client Hints
@@ -762,6 +762,8 @@ function parseServerFrame(raw: unknown): Exclude<DeviceServerFrame, DeviceArtifa
   }
   if (typeof payload !== "object" || payload === null) return null;
   const candidate = payload as DeviceServerFrame;
+  if (candidate.type === "artifacts.import") return typeof candidate.id === "string" && validWorkspaceImport(candidate.image) ? candidate : null;
+  if (candidate.type === "artifacts.list") return typeof candidate.id === "string" && Number.isSafeInteger(candidate.offset) && candidate.offset >= 0 ? candidate : null;
   if (candidate.type === "op") {
     if (typeof candidate.id !== "string") return null;
     if (typeof candidate.op !== "string") return null;
@@ -1399,6 +1401,7 @@ export class DeviceBridgeConnection implements PageOperationBridge {
   private reconnectAttempt = 0;
   private destroyed = false;
   private authorityRevoked = false;
+  private artifactConnection = new AbortController();
   private readonly capabilities: DeviceCapabilities;
   private snapshot: DeviceBridgeSnapshot;
   private readonly listeners = new Set<() => void>();
@@ -1499,6 +1502,7 @@ export class DeviceBridgeConnection implements PageOperationBridge {
 
   destroy(): void {
     this.destroyed = true;
+    this.artifactConnection.abort();
     this.operationManager?.revokeAuthority("Device connection closed.");
     clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
@@ -1532,10 +1536,12 @@ export class DeviceBridgeConnection implements PageOperationBridge {
       this.send({ type: "hello", capabilities: this.capabilities, devices: listDeviceInfos(this.sessionId) });
       this.operationDelegate?.snapshot(this);
     };
-    socket.onmessage = (event) => { void this.handleMessage(event); };
+    socket.onmessage = (event) => { if (this.socket === socket) void this.handleMessage(event); };
     socket.onclose = (event) => {
           if (this.socket !== socket) return;
           this.socket = null;
+          this.artifactConnection.abort();
+          this.artifactConnection = new AbortController();
           this.clearActivity();
           this.tunnels.dropAll("The connection to the Cody server closed.");
           const replaced = event.code === 4001 && event.reason === "Device host authority replaced.";
@@ -1641,6 +1647,18 @@ export class DeviceBridgeConnection implements PageOperationBridge {
     }
     const frame = parseServerFrame(event.data);
     if (!frame) return;
+    if (frame.type === "artifacts.import" || frame.type === "artifacts.list") {
+      const connection = this.artifactConnection.signal;
+      if (this.destroyed || this.authorityRevoked || connection.aborted) return;
+      try {
+        const signal = frame.type === "artifacts.import" ? AbortSignal.any([connection, AbortSignal.timeout(ARTIFACT_IMPORT_TIMEOUT_MS)]) : connection;
+        const value = await runArtifactInput(deviceArtifacts, this.sessionId, frame, signal);
+        if (!connection.aborted) this.send({ type: "result", id: frame.id, status: "ok", value });
+      } catch (error) {
+        if (!connection.aborted) this.send({ type: "result", id: frame.id, status: "error", error: error instanceof Error ? error.message : String(error) });
+      }
+      return;
+    }
     if (frame.type === "activity") {
       this.publishActivity(frame.devices);
       return;
@@ -1695,7 +1713,7 @@ export class DeviceBridgeConnection implements PageOperationBridge {
     this.lifecycleUnsubs.set(id, unsubscribe);
   }
 
-  async borrowHardwareTransport(deviceId: string, options: { interfaceNumber?: number; alternateSetting?: number } = {}): Promise<HardwareTransportLease> {
+  async borrowHardwareTransport(deviceId: string, options: { interfaceNumber?: number; alternateSetting?: number; pinConnection?: boolean } = {}): Promise<HardwareTransportLease> {
     const ownership = deviceLeases.borrow(this.sessionId, deviceId);
     try {
       const entry = registry.get(deviceId);
@@ -1837,18 +1855,26 @@ export class DeviceBridgeConnection implements PageOperationBridge {
     };
   }
 
-  private async borrowUsbTransport(entry: UsbEntry, ownership: DeviceBorrowLease, options: { interfaceNumber?: number; alternateSetting?: number }): Promise<HardwareTransportLease> {
+  private async borrowUsbTransport(entry: UsbEntry, ownership: DeviceBorrowLease, options: { interfaceNumber?: number; alternateSetting?: number; pinConnection?: boolean }): Promise<HardwareTransportLease> {
     const requestedInterface = options.interfaceNumber;
     if (options.alternateSetting !== undefined && requestedInterface === undefined) throw new Error("alternateSetting requires interfaceNumber.");
     const requestedAlternate = options.alternateSetting === undefined || requestedInterface === undefined ? undefined : { interfaceNumber: requestedInterface, alternateSetting: options.alternateSetting };
-    const ready = getUsbEntry([...registry.entries()].find(([, candidate]) => candidate === entry)?.[0] ?? "", true);
-    let released = false;
+    const grant = getUsbEntry([...registry.entries()].find(([, candidate]) => candidate === entry)?.[0] ?? "", true);
+    // Adoption may replace grant.device even with identical VID/PID/serial. One Fastboot run's reads, writes,
+    // aborts and close must address its original native object, never the unit that subsequently took its place.
+    const ready = options.pinConnection ? { ...grant, quietReads: new Map<number, UsbQuietRead>() } : grant;
+    const stillAttached = () => grant.device === ready.device && !grant.invalidatedReason && !grant.needsNewGrant && ready.device.opened;
+    let initialized = false, released = false;
     const ensureReady = async (): Promise<void> => {
       if (released) throw new Error("The hardware operation lease ended.");
-      if (ready.needsNewGrant) throw new Error(USB_REGRANT_MESSAGE);
+      if (grant.needsNewGrant) throw new Error(USB_REGRANT_MESSAGE);
+      if (initialized && options.pinConnection) {
+        if (!stillAttached()) throw new Error("Fastboot lost its original USB connection. Start a fresh operation; nothing is replayed.");
+        return;
+      }
       if (!ready.device.opened) {
         await ready.device.open();
-        ready.invalidatedReason = null;
+        if (grant.device === ready.device) grant.invalidatedReason = null;
         if (ready.device.configuration === null && ready.device.configurations.length > 0) {
           await ready.device.selectConfiguration(ready.device.configurations[0].configurationValue);
         }
@@ -1856,6 +1882,11 @@ export class DeviceBridgeConnection implements PageOperationBridge {
       await claimUsbInterfaces(ready.device, requestedInterface, requestedAlternate);
     };
     await ensureReady();
+    initialized = true;
+    if (options.pinConnection && !stillAttached()) {
+      await ready.device.close().catch(() => {});
+      throw new Error("Fastboot lost its original USB connection during setup.");
+    }
     const interfaceNumber = selectBorrowInterface(ready.device, requestedInterface);
     const requireEndpoint = (direction: "in" | "out"): number => {
       if (interfaceNumber === undefined) throw new Error("This USB protocol needs an explicitly selected transfer interface.");
@@ -1901,7 +1932,7 @@ export class DeviceBridgeConnection implements PageOperationBridge {
         await ensureReady();
         await runUsbAbortable(ready, signal, () => ready.device.reset());
       },
-      connected: () => ready.device.opened,
+      connected: () => options.pinConnection ? stillAttached() : ready.device.opened,
     };
     let protocolTransport = transport;
     if (selectedAlternate?.interfaceClass === 0x0a && interfaceNumber !== undefined) {
@@ -1915,7 +1946,8 @@ export class DeviceBridgeConnection implements PageOperationBridge {
       release: async () => {
         if (released) return;
         released = true;
-        await invalidateUsbEntry(ready, "The hardware operation lease ended.");
+        // Do not clear a lost grant's re-pick requirement, or close the replacement a new operation would use.
+        await invalidateUsbEntry(grant.device === ready.device && !grant.needsNewGrant ? grant : ready, "The hardware operation lease ended.");
         ownership.release();
       },
     };

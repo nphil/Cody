@@ -153,7 +153,8 @@ async function main() {
       method: "POST",
       headers: { Authorization: "Bearer " + capability, "Content-Type": "application/json" },
       body: JSON.stringify({ sessionId, tool, arguments: toolArgs }),
-      signal: AbortSignal.timeout(quietBudget + 5_000),
+      signal: AbortSignal.timeout(tool === "device_artifacts_import" || tool === "device_artifacts_export" ? 31 * 60_000
+        : tool === "device_artifacts_save" ? 125_000 : quietBudget + 5_000),
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(typeof body.error === "string" ? body.error : "HTTP " + response.status);
@@ -486,8 +487,8 @@ async function main() {
     set: z.string().max(80).optional().describe("Name of the backup this operation belongs to. When a backup takes several steps (one device_dump per partition, several device_pull calls, a backup command plus its partition table), give EVERY step the SAME name: the files saved under one name on one device become one set, however long the steps are apart and whatever command made them. A set is one card in Files & backups and one .zip when it is downloaded or saved. Use one name per backup and make it specific, for example with the device and the date. Without a name, runs of the same kind within two minutes of each other are grouped. 1 to 80 characters, no control characters."),
   };
   const startOperationTools = [
-    ["device_detect", "Start protocol detection in the browser (read-only: it needs no trust). Protocol edl reads a Qualcomm 9008 device's boot-ROM identity (chip serial, hardware id, public-key hash) and needs no loader."],
-    ["device_flash", "Start a verified flash. Fastboot without fetch can write after an UNVERIFIED warning; verify in ADB recovery afterwards. ESP, DFU, STM32 and STK500 refuse a protected destination unless options.protectedOverride names the exact override (the refusal says which); nothing else is asked. Protocol edl: target is the exact GPT partition name, fileId + sha256 the image (the partition's exact size, or smaller with options.pad zero or ff); the partition is saved first, boot0/boot1/rpmb are refused, and the read-back SHA-256 decides verified. Run device_exec connect first; flash never sends a loader."],
+    ["device_detect", "Read-only protocol detection. For Fastboot give target to check that partition's size, slot and readback capability before a backup or flash. EDL reads Qualcomm 9008 boot-ROM identity without a loader."],
+    ["device_flash", "Flash the exact target using the session image's fileId and sha256. On Fastboot use the explicit slotted name when applicable; without fetch the write is UNVERIFIED until checked in recovery. ESP, DFU, STM32 and STK500 require the named protectedOverride for protected targets. EDL needs a running programmer (device_exec connect), exact GPT name and exact partition-sized image or options.pad zero/ff; backs up first, refuses boot0/boot1/rpmb, verifies by readback or reports UNVERIFIED."],
     ["device_dump", "Start a dump or backup; resulting bytes remain a session-owned browser artifact. Protocol edl: target is the exact GPT partition name, or user-area with options.sectors set to the count device_exec check verified; fileId + sha256 name the loader while the device is still in the boot ROM. Dumping partition after partition? Give every device_dump the same set name (one name for the whole backup, with the device and the date) so they become one backup - one card in Files & backups, one .zip - instead of many."],
     ["device_exec", "Start a protocol command. ADB runs arbitrary shell commands. Protocol edl (Qualcomm 9008) takes connect, printgpt, check, reset, erase (target = the exact GPT partition name; saved first, reports what the partition reads as afterwards; boot0/boot1/rpmb are refused), backup (every partition and both partition tables saved with a manifest; options.partitions is an optional list of exact GPT partition names, as printgpt shows them (an unnamed entry is \"partition N\", N being its index), and backs up only those - omit it for every partition; a backup of chosen partitions is still one set and one archive, is labelled partial everywhere, and cannot be restored as a set; a whole set is restorable only when taken from a device freshly put into EDL mode with the loader as fileId + sha256), restore (fileId + sha256 = the loader, options.manifestSha256 = the manifest's SHA-256; same unit only, partition tables written last, every region read back) and setbootablestoragedrive (target = the drive number 0-7, always UNVERIFIED)."],
     ["device_push", "Start a resumable file push from a session artifact."],
@@ -498,7 +499,7 @@ async function main() {
     ["device_monitor", "Start an exclusive serial monitor. Use device_monitor_send with its operation id for input."],
   ];
   // Written once in lib/devices/operation-tools.ts (DEVICE_TRUST_NOTE); bin/cody-display-mcp.test.mjs fails when this copy drifts.
-  const DEVICE_TRUST_NOTE = "Needs the user's one-time trust of the device: the first control operation (anything but device_detect) asks them once in the chat and the others queue behind that one question; nothing else asks for approval afterwards. If they decline, every queued operation fails with \"The user declined control of <device>; do not ask again until they reconnect it\" - stop using that device until they do. An unanswered question has no time limit.";
+  const DEVICE_TRUST_NOTE = "Needs the user's one-time trust of the device: the first control operation asks in the chat and the others queue behind it. Fastboot flash and package update also require the user to approve the exact plan. If trust is declined, stop using the device until it is reconnected. An unanswered trust question has no time limit.";
   const DEVICE_TRUST_TOOLS = { device_flash: true, device_dump: true, device_exec: true, device_push: true, device_pull: true, device_sideload: true, device_install: true, device_verify: true, device_monitor: true, device_forward: true, device_reverse: true };
   const withTrustNote = (name, description) => (DEVICE_TRUST_TOOLS[name] ? `${description} ${DEVICE_TRUST_NOTE}` : description);
   for (const [name, description] of startOperationTools) {
@@ -577,6 +578,19 @@ async function main() {
       return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : "Unable to send monitor input" }] };
     }
   });
+  for (const [name, description, inputSchema] of [
+    ["device_artifacts_import", "Import a file from this chat's workspace into its browser. Returns fileId, SHA-256 and size; does not touch a device. Supply sha256 to check against a known digest.", { path: z.string(), sha256: z.string().optional() }],
+    ["device_artifacts_list", "List this chat's browser files and device outputs with their file IDs, sizes and hashes.", { offset: z.number().int().nonnegative().optional() }],
+    ["device_artifacts_export", "Copy a completed, verified device backup archive into a directory relative to this chat's workspace without overwriting a file. Defaults to the latest save started by this chat.", { saveId: z.string().optional(), directory: z.string() }],
+  ]) {
+    server.registerTool(name, { description, inputSchema }, async (input) => {
+      try {
+        return { content: [{ type: "text", text: await callDeviceTool(name, input) }] };
+      } catch (error) {
+        return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : `${name} failed` }] };
+      }
+    });
+  }
   server.registerTool("device_artifacts_save", {
     description: "Save files this chat's browser holds (a backup's partitions, dumps, pulls) to the Cody server as ONE compressed .zip file, where you and the NAS can read it: uploaded in slices, every file re-read from the server's disk and checked against its SHA-256, packed with SHA256SUMS and manifest.json into a single zip, which the server re-reads and checks again before it appears under its final name <label>-<date>.zip. Name operationId/operationIds, set (every file filed under that backup name), fileIds or all: true, and add files to keep only some of them by file name or partition (for example [\"boot_a\"]). Returns the zip's path, its size packed and unpacked and how to check it (unzip -t), or follow it with device_artifacts_status. The upload runs in the user's browser and continues only while the tab stays open. If packing fails the uploaded files stay on the server: call this again with the same selection and nothing is uploaded twice.",
     inputSchema: {

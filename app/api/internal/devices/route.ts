@@ -4,6 +4,7 @@ import { verifyDisplayCapability } from "@/lib/display/capability";
 import { getDeviceBridge } from "@/lib/devices/bus";
 import { DEVICE_OPERATION_TOOLS } from "@/lib/devices/operation-tools";
 import { DEVICE_TOOLS, type DeviceToolContext } from "@/lib/devices/tools";
+import { getRpcSession } from "@/lib/rpc-manager";
 import { isRecord } from "@/lib/type-guards";
 
 export const dynamic = "force-dynamic";
@@ -64,7 +65,11 @@ export async function POST(request: Request) {
   // getDeviceBridge creates the bridge on first touch (bus.ts), so a session
   // whose browser has never attached still resolves to an empty, unattached
   // one rather than a lookup failure.
-  const context: DeviceToolContext = { bridge: getDeviceBridge(capability.sid) };
+  const context: DeviceToolContext = {
+    bridge: getDeviceBridge(capability.sid),
+    cwd: getRpcSession(capability.sid)?.cwd,
+    sessionId: capability.sid,
+  };
 
   try {
     const text = await tool.handler(toolArgs, context);

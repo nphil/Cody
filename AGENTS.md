@@ -621,10 +621,11 @@ Details: docs/agents/automation.md
 
 ### Browser-hosted hardware (`lib/devices/`)
 - Trust: ONE chat-card permission per device (`answerTrust`; key = USB vendor id + serial); no tool/option/frame grants it, trust PUT refuses `Authorization`; raw tools skip it. Never reuse/widen a grant across sessions; a new USB mode = fresh grant.
-- Writes: never replay one after disconnect/cancel/mode change; `context.confirm` only declares risk; ACK/CRC/progress is never readback proof; unknown readback = write once + UNVERIFIED; timeout = unknown completion.
+- Writes: never replay after disconnect/cancel/mode change. `context.confirm` declares risk; Fastboot partition flashing additionally needs the user's approval of the prepared target and image. ACK/CRC/progress is not readback proof; timeout means unknown completion.
 - Boundaries: never burn eFuses or write EDL boot0/boot1/rpmb or table-overlapping partitions; protected ESP/DFU/STM32/STK500 ranges need exact `allow-bootloader`/`allow-spi-boot`; MTK, CMSIS-DAP, UF2 not shipped.
 - ADB forward/reverse: "Host" = Cody server `127.0.0.1` only, never LAN; server verifies rules (`riskDeclared`, 16/session); one device listen address = one rule.
 - Operations: changing an operation tool means editing `DEVICE_OPERATION_TOOLS` AND `bin/cody-display-mcp.js`; pop-ups only via `noticeForOperation` (news, not progress); no hand-rolled packet loops in `eval`; BLE UUIDs via `canonicalBleUuid` ("0x18f0" breaks `requestDevice`).
+- Artifact import/list/export use the chat's workspace and browser, never a caller-chosen root; a factory image is not a device backup. Fastboot `DATA` may have one terminal NUL, never a different transfer length.
 - Evidence: emulator-tested only, unverified on real hardware; trust is no go-ahead for a test; `docs/hardware-host-helper.md` is design only.
 Details: docs/agents/hardware.md
 

@@ -21,6 +21,7 @@ grants are user-selected, secure-context capabilities. Do not claim, widen, or
 re-use a grant across sessions.
 
 An Android daemon can omit the checksum on its 20-byte authentication challenge before replying to Cody's connection request. Accept that zero field without treating it as version negotiation: the daemon's connection reply determines checksum handling for later packets. This does not change RSA authentication.
+Fastboot `DATA` lengths are eight ASCII hex digits, optionally followed by one NUL byte on the wire. Never trim general whitespace or padding, or drop the exact requested-size check before sending an image.
 
 - **Discover first.** `device_list` reports the current browser's secure-context
   and Serial/USB/Bluetooth capabilities plus its granted device IDs. If it has
@@ -103,10 +104,7 @@ arguments.
 
 #### Device trust: one permission per device (`lib/devices/trust*.ts`)
 
-There is exactly ONE permission between an agent and a device, it is given per
-device, and it is asked in the chat, not in the Devices panel. It replaced the
-per-operation approval cards, the typed protected-region overrides, the armed
-approval countdown and the connection-scoped shell grant; none of them exists any more.
+Device trust is granted once per device in the chat. It is separate from approval of a specific Fastboot flash: after preflight, the granting browser asks about the concrete partition and image before any flash command. An agent cannot answer for the person. Other protocols keep their existing trust rules.
 
 - **The gate** (`DeviceOperationManager.requireTrust`, operations.ts). An agent
   operation (`manager.start`) that is anything but read-only `detect`
@@ -182,6 +180,8 @@ approval countdown and the connection-scoped shell grant; none of them exists an
   (`currentIdentity`, `transport.connected()`), and fails with "Not sent: ..."
   otherwise. Tests: `operation-trust.test.mjs` (the gate, remembering, Forget),
   `operation-countdown.test.mjs`, the route and store tests, `DeviceTrustCard.test.mjs`.
+
+An agent can use `device_artifacts_import` with a workspace-relative path and expected SHA-256, then pass the returned ID and hash directly to an operation. `device_artifacts_list` discovers inputs and device outputs in this chat without a copied ID. `device_artifacts_save` archives device outputs with their hashes and manifest; `device_artifacts_export` places a finished backup in a project-relative directory without overwriting an existing file. Importing a factory image does not make it a device backup.
 
 Input uploads (picker, drop, or an authorized local-path import) and device
 outputs are browser-owned session artifacts. `DeviceArtifactStore` hashes each
@@ -329,14 +329,7 @@ verification.
 
 #### Trust-gated flashing and honest verification
 
-Caller options cannot supply authority, device geometry, or trust. Each
-structured mutation declares its real target, input digest, and backup status
-before anything is sent (`context.confirm`: a declaration the manager checks and
-logs, never a question); the device's trust, given earlier in the chat, is the only
-permission. Protected destinations (the boot chain, partition tables) are noted
-PROTECTED in the declared details and proceed with no extra prompt. Unknown
-readback is not a write veto:
-Fastboot explicitly warns, writes once, and reports UNVERIFIED.
+Caller options cannot supply authority, device geometry, or trust. Each structured mutation declares its target, digest and backup status. Fastboot flash also requires human approval of its prepared plan; a package update must not treat approval of one image as permission for a different image. Protected destinations are identified as such. A bootloader without partition readback cannot produce a device backup or a verified flash: Cody warns before the write and reports it as UNVERIFIED afterwards.
 An ACK, progress counter, CRC or successful command is never readback proof.
 A transport timeout is unknown completion, never permission to replay a write.
 

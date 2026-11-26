@@ -63,7 +63,7 @@ export interface OperationArtifacts {
  export interface HardwareTransportProvider {
    borrowHardwareTransport(
      deviceId: string,
-     options?: { interfaceNumber?: number; alternateSetting?: number },
+     options?: { interfaceNumber?: number; alternateSetting?: number; pinConnection?: boolean },
    ): Promise<HardwareTransportLease>;
   /**
    * The SAME granted device again after it left the bus and came back. Rejects
@@ -578,6 +578,8 @@ export class DeviceOperationManager {
     artifacts: OperationArtifacts,
     flashers: readonly Flasher[] = [serialFlasher],
     trust: DeviceTrustBook = new MemoryTrustBook(),
+    // Page dependency only. There is deliberately no command, option or trust answer that supplies this decision.
+    private readonly approveFastbootWrite: (plan: string) => boolean = (plan) => globalThis.window?.confirm?.(plan) === true,
   ) {
     this.sessionId = sessionId;
     this.transportProvider = transportProvider;
@@ -601,7 +603,7 @@ export class DeviceOperationManager {
    */
   private async acquireLease(record: OperationRecord): Promise<HardwareTransportLease> {
     const { request } = record;
-    const options = { interfaceNumber: request.interfaceNumber, alternateSetting: request.alternateSetting };
+    const options = { interfaceNumber: request.interfaceNumber, alternateSetting: request.alternateSetting, ...(request.protocol === "fastboot" ? { pinConnection: true } : {}) };
     if (!sharesAdbConnection(request)) return this.transportProvider.borrowHardwareTransport(request.deviceId, options);
     const deviceId = request.deviceId;
     let shared = this.sharedAdb.get(deviceId);
@@ -1280,8 +1282,8 @@ export class DeviceOperationManager {
   /**
    * A protocol is about to send something to the device and says exactly what. The manager checks that it is what
    * was requested, writes it to the operation's log, and - once, before the first thing is sent - holds for the
-   * countdown the request asked for. Nobody is asked anything here: the person's trust covered the operation before
-   * it began.
+   * countdown the request asked for. Fastboot partition writes also require the operator's local approval of the
+   * inspected image, partition and readback limits; the standing device grant cannot give it.
    */
   private async declareRisk(record: OperationRecord, risk: HardwareRisk): Promise<void> {
     if (record.controller.signal.aborted) throw new DOMException("Operation cancelled.", "AbortError");
@@ -1289,6 +1291,29 @@ export class DeviceOperationManager {
     record.riskDeclared = true;
     this.addOutput(record, `Starting ${binding.action} on ${binding.target}. Backup: ${binding.backup}`);
     this.emit(record, { type: "declared", declared: binding });
+    if (record.request.protocol === "fastboot") {
+      // The package overview is informational; each member is separately bound and approved below, not the first alone.
+      if (binding.action === "fastboot update") return;
+      if (binding.action === "fastboot flash" || binding.action === "fastboot update partition") {
+        const deviceId = record.request.deviceId;
+        const plan = [
+          `Write this image to ${binding.target}?`,
+          `Device: ${this.subjectOf(deviceId).label} (${record.identity ?? `session grant ${deviceId}; no stable USB identity`})`,
+          binding.details,
+          binding.backup,
+          ...(binding.action === "fastboot update partition" ? [`Source package: ${binding.length} bytes, SHA-256 ${binding.sha256}.`] : []),
+        ].join("\n");
+        this.addOutput(record, plan);
+        this.reportProgress(record, {phase:"awaiting-flash-approval",message:`Waiting for approval in the device's browser: ${binding.target}.`});
+        if (this.approveFastbootWrite(plan) !== true) throw new Error(`Write to ${binding.target} not approved in the device's browser. No image was sent to that partition.`);
+        // Native dialogs suspend script. Give queued disconnect/cancel events a turn before inspecting the original lease.
+        await pause(0, record.controller.signal);
+        if (!record.lease || record.lease.transport.connected?.() === false ||
+            (record.identity !== undefined && this.transportProvider.currentIdentity && this.transportProvider.currentIdentity(deviceId) !== record.identity)) {
+          throw new Error("The granted device changed or disconnected during flash approval. The write was not sent.");
+        }
+      }
+    }
     const seconds = record.sendDelaySeconds;
     if (seconds === undefined) return;
     record.sendDelaySeconds = undefined;

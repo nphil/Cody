@@ -1,6 +1,7 @@
 import type { OperationArtifacts } from "./operations";
 import { encodeFilePathForApi } from "@/lib/file-paths";
 import { hashBlobWithCrc } from "./blob-stream";
+import { validWorkspaceImport, type WorkspaceImport } from "./protocol";
 import type { StreamArtifact } from "./flasher";
 import { combinedSetName, effectiveSetName, groupArtifactSets, olderSetOf, setFileLabel, setSaveState } from "./artifact-sets";
 import { usableSetName } from "./set-name";
@@ -113,6 +114,8 @@ export interface AddDeviceArtifactOptions {
   readonly kind?: DeviceArtifactKind;
   readonly source?: DeviceArtifactSource;
   readonly provenance?: ArtifactProvenance;
+  readonly expected?: Pick<WorkspaceImport, "sha256" | "size">;
+  readonly signal?: AbortSignal;
 }
 
 export type DeviceArtifactListener = (artifacts: readonly DeviceArtifact[]) => void;
@@ -432,7 +435,10 @@ export class DeviceArtifactStore implements OperationArtifacts {
   async add(sessionId: string, file: Blob, name: string, options: AddDeviceArtifactOptions = {}): Promise<DeviceArtifact> {
     if (!(file instanceof Blob)) throw new DeviceArtifactError("A browser Blob is required for a device artifact.");
     cryptoApi();
-    const { sha256, crc32 } = await hashBlobWithCrc(file);
+    if (options.expected && file.size !== options.expected.size) throw new DeviceArtifactError("Imported byte count does not match the workspace file. Nothing was added.");
+    const { sha256, crc32 } = await hashBlobWithCrc(file, options.signal);
+    options.signal?.throwIfAborted();
+    if (options.expected && sha256 !== options.expected.sha256) throw new DeviceArtifactError("Imported SHA-256 does not match the workspace file. Nothing was added.");
     const provenance = cleanProvenance(options.provenance);
     const artifact: StoredDeviceArtifact = {
       id: cryptoApi().randomUUID(),
@@ -456,28 +462,36 @@ export class DeviceArtifactStore implements OperationArtifacts {
   /** Spool to browser-private disk; commit the Blob to escrow before deleting
    * the spool. No full-file JS array is ever constructed. */
   async saveStream(sessionId: string, name: string, chunks: AsyncIterable<Uint8Array>, signal: AbortSignal, provenance?: ArtifactProvenance): Promise<StreamArtifact> {
+    const artifact = await this.escrowStream(sessionId, name, chunks, signal, { kind: "output", source: "device", provenance });
+    return { fileId: artifact.id, sha256: artifact.sha256, length: artifact.size };
+  }
+
+  private async escrowStream(sessionId: string, name: string, chunks: AsyncIterable<Uint8Array>, signal: AbortSignal, options: AddDeviceArtifactOptions): Promise<DeviceArtifact> {
     if (!navigator.storage?.getDirectory) throw new DeviceArtifactError("This browser has no streaming file storage (OPFS).");
     const directory = await navigator.storage.getDirectory();
     const temporary = "cody-transfer-" + cryptoApi().randomUUID();
     const handle = await directory.getFileHandle(temporary, { create: true });
-    const writer = await handle.createWritable();
-    let closed = false;
+    let writer: FileSystemWritableFileStream | undefined;
     try {
+      writer = await handle.createWritable();
+      let received = 0;
       for await (const chunk of chunks) {
         signal.throwIfAborted();
+        received += chunk.byteLength;
+        if (options.expected && received > options.expected.size) throw new DeviceArtifactError("Import exceeded the workspace file's size. Nothing was added.");
         await writer.write(chunk as Uint8Array<ArrayBuffer>);
       }
       signal.throwIfAborted();
       await writer.close();
-      closed = true;
-      const artifact = await this.add(sessionId, await handle.getFile(), name, { kind: "output", source: "device", ...(provenance ? { provenance } : {}) });
+      writer = undefined;
+      const artifact = await this.add(sessionId, await handle.getFile(), name, { ...options, signal });
       // Keep the independently escrowed Blob, not a File backed by the spool.
       const persisted = await this.persistence.get(sessionId, artifact.id);
       if (!persisted) throw new DeviceArtifactError("Streamed artifact escrow could not be read back.");
       this.entries(sessionId).set(artifact.id, persisted);
-      return { fileId: artifact.id, sha256: artifact.sha256, length: artifact.size };
+      return artifact;
     } finally {
-      if (!closed) await writer.abort().catch(() => undefined);
+      await writer?.abort().catch(() => undefined);
       await directory.removeEntry(temporary);
     }
   }
@@ -486,10 +500,28 @@ export class DeviceArtifactStore implements OperationArtifacts {
     return this.add(sessionId, file, name, { kind: "input", source });
   }
 
-  async importAuthorizedFile(sessionId: string, filePath: string, fetchImpl: FetchLike = fetch): Promise<DeviceArtifact> {
-    const response = await fetchImpl(authorizedArtifactDownloadUrl(sessionId, filePath), { credentials: "same-origin" });
-    if (!response.ok) throw new DeviceArtifactError(`Could not import the authorized file (${response.status}).`);
-    return this.add(sessionId, await response.blob(), filenameFromPath(filePath), { kind: "input", source: "server-file" });
+  async importAuthorizedFile(sessionId: string, source: string | WorkspaceImport, signal: AbortSignal = new AbortController().signal): Promise<DeviceArtifact> {
+    const image = typeof source === "string" ? undefined : source;
+    if (image && !validWorkspaceImport(image)) throw new DeviceArtifactError("Invalid workspace image request.");
+    const url = typeof source === "string" ? authorizedArtifactDownloadUrl(sessionId, source)
+      : `/api/devices/artifacts/import?${new URLSearchParams({ sessionId, token: source.token })}`;
+    const response = await this.fetchImpl(url, { credentials: "same-origin", redirect: "error", signal });
+    if (!response.ok || !response.body) throw new DeviceArtifactError(`Could not import the authorized file (${response.status}).`);
+    const reader = response.body.getReader();
+    async function* chunks() {
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) return;
+        yield next.value;
+      }
+    }
+    try {
+      return await this.escrowStream(sessionId, typeof source === "string" ? filenameFromPath(source) : source.name,
+        chunks(), signal, { kind: "input", source: "server-file", expected: image });
+    } finally {
+      await reader.cancel().catch(() => undefined);
+      reader.releaseLock();
+    }
   }
 
   list(sessionId: string): readonly DeviceArtifact[] {

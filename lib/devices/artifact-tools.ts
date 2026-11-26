@@ -11,9 +11,10 @@
  * read. Only saves this chat's agent started can be asked about, and only this chat's own files can be named.
  */
 
+import { getSessionOwner } from "../auth/session-owners";
 import { formatBytes } from "../format-bytes";
 import { numberArg, stringArg } from "../session-tools";
-import { saveStatus, vaultConfig, type SaveStatus } from "./artifact-vault";
+import { exportDeviceBackup, saveStatus, vaultConfig, type SaveStatus } from "./artifact-vault";
 import type { ArtifactSaveSelection } from "./protocol";
 import type { DeviceOperationToolDefinition, DeviceOperationToolHandler } from "./operation-tools";
 
@@ -107,7 +108,8 @@ function sleep(milliseconds: number): Promise<void> {
   return promise;
 }
 
-const saveHandler: DeviceOperationToolHandler = async (args, { bridge }) => {
+const saveHandler: DeviceOperationToolHandler = async (args, { bridge, sessionId }) => {
+  if (!sessionId) return "The chat identity is unavailable; no save was started.";
   const operationIds = list(args.operationIds, "operationIds");
   const fileIds = list(args.fileIds, "fileIds");
   const only = list(args.files, "files");
@@ -140,9 +142,11 @@ const saveHandler: DeviceOperationToolHandler = async (args, { bridge }) => {
   }
   const intro = `Save ${ack.saveId} ${ack.alreadySaved ? "was already on the server" : ack.resumed ? "was resumed" : "was started"}: ${count(ack.files)}, ${formatBytes(ack.bytes)}.`;
   const config = vaultConfig();
+  const owner = getSessionOwner(sessionId);
   const deadline = Date.now() + wait * 1000;
   for (;;) {
     const status = await saveStatus(config, ack.saveId);
+    if (status && (status.sessionId !== sessionId || status.owner !== owner)) return "That save does not belong to this chat and its owner.";
     if (status?.state === "complete") return `${intro}\n${describeComplete(status)}`;
     if (!status) return `${intro}\nThe server no longer has this save (it may have been deleted or cleaned up). Call device_artifacts_save again to start it afresh.`;
     // A failed build does not mend by waiting: say so now.
@@ -151,13 +155,28 @@ const saveHandler: DeviceOperationToolHandler = async (args, { bridge }) => {
   }
 };
 
-const statusHandler: DeviceOperationToolHandler = async (args, { bridge }) => {
+const statusHandler: DeviceOperationToolHandler = async (args, { bridge, sessionId }) => {
+  if (!sessionId) return "The chat identity is unavailable; the save cannot be read.";
   const saveId = stringArg(args, "saveId")?.trim() || bridge.latestArtifactSave();
   if (!saveId) return "No save has been started from this chat yet. Use device_artifacts_save.";
   if (!bridge.startedArtifactSave(saveId)) return `Save ${saveId} was not started by this chat's agent, so it cannot be read from here.`;
   const status = await saveStatus(vaultConfig(), saveId);
   if (!status) return `The server has no save ${saveId}: it may have been deleted or cleaned up.`;
+  if (status.sessionId !== sessionId || status.owner !== getSessionOwner(sessionId)) return "That save does not belong to this chat and its owner.";
   return status.state === "complete" ? describeComplete(status) : describeUnfinished(status);
+};
+
+const exportHandler: DeviceOperationToolHandler = async (args, { bridge, cwd, sessionId }) => {
+  if (!cwd || !sessionId) return "The chat's project or identity is unavailable; no backup was exported.";
+  const saveId = args.saveId === undefined ? bridge.latestArtifactSave() : stringArg(args, "saveId");
+  if (!saveId || !bridge.startedArtifactSave(saveId)) return "Name a save started by this chat's device_artifacts_save tool.";
+  if (typeof args.directory !== "string" || !args.directory.trim()) return "Name a project-relative backup directory, such as backups/tablet.";
+  try {
+    const archive = await exportDeviceBackup(vaultConfig(), saveId, sessionId, getSessionOwner(sessionId), cwd, args.directory);
+    return `Exported verified device outputs to ${archive}. SHA256SUMS and manifest.json inside retain each file's hash and recorded device operation. No device action was taken.`;
+  } catch (error) {
+    return `Could not export the backup: ${error instanceof Error ? error.message : String(error)}`;
+  }
 };
 
 export const DEVICE_ARTIFACT_TOOLS: DeviceOperationToolDefinition[] = [
@@ -187,5 +206,18 @@ export const DEVICE_ARTIFACT_TOOLS: DeviceOperationToolDefinition[] = [
       "Follow a save started with device_artifacts_save: files verified, bytes stored, \"packing the archive: N %\" while the server writes the zip, and once it is done the zip's path, its size and how to check it (unzip -t). Says why packing stopped when it did, and that the uploaded files are still on the server. Defaults to the latest save of this chat.",
     parameters: { type: "object", properties: { saveId: { type: "string", description: "The save id device_artifacts_save returned." } }, required: [] },
     handler: statusHandler,
+  },
+  {
+    name: "device_artifacts_export",
+    description: "Export a completed, verified device_artifacts_save archive to a backup directory inside this chat's project on the Linux Cody server. Keeps per-file SHA-256 and recorded device and partition provenance. Refuses imported images, missing device provenance, symlinks and overwrites; no device or browser action.",
+    parameters: {
+      type: "object",
+      properties: {
+        saveId: { type: "string", description: "A save started by this chat's agent; defaults to its latest." },
+        directory: { type: "string", description: "Project-relative backup directory, e.g. backups/tablet. Created if missing." },
+      },
+      required: ["directory"],
+    },
+    handler: exportHandler,
   },
 ];
