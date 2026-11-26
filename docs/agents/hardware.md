@@ -20,6 +20,8 @@ characteristic; the server only relays frames within that Cody session. Browser
 grants are user-selected, secure-context capabilities. Do not claim, widen, or
 re-use a grant across sessions.
 
+An Android daemon can omit the checksum on its 20-byte authentication challenge before replying to Cody's connection request. Accept that zero field without treating it as version negotiation: the daemon's connection reply determines checksum handling for later packets. This does not change RSA authentication.
+
 - **Discover first.** `device_list` reports the current browser's secure-context
   and Serial/USB/Bluetooth capabilities plus its granted device IDs. If it has
   no device, ask the user to use the Devices panel's browser picker. Web Serial

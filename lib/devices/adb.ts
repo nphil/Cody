@@ -1,4 +1,4 @@
-import { Adb, AdbCommand, AdbDaemonTransport, AdbPacket, AdbPacketSerializeStream, calculateChecksum, type AdbPacketData, type AdbPacketInit, type AdbSocket } from "@yume-chan/adb";
+import { Adb, AdbAuthType, AdbCommand, AdbDaemonTransport, AdbPacket, AdbPacketSerializeStream, calculateChecksum, type AdbPacketData, type AdbPacketInit, type AdbSocket } from "@yume-chan/adb";
 import type { StructDeserializer } from "@yume-chan/struct";
 import AdbWebCredentialStore from "@yume-chan/adb-credential-web";
 import {
@@ -47,7 +47,7 @@ export function calculateAdbChecksum(payload: Uint8Array): number {
  */
 export function createAdbHardwareConnection(transport: HardwareTransport, signal: AbortSignal, onInitialProbeFailure?: () => void) { let outputFailure: unknown;
 let receivedInboundPacket = false;
-  let checksumOptional = false;
+  let checksumOptional: boolean | undefined;
   const rawReadable = new AdbReadableStream<Uint8Array>({
     async pull(controller) {
       for (;;) {
@@ -105,7 +105,10 @@ return {
           if (packet.command === AdbCommand.Connect) {
             checksumOptional = packet.arg0 >= 0x01000001;
           }
-          if (!checksumOptional && packet.checksum !== calculateChecksum(packet.payload)) {
+          // adbd can act on our CNXN version and omit the AUTH token checksum before sending its own CNXN.
+          const earlyToken = checksumOptional === undefined && packet.command === AdbCommand.Auth &&
+            packet.arg0 === AdbAuthType.Token && packet.arg1 === 0 && packet.payload.length === 20 && packet.checksum === 0;
+          if (!checksumOptional && !earlyToken && packet.checksum !== calculateChecksum(packet.payload)) {
             throw new AdbProtocolError("ADB packet checksum does not match its payload.");
           }
           controller.enqueue(packet);

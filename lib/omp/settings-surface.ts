@@ -133,6 +133,8 @@ const TERMINAL_ONLY_KEYS = new Set([
   // Cody chat therefore has no peer to read or message whatever this is set
   // to; turned on it only adds one sentence about agent://peers to the prompt.
   "task.crossInstance",
+  // omp 19.2.1 turns leftover-process cleanup off for RPC sessions regardless of this setting.
+  "bash.reapBackground",
 ]);
 
 /** Dotted-path prefixes (matched at a segment boundary) that are terminal-only
